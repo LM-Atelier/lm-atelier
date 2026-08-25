@@ -16,7 +16,19 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 import httpx
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+)
+from fastapi import (
+    Path as PathParam,
+)
 from sqlalchemy import Select, and_, func, or_, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
@@ -24,7 +36,7 @@ from starlette.responses import FileResponse, HTMLResponse
 
 from . import __version__
 from .adapter_grammar_review import review_adapter_grammar
-from .api_errors import api_error
+from .api_errors import ApiError, api_error
 from .artifact_library import (
     ArtifactLibraryConflict,
     ArtifactLibraryCursorError,
@@ -58,6 +70,14 @@ from .comfy_registry_downloads import ComfyRegistryArchiveDownloader
 from .comfy_registry_installs import installed_comfy_registry_versions
 from .comfy_registry_interpreter import probe_comfy_registry_runtime_target
 from .comfy_registry_paths import registry_wheel_environment_root
+from .comfy_registry_reconciliation import (
+    ComfyRegistryReconciliationError,
+    RegistryInstallDiskState,
+    inspect_registry_install_disk_state,
+)
+from .comfy_registry_reconciliation import (
+    remove_registry_install as remove_comfy_registry_install,
+)
 from .comfy_registry_wheel_downloads import ComfyRegistryWheelDownloader
 from .comfy_registry_wheel_projects import ComfyRegistryWheelProjectClient
 from .comfy_templates import (
@@ -141,6 +161,9 @@ from .models import (
     ModelProfile,
     Project,
     ProjectWorkflowSelection,
+    PromptExpansionBatch,
+    PromptTemplateDefinition,
+    PromptTemplateRevision,
     ReferenceAsset,
     ReferenceSubject,
     ResponseFeedback,
@@ -180,11 +203,46 @@ from .profile_service import (
     validate_profile_install,
 )
 from .progress import update_job_progress
+from .prompt_expansion import (
+    PromptExpansionError,
+    expand_prompt_template,
+    parse_expansion_request,
+)
+from .prompt_expansion_store import (
+    PromptExpansionModelSnapshot,
+    PromptExpansionStoreConflict,
+    PromptExpansionStoreError,
+    StoredExpansion,
+    create_or_replay_expansion,
+    read_expansion,
+    update_expansion_item,
+)
+from .prompt_expansion_use import PromptExpansionUseConflict, PromptExpansionUseError
 from .prompt_grammar import PromptGrammarError
 from .prompt_helpers import (
     PROMPT_HELPER_SCOPE,
     STANDARD_CHAT_SCOPE,
     prompt_preview_settings,
+)
+from .prompt_library import (
+    PromptLibraryError,
+    PromptTemplateWriteResult,
+    create_prompt_template,
+    restore_prompt_template_revision,
+    update_prompt_template,
+)
+from .prompt_template_import import PromptTemplateImportError, commit_prompt_template_import
+from .prompt_template_portability import (
+    PromptTemplatePortabilityError,
+    export_prompt_template_bundle,
+    preview_prompt_template_import,
+    resolve_prompt_template_import_candidate,
+)
+from .prompt_templates import (
+    PromptTemplateError,
+    parse_prompt_template_contract,
+    prompt_template_contract_payload,
+    prompt_template_contract_sha256,
 )
 from .recipes import get_reference_recipe, list_reference_recipes
 from .reference_library import (
@@ -272,9 +330,28 @@ from .schemas import (
     ProjectOut,
     ProjectUpdate,
     ProjectWorkflowSelectionIn,
+    PromptExpansionBatchOut,
+    PromptExpansionCreate,
+    PromptExpansionItemOut,
+    PromptExpansionItemUpdate,
+    PromptExpansionQueue,
     PromptHelperCreate,
     PromptHelperDetail,
     PromptHelperUpdate,
+    PromptTemplateCreate,
+    PromptTemplateDefinitionOut,
+    PromptTemplateDetailOut,
+    PromptTemplateImportCandidateResolve,
+    PromptTemplateImportCommit,
+    PromptTemplateImportCommitOut,
+    PromptTemplateImportPreviewOut,
+    PromptTemplateImportWorkflowSuggestionOut,
+    PromptTemplatePageOut,
+    PromptTemplatePortableBundleOut,
+    PromptTemplateRestore,
+    PromptTemplateRevisionOut,
+    PromptTemplateUpdate,
+    PromptTemplateWriteOut,
     ReferenceAssetAttach,
     ReferenceAssetAttached,
     ReferenceAssetOut,
@@ -400,6 +477,7 @@ from .workflow_asset_downloads import (
     compose_workflow_asset_download_requests,
 )
 from .workflow_compatibility import (
+    WorkflowSelectionInvalid,
     copy_chat_workflow_selections,
     ensure_legacy_profile_workflow,
     mirror_legacy_chat_workflow_selections,
@@ -625,6 +703,7 @@ async def application_info(request: Request) -> ApplicationInfo:
         version=__version__,
         data_directory=str(settings.data_dir.resolve()),
         log_directory=str(settings.log_dir.resolve()),
+        max_media_outputs_per_plan=settings.max_media_outputs_per_plan,
         web_access_enabled=settings.web_access_enabled,
     )
 
@@ -1780,6 +1859,669 @@ def _studio_session_query(session_id: str) -> Select[tuple[Chat]]:
     )
 
 
+def _prompt_template_error(exc: PromptLibraryError) -> ApiError:
+    return api_error(exc.status_code, exc.code, str(exc))
+
+
+def _prompt_template_revision_out(
+    revision: PromptTemplateRevision,
+) -> PromptTemplateRevisionOut:
+    try:
+        contract = parse_prompt_template_contract(revision.contract_json)
+        contract_json = prompt_template_contract_payload(contract)
+        contract_sha256 = prompt_template_contract_sha256(contract)
+    except PromptTemplateError as exc:
+        raise api_error(
+            409,
+            "prompt-template-conflict",
+            "Prompt template conflicts with an existing template.",
+        ) from exc
+    if (
+        revision.schema_version != contract.schema_version
+        or revision.contract_sha256 != contract_sha256
+    ):
+        raise api_error(
+            409,
+            "prompt-template-conflict",
+            "Prompt template conflicts with an existing template.",
+        )
+    return PromptTemplateRevisionOut(
+        id=revision.id,
+        prompt_template_id=revision.prompt_template_id,
+        version=revision.version,
+        schema_version=contract.schema_version,
+        contract_json=contract_json,
+        contract_sha256=contract_sha256,
+        created_at=revision.created_at,
+    )
+
+
+def _prompt_template_definition_out(
+    definition: PromptTemplateDefinition,
+) -> PromptTemplateDefinitionOut:
+    if definition.current_revision_id is None:
+        raise api_error(
+            409,
+            "prompt-template-conflict",
+            "Prompt template conflicts with an existing template.",
+        )
+    return PromptTemplateDefinitionOut.model_validate(definition)
+
+
+def _prompt_template_detail_out(
+    session: Session,
+    definition: PromptTemplateDefinition,
+) -> PromptTemplateDetailOut:
+    summary = _prompt_template_definition_out(definition)
+    revision = session.get(PromptTemplateRevision, summary.current_revision_id)
+    if revision is None or revision.prompt_template_id != definition.id:
+        raise api_error(
+            409,
+            "prompt-template-conflict",
+            "Prompt template conflicts with an existing template.",
+        )
+    return PromptTemplateDetailOut(
+        **summary.model_dump(),
+        current_revision=_prompt_template_revision_out(revision),
+    )
+
+
+def _prompt_template_write_out(
+    session: Session,
+    result: PromptTemplateWriteResult,
+) -> PromptTemplateWriteOut:
+    return PromptTemplateWriteOut(
+        template=_prompt_template_detail_out(session, result.definition),
+        revision=_prompt_template_revision_out(result.revision),
+        idempotent=result.idempotent,
+    )
+
+
+def _prompt_expansion_out(stored: StoredExpansion) -> PromptExpansionBatchOut:
+    batch = stored.batch
+    try:
+        request = parse_expansion_request(json.loads(batch.request_json))
+    except (json.JSONDecodeError, PromptExpansionError) as exc:
+        raise api_error(
+            409,
+            "prompt-batch-conflict",
+            "Prompt batch conflicts with its stored receipt.",
+        ) from exc
+    return PromptExpansionBatchOut(
+        id=batch.id,
+        chat_id=batch.chat_id,
+        prompt_template_id=batch.prompt_template_id,
+        prompt_template_revision_id=batch.prompt_template_revision_id,
+        schema_version=cast(Literal[1], batch.schema_version),
+        contract_sha256=batch.contract_sha256,
+        codec_version=cast(Literal[2], batch.codec_version),
+        requested_count=request.item_count,
+        selection_seed=request.selection_seed,
+        plan_sha256=batch.plan_sha256,
+        state=cast(Literal["draft", "queued"], batch.state),
+        plan_version=batch.plan_version,
+        items=[
+            PromptExpansionItemOut(
+                id=item.id,
+                ordinal=item.ordinal,
+                rendered_prompt=item.original_rendered_prompt,
+                rendered_sha256=item.original_rendered_sha256,
+                reviewed_prompt=item.reviewed_prompt,
+                reviewed_sha256=item.reviewed_sha256,
+                selected=item.selected,
+                review_version=item.review_version,
+                reroll_count=item.reroll_count,
+                work_step_id=item.work_step_id,
+                run_id=item.run_id,
+                media_seed=item.media_seed,
+            )
+            for item in stored.items
+        ],
+        queue_idempotency_key=batch.queue_idempotency_key,
+        work_plan_id=batch.work_plan_id,
+        queued_at=batch.queued_at,
+        replayed=stored.replayed,
+    )
+
+
+def _prompt_batch_conflict(exc: PromptExpansionStoreError) -> ApiError:
+    if isinstance(exc, PromptExpansionStoreConflict):
+        return api_error(409, "prompt-batch-stale", "Prompt batch changed; reload and retry.")
+    return api_error(
+        409,
+        "prompt-batch-conflict",
+        "Prompt batch conflicts with its stored receipt.",
+    )
+
+
+@router.get("/prompt-templates", response_model=PromptTemplatePageOut)
+async def list_prompt_templates(
+    session: SessionDep,
+    include_archived: bool = False,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0, le=10_000)] = 0,
+) -> PromptTemplatePageOut:
+    filters = [] if include_archived else [PromptTemplateDefinition.archived.is_(False)]
+    total = session.scalar(
+        select(func.count()).select_from(PromptTemplateDefinition).where(*filters)
+    )
+    definitions = session.scalars(
+        select(PromptTemplateDefinition)
+        .where(*filters)
+        .order_by(
+            PromptTemplateDefinition.archived,
+            PromptTemplateDefinition.name,
+            PromptTemplateDefinition.id,
+        )
+        .offset(offset)
+        .limit(limit)
+    ).all()
+    return PromptTemplatePageOut(
+        items=[_prompt_template_definition_out(item) for item in definitions],
+        total=int(total or 0),
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.post("/prompt-templates", response_model=PromptTemplateWriteOut, status_code=201)
+async def create_prompt_template_route(
+    payload: PromptTemplateCreate,
+    request: Request,
+    session: SessionDep,
+) -> PromptTemplateWriteOut:
+    try:
+        result = create_prompt_template(
+            session,
+            idempotency_key=payload.idempotency_key,
+            name=payload.name,
+            description=payload.description,
+            contract_value=payload.contract,
+            expected_engine=_services(request).settings.media_engine,
+        )
+    except PromptLibraryError as exc:
+        raise _prompt_template_error(exc) from exc
+    return _prompt_template_write_out(session, result)
+
+
+_MAX_PROMPT_TEMPLATE_IMPORT_REQUEST_BYTES = 4_194_304
+
+
+def _prompt_template_import_unique_object(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate key")
+        result[key] = value
+    return result
+
+
+async def _prompt_template_import_json(
+    request: Request,
+    model: type[PromptTemplateImportCommit] | type[PromptTemplateImportCandidateResolve],
+) -> PromptTemplateImportCommit | PromptTemplateImportCandidateResolve:
+    media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if media_type != "application/json":
+        raise api_error(
+            415,
+            "prompt-template-import-media-type-invalid",
+            "Prompt template import request is invalid.",
+        )
+    body = await request.body()
+    if not body or len(body) > _MAX_PROMPT_TEMPLATE_IMPORT_REQUEST_BYTES:
+        raise api_error(
+            422,
+            "prompt-template-import-request-invalid",
+            "Prompt template import request is invalid.",
+        )
+    try:
+        text_value = body.decode("utf-8")
+        if text_value.startswith("\ufeff"):
+            raise ValueError("byte order mark")
+        value = json.loads(text_value, object_pairs_hook=_prompt_template_import_unique_object)
+        return model.model_validate(value)
+    except (RecursionError, TypeError, UnicodeError, ValueError) as exc:
+        raise api_error(
+            422,
+            "prompt-template-import-request-invalid",
+            "Prompt template import request is invalid.",
+        ) from exc
+
+
+@router.post(
+    "/prompt-templates/import/preview",
+    response_model=PromptTemplateImportPreviewOut,
+)
+async def preview_prompt_template_import_route(
+    request: Request,
+    response: Response,
+    session: SessionDep,
+) -> PromptTemplateImportPreviewOut:
+    media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if media_type != "application/json":
+        raise api_error(
+            415,
+            "prompt-template-bundle-media-type-invalid",
+            "Prompt template bundle is invalid.",
+        )
+    raw_bundle = await request.body()
+    try:
+        with session.no_autoflush:
+            preview = preview_prompt_template_import(
+                session,
+                raw_bundle,
+                expected_engine=_services(request).settings.media_engine,
+                signing_key=_services(request).security.local_state_signing_key(
+                    b"prompt-template-import-preview-v1"
+                ),
+            )
+    except PromptTemplatePortabilityError as exc:
+        raise api_error(exc.status_code, exc.code, str(exc)) from exc
+    response.headers["Cache-Control"] = "no-store"
+    return PromptTemplateImportPreviewOut.model_validate(
+        {
+            "bundle": preview.bundle.payload,
+            "requirements": list(preview.requirements),
+            "receipt": preview.receipt,
+            "expires_at": preview.expires_at,
+        }
+    )
+
+
+@router.post(
+    "/prompt-templates/import/candidates/resolve",
+    response_model=PromptTemplateImportWorkflowSuggestionOut,
+)
+async def resolve_prompt_template_import_candidate_route(
+    request: Request,
+    response: Response,
+    session: SessionDep,
+) -> PromptTemplateImportWorkflowSuggestionOut:
+    parsed = await _prompt_template_import_json(
+        request,
+        PromptTemplateImportCandidateResolve,
+    )
+    payload = cast(PromptTemplateImportCandidateResolve, parsed)
+    try:
+        with session.no_autoflush:
+            candidate = resolve_prompt_template_import_candidate(
+                session,
+                payload.bundle_json,
+                preview_receipt=payload.preview_receipt,
+                binding_key=payload.binding_key,
+                local_ref=payload.local_ref,
+                expected_engine=_services(request).settings.media_engine,
+                signing_key=_services(request).security.local_state_signing_key(
+                    b"prompt-template-import-preview-v1"
+                ),
+            )
+    except PromptTemplatePortabilityError as exc:
+        raise api_error(exc.status_code, exc.code, str(exc)) from exc
+    response.headers["Cache-Control"] = "no-store"
+    return PromptTemplateImportWorkflowSuggestionOut.model_validate(candidate)
+
+
+@router.post(
+    "/prompt-templates/import",
+    response_model=PromptTemplateImportCommitOut,
+    status_code=201,
+)
+async def commit_prompt_template_import_route(
+    request: Request,
+    response: Response,
+    session: SessionDep,
+) -> PromptTemplateImportCommitOut:
+    parsed = await _prompt_template_import_json(request, PromptTemplateImportCommit)
+    payload = cast(PromptTemplateImportCommit, parsed)
+    try:
+        result = commit_prompt_template_import(
+            session,
+            idempotency_key=payload.idempotency_key,
+            raw_bundle=payload.bundle_json,
+            preview_receipt=payload.preview_receipt,
+            confirmed_bundle_sha256=payload.confirmed_bundle_sha256,
+            destination_name=payload.destination_name,
+            workflow_bindings=[
+                item.model_dump(mode="python") for item in payload.workflow_bindings
+            ],
+            lora_confirmations=[
+                item.model_dump(mode="python") for item in payload.lora_confirmations
+            ],
+            expected_engine=_services(request).settings.media_engine,
+            signing_key=_services(request).security.local_state_signing_key(
+                b"prompt-template-import-preview-v1"
+            ),
+        )
+    except (PromptLibraryError, PromptTemplateImportError, PromptTemplatePortabilityError) as exc:
+        raise api_error(exc.status_code, exc.code, str(exc)) from exc
+    response.headers["Cache-Control"] = "no-store"
+    return PromptTemplateImportCommitOut.model_validate(result)
+
+
+@router.get("/prompt-templates/{template_id}", response_model=PromptTemplateDetailOut)
+async def get_prompt_template(
+    template_id: str,
+    session: SessionDep,
+) -> PromptTemplateDetailOut:
+    definition = session.get(PromptTemplateDefinition, template_id)
+    if definition is None:
+        raise api_error(
+            404,
+            "prompt-template-not-found",
+            "Prompt template does not exist.",
+        )
+    return _prompt_template_detail_out(session, definition)
+
+
+@router.patch("/prompt-templates/{template_id}", response_model=PromptTemplateWriteOut)
+async def patch_prompt_template(
+    template_id: str,
+    payload: PromptTemplateUpdate,
+    request: Request,
+    session: SessionDep,
+) -> PromptTemplateWriteOut:
+    values = payload.model_dump(exclude_unset=True, mode="python")
+    if any(
+        field in payload.model_fields_set and getattr(payload, field) is None
+        for field in ("name", "description", "archived", "contract")
+    ):
+        raise api_error(
+            422,
+            "prompt-template-request-invalid",
+            "Prompt template request is invalid.",
+        )
+    try:
+        result = update_prompt_template(
+            session,
+            definition_id=template_id,
+            expected_current_revision_id=payload.expected_current_revision_id,
+            name=values.get("name"),
+            description=values.get("description"),
+            archived=values.get("archived"),
+            contract_value=values.get("contract"),
+            idempotency_key=values.get("idempotency_key"),
+            expected_engine=_services(request).settings.media_engine,
+        )
+    except PromptLibraryError as exc:
+        raise _prompt_template_error(exc) from exc
+    return _prompt_template_write_out(session, result)
+
+
+@router.get(
+    "/prompt-templates/{template_id}/revisions",
+    response_model=list[PromptTemplateRevisionOut],
+)
+async def list_prompt_template_revisions(
+    template_id: str,
+    session: SessionDep,
+    limit: Annotated[int, Query(ge=1, le=100)] = 100,
+    offset: Annotated[int, Query(ge=0, le=10_000)] = 0,
+) -> list[PromptTemplateRevisionOut]:
+    if session.get(PromptTemplateDefinition, template_id) is None:
+        raise api_error(
+            404,
+            "prompt-template-not-found",
+            "Prompt template does not exist.",
+        )
+    revisions = session.scalars(
+        select(PromptTemplateRevision)
+        .where(PromptTemplateRevision.prompt_template_id == template_id)
+        .order_by(PromptTemplateRevision.version.desc())
+        .offset(offset)
+        .limit(limit)
+    ).all()
+    return [_prompt_template_revision_out(item) for item in revisions]
+
+
+@router.get(
+    "/prompt-templates/{template_id}/revisions/{revision_id}",
+    response_model=PromptTemplateRevisionOut,
+)
+async def get_prompt_template_revision(
+    template_id: str,
+    revision_id: str,
+    session: SessionDep,
+) -> PromptTemplateRevisionOut:
+    revision = session.get(PromptTemplateRevision, revision_id)
+    if revision is None or revision.prompt_template_id != template_id:
+        raise api_error(
+            404,
+            "prompt-template-revision-not-found",
+            "Prompt template does not exist.",
+        )
+    return _prompt_template_revision_out(revision)
+
+
+@router.get(
+    "/prompt-templates/{template_id}/revisions/{revision_id}/export",
+    response_model=PromptTemplatePortableBundleOut,
+)
+async def export_prompt_template_revision(
+    template_id: str,
+    revision_id: str,
+    response: Response,
+    session: SessionDep,
+) -> PromptTemplatePortableBundleOut:
+    try:
+        bundle = export_prompt_template_bundle(
+            session,
+            definition_id=template_id,
+            revision_id=revision_id,
+        )
+    except PromptTemplatePortabilityError as exc:
+        raise api_error(exc.status_code, exc.code, str(exc)) from exc
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Content-Disposition"] = (
+        f'attachment; filename="prompt-template-{bundle.bundle_sha256[:12]}.json"'
+    )
+    return PromptTemplatePortableBundleOut.model_validate(bundle.payload)
+
+
+@router.post(
+    "/prompt-templates/{template_id}/revisions/{revision_id}/restore",
+    response_model=PromptTemplateWriteOut,
+)
+async def restore_prompt_template_revision_route(
+    template_id: str,
+    revision_id: str,
+    payload: PromptTemplateRestore,
+    request: Request,
+    session: SessionDep,
+) -> PromptTemplateWriteOut:
+    try:
+        result = restore_prompt_template_revision(
+            session,
+            definition_id=template_id,
+            revision_id=revision_id,
+            expected_current_revision_id=payload.expected_current_revision_id,
+            idempotency_key=payload.idempotency_key,
+            expected_engine=_services(request).settings.media_engine,
+        )
+    except PromptLibraryError as exc:
+        raise _prompt_template_error(exc) from exc
+    return _prompt_template_write_out(session, result)
+
+
+@router.post(
+    "/chats/{chat_id}/prompt-batches",
+    response_model=PromptExpansionBatchOut,
+    status_code=201,
+)
+async def create_prompt_batch(
+    chat_id: str,
+    payload: PromptExpansionCreate,
+    session: ConversationSessionDep,
+) -> PromptExpansionBatchOut:
+    chat = session.get(Chat, chat_id)
+    if chat is None or chat.scope != STANDARD_CHAT_SCOPE:
+        raise api_error(404, "chat-not-found", "chat not found")
+    revision = session.get(PromptTemplateRevision, payload.template_revision_id)
+    if revision is None:
+        raise api_error(
+            404, "prompt-template-revision-not-found", "Prompt template does not exist."
+        )
+    definition = session.get(PromptTemplateDefinition, revision.prompt_template_id)
+    if (
+        definition is None
+        or definition.archived
+        or definition.current_revision_id != revision.id
+        or revision.contract_sha256 != payload.contract_sha256
+    ):
+        raise api_error(
+            409,
+            "prompt-template-stale",
+            "Prompt template changed; reload and retry.",
+        )
+    try:
+        contract = parse_prompt_template_contract(revision.contract_json)
+        if prompt_template_contract_sha256(contract) != revision.contract_sha256:
+            raise api_error(
+                409,
+                "prompt-template-conflict",
+                "Prompt template conflicts with its stored revision.",
+            )
+        expansion_request = parse_expansion_request(
+            {
+                "definition_id": definition.id,
+                "revision_id": revision.id,
+                "contract_sha256": revision.contract_sha256,
+                "item_count": payload.item_count,
+                "selection_seed": payload.selection_seed,
+                "inputs": payload.inputs,
+            }
+        )
+        plan = expand_prompt_template(contract, expansion_request)
+    except (PromptExpansionError, PromptTemplateError) as exc:
+        raise api_error(
+            422,
+            "prompt-batch-request-invalid",
+            "Prompt batch request is invalid.",
+        ) from exc
+    if not plan.complete:
+        raise api_error(
+            409,
+            "prompt-model-slots-unavailable",
+            "Prompt model slots are not available for preview yet.",
+        )
+    try:
+        stored = create_or_replay_expansion(
+            session,
+            chat.id,
+            payload.idempotency_key,
+            expansion_request,
+            plan,
+            PromptExpansionModelSnapshot(version=1, kind="deterministic"),
+        )
+    except PromptExpansionStoreError as exc:
+        raise _prompt_batch_conflict(exc) from exc
+    session.commit()
+    return _prompt_expansion_out(stored)
+
+
+@router.get("/prompt-batches/{batch_id}", response_model=PromptExpansionBatchOut)
+async def get_prompt_batch(
+    batch_id: str,
+    session: ConversationSessionDep,
+) -> PromptExpansionBatchOut:
+    batch = session.get(PromptExpansionBatch, batch_id)
+    if batch is None:
+        raise api_error(404, "prompt-batch-not-found", "Prompt batch does not exist.")
+    chat = session.get(Chat, batch.chat_id)
+    if chat is None or chat.scope != STANDARD_CHAT_SCOPE:
+        raise api_error(404, "prompt-batch-not-found", "Prompt batch does not exist.")
+    try:
+        stored = read_expansion(session, batch.chat_id, batch.id)
+    except PromptExpansionStoreError as exc:
+        raise _prompt_batch_conflict(exc) from exc
+    return _prompt_expansion_out(stored)
+
+
+@router.patch(
+    "/prompt-batches/{batch_id}/items/{ordinal}",
+    response_model=PromptExpansionBatchOut,
+)
+async def patch_prompt_batch_item(
+    batch_id: str,
+    ordinal: Annotated[int, PathParam(ge=1, le=16)],
+    payload: PromptExpansionItemUpdate,
+    session: ConversationSessionDep,
+) -> PromptExpansionBatchOut:
+    batch = session.get(PromptExpansionBatch, batch_id)
+    if batch is None:
+        raise api_error(404, "prompt-batch-not-found", "Prompt batch does not exist.")
+    chat = session.get(Chat, batch.chat_id)
+    if chat is None or chat.scope != STANDARD_CHAT_SCOPE:
+        raise api_error(404, "prompt-batch-not-found", "Prompt batch does not exist.")
+    try:
+        current = read_expansion(session, batch.chat_id, batch.id)
+        item = next(
+            (candidate for candidate in current.items if candidate.ordinal == ordinal), None
+        )
+        if item is None:
+            raise api_error(404, "prompt-batch-item-not-found", "Prompt batch item does not exist.")
+        stored = update_expansion_item(
+            session,
+            batch.chat_id,
+            batch.id,
+            item.id,
+            expected_item_version=payload.expected_review_version,
+            expected_plan_version=payload.expected_plan_version,
+            reviewed_prompt=payload.reviewed_prompt,
+            selected=payload.selected,
+        )
+    except PromptExpansionStoreError as exc:
+        raise _prompt_batch_conflict(exc) from exc
+    session.commit()
+    return _prompt_expansion_out(stored)
+
+
+@router.post(
+    "/prompt-batches/{batch_id}/queue",
+    response_model=PromptExpansionBatchOut,
+    status_code=202,
+)
+async def queue_prompt_batch(
+    batch_id: str,
+    payload: PromptExpansionQueue,
+    request: Request,
+    session: ConversationSessionDep,
+) -> PromptExpansionBatchOut:
+    batch = session.get(PromptExpansionBatch, batch_id)
+    if batch is None:
+        raise api_error(404, "prompt-batch-not-found", "Prompt batch does not exist.")
+    chat = session.get(Chat, batch.chat_id)
+    if chat is None or chat.scope != STANDARD_CHAT_SCOPE:
+        raise api_error(404, "prompt-batch-not-found", "Prompt batch does not exist.")
+    try:
+        _, replayed = await _services(request).orchestrator.create_prompt_batch_turn(
+            session,
+            chat.id,
+            batch.id,
+            queue_idempotency_key=payload.idempotency_key,
+            expected_plan_version=payload.expected_plan_version,
+            expected_plan_sha256=payload.expected_plan_sha256,
+        )
+        stored = read_expansion(session, chat.id, batch.id)
+    except PromptExpansionUseConflict as exc:
+        session.rollback()
+        raise api_error(409, "prompt-source-conflict", str(exc)) from exc
+    except PromptExpansionUseError as exc:
+        session.rollback()
+        raise api_error(422, "prompt-source-invalid", str(exc)) from exc
+    except (EngineNotConfiguredError, WorkflowSelectionInvalid) as exc:
+        session.rollback()
+        raise api_error(409, "engine-not-configured", str(exc)) from exc
+    except EngineSchemaUnavailableError as exc:
+        session.rollback()
+        raise api_error(503, "engine-schema-unavailable", str(exc)) from exc
+    except ValueError as exc:
+        session.rollback()
+        raise api_error(422, "generation-settings-invalid", str(exc)) from exc
+    return _prompt_expansion_out(stored).model_copy(update={"replayed": replayed})
+
+
 @router.post("/prompt-helpers", response_model=PromptHelperDetail, status_code=201)
 async def create_prompt_helper(
     payload: PromptHelperCreate,
@@ -1998,6 +2740,7 @@ async def _accept_turn(
     replacement_message_id: str | None = None,
     source_action: str = "send",
     inherited_image_edit_strength: dict[str, Any] | None = None,
+    inherited_prompt_source: object | None = None,
     reference_source_message_id: str | None = None,
 ) -> TurnAccepted:
     try:
@@ -2009,6 +2752,7 @@ async def _accept_turn(
             replacement_message_id=replacement_message_id,
             source_action=source_action,
             inherited_image_edit_strength=inherited_image_edit_strength,
+            inherited_prompt_source=inherited_prompt_source,
             reference_source_message_id=reference_source_message_id,
         )
     except LookupError as exc:
@@ -2066,6 +2810,10 @@ async def _accept_turn(
         raise api_error(503, "engine-schema-unavailable", str(exc)) from exc
     except ReferenceNotFoundError as exc:
         raise api_error(404, "reference-not-found", str(exc)) from exc
+    except PromptExpansionUseConflict as exc:
+        raise api_error(409, "prompt-source-conflict", str(exc)) from exc
+    except PromptExpansionUseError as exc:
+        raise api_error(422, "prompt-source-invalid", str(exc)) from exc
     except ValueError as exc:
         raise api_error(422, "turn-invalid", str(exc)) from exc
 
@@ -2139,6 +2887,21 @@ def _inherited_auto_image_edit_strength(run: Run) -> dict[str, Any] | None:
     return strength
 
 
+def _message_prompt_source(message: Message) -> object | None:
+    for part in sorted(message.parts, key=lambda candidate: candidate.position):
+        metadata = part.metadata_json
+        if part.type == "text" and type(metadata) is dict and "prompt_source" in metadata:
+            return cast(object, metadata["prompt_source"])
+    return None
+
+
+def _run_prompt_source(run: Run) -> object | None:
+    provenance = run.provenance_json
+    if type(provenance) is dict and "prompt_source" in provenance:
+        return cast(object, provenance["prompt_source"])
+    return None
+
+
 @router.post("/messages/{message_id}/regenerate", response_model=TurnAccepted, status_code=202)
 async def regenerate_message(
     message_id: str,
@@ -2187,7 +2950,12 @@ async def regenerate_message(
     )
     if not user_message:
         raise api_error(404, "source-user-message-not-found", "source user message not found")
-    text = "\n".join(part.text for part in user_message.parts if part.text).strip()
+    run_prompt_source = _run_prompt_source(prior_run)
+    text = (
+        prior_run.standalone_prompt
+        if run_prompt_source is not None
+        else "\n".join(part.text for part in user_message.parts if part.text).strip()
+    )
     mode = _mode_for_operation(Operation(prior_run.operation))
     prior_revision = (
         session.get(WorkflowRevision, prior_run.workflow_revision_id)
@@ -2226,6 +2994,9 @@ async def regenerate_message(
     inherited_image_edit_strength = (
         None if inherited_parameter in payload.settings else prior_strength
     )
+    inherited_prompt_source = run_prompt_source
+    if inherited_prompt_source is None:
+        inherited_prompt_source = _message_prompt_source(user_message)
     return await _accept_turn(
         orchestrator,
         session,
@@ -2235,6 +3006,7 @@ async def regenerate_message(
         replacement_message_id=message_id,
         source_action="regenerate",
         inherited_image_edit_strength=inherited_image_edit_strength,
+        inherited_prompt_source=inherited_prompt_source,
         reference_source_message_id=user_message.id,
     )
 
@@ -2268,7 +3040,9 @@ async def edit_and_branch(
     request: Request,
     session: ConversationSessionDep,
 ) -> TurnAccepted:
-    source = session.get(Message, message_id)
+    source = session.scalar(
+        select(Message).options(selectinload(Message.parts)).where(Message.id == message_id)
+    )
     if not source or source.role != MessageRole.USER.value:
         raise api_error(404, "user-message-not-found", "user message not found")
     prior_run = session.scalar(select(Run).where(Run.user_message_id == source.id))
@@ -2317,6 +3091,16 @@ async def edit_and_branch(
             except ValueError as exc:
                 raise api_error(422, "generation-settings-invalid", str(exc)) from exc
     turn = payload.model_copy(update=updates)
+    inherited_prompt_source = (
+        _message_prompt_source(source)
+        if (
+            "prompt_source" not in payload.model_fields_set
+            and prior_run is not None
+            and prior_run.operation == Operation.TEXT_TO_IMAGE.value
+            and turn.mode == RoutingMode.IMAGE
+        )
+        else None
+    )
     reference_source_message_id = (
         source.id if "references" not in payload.model_fields_set else None
     )
@@ -2328,6 +3112,7 @@ async def edit_and_branch(
         use_explicit_parent=True,
         source_action="edit_and_branch",
         inherited_image_edit_strength=inherited_image_edit_strength,
+        inherited_prompt_source=inherited_prompt_source,
         reference_source_message_id=reference_source_message_id,
     )
 
@@ -8795,7 +9580,10 @@ def _registry_activation_failure(exc: ComfyRegistryActivationError) -> Exception
     return api_error(_REGISTRY_ACTIVATION_STATUS.get(exc.code, 500), exc.code, str(exc))
 
 
-def _registry_install_out(install: ComfyRegistryInstall) -> RegistryInstallOut:
+def _registry_install_out(
+    install: ComfyRegistryInstall,
+    disk_state: RegistryInstallDiskState,
+) -> RegistryInstallOut:
     review = install.review_json if isinstance(install.review_json, dict) else {}
     reviewed_at = review.get("reviewed_at")
     activated_at = review.get("activated_at")
@@ -8808,6 +9596,9 @@ def _registry_install_out(install: ComfyRegistryInstall) -> RegistryInstallOut:
         manifest_sha256=install.manifest_sha256,
         wheel_closure_sha256=install.wheel_closure_sha256,
         wheel_environment_sha256=install.wheel_environment_sha256,
+        disk_status=disk_state.status,
+        node_files_present=disk_state.node_files_present,
+        wheel_environment_present=disk_state.wheel_environment_present,
         trusted=install.trusted,
         active=install.active,
         reviewed_at=reviewed_at if isinstance(reviewed_at, str) else None,
@@ -8874,16 +9665,36 @@ def _registry_activation_context(services: Services) -> PreparationContext:
         raise api_error(422, exc.code, str(exc)) from exc
 
 
+def _registry_install_disk_state(
+    services: Services,
+    install: ComfyRegistryInstall,
+) -> RegistryInstallDiskState:
+    custom_node_root = (
+        services.settings.comfy_directory / "custom_nodes"
+        if services.settings.comfy_directory is not None
+        else None
+    )
+    return inspect_registry_install_disk_state(
+        install,
+        custom_node_root=custom_node_root,
+        environment_root=registry_wheel_environment_root(services.settings.registry_dir),
+    )
+
+
 @router.get("/workflows/packages/installs", response_model=list[RegistryInstallOut])
-async def list_registry_installs(session: SessionDep) -> list[RegistryInstallOut]:
+async def list_registry_installs(request: Request, session: SessionDep) -> list[RegistryInstallOut]:
     """List every prepared package with its trust and activation state."""
 
+    services = _services(request)
     installs = session.scalars(
         select(ComfyRegistryInstall).order_by(
             ComfyRegistryInstall.package_id, ComfyRegistryInstall.package_version
         )
     ).all()
-    return [_registry_install_out(install) for install in installs]
+    return [
+        _registry_install_out(install, _registry_install_disk_state(services, install))
+        for install in installs
+    ]
 
 
 @router.post(
@@ -8895,12 +9706,28 @@ async def renew_registry_install(install_id: str, request: Request, session: Ses
     """Rebuild an inactive package's dependencies for the current media runtime."""
 
     services = _services(request)
+    async with services.scheduler.lease("primary"):
+        return _queue_registry_install_renewal(session, services, install_id)
+
+
+def _queue_registry_install_renewal(
+    session: Session,
+    services: Services,
+    install_id: str,
+) -> Job:
     install = _loaded_registry_install(session, install_id)
     if install.active:
         raise api_error(
             409,
             "registry-install-active",
             "Deactivate the Registry package before refreshing its dependencies",
+        )
+    disk_state = _registry_install_disk_state(services, install)
+    if not disk_state.node_files_present:
+        raise api_error(
+            409,
+            "registry-install-files-missing",
+            "Remove this incomplete Registry package and prepare it again",
         )
     if not _media_worker_truly_stopped(services):
         raise api_error(
@@ -8949,7 +9776,8 @@ async def review_registry_install(
             )
         except ComfyRegistryActivationError as exc:
             raise _registry_activation_failure(exc) from exc
-    return _registry_install_out(_loaded_registry_install(session, install_id))
+    install = _loaded_registry_install(session, install_id)
+    return _registry_install_out(install, _registry_install_disk_state(services, install))
 
 
 @router.post(
@@ -8978,7 +9806,8 @@ async def activate_registry_install(
             )
         except ComfyRegistryActivationError as exc:
             raise _registry_activation_failure(exc) from exc
-    return _registry_install_out(_loaded_registry_install(session, install_id))
+    install = _loaded_registry_install(session, install_id)
+    return _registry_install_out(install, _registry_install_disk_state(services, install))
 
 
 @router.post(
@@ -9001,7 +9830,50 @@ async def deactivate_registry_install(
             )
         except ComfyRegistryActivationError as exc:
             raise _registry_activation_failure(exc) from exc
-    return _registry_install_out(_loaded_registry_install(session, install_id))
+    install = _loaded_registry_install(session, install_id)
+    return _registry_install_out(install, _registry_install_disk_state(services, install))
+
+
+_REGISTRY_REMOVAL_STATUS: dict[str, int] = {
+    "registry_install_not_found": 404,
+    "registry_install_active": 409,
+    "registry_install_in_use": 409,
+    "registry_install_busy": 409,
+    "registry_install_path_invalid": 409,
+    "registry_install_remove_failed": 500,
+    "registry_install_restore_failed": 500,
+}
+
+
+@router.delete("/workflows/packages/installs/{install_id}", status_code=204)
+async def delete_registry_install(
+    install_id: str,
+    request: Request,
+    session: SessionDep,
+) -> Response:
+    """Remove one inactive prepared package and its exclusively owned files."""
+
+    services = _services(request)
+    custom_node_root = (
+        services.settings.comfy_directory / "custom_nodes"
+        if services.settings.comfy_directory is not None
+        else None
+    )
+    async with services.scheduler.lease("primary"):
+        try:
+            remove_comfy_registry_install(
+                session,
+                install_id=install_id,
+                custom_node_root=custom_node_root,
+                environment_root=registry_wheel_environment_root(services.settings.registry_dir),
+            )
+        except ComfyRegistryReconciliationError as exc:
+            raise api_error(
+                _REGISTRY_REMOVAL_STATUS.get(exc.code, 500),
+                exc.code,
+                str(exc),
+            ) from exc
+    return Response(status_code=204)
 
 
 def _rebuild_asset_binding(

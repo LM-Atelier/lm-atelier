@@ -24,6 +24,7 @@ export function RegistryInstallsPanel() {
   });
   const refresh = () => void client.invalidateQueries({ queryKey: ["registry-installs"] });
   const [trusting, setTrusting] = useState<RegistryInstall | null>(null);
+  const [removing, setRemoving] = useState<RegistryInstall | null>(null);
   const review = useMutation({
     mutationFn: ({ id, trusted }: { id: string; trusted: boolean }) =>
       api.reviewRegistryInstall(id, trusted),
@@ -44,7 +45,11 @@ export function RegistryInstallsPanel() {
       void client.invalidateQueries({ queryKey: ["jobs"] });
     },
   });
-  const error = (review.error ?? activate.error ?? deactivate.error ?? renew.error) as
+  const remove = useMutation({
+    mutationFn: (id: string) => api.removeRegistryInstall(id),
+    onSuccess: refresh,
+  });
+  const error = (review.error ?? activate.error ?? deactivate.error ?? renew.error ?? remove.error) as
     | (Error & { code?: string })
     | null;
   if (!installs.data?.length) return null;
@@ -69,29 +74,37 @@ export function RegistryInstallsPanel() {
             <span className={`badge ${install.active ? "likely" : "advanced_import"}`}>
               {install.active ? "Active" : "Inactive"}
             </span>
+            {install.disk_status !== "ready" && (
+              <span className="badge advanced_import">Files missing</span>
+            )}
             <span>
               <strong>{install.package_id}</strong>
               <small>
                 {install.package_version}
                 {` · ${install.node_types.length} node type${install.node_types.length === 1 ? "" : "s"}`}
               </small>
+              {install.disk_status !== "ready" && (
+                <small>This prepared package is incomplete. Remove it, then prepare it again.</small>
+              )}
             </span>
             <details>
               <summary>Identity</summary>
               <pre>{identityLines(install)}</pre>
             </details>
             <span className="row-actions">
-              <button
-                className="secondary compact-button"
-                onClick={() =>
-                  install.trusted
-                    ? review.mutate({ id: install.id, trusted: false })
-                    : setTrusting(install)
-                }
-              >
-                {install.trusted ? "Revoke trust" : "Trust package"}
-              </button>
-              {install.trusted && !install.active && (
+              {(install.trusted || install.disk_status === "ready") && (
+                <button
+                  className="secondary compact-button"
+                  onClick={() =>
+                    install.trusted
+                      ? review.mutate({ id: install.id, trusted: false })
+                      : setTrusting(install)
+                  }
+                >
+                  {install.trusted ? "Revoke trust" : "Trust package"}
+                </button>
+              )}
+              {install.trusted && !install.active && install.disk_status === "ready" && (
                 <button
                   className="secondary compact-button"
                   onClick={() => activate.mutate(install.id)}
@@ -107,13 +120,22 @@ export function RegistryInstallsPanel() {
                   Deactivate
                 </button>
               )}
-              {!install.active && (
+              {!install.active && install.node_files_present && (
                 <button
                   className="secondary compact-button"
                   disabled={renew.isPending && renew.variables === install.id}
                   onClick={() => renew.mutate(install.id)}
                 >
                   Refresh dependencies
+                </button>
+              )}
+              {!install.active && (
+                <button
+                  className="secondary compact-button danger"
+                  disabled={remove.isPending && remove.variables === install.id}
+                  onClick={() => setRemoving(install)}
+                >
+                  Remove
                 </button>
               )}
             </span>
@@ -150,6 +172,32 @@ export function RegistryInstallsPanel() {
             const chosen = trusting;
             setTrusting(null);
             review.mutate({ id: chosen.id, trusted: true });
+          }}
+        />
+      )}
+      {removing && (
+        <ConfirmDialog
+          title={`Remove ${removing.package_id}?`}
+          question="This removes the prepared package record and its managed package files. You can prepare the package again later."
+          detail={
+            <dl className="confirm-facts">
+              <div>
+                <dt>Package</dt>
+                <dd>{removing.package_id}</dd>
+              </div>
+              <div>
+                <dt>Version</dt>
+                <dd>{removing.package_version}</dd>
+              </div>
+            </dl>
+          }
+          confirmLabel="Remove prepared package"
+          confirmDisabled={remove.isPending}
+          onCancel={() => setRemoving(null)}
+          onConfirm={() => {
+            const chosen = removing;
+            setRemoving(null);
+            remove.mutate(chosen.id);
           }}
         />
       )}

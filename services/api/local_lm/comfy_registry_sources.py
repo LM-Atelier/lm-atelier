@@ -61,16 +61,24 @@ def resolve_comfy_package_source(
         revision = resolution.declared_version
         if _COMMIT.fullmatch(revision) is None:
             raise ComfyPackageSourceError("package resolution has an invalid commit revision")
-        if resolution.registry_record_id is not None or resolution.download_url is not None:
-            raise ComfyPackageSourceError("commit resolution contains conflicting source metadata")
         digest = hashlib.sha256(f"{repository}{chr(0)}{revision}".encode()).hexdigest()
+        record_id = f"github-commit:{digest}"
+        download_url = _github_commit_download_url(repository, revision)
+        if resolution.registry_record_id not in (
+            None,
+            record_id,
+        ) or resolution.download_url not in (
+            None,
+            download_url,
+        ):
+            raise ComfyPackageSourceError("commit resolution contains conflicting source metadata")
         return ComfyPackageSourceIdentity(
             "git_commit",
             resolution.package_id,
             revision,
-            f"github-commit:{digest}",
+            record_id,
             repository,
-            _github_commit_download_url(repository, revision),
+            download_url,
         )
     raise ComfyPackageSourceError("package resolution has an unsupported install kind")
 

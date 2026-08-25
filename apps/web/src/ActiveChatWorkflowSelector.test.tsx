@@ -181,7 +181,7 @@ describe("ActiveChatWorkflowSelector", () => {
         variants: [{
           ...family().variants[0],
           readiness: "setup_required",
-          readiness_reason: "Install one model file.",
+          readiness_reason: "model_unavailable",
         }],
       })],
       selectedFamilyMissing: false,
@@ -191,14 +191,14 @@ describe("ActiveChatWorkflowSelector", () => {
     });
 
     render(<ActiveChatWorkflowSelector chatId="chat-1" routingMode="image" />);
-    expect(screen.getByRole("status")).toHaveTextContent("Install one model file.");
+    expect(screen.getByRole("status")).toHaveTextContent("The model it needs is not installed.");
   });
 
   it("does not let a ready unrelated variant hide a blocked active capability", () => {
     const imageVariant = {
       ...family().variants[0],
       readiness: "setup_required" as const,
-      readiness_reason: "Image assets are missing.",
+      readiness_reason: "future_server_reason",
     };
     const videoVariant = {
       ...family().variants[0],
@@ -228,7 +228,10 @@ describe("ActiveChatWorkflowSelector", () => {
     });
 
     render(<ActiveChatWorkflowSelector chatId="chat-1" routingMode="image" />);
-    expect(screen.getByRole("status")).toHaveTextContent("Image assets are missing.");
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Needs files or nodes installed before it can run.",
+    );
+    expect(screen.getByRole("status")).not.toHaveTextContent("future_server_reason");
   });
 
   it("reports a family with no variant for the active capability", () => {

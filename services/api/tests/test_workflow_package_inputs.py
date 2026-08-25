@@ -716,7 +716,7 @@ def test_a_load_image_inside_a_bypassed_subgraph_is_not_a_source() -> None:
                 "type": "sub",
                 "mode": 4,
                 "inputs": [],
-                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": []}],
+                "outputs": [],
                 "widgets_values": [],
             },
             {

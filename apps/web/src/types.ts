@@ -888,6 +888,7 @@ export interface ApplicationInfo {
   version: string;
   data_directory: string;
   log_directory: string;
+  max_media_outputs_per_plan: number;
   // The installation-wide gate. False means no chat can open its own, and
   // the UI says so rather than offering a switch that does nothing.
   web_access_enabled: boolean;
@@ -1090,6 +1091,9 @@ export interface RegistryInstall {
   manifest_sha256: string;
   wheel_closure_sha256: string | null;
   wheel_environment_sha256: string | null;
+  disk_status: "ready" | "node_files_missing" | "wheel_environment_missing" | "files_missing";
+  node_files_present: boolean;
+  wheel_environment_present: boolean;
   trusted: boolean;
   active: boolean;
   reviewed_at: string | null;
@@ -1308,6 +1312,180 @@ export interface ReferenceAsset {
   view_label: string | null;
   sort_order: number;
   validation_state: string;
+}
+
+export type PromptTemplateSlotMode = "input" | "choice" | "model" | "fixed";
+export type PromptTemplateVariationScope = "item" | "batch";
+
+export type PromptTemplateSlot = {
+  name: string;
+  variation_scope: PromptTemplateVariationScope;
+} & (
+  | { mode: "input" }
+  | { mode: "choice"; choices: string[] }
+  | { mode: "model"; guidance: string }
+  | { mode: "fixed"; fixed_value: string }
+);
+
+export interface PromptTemplateLora {
+  sha256: string;
+  model_strength: number;
+  clip_strength: number;
+}
+
+export type PromptTemplateLoraPolicy =
+  | { mode: "inherited_auto" }
+  | { mode: "none" }
+  | { mode: "fixed"; stack: PromptTemplateLora[] }
+  | {
+      mode: "pool";
+      strategy: "random" | "round_robin";
+      stacks: PromptTemplateLora[][];
+    };
+
+/** A pool option pairs one workflow with a LoRA policy that is never itself a
+ * pool: the server refuses a nested pool because it would create a second
+ * allocation order over the same draft. */
+export type PromptTemplateOptionLoraPolicy = Exclude<
+  PromptTemplateLoraPolicy,
+  { mode: "pool" }
+>;
+
+export interface PromptTemplateResourceOption {
+  workflow_revision_id: string;
+  lora_policy: PromptTemplateOptionLoraPolicy;
+}
+
+export type PromptTemplateResourcePolicy =
+  | { mode: "inherited" }
+  | {
+      mode: "fixed";
+      workflow_revision_id: string;
+      lora_policy: PromptTemplateLoraPolicy;
+    }
+  | {
+      mode: "pool";
+      strategy: "random" | "round_robin";
+      options: PromptTemplateResourceOption[];
+    };
+
+export interface PromptTemplateContract {
+  schema_version: 1;
+  operation: "text_to_image";
+  body: string;
+  slots: PromptTemplateSlot[];
+  resource_policy: PromptTemplateResourcePolicy;
+}
+
+export interface PromptTemplateRevision {
+  id: string;
+  prompt_template_id: string;
+  version: number;
+  schema_version: number;
+  contract_json: PromptTemplateContract;
+  contract_sha256: string;
+  created_at: string;
+}
+
+export interface PromptTemplateDefinition {
+  id: string;
+  name: string;
+  description: string;
+  archived: boolean;
+  current_revision_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PromptTemplateDetail extends PromptTemplateDefinition {
+  current_revision: PromptTemplateRevision;
+}
+
+export interface PromptTemplateWriteResult {
+  template: PromptTemplateDetail;
+  revision: PromptTemplateRevision;
+  idempotent: boolean;
+}
+
+export interface PromptTemplatePage {
+  items: PromptTemplateDefinition[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface PromptTemplateCreateInput {
+  idempotency_key: string;
+  name: string;
+  description: string;
+  contract: PromptTemplateContract;
+}
+
+export interface PromptTemplateUpdateInput {
+  expected_current_revision_id: string;
+  idempotency_key?: string;
+  name?: string;
+  description?: string;
+  archived?: boolean;
+  contract?: PromptTemplateContract;
+}
+
+/** Provisional Prompt Library expansion transport, isolated for API reconciliation. */
+export interface PromptBatchCreateInput {
+  idempotency_key: string;
+  template_revision_id: string;
+  contract_sha256: string;
+  item_count: number;
+  selection_seed: number;
+  inputs: Record<string, string | string[]>;
+}
+
+export interface PromptBatchItemUpdateInput {
+  expected_review_version: number;
+  expected_plan_version: number;
+  reviewed_prompt: string;
+  selected: boolean;
+}
+
+export interface PromptBatchQueueInput {
+  idempotency_key: string;
+  expected_plan_version: number;
+  expected_plan_sha256: string;
+}
+
+export interface PromptBatchItem {
+  id: string;
+  ordinal: number;
+  rendered_prompt: string;
+  rendered_sha256: string;
+  reviewed_prompt: string;
+  reviewed_sha256: string;
+  selected: boolean;
+  review_version: number;
+  reroll_count: number;
+  work_step_id: string | null;
+  run_id: string | null;
+  media_seed: number | null;
+}
+
+export interface PromptBatch {
+  id: string;
+  chat_id: string;
+  prompt_template_id: string;
+  prompt_template_revision_id: string;
+  schema_version: number;
+  contract_sha256: string;
+  codec_version: 2;
+  requested_count: number;
+  selection_seed: number;
+  plan_sha256: string;
+  state: "draft" | "queued";
+  plan_version: number;
+  queue_idempotency_key: string | null;
+  work_plan_id: string | null;
+  queued_at: string | null;
+  items: PromptBatchItem[];
+  replayed: boolean;
 }
 
 /** An image already held that closely resembles one just added. */

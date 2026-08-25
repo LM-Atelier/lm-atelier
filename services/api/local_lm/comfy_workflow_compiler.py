@@ -25,8 +25,29 @@ _CONTROL_WIDGET = "control_after_generate"
 # are rewritten away.
 _SCOPE_SEPARATOR = ":"
 # Nodes that draw something and carry nothing. Dropping one loses a caption.
+#
+# `Fast Groups Bypasser (rgthree)` belongs here for the same reason and it is
+# worth saying why, because at a glance it looks like a control with
+# behaviour. What it does is set the MODE of the nodes in the groups it names,
+# and those modes are already serialized on those nodes in the saved file.
+# `expand_workflow` - which runs above, before this check - resolves every
+# mode-4 node away in `_resolve_bypasses`. So by the time this set is consulted
+# the control's effect has already been applied. Adding it here does not run
+# bypassed nodes; they are gone before the decision.
+#
+# It carries nothing of its own EITHER, and that is enforced rather than
+# assumed: rgthree permits one of these to drive another through
+# OPT_CONNECTION, and a linked one is refused with `frontend_node_link` below
+# rather than dropped with its edge. Ignoring a node is only ever safe while
+# both halves hold, and both have a test.
 _IGNORED_FRONTEND_NODE_TYPES = frozenset(
-    {"MarkdownNote", "Note", "PrimitiveNode", "Label (rgthree)"}
+    {
+        "MarkdownNote",
+        "Note",
+        "PrimitiveNode",
+        "Fast Groups Bypasser (rgthree)",
+        "Label (rgthree)",
+    }
 )
 # Nodes that carry a wire and nothing else. They are resolved away before
 # compilation rather than ignored: ignoring one drops the edge it was

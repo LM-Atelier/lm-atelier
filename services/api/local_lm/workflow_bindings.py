@@ -39,6 +39,13 @@ from .workflow_dependencies import (
 
 WORKFLOW_BINDING_VERSION = 1
 MAX_WORKFLOW_BINDING_SELECTIONS = 512
+WORKFLOW_DEPENDENCY_MATERIALIZER_ISSUE_CODES: frozenset[str] = frozenset(
+    {
+        "dependency_unavailable",
+        "invalid_dependency_identity",
+        "legacy_environment_manifest",
+    }
+)
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _DIGEST_INPUT = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -189,7 +196,7 @@ def resolve_workflow_activation(
             try:
                 materialized = materialize(requirement, selection)
             except WorkflowBindingError as exc:
-                if exc.code not in {"dependency_unavailable", "invalid_dependency_identity"}:
+                if exc.code not in WORKFLOW_DEPENDENCY_MATERIALIZER_ISSUE_CODES:
                     raise
                 issues.append(WorkflowBindingIssue(exc.code, slot.name, selection.requirement_key))
                 continue

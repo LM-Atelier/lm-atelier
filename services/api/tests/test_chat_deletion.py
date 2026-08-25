@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any, cast
 
 import pytest
 from httpx2 import AsyncClient
@@ -15,32 +16,33 @@ from local_lm.chat_deletion import (
     delete_exchange,
 )
 from local_lm.db import SessionLocal
+from local_lm.domain import JobKind, JobStatus
 from local_lm.models import Artifact, Chat, Job, Message, Run
 
 
-async def wait_for_run(client: AsyncClient, run_id: str) -> dict:  # type: ignore[type-arg]
+async def wait_for_run(client: AsyncClient, run_id: str) -> dict[str, Any]:
     for _ in range(400):
-        payload = (await client.get(f"/api/runs/{run_id}")).json()
+        payload = cast(dict[str, Any], (await client.get(f"/api/runs/{run_id}")).json())
         if payload["status"] in {"complete", "failed", "cancelled"}:
             return payload
         await asyncio.sleep(0.01)
     raise AssertionError("run did not finish in time")
 
 
-async def _text_exchange(client: AsyncClient, chat_id: str, text: str) -> dict:  # type: ignore[type-arg]
+async def _text_exchange(client: AsyncClient, chat_id: str, text: str) -> dict[str, Any]:
     accepted = await client.post(f"/api/chats/{chat_id}/turns", json={"text": text, "mode": "text"})
     assert accepted.status_code == 202
-    payload = accepted.json()
+    payload = cast(dict[str, Any], accepted.json())
     await wait_for_run(client, payload["run"]["id"])
     return payload
 
 
-async def _image_exchange(client: AsyncClient, chat_id: str, text: str) -> dict:  # type: ignore[type-arg]
+async def _image_exchange(client: AsyncClient, chat_id: str, text: str) -> dict[str, Any]:
     accepted = await client.post(
         f"/api/chats/{chat_id}/turns", json={"text": text, "mode": "image"}
     )
     assert accepted.status_code == 202
-    payload = accepted.json()
+    payload = cast(dict[str, Any], accepted.json())
     await wait_for_run(client, payload["run"]["id"])
     return payload
 
@@ -73,7 +75,9 @@ async def test_deleting_a_media_turn_removes_the_exchange_and_releases_its_image
         for artifact_id in result.released_artifact_ids:
             assert session.get(Artifact, artifact_id) is not None
         # The transcript head walked back to the surviving exchange.
-        head = session.get(Chat, chat["id"]).active_head_message_id
+        stored_chat = session.get(Chat, chat["id"])
+        assert stored_chat is not None
+        head = stored_chat.active_head_message_id
         assert head not in set(result.message_ids)
 
 
@@ -105,6 +109,112 @@ async def test_a_turn_with_live_jobs_is_refused(client: AsyncClient) -> None:
 
     with SessionLocal() as session, pytest.raises(ExchangeBusy):
         delete_exchange(session, exchange["user_message"]["id"])
+
+
+async def test_runless_edit_verification_jobs_make_the_source_exchange_busy(
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Busy verification"})).json()
+    exchange = await _text_exchange(client, chat["id"], "Finished source turn")
+
+    with SessionLocal() as session:
+        run_id = session.scalar(
+            select(Run.id).where(Run.user_message_id == exchange["user_message"]["id"])
+        )
+        assert run_id
+        job_ids: list[str] = []
+        for status in (JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.PAUSED):
+            job = Job(
+                kind=JobKind.EDIT_VERIFY.value,
+                status=status.value,
+                phase=status.value,
+                run_id=None,
+                payload_json={"chat_id": chat["id"], "source_run_id": run_id},
+            )
+            session.add(job)
+            session.flush()
+            job_ids.append(job.id)
+        session.commit()
+
+    refused = await client.delete(f"/api/messages/{exchange['user_message']['id']}/exchange")
+    assert refused.status_code == 409
+    assert refused.json()["code"] == "exchange-busy"
+    assert refused.json()["job_count"] == 3
+
+    with SessionLocal() as session:
+        assert session.get(Message, exchange["user_message"]["id"]) is not None
+        assert all(session.get(Job, job_id) is not None for job_id in job_ids)
+
+
+async def test_settled_runless_edit_verification_jobs_are_deleted_with_the_exchange(
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Settled verification"})).json()
+    exchange = await _text_exchange(client, chat["id"], "Finished source turn")
+
+    with SessionLocal() as session:
+        run_id = session.scalar(
+            select(Run.id).where(Run.user_message_id == exchange["user_message"]["id"])
+        )
+        assert run_id
+        job_ids: list[str] = []
+        for status in (
+            JobStatus.COMPLETE,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+            JobStatus.INTERRUPTED,
+        ):
+            job = Job(
+                kind=JobKind.EDIT_VERIFY.value,
+                status=status.value,
+                phase=status.value,
+                run_id=None,
+                payload_json={"chat_id": chat["id"], "source_run_id": run_id},
+            )
+            session.add(job)
+            session.flush()
+            job_ids.append(job.id)
+        session.commit()
+
+    with SessionLocal() as session:
+        result = delete_exchange(session, exchange["user_message"]["id"])
+        session.commit()
+
+    assert set(job_ids) <= set(result.job_ids)
+    with SessionLocal() as session:
+        assert all(session.get(Job, job_id) is None for job_id in job_ids)
+
+
+async def test_a_runless_verification_for_another_exchange_does_not_block(
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Exact verification"})).json()
+    earlier = await _text_exchange(client, chat["id"], "Earlier source turn")
+    removed = await _text_exchange(client, chat["id"], "Independent later turn")
+
+    with SessionLocal() as session:
+        source_run_id = session.scalar(
+            select(Run.id).where(Run.user_message_id == earlier["user_message"]["id"])
+        )
+        assert source_run_id
+        verification = Job(
+            kind=JobKind.EDIT_VERIFY.value,
+            status=JobStatus.QUEUED.value,
+            phase=JobStatus.QUEUED.value,
+            run_id=None,
+            payload_json={"chat_id": chat["id"], "source_run_id": source_run_id},
+        )
+        session.add(verification)
+        session.commit()
+        verification_id = verification.id
+
+    with SessionLocal() as session:
+        result = delete_exchange(session, removed["user_message"]["id"])
+        session.commit()
+
+    assert verification_id not in result.job_ids
+    with SessionLocal() as session:
+        assert session.get(Job, verification_id) is not None
 
 
 async def test_an_artifact_still_referenced_elsewhere_is_retained(

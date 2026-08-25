@@ -223,8 +223,15 @@ being bad. A model can be unsupported here and work elsewhere.
 | Code | What you were shown |
 |---|---|
 | `workflow_missing` | No compatible workflow is installed for this model. |
+| `workflow_activation_not_ready` | The compatible workflow dependencies are not active. |
 | `workflow_invalid` | The compatible workflow is incomplete. |
 | `workflow_untrusted` | The compatible workflow has not been trusted. |
+
+`workflow_activation_not_ready` offers **Review workflows**. Open the
+compatible workflow in Workflow Library, repair or activate its required
+dependencies, and return to setup after the workflow reports that it is ready.
+The application will not use an incomplete, stale, or invalidated dependency
+activation as though it were current.
 
 `workflow_untrusted` is usually an imported workflow. Starting verification will
 first try to rebuild it from the template it records: if the rebuild is

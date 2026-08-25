@@ -358,6 +358,49 @@ def test_dangling_ui_links_are_inert_and_reported() -> None:
     assert analysis.ready
 
 
+def test_h3_nodes_are_observed_without_authority() -> None:
+    analysis = analyze_comfyui_workflow_package(
+        workflow(
+            nodes=[
+                node(1, "MiniMaxH3ImageToVideo", package="comfy-core", version="0.30.0"),
+                node(2, "KSampler", package="comfy-core", version="0.30.0"),
+            ]
+        ),
+        available_node_types={"MiniMaxH3ImageToVideo", "KSampler"},
+    )
+    assert len(analysis.model_family_observations) == 1
+    observation = analysis.model_family_observations[0]
+    assert observation.family_id == "minimax-h3"
+    assert observation.declaration_source == "exact_workflow_node_types"
+    assert observation.evidence_node_types == ("MiniMaxH3ImageToVideo",)
+    assert observation.variant_hints == ("image_to_video",)
+    assert observation.runtime_verified is False
+    assert observation.installation_authorized is False
+    assert observation.execution_authorized is False
+    assert observation.workflow_contract_bound is False
+    assert observation.geometry_claimed is False
+    assert observation.reference_slots_claimed is False
+    assert not hasattr(observation, "geometry_alignment_pixels")
+    assert not hasattr(observation, "reference_image_slots_max")
+    assert analysis.ready
+
+
+def test_h3_lookalikes_are_not_observed() -> None:
+    analysis = analyze_comfyui_workflow_package(
+        workflow(nodes=[node(1, "MiniMaxH3ImageToVideoX")]),
+        available_node_types={"MiniMaxH3ImageToVideoX"},
+    )
+    assert analysis.model_family_observations == ()
+
+
+def test_non_h3_graph_has_no_family_observation() -> None:
+    analysis = analyze_comfyui_workflow_package(
+        workflow(nodes=[node(1, "KSampler")]),
+        available_node_types={"KSampler"},
+    )
+    assert analysis.model_family_observations == ()
+
+
 def test_operation_guess_is_display_only() -> None:
     analysis = analyze_comfyui_workflow_package(
         workflow(nodes=[node(1, "VHS_VideoCombine")]),

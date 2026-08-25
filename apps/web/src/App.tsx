@@ -1,11 +1,4 @@
-import {
-  Fragment,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Bot,
@@ -77,10 +70,12 @@ import { PendingResponseStatus } from "./PendingResponseStatus";
 import { MarkdownText } from "./MarkdownText";
 import { MentionText } from "./MentionText";
 import { MessageField } from "./MessageField";
+import { OutputCountControl } from "./OutputCountControl";
+import { mediaOutputCountForTurn, useMediaOutputCount } from "./mediaOutputCount";
 import type { TurnReference } from "./mentionDraft";
 import { useComposerMentions } from "./useComposerMentions";
 import { useConfirm } from "./useConfirm";
-import { focusMainContent, roleForMode } from "./viewHelpers";
+import { drawerRoleView, focusMainContent, roleForMode } from "./viewHelpers";
 import { ArtifactPart } from "./ArtifactPart";
 import { ImageStudioIcon } from "./ImageStudioIcon";
 import { FirstRunSetup } from "./SetupWizard";
@@ -95,10 +90,22 @@ import { WorkflowConsumers } from "./WorkflowConsumers";
 import { operationForTurn, revisionForTurn, schemaForRevision } from "./turnWorkflow";
 import type { WorkflowFamily, WorkflowSelection } from "./types";
 import { PromptDialog } from "./ConfirmDialog";
-import { GenerationSettingsPanel } from "./GenerationSettingsPanel";
+import { SettingsDrawer } from "./SettingsDrawer";
 import { ProjectManager } from "./ProjectManager";
 import { SettingsView } from "./SettingsView";
 import { MediaLibraryView } from "./MediaLibraryView";
+import { PromptLibraryView } from "./PromptLibraryView";
+import { ComposerPromptTemplatesAction } from "./ComposerPromptTemplatesAction";
+import type { ChatViewProps, ComposerProps, PendingTurn } from "./chatComposerContracts";
+import {
+  EMPTY_COMPOSER_DRAFT,
+  composerDraftWithText,
+  detachedComposerDraft,
+  promptSourceForTurn,
+  updatedComposerDrafts,
+  withoutComposerDraft,
+  type ComposerDraft, type ComposerPromptSource,
+} from "./composerPromptSource";
 import { ReferencesLibrary } from "./ReferencesLibrary";
 import { MediaOutputPlan } from "./MediaOutputPlan";
 import { ModelCard } from "./ModelCard";
@@ -115,6 +122,8 @@ import { useComposerUploads } from "./useComposerUploads";
 import type { ComposerAttachment } from "./useComposerUploads";
 import { useDraftClassification } from "./useDraftClassification";
 import { useFirstRunSetup } from "./useFirstRunSetup";
+import { recoverPromptSourceSend } from "./promptSourceSendRecovery";
+import { useWorkPlanMutations } from "./useWorkPlanMutations";
 import { useGenerationModeSelection } from "./useGenerationModeSelection";
 import { useMessageActions } from "./useMessageActions";
 import {
@@ -142,22 +151,21 @@ import type {
   SetupReadinessReport,
   TurnAccepted,
   Workflow,
-  WorkPlan,
 } from "./types";
 
-type PendingTurn = { id: string; text: string; mode: RoutingMode };
 type SendTurnVariables = PendingTurn & {
   chatId: string;
   artifacts: string[];
   settings: Record<string, unknown>;
   /** Subject ids chosen from the mention picker, never parsed from the text. */
   references: TurnReference[];
+  outputCount?: number;
+  promptSource?: ComposerPromptSource;
   stopCurrent?: boolean;
 };
 
 const SETUP_DISMISSED_KEY = "lm-atelier-setup-dismissed";
 const CURRENT_CHAT_KEY = "local-lm-chat";
-
 
 /** The library's Edit action: attach the selection in the chat composer,
  * switch to image mode, and open the studio. */
@@ -477,71 +485,6 @@ function MessageBubble({
 }
 
 
-function SettingsDrawer({
-  open,
-  onClose,
-  mode,
-  engines,
-  values,
-  onValues,
-  presets,
-  presetId,
-  onPreset,
-  workflowSchema,
-  inheritedValues,
-  inheritedPresetId,
-  profileValues,
-  imageEdit,
-  imageEditPrompt,
-}: {
-  open: boolean;
-  onClose: () => void;
-  mode: RoutingMode;
-  engines: EngineCapabilities[];
-  values: Record<string, unknown>;
-  onValues: (values: Record<string, unknown>) => void;
-  presets: GenerationPreset[];
-  presetId: string | null;
-  onPreset: (presetId: string | null) => void;
-  workflowSchema?: Record<string, unknown>;
-  inheritedValues?: Record<string, unknown>;
-  inheritedPresetId?: string | null;
-  profileValues?: Record<string, unknown>;
-  imageEdit: boolean;
-  imageEditPrompt: string;
-}) {
-  const role = roleForMode(mode);
-  if (!open) return null;
-  return (
-    <AccessibleDialog
-      title={`${role[0].toUpperCase() + role.slice(1)} settings`}
-      eyebrow="Chat defaults"
-      closeLabel="Close settings"
-      onClose={onClose}
-      className="settings-drawer"
-      backdropClassName="settings-drawer-backdrop"
-    >
-      <GenerationSettingsPanel
-        role={role}
-        engines={engines}
-        values={values}
-        onValues={onValues}
-        presets={presets}
-        presetId={presetId}
-        onPreset={onPreset}
-        workflowSchema={workflowSchema}
-        inheritedValues={inheritedValues}
-        inheritedPresetId={inheritedPresetId}
-        profileValues={profileValues}
-        imageEdit={imageEdit}
-        imageEditPrompt={imageEditPrompt}
-        resetLabel="Reset chat overrides"
-        onReset={() => onValues({})}
-      />
-    </AccessibleDialog>
-  );
-}
-
 function promptHelperMessageText(message: Message): string {
   return message.parts
     .filter((part) => part.type === "text")
@@ -788,6 +731,8 @@ function Composer({
   stoppable,
   settings,
   onSettings,
+  settingsRole,
+  onSettingsRole,
   presets,
   presetId,
   onPreset,
@@ -795,36 +740,20 @@ function Composer({
   onSend,
   onStop,
   onStopAndSend,
+  maxMediaOutputsPerPlan,
   workflows,
   project,
   visualTarget,
   quoteTarget,
-}: {
-  chat: ChatDetail;
-  engines: EngineCapabilities[];
-  profiles: ModelProfile[];
-  stoppable: boolean;
-  settings: Record<string, unknown>;
-  onSettings: (settings: Record<string, unknown>) => void;
-  presets: GenerationPreset[];
-  presetId: string | null;
-  onPreset: (presetId: string | null) => void;
-  onMode: (mode: RoutingMode) => void;
-  onSend: (text: string, mode: RoutingMode, artifacts: string[], settings: Record<string, unknown>, references: TurnReference[]) => void;
-  onStop: () => void;
-  onStopAndSend: (
-    text: string,
-    mode: RoutingMode,
-    artifacts: string[],
-    settings: Record<string, unknown>,
-    references: TurnReference[],
-  ) => void;
-  workflows: Workflow[];
-  project?: Project;
-  visualTarget?: VisualTarget | null;
-  quoteTarget?: { text: string; requestId: number } | null;
-}) {
-  const [text, setText] = useState("");
+  draft,
+  onDraftChange,
+}: ComposerProps) {
+  const text = draft.text;
+  const setText = useCallback((next: string | ((current: string) => string)) => onDraftChange(
+    (current) => composerDraftWithText(current, typeof next === "function" ? next(current.text) : next),
+  ), [onDraftChange]);
+  const detachPromptSource = useCallback(() => onDraftChange(detachedComposerDraft), [onDraftChange]);
+  const { outputCount, setOutputCount, resetOutputCount } = useMediaOutputCount();
   const mentions = useComposerMentions();
   const { mode, changeMode, currentMode } = useGenerationModeSelection(chat.routing_mode, onMode);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -832,9 +761,8 @@ function Composer({
   const [studioOpen, setStudioOpen] = useState(false);
   const [templateSettings, setTemplateSettings] = useState<{ name: string; settings: Record<string, unknown> } | null>(null);
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
-  const { uploading, uploadError, setUploadError, uploadFiles, uploadPastedImages } = useComposerUploads(
-    (attachment) => setAttachments((current) => [...current, attachment]),
-  );
+  const addAttachment = (attachment: ComposerAttachment) => { detachPromptSource(); setAttachments((current) => [...current, attachment]); };
+  const { uploading, uploadError, setUploadError, uploadFiles, uploadPastedImages } = useComposerUploads(addAttachment);
   const [dropActive, setDropActive] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const textInput = useRef<HTMLTextAreaElement>(null);
@@ -842,6 +770,7 @@ function Composer({
   useEffect(() => {
     if (!visualTarget || consumedVisualRequest.current === visualTarget.requestId) return;
     consumedVisualRequest.current = visualTarget.requestId;
+    detachPromptSource();
     setAttachments((current) => {
       const additions = [visualTarget.attachment, ...(visualTarget.extraAttachments ?? [])]
         .filter((addition) => !current.some((item) => item.id === addition.id));
@@ -858,7 +787,7 @@ function Composer({
       window.setTimeout(() => setStudioOpen(true), 0);
     }
     textInput.current?.focus();
-  }, [visualTarget, changeMode]);
+  }, [visualTarget, changeMode, detachPromptSource, setText]);
   const consumedQuoteRequest = useRef<number | null>(null);
   useEffect(() => {
     if (!quoteTarget || consumedQuoteRequest.current === quoteTarget.requestId) return;
@@ -870,7 +799,7 @@ function Composer({
       .join("\n");
     setText((current) => (current.trim() ? `${quoted}\n\n${current}` : `${quoted}\n\n`));
     textInput.current?.focus();
-  }, [quoteTarget]);
+  }, [quoteTarget, setText]);
   const branchMessages = activeBranchMessages(chat);
   const priorVisual = branchMessages.some((message) =>
     message.parts.some((part) =>
@@ -887,11 +816,15 @@ function Composer({
     )
   );
   const usePriorVisual = useDraftClassification(chat.id, text, mode, priorVisual);
-  const imageEdit = mode === "image" && (
+  const editableImageAttached =
     attachments.some((attachment) => attachment.kind === "image")
-    || (priorImage && usePriorVisual)
-  );
-  const needsWorkflowSchema = mode === "image" || mode === "video";
+    || (priorImage && usePriorVisual);
+  const imageEdit = mode === "image" && editableImageAttached;
+  // See drawerRoleView: the drawer follows the persisted routing mode and
+  // the picked role, not the composer's local mode.
+  const { drawerMode, drawerImageEdit } = drawerRoleView(chat.routing_mode, settingsRole, editableImageAttached);
+  const needsWorkflowSchema =
+    mode === "image" || mode === "video" || drawerMode === "image" || drawerMode === "video";
   const families = useQuery({
     queryKey: ["workflow-families"],
     queryFn: () => api.workflowFamilies(),
@@ -919,7 +852,16 @@ function Composer({
     selections.data?.find((one) => one.selector_capability === mode),
     project ? projectSelections.data?.find((one) => one.selector_capability === mode) : null,
   );
-
+  const drawerWorkflowSchema = drawerMode === mode
+    ? workflowSchema
+    : workflowSchemaForTurn(
+        workflows,
+        drawerMode,
+        attachments.length > 0 || usePriorVisual,
+        families.data ?? [],
+        selections.data?.find((one) => one.selector_capability === drawerMode),
+        project ? projectSelections.data?.find((one) => one.selector_capability === drawerMode) : null,
+      );
   const submit = (stopCurrent = false) => {
     if (!text.trim()) return;
     const selectedMode = currentMode();
@@ -930,6 +872,9 @@ function Composer({
       workflowSchema,
     );
     const dispatch = stopCurrent ? onStopAndSend : onSend;
+    const requestedOutputCount = mediaOutputCountForTurn(selectedMode, outputCount);
+    const references = mentions.forText(text);
+    const promptSource = promptSourceForTurn(draft, selectedMode, attachments.length, references.length, requestedOutputCount);
     dispatch(
       text.trim(),
       selectedMode,
@@ -940,12 +885,15 @@ function Composer({
             templateSettings ? { ...settings, ...templateSettings.settings } : settings,
             fields,
           ),
-      mentions.forText(text),
+      references,
+      requestedOutputCount,
+      promptSource,
     );
     setText("");
     mentions.clear();
     setAttachments([]);
     setTemplateSettings(null);
+    resetOutputCount();
   };
 
   return (
@@ -1017,6 +965,7 @@ function Composer({
                           aria-label="Animate attached image"
                           onClick={() => {
                             onMode("video");
+                            detachPromptSource();
                             setText((current) => current.trim() ? current : "Animate this image");
                             textInput.current?.focus();
                           }}
@@ -1045,11 +994,17 @@ function Composer({
             <button aria-label="Remove template settings" onClick={() => setTemplateSettings(null)}><X size={12} /></button>
           </div>
         )}
+        {draft.promptSource && (
+          <div className="template-settings-chip prompt-source-chip">
+            <span>Prompt Library draft linked</span>
+            <button aria-label="Remove Prompt Library source" onClick={detachPromptSource}><X size={12} /></button>
+          </div>
+        )}
         <div className="composer">
-          <MessageField field={textInput} value={text} onChange={setText} onSubmit={submit} onMention={mentions.add} onPasteFiles={(files) => { void uploadPastedImages(files); }} />
+          <MessageField field={textInput} value={text} onChange={setText} onSubmit={submit} onMention={(mention) => { mentions.add(mention); detachPromptSource(); }} onPasteFiles={(files) => { detachPromptSource(); void uploadPastedImages(files); }} />
           <div className="composer-tools">
             <div className="left-tools">
-              <AttachControls disabled={uploading} onPickFile={() => fileInput.current?.click()} onAttach={(attachment) => setAttachments((current) => [...current, attachment])} />
+              <AttachControls disabled={uploading} onPickFile={() => fileInput.current?.click()} onAttach={addAttachment} />
               <input ref={fileInput} hidden multiple type="file" accept="image/*,video/*" onChange={(event) => { setUploadError(""); void uploadFiles(Array.from(event.target.files ?? [])); event.target.value = ""; }} />
               <button
                 className="icon-button"
@@ -1060,16 +1015,22 @@ function Composer({
               >
                 <Sparkles size={18} />
               </button>
+              <ComposerPromptTemplatesAction chatId={chat.id} currentPrompt={text} maximum={maxMediaOutputsPerPlan} />
               <label className={`mode-select mode-${mode}`}>
                 {mode === "auto" && <Sparkles size={15} />}
                 {mode === "text" && <MessageSquare size={15} />}
                 {mode === "image" && <ImageIcon size={15} />}
                 {mode === "video" && <Film size={15} />}
-                <select aria-label="Generation mode" value={mode} onChange={(event) => changeMode(event.target.value as RoutingMode)}>
+                <select aria-label="Generation mode" value={mode} onChange={(event) => {
+                  const nextMode = event.target.value as RoutingMode;
+                  changeMode(nextMode);
+                  if (nextMode !== "image") detachPromptSource();
+                }}>
                   <option value="auto">Auto</option><option value="text">Text</option><option value="image">Image</option><option value="video">Video</option>
                 </select>
                 <ChevronDown size={13} />
               </label>
+              <OutputCountControl mode={mode} maximum={maxMediaOutputsPerPlan} value={outputCount} onChange={(nextCount) => { setOutputCount(nextCount); if (nextCount > 1) detachPromptSource(); }} />
               <div className="composer-workflow-selector">
                 <WorkflowIcon aria-hidden="true" size={15} />
                 <ActiveChatWorkflowSelector chatId={chat.id} routingMode={mode} />
@@ -1122,6 +1083,7 @@ function Composer({
         for (const item of attachments.filter((entry) => entry.kind === "image")) onSend(instruction, "image", [item.id], merged, []);
         setAttachments([]); setText(""); setTemplateSettings(null); setStudioOpen(false);
       }} />}
+
       {promptHelperDraft !== null && (
         <PromptHelperDialog
           sourceChat={chat}
@@ -1144,18 +1106,20 @@ function Composer({
       <SettingsDrawer
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
-        mode={mode}
+        mode={chat.routing_mode}
+        role={settingsRole}
+        onRole={onSettingsRole}
         engines={engines}
         values={settings}
         onValues={onSettings}
         presets={presets}
         presetId={presetId}
         onPreset={onPreset}
-        workflowSchema={workflowSchema}
-        inheritedValues={project?.generation_settings_json?.[roleForMode(mode)]}
-        inheritedPresetId={project?.generation_preset_ids_json?.[roleForMode(mode)]}
+        workflowSchema={drawerWorkflowSchema}
+        inheritedValues={project?.generation_settings_json?.[settingsRole]}
+        inheritedPresetId={project?.generation_preset_ids_json?.[settingsRole]}
         profileValues={profileValues}
-        imageEdit={imageEdit}
+        imageEdit={drawerImageEdit}
         imageEditPrompt={text}
       />
     </>
@@ -1210,6 +1174,8 @@ function ChatView({
   pendingTurns,
   workPlans,
   settings,
+  settingsRole,
+  onSettingsRole,
   presets,
   presetId,
   onSettings,
@@ -1221,52 +1187,17 @@ function ChatView({
   onEdit,
   onStop,
   onStopAndSend,
+  maxMediaOutputsPerPlan,
   onCancelPlan,
+  onRetryPlan,
   onCancelStep,
   onRetryStep,
   onDeleteExchange,
   onForkThread,
   libraryEdit,
-}: {
-  onOpenStudio: (artifactId: string) => void;
-  chat?: ChatDetail;
-  engines: EngineCapabilities[];
-  profiles: ModelProfile[];
-  workflows: Workflow[];
-  project?: Project;
-  liveText: Record<string, string>;
-  pendingTurns: PendingTurn[];
-  workPlans: WorkPlan[];
-  settings: Record<string, unknown>;
-  presets: GenerationPreset[];
-  presetId: string | null;
-  onSettings: (settings: Record<string, unknown>) => void;
-  onPreset: (presetId: string | null) => void;
-  onMode: (mode: RoutingMode) => void;
-  onSend: (text: string, mode: RoutingMode, artifacts: string[], settings: Record<string, unknown>, references: TurnReference[]) => void;
-  onRegenerate: (messageId: string, settings: Record<string, unknown>) => void;
-  onSelectRevision: (messageId: string, revisionId: string) => void;
-  onEdit: (
-    messageId: string,
-    text: string,
-    mode: RoutingMode,
-    settings: Record<string, unknown>,
-  ) => void;
-  onStop: () => void;
-  onStopAndSend: (
-    text: string,
-    mode: RoutingMode,
-    artifacts: string[],
-    settings: Record<string, unknown>,
-    references: TurnReference[],
-  ) => void;
-  onCancelPlan: (planId: string) => void;
-  onCancelStep: (stepId: string) => void;
-  onRetryStep: (stepId: string) => void;
-  onDeleteExchange: (messageId: string) => void;
-  onForkThread: (messageId: string) => void;
-  libraryEdit?: VisualTarget | null;
-}) {
+  composerDraft,
+  onComposerDraft,
+}: ChatViewProps) {
   const endRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const followMessages = useRef(true);
@@ -1358,9 +1289,17 @@ function ChatView({
           const isPrimaryOutput = messagePlan?.summary_json.assistant_message_id === message.id;
           return (
             <Fragment key={message.id}>
-              {messagePlan && messagePlan.steps.length > 1 && isPrimaryOutput && messagePlan.steps.some((step) => step.status !== "complete") && (
+              {messagePlan
+                && messagePlan.steps.length > 1
+                && isPrimaryOutput
+                && (
+                  messagePlan.planner_version === "prompt-template-v1"
+                  || messagePlan.steps.some((step) => step.status !== "complete")
+                ) && (
                 <MediaOutputPlan
                   plan={messagePlan}
+                  onCancelPlan={onCancelPlan}
+                  onRetryPlan={onRetryPlan}
                   onCancelStep={onCancelStep}
                   onRetryStep={onRetryStep}
                 />
@@ -1453,7 +1392,7 @@ function ChatView({
         ))}
         <div ref={endRef} />
       </div>
-      <Composer chat={chat} engines={engines} profiles={profiles} stoppable={stoppable} settings={settings} onSettings={onSettings} presets={presets} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} onStopAndSend={onStopAndSend} workflows={workflows} project={project} visualTarget={visualTarget} quoteTarget={quoteTarget} />
+      <Composer chat={chat} engines={engines} profiles={profiles} stoppable={stoppable} settings={settings} onSettings={onSettings} settingsRole={settingsRole} onSettingsRole={onSettingsRole} presets={presets} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} onStopAndSend={onStopAndSend} maxMediaOutputsPerPlan={maxMediaOutputsPerPlan} workflows={workflows} project={project} visualTarget={visualTarget} quoteTarget={quoteTarget} draft={composerDraft} onDraftChange={onComposerDraft} />
     </div>
   );
 }
@@ -2070,7 +2009,7 @@ function Sidebar({
     <aside className={`sidebar ${mobileOpen ? "mobile-open" : ""}`}>
       <div className="brand"><div className="brand-mark"><AtelierMark /></div><span>LM Atelier<small>Local creative studio</small></span><button className="icon-button mobile-menu" aria-label="Toggle navigation" aria-expanded={mobileOpen} onClick={() => setMobileOpen((open) => !open)}><Menu /></button></div>
       <button className="new-chat" onClick={() => { onNewChat(null); setMobileOpen(false); }}><Plus size={18} />New chat</button>
-      <nav className="primary-nav"><button className={view === "media" ? "active" : ""} aria-current={view === "media" ? "page" : undefined} onClick={() => { onView("media"); setMobileOpen(false); }}><ImageIcon />Media library</button><button className={view === "models" ? "active" : ""} aria-current={view === "models" ? "page" : undefined} onClick={() => { onView("models"); setMobileOpen(false); }}><Library />Model library</button><button className={view === "references" ? "active" : ""} aria-current={view === "references" ? "page" : undefined} onClick={() => { onView("references"); setMobileOpen(false); }}><Star />References</button><button className={view === "workflows" ? "active" : ""} aria-current={view === "workflows" ? "page" : undefined} onClick={() => { onView("workflows"); setMobileOpen(false); }}><WorkflowIcon />Workflows</button><button className={view === "studio" ? "active" : ""} aria-current={view === "studio" ? "page" : undefined} onClick={() => { onView("studio"); setMobileOpen(false); }}><ImageStudioIcon />Image Studio</button></nav>
+      <nav className="primary-nav"><button className={view === "media" ? "active" : ""} aria-current={view === "media" ? "page" : undefined} onClick={() => { onView("media"); setMobileOpen(false); }}><ImageIcon />Media library</button><button className={view === "models" ? "active" : ""} aria-current={view === "models" ? "page" : undefined} onClick={() => { onView("models"); setMobileOpen(false); }}><Library />Model library</button><button className={view === "references" ? "active" : ""} aria-current={view === "references" ? "page" : undefined} onClick={() => { onView("references"); setMobileOpen(false); }}><Star />References</button><button className={view === "prompts" ? "active" : ""} aria-current={view === "prompts" ? "page" : undefined} onClick={() => { onView("prompts"); setMobileOpen(false); }}><Quote />Prompt library</button><button className={view === "workflows" ? "active" : ""} aria-current={view === "workflows" ? "page" : undefined} onClick={() => { onView("workflows"); setMobileOpen(false); }}><WorkflowIcon />Workflows</button><button className={view === "studio" ? "active" : ""} aria-current={view === "studio" ? "page" : undefined} onClick={() => { onView("studio"); setMobileOpen(false); }}><ImageStudioIcon />Image Studio</button></nav>
       <div className="workspace-search"><Search size={14} /><input aria-label="Search projects and chats" placeholder="Search workspace" value={search} onChange={(event) => setSearch(event.target.value)} /><button className={showArchived ? "active" : ""} aria-pressed={showArchived} onClick={() => setShowArchived((value) => !value)}>Archived</button></div>
       <div className="workspace-tree" role="region" aria-label="Projects and chats">
         <div className="sidebar-section">
@@ -2123,6 +2062,11 @@ export default function App() {
   const [currentChatId, setCurrentChatId] = useState<string | null>(() => localStorage.getItem(CURRENT_CHAT_KEY));
   const [liveText, setLiveText] = useState<Record<string, string>>({});
   const [chatDrafts, setChatDrafts] = useState<Record<string, Partial<Chat>>>({});
+  // Which role's settings the drawer edits while a chat routes in auto: the
+  // last role picked in that chat's drawer, chat until one is picked. In every
+  // other mode the role follows the mode and this map is ignored.
+  const [autoSettingsRoles, setAutoSettingsRoles] = useState<Record<string, EngineRole>>({});
+  const [composerDrafts, setComposerDrafts] = useState<Record<string, ComposerDraft>>({});
   const [pendingTurns, setPendingTurns] = useState<Record<string, PendingTurn[]>>({});
   const setupReadiness = useQuery({
     queryKey: ["setup-readiness"],
@@ -2149,6 +2093,7 @@ export default function App() {
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
   const presets = useQuery({ queryKey: ["presets"], queryFn: api.presets });
   const workflows = useQuery({ queryKey: ["workflows"], queryFn: api.workflows });
+  const applicationInfo = useQuery({ queryKey: ["about"], queryFn: api.about });
   const eventsConnected = useLiveEvents(client, setLiveText);
 
   const createChat = useMutation({
@@ -2183,10 +2128,16 @@ export default function App() {
     void client.invalidateQueries({ queryKey: ["work-plans", chatId] });
   };
   const send = useMutation({
-    mutationFn: ({ chatId, id, text, mode, artifacts, settings, references, stopCurrent }: SendTurnVariables) =>
-      stopCurrent
-        ? api.stopAndSendTurn(chatId, text, mode, artifacts, settings, id, references)
-        : api.sendTurn(chatId, text, mode, artifacts, settings, id, "turns", undefined, references),
+    mutationFn: ({ chatId, id, text, mode, artifacts, settings, references, outputCount, promptSource, stopCurrent }: SendTurnVariables) => {
+      if (stopCurrent) {
+        if (promptSource) return api.stopAndSendTurn(chatId, text, mode, artifacts, settings, id, references, outputCount, promptSource);
+        if (outputCount !== undefined) return api.stopAndSendTurn(chatId, text, mode, artifacts, settings, id, references, outputCount);
+        return api.stopAndSendTurn(chatId, text, mode, artifacts, settings, id, references);
+      }
+      if (promptSource) return api.sendTurn(chatId, text, mode, artifacts, settings, id, "turns", undefined, references, outputCount, promptSource);
+      if (outputCount !== undefined) return api.sendTurn(chatId, text, mode, artifacts, settings, id, "turns", undefined, references, outputCount);
+      return api.sendTurn(chatId, text, mode, artifacts, settings, id, "turns", undefined, references);
+    },
     onMutate: ({ chatId, id, text, mode }) => {
       setPendingTurns((current) => ({
         ...current,
@@ -2194,6 +2145,7 @@ export default function App() {
       }));
     },
     onSuccess: (accepted, { chatId }) => applyAcceptedTurn(chatId, accepted),
+    onError: (_error, variables) => recoverPromptSourceSend(client, setComposerDrafts, variables),
     onSettled: (_accepted, _error, { chatId, id }) => {
       setPendingTurns((current) => {
         const remaining = (current[chatId] ?? []).filter((pending) => pending.id !== id);
@@ -2204,28 +2156,13 @@ export default function App() {
       });
     },
   });
-  const cancelWorkPlan = useMutation({
-    mutationFn: api.cancelWorkPlan,
-    onSuccess: (plan) => {
-      void client.invalidateQueries({ queryKey: ["chat", plan.chat_id] });
-      void client.invalidateQueries({ queryKey: ["work-plans", plan.chat_id] });
-      void client.invalidateQueries({ queryKey: ["jobs"] });
-    },
-  });
+  const {
+    cancelWorkPlan,
+    retryWorkPlan,
+    cancelWorkStep,
+    retryWorkStep,
+  } = useWorkPlanMutations(activeChatId);
   const { deleteExchange, forkThread } = useMessageActions(setCurrentChatId, setView);
-  const refreshWorkStep = () => {
-    void client.invalidateQueries({ queryKey: ["chat", activeChatId] });
-    void client.invalidateQueries({ queryKey: ["work-plans", activeChatId] });
-    void client.invalidateQueries({ queryKey: ["jobs"] });
-  };
-  const cancelWorkStep = useMutation({
-    mutationFn: api.cancelWorkStep,
-    onSuccess: refreshWorkStep,
-  });
-  const retryWorkStep = useMutation({
-    mutationFn: api.retryWorkStep,
-    onSuccess: refreshWorkStep,
-  });
   const regenerate = useMutation({
     mutationFn: ({ messageId, settings }: { chatId: string; messageId: string; settings: Record<string, unknown> }) =>
       api.regenerateMessage(messageId, settings),
@@ -2335,6 +2272,7 @@ export default function App() {
         delete next[deletedId];
         return next;
       });
+      setComposerDrafts((current) => withoutComposerDraft(current, deletedId));
       void client.invalidateQueries({ queryKey: ["artifacts"] });
       void client.invalidateQueries({ queryKey: ["artifact-storage"] });
       void client.invalidateQueries({ queryKey: ["jobs"] });
@@ -2362,7 +2300,6 @@ export default function App() {
     setView("studio");
     focusMainContent();
   }, []);
-
   const allChats = useMemo(() => chats.data ?? [], [chats.data]);
   const allProjects = useMemo(() => projects.data ?? [], [projects.data]);
   // One place that knows what opening the library means, since three
@@ -2379,15 +2316,20 @@ export default function App() {
           onClose={() => setStudioSource(null)}/>
       );
     }
-    if (view === "media") return <MediaLibraryView onEditImage={openLibraryImage} />;
-    if (view === "models") return <ModelsView key={modelLibraryRole} initialRole={modelLibraryRole} />;
-    if (view === "references") return <ReferencesLibrary />;
-    if (view === "workflows") return <WorkflowsView />;
+    const topLevelView = view === "media" ? <MediaLibraryView onEditImage={openLibraryImage} /> : view === "models" ? <ModelsView key={modelLibraryRole} initialRole={modelLibraryRole} /> : view === "references" ? <ReferencesLibrary /> : view === "prompts" ? <PromptLibraryView /> : view === "workflows" ? <WorkflowsView /> : null;
+    if (topLevelView) return topLevelView;
     if (view === "settings") return <SettingsView engines={engines.data ?? []} />;
     const displayedChat = chat.data
       ? { ...chat.data, ...(chatDrafts[chat.data.id] ?? {}) }
       : undefined;
-    const selectedRole = roleForMode(displayedChat?.routing_mode ?? "auto");
+    const routingMode = displayedChat?.routing_mode ?? "auto";
+    // In auto the settings drawer edits an explicitly chosen role; the backend
+    // resolves its role from the operation, so following roleForMode here
+    // would silently read and write the chat bag for turns that route to
+    // image or video.
+    const selectedRole = routingMode === "auto"
+      ? (autoSettingsRoles[displayedChat?.id ?? ""] ?? "chat")
+      : roleForMode(routingMode);
     const scopedSettings = displayedChat?.generation_settings_json?.[selectedRole] ?? {};
     const presetId = displayedChat?.generation_preset_ids_json?.[selectedRole] ?? null;
     const persistActiveChat = (values: Partial<Chat>) => {
@@ -2401,21 +2343,25 @@ export default function App() {
       ));
       updateChat.mutate({ id: displayedChat.id, values });
     };
-    return <ChatView key={displayedChat?.id ?? "empty-chat"} onOpenStudio={(artifactId) => { setStudioSource({ artifactId, chatId: displayedChat?.id ?? null }); setView("studio"); focusMainContent(); }} chat={displayedChat} engines={engines.data ?? []} profiles={profiles.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} project={allProjects.find((item) => item.id === displayedChat?.project_id)} liveText={liveText} pendingTurns={displayedChat ? pendingTurns[displayedChat.id] ?? [] : []} workPlans={workPlans.data ?? []} settings={scopedSettings} presetId={presetId} onSettings={(settings) => {
+    return <ChatView key={displayedChat?.id ?? "empty-chat"} onOpenStudio={(artifactId) => { setStudioSource({ artifactId, chatId: displayedChat?.id ?? null }); setView("studio"); focusMainContent(); }} chat={displayedChat} engines={engines.data ?? []} profiles={profiles.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} project={allProjects.find((item) => item.id === displayedChat?.project_id)} liveText={liveText} pendingTurns={displayedChat ? pendingTurns[displayedChat.id] ?? [] : []} workPlans={workPlans.data ?? []} settings={scopedSettings} settingsRole={selectedRole} onSettingsRole={(role) => {
       if (!displayedChat) return;
-      const role = roleForMode(displayedChat.routing_mode);
+      setAutoSettingsRoles((current) => ({ ...current, [displayedChat.id]: role }));
+    }} presetId={presetId} maxMediaOutputsPerPlan={applicationInfo.data?.max_media_outputs_per_plan ?? 1} composerDraft={displayedChat ? composerDrafts[displayedChat.id] ?? EMPTY_COMPOSER_DRAFT : EMPTY_COMPOSER_DRAFT} onComposerDraft={(update) => {
+      if (!displayedChat) return;
+      setComposerDrafts((current) => updatedComposerDrafts(current, displayedChat.id, update));
+    }} onSettings={(settings) => {
+      if (!displayedChat) return;
       persistActiveChat({
         generation_settings_json: {
           ...(displayedChat.generation_settings_json ?? {}),
-          [role]: settings,
+          [selectedRole]: settings,
         },
       });
     }} onPreset={(selectedPresetId) => {
       if (!displayedChat) return;
-      const role = roleForMode(displayedChat.routing_mode);
       const bindings = { ...(displayedChat.generation_preset_ids_json ?? {}) };
-      if (selectedPresetId) bindings[role] = selectedPresetId;
-      else delete bindings[role];
+      if (selectedPresetId) bindings[selectedRole] = selectedPresetId;
+      else delete bindings[selectedRole];
       persistActiveChat({ generation_preset_ids_json: bindings });
     }} onMode={(mode) => {
       persistActiveChat({ routing_mode: mode });
@@ -2439,22 +2385,24 @@ export default function App() {
       });
     }} onStop={() => {
       if (displayedChat) stop.mutate(displayedChat.id);
-    }} onStopAndSend={(text, mode, artifacts, settings, references) => {
+    }} onStopAndSend={(text, mode, artifacts, settings, references, outputCount, promptSource) => {
       if (displayedChat) {
-        send.mutate({ chatId: displayedChat.id, id: crypto.randomUUID(), text, mode, artifacts, settings, references, stopCurrent: true });
+        send.mutate({ chatId: displayedChat.id, id: crypto.randomUUID(), text, mode, artifacts, settings, references, outputCount, promptSource, stopCurrent: true });
       }
     }} onDeleteExchange={deleteExchange.mutate} onForkThread={forkThread.mutate} onCancelPlan={(planId) => {
       cancelWorkPlan.mutate(planId);
+    }} onRetryPlan={(planId) => {
+      retryWorkPlan.mutate(planId);
     }} onCancelStep={(stepId) => {
       cancelWorkStep.mutate(stepId);
     }} onRetryStep={(stepId) => {
       retryWorkStep.mutate(stepId);
-    }} onSend={(text, mode, artifacts, settings, references) => {
+    }} onSend={(text, mode, artifacts, settings, references, outputCount, promptSource) => {
       if (displayedChat) {
-        send.mutate({ chatId: displayedChat.id, id: crypto.randomUUID(), text, mode, artifacts, settings, references });
+        send.mutate({ chatId: displayedChat.id, id: crypto.randomUUID(), text, mode, artifacts, settings, references, outputCount, promptSource });
       }
     }} />;
-  }, [studioSource, view, modelLibraryRole, engines.data, profiles.data, presets.data, workflows.data, allProjects, chat.data, chatDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, forkThread, client, openLibraryImage]);
+  }, [studioSource, view, modelLibraryRole, engines.data, profiles.data, presets.data, workflows.data, applicationInfo.data, allProjects, chat.data, chatDrafts, autoSettingsRoles, composerDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, forkThread, client, openLibraryImage]);
 
   if (firstRunSetup && setupReadiness.data) {
     return <FirstRunSetup report={setupReadiness.data} onExit={exitFirstRunSetup} onOpenModels={(role) => { exitFirstRunSetup(); setModelLibraryRole(role); setView("models"); }} onOpenWorkflows={() => { exitFirstRunSetup(); setView("workflows"); }} />;
@@ -2485,7 +2433,7 @@ export default function App() {
         onOpenWorkflows={() => { setSetupOpen(false); openWorkflows(); }}
       />
       <JobsPanel />
-      <GlobalNotices connected={eventsConnected} mutations={[send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, cancelWorkStep, retryWorkStep, updateChat, createChat, createProject, exportProject, importProject, manageChat, deleteChat, updateProject, deleteProject, deleteExchange, forkThread]} />
+      <GlobalNotices connected={eventsConnected} mutations={[send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, createChat, createProject, exportProject, importProject, manageChat, deleteChat, updateProject, deleteProject, deleteExchange, forkThread]} />
     </div>
   );
 }

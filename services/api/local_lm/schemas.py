@@ -4,7 +4,16 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_serializer
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    StrictStr,
+    StringConstraints,
+    field_serializer,
+)
 
 from .domain import Operation, RoutingMode
 from .references import MAX_REFERENCES_PER_TURN, MAX_ROLE, MentionSource
@@ -352,6 +361,248 @@ class PromptHelperDetail(ChatDetail):
     draft_prompt: str
 
 
+class PromptTemplateCreate(ApiModel):
+    idempotency_key: str = Field(
+        min_length=1,
+        max_length=200,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$",
+    )
+    name: str = Field(min_length=1, max_length=200)
+    description: str = Field(default="", max_length=4_000)
+    contract: dict[str, Any]
+
+
+class PromptTemplateUpdate(ApiModel):
+    expected_current_revision_id: str = Field(min_length=1, max_length=40)
+    idempotency_key: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$",
+    )
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=4_000)
+    archived: bool | None = None
+    contract: dict[str, Any] | None = None
+
+
+class PromptTemplateRestore(ApiModel):
+    expected_current_revision_id: str = Field(min_length=1, max_length=40)
+    idempotency_key: str = Field(
+        min_length=1,
+        max_length=200,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$",
+    )
+
+
+class PromptTemplateRevisionOut(ApiModel):
+    id: str
+    prompt_template_id: str
+    version: int
+    schema_version: int
+    contract_json: dict[str, Any]
+    contract_sha256: str
+    created_at: datetime
+
+    @field_serializer("created_at", when_used="json")
+    def serialize_timestamp_as_utc(self, value: datetime) -> str:
+        normalized = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        return normalized.isoformat().replace("+00:00", "Z")
+
+
+class PromptTemplateDefinitionOut(ApiModel):
+    id: str
+    name: str
+    description: str
+    archived: bool
+    current_revision_id: str
+    created_at: datetime
+    updated_at: datetime
+
+    @field_serializer("created_at", "updated_at", when_used="json")
+    def serialize_timestamps_as_utc(self, value: datetime) -> str:
+        normalized = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        return normalized.isoformat().replace("+00:00", "Z")
+
+
+class PromptTemplateDetailOut(PromptTemplateDefinitionOut):
+    current_revision: PromptTemplateRevisionOut
+
+
+class PromptTemplateWriteOut(ApiModel):
+    template: PromptTemplateDetailOut
+    revision: PromptTemplateRevisionOut
+    idempotent: bool
+
+
+class PromptTemplatePortableWorkflowDescriptorOut(ApiModel):
+    descriptor_version: Literal[1]
+    operation: Literal["text_to_image"]
+    artifact_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    dependency_contract_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+class PromptTemplatePortableWorkflowBindingOut(ApiModel):
+    key: str = Field(pattern=r"^workflow_[1-9][0-9]{0,2}$")
+    descriptor: PromptTemplatePortableWorkflowDescriptorOut
+
+
+class PromptTemplatePortableTemplateOut(ApiModel):
+    name: str = Field(min_length=1, max_length=200)
+    description: str = Field(max_length=4_000)
+    contract: dict[str, Any]
+
+
+class PromptTemplatePortableBundleOut(ApiModel):
+    kind: Literal["lm-atelier-prompt-template"]
+    bundle_version: Literal[1]
+    template: PromptTemplatePortableTemplateOut
+    workflows: list[PromptTemplatePortableWorkflowBindingOut] = Field(max_length=16)
+    bundle_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PromptTemplateImportWorkflowSuggestionOut(ApiModel):
+    local_ref: str = Field(min_length=1, max_length=40)
+    label: str = Field(min_length=1, max_length=240)
+    authority_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    candidate_receipt: str = Field(min_length=1, max_length=2_048)
+
+
+class PromptTemplateImportCandidateResolve(ApiModel):
+    bundle_json: StrictStr = Field(min_length=1, max_length=524_288)
+    preview_receipt: StrictStr = Field(min_length=1, max_length=2_048)
+    binding_key: StrictStr = Field(pattern=r"^workflow_[1-9][0-9]{0,2}$")
+    local_ref: StrictStr = Field(min_length=1, max_length=40)
+
+
+class PromptTemplateImportWorkflowBindingIn(ApiModel):
+    binding_key: StrictStr = Field(pattern=r"^workflow_[1-9][0-9]{0,2}$")
+    local_ref: StrictStr = Field(min_length=1, max_length=40)
+    candidate_receipt: StrictStr = Field(min_length=1, max_length=2_048)
+
+
+class PromptTemplateImportLoraConfirmationIn(ApiModel):
+    sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    confirmation_receipt: StrictStr = Field(min_length=1, max_length=2_048)
+
+
+class PromptTemplateImportCommit(ApiModel):
+    idempotency_key: StrictStr = Field(
+        min_length=1,
+        max_length=200,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$",
+    )
+    bundle_json: StrictStr = Field(min_length=1, max_length=524_288)
+    preview_receipt: StrictStr = Field(min_length=1, max_length=2_048)
+    confirmed_bundle_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    destination_name: StrictStr = Field(min_length=1, max_length=200)
+    workflow_bindings: list[PromptTemplateImportWorkflowBindingIn] = Field(max_length=16)
+    lora_confirmations: list[PromptTemplateImportLoraConfirmationIn] = Field(max_length=64)
+
+
+class PromptTemplateImportCommitOut(ApiModel):
+    template_id: str = Field(min_length=1, max_length=40)
+    revision_id: str = Field(min_length=1, max_length=40)
+    contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    idempotent: bool
+
+
+class PromptTemplateImportWorkflowRequirementOut(ApiModel):
+    kind: Literal["workflow"]
+    binding_key: str = Field(pattern=r"^workflow_[1-9][0-9]{0,2}$")
+    descriptor: PromptTemplatePortableWorkflowDescriptorOut
+    suggestions: list[PromptTemplateImportWorkflowSuggestionOut] = Field(max_length=20)
+
+
+class PromptTemplateImportLoraRequirementOut(ApiModel):
+    kind: Literal["lora"]
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    available: StrictBool
+    authority_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    confirmation_receipt: str = Field(min_length=1, max_length=2_048)
+
+
+class PromptTemplateImportPreviewOut(ApiModel):
+    bundle: PromptTemplatePortableBundleOut
+    requirements: list[
+        PromptTemplateImportWorkflowRequirementOut | PromptTemplateImportLoraRequirementOut
+    ]
+    receipt: str = Field(min_length=1, max_length=2_048)
+    expires_at: StrictInt = Field(ge=0)
+
+
+class PromptTemplatePageOut(ApiModel):
+    items: list[PromptTemplateDefinitionOut]
+    total: int
+    limit: int
+    offset: int
+
+
+class PromptExpansionCreate(ApiModel):
+    idempotency_key: StrictStr = Field(
+        min_length=1,
+        max_length=200,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$",
+    )
+    template_revision_id: StrictStr = Field(min_length=1, max_length=40)
+    contract_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    item_count: StrictInt = Field(ge=1, le=16)
+    selection_seed: StrictInt = Field(ge=0, lt=2_147_483_648)
+    inputs: dict[StrictStr, StrictStr | list[StrictStr]] = Field(default_factory=dict)
+
+
+class PromptExpansionItemUpdate(ApiModel):
+    expected_review_version: StrictInt = Field(ge=1)
+    expected_plan_version: StrictInt = Field(ge=1)
+    reviewed_prompt: StrictStr = Field(min_length=1, max_length=32_000)
+    selected: StrictBool
+
+
+class PromptExpansionQueue(ApiModel):
+    idempotency_key: StrictStr = Field(
+        min_length=1,
+        max_length=200,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$",
+    )
+    expected_plan_version: StrictInt = Field(ge=1)
+    expected_plan_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PromptExpansionItemOut(ApiModel):
+    id: str = Field(min_length=1, max_length=40)
+    ordinal: int = Field(ge=1, le=16)
+    rendered_prompt: str = Field(min_length=1, max_length=32_000)
+    rendered_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reviewed_prompt: str = Field(min_length=1, max_length=32_000)
+    reviewed_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    selected: bool
+    review_version: int = Field(ge=1)
+    reroll_count: int = Field(ge=0)
+    work_step_id: str | None = Field(default=None, min_length=1, max_length=40)
+    run_id: str | None = Field(default=None, min_length=1, max_length=40)
+    media_seed: int | None = Field(default=None, ge=0, lt=2_147_483_648)
+
+
+class PromptExpansionBatchOut(ApiModel):
+    id: str = Field(min_length=1, max_length=40)
+    chat_id: str = Field(min_length=1, max_length=40)
+    prompt_template_id: str = Field(min_length=1, max_length=40)
+    prompt_template_revision_id: str = Field(min_length=1, max_length=40)
+    schema_version: Literal[1]
+    contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    codec_version: Literal[2]
+    requested_count: int = Field(ge=1, le=16)
+    selection_seed: int = Field(ge=0, lt=2_147_483_648)
+    plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    state: Literal["draft", "queued"]
+    plan_version: int = Field(ge=1)
+    queue_idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
+    work_plan_id: str | None = Field(default=None, min_length=1, max_length=40)
+    queued_at: datetime | None = None
+    items: list[PromptExpansionItemOut] = Field(min_length=1, max_length=16)
+    replayed: bool
+
+
 class TurnReferenceIn(ApiModel):
     """One explicitly structured Reference attached to a turn."""
 
@@ -362,6 +613,21 @@ class TurnReferenceIn(ApiModel):
     source: MentionSource = MentionSource.MENTION
 
 
+class PromptComposerSourceIn(ApiModel):
+    """One reviewed Prompt Library item the composer was populated from."""
+
+    version: Literal[1] = 1
+    batch_id: str = Field(min_length=1, max_length=40)
+    expected_plan_version: int = Field(ge=1)
+    expected_plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    item_id: str = Field(min_length=1, max_length=40)
+    expected_review_version: int = Field(ge=1)
+    expected_reviewed_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    prompt_template_id: str = Field(min_length=1, max_length=40)
+    prompt_template_revision_id: str = Field(min_length=1, max_length=40)
+    contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class TurnRequest(ApiModel):
     text: str = Field(min_length=1, max_length=200_000)
     mode: RoutingMode | None = None
@@ -370,6 +636,7 @@ class TurnRequest(ApiModel):
     references: list[TurnReferenceIn] = Field(
         default_factory=list, max_length=MAX_REFERENCES_PER_TURN
     )
+    prompt_source: PromptComposerSourceIn | None = None
     settings: dict[str, Any] = Field(default_factory=dict)
     ordered_settings: dict[str, dict[str, Any]] = Field(default_factory=dict, max_length=3)
     output_count: int | None = Field(default=None, ge=1, le=16)
@@ -1247,6 +1514,14 @@ class RegistryInstallOut(ApiModel):
     manifest_sha256: str
     wheel_closure_sha256: str | None
     wheel_environment_sha256: str | None
+    disk_status: Literal[
+        "ready",
+        "node_files_missing",
+        "wheel_environment_missing",
+        "files_missing",
+    ]
+    node_files_present: bool
+    wheel_environment_present: bool
     trusted: bool
     active: bool
     reviewed_at: str | None
@@ -2041,6 +2316,7 @@ class ApplicationInfo(ApiModel):
     version: str
     data_directory: str
     log_directory: str
+    max_media_outputs_per_plan: int = Field(ge=1, le=16)
     # The installation-wide gate. When this is false no chat can open its
     # own, and the UI says so rather than offering a switch that does
     # nothing.

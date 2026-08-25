@@ -43,12 +43,20 @@ def settings(tmp_path: Path, migrated_database_template: Path) -> Settings:
     state_dir = data_dir / "state"
     state_dir.mkdir(parents=True)
     shutil.copy2(migrated_database_template, state_dir / "local-lm.sqlite3")
-    return Settings(
+    test_settings = Settings(
         data_dir=data_dir,
         dev=True,
         chat_engine="mock",
         media_engine="mock",
     )
+    # Bind the module-global session to THIS test's copy. Building the
+    # template configured the global engine against the template file, and
+    # `configure_database` rebinds `SessionLocal` globally - so a test that
+    # opens `SessionLocal()` directly, rather than going through the app,
+    # wrote into the shared template and every later test copied the result.
+    # Tests that create their own app re-bind again through `create_app`.
+    configure_database(test_settings)
+    return test_settings
 
 
 @pytest.fixture

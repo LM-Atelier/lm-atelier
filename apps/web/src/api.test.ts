@@ -120,6 +120,160 @@ it("requests the read-only setup readiness contract", async () => {
   expect(fetchMock.mock.calls[1][1]?.method).toBeUndefined();
 });
 
+it("uses the bounded Prompt Library CRUD and append-only revision routes", async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ items: [], total: 0, limit: 100, offset: 0 }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 201 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify([]), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 200 }));
+  vi.stubGlobal("fetch", fetchMock);
+  const { api } = await import("./api");
+  const contract = {
+    schema_version: 1 as const,
+    operation: "text_to_image" as const,
+    body: "A {{subject}}.",
+    slots: [{ name: "subject", mode: "input" as const, variation_scope: "item" as const }],
+    resource_policy: { mode: "inherited" as const },
+  };
+
+  await api.promptTemplates(true, 100, 0);
+  await api.createPromptTemplate({ idempotency_key: "create-one", name: "One", description: "", contract });
+  await api.updatePromptTemplate("definition/one", {
+    expected_current_revision_id: "revision-one",
+    idempotency_key: "edit-one",
+    contract,
+  });
+  await api.promptTemplateRevisions("definition/one");
+  await api.restorePromptTemplateRevision("definition/one", "revision/old", "revision-one", "restore-one");
+
+  expect(fetchMock.mock.calls.slice(1).map((call) => call[0])).toEqual([
+    "/api/prompt-templates?include_archived=true&limit=100&offset=0",
+    "/api/prompt-templates",
+    "/api/prompt-templates/definition%2Fone",
+    "/api/prompt-templates/definition%2Fone/revisions",
+    "/api/prompt-templates/definition%2Fone/revisions/revision%2Fold/restore",
+  ]);
+  expect(JSON.parse(String(fetchMock.mock.calls[2][1]?.body))).toEqual({
+    idempotency_key: "create-one",
+    name: "One",
+    description: "",
+    contract,
+  });
+  expect(JSON.parse(String(fetchMock.mock.calls[5][1]?.body))).toEqual({
+    expected_current_revision_id: "revision-one",
+    idempotency_key: "restore-one",
+  });
+});
+
+it("uses the isolated no-media Prompt Library batch transport contract", async () => {
+  const item = {
+    id: "item/one",
+    ordinal: 1,
+    rendered_prompt: "A portrait of Ada.",
+    rendered_sha256: "a".repeat(64),
+    reviewed_prompt: "A portrait of Ada.",
+    reviewed_sha256: "a".repeat(64),
+    selected: true,
+    review_version: 1,
+    reroll_count: 0,
+    work_step_id: null,
+    run_id: null,
+    media_seed: null,
+  };
+  const batch = {
+    id: "batch/one",
+    chat_id: "chat/one",
+    prompt_template_id: "definition-one",
+    prompt_template_revision_id: "revision-one",
+    schema_version: 1,
+    contract_sha256: "b".repeat(64),
+    codec_version: 2,
+    requested_count: 1,
+    selection_seed: 17,
+    plan_sha256: "c".repeat(64),
+    state: "draft",
+    plan_version: 1,
+    queue_idempotency_key: null,
+    work_plan_id: null,
+    queued_at: null,
+    items: [item],
+    replayed: false,
+  };
+  const readBatch = { ...batch, replayed: true };
+  const updatedBatch = {
+    ...batch,
+    plan_sha256: "d".repeat(64),
+    plan_version: 2,
+    items: [{
+      ...item,
+      reviewed_prompt: "A reviewed portrait.",
+      selected: false,
+      review_version: 2,
+    }],
+  };
+  const queuedBatch = {
+    ...batch,
+    state: "queued",
+    plan_version: 2,
+    queue_idempotency_key: "queue-one",
+    work_plan_id: "work-plan-one",
+    queued_at: "2026-08-21T12:00:00Z",
+    items: [{
+      ...item,
+      work_step_id: "work-step-one",
+      run_id: "run-one",
+      media_seed: 73,
+    }],
+  };
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify(batch), { status: 201 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify(readBatch), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify(updatedBatch), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify(queuedBatch), { status: 202 }));
+  vi.stubGlobal("fetch", fetchMock);
+  const { api } = await import("./api");
+  const create = {
+    idempotency_key: "expand-one",
+    template_revision_id: "revision-one",
+    contract_sha256: "b".repeat(64),
+    item_count: 1,
+    selection_seed: 17,
+    inputs: { subject: ["Ada"] },
+  };
+  const review = {
+    expected_review_version: 1,
+    expected_plan_version: 1,
+    reviewed_prompt: "A reviewed portrait.",
+    selected: false,
+  };
+  const queue = {
+    idempotency_key: "queue-one",
+    expected_plan_version: 1,
+    expected_plan_sha256: batch.plan_sha256,
+  };
+
+  await expect(api.createPromptBatch("chat/one", create)).resolves.toEqual(batch);
+  await expect(api.promptBatch("batch/one")).resolves.toEqual(readBatch);
+  await expect(api.updatePromptBatchItem("batch/one", 1, review)).resolves.toMatchObject({
+    plan_version: 2,
+    items: [{ review_version: 2, selected: false }],
+  });
+  await expect(api.queuePromptBatch("batch/one", queue)).resolves.toEqual(queuedBatch);
+
+  expect(fetchMock.mock.calls.slice(1).map(([url, init]) => [url, init?.method])).toEqual([
+    ["/api/chats/chat%2Fone/prompt-batches", "POST"],
+    ["/api/prompt-batches/batch%2Fone", undefined],
+    ["/api/prompt-batches/batch%2Fone/items/1", "PATCH"],
+    ["/api/prompt-batches/batch%2Fone/queue", "POST"],
+  ]);
+  expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual(create);
+  expect(JSON.parse(String(fetchMock.mock.calls[3][1]?.body))).toEqual(review);
+  expect(JSON.parse(String(fetchMock.mock.calls[4][1]?.body))).toEqual(queue);
+});
+
 it("starts setup verification with the local CSRF contract", async () => {
   const verification = {
     id: "verify-image",
@@ -1104,4 +1258,91 @@ it("sends an empty reference list when nothing was chosen", async () => {
 
   const body = JSON.parse(String(fetchMock.mock.calls[1][1]?.body));
   expect(body.references).toEqual([]);
+});
+
+it("sends Prompt Library authority as a dedicated top-level turn field", async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ accepted: true }), {
+        status: 202,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  vi.stubGlobal("fetch", fetchMock);
+  const source = {
+    version: 1 as const,
+    batch_id: "prompt-batch-one",
+    expected_plan_version: 3,
+    expected_plan_sha256: "a".repeat(64),
+    item_id: "prompt-item-one",
+    expected_review_version: 2,
+    expected_reviewed_sha256: "b".repeat(64),
+    prompt_template_id: "ptdef-one",
+    prompt_template_revision_id: "ptrev-two",
+    contract_sha256: "c".repeat(64),
+  };
+
+  const { api } = await import("./api");
+  await api.sendTurn(
+    "chat-1", "A reviewed portrait.", "image", [], {}, "prompt-source-key",
+    "turns", undefined, [], undefined, source,
+  );
+
+  const body = JSON.parse(String(fetchMock.mock.calls[1][1]?.body));
+  expect(body.prompt_source).toEqual(source);
+  expect(body.settings).toEqual({});
+  expect(body.settings).not.toHaveProperty("prompt_source");
+});
+
+it("sends an explicit media output count and never leaks it into Auto", async () => {
+  vi.stubGlobal("confirm", vi.fn(() => true));
+  const accepted = () => new Response(JSON.stringify({ accepted: true }), {
+    status: 202,
+    headers: { "content-type": "application/json" },
+  });
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ csrf_token: "csrf" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(accepted())
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({
+        detail: {
+          code: "route_confirmation_required",
+          plan: { operation: "text_to_image" },
+          estimate: {},
+        },
+      }), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      }),
+    )
+    .mockResolvedValueOnce(accepted());
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api } = await import("./api");
+  await api.sendTurn(
+    "chat-1", "four images", "image", [], {}, "image-count", "turns", undefined, [], 4,
+  );
+  await api.sendTurn(
+    "chat-1", "choose for me", "auto", [], {}, "auto-count", "turns", undefined, [], 4,
+  );
+
+  const imageBody = JSON.parse(String(fetchMock.mock.calls[1][1]?.body));
+  const autoBody = JSON.parse(String(fetchMock.mock.calls[2][1]?.body));
+  const confirmedAutoBody = JSON.parse(String(fetchMock.mock.calls[3][1]?.body));
+  expect(imageBody.output_count).toBe(4);
+  expect(autoBody).not.toHaveProperty("output_count");
+  expect(confirmedAutoBody.mode).toBe("image");
+  expect(confirmedAutoBody.confirm_media).toBe(true);
+  expect(confirmedAutoBody).not.toHaveProperty("output_count");
 });

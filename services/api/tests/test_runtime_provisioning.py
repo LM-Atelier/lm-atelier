@@ -40,6 +40,8 @@ def _write_manifest(
     llama_content: bytes,
     llama_sha256: str | None = None,
     comfy_content: bytes | None = None,
+    comfy_release: str = "v-test",
+    comfy_version: str = "0.28.0",
 ) -> None:
     llama_hash = llama_sha256 or hashlib.sha256(llama_content).hexdigest()
     comfy_hash = hashlib.sha256(comfy_content).hexdigest() if comfy_content else "0" * 64
@@ -47,7 +49,7 @@ def _write_manifest(
     comfy_identity = "example-1.0.dist-info"
     review = {
         "schema_version": 1,
-        "release": "v-test",
+        "release": comfy_release,
         "assets": {
             "test-platform": {
                 "source_asset_url": "https://runtime.test/comfy-runtime.zip",
@@ -66,7 +68,7 @@ def _write_manifest(
             }
         },
     }
-    review_path = path.parent / "runtime-reviews" / "comfyui-v-test.json"
+    review_path = path.parent / "runtime-reviews" / f"comfyui-{comfy_release}.json"
     review_path.parent.mkdir(parents=True, exist_ok=True)
     review_bytes = (json.dumps(review, indent=2) + "\n").encode()
     review_path.write_bytes(review_bytes)
@@ -98,7 +100,7 @@ def _write_manifest(
                 "runtime_assets": {},
             },
             "comfyui": {
-                "pinned_release": "v-test",
+                "pinned_release": comfy_release,
                 "distribution": "external-gpl-3.0",
                 "license": "GPL-3.0-only",
                 "security_review": {
@@ -119,14 +121,14 @@ def _write_manifest(
                         "dependency_inventory_count": 1,
                         "dependency_inventory_sha256": _inventory_sha256([comfy_identity]),
                         "dependency_review": {
-                            "file": "runtime-reviews/comfyui-v-test.json",
+                            "file": f"runtime-reviews/comfyui-{comfy_release}.json",
                             "sha256": hashlib.sha256(review_bytes).hexdigest(),
                             "asset_key": "test-platform",
                         },
                         "security_overlays": [],
                         "runtime_probe": {
                             "python": "3.13.14",
-                            "comfyui": "0.28.0",
+                            "comfyui": comfy_version,
                             "imports": ["example"],
                             "packages": {"example": "1.0"},
                         },
@@ -450,6 +452,131 @@ async def test_external_comfy_archive_is_provisioned_without_bundling_it(
     assert settings.comfy_executable.read_bytes() == b"python"
     assert settings.comfy_directory
     assert (settings.comfy_directory / "main.py").is_file()
+
+
+async def test_comfy_upgrade_carries_only_managed_registry_nodes(
+    settings,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    llama_content = _zip_bytes({"llama-server.exe": b"llama"})
+    comfy_content = _zip_bytes(
+        {
+            "python/python.exe": b"python",
+            "python/Lib/site-packages/example-1.0.dist-info/METADATA": (
+                b"Name: example\nVersion: 1.0\n"
+            ),
+            "ComfyUI/main.py": b"print('comfy')",
+        }
+    )
+    manifest = tmp_path / "engines.json"
+    _write_manifest(
+        manifest,
+        llama_content=llama_content,
+        comfy_content=comfy_content,
+        comfy_release="v-old",
+        comfy_version="0.28.0",
+    )
+    settings.prepare()
+    probe = {"python": "3.13.14", "comfyui": "0.28.0", "packages": {"example": "1.0"}}
+    monkeypatch.setattr(
+        runtime_provisioning.subprocess,
+        "run",
+        lambda *args, **kwargs: runtime_provisioning.subprocess.CompletedProcess(  # noqa: ARG005
+            args[0],
+            0,
+            stdout=f"{runtime_provisioning._RUNTIME_PROBE_SENTINEL}{json.dumps(probe)}\n",
+            stderr="",
+        ),
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=comfy_content))
+    ) as client:
+        first = RuntimeProvisioner(
+            settings,
+            manifest_path=manifest,
+            client=client,
+            environment={},
+            platform_key="test-platform",
+            allowed_download_hosts={"runtime.test"},
+        )
+        assert (await first.ensure("comfyui")).state == "ready"
+        await first.close()
+
+        assert settings.comfy_directory is not None
+        old_directory = settings.comfy_directory
+        managed = old_directory / "custom_nodes" / "lm-atelier-registry_example"
+        unmanaged = old_directory / "custom_nodes" / "manually-installed-node"
+        managed.mkdir(parents=True)
+        unmanaged.mkdir()
+        (managed / "node.py").write_bytes(b"managed node")
+        (unmanaged / "node.py").write_bytes(b"manual node")
+        unrelated_release = settings.data_dir / "runtimes" / "comfyui" / "v-unrelated"
+        unrelated = unrelated_release / "ComfyUI" / "custom_nodes" / "lm-atelier-registry_unrelated"
+        unrelated.mkdir(parents=True)
+        (unrelated / "node.py").write_bytes(b"unrelated node")
+        (unrelated_release / ".lm-atelier-runtime.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 3,
+                    "engine": "comfyui",
+                    "release": "v-unrelated",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        _write_manifest(
+            manifest,
+            llama_content=llama_content,
+            comfy_content=comfy_content,
+            comfy_release="v-new",
+            comfy_version="0.30.0",
+        )
+        probe["comfyui"] = "0.30.0"
+        second = RuntimeProvisioner(
+            settings,
+            manifest_path=manifest,
+            client=client,
+            environment={},
+            platform_key="test-platform",
+            allowed_download_hosts={"runtime.test"},
+        )
+        assert (await second.ensure("comfyui")).state == "ready"
+        await second.close()
+
+    assert settings.comfy_directory is not None
+    assert settings.comfy_directory != old_directory
+    restored = settings.comfy_directory / "custom_nodes" / managed.name
+    assert (restored / "node.py").read_bytes() == b"managed node"
+    assert not (settings.comfy_directory / "custom_nodes" / unmanaged.name).exists()
+    assert not (settings.comfy_directory / "custom_nodes" / unrelated.name).exists()
+    assert (managed / "node.py").read_bytes() == b"managed node"
+
+
+def test_managed_registry_copy_budget_is_shared_across_folders(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    (first / "node.py").write_bytes(b"a")
+    (second / "node.py").write_bytes(b"b")
+
+    entries, copied_bytes = RuntimeProvisioner._copy_managed_registry_tree(
+        first,
+        tmp_path / "first-copy",
+        max_entries=1,
+        max_bytes=2,
+    )
+    assert (entries, copied_bytes) == (1, 1)
+    with pytest.raises(RuntimeProvisioningError, match="unsupported shape"):
+        RuntimeProvisioner._copy_managed_registry_tree(
+            second,
+            tmp_path / "second-copy",
+            max_entries=1 - entries,
+            max_bytes=2 - copied_bytes,
+        )
 
 
 def _provisioner(settings, tmp_path: Path):  # type: ignore[no-untyped-def]

@@ -45,6 +45,18 @@ from .media_organization_schema import (
     CREATE_MEDIA_ORGANIZATION_TRIGGER_SQL,
     DROP_MEDIA_ORGANIZATION_TRIGGER_SQL,
 )
+from .prompt_expansion_schema import (
+    CREATE_PROMPT_EXPANSION_TRIGGER_SQL,
+    DROP_PROMPT_EXPANSION_TRIGGER_SQL,
+)
+from .prompt_template_schema import (
+    CREATE_PROMPT_TEMPLATE_TRIGGER_SQL,
+    DROP_PROMPT_TEMPLATE_TRIGGER_SQL,
+)
+from .reference_review_schema import (
+    CREATE_REFERENCE_REVIEW_TRIGGER_SQL,
+    DROP_REFERENCE_REVIEW_TRIGGER_SQL,
+)
 
 
 def _lowercase_sha256_check(column: str) -> str:
@@ -151,6 +163,11 @@ class Chat(TimestampMixin, Base):
         back_populates="chat", cascade="all, delete-orphan", order_by="Message.created_at"
     )
     runs: Mapped[list[Run]] = relationship(back_populates="chat", cascade="all, delete-orphan")
+    prompt_expansion_batches: Mapped[list[PromptExpansionBatch]] = relationship(
+        back_populates="chat",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
 
 class Message(TimestampMixin, Base):
@@ -613,6 +630,276 @@ class MediaTagAssignment(Base):
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class PromptTemplateDefinition(TimestampMixin, Base):
+    """User-visible Prompt Library identity; edits append immutable revisions."""
+
+    __tablename__ = "prompt_template_definitions"
+    __table_args__ = (
+        UniqueConstraint("name", name="uq_prompt_template_definition_name"),
+        CheckConstraint(
+            "length(name) BETWEEN 1 AND 200 AND name = trim(name) AND instr(name, char(0)) = 0",
+            name="ck_prompt_template_definition_name",
+        ),
+        CheckConstraint(
+            "length(description) <= 4000 AND instr(description, char(0)) = 0",
+            name="ck_prompt_template_definition_description",
+        ),
+        CheckConstraint(
+            "current_revision_id IS NULL OR length(current_revision_id) BETWEEN 1 AND 40",
+            name="ck_prompt_template_definition_current_revision",
+        ),
+        Index(
+            "ix_prompt_template_definitions_archived_name",
+            "archived",
+            "name",
+            "id",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("ptdef"))
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text, default="")
+    archived: Mapped[bool] = mapped_column(Boolean, default=False)
+    current_revision_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+    revisions: Mapped[list[PromptTemplateRevision]] = relationship(
+        back_populates="definition",
+        passive_deletes="all",
+        order_by="PromptTemplateRevision.version",
+    )
+
+
+class PromptExpansionBatch(TimestampMixin, Base):
+    """One chat-scoped, versioned Prompt Library draft batch."""
+
+    __tablename__ = "prompt_expansion_batches"
+    __table_args__ = (
+        UniqueConstraint(
+            "chat_id",
+            "idempotency_key",
+            name="uq_prompt_expansion_batch_chat_idempotency",
+        ),
+        UniqueConstraint(
+            "chat_id",
+            "queue_idempotency_key",
+            name="uq_prompt_expansion_batch_chat_queue_key",
+        ),
+        CheckConstraint(
+            "length(idempotency_key) BETWEEN 1 AND 200 AND instr(idempotency_key, char(0)) = 0",
+            name="ck_prompt_expansion_batch_idempotency_key",
+        ),
+        CheckConstraint(
+            "queue_idempotency_key IS NULL OR "
+            "(length(queue_idempotency_key) BETWEEN 1 AND 200 "
+            "AND instr(queue_idempotency_key, char(0)) = 0)",
+            name="ck_prompt_expansion_batch_queue_key",
+        ),
+        CheckConstraint("schema_version = 1", name="ck_prompt_expansion_batch_schema_version"),
+        CheckConstraint("codec_version = 2", name="ck_prompt_expansion_batch_codec_version"),
+        CheckConstraint(
+            _lowercase_sha256_check("contract_sha256"),
+            name="ck_prompt_expansion_batch_contract_sha256",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("original_plan_sha256"),
+            name="ck_prompt_expansion_batch_original_plan_sha256",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("plan_sha256"),
+            name="ck_prompt_expansion_batch_plan_sha256",
+        ),
+        CheckConstraint("plan_version > 0", name="ck_prompt_expansion_batch_plan_version"),
+        CheckConstraint("state IN ('draft', 'queued')", name="ck_prompt_expansion_batch_state"),
+        Index("ix_prompt_expansion_batches_chat_created", "chat_id", "created_at", "id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("ptbatch"))
+    chat_id: Mapped[str] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(200))
+    prompt_template_id: Mapped[str] = mapped_column(
+        ForeignKey("prompt_template_definitions.id", ondelete="RESTRICT"), index=True
+    )
+    prompt_template_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("prompt_template_revisions.id", ondelete="RESTRICT"), index=True
+    )
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    contract_sha256: Mapped[str] = mapped_column(String(64))
+    codec_version: Mapped[int] = mapped_column(Integer, default=2)
+    request_json: Mapped[str] = mapped_column(Text)
+    model_snapshot_json: Mapped[str] = mapped_column(Text)
+    original_plan_sha256: Mapped[str] = mapped_column(String(64))
+    plan_sha256: Mapped[str] = mapped_column(String(64))
+    plan_version: Mapped[int] = mapped_column(Integer, default=1)
+    state: Mapped[str] = mapped_column(String(16), default="draft")
+    queue_idempotency_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    work_plan_id: Mapped[str | None] = mapped_column(
+        ForeignKey("work_plans.id", ondelete="SET NULL"), nullable=True, unique=True
+    )
+    queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    chat: Mapped[Chat] = relationship(back_populates="prompt_expansion_batches")
+    items: Mapped[list[PromptExpansionItem]] = relationship(
+        back_populates="batch",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="PromptExpansionItem.ordinal",
+    )
+
+
+class PromptExpansionItem(TimestampMixin, Base):
+    """Immutable generated origin plus one editable, pre-queue candidate."""
+
+    __tablename__ = "prompt_expansion_items"
+    __table_args__ = (
+        UniqueConstraint("batch_id", "ordinal", name="uq_prompt_expansion_item_ordinal"),
+        CheckConstraint("ordinal > 0", name="ck_prompt_expansion_item_ordinal"),
+        CheckConstraint(
+            _lowercase_sha256_check("original_rendered_sha256"),
+            name="ck_prompt_expansion_item_original_rendered_sha256",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("reviewed_sha256"),
+            name="ck_prompt_expansion_item_reviewed_sha256",
+        ),
+        CheckConstraint(
+            "length(original_rendered_prompt) BETWEEN 1 AND 32000 "
+            "AND instr(original_rendered_prompt, char(0)) = 0",
+            name="ck_prompt_expansion_item_original_prompt",
+        ),
+        CheckConstraint(
+            "length(reviewed_prompt) BETWEEN 1 AND 32000 AND instr(reviewed_prompt, char(0)) = 0",
+            name="ck_prompt_expansion_item_reviewed_prompt",
+        ),
+        CheckConstraint("review_version > 0", name="ck_prompt_expansion_item_review_version"),
+        CheckConstraint("reroll_count >= 0", name="ck_prompt_expansion_item_reroll_count"),
+        CheckConstraint(
+            "media_seed IS NULL OR (media_seed >= 0 AND media_seed < 2147483648)",
+            name="ck_prompt_expansion_item_media_seed",
+        ),
+        Index("ix_prompt_expansion_items_batch_ordinal", "batch_id", "ordinal"),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("ptitem"))
+    batch_id: Mapped[str] = mapped_column(
+        ForeignKey("prompt_expansion_batches.id", ondelete="CASCADE"), index=True
+    )
+    ordinal: Mapped[int] = mapped_column(Integer)
+    original_evidence_json: Mapped[str] = mapped_column(Text)
+    current_evidence_json: Mapped[str] = mapped_column(Text)
+    original_rendered_prompt: Mapped[str] = mapped_column(Text)
+    original_rendered_sha256: Mapped[str] = mapped_column(String(64))
+    reviewed_prompt: Mapped[str] = mapped_column(Text)
+    reviewed_sha256: Mapped[str] = mapped_column(String(64))
+    selected: Mapped[bool] = mapped_column(Boolean, default=True)
+    review_version: Mapped[int] = mapped_column(Integer, default=1)
+    reroll_count: Mapped[int] = mapped_column(Integer, default=0)
+    work_step_id: Mapped[str | None] = mapped_column(
+        ForeignKey("work_steps.id", ondelete="SET NULL"), nullable=True, unique=True
+    )
+    run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL"), nullable=True, unique=True
+    )
+    media_seed: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    batch: Mapped[PromptExpansionBatch] = relationship(back_populates="items")
+
+
+class PromptTemplateRevision(TimestampMixin, Base):
+    """One append-only canonical Prompt Library contract."""
+
+    __tablename__ = "prompt_template_revisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "prompt_template_id",
+            "version",
+            name="uq_prompt_template_revision_version",
+        ),
+        CheckConstraint("version > 0", name="ck_prompt_template_revision_version_positive"),
+        CheckConstraint("schema_version = 1", name="ck_prompt_template_revision_schema_version"),
+        CheckConstraint(
+            _lowercase_sha256_check("contract_sha256"),
+            name="ck_prompt_template_revision_contract_sha256",
+        ),
+        Index(
+            "ix_prompt_template_revisions_definition_created",
+            "prompt_template_id",
+            "version",
+            "id",
+        ),
+        Index(
+            "ix_prompt_template_revisions_contract_sha256",
+            "contract_sha256",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("ptrev"))
+    prompt_template_id: Mapped[str] = mapped_column(
+        ForeignKey("prompt_template_definitions.id", ondelete="RESTRICT")
+    )
+    version: Mapped[int] = mapped_column(Integer)
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    contract_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    contract_sha256: Mapped[str] = mapped_column(String(64))
+
+    definition: Mapped[PromptTemplateDefinition] = relationship(
+        back_populates="revisions",
+        foreign_keys=[prompt_template_id],
+    )
+
+
+class PromptTemplateImportWinner(Base):
+    """Immutable winner for one semantic portable-template import request."""
+
+    __tablename__ = "prompt_template_import_winners"
+    __table_args__ = (
+        CheckConstraint(
+            "length(idempotency_key) BETWEEN 1 AND 200 AND instr(idempotency_key, char(0)) = 0",
+            name="ck_prompt_template_import_winner_idempotency_key",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("request_sha256"),
+            name="ck_prompt_template_import_winner_request_sha256",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("bundle_sha256"),
+            name="ck_prompt_template_import_winner_bundle_sha256",
+        ),
+        CheckConstraint(
+            "authority_rule = 'prompt-template-import-authority-v1'",
+            name="ck_prompt_template_import_winner_authority_rule",
+        ),
+        CheckConstraint(
+            "length(prompt_template_id) BETWEEN 1 AND 40",
+            name="ck_prompt_template_import_winner_template_id",
+        ),
+        CheckConstraint(
+            "length(prompt_template_revision_id) BETWEEN 1 AND 40",
+            name="ck_prompt_template_import_winner_revision_id",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("contract_sha256"),
+            name="ck_prompt_template_import_winner_contract_sha256",
+        ),
+        UniqueConstraint("prompt_template_id", name="uq_prompt_template_import_winner_template_id"),
+        UniqueConstraint(
+            "prompt_template_revision_id", name="uq_prompt_template_import_winner_revision_id"
+        ),
+    )
+
+    idempotency_key: Mapped[str] = mapped_column(String(200), primary_key=True)
+    request_sha256: Mapped[str] = mapped_column(String(64))
+    bundle_sha256: Mapped[str] = mapped_column(String(64))
+    authority_rule: Mapped[str] = mapped_column(String(64))
+    prompt_template_id: Mapped[str] = mapped_column(
+        ForeignKey("prompt_template_definitions.id", ondelete="RESTRICT")
+    )
+    prompt_template_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("prompt_template_revisions.id", ondelete="RESTRICT")
+    )
+    contract_sha256: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 for _statement in CREATE_TRIGGER_SQL:
     event.listen(
         Base.metadata,
@@ -632,6 +919,42 @@ for _statement in CREATE_MEDIA_ORGANIZATION_TRIGGER_SQL:
         _install_sqlite_trigger(_statement),
     )
 for _statement in DROP_MEDIA_ORGANIZATION_TRIGGER_SQL:
+    event.listen(
+        Base.metadata,
+        "before_drop",
+        DDL(_statement).execute_if(dialect="sqlite"),  # type: ignore[no-untyped-call]
+    )
+for _statement in CREATE_REFERENCE_REVIEW_TRIGGER_SQL:
+    event.listen(
+        Base.metadata,
+        "after_create",
+        _install_sqlite_trigger(_statement),
+    )
+for _statement in DROP_REFERENCE_REVIEW_TRIGGER_SQL:
+    event.listen(
+        Base.metadata,
+        "before_drop",
+        DDL(_statement).execute_if(dialect="sqlite"),  # type: ignore[no-untyped-call]
+    )
+for _statement in CREATE_PROMPT_TEMPLATE_TRIGGER_SQL:
+    event.listen(
+        Base.metadata,
+        "after_create",
+        _install_sqlite_trigger(_statement),
+    )
+for _statement in CREATE_PROMPT_EXPANSION_TRIGGER_SQL:
+    event.listen(
+        Base.metadata,
+        "after_create",
+        _install_sqlite_trigger(_statement),
+    )
+for _statement in DROP_PROMPT_EXPANSION_TRIGGER_SQL:
+    event.listen(
+        Base.metadata,
+        "before_drop",
+        DDL(_statement).execute_if(dialect="sqlite"),  # type: ignore[no-untyped-call]
+    )
+for _statement in DROP_PROMPT_TEMPLATE_TRIGGER_SQL:
     event.listen(
         Base.metadata,
         "before_drop",
@@ -1647,6 +1970,7 @@ class ReferenceAsset(TimestampMixin, Base):
         # name, and autogenerate would propose renaming them on real data.
         Index("ix_reference_assets_subject", "reference_subject_id"),
         Index("ix_reference_assets_artifact", "artifact_id"),
+        CheckConstraint("review_version > 0", name="ck_reference_asset_review_version"),
     )
 
     id: Mapped[str] = mapped_column(
@@ -1668,8 +1992,48 @@ class ReferenceAsset(TimestampMixin, Base):
     validation_reasons_json: Mapped[list[str]] = mapped_column(JSON, default=list)
     width: Mapped[int | None] = mapped_column(Integer, nullable=True)
     height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Version 1 means unchecked. The first and only decision advances it to 2.
+    review_version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
 
     subject: Mapped[ReferenceSubject] = relationship(back_populates="assets")
+
+
+class ReferenceAssetReviewEvent(Base):
+    """One immutable human decision over exact retained artifact bytes."""
+
+    __tablename__ = "reference_asset_review_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "reference_asset_id", "result_version", name="uq_reference_asset_review_version"
+        ),
+        CheckConstraint("expected_version > 0", name="ck_reference_review_expected_version"),
+        CheckConstraint(
+            "result_version = expected_version + 1", name="ck_reference_review_result_version"
+        ),
+        CheckConstraint("width > 0 AND height > 0", name="ck_reference_review_dimensions"),
+        CheckConstraint(
+            _lowercase_sha256_check("artifact_sha256"), name="ck_reference_review_artifact_sha256"
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("decision_sha256"), name="ck_reference_review_decision_sha256"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(88), primary_key=True)
+    # A snapshot, not a foreign key: detach must not erase the review history.
+    reference_asset_id: Mapped[str] = mapped_column(String(48), index=True)
+    artifact_id: Mapped[str] = mapped_column(String(80))
+    artifact_sha256: Mapped[str] = mapped_column(String(64))
+    reviewer_kind: Mapped[str] = mapped_column(String(32))
+    expected_state: Mapped[str] = mapped_column(String(30))
+    expected_version: Mapped[int] = mapped_column(Integer)
+    result_version: Mapped[int] = mapped_column(Integer)
+    decision: Mapped[str] = mapped_column(String(30))
+    reasons_json: Mapped[list[str]] = mapped_column(JSON)
+    width: Mapped[int] = mapped_column(Integer)
+    height: Mapped[int] = mapped_column(Integer)
+    decision_sha256: Mapped[str] = mapped_column(String(64), unique=True)
+    reviewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class MessageReference(TimestampMixin, Base):

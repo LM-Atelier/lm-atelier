@@ -1,4 +1,5 @@
 import type { TurnReference } from "./mentionDraft";
+import type { ComposerPromptSource } from "./composerPromptSource";
 import {
   parseArtifactLibraryPage,
   type ArtifactLibraryFilters,
@@ -44,6 +45,15 @@ import type {
   ModelProfileBundle,
   PlatformMatrixEntry,
   PromptHelperDetail,
+  PromptBatchCreateInput,
+  PromptBatchItemUpdateInput,
+  PromptBatchQueueInput,
+  PromptTemplateCreateInput,
+  PromptTemplateDetail,
+  PromptTemplatePage,
+  PromptTemplateRevision,
+  PromptTemplateUpdateInput,
+  PromptTemplateWriteResult,
   Project,
   ReferenceRecipe,
   RegistryInstall,
@@ -264,6 +274,65 @@ export const api = {
     ),
   deletePromptHelper: (id: string) =>
     request<void>(`/api/prompt-helpers/${id}`, { method: "DELETE" }),
+  promptTemplates: (includeArchived = false, limit = 100, offset = 0) => {
+    const parameters = new URLSearchParams({
+      include_archived: String(includeArchived),
+      limit: String(limit),
+      offset: String(offset),
+    });
+    return request<PromptTemplatePage>(`/api/prompt-templates?${parameters}`);
+  },
+  promptTemplate: (id: string) =>
+    request<PromptTemplateDetail>(`/api/prompt-templates/${encodeURIComponent(id)}`),
+  createPromptTemplate: (payload: PromptTemplateCreateInput) =>
+    request<PromptTemplateWriteResult>("/api/prompt-templates", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updatePromptTemplate: (id: string, payload: PromptTemplateUpdateInput) =>
+    request<PromptTemplateWriteResult>(`/api/prompt-templates/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  promptTemplateRevisions: (id: string) =>
+    request<PromptTemplateRevision[]>(
+      `/api/prompt-templates/${encodeURIComponent(id)}/revisions`,
+    ),
+  restorePromptTemplateRevision: (
+    id: string,
+    revisionId: string,
+    expectedCurrentRevisionId: string,
+    idempotencyKey: string,
+  ) => request<PromptTemplateWriteResult>(
+    `/api/prompt-templates/${encodeURIComponent(id)}/revisions/${encodeURIComponent(revisionId)}/restore`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        expected_current_revision_id: expectedCurrentRevisionId,
+        idempotency_key: idempotencyKey,
+      }),
+    },
+  ),
+  createPromptBatch: (chatId: string, payload: PromptBatchCreateInput) =>
+    request<unknown>(`/api/chats/${encodeURIComponent(chatId)}/prompt-batches`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  promptBatch: (batchId: string) =>
+    request<unknown>(`/api/prompt-batches/${encodeURIComponent(batchId)}`),
+  updatePromptBatchItem: (
+    batchId: string,
+    ordinal: number,
+    payload: PromptBatchItemUpdateInput,
+  ) => request<unknown>(
+    `/api/prompt-batches/${encodeURIComponent(batchId)}/items/${ordinal}`,
+    { method: "PATCH", body: JSON.stringify(payload) },
+  ),
+  queuePromptBatch: (batchId: string, payload: PromptBatchQueueInput) =>
+    request<unknown>(`/api/prompt-batches/${encodeURIComponent(batchId)}/queue`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   studioCapabilities: () => request<StudioCapabilityReport>("/api/studio/capabilities"),
   sendTurn: async (
     chatId: string,
@@ -278,7 +347,15 @@ export const api = {
     // text: the server refuses to recover references by reading a prompt,
     // because that binds whoever the words most resemble.
     references: TurnReference[] = [],
+    outputCount?: number,
+    promptSource?: ComposerPromptSource,
   ) => {
+    // The count belongs to the mode the person explicitly chose. Auto may
+    // later confirm a media route, but that must not resurrect a hidden media
+    // control from an earlier mode.
+    const requestedOutputCount = mode === "image" || mode === "video"
+      ? outputCount
+      : undefined;
     const submit = (selectedMode: RoutingMode, confirmed = false) => request<TurnAccepted>(`/api/chats/${chatId}/${endpoint}`, {
       method: "POST",
       body: JSON.stringify({
@@ -288,8 +365,10 @@ export const api = {
         references,
         settings,
         workflow_revision_id: workflowRevisionId,
+        output_count: requestedOutputCount,
         confirm_media: confirmed,
         idempotency_key: idempotencyKey,
+        prompt_source: promptSource,
       }),
     });
     try {
@@ -352,6 +431,8 @@ export const api = {
     settings: Record<string, unknown>,
     idempotencyKey: string = crypto.randomUUID(),
     references: TurnReference[] = [],
+    outputCount?: number,
+    promptSource?: ComposerPromptSource,
   ) => api.sendTurn(
     chatId,
     text,
@@ -362,6 +443,8 @@ export const api = {
     "stop-and-send",
     undefined,
     references,
+    outputCount,
+    promptSource,
   ),
   regenerateMessage: (messageId: string, settings: Record<string, unknown>) =>
     request<TurnAccepted>(`/api/messages/${messageId}/regenerate`, {
@@ -920,6 +1003,10 @@ export const api = {
   renewRegistryInstall: (installId: string) =>
     request<Job>(`/api/workflows/packages/installs/${installId}/renew`, {
       method: "POST",
+    }),
+  removeRegistryInstall: (installId: string) =>
+    request<void>(`/api/workflows/packages/installs/${installId}`, {
+      method: "DELETE",
     }),
   analyzeWorkflowPackage: (uiGraph: Record<string, unknown>) =>
     request<WorkflowPackageAnalysis>("/api/workflows/packages/analyze", {

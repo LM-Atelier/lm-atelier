@@ -1,20 +1,12 @@
 import { useId } from "react";
 import { variantServesComposerCapability } from "./activeWorkflowCapability";
 import { useActiveChatWorkflowSelection } from "./useActiveChatWorkflowSelection";
-import type { RoutingMode, WorkflowFamilyVariant } from "./types";
+import { readinessReason } from "./readinessReason";
+import type { RoutingMode } from "./types";
 
 const LEGACY_VALUE = "compatibility:legacy";
 const REVISION_VALUE = "compatibility:revision";
 
-function readinessNote(variant: WorkflowFamilyVariant): string {
-  if (variant.readiness === "setup_required") {
-    return variant.readiness_reason ?? "Needs files or nodes installed before it can run.";
-  }
-  if (variant.readiness === "review_required") {
-    return variant.readiness_reason ?? "Needs review before it can run.";
-  }
-  return variant.readiness_reason ?? "Cannot run on this machine as configured.";
-}
 
 export function ActiveChatWorkflowSelector({
   chatId,
@@ -126,7 +118,7 @@ export function ActiveChatWorkflowSelector({
       {noApplicableVariant && (
         <small role="status">This workflow has no {state.capability} variant.</small>
       )}
-      {fullyBlocked && <small role="status">{readinessNote(blockedVariants[0])}</small>}
+      {fullyBlocked && <small role="status">{readinessReason(blockedVariants[0])}</small>}
     </div>
   );
 }

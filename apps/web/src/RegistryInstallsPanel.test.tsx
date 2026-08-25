@@ -12,6 +12,7 @@ vi.mock("./api", () => ({
     activateRegistryInstall: vi.fn(),
     deactivateRegistryInstall: vi.fn(),
     renewRegistryInstall: vi.fn(),
+    removeRegistryInstall: vi.fn(),
   },
 }));
 
@@ -24,6 +25,9 @@ const install = (overrides: Partial<RegistryInstall> = {}): RegistryInstall => (
   manifest_sha256: "b".repeat(64),
   wheel_closure_sha256: null,
   wheel_environment_sha256: null,
+  disk_status: "ready",
+  node_files_present: true,
+  wheel_environment_present: true,
   trusted: false,
   active: false,
   reviewed_at: null,
@@ -61,6 +65,7 @@ describe("RegistryInstallsPanel", () => {
     vi.mocked(api.activateRegistryInstall).mockResolvedValue(install({ active: true }));
     vi.mocked(api.deactivateRegistryInstall).mockResolvedValue(install());
     vi.mocked(api.renewRegistryInstall).mockResolvedValue({ id: "job-renew" } as never);
+    vi.mocked(api.removeRegistryInstall).mockResolvedValue(undefined);
   });
   afterEach(() => {
     cleanup();
@@ -171,6 +176,20 @@ describe("RegistryInstallsPanel", () => {
     expect(screen.queryByRole("button", { name: "Activate" })).toBeNull();
   });
 
+  it("explains activation rollback and the safe recovery path", async () => {
+    vi.mocked(api.registryInstalls).mockResolvedValue([install({ trusted: true })]);
+    vi.mocked(api.activateRegistryInstall).mockRejectedValue(
+      Object.assign(new Error("409 Conflict"), { code: "activation_start_failed" }),
+    );
+    renderPanel();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Activate" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "The package prevented media startup. It was deactivated and the previous runtime was restored. Leave it inactive. Refresh its dependencies or remove it and prepare a compatible revision before trying again.",
+    );
+  });
+
   it("refreshes dependencies only while the package is inactive", async () => {
     renderPanel();
 
@@ -182,6 +201,54 @@ describe("RegistryInstallsPanel", () => {
     renderPanel();
     expect(await screen.findByText("comfyui-example-node")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Refresh dependencies" })).toBeNull();
+  });
+
+  it("explains incomplete installs and offers a confirmed removal", async () => {
+    vi.mocked(api.registryInstalls).mockResolvedValue([
+      install({
+        disk_status: "node_files_missing",
+        node_files_present: false,
+        wheel_environment_present: true,
+      }),
+    ]);
+    renderPanel();
+
+    expect(await screen.findByText("Files missing")).toBeInTheDocument();
+    expect(screen.getByText(/Remove it, then prepare it again/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Trust package" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Activate" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Refresh dependencies" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    expect(screen.getByText(/removes the prepared package record/)).toBeInTheDocument();
+    expect(api.removeRegistryInstall).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove prepared package" }));
+    await waitFor(() => expect(api.removeRegistryInstall).toHaveBeenCalledWith("install-1"));
+  });
+
+  it("does not offer removal while a package is active", async () => {
+    vi.mocked(api.registryInstalls).mockResolvedValue([install({ trusted: true, active: true })]);
+    renderPanel();
+
+    expect(await screen.findByText("comfyui-example-node")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Remove" })).toBeNull();
+  });
+
+  it("offers dependency repair but not trust when only the wheel environment is missing", async () => {
+    vi.mocked(api.registryInstalls).mockResolvedValue([
+      install({
+        disk_status: "wheel_environment_missing",
+        node_files_present: true,
+        wheel_environment_present: false,
+      }),
+    ]);
+    renderPanel();
+
+    expect(await screen.findByText("Files missing")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Trust package" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Refresh dependencies" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove" })).toBeInTheDocument();
   });
 
   it("speaks the server's stable refusal codes in plain words", async () => {

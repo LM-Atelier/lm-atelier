@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 import local_lm.api as api_module
 from local_lm import __version__
-from local_lm.adapters.base import ChatEvent, ChatRequest, MediaEvent, MediaRequest
+from local_lm.adapters.base import ChatEvent, ChatRequest, GeneratedAsset, MediaEvent, MediaRequest
 from local_lm.adapters.mock import MockChatAdapter, MockMediaAdapter
 from local_lm.auxiliary_assets import checkpoint_lora_extension
 from local_lm.catalog import HuggingFaceCatalog
@@ -261,6 +261,7 @@ async def test_model_readiness_requires_matching_capability_evidence(
 async def test_about_reports_version_and_local_support_paths(
     client: AsyncClient, settings: Settings
 ) -> None:
+    settings.max_media_outputs_per_plan = 3
     response = await client.get("/api/about")
 
     assert response.status_code == 200
@@ -268,6 +269,7 @@ async def test_about_reports_version_and_local_support_paths(
         "version": __version__,
         "data_directory": str(settings.data_dir.resolve()),
         "log_directory": str(settings.log_dir.resolve()),
+        "max_media_outputs_per_plan": settings.max_media_outputs_per_plan,
         # Reported so the UI can explain a switch it cannot offer. Shut unless
         # the installation says otherwise.
         "web_access_enabled": False,
@@ -374,6 +376,91 @@ async def test_project_chat_text_and_inline_image_flow(client: AsyncClient) -> N
         image_part["artifact_id"]
     ]
     await wait_for_assistant(client, chat["id"], "video")
+
+
+async def test_replaced_generation_previews_survive_until_retention_cleanup(
+    client: AsyncClient, monkeypatch, settings: Settings
+) -> None:  # type: ignore[no-untyped-def]
+    first_processed = asyncio.Event()
+    allow_second = asyncio.Event()
+    second_processed = asyncio.Event()
+    allow_complete = asyncio.Event()
+
+    def jpeg_bytes(color: tuple[int, int, int]) -> bytes:
+        output = io.BytesIO()
+        Image.new("RGB", (2, 2), color).save(output, format="JPEG")
+        return output.getvalue()
+
+    async def staged_generate(
+        self: MockMediaAdapter, request: MediaRequest
+    ) -> AsyncIterator[MediaEvent]:
+        del self, request
+        yield MediaEvent(type="preview", preview=jpeg_bytes((191, 31, 31)))
+        first_processed.set()
+        await allow_second.wait()
+        yield MediaEvent(type="preview", preview=jpeg_bytes((31, 31, 191)))
+        second_processed.set()
+        await allow_complete.wait()
+        yield MediaEvent(
+            type="complete",
+            assets=[
+                GeneratedAsset(
+                    content=ONE_PIXEL_PNG,
+                    media_type="image/png",
+                    kind="image",
+                    name="final.png",
+                )
+            ],
+        )
+
+    async def current_preview_id(chat_id: str) -> str:
+        response = await client.get(f"/api/chats/{chat_id}")
+        assert response.status_code == 200
+        assistant = [
+            message for message in response.json()["messages"] if message["role"] == "assistant"
+        ][-1]
+        preview = next(
+            part
+            for part in assistant["parts"]
+            if part["type"] == "image" and part["metadata_json"].get("preview")
+        )
+        return preview["artifact_id"]
+
+    monkeypatch.setattr(MockMediaAdapter, "generate", staged_generate)
+    chat = (await client.post("/api/chats", json={"title": "Preview retention"})).json()
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Create an image with two previews", "mode": "auto"},
+    )
+    assert turn.status_code == 202
+
+    await asyncio.wait_for(first_processed.wait(), timeout=5)
+    first_id = await current_preview_id(chat["id"])
+    assert (await client.get(f"/api/artifacts/{first_id}/content")).status_code == 200
+
+    allow_second.set()
+    await asyncio.wait_for(second_processed.wait(), timeout=5)
+    second_id = await current_preview_id(chat["id"])
+    assert second_id != first_id
+    assert (await client.get(f"/api/artifacts/{first_id}/content")).status_code == 200
+
+    allow_complete.set()
+    await wait_for_assistant(client, chat["id"], "image")
+    assert (await client.get(f"/api/artifacts/{second_id}/content")).status_code == 200
+
+    expired_at = datetime.now(UTC) - timedelta(hours=settings.temporary_retention_hours + 1)
+    with SessionLocal() as session:
+        for preview_id in (first_id, second_id):
+            artifact = session.get(Artifact, preview_id)
+            assert artifact and artifact.metadata_json.get("temporary_preview") is True
+            artifact.created_at = expired_at
+        session.commit()
+
+    cleaned = await client.post("/api/artifacts/cleanup", json={"dry_run": False})
+    assert cleaned.status_code == 200
+    assert cleaned.json()["removed_count"] == 2
+    for preview_id in (first_id, second_id):
+        assert (await client.get(f"/api/artifacts/{preview_id}/content")).status_code == 404
 
 
 async def test_image_turn_resolves_verified_lora_stack_and_provenance(

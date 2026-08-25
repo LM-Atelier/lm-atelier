@@ -22,6 +22,7 @@ from local_lm.models import (
     ModelInstall,
     ModelProfile,
     SetupVerification,
+    WorkflowActivation,
     WorkflowDefinition,
     WorkflowRevision,
 )
@@ -176,6 +177,27 @@ def _add_workflow(
     return definition, revision
 
 
+def _add_activation(
+    revision: WorkflowRevision,
+    *,
+    active: bool = True,
+    contract_sha256: str | None = None,
+    launch_sha256: str = "c" * 64,
+) -> WorkflowActivation:
+    return WorkflowActivation(
+        id=f"activation_{revision.id}",
+        workflow_revision_id=revision.id,
+        resolver_version="test",
+        dependency_contract_sha256=(
+            contract_sha256 or revision.dependency_contract_sha256 or "a" * 64
+        ),
+        binding_sha256="b" * 64,
+        state="ready" if active else "stale",
+        is_active=active,
+        details_json={"launch_sha256": launch_sha256},
+    )
+
+
 async def test_internal_package_draft_is_not_a_setup_candidate(app: FastAPI) -> None:
     del app
     install = _add_install(role="image", engine="comfyui")
@@ -193,6 +215,87 @@ async def test_internal_package_draft_is_not_a_setup_candidate(app: FastAPI) -> 
 
     assert selected is None
     assert check.code == "workflow_missing"
+    assert check.action == "repair_workflow"
+
+
+async def test_contract_workflow_requires_a_ready_activation(app: FastAPI) -> None:
+    del app
+    install = _add_install(role="image", engine="comfyui")
+    definition, revision = _add_workflow(install, "text_to_image")
+    revision.dependency_contract_sha256 = "a" * 64
+
+    with SessionLocal() as session:
+        session.add_all([install, definition])
+        session.flush()
+        session.add(revision)
+        session.commit()
+        selected, check = _workflow_check(session, "image", install)
+
+    assert selected is None
+    assert check.code == "workflow_activation_not_ready"
+    assert check.status == "fail"
+    assert check.action == "repair_workflow"
+
+
+async def test_contract_workflow_with_a_ready_activation_is_ready(app: FastAPI) -> None:
+    del app
+    install = _add_install(role="image", engine="comfyui")
+    definition, revision = _add_workflow(install, "text_to_image")
+    revision.dependency_contract_sha256 = "a" * 64
+
+    with SessionLocal() as session:
+        session.add_all([install, definition])
+        session.flush()
+        session.add(revision)
+        session.flush()
+        session.add(_add_activation(revision))
+        session.commit()
+        selected, check = _workflow_check(session, "image", install)
+
+    assert selected is not None
+    assert selected.id == revision.id
+    assert check.code == "workflow_ready"
+    assert check.status == "pass"
+
+
+@pytest.mark.parametrize(
+    ("active", "contract_sha256", "launch_sha256"),
+    [
+        (False, None, "c" * 64),
+        (True, "d" * 64, "c" * 64),
+        (True, None, "not-a-launch-digest"),
+    ],
+)
+async def test_contract_workflow_refuses_invalid_activation_authority(
+    app: FastAPI,
+    *,
+    active: bool,
+    contract_sha256: str | None,
+    launch_sha256: str,
+) -> None:
+    del app
+    install = _add_install(role="image", engine="comfyui")
+    definition, revision = _add_workflow(install, "text_to_image")
+    revision.dependency_contract_sha256 = "a" * 64
+
+    with SessionLocal() as session:
+        session.add_all([install, definition])
+        session.flush()
+        session.add(revision)
+        session.flush()
+        session.add(
+            _add_activation(
+                revision,
+                active=active,
+                contract_sha256=contract_sha256,
+                launch_sha256=launch_sha256,
+            )
+        )
+        session.commit()
+        selected, check = _workflow_check(session, "image", install)
+
+    assert selected is None
+    assert check.code == "workflow_activation_not_ready"
     assert check.action == "repair_workflow"
 
 

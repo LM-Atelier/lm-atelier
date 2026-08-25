@@ -23,6 +23,7 @@ from .instance_identity import (
 )
 from .runtime_config import (
     RUNTIME_ENV_KEYS,
+    RuntimeConfigError,
     configure_persisted_runtime,
     persist_runtime_values,
 )
@@ -202,7 +203,18 @@ def _set_console_title() -> None:
 
 
 def main() -> int:
-    configure_desktop_environment()
+    try:
+        configure_desktop_environment()
+    except RuntimeConfigError as exc:
+        # A redirected state folder is refused rather than written through, and
+        # this is the first thing that touches it - so without this the refusal
+        # would arrive as a traceback at startup instead of the same clean
+        # message and exit code the sibling containment refusal already uses.
+        print(
+            f"LM Atelier could not establish ownership of its data folder: {exc}.",
+            file=sys.stderr,
+        )
+        return 2
     if "--download-worker" in sys.argv[1:]:
         from .download_worker import main as download_worker_main
 

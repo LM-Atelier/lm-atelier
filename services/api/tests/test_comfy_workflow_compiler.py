@@ -1923,3 +1923,130 @@ def test_a_widget_with_no_upload_button_consumes_nothing_extra() -> None:
     object_info["LoadImage"]["input"]["required"]["image"] = [["seed.jpg", "other.png"], {}]
 
     _assert_error("unsupported_widget_values", workflow, object_info)
+
+
+def _group_control() -> dict[str, Any]:
+    """The control as ComfyUI actually saves it: no inputs, nothing linked out.
+
+    The node draws a list of groups with switches. What it SAVES is only the
+    title-matching rule in its properties; the switches themselves are recorded
+    as the `mode` of the nodes in the matched groups, which is why the compiler
+    can drop this node without losing the decision it expresses.
+    """
+
+    return {
+        "id": 9,
+        "type": "Fast Groups Bypasser (rgthree)",
+        "mode": 0,
+        "inputs": [],
+        "outputs": [{"name": "OPT_CONNECTION", "type": "*", "links": None}],
+        "properties": {"matchTitle": "^Extras"},
+    }
+
+
+def _graph_with_a_switchable_node(member_mode: int) -> dict[str, Any]:
+    """Source feeding two Saves, the second of which a group could switch off."""
+
+    workflow = _workflow()
+    switchable = deepcopy(workflow["nodes"][1])
+    switchable["id"] = 3
+    switchable["mode"] = member_mode
+    switchable["inputs"][0]["link"] = 8
+    workflow["nodes"].append(switchable)
+    workflow["nodes"][0]["outputs"][0]["links"] = [7, 8]
+    workflow["links"].append([8, 1, 0, 3, 0, "IMAGE"])
+    return workflow
+
+
+def _with_group_control(workflow: dict[str, Any]) -> dict[str, Any]:
+    workflow = deepcopy(workflow)
+    workflow["nodes"].append(_group_control())
+    return workflow
+
+
+def test_an_active_group_compiles_the_same_with_and_without_its_control() -> None:
+    """The control is present and every member is live, so nothing is switched off."""
+
+    without = _graph_with_a_switchable_node(0)
+
+    plain = compile_comfyui_ui_graph(without, _object_info())
+    with_control = compile_comfyui_ui_graph(_with_group_control(without), _object_info())
+
+    assert plain.execution_order == ("1", "2", "3")
+    assert with_control.execution_order == plain.execution_order
+    assert with_control.api_graph == plain.api_graph
+
+
+def test_a_bypassed_group_compiles_the_same_with_and_without_its_control() -> None:
+    """The case the control exists for, and the one that proves it carries nothing.
+
+    Member at mode 4 means the person switched that group off in the editor.
+    The saved mode is what says so; `expand_workflow` resolves it away before
+    the frontend-node check runs. If the control were doing the work rather
+    than recording it, dropping the node would run the bypassed member and
+    these two graphs would differ.
+    """
+
+    without = _graph_with_a_switchable_node(4)
+
+    plain = compile_comfyui_ui_graph(without, _object_info())
+    with_control = compile_comfyui_ui_graph(_with_group_control(without), _object_info())
+
+    assert plain.execution_order == ("1", "2")
+    assert with_control.execution_order == plain.execution_order
+    assert with_control.api_graph == plain.api_graph
+
+
+def test_the_control_does_not_excuse_a_member_mode_the_compiler_refuses() -> None:
+    """Ignoring the control must not turn a refusal into a compile.
+
+    Mode 2 is muted, which is neither live nor bypass and cannot be rewritten
+    exactly. Before this change the control refused first and that refusal was
+    never reached; ignoring it has to give the ORIGINAL answer back, not a
+    permissive one.
+    """
+
+    without = _graph_with_a_switchable_node(2)
+
+    _assert_error("unsupported_node_mode", without, _object_info())
+    _assert_error("unsupported_node_mode", _with_group_control(without), _object_info())
+
+
+def test_a_group_control_that_carries_a_wire_still_refuses() -> None:
+    """The precondition the ignore set rests on, pinned at the type it was added for.
+
+    Ignoring a node is only safe while that node carries nothing. rgthree lets
+    one of these drive another through OPT_CONNECTION, and a chained pair would
+    put an ignored type on a real link. Measured: the compiler refuses that with
+    `frontend_node_link` rather than dropping the node and its edge, which is
+    what makes the ignore set safe rather than merely convenient.
+
+    `test_rejects_links_attached_to_note_nodes` proves the guard exists. This
+    proves the type added here is subject to it - so moving this control into
+    the pass-through set, or special-casing it, turns this red.
+    """
+
+    workflow = _graph_with_a_switchable_node(0)
+    workflow["nodes"].append(
+        {
+            "id": 9,
+            "type": "Fast Groups Bypasser (rgthree)",
+            "mode": 0,
+            "inputs": [],
+            "outputs": [{"name": "OPT_CONNECTION", "type": "*", "links": [20]}],
+            "properties": {"matchTitle": "^Extras"},
+        }
+    )
+    workflow["nodes"].append(
+        {
+            "id": 10,
+            "type": "Fast Groups Bypasser (rgthree)",
+            "mode": 0,
+            "inputs": [{"name": "OPT_CONNECTION", "type": "*", "link": 20}],
+            "outputs": [{"name": "OPT_CONNECTION", "type": "*", "links": None}],
+            "properties": {"matchTitle": "^More"},
+        }
+    )
+    workflow["links"].append([20, 9, 0, 10, 0, "*"])
+
+    _assert_error("frontend_node_link", workflow, _object_info())
