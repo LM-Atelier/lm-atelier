@@ -309,7 +309,14 @@ def _resolved_contract(
         or revision.prompt_template_id != definition.id
         or revision.schema_version != 1
         or revision.contract_sha256 != request.contract_sha256
-        or (creating and (definition.archived or definition.current_revision_id != revision.id))
+        or (
+            creating
+            and (
+                definition.archived
+                or definition.deleted_at is not None
+                or definition.current_revision_id != revision.id
+            )
+        )
     ):
         _invalid()
     try:

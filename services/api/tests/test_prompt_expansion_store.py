@@ -60,6 +60,7 @@ from local_lm.prompt_model_values import (
     prompt_model_slot_contract,
     prompt_model_values_sha256,
 )
+from local_lm.prompt_template_schema import DELETED_PROMPT_TEMPLATE_NAME_PREFIX
 from local_lm.prompt_templates import (
     PromptTemplateContract,
     parse_prompt_template_contract,
@@ -304,6 +305,52 @@ def test_request_preflight_replays_exactly_and_refuses_changed_authority(
         with pytest.raises(PromptExpansionStoreConflict) as caught:
             replay_expansion_request(session, chat.id, "preflight-key", changed)
         assert str(caught.value) == PROMPT_EXPANSION_STORE_CONFLICT
+
+
+def test_deleted_definition_preserves_existing_batch_but_refuses_a_new_one(
+    sessions: SessionFactory,
+) -> None:
+    with sessions() as session:
+        chat, request, plan, created = _create(session, key="before-delete")
+        session.commit()
+        definition = session.get(PromptTemplateDefinition, request.definition_id)
+        assert definition is not None
+        definition.name = f"{DELETED_PROMPT_TEMPLATE_NAME_PREFIX}{definition.id}"
+        definition.description = ""
+        definition.archived = True
+        definition.deleted_at = utcnow()
+        session.commit()
+
+        # The database normally requires every tombstone to be archived. Drop
+        # that persistence-layer guard in this isolated constructed fixture so
+        # this store boundary proves it checks deletion independently rather
+        # than inheriting the archived-implies-deleted coupling.
+        session.execute(text("DROP TRIGGER prompt_template_definition_update_guard"))
+        session.execute(
+            text("UPDATE prompt_template_definitions SET archived = 0 WHERE id = :definition_id"),
+            {"definition_id": definition.id},
+        )
+        session.commit()
+        session.expire_all()
+        independently_deleted = session.get(PromptTemplateDefinition, request.definition_id)
+        assert independently_deleted is not None
+        assert independently_deleted.archived is False
+        assert independently_deleted.deleted_at is not None
+
+        retained = read_expansion(session, chat.id, created.batch.id)
+        assert retained.batch.id == created.batch.id
+        replay = replay_expansion_request(session, chat.id, "before-delete", request)
+        assert replay is not None
+        assert replay.batch.id == created.batch.id
+        with pytest.raises(PromptExpansionStoreError, match=PROMPT_EXPANSION_STORE_INVALID):
+            create_or_replay_expansion(
+                session,
+                chat.id,
+                "after-delete",
+                request,
+                plan,
+                {"version": 1, "kind": "deterministic"},
+            )
 
 
 def test_same_key_with_changed_exact_request_or_snapshot_refuses(
@@ -1341,7 +1388,7 @@ def test_migration_is_self_contained_and_chat_delete_cascades(tmp_path: Path) ->
             "prompt_expansion_item_update_guard",
         }
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "c5a8e1d72f40",
+            "d6a8f1c42b90",
         )
         batch_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(prompt_expansion_batches)")

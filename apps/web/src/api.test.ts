@@ -126,6 +126,7 @@ it("uses the bounded Prompt Library CRUD and append-only revision routes", async
     .mockResolvedValueOnce(new Response(JSON.stringify({ items: [], total: 0, limit: 100, offset: 0 }), { status: 200 }))
     .mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 201 }))
     .mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 200 }))
+    .mockResolvedValueOnce(new Response(null, { status: 204 }))
     .mockResolvedValueOnce(new Response(JSON.stringify([]), { status: 200 }))
     .mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 200 }));
   vi.stubGlobal("fetch", fetchMock);
@@ -145,6 +146,7 @@ it("uses the bounded Prompt Library CRUD and append-only revision routes", async
     idempotency_key: "edit-one",
     contract,
   });
+  await api.deletePromptTemplate("definition/one", "revision-one");
   await api.promptTemplateRevisions("definition/one");
   await api.restorePromptTemplateRevision("definition/one", "revision/old", "revision-one", "restore-one");
 
@@ -152,6 +154,7 @@ it("uses the bounded Prompt Library CRUD and append-only revision routes", async
     "/api/prompt-templates?include_archived=true&limit=100&offset=0",
     "/api/prompt-templates",
     "/api/prompt-templates/definition%2Fone",
+    "/api/prompt-templates/definition%2Fone?expected_current_revision_id=revision-one",
     "/api/prompt-templates/definition%2Fone/revisions",
     "/api/prompt-templates/definition%2Fone/revisions/revision%2Fold/restore",
   ]);
@@ -161,7 +164,8 @@ it("uses the bounded Prompt Library CRUD and append-only revision routes", async
     description: "",
     contract,
   });
-  expect(JSON.parse(String(fetchMock.mock.calls[5][1]?.body))).toEqual({
+  expect(fetchMock.mock.calls[4][1]?.method).toBe("DELETE");
+  expect(JSON.parse(String(fetchMock.mock.calls[6][1]?.body))).toEqual({
     expected_current_revision_id: "revision-one",
     idempotency_key: "restore-one",
   });

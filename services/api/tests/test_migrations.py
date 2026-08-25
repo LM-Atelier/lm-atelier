@@ -85,7 +85,7 @@ def test_chat_item_content_tombstone_migration_round_trips(tmp_path: Path) -> No
             "AND name = 'ix_messages_content_removed_at'"
         ).fetchone() == ("ix_messages_content_removed_at",)
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "c5a8e1d72f40",
+            "d6a8f1c42b90",
         )
 
     engine = create_engine(f"sqlite:///{database}")
@@ -477,7 +477,7 @@ def test_artifact_library_migration_fence_blocks_concurrent_dangling_writer(
             "SELECT count(*) FROM jobs WHERE id = 'migration-race-writer'"
         ).fetchone() == (0,)
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "c5a8e1d72f40",
+            "d6a8f1c42b90",
         )
         membership_schema = connection.execute(
             "SELECT sql FROM sqlite_master "

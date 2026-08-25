@@ -142,6 +142,30 @@ async def test_inherited_import_commits_once_and_replays_before_receipt_validati
         assert winner.prompt_template_id == first.json()["template_id"]
         assert winner.prompt_template_revision_id == first.json()["revision_id"]
 
+    deleted = await client.delete(
+        f"/api/prompt-templates/{first.json()['template_id']}",
+        params={"expected_current_revision_id": first.json()["revision_id"]},
+    )
+    assert deleted.status_code == 204
+    deleted_replay = await client.post(
+        "/api/prompt-templates/import",
+        json={**payload, "preview_receipt": "expired-placeholder"},
+    )
+    assert deleted_replay.status_code == 409
+    assert deleted_replay.json() == {
+        "detail": (
+            "This import already created a template that was deleted. Use a new idempotency key."
+        ),
+        "code": "prompt-template-import-deleted",
+    }
+
+    replacement = await client.post(
+        "/api/prompt-templates/import",
+        json={**payload, "idempotency_key": "import-atomic-inherited-replacement"},
+    )
+    assert replacement.status_code == 201, replacement.text
+    assert replacement.json()["template_id"] != first.json()["template_id"]
+
 
 @pytest.mark.asyncio
 async def test_fixed_import_rebinds_the_exact_authorized_local_workflow(

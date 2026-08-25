@@ -233,6 +233,8 @@ from .prompt_library import (
     PromptLibraryError,
     PromptTemplateWriteResult,
     create_prompt_template,
+    delete_prompt_template,
+    require_live_prompt_template_definition,
     restore_prompt_template_revision,
     update_prompt_template,
 )
@@ -2009,7 +2011,9 @@ async def list_prompt_templates(
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0, le=10_000)] = 0,
 ) -> PromptTemplatePageOut:
-    filters = [] if include_archived else [PromptTemplateDefinition.archived.is_(False)]
+    filters = [PromptTemplateDefinition.deleted_at.is_(None)]
+    if not include_archived:
+        filters.append(PromptTemplateDefinition.archived.is_(False))
     total = session.scalar(
         select(func.count()).select_from(PromptTemplateDefinition).where(*filters)
     )
@@ -2213,13 +2217,10 @@ async def get_prompt_template(
     template_id: str,
     session: SessionDep,
 ) -> PromptTemplateDetailOut:
-    definition = session.get(PromptTemplateDefinition, template_id)
-    if definition is None:
-        raise api_error(
-            404,
-            "prompt-template-not-found",
-            "Prompt template does not exist.",
-        )
+    try:
+        definition = require_live_prompt_template_definition(session, template_id)
+    except PromptLibraryError as exc:
+        raise _prompt_template_error(exc) from exc
     return _prompt_template_detail_out(session, definition)
 
 
@@ -2257,6 +2258,23 @@ async def patch_prompt_template(
     return _prompt_template_write_out(session, result)
 
 
+@router.delete("/prompt-templates/{template_id}", status_code=204)
+async def delete_prompt_template_route(
+    template_id: str,
+    session: SessionDep,
+    expected_current_revision_id: Annotated[str, Query(min_length=1, max_length=40)],
+) -> Response:
+    try:
+        delete_prompt_template(
+            session,
+            definition_id=template_id,
+            expected_current_revision_id=expected_current_revision_id,
+        )
+    except PromptLibraryError as exc:
+        raise _prompt_template_error(exc) from exc
+    return Response(status_code=204)
+
+
 @router.get(
     "/prompt-templates/{template_id}/revisions",
     response_model=list[PromptTemplateRevisionOut],
@@ -2267,12 +2285,10 @@ async def list_prompt_template_revisions(
     limit: Annotated[int, Query(ge=1, le=100)] = 100,
     offset: Annotated[int, Query(ge=0, le=10_000)] = 0,
 ) -> list[PromptTemplateRevisionOut]:
-    if session.get(PromptTemplateDefinition, template_id) is None:
-        raise api_error(
-            404,
-            "prompt-template-not-found",
-            "Prompt template does not exist.",
-        )
+    try:
+        require_live_prompt_template_definition(session, template_id)
+    except PromptLibraryError as exc:
+        raise _prompt_template_error(exc) from exc
     revisions = session.scalars(
         select(PromptTemplateRevision)
         .where(PromptTemplateRevision.prompt_template_id == template_id)
@@ -2292,6 +2308,13 @@ async def get_prompt_template_revision(
     revision_id: str,
     session: SessionDep,
 ) -> PromptTemplateRevisionOut:
+    definition = session.get(PromptTemplateDefinition, template_id)
+    if definition is not None and definition.deleted_at is not None:
+        raise api_error(
+            410,
+            "prompt-template-deleted",
+            "Prompt template was deleted. Choose another template.",
+        )
     revision = session.get(PromptTemplateRevision, revision_id)
     if revision is None or revision.prompt_template_id != template_id:
         raise api_error(
@@ -2389,6 +2412,12 @@ async def _create_prompt_batch_locked(
             404, "prompt-template-revision-not-found", "Prompt template does not exist."
         )
     definition = session.get(PromptTemplateDefinition, revision.prompt_template_id)
+    if definition is not None and definition.deleted_at is not None:
+        raise api_error(
+            410,
+            "prompt-template-deleted",
+            "Prompt template was deleted. Choose another template.",
+        )
     if (
         definition is None
         or definition.archived

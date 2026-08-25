@@ -294,6 +294,15 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(payload),
     }),
+  deletePromptTemplate: (id: string, expectedCurrentRevisionId: string) => {
+    const parameters = new URLSearchParams({
+      expected_current_revision_id: expectedCurrentRevisionId,
+    });
+    return request<void>(
+      `/api/prompt-templates/${encodeURIComponent(id)}?${parameters}`,
+      { method: "DELETE" },
+    );
+  },
   promptTemplateRevisions: (id: string) =>
     request<PromptTemplateRevision[]>(
       `/api/prompt-templates/${encodeURIComponent(id)}/revisions`,

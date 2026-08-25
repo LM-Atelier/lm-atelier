@@ -1637,6 +1637,107 @@ async def test_prompt_template_crud_history_restore_and_archive_are_idempotent(
 
 
 @pytest.mark.asyncio
+async def test_prompt_template_delete_hides_definition_and_retains_frozen_history(
+    client: AsyncClient,
+) -> None:
+    payload = _create_payload(key="prompt-delete-source", name="Reusable deletion name")
+    created = (await client.post("/api/prompt-templates", json=payload)).json()
+    template = created["template"]
+    revision = created["revision"]
+    chat = (await client.post("/api/chats", json={"title": "Constructed deletion batch"})).json()
+    batch_payload = {
+        "idempotency_key": "prompt-delete-existing-batch",
+        "template_revision_id": revision["id"],
+        "contract_sha256": revision["contract_sha256"],
+        "item_count": 1,
+        "selection_seed": 17,
+        "inputs": {"subject": ["constructed subject"]},
+    }
+    batch = (
+        await client.post(
+            f"/api/chats/{chat['id']}/prompt-batches",
+            json=batch_payload,
+        )
+    ).json()
+
+    stale = await client.delete(
+        f"/api/prompt-templates/{template['id']}",
+        params={"expected_current_revision_id": "ptrev_stale"},
+    )
+    assert stale.status_code == 409
+    assert stale.json()["code"] == "prompt-template-stale"
+
+    deleted = await client.delete(
+        f"/api/prompt-templates/{template['id']}",
+        params={"expected_current_revision_id": revision["id"]},
+    )
+    assert deleted.status_code == 204
+    assert deleted.content == b""
+
+    for include_archived in (False, True):
+        page = await client.get(
+            "/api/prompt-templates",
+            params={"include_archived": include_archived},
+        )
+        assert page.status_code == 200
+        assert page.json()["items"] == []
+
+    blocked = (
+        await client.get(f"/api/prompt-templates/{template['id']}"),
+        await client.patch(
+            f"/api/prompt-templates/{template['id']}",
+            json={
+                "expected_current_revision_id": revision["id"],
+                "description": "cannot return",
+            },
+        ),
+        await client.get(f"/api/prompt-templates/{template['id']}/revisions"),
+        await client.get(f"/api/prompt-templates/{template['id']}/revisions/{revision['id']}"),
+        await client.get(
+            f"/api/prompt-templates/{template['id']}/revisions/{revision['id']}/export"
+        ),
+        await client.post(
+            f"/api/prompt-templates/{template['id']}/revisions/{revision['id']}/restore",
+            json={
+                "expected_current_revision_id": revision["id"],
+                "idempotency_key": "prompt-delete-restore",
+            },
+        ),
+        await client.post(
+            f"/api/chats/{chat['id']}/prompt-batches",
+            json={**batch_payload, "idempotency_key": "prompt-delete-new-batch"},
+        ),
+    )
+    assert {(response.status_code, response.json()["code"]) for response in blocked} == {
+        (410, "prompt-template-deleted")
+    }
+
+    existing_batch = await client.get(f"/api/prompt-batches/{batch['id']}")
+    assert existing_batch.status_code == 200
+    assert existing_batch.json()["prompt_template_revision_id"] == revision["id"]
+
+    with SessionLocal() as session:
+        stored_definition = session.get(PromptTemplateDefinition, template["id"])
+        assert stored_definition is not None
+        assert stored_definition.deleted_at is not None
+        assert stored_definition.archived is True
+        assert stored_definition.description == ""
+        assert stored_definition.name == f"__deleted_prompt_template__:{template['id']}"
+        assert session.get(PromptTemplateRevision, revision["id"]) is not None
+        assert session.get(PromptExpansionBatch, batch["id"]) is not None
+
+    replay = await client.post("/api/prompt-templates", json=payload)
+    assert replay.status_code == 409
+    assert replay.json()["code"] == "prompt-template-conflict"
+    replacement = await client.post(
+        "/api/prompt-templates",
+        json={**payload, "idempotency_key": "prompt-delete-replacement"},
+    )
+    assert replacement.status_code == 201
+    assert replacement.json()["template"]["name"] == "Reusable deletion name"
+
+
+@pytest.mark.asyncio
 async def test_prompt_template_create_and_patch_conflicts_are_fixed_and_non_echoing(
     client: AsyncClient,
 ) -> None:
@@ -1661,6 +1762,16 @@ async def test_prompt_template_create_and_patch_conflicts_are_fixed_and_non_echo
     )
     assert name_collision.status_code == 409
     assert name_collision.json()["code"] == "prompt-template-name-taken"
+
+    reserved_name = await client.post(
+        "/api/prompt-templates",
+        json=_create_payload(
+            key="prompt-create-reserved-name",
+            name="__deleted_prompt_template__:constructed",
+        ),
+    )
+    assert reserved_name.status_code == 422
+    assert reserved_name.json()["code"] == "prompt-template-request-invalid"
 
     other = (
         await client.post(

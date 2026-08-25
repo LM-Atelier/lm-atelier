@@ -667,6 +667,10 @@ class PromptTemplateDefinition(TimestampMixin, Base):
             "name",
             "id",
         ),
+        Index(
+            "ix_prompt_template_definitions_deleted_at",
+            "deleted_at",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("ptdef"))
@@ -674,6 +678,7 @@ class PromptTemplateDefinition(TimestampMixin, Base):
     description: Mapped[str] = mapped_column(Text, default="")
     archived: Mapped[bool] = mapped_column(Boolean, default=False)
     current_revision_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     revisions: Mapped[list[PromptTemplateRevision]] = relationship(
         back_populates="definition",
