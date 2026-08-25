@@ -21,6 +21,7 @@ vi.mock("./api", async (importOriginal) => {
     promptTemplate: vi.fn(),
     createPromptTemplate: vi.fn(),
     updatePromptTemplate: vi.fn(),
+    deletePromptTemplate: vi.fn(),
     promptTemplateRevisions: vi.fn(),
     restorePromptTemplateRevision: vi.fn(),
     chat: vi.fn(),
@@ -177,6 +178,7 @@ beforeEach(() => {
   vi.mocked(api.promptTemplateRevisions).mockResolvedValue([currentRevision, previousRevision]);
   vi.mocked(api.createPromptTemplate).mockResolvedValue(writeResult);
   vi.mocked(api.updatePromptTemplate).mockResolvedValue(writeResult);
+  vi.mocked(api.deletePromptTemplate).mockResolvedValue(undefined);
   vi.mocked(api.restorePromptTemplateRevision).mockResolvedValue(writeResult);
 });
 
@@ -278,6 +280,22 @@ describe("Prompt Library Phase 1", () => {
       expected_current_revision_id: currentRevision.id,
       archived: true,
     }));
+  });
+
+  it("requires explicit retained-history confirmation before deletion", async () => {
+    renderLibrary();
+    await screen.findByRole("heading", { name: "Portrait variants" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    const dialog = screen.getByRole("dialog", { name: "Delete Portrait variants?" });
+    expect(within(dialog).getByText("Immutable revisions and existing batch/import history will remain for provenance. The template cannot be edited, restored, exported, or used for new batches after deletion.")).toBeVisible();
+    expect(api.deletePromptTemplate).not.toHaveBeenCalled();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete template" }));
+    await waitFor(() => expect(api.deletePromptTemplate).toHaveBeenCalledWith(
+      definition.id,
+      currentRevision.id,
+    ));
   });
 
   it("keeps edit authority bound to the template that opened the editor", async () => {

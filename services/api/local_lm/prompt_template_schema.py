@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+DELETED_PROMPT_TEMPLATE_NAME_PREFIX = "__deleted_prompt_template__:"
+
 DEFINITION_INSERT_TRIGGER = """
 CREATE TRIGGER prompt_template_definition_insert_guard
 BEFORE INSERT ON prompt_template_definitions
 BEGIN
   SELECT CASE WHEN NEW.current_revision_id IS NOT NULL
     THEN RAISE(ABORT, 'prompt template must begin without a current revision') END;
+  SELECT CASE WHEN NEW.deleted_at IS NOT NULL
+    THEN RAISE(ABORT, 'prompt template cannot begin deleted') END;
+  SELECT CASE WHEN substr(NEW.name, 1, 28) = '__deleted_prompt_template__:'
+    THEN RAISE(ABORT, 'prompt template name is reserved') END;
 END
 """
 
@@ -17,6 +23,20 @@ BEFORE UPDATE ON prompt_template_definitions
 BEGIN
   SELECT CASE WHEN NEW.id != OLD.id
     THEN RAISE(ABORT, 'prompt template identity is immutable') END;
+  SELECT CASE WHEN OLD.deleted_at IS NOT NULL
+    THEN RAISE(ABORT, 'deleted prompt template is immutable') END;
+  SELECT CASE WHEN NEW.deleted_at IS NULL
+                        AND substr(NEW.name, 1, 28) = '__deleted_prompt_template__:'
+    THEN RAISE(ABORT, 'prompt template name is reserved') END;
+  SELECT CASE WHEN OLD.deleted_at IS NULL
+                        AND NEW.deleted_at IS NOT NULL
+                        AND (
+                          NEW.name != '__deleted_prompt_template__:' || OLD.id
+                          OR NEW.description != ''
+                          OR NEW.archived != 1
+                          OR NEW.current_revision_id IS NOT OLD.current_revision_id
+                        )
+    THEN RAISE(ABORT, 'prompt template deletion tombstone is invalid') END;
   SELECT CASE WHEN OLD.current_revision_id IS NOT NULL
                         AND NEW.current_revision_id IS NULL
     THEN RAISE(ABORT, 'prompt template current revision cannot be cleared') END;

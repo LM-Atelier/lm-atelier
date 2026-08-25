@@ -40,6 +40,9 @@ from .prompt_templates import (
 PROMPT_TEMPLATE_IMPORT_INVALID = "Prompt template import request is invalid."
 PROMPT_TEMPLATE_IMPORT_CONFLICT = "Prompt template import conflicts with an existing import."
 PROMPT_TEMPLATE_IMPORT_BUSY = "Prompt template import is busy. Try again."
+PROMPT_TEMPLATE_IMPORT_DELETED = (
+    "This import already created a template that was deleted. Use a new idempotency key."
+)
 
 MAX_IMPORT_WORKFLOWS = 16
 MAX_IMPORT_LORAS = 64
@@ -102,6 +105,14 @@ def _busy() -> NoReturn:
     raise PromptTemplateImportError(
         "prompt-template-import-busy",
         PROMPT_TEMPLATE_IMPORT_BUSY,
+        status_code=409,
+    )
+
+
+def _deleted() -> NoReturn:
+    raise PromptTemplateImportError(
+        "prompt-template-import-deleted",
+        PROMPT_TEMPLATE_IMPORT_DELETED,
         status_code=409,
     )
 
@@ -256,6 +267,7 @@ def _prepare(
 
 
 def _winner_result(
+    session: Session,
     winner: PromptTemplateImportWinner | None,
     prepared: _PreparedImport,
     *,
@@ -263,6 +275,9 @@ def _winner_result(
 ) -> PromptTemplateImportResult | None:
     if winner is None:
         return None
+    definition = session.get(PromptTemplateDefinition, winner.prompt_template_id)
+    if definition is not None and definition.deleted_at is not None:
+        _deleted()
     if (
         winner.request_sha256 != prepared.request_sha256
         or winner.bundle_sha256 != prepared.bundle.bundle_sha256
@@ -287,7 +302,7 @@ def _retry_after_database_error(
     session.rollback()
     try:
         winner = session.get(PromptTemplateImportWinner, prepared.key)
-        result = _winner_result(winner, prepared, idempotent=True)
+        result = _winner_result(session, winner, prepared, idempotent=True)
     except OperationalError:
         session.rollback()
         _busy()
@@ -332,6 +347,7 @@ def commit_prompt_template_import(
 
     try:
         early = _winner_result(
+            session,
             session.get(PromptTemplateImportWinner, prepared.key),
             prepared,
             idempotent=True,
@@ -354,6 +370,7 @@ def commit_prompt_template_import(
 
     try:
         fenced = _winner_result(
+            session,
             session.get(PromptTemplateImportWinner, prepared.key),
             prepared,
             idempotent=True,

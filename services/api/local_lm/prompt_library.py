@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .domain import Operation
+from .domain import Operation, utcnow
 from .models import (
     ModelAssetInstall,
     PromptTemplateDefinition,
@@ -20,6 +20,7 @@ from .models import (
     WorkflowDefinition,
     WorkflowRevision,
 )
+from .prompt_template_schema import DELETED_PROMPT_TEMPLATE_NAME_PREFIX
 from .prompt_templates import (
     PromptTemplateContract,
     PromptTemplateError,
@@ -37,6 +38,7 @@ PROMPT_LIBRARY_CONFLICT = "Prompt template conflicts with an existing template."
 PROMPT_LIBRARY_NAME_TAKEN = "A prompt template with this name already exists."
 PROMPT_LIBRARY_STALE = "Prompt template changed. Refresh and try again."
 PROMPT_LIBRARY_RESOURCES_UNAVAILABLE = "Prompt template resources are unavailable."
+PROMPT_LIBRARY_DELETED = "Prompt template was deleted. Choose another template."
 
 _IDEMPOTENCY_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}", re.ASCII)
 _SHA256 = re.compile(r"[0-9a-f]{64}", re.ASCII)
@@ -74,6 +76,14 @@ def _conflict() -> NoReturn:
     )
 
 
+def _deleted() -> NoReturn:
+    raise PromptLibraryError(
+        "prompt-template-deleted",
+        PROMPT_LIBRARY_DELETED,
+        status_code=410,
+    )
+
+
 def _name_taken() -> NoReturn:
     raise PromptLibraryError(
         "prompt-template-name-taken",
@@ -92,6 +102,22 @@ def _has_other_name(
     if excluding_definition_id is not None:
         statement = statement.where(PromptTemplateDefinition.id != excluding_definition_id)
     return session.scalar(statement.limit(1)) is not None
+
+
+def require_live_prompt_template_definition(
+    session: Session,
+    definition_id: str,
+) -> PromptTemplateDefinition:
+    definition = session.get(PromptTemplateDefinition, definition_id)
+    if definition is None:
+        raise PromptLibraryError(
+            "prompt-template-not-found",
+            PROMPT_LIBRARY_NOT_FOUND,
+            status_code=404,
+        )
+    if definition.deleted_at is not None:
+        _deleted()
+    return definition
 
 
 def _stale() -> NoReturn:
@@ -115,6 +141,13 @@ def _text(value: object, *, maximum: int, allow_empty: bool) -> str:
         _invalid()
     normalized = value.strip()
     if not allow_empty and not normalized:
+        _invalid()
+    return normalized
+
+
+def _name(value: object) -> str:
+    normalized = _text(value, maximum=200, allow_empty=False)
+    if normalized.startswith(DELETED_PROMPT_TEMPLATE_NAME_PREFIX):
         _invalid()
     return normalized
 
@@ -277,6 +310,7 @@ def _exact_create_retry(
         or definition.name != name
         or definition.description != description
         or definition.archived
+        or definition.deleted_at is not None
         or definition.current_revision_id != revision.id
         or revision.version != 1
         or revision.contract_sha256 != digest
@@ -295,7 +329,7 @@ def create_prompt_template(
     expected_engine: str,
 ) -> PromptTemplateWriteResult:
     key = _idempotency_key(idempotency_key)
-    normalized_name = _text(name, maximum=200, allow_empty=False)
+    normalized_name = _name(name)
     normalized_description = _text(description, maximum=4_000, allow_empty=True)
     contract, payload, digest = _canonical_contract(contract_value)
     validate_prompt_template_resources(session, contract, expected_engine=expected_engine)
@@ -384,16 +418,10 @@ def update_prompt_template(
 ) -> PromptTemplateWriteResult:
     if type(definition_id) is not str or not definition_id:
         _invalid()
-    definition = session.get(PromptTemplateDefinition, definition_id)
-    if definition is None:
-        raise PromptLibraryError(
-            "prompt-template-not-found",
-            PROMPT_LIBRARY_NOT_FOUND,
-            status_code=404,
-        )
+    definition = require_live_prompt_template_definition(session, definition_id)
     if type(expected_current_revision_id) is not str or not expected_current_revision_id:
         _invalid()
-    normalized_name = _text(name, maximum=200, allow_empty=False) if name is not None else None
+    normalized_name = _name(name) if name is not None else None
     normalized_description = (
         _text(description, maximum=4_000, allow_empty=True) if description is not None else None
     )
@@ -487,21 +515,22 @@ def update_prompt_template(
     except IntegrityError as exc:
         session.rollback()
         prior = session.get(PromptTemplateRevision, revision_id)
-        definition = session.get(PromptTemplateDefinition, definition_id)
+        retry_definition = session.get(PromptTemplateDefinition, definition_id)
         if (
             prior is not None
-            and definition is not None
-            and prior.prompt_template_id == definition.id
+            and retry_definition is not None
+            and retry_definition.deleted_at is None
+            and prior.prompt_template_id == retry_definition.id
             and prior.contract_sha256 == digest
-            and definition.current_revision_id == prior.id
+            and retry_definition.current_revision_id == prior.id
             and _metadata_matches(
-                definition,
+                retry_definition,
                 name=normalized_name,
                 description=normalized_description,
                 archived=normalized_archived,
             )
         ):
-            return PromptTemplateWriteResult(definition, prior, True)
+            return PromptTemplateWriteResult(retry_definition, prior, True)
         if normalized_name is not None and _has_other_name(
             session,
             normalized_name,
@@ -525,6 +554,7 @@ def restore_prompt_template_revision(
     idempotency_key: object,
     expected_engine: str,
 ) -> PromptTemplateWriteResult:
+    require_live_prompt_template_definition(session, definition_id)
     source = session.get(PromptTemplateRevision, revision_id)
     if source is None or source.prompt_template_id != definition_id:
         raise PromptLibraryError(
@@ -543,3 +573,37 @@ def restore_prompt_template_revision(
         idempotency_key=idempotency_key,
         expected_engine=expected_engine,
     )
+
+
+def delete_prompt_template(
+    session: Session,
+    *,
+    definition_id: str,
+    expected_current_revision_id: object,
+) -> None:
+    """Hide one definition while preserving immutable provenance rows."""
+
+    if type(definition_id) is not str or not definition_id:
+        _invalid()
+    definition = require_live_prompt_template_definition(session, definition_id)
+    if type(expected_current_revision_id) is not str or not expected_current_revision_id:
+        _invalid()
+    _current_revision(session, definition)
+    if definition.current_revision_id != expected_current_revision_id:
+        _stale()
+    definition.name = f"{DELETED_PROMPT_TEMPLATE_NAME_PREFIX}{definition.id}"
+    definition.description = ""
+    definition.archived = True
+    definition.deleted_at = utcnow()
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        current = session.get(PromptTemplateDefinition, definition_id)
+        if current is not None and current.deleted_at is not None:
+            _deleted()
+        raise PromptLibraryError(
+            "prompt-template-conflict",
+            PROMPT_LIBRARY_CONFLICT,
+            status_code=409,
+        ) from exc

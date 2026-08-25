@@ -68,6 +68,7 @@ MAX_PORTABLE_JSON_NUMBER_CHARACTERS = 128
 PORTABLE_INVALID = "Prompt template bundle is invalid."
 PORTABLE_NOT_FOUND = "Prompt template does not exist."
 PORTABLE_CONFLICT = "Prompt template conflicts with its stored revision."
+PORTABLE_DELETED = "Prompt template was deleted. Choose another template."
 PORTABLE_RECEIPT_INVALID = "Prompt template import preview has expired or is invalid."
 
 _BUNDLE_CONTEXT = b"lm-atelier-prompt-template-bundle-v1\0"
@@ -751,6 +752,10 @@ def export_prompt_template_bundle(
 
     definition = session.get(PromptTemplateDefinition, definition_id)
     revision = session.get(PromptTemplateRevision, revision_id)
+    if definition is not None and definition.deleted_at is not None:
+        raise PromptTemplatePortabilityError(
+            "prompt-template-deleted", PORTABLE_DELETED, status_code=410
+        )
     if definition is None or revision is None or revision.prompt_template_id != definition_id:
         raise PromptTemplatePortabilityError(
             "prompt-template-revision-not-found", PORTABLE_NOT_FOUND, status_code=404

@@ -5,6 +5,7 @@ import { AccessibleDialog } from "./AccessibleDialog";
 import { api, ApiError } from "./api";
 import { EmptyState } from "./EmptyState";
 import { ErrorCallout } from "./ErrorCallout";
+import { useConfirm } from "./useConfirm";
 import { servesCapability } from "./workflowFamilies";
 import type {
   PromptTemplateContract,
@@ -614,6 +615,7 @@ function resourceSummary(policy: PromptTemplateResourcePolicy): string {
 
 export function PromptLibraryView() {
   const client = useQueryClient();
+  const [confirmDialog, confirm] = useConfirm();
   const [includeArchived, setIncludeArchived] = useState(false);
   const [offset, setOffset] = useState(0);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -684,6 +686,25 @@ export function PromptLibraryView() {
     }),
     onSuccess: refresh,
   });
+  const remove = useMutation({
+    mutationFn: (template: PromptTemplateDetail) =>
+      api.deletePromptTemplate(template.id, template.current_revision_id),
+    onSuccess: () => {
+      setSelectedId(null);
+      setEditor(null);
+      refresh();
+    },
+  });
+  const confirmRemoval = async (template: PromptTemplateDetail) => {
+    const confirmed = await confirm({
+      title: `Delete ${template.name}?`,
+      question: "Delete this prompt template from your library? This cannot be undone.",
+      detail: <p>Immutable revisions and existing batch/import history will remain for provenance. The template cannot be edited, restored, exported, or used for new batches after deletion.</p>,
+      confirmLabel: "Delete template",
+      tone: "danger",
+    });
+    if (confirmed) remove.mutate(template);
+  };
   const restore = useMutation({
     mutationFn: ({ template, revisionId }: { template: PromptTemplateDetail; revisionId: string }) =>
       api.restorePromptTemplateRevision(
@@ -696,8 +717,8 @@ export function PromptLibraryView() {
   });
   const selected = detail.data;
   const failure = page.error || detail.error || revisions.error
-    || (!editor && save.error) || archive.error || restore.error;
-  const busy = save.isPending || archive.isPending || restore.isPending;
+    || (!editor && save.error) || archive.error || restore.error || remove.error;
+  const busy = save.isPending || archive.isPending || restore.isPending || remove.isPending;
   const currentSlots = selected?.current_revision.contract_json.slots ?? [];
   const archivedCount = useMemo(
     () => page.data?.items.filter((item) => item.archived).length ?? 0,
@@ -713,7 +734,7 @@ export function PromptLibraryView() {
       {includeArchived && archivedCount > 0 && <small>{archivedCount} archived</small>}
       {page.data && (offset > 0 || page.data.total > PAGE_LIMIT) && <div className="prompt-page-controls"><button className="secondary compact-button" disabled={offset === 0 || page.isFetching} onClick={() => setOffset(Math.max(0, offset - PAGE_LIMIT))}>Previous</button><small>{page.data.items.length ? `${offset + 1}–${Math.min(offset + page.data.items.length, page.data.total)}` : "No items"} of {page.data.total}</small><button className="secondary compact-button" disabled={offset + page.data.items.length >= page.data.total || page.isFetching} onClick={() => setOffset(offset + PAGE_LIMIT)}>Next</button></div>}
     </div>
-    <ErrorCallout message={failure ? "The Prompt Library could not complete that request. Refresh and try again." : null} action={failure ? <button className="secondary compact-button" onClick={refresh}>Refresh</button> : undefined} />
+    <ErrorCallout message={failure instanceof ApiError ? failure.message : failure ? "The Prompt Library could not complete that request. Refresh and try again." : null} action={failure ? <button className="secondary compact-button" onClick={refresh}>Refresh</button> : undefined} />
     {page.isPending && <div className="loading-line" />}
     {!page.isPending && !page.data?.items.length ? <EmptyState icon={<BookOpen />} title="No prompt templates yet" body="Create a structured image prompt that can be revised without rewriting its history." /> : <div className="workflow-layout prompt-library-layout">
       <ul className="workflow-list prompt-template-list" aria-label="Prompt templates">
@@ -722,7 +743,7 @@ export function PromptLibraryView() {
       <section className="workflow-detail prompt-template-detail" aria-live="polite">
         {detail.isPending && <div className="loading-line" />}
         {selected && <>
-          <div className="detail-title"><div><small>Image template · revision {selected.current_revision.version}</small><h2>{selected.name}</h2></div><div className="storage-actions"><button className="secondary" disabled={busy} onClick={() => { save.reset(); setEditor({ creating: false, draft: draftFromTemplate(selected), templateId: selected.id, expectedRevisionId: selected.current_revision_id }); }}><Pencil size={14} />Edit</button><button className="secondary" disabled={busy} onClick={() => archive.mutate(selected)}>{selected.archived ? <ArchiveRestore size={14} /> : <Archive size={14} />}{selected.archived ? "Unarchive" : "Archive"}</button></div></div>
+          <div className="detail-title"><div><small>Image template · revision {selected.current_revision.version}</small><h2>{selected.name}</h2></div><div className="storage-actions"><button className="secondary" disabled={busy} onClick={() => { save.reset(); setEditor({ creating: false, draft: draftFromTemplate(selected), templateId: selected.id, expectedRevisionId: selected.current_revision_id }); }}><Pencil size={14} />Edit</button><button className="secondary" disabled={busy} onClick={() => archive.mutate(selected)}>{selected.archived ? <ArchiveRestore size={14} /> : <Archive size={14} />}{selected.archived ? "Unarchive" : "Archive"}</button><button className="danger" disabled={busy} onClick={() => void confirmRemoval(selected)}><Trash2 size={14} />Delete</button></div></div>
           {selected.description && <p>{selected.description}</p>}
           <section className="prompt-template-body"><h3>Template body</h3><pre>{selected.current_revision.contract_json.body}</pre></section>
           <section className="prompt-template-slots"><h3>Slots</h3>{currentSlots.length ? <dl>{currentSlots.map((slot) => <div key={slot.name}><dt><code>{`{{${slot.name}}}`}</code><span className="badge">{slot.mode}</span><span className="badge">{slot.variation_scope}</span></dt><dd>{slot.mode === "choice" ? slot.choices.join(" · ") : slot.mode === "model" ? slot.guidance : slot.mode === "fixed" ? slot.fixed_value : "Provided when the template is used."}</dd></div>)}</dl> : <p className="muted">This template has no variable slots.</p>}</section>
@@ -732,5 +753,6 @@ export function PromptLibraryView() {
       </section>
     </div>}
     {editor && <TemplateEditor initial={editor.draft} creating={editor.creating} saving={save.isPending} requestError={save.error} onCancel={() => { save.reset(); setEditor(null); }} onSave={(draft) => save.mutate({ creating: editor.creating, draft, templateId: editor.templateId, expectedRevisionId: editor.expectedRevisionId })} />}
+    {confirmDialog}
   </div>;
 }
