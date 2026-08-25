@@ -47,7 +47,7 @@ def test_identity_is_stable_and_opaque_hex(tmp_path: Path) -> None:
 def test_every_input_dimension_changes_the_identity(tmp_path: Path) -> None:
     base = _derive(tmp_path / "data")
     assert _derive(tmp_path / "other-data") != base
-    assert _derive(tmp_path / "data", product_namespace="lm-atelier-red") != base
+    assert _derive(tmp_path / "data", product_namespace="other-product") != base
     assert _derive(tmp_path / "data", channel="beta") != base
     assert _derive(tmp_path / "data", build_fingerprint="0.1.9") != base
 
