@@ -425,6 +425,7 @@ h1, h2, h3 { margin: 0; }
 .message-content { min-width: 0; line-height: 1.7; color: var(--ink-primary); padding-top: 3px; }
 .message.user .message-content { color: var(--ink-primary); }
 .message-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.message-removed { color: var(--ink-muted); font-style: italic; }
 .message-attachment { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; overflow-wrap: anywhere; }
 .message-text.markdown { white-space: normal; }
 /* Long answers on paper are read the way prose is read, so they get the

@@ -97,6 +97,7 @@ export interface Message {
   role: "user" | "assistant" | "system" | "tool";
   status: "complete" | "pending" | "failed" | "cancelled";
   transcript_visible?: boolean;
+  content_removed_at?: string | null;
   active_response_revision_id?: string | null;
   parts: MessagePart[];
   /** What this turn referred to, as it stood when the turn was accepted.

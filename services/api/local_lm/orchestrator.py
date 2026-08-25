@@ -6044,6 +6044,7 @@ class ConversationOrchestrator:
             if (
                 message.role != MessageRole.ASSISTANT.value
                 or message.status != MessageStatus.COMPLETE.value
+                or message.content_removed_at is not None
             ):
                 continue
             run = session.scalar(
@@ -6110,6 +6111,7 @@ class ConversationOrchestrator:
             if (
                 message.role != MessageRole.ASSISTANT.value
                 or message.status != MessageStatus.COMPLETE.value
+                or message.content_removed_at is not None
             ):
                 continue
             run = session.scalar(
@@ -7290,6 +7292,8 @@ class ConversationOrchestrator:
             .options(selectinload(Message.parts))
             .where(Message.id == run.user_message_id, Message.chat_id == run.chat_id)
         )
+        if user_message and user_message.content_removed_at is not None:
+            return []
         durable_ids = (
             [
                 part.artifact_id
@@ -7415,7 +7419,7 @@ class ConversationOrchestrator:
     ) -> list[Artifact]:
         """Load a user's explicit inputs, including legacy provenance-only runs."""
 
-        if message.role != MessageRole.USER.value:
+        if message.role != MessageRole.USER.value or message.content_removed_at is not None:
             return []
         direct_ids = [
             part.artifact_id
@@ -7528,6 +7532,8 @@ class ConversationOrchestrator:
         message: Message,
         input_artifacts: list[Artifact] | None = None,
     ) -> str:
+        if message.content_removed_at is not None:
+            return ""
         text = "\n".join(part.text for part in message.parts if part.text).strip()
         attachment_lines: list[str] = []
         for artifact in input_artifacts or []:

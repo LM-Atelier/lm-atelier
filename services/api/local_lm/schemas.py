@@ -263,6 +263,7 @@ class MessageOut(ApiModel):
     role: str
     status: str
     transcript_visible: bool
+    content_removed_at: datetime | None
     active_response_revision_id: str | None
     parts: list[MessagePartOut]
     # Empty for every message that named nothing, which is almost all of them.
@@ -272,9 +273,11 @@ class MessageOut(ApiModel):
     created_at: datetime
     updated_at: datetime
 
-    @field_serializer("created_at", "updated_at", when_used="json")
-    def serialize_timestamp_as_utc(self, value: datetime) -> str:
+    @field_serializer("content_removed_at", "created_at", "updated_at", when_used="json")
+    def serialize_timestamp_as_utc(self, value: datetime | None) -> str | None:
         """Keep SQLite-naive UTC instants explicit at the browser boundary."""
+        if value is None:
+            return None
         normalized = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
         return normalized.isoformat().replace("+00:00", "Z")
 
