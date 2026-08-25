@@ -346,6 +346,7 @@ class ChatItemRemovalReferenceOut(ApiModel):
 class ChatItemRemovalImpactOut(ApiModel):
     chat_id: str
     message_id: str
+    message_revision_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     role: str
     already_removed: bool
     has_replies: bool
@@ -364,6 +365,25 @@ class ChatItemRemovalImpactOut(ApiModel):
     retained_witness_classes: list[str]
     forensic_erasure: Literal[False]
     execute_authorized: Literal[False]
+
+
+class ChatItemRemovalExecute(ApiModel):
+    expected_message_id: str = Field(min_length=1, max_length=40)
+    expected_revision_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    operation_key: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    )
+
+
+class ChatItemRemovalExecutionOut(ApiModel):
+    operation_key: str
+    chat_id: str
+    message_id: str
+    message_revision_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    content_removed_at: datetime
+    replayed: bool
 
 
 class StudioSessionCreate(ApiModel):

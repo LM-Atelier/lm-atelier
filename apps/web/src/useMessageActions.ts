@@ -4,11 +4,7 @@ import { api } from "./api";
 
 /** The per-message actions that change which conversations exist.
  *
- * Deleting a turn removes messages, runs, jobs, a possible work plan, and
- * artifact references in one server-side cascade; forking creates a new chat
- * and opens it, because the user is starting a tangent and would otherwise
- * have to hunt for the thread they just made. Both invalidate the same
- * queries, so they live together rather than duplicating that list.
+ * These actions all mutate chat history and share cache reconciliation.
  */
 export function useMessageActions(
   openChat: (id: string) => void,
@@ -24,6 +20,21 @@ export function useMessageActions(
       void client.invalidateQueries({ queryKey: ["artifacts"] });
     },
   });
+  const removeItem = useMutation({
+    mutationFn: async (messageId: string) => {
+      const impact = await api.chatItemRemovalImpact(messageId);
+      return api.removeChatItemContent(
+        messageId,
+        impact.message_revision_id,
+        crypto.randomUUID(),
+      );
+    },
+    onSuccess: (result) => {
+      void client.invalidateQueries({ queryKey: ["chat", result.chat_id] });
+      void client.invalidateQueries({ queryKey: ["artifacts"] });
+      void client.invalidateQueries({ queryKey: ["jobs"] });
+    },
+  });
   const forkThread = useMutation({
     mutationFn: (messageId: string) => api.forkThread(messageId),
     onSuccess: (chat) => {
@@ -32,5 +43,5 @@ export function useMessageActions(
       showChatView("chat");
     },
   });
-  return { deleteExchange, forkThread };
+  return { deleteExchange, removeItem, forkThread };
 }

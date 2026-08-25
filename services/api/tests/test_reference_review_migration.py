@@ -294,7 +294,7 @@ def test_a9_write_fence_blocks_a_concurrent_settled_writer(tmp_path: Path) -> No
             "SELECT count(*) FROM reference_assets WHERE id = 'refasset_race'"
         ).fetchone() == (0,)
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "d6a8f1c42b90",
+            "e7b9c4d12f60",
         )
 
 
@@ -738,7 +738,7 @@ def test_downgrade_refuses_a_non_pristine_asset_even_without_events(
     command.upgrade(pristine_config, "head")
     with sqlite3.connect(pristine_database) as connection:
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "d6a8f1c42b90",
+            "e7b9c4d12f60",
         )
         assert connection.execute(
             "SELECT validation_state, validation_reasons_json, width, height, review_version "

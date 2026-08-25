@@ -56,7 +56,16 @@ from .chat_deletion import (
     delete_exchange,
 )
 from .chat_forking import ForkSourceNotFound, fork_chat_from_message
-from .chat_item_removal import ChatItemRemovalNotFound, preview_chat_item_removal
+from .chat_item_removal import (
+    ChatItemRemovalActiveWork,
+    ChatItemRemovalAlreadyRemoved,
+    ChatItemRemovalIdempotencyConflict,
+    ChatItemRemovalIdentityMismatch,
+    ChatItemRemovalNotFound,
+    ChatItemRemovalRevisionConflict,
+    execute_chat_item_removal,
+    preview_chat_item_removal,
+)
 from .civitai_catalog import CivitaiCatalog
 from .comfy_editor_bridge import ComfyEditorBridgeError
 from .comfy_registry import ComfyRegistryClient
@@ -297,6 +306,8 @@ from .schemas import (
     CatalogVersions,
     ChatCreate,
     ChatDetail,
+    ChatItemRemovalExecute,
+    ChatItemRemovalExecutionOut,
     ChatItemRemovalImpactOut,
     ChatOut,
     ChatUpdate,
@@ -3006,6 +3017,70 @@ async def get_chat_item_removal_impact(
     except ChatItemRemovalNotFound as exc:
         raise api_error(404, "message-not-found", str(exc)) from exc
     return ChatItemRemovalImpactOut.model_validate(impact)
+
+
+@router.post(
+    "/messages/{message_id}/remove-content",
+    response_model=ChatItemRemovalExecutionOut,
+)
+async def remove_chat_item_content(
+    message_id: str,
+    payload: ChatItemRemovalExecute,
+    request: Request,
+    session: ConversationSessionDep,
+) -> ChatItemRemovalExecutionOut:
+    """Detach one item's owned payload while preserving its graph identity."""
+
+    if payload.expected_message_id != message_id:
+        raise api_error(
+            409,
+            "message-identity-mismatch",
+            "message identity does not match the removal request",
+        )
+    message = session.get(Message, message_id)
+    if message is None:
+        raise api_error(404, "message-not-found", "message not found")
+    services = _services(request)
+    chat_id = message.chat_id
+    # End the path-to-chat lookup transaction before waiting for the lock.
+    # The locked lookup below must observe the latest committed graph, not a
+    # WAL snapshot opened while another mutation still held this chat guard.
+    session.rollback()
+    async with services.orchestrator.chat_guard(chat_id):
+        session.expire_all()
+        try:
+            result = execute_chat_item_removal(
+                session,
+                message_id,
+                expected_message_id=payload.expected_message_id,
+                expected_revision_id=payload.expected_revision_id,
+                operation_key=payload.operation_key,
+            )
+        except ChatItemRemovalIdentityMismatch as exc:
+            raise api_error(409, "message-identity-mismatch", str(exc)) from exc
+        except ChatItemRemovalNotFound as exc:
+            raise api_error(404, "message-not-found", str(exc)) from exc
+        except ChatItemRemovalIdempotencyConflict as exc:
+            raise api_error(409, "operation-key-conflict", str(exc)) from exc
+        except ChatItemRemovalAlreadyRemoved as exc:
+            raise api_error(409, "message-already-removed", str(exc)) from exc
+        except ChatItemRemovalActiveWork as exc:
+            raise api_error(
+                409,
+                "chat-removal-active-work",
+                str(exc),
+                job_count=exc.job_count,
+            ) from exc
+        except ChatItemRemovalRevisionConflict as exc:
+            raise api_error(409, "message-revision-conflict", str(exc)) from exc
+        session.commit()
+    if not result.replayed:
+        await services.events.publish(
+            "message.updated",
+            message_id,
+            {"chat_id": result.chat_id, "content_removed": True},
+        )
+    return ChatItemRemovalExecutionOut.model_validate(result)
 
 
 @router.delete("/messages/{message_id}/exchange", response_model=ExchangeDeletionOut)
