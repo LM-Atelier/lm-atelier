@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Archive, ArchiveRestore, BookOpen, History, Pencil, Plus, Trash2 } from "lucide-react";
 import { AccessibleDialog } from "./AccessibleDialog";
-import { api } from "./api";
+import { api, ApiError } from "./api";
 import { EmptyState } from "./EmptyState";
 import { ErrorCallout } from "./ErrorCallout";
 import { servesCapability } from "./workflowFamilies";
@@ -44,10 +44,27 @@ const defaultContract = (): PromptTemplateContract => ({
 });
 
 const emptyDraft = (): TemplateDraft => ({
-  name: "Untitled image template",
+  name: "",
   description: "",
   contract: defaultContract(),
 });
+
+function templateSaveError(error: unknown): string | null {
+  if (!error) return null;
+  if (error instanceof ApiError && error.code === "prompt-template-name-taken") {
+    return "A template with this name already exists. Choose a different name.";
+  }
+  if (error instanceof ApiError && error.code === "prompt-template-stale") {
+    return "This template changed after you opened it. Close the editor, refresh, and try again.";
+  }
+  if (error instanceof ApiError && error.code === "prompt-template-resources-unavailable") {
+    return "One or more selected workflows or LoRAs are no longer available.";
+  }
+  if (error instanceof ApiError && error.code === "prompt-template-request-invalid") {
+    return "Review the template name, body, slots, and image resources, then try again.";
+  }
+  return "The Prompt Library could not save that revision. Review the template and try again.";
+}
 
 function draftFromTemplate(template: PromptTemplateDetail): TemplateDraft {
   return {
@@ -65,7 +82,12 @@ function slotForMode(
     name: current.name,
     variation_scope: mode === "fixed" ? "batch" as const : current.variation_scope,
   };
-  if (mode === "choice") return { ...common, mode, choices: ["Option one", "Option two"] };
+  if (mode === "choice") return {
+    ...common,
+    mode,
+    choices: ["Option one", "Option two"],
+    choice_strategy: "with_replacement",
+  };
   if (mode === "model") return { ...common, mode, guidance: "Describe the requested variation." };
   if (mode === "fixed") return { ...common, mode, fixed_value: "Fixed text" };
   return { ...common, mode };
@@ -195,14 +217,14 @@ function TemplateEditor({
   initial,
   creating,
   saving,
-  requestFailed,
+  requestError,
   onCancel,
   onSave,
 }: {
   initial: TemplateDraft;
   creating: boolean;
   saving: boolean;
-  requestFailed: boolean;
+  requestError: unknown;
   onCancel: () => void;
   onSave: (draft: TemplateDraft) => void;
 }) {
@@ -243,12 +265,10 @@ function TemplateEditor({
       className="prompt-template-editor"
       onClose={onCancel}
     >
-      <ErrorCallout message={error ?? (requestFailed
-        ? "The Prompt Library could not save that revision. Review the template and try again."
-        : null)} />
+      <ErrorCallout message={error ?? templateSaveError(requestError)} />
       <label>
         Name
-        <input aria-label="Template name" value={draft.name} maxLength={200} onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
+        <input aria-label="Template name" value={draft.name} placeholder="Name this template" maxLength={200} onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
       </label>
       <label>
         Description
@@ -285,7 +305,10 @@ function TemplateEditor({
                 replaceContract({ ...contract, slots: contract.slots.filter((_, currentIndex) => currentIndex !== index) });
               }}><Trash2 size={15} /></button>
             </div>
-            {slot.mode === "choice" && <label>Choices, one per line<textarea aria-label={`Slot ${index + 1} choices`} rows={3} value={slot.choices.join("\n")} onChange={(event) => replaceSlot(index, { ...slot, choices: event.target.value.split("\n") })} /></label>}
+            {slot.mode === "choice" && <>
+              <label>Choices, one per line<textarea aria-label={`Slot ${index + 1} choices`} rows={3} value={slot.choices.join("\n")} onChange={(event) => replaceSlot(index, { ...slot, choices: event.target.value.split("\n") })} /></label>
+              <label>Choice use<select aria-label={`Slot ${index + 1} choice use`} value={slot.choice_strategy ?? "distinct"} onChange={(event) => replaceSlot(index, { ...slot, choice_strategy: event.target.value as "distinct" | "with_replacement" })}><option value="with_replacement">Allow repeats (recommended)</option><option value="distinct">Require distinct prompts</option></select></label>
+            </>}
             {slot.mode === "model" && <label>Model guidance<textarea aria-label={`Slot ${index + 1} guidance`} rows={3} value={slot.guidance} maxLength={4_000} onChange={(event) => replaceSlot(index, { ...slot, guidance: event.target.value })} /></label>}
             {slot.mode === "fixed" && <label>Fixed value<input aria-label={`Slot ${index + 1} fixed value`} value={slot.fixed_value} maxLength={2_000} onChange={(event) => replaceSlot(index, { ...slot, fixed_value: event.target.value })} /></label>}
           </fieldset>
@@ -708,6 +731,6 @@ export function PromptLibraryView() {
         </>}
       </section>
     </div>}
-    {editor && <TemplateEditor initial={editor.draft} creating={editor.creating} saving={save.isPending} requestFailed={Boolean(save.error)} onCancel={() => { save.reset(); setEditor(null); }} onSave={(draft) => save.mutate({ creating: editor.creating, draft, templateId: editor.templateId, expectedRevisionId: editor.expectedRevisionId })} />}
+    {editor && <TemplateEditor initial={editor.draft} creating={editor.creating} saving={save.isPending} requestError={save.error} onCancel={() => { save.reset(); setEditor(null); }} onSave={(draft) => save.mutate({ creating: editor.creating, draft, templateId: editor.templateId, expectedRevisionId: editor.expectedRevisionId })} />}
   </div>;
 }

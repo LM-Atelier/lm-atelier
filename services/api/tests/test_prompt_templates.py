@@ -18,6 +18,7 @@ from local_lm.prompt_templates import (
     MAX_TEMPLATE_SLOTS,
     MAX_TEMPLATE_TOTAL_CHOICES,
     MAX_TEMPLATE_WORKFLOW_OPTIONS,
+    PromptTemplateChoiceStrategy,
     PromptTemplateContract,
     PromptTemplateError,
     parse_prompt_template_contract,
@@ -547,6 +548,35 @@ def test_duplicate_slots_and_choice_values_are_refused() -> None:
     assert isinstance(slots, list)
     slots.append(copy.deepcopy(slots[0]))
     payload["body"] = "{{subject}}, {{style}}, {{setting}}, {{signature}}, {{subject}}"
+    _assert_invalid(payload)
+
+
+def test_choice_strategy_is_backward_compatible_and_round_trips_when_reusable() -> None:
+    legacy = _payload()
+    parsed_legacy = parse_prompt_template_contract(legacy)
+    assert parsed_legacy.slots[1].choice_strategy is PromptTemplateChoiceStrategy.DISTINCT
+    assert prompt_template_contract_payload(parsed_legacy) == legacy
+
+    reusable = _payload()
+    slots = reusable["slots"]
+    assert isinstance(slots, list) and isinstance(slots[1], dict)
+    slots[1]["choice_strategy"] = "with_replacement"
+    parsed_reusable = parse_prompt_template_contract(reusable)
+    assert parsed_reusable.slots[1].choice_strategy is PromptTemplateChoiceStrategy.WITH_REPLACEMENT
+    assert prompt_template_contract_payload(parsed_reusable) == reusable
+
+
+@pytest.mark.parametrize("value", ["unknown", 1, True, None])
+def test_choice_strategy_is_a_closed_choice_only_vocabulary(value: object) -> None:
+    payload = _payload()
+    slots = payload["slots"]
+    assert isinstance(slots, list) and isinstance(slots[1], dict)
+    slots[1]["choice_strategy"] = value
+    _assert_invalid(payload)
+
+    payload = _payload()
+    assert isinstance(payload["slots"], list) and isinstance(payload["slots"][0], dict)
+    payload["slots"][0]["choice_strategy"] = "with_replacement"
     _assert_invalid(payload)
 
     payload = _payload()

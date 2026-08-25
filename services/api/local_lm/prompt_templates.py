@@ -69,6 +69,11 @@ class PromptTemplateSlotMode(StrEnum):
     FIXED = "fixed"
 
 
+class PromptTemplateChoiceStrategy(StrEnum):
+    DISTINCT = "distinct"
+    WITH_REPLACEMENT = "with_replacement"
+
+
 class PromptTemplateVariationScope(StrEnum):
     ITEM = "item"
     BATCH = "batch"
@@ -98,6 +103,7 @@ class PromptTemplateSlot:
     mode: PromptTemplateSlotMode
     variation_scope: PromptTemplateVariationScope
     choices: tuple[str, ...] = ()
+    choice_strategy: PromptTemplateChoiceStrategy = PromptTemplateChoiceStrategy.DISTINCT
     guidance: str | None = None
     fixed_value: str | None = None
 
@@ -291,6 +297,8 @@ def _parse_slot(value: object) -> PromptTemplateSlot:
     expected = _SLOT_COMMON_KEYS
     if mode is PromptTemplateSlotMode.CHOICE:
         expected = expected | {"choices"}
+        if "choice_strategy" in value:
+            expected = expected | {"choice_strategy"}
     elif mode is PromptTemplateSlotMode.MODEL:
         expected = expected | {"guidance"}
     elif mode is PromptTemplateSlotMode.FIXED:
@@ -299,6 +307,7 @@ def _parse_slot(value: object) -> PromptTemplateSlot:
     name = _slot_name(entry["name"])
     scope = _enum_value(entry["variation_scope"], PromptTemplateVariationScope)
     choices: tuple[str, ...] = ()
+    choice_strategy = PromptTemplateChoiceStrategy.DISTINCT
     guidance: str | None = None
     fixed_value: str | None = None
     if mode is PromptTemplateSlotMode.CHOICE:
@@ -311,6 +320,8 @@ def _parse_slot(value: object) -> PromptTemplateSlot:
         if len(set(parsed)) != len(parsed):
             _invalid()
         choices = parsed
+        if "choice_strategy" in entry:
+            choice_strategy = _enum_value(entry["choice_strategy"], PromptTemplateChoiceStrategy)
     elif mode is PromptTemplateSlotMode.MODEL:
         guidance = _text(entry["guidance"], maximum=MAX_TEMPLATE_GUIDANCE_CHARS)
     elif mode is PromptTemplateSlotMode.FIXED:
@@ -322,6 +333,7 @@ def _parse_slot(value: object) -> PromptTemplateSlot:
         mode=mode,
         variation_scope=scope,
         choices=choices,
+        choice_strategy=choice_strategy,
         guidance=guidance,
         fixed_value=fixed_value,
     )
@@ -592,6 +604,7 @@ def prompt_template_contract_payload(
             or type(slot.mode) is not PromptTemplateSlotMode
             or type(slot.variation_scope) is not PromptTemplateVariationScope
             or type(slot.choices) is not tuple
+            or type(slot.choice_strategy) is not PromptTemplateChoiceStrategy
             or any(type(value) is not str for value in slot.choices)
             or type(slot.guidance) not in {str, type(None)}
             or type(slot.fixed_value) not in {str, type(None)}
@@ -604,6 +617,8 @@ def prompt_template_contract_payload(
         }
         if slot.mode is PromptTemplateSlotMode.CHOICE:
             item["choices"] = list(slot.choices)
+            if slot.choice_strategy is not PromptTemplateChoiceStrategy.DISTINCT:
+                item["choice_strategy"] = slot.choice_strategy.value
         elif slot.mode is PromptTemplateSlotMode.MODEL:
             item["guidance"] = slot.guidance
         elif slot.mode is PromptTemplateSlotMode.FIXED:

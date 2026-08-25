@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Quote } from "lucide-react";
-import { api } from "./api";
+import { api, ApiError } from "./api";
 import {
   admitCreatedPromptBatch,
   admitQueuedPromptBatch,
@@ -36,6 +36,7 @@ export interface PromptDirectQueueAttempt {
   batch: PromptBatch | null;
   status: PromptDirectQueueStatus;
   errorStage: "create" | "queue" | "admission" | null;
+  errorCode: string | null;
 }
 
 export function ComposerPromptTemplatesAction({
@@ -60,7 +61,7 @@ export function ComposerPromptTemplatesAction({
   };
 
   const complete = (queued: PromptBatch, current: PromptDirectQueueAttempt) => {
-    publish({ ...current, batch: queued, status: "queued", errorStage: null });
+    publish({ ...current, batch: queued, status: "queued", errorStage: null, errorCode: null });
     client.setQueryData(["prompt-batch", queued.id], queued);
     void client.invalidateQueries({ queryKey: ["chat", chatId] });
     void client.invalidateQueries({ queryKey: ["work-plans", chatId] });
@@ -84,7 +85,7 @@ export function ComposerPromptTemplatesAction({
       };
       let draft = frozen.batch;
       if (!draft) {
-        current = { ...current, status: "creating", errorStage: null };
+        current = { ...current, status: "creating", errorStage: null, errorCode: null };
         publish(current);
         const response = await api.createPromptBatch(chatId, frozen.createPayload);
         draft = await admitCreatedPromptBatch(response, authority);
@@ -96,7 +97,7 @@ export function ComposerPromptTemplatesAction({
       }
 
       stage = "queue";
-      current = { ...current, batch: draft, status: "queueing", errorStage: null };
+      current = { ...current, batch: draft, status: "queueing", errorStage: null, errorCode: null };
       publish(current);
       const queuePayload: PromptBatchQueueInput = {
         idempotency_key: frozen.queueIdempotencyKey,
@@ -111,7 +112,12 @@ export function ComposerPromptTemplatesAction({
         && error.name === "PromptDirectQueueAdmissionError"
         ? "admission"
         : stage;
-      publish({ ...current, status: "error", errorStage });
+      publish({
+        ...current,
+        status: "error",
+        errorStage,
+        errorCode: error instanceof ApiError ? error.code ?? null : null,
+      });
     } finally {
       inFlight.current = false;
     }
@@ -139,6 +145,7 @@ export function ComposerPromptTemplatesAction({
       batch: null,
       status: "creating",
       errorStage: null,
+      errorCode: null,
     };
     publish(frozen);
     void run(frozen);

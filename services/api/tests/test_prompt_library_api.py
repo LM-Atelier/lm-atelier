@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from httpx2 import AsyncClient
 from sqlalchemy import select
 
+from local_lm import api as api_module
 from local_lm import orchestrator as orchestrator_module
 from local_lm.auxiliary_assets import AutomaticLoraSelection, ResolvedLoraStack
 from local_lm.db import SessionLocal
@@ -20,6 +21,8 @@ from local_lm.models import (
     Job,
     Message,
     ModelAssetInstall,
+    ModelInstall,
+    ModelProfile,
     Project,
     PromptExpansionBatch,
     PromptExpansionItem,
@@ -31,6 +34,15 @@ from local_lm.models import (
     WorkStep,
 )
 from local_lm.prompt_library import PromptLibraryError, create_prompt_template
+from local_lm.prompt_model_invocation import (
+    PromptModelInvocationError,
+    PromptModelInvocationResult,
+)
+from local_lm.prompt_model_values import (
+    parse_prompt_model_values,
+    prompt_model_values_sha256,
+)
+from local_lm.schemas import WorkerStatus
 
 
 def _contract(
@@ -1210,9 +1222,278 @@ async def test_prompt_batch_request_is_strict_and_model_slots_fail_without_rows(
         },
     )
     assert unavailable.status_code == 409
-    assert unavailable.json()["code"] == "prompt-model-slots-unavailable"
+    assert unavailable.json()["code"] == "prompt-model-worker-unavailable"
     with SessionLocal() as session:
         assert session.query(PromptExpansionBatch).count() == 0
+
+
+def _ready_chat_model(app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> tuple[str, str]:
+    with SessionLocal() as session:
+        install = ModelInstall(
+            name="Prompt template chat model",
+            role="chat",
+            engine=app.state.services.settings.chat_engine,
+            local_path="managed/prompt-template-chat-model",
+            active=True,
+        )
+        session.add(install)
+        session.flush()
+        profile = ModelProfile(
+            name="Prompt template chat profile",
+            role="chat",
+            engine=app.state.services.settings.chat_engine,
+            model_install_id=install.id,
+        )
+        session.add(profile)
+        session.commit()
+        profile_id = profile.id
+        install_id = install.id
+    monkeypatch.setattr(
+        app.state.services.processes,
+        "statuses",
+        lambda: [
+            WorkerStatus(
+                name="chat",
+                state="ready",
+                managed=True,
+                running=True,
+                profile_id=profile_id,
+            )
+        ],
+    )
+    return profile_id, install_id
+
+
+@pytest.mark.asyncio
+async def test_model_guided_prompt_batch_invokes_once_and_replays_before_readiness(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _profile_id, install_id = _ready_chat_model(app, monkeypatch)
+    calls = 0
+
+    async def invoke(_adapter: object, *, contract: Any, data: Any) -> PromptModelInvocationResult:
+        nonlocal calls
+        calls += 1
+        items = data.items
+        values = parse_prompt_model_values(
+            {
+                "version": 1,
+                "batch_values": {},
+                "items": [
+                    {
+                        "ordinal": item.ordinal,
+                        "values": {"subject": f"model subject {item.ordinal}"},
+                    }
+                    for item in items
+                ],
+            },
+            contract=contract,
+        )
+        return PromptModelInvocationResult(
+            values=values,
+            values_sha256=prompt_model_values_sha256(values, contract=contract),
+            attempts=(),
+        )
+
+    monkeypatch.setattr(api_module, "invoke_prompt_model_values", invoke)
+    chat = (await client.post("/api/chats", json={"title": "Model previews"})).json()
+    model_contract = _contract()
+    model_contract["slots"] = [
+        {
+            "name": "subject",
+            "mode": "model",
+            "variation_scope": "item",
+            "guidance": "one concrete subject",
+        }
+    ]
+    created = (
+        await client.post(
+            "/api/prompt-templates",
+            json=_create_payload(
+                key="model-success-template",
+                name="Model success template",
+                contract=model_contract,
+            ),
+        )
+    ).json()
+    revision = created["revision"]
+    payload = {
+        "idempotency_key": "model-success-preview",
+        "template_revision_id": revision["id"],
+        "contract_sha256": revision["contract_sha256"],
+        "item_count": 2,
+        "selection_seed": 9,
+        "inputs": {},
+    }
+    first = await client.post(f"/api/chats/{chat['id']}/prompt-batches", json=payload)
+    assert first.status_code == 201
+    assert first.json()["replayed"] is False
+    assert len(first.json()["items"]) == 2
+    assert calls == 1
+
+    monkeypatch.setattr(app.state.services.processes, "statuses", lambda: [])
+    replay = await client.post(f"/api/chats/{chat['id']}/prompt-batches", json=payload)
+    assert replay.status_code == 201
+    assert replay.json()["replayed"] is True
+    assert replay.json()["id"] == first.json()["id"]
+    assert calls == 1
+    with SessionLocal() as session:
+        batch = session.get(PromptExpansionBatch, first.json()["id"])
+        assert batch is not None
+        assert json.loads(batch.model_snapshot_json) == {
+            "adapter_id": app.state.services.settings.chat_engine,
+            "kind": "model",
+            "model_id": install_id,
+            "values_sha256": json.loads(batch.model_snapshot_json)["values_sha256"],
+            "version": 1,
+        }
+
+
+@pytest.mark.asyncio
+async def test_model_guided_prompt_batch_failure_is_fixed_and_atomic(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ready_chat_model(app, monkeypatch)
+
+    async def fail(*_args: object, **_kwargs: object) -> PromptModelInvocationResult:
+        raise PromptModelInvocationError()
+
+    monkeypatch.setattr(api_module, "invoke_prompt_model_values", fail)
+    chat = (await client.post("/api/chats", json={"title": "Model failure"})).json()
+    model_contract = _contract()
+    model_contract["slots"] = [
+        {
+            "name": "subject",
+            "mode": "model",
+            "variation_scope": "item",
+            "guidance": "one concrete subject",
+        }
+    ]
+    created = (
+        await client.post(
+            "/api/prompt-templates",
+            json=_create_payload(
+                key="model-failure-template",
+                name="Model failure template",
+                contract=model_contract,
+            ),
+        )
+    ).json()
+    revision = created["revision"]
+    failed = await client.post(
+        f"/api/chats/{chat['id']}/prompt-batches",
+        json={
+            "idempotency_key": "model-failure-preview",
+            "template_revision_id": revision["id"],
+            "contract_sha256": revision["contract_sha256"],
+            "item_count": 1,
+            "selection_seed": 3,
+            "inputs": {},
+        },
+    )
+    assert failed.status_code == 503
+    assert failed.json() == {
+        "detail": (
+            "The chat model could not fill the template slots. Retry, or use authored "
+            "inputs and choices instead."
+        ),
+        "code": "prompt-model-invocation-failed",
+    }
+    with SessionLocal() as session:
+        assert session.query(PromptExpansionBatch).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_prompt_batch_distinct_capacity_has_actionable_fixed_feedback(
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Choice capacity"})).json()
+    choice_contract = _contract()
+    choice_contract["slots"] = [
+        {
+            "name": "subject",
+            "mode": "choice",
+            "variation_scope": "item",
+            "choices": ["private fox", "private hare"],
+            "choice_strategy": "distinct",
+        }
+    ]
+    created = (
+        await client.post(
+            "/api/prompt-templates",
+            json=_create_payload(
+                key="choice-capacity-template",
+                name="Choice capacity template",
+                contract=choice_contract,
+            ),
+        )
+    ).json()
+    revision = created["revision"]
+    refused = await client.post(
+        f"/api/chats/{chat['id']}/prompt-batches",
+        json={
+            "idempotency_key": "choice-capacity-preview",
+            "template_revision_id": revision["id"],
+            "contract_sha256": revision["contract_sha256"],
+            "item_count": 3,
+            "selection_seed": 4,
+            "inputs": {},
+        },
+    )
+    assert refused.status_code == 422
+    assert refused.json()["code"] == "prompt-batch-distinct-capacity-exceeded"
+    assert "private" not in refused.text
+    with SessionLocal() as session:
+        assert session.query(PromptExpansionBatch).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_prompt_batch_reusable_choice_can_repeat_without_a_choice_count_limit(
+    client: AsyncClient,
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Reusable choice"})).json()
+    choice_contract = _contract()
+    choice_contract["slots"] = [
+        {
+            "name": "subject",
+            "mode": "choice",
+            "variation_scope": "item",
+            "choices": ["repeatable subject"],
+            "choice_strategy": "with_replacement",
+        }
+    ]
+    created = (
+        await client.post(
+            "/api/prompt-templates",
+            json=_create_payload(
+                key="reusable-choice-template",
+                name="Reusable choice template",
+                contract=choice_contract,
+            ),
+        )
+    ).json()
+    revision = created["revision"]
+    response = await client.post(
+        f"/api/chats/{chat['id']}/prompt-batches",
+        json={
+            "idempotency_key": "reusable-choice-preview",
+            "template_revision_id": revision["id"],
+            "contract_sha256": revision["contract_sha256"],
+            "item_count": 3,
+            "selection_seed": 4,
+            "inputs": {},
+        },
+    )
+    assert response.status_code == 201
+    assert [item["rendered_prompt"] for item in response.json()["items"]] == [
+        "A repeatable subject.",
+        "A repeatable subject.",
+        "A repeatable subject.",
+    ]
 
 
 @pytest.mark.asyncio
@@ -1348,7 +1629,23 @@ async def test_prompt_template_create_and_patch_conflicts_are_fixed_and_non_echo
         json=_create_payload(key="prompt-create-other"),
     )
     assert name_collision.status_code == 409
-    assert name_collision.json()["code"] == "prompt-template-conflict"
+    assert name_collision.json()["code"] == "prompt-template-name-taken"
+
+    other = (
+        await client.post(
+            "/api/prompt-templates",
+            json=_create_payload(key="prompt-create-unique", name="Unique template"),
+        )
+    ).json()
+    rename_collision = await client.patch(
+        f"/api/prompt-templates/{other['template']['id']}",
+        json={
+            "expected_current_revision_id": other["revision"]["id"],
+            "name": created["template"]["name"],
+        },
+    )
+    assert rename_collision.status_code == 409
+    assert rename_collision.json()["code"] == "prompt-template-name-taken"
 
     for invalid_patch in (
         {"expected_current_revision_id": revision_id},

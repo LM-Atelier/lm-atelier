@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { api } from "./api";
+import { ApiError, api } from "./api";
 import { PromptLibraryView } from "./PromptLibraryView";
 import type {
   PromptTemplateContract,
@@ -11,8 +11,12 @@ import type {
   PromptTemplateWriteResult,
 } from "./types";
 
-vi.mock("./api", () => ({
-  api: {
+vi.mock("./api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./api")>();
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
     promptTemplates: vi.fn(),
     promptTemplate: vi.fn(),
     createPromptTemplate: vi.fn(),
@@ -26,8 +30,9 @@ vi.mock("./api", () => ({
     queuePromptBatch: vi.fn(),
     workflowFamilies: vi.fn(),
     modelAssets: vi.fn(),
-  },
-}));
+    },
+  };
+});
 
 const stamp = "2026-08-20T12:00:00Z";
 function readyVariant(name: string, revisionId: string) {
@@ -154,6 +159,11 @@ function renderLibrary() {
   return client;
 }
 
+function beginNewTemplate(name = "Test image template") {
+  fireEvent.click(screen.getByRole("button", { name: "New template" }));
+  fireEvent.change(screen.getByLabelText("Template name"), { target: { value: name } });
+}
+
 beforeEach(() => {
   vi.mocked(api.promptTemplates).mockResolvedValue({
     items: [definition],
@@ -176,6 +186,19 @@ afterEach(() => {
 });
 
 describe("Prompt Library Phase 1", () => {
+  it("starts each new template unnamed and requires an intentional name", async () => {
+    renderLibrary();
+    await screen.findByRole("heading", { name: "Portrait variants" });
+
+    fireEvent.click(screen.getByRole("button", { name: "New template" }));
+    expect(screen.getByLabelText("Template name")).toHaveValue("");
+    expect(screen.getByLabelText("Template name")).toHaveAttribute("placeholder", "Name this template");
+    fireEvent.click(screen.getByRole("button", { name: "Save revision" }));
+
+    expect(await screen.findByText("Enter a template name of at most 200 characters.")).toBeVisible();
+    expect(api.createPromptTemplate).not.toHaveBeenCalled();
+  });
+
   it("shows the immutable current revision, structured slots, resources, and history", async () => {
     renderLibrary();
 
@@ -191,7 +214,7 @@ describe("Prompt Library Phase 1", () => {
     renderLibrary();
     await screen.findByRole("heading", { name: "Portrait variants" });
 
-    fireEvent.click(screen.getByRole("button", { name: "New template" }));
+    beginNewTemplate();
     fireEvent.change(screen.getByLabelText("Template name"), { target: { value: "Mood board" } });
     fireEvent.change(screen.getByLabelText("Slot 1 mode"), { target: { value: "choice" } });
     fireEvent.change(screen.getByLabelText("Slot 1 choices"), { target: { value: "warm\ncool" } });
@@ -203,9 +226,35 @@ describe("Prompt Library Phase 1", () => {
       idempotency_key: expect.any(String),
       name: "Mood board",
       contract: expect.objectContaining({
-        slots: [{ name: "subject", mode: "choice", variation_scope: "item", choices: ["warm", "cool"] }],
+        slots: [{
+          name: "subject",
+          mode: "choice",
+          variation_scope: "item",
+          choices: ["warm", "cool"],
+          choice_strategy: "with_replacement",
+        }],
       }),
     }));
+  });
+
+  it("offers reusable choices by default and an explicit distinct mode", async () => {
+    renderLibrary();
+    await screen.findByRole("heading", { name: "Portrait variants" });
+    beginNewTemplate("Choice use template");
+    fireEvent.change(screen.getByLabelText("Slot 1 mode"), { target: { value: "choice" } });
+    expect(screen.getByLabelText("Slot 1 choice use")).toHaveValue("with_replacement");
+    fireEvent.change(screen.getByLabelText("Slot 1 choice use"), {
+      target: { value: "distinct" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save revision" }));
+
+    await waitFor(() => expect(api.createPromptTemplate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        contract: expect.objectContaining({
+          slots: [expect.objectContaining({ choice_strategy: "distinct" })],
+        }),
+      }),
+    ));
   });
 
   it("saves edits with optimistic revision authority and archives without minting a body", async () => {
@@ -274,7 +323,7 @@ describe("Prompt Library Phase 1", () => {
   it("authors fixed slots and a verified fixed resource policy without paths or mutable names", async () => {
     renderLibrary();
     await screen.findByRole("heading", { name: "Portrait variants" });
-    fireEvent.click(screen.getByRole("button", { name: "New template" }));
+    beginNewTemplate();
     fireEvent.change(screen.getByLabelText("Slot 1 mode"), { target: { value: "fixed" } });
     fireEvent.change(screen.getByLabelText("Slot 1 fixed value"), { target: { value: "studio portrait" } });
     fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "fixed" } });
@@ -305,7 +354,7 @@ describe("Prompt Library Phase 1", () => {
   it("authors an exact workflow bundle pool with per-option LoRA policies", async () => {
     renderLibrary();
     await screen.findByRole("heading", { name: "Portrait variants" });
-    fireEvent.click(screen.getByRole("button", { name: "New template" }));
+    beginNewTemplate();
     fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "pool" } });
     await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
     fireEvent.change(screen.getByLabelText("Pool strategy"), { target: { value: "random" } });
@@ -343,7 +392,7 @@ describe("Prompt Library Phase 1", () => {
     // workflow may appear twice when its LoRA policy differs.
     renderLibrary();
     await screen.findByRole("heading", { name: "Portrait variants" });
-    fireEvent.click(screen.getByRole("button", { name: "New template" }));
+    beginNewTemplate();
     fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "pool" } });
     await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
     fireEvent.change(screen.getByLabelText("Option 1 workflow revision"), { target: { value: "shared-revision" } });
@@ -368,7 +417,7 @@ describe("Prompt Library Phase 1", () => {
   it("refuses two identical workflow and LoRA bundles", async () => {
     renderLibrary();
     await screen.findByRole("heading", { name: "Portrait variants" });
-    fireEvent.click(screen.getByRole("button", { name: "New template" }));
+    beginNewTemplate();
     fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "pool" } });
     await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
     fireEvent.change(screen.getByLabelText("Option 1 workflow revision"), { target: { value: "same-revision" } });
@@ -382,7 +431,7 @@ describe("Prompt Library Phase 1", () => {
   it("refuses a pool option with no workflow revision", async () => {
     renderLibrary();
     await screen.findByRole("heading", { name: "Portrait variants" });
-    fireEvent.click(screen.getByRole("button", { name: "New template" }));
+    beginNewTemplate();
     fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "pool" } });
     await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
     fireEvent.change(screen.getByLabelText("Option 1 workflow revision"), { target: { value: "workflow-revision-1" } });
@@ -395,7 +444,7 @@ describe("Prompt Library Phase 1", () => {
   it("omits a family whose image preference is disabled", async () => {
     renderLibrary();
     await screen.findByRole("heading", { name: "Portrait variants" });
-    fireEvent.click(screen.getByRole("button", { name: "New template" }));
+    beginNewTemplate();
     fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "pool" } });
     await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
 
@@ -409,7 +458,7 @@ describe("Prompt Library Phase 1", () => {
   it("omits a variant that is not ready", async () => {
     renderLibrary();
     await screen.findByRole("heading", { name: "Portrait variants" });
-    fireEvent.click(screen.getByRole("button", { name: "New template" }));
+    beginNewTemplate();
     fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "pool" } });
     await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
 
@@ -423,7 +472,7 @@ describe("Prompt Library Phase 1", () => {
   it("refuses a pool option whose fixed stack is incomplete", async () => {
     renderLibrary();
     await screen.findByRole("heading", { name: "Portrait variants" });
-    fireEvent.click(screen.getByRole("button", { name: "New template" }));
+    beginNewTemplate();
     fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "pool" } });
     await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
     fireEvent.change(screen.getByLabelText("Option 1 workflow revision"), { target: { value: "workflow-revision-1" } });
@@ -441,7 +490,7 @@ describe("Prompt Library Phase 1", () => {
     // Uniqueness is on the whole bundle, so the stack has to be part of the key.
     renderLibrary();
     await screen.findByRole("heading", { name: "Portrait variants" });
-    fireEvent.click(screen.getByRole("button", { name: "New template" }));
+    beginNewTemplate();
     fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "pool" } });
     await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
     for (const option of [1, 2]) {
@@ -480,7 +529,7 @@ describe("Prompt Library Phase 1", () => {
     // still wrong for a prompt template.
     renderLibrary();
     await screen.findByRole("heading", { name: "Portrait variants" });
-    fireEvent.click(screen.getByRole("button", { name: "New template" }));
+    beginNewTemplate();
     fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "pool" } });
     await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
 
@@ -558,7 +607,7 @@ describe("Prompt Library Phase 1", () => {
   it("refuses a fixed stack on another option once sixty-four LoRAs are pooled", async () => {
     renderLibrary();
     await screen.findByRole("heading", { name: "Portrait variants" });
-    fireEvent.click(screen.getByRole("button", { name: "New template" }));
+    beginNewTemplate();
     fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "pool" } });
     await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
     // Nine options: eight carrying eight LoRAs each, and one still automatic.
@@ -598,7 +647,7 @@ describe("Prompt Library Phase 1", () => {
   it("keeps the pool between two and sixteen options and offers no nested LoRA pool", async () => {
     renderLibrary();
     await screen.findByRole("heading", { name: "Portrait variants" });
-    fireEvent.click(screen.getByRole("button", { name: "New template" }));
+    beginNewTemplate();
     fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "pool" } });
     await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
 
@@ -621,7 +670,7 @@ describe("Prompt Library Phase 1", () => {
   it("authors an exact deterministic LoRA stack pool", async () => {
     renderLibrary();
     await screen.findByRole("heading", { name: "Portrait variants" });
-    fireEvent.click(screen.getByRole("button", { name: "New template" }));
+    beginNewTemplate();
     fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "fixed" } });
     await screen.findByRole("option", { name: "Portrait - Pool - revision 1" });
     fireEvent.change(screen.getByLabelText("Workflow"), {
@@ -689,7 +738,7 @@ describe("Prompt Library Phase 1", () => {
     renderLibrary();
     await screen.findByRole("heading", { name: "Portrait variants" });
 
-    fireEvent.click(screen.getByRole("button", { name: "New template" }));
+    beginNewTemplate();
     fireEvent.change(screen.getByLabelText("Template body"), { target: { value: "No declared token" } });
     fireEvent.click(screen.getByRole("button", { name: "Save revision" }));
 
@@ -715,6 +764,22 @@ describe("Prompt Library Phase 1", () => {
     const dialog = screen.getByRole("dialog", { name: "Edit Portrait variants" });
     expect(await within(dialog).findByText("The Prompt Library could not save that revision. Review the template and try again.")).toBeVisible();
     expect(screen.queryByText(/private\\saved-template/)).toBeNull();
+  });
+
+  it("explains a duplicate template name without echoing backend text", async () => {
+    vi.mocked(api.createPromptTemplate).mockRejectedValue(new ApiError(
+      409,
+      { detail: "C:\\private\\duplicate-template.json" },
+      "C:\\private\\duplicate-template.json",
+      "prompt-template-name-taken",
+    ));
+    renderLibrary();
+    await screen.findByRole("heading", { name: "Portrait variants" });
+    beginNewTemplate("Portrait variants");
+    fireEvent.click(screen.getByRole("button", { name: "Save revision" }));
+
+    expect(await screen.findByText("A template with this name already exists. Choose a different name.")).toBeVisible();
+    expect(screen.queryByText(/private\\duplicate-template/)).toBeNull();
   });
 
   it("pages through a bounded template list", async () => {
