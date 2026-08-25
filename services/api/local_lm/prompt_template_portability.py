@@ -875,10 +875,10 @@ def verify_prompt_template_import_receipt(
     *,
     signing_key: bytes,
     now: int | None = None,
-) -> None:
-    """Verify the root preview receipt for the later atomic commit boundary."""
+) -> int:
+    """Verify the root preview receipt and return its immutable expiry."""
 
-    _verify_import_receipt_expires_at(
+    return _verify_import_receipt_expires_at(
         receipt,
         bundle,
         signing_key=signing_key,
@@ -1059,6 +1059,88 @@ def _verified_lora_digests(session: Session, expected: frozenset[str]) -> set[st
         if materialized.identity.get("sha256") == digest:
             matched.add(digest)
     return matched
+
+
+def bind_portable_prompt_template_contract(
+    bundle: PortablePromptTemplateBundle,
+    workflow_bindings: dict[str, str],
+) -> PromptTemplateContract:
+    """Replace portable keys with exact local refs and re-enter the live codec."""
+
+    required = tuple(str(item["key"]) for item in bundle.workflow_requirements)
+    if set(workflow_bindings) != set(required) or any(
+        type(key) is not str
+        or _BINDING_KEY.fullmatch(key) is None
+        or type(value) is not str
+        or _LOCAL_REF.fullmatch(value) is None
+        for key, value in workflow_bindings.items()
+    ):
+        _invalid("prompt-template-bundle-bindings-invalid")
+    template = cast(dict[str, object], bundle.payload["template"])
+    portable_contract = cast(dict[str, object], template["contract"])
+    local_policy, traversal = _portable_policy_to_local(portable_contract["resource_policy"])
+    if tuple(dict.fromkeys(traversal)) != required:
+        _invalid("prompt-template-bundle-bindings-invalid")
+    if local_policy["mode"] == "fixed":
+        key = cast(str, local_policy["workflow_revision_id"])
+        local_policy["workflow_revision_id"] = workflow_bindings[key]
+    elif local_policy["mode"] == "pool":
+        for option in cast(list[dict[str, object]], local_policy["options"]):
+            key = cast(str, option["workflow_revision_id"])
+            option["workflow_revision_id"] = workflow_bindings[key]
+    try:
+        return parse_prompt_template_contract(
+            {
+                "schema_version": portable_contract["schema_version"],
+                "operation": portable_contract["operation"],
+                "body": portable_contract["body"],
+                "slots": portable_contract["slots"],
+                "resource_policy": local_policy,
+            }
+        )
+    except PromptTemplateError as exc:
+        raise PromptTemplatePortabilityError(
+            "prompt-template-bundle-invalid", PORTABLE_INVALID, status_code=422
+        ) from exc
+
+
+def prompt_template_import_workflow_authority(
+    session: Session,
+    *,
+    local_ref: str,
+    expected_engine: str,
+) -> tuple[dict[str, object], str] | None:
+    """Return the fresh descriptor and authority digest for one local workflow."""
+
+    revision = session.get(WorkflowRevision, local_ref)
+    if revision is None:
+        return None
+    result = _workflow_suggestion_authority(
+        session,
+        revision,
+        expected_engine=expected_engine,
+    )
+    if result is None:
+        return None
+    _definition, descriptor, authority_sha256 = result
+    return descriptor, authority_sha256
+
+
+def prompt_template_import_lora_authority(
+    session: Session,
+    *,
+    sha256: str,
+) -> str | None:
+    """Return fresh verified-active LoRA authority, never an unavailable receipt."""
+
+    if _SHA256.fullmatch(sha256) is None:
+        return None
+    if sha256 not in _verified_lora_digests(session, frozenset({sha256})):
+        return None
+    return _digest(
+        _LORA_AUTHORITY_CONTEXT,
+        {"version": 1, "sha256": sha256, "verified_active_exists": True},
+    )
 
 
 def resolve_prompt_template_import_candidate(

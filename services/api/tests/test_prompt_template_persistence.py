@@ -14,7 +14,10 @@ from local_lm import models  # noqa: F401 - registers metadata
 from local_lm.config import Settings
 from local_lm.database_migrations import alembic_config
 from local_lm.db import Base
-from local_lm.models import PromptTemplateDefinition, PromptTemplateRevision
+from local_lm.models import (
+    PromptTemplateDefinition,
+    PromptTemplateRevision,
+)
 from local_lm.prompt_templates import (
     parse_prompt_template_contract,
     prompt_template_contract_payload,
@@ -130,6 +133,7 @@ def test_migration_upgrade_downgrade_and_trigger_inventory(tmp_path: Path) -> No
         assert {
             "prompt_template_definitions",
             "prompt_template_revisions",
+            "prompt_template_import_winners",
         } <= tables
         triggers = {
             row[0]
@@ -145,9 +149,12 @@ def test_migration_upgrade_downgrade_and_trigger_inventory(tmp_path: Path) -> No
             "prompt_template_revision_insert_guard",
             "prompt_template_revision_update_guard",
             "prompt_template_revision_delete_guard",
+            "prompt_template_import_winner_insert_guard",
+            "prompt_template_import_winner_update_guard",
+            "prompt_template_import_winner_delete_guard",
         }
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "a6e2c9f31b47",
+            "b1d9e4c72f60",
         )
 
     command.downgrade(config, "a9c4e7d21b60")
@@ -162,7 +169,7 @@ def test_migration_upgrade_downgrade_and_trigger_inventory(tmp_path: Path) -> No
     command.upgrade(config, "head")
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "a6e2c9f31b47",
+            "b1d9e4c72f60",
         )
 
 
@@ -456,3 +463,83 @@ def test_fresh_metadata_schema_matches_orm_relationships_and_guards(
             connection.exec_driver_sql("UPDATE prompt_template_revisions SET version = 2")
     finally:
         engine.dispose()
+
+
+def _insert_import_winner(
+    connection: sqlite3.Connection,
+    *,
+    key: str = "import-winner",
+    definition_id: str = "ptdef_test",
+    revision_id: str = "ptrev_1",
+    contract_sha256: str | None = None,
+) -> None:
+    digest = contract_sha256 or _canonical_contract()[1]
+    connection.execute(
+        """
+        INSERT INTO prompt_template_import_winners
+          (idempotency_key, request_sha256, bundle_sha256, authority_rule,
+           prompt_template_id, prompt_template_revision_id, contract_sha256,
+           created_at)
+        VALUES (?, ?, ?, 'prompt-template-import-authority-v1',
+                ?, ?, ?, CURRENT_TIMESTAMP)
+        """,
+        (key, "a" * 64, "b" * 64, definition_id, revision_id, digest),
+    )
+
+
+def test_import_winner_guard_binds_exact_initial_revision_and_is_immutable(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(data_dir=tmp_path / "prompt-import-winner-guard")
+    settings.prepare()
+    command.upgrade(alembic_config(settings), "head")
+    database = settings.state_dir / "local-lm.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        _insert_definition(connection)
+        _insert_revision(connection, revision_id="ptrev_1", version=1)
+        with pytest.raises(sqlite3.IntegrityError, match="winner is invalid"):
+            _insert_import_winner(connection)
+        connection.execute(
+            "UPDATE prompt_template_definitions "
+            "SET current_revision_id = 'ptrev_1' WHERE id = 'ptdef_test'"
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="winner is invalid"):
+            _insert_import_winner(connection, contract_sha256="c" * 64)
+        _insert_import_winner(connection)
+        with pytest.raises(sqlite3.IntegrityError, match="winners are immutable"):
+            connection.execute(
+                "UPDATE prompt_template_import_winners SET bundle_sha256 = ?",
+                ("d" * 64,),
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="winners are immutable"):
+            connection.execute("DELETE FROM prompt_template_import_winners")
+
+
+def test_import_winner_triggers_are_identical_after_migration_and_fresh_metadata(
+    tmp_path: Path,
+) -> None:
+    migrated = Settings(data_dir=tmp_path / "prompt-import-winner-migrated")
+    migrated.prepare()
+    command.upgrade(alembic_config(migrated), "head")
+    migrated_database = migrated.state_dir / "local-lm.sqlite3"
+    fresh_database = tmp_path / "prompt-import-winner-fresh.sqlite3"
+    engine = create_engine(f"sqlite:///{fresh_database}")
+    try:
+        Base.metadata.create_all(engine)
+    finally:
+        engine.dispose()
+
+    def trigger_sql(database: Path) -> dict[str, str]:
+        with sqlite3.connect(database) as connection:
+            return {
+                str(name): str(sql)
+                for name, sql in connection.execute(
+                    "SELECT name, sql FROM sqlite_master "
+                    "WHERE type = 'trigger' "
+                    "AND name LIKE 'prompt_template_import_winner_%' "
+                    "ORDER BY name"
+                )
+            }
+
+    assert trigger_sql(migrated_database) == trigger_sql(fresh_database)

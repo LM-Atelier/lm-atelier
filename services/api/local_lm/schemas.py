@@ -475,6 +475,38 @@ class PromptTemplateImportCandidateResolve(ApiModel):
     local_ref: StrictStr = Field(min_length=1, max_length=40)
 
 
+class PromptTemplateImportWorkflowBindingIn(ApiModel):
+    binding_key: StrictStr = Field(pattern=r"^workflow_[1-9][0-9]{0,2}$")
+    local_ref: StrictStr = Field(min_length=1, max_length=40)
+    candidate_receipt: StrictStr = Field(min_length=1, max_length=2_048)
+
+
+class PromptTemplateImportLoraConfirmationIn(ApiModel):
+    sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    confirmation_receipt: StrictStr = Field(min_length=1, max_length=2_048)
+
+
+class PromptTemplateImportCommit(ApiModel):
+    idempotency_key: StrictStr = Field(
+        min_length=1,
+        max_length=200,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$",
+    )
+    bundle_json: StrictStr = Field(min_length=1, max_length=524_288)
+    preview_receipt: StrictStr = Field(min_length=1, max_length=2_048)
+    confirmed_bundle_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    destination_name: StrictStr = Field(min_length=1, max_length=200)
+    workflow_bindings: list[PromptTemplateImportWorkflowBindingIn] = Field(max_length=16)
+    lora_confirmations: list[PromptTemplateImportLoraConfirmationIn] = Field(max_length=64)
+
+
+class PromptTemplateImportCommitOut(ApiModel):
+    template_id: str = Field(min_length=1, max_length=40)
+    revision_id: str = Field(min_length=1, max_length=40)
+    contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    idempotent: bool
+
+
 class PromptTemplateImportWorkflowRequirementOut(ApiModel):
     kind: Literal["workflow"]
     binding_key: str = Field(pattern=r"^workflow_[1-9][0-9]{0,2}$")

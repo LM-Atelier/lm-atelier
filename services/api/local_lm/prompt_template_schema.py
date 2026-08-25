@@ -78,6 +78,39 @@ BEGIN
 END
 """
 
+IMPORT_WINNER_INSERT_TRIGGER = """
+CREATE TRIGGER prompt_template_import_winner_insert_guard
+BEFORE INSERT ON prompt_template_import_winners
+BEGIN
+  SELECT CASE WHEN NOT EXISTS (
+    SELECT 1
+    FROM prompt_template_definitions AS definition
+    JOIN prompt_template_revisions AS revision
+      ON revision.id = NEW.prompt_template_revision_id
+     AND revision.prompt_template_id = definition.id
+    WHERE definition.id = NEW.prompt_template_id
+      AND definition.current_revision_id = NEW.prompt_template_revision_id
+      AND revision.version = 1
+      AND revision.contract_sha256 = NEW.contract_sha256
+  ) THEN RAISE(ABORT, 'prompt template import winner is invalid') END;
+END
+"""
+
+IMPORT_WINNER_UPDATE_TRIGGER = """
+CREATE TRIGGER prompt_template_import_winner_update_guard
+BEFORE UPDATE ON prompt_template_import_winners
+BEGIN
+  SELECT RAISE(ABORT, 'prompt template import winners are immutable');
+END
+"""
+
+IMPORT_WINNER_DELETE_TRIGGER = """
+CREATE TRIGGER prompt_template_import_winner_delete_guard
+BEFORE DELETE ON prompt_template_import_winners
+BEGIN
+  SELECT RAISE(ABORT, 'prompt template import winners are immutable');
+END
+"""
 CREATE_PROMPT_TEMPLATE_TRIGGER_SQL = (
     DEFINITION_INSERT_TRIGGER,
     DEFINITION_UPDATE_TRIGGER,
@@ -85,9 +118,15 @@ CREATE_PROMPT_TEMPLATE_TRIGGER_SQL = (
     REVISION_INSERT_TRIGGER,
     REVISION_UPDATE_TRIGGER,
     REVISION_DELETE_TRIGGER,
+    IMPORT_WINNER_INSERT_TRIGGER,
+    IMPORT_WINNER_UPDATE_TRIGGER,
+    IMPORT_WINNER_DELETE_TRIGGER,
 )
 
 DROP_PROMPT_TEMPLATE_TRIGGER_SQL = (
+    "DROP TRIGGER prompt_template_import_winner_delete_guard",
+    "DROP TRIGGER prompt_template_import_winner_update_guard",
+    "DROP TRIGGER prompt_template_import_winner_insert_guard",
     "DROP TRIGGER prompt_template_revision_delete_guard",
     "DROP TRIGGER prompt_template_revision_update_guard",
     "DROP TRIGGER prompt_template_revision_insert_guard",

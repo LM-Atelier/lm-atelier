@@ -231,6 +231,7 @@ from .prompt_library import (
     restore_prompt_template_revision,
     update_prompt_template,
 )
+from .prompt_template_import import PromptTemplateImportError, commit_prompt_template_import
 from .prompt_template_portability import (
     PromptTemplatePortabilityError,
     export_prompt_template_bundle,
@@ -341,6 +342,8 @@ from .schemas import (
     PromptTemplateDefinitionOut,
     PromptTemplateDetailOut,
     PromptTemplateImportCandidateResolve,
+    PromptTemplateImportCommit,
+    PromptTemplateImportCommitOut,
     PromptTemplateImportPreviewOut,
     PromptTemplateImportWorkflowSuggestionOut,
     PromptTemplatePageOut,
@@ -2055,9 +2058,10 @@ def _prompt_template_import_unique_object(
     return result
 
 
-async def _prompt_template_import_candidate_json(
+async def _prompt_template_import_json(
     request: Request,
-) -> PromptTemplateImportCandidateResolve:
+    model: type[PromptTemplateImportCommit] | type[PromptTemplateImportCandidateResolve],
+) -> PromptTemplateImportCommit | PromptTemplateImportCandidateResolve:
     media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
     if media_type != "application/json":
         raise api_error(
@@ -2077,7 +2081,7 @@ async def _prompt_template_import_candidate_json(
         if text_value.startswith("\ufeff"):
             raise ValueError("byte order mark")
         value = json.loads(text_value, object_pairs_hook=_prompt_template_import_unique_object)
-        return PromptTemplateImportCandidateResolve.model_validate(value)
+        return model.model_validate(value)
     except (RecursionError, TypeError, UnicodeError, ValueError) as exc:
         raise api_error(
             422,
@@ -2135,7 +2139,11 @@ async def resolve_prompt_template_import_candidate_route(
     response: Response,
     session: SessionDep,
 ) -> PromptTemplateImportWorkflowSuggestionOut:
-    payload = await _prompt_template_import_candidate_json(request)
+    parsed = await _prompt_template_import_json(
+        request,
+        PromptTemplateImportCandidateResolve,
+    )
+    payload = cast(PromptTemplateImportCandidateResolve, parsed)
     try:
         with session.no_autoflush:
             candidate = resolve_prompt_template_import_candidate(
@@ -2153,6 +2161,43 @@ async def resolve_prompt_template_import_candidate_route(
         raise api_error(exc.status_code, exc.code, str(exc)) from exc
     response.headers["Cache-Control"] = "no-store"
     return PromptTemplateImportWorkflowSuggestionOut.model_validate(candidate)
+
+
+@router.post(
+    "/prompt-templates/import",
+    response_model=PromptTemplateImportCommitOut,
+    status_code=201,
+)
+async def commit_prompt_template_import_route(
+    request: Request,
+    response: Response,
+    session: SessionDep,
+) -> PromptTemplateImportCommitOut:
+    parsed = await _prompt_template_import_json(request, PromptTemplateImportCommit)
+    payload = cast(PromptTemplateImportCommit, parsed)
+    try:
+        result = commit_prompt_template_import(
+            session,
+            idempotency_key=payload.idempotency_key,
+            raw_bundle=payload.bundle_json,
+            preview_receipt=payload.preview_receipt,
+            confirmed_bundle_sha256=payload.confirmed_bundle_sha256,
+            destination_name=payload.destination_name,
+            workflow_bindings=[
+                item.model_dump(mode="python") for item in payload.workflow_bindings
+            ],
+            lora_confirmations=[
+                item.model_dump(mode="python") for item in payload.lora_confirmations
+            ],
+            expected_engine=_services(request).settings.media_engine,
+            signing_key=_services(request).security.local_state_signing_key(
+                b"prompt-template-import-preview-v1"
+            ),
+        )
+    except (PromptLibraryError, PromptTemplateImportError, PromptTemplatePortabilityError) as exc:
+        raise api_error(exc.status_code, exc.code, str(exc)) from exc
+    response.headers["Cache-Control"] = "no-store"
+    return PromptTemplateImportCommitOut.model_validate(result)
 
 
 @router.get("/prompt-templates/{template_id}", response_model=PromptTemplateDetailOut)
