@@ -1,42 +1,40 @@
-"""SQLite guards for durable Prompt Library expansion drafts.
+"""allow queued prompt execution links to follow referential deletion
 
-Alembic revisions embed their own copies of these statements.  This module is
-only the live ``create_all`` authority; keeping migrations self-contained means
-a future edit here cannot silently rewrite historical schema.
+Revision ID: f2a7c9d41e63
+Revises: b1d9e4c72f60
+Create Date: 2026-08-25
 """
 
-from __future__ import annotations
+from collections.abc import Sequence
 
-MAX_EXPANSION_REQUEST_JSON_CHARS = 1_200_000
-MAX_EXPANSION_MODEL_SNAPSHOT_JSON_CHARS = 1_024
-MAX_EXPANSION_EVIDENCE_JSON_CHARS = 262_144
-MEDIA_SEED_SPACE = 2_147_483_648
+from alembic import op
 
-BATCH_INSERT_TRIGGER = f"""
-CREATE TRIGGER prompt_expansion_batch_insert_guard
-BEFORE INSERT ON prompt_expansion_batches
-BEGIN
-  SELECT CASE WHEN NOT json_valid(NEW.request_json)
-                        OR json_type(NEW.request_json) != 'object'
-                        OR json_type(NEW.request_json, '$.item_count') != 'integer'
-                        OR json_extract(NEW.request_json, '$.item_count') NOT BETWEEN 1 AND 16
-                        OR length(NEW.request_json) > {MAX_EXPANSION_REQUEST_JSON_CHARS}
-                        OR NOT json_valid(NEW.model_snapshot_json)
-                        OR json_type(NEW.model_snapshot_json) != 'object'
-                        OR json_type(NEW.model_snapshot_json, '$.version') != 'integer'
-                        OR json_extract(NEW.model_snapshot_json, '$.version') != 1
-                        OR length(NEW.model_snapshot_json) > 1024
-                        OR NEW.plan_version != 1
-                        OR NEW.state != 'draft'
-                        OR NEW.original_plan_sha256 IS NOT NEW.plan_sha256
-                        OR NEW.queue_idempotency_key IS NOT NULL
-                        OR NEW.work_plan_id IS NOT NULL
-                        OR NEW.queued_at IS NOT NULL
-    THEN RAISE(ABORT, 'prompt expansion JSON is invalid') END;
-END
-"""
+revision: str = "f2a7c9d41e63"
+down_revision: str | None = "b1d9e4c72f60"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
-BATCH_UPDATE_TRIGGER = """
+
+def _batch_update_trigger(*, allow_deleted_work_plan_unlink: bool) -> str:
+    deleted_work_plan_unlink = (
+        """
+                          OR (
+                            NEW.state IS OLD.state
+                            AND NEW.plan_version IS OLD.plan_version
+                            AND NEW.plan_sha256 IS OLD.plan_sha256
+                            AND NEW.queue_idempotency_key IS OLD.queue_idempotency_key
+                            AND OLD.work_plan_id IS NOT NULL
+                            AND NEW.work_plan_id IS NULL
+                            AND NEW.queued_at IS OLD.queued_at
+                            AND NOT EXISTS (
+                              SELECT 1 FROM work_plans AS plan
+                              WHERE plan.id = OLD.work_plan_id
+                            )
+                          )"""
+        if allow_deleted_work_plan_unlink
+        else ""
+    )
+    return f"""
 CREATE TRIGGER prompt_expansion_batch_update_guard
 BEFORE UPDATE ON prompt_expansion_batches
 BEGIN
@@ -82,64 +80,57 @@ BEGIN
                             AND NEW.work_plan_id IS NOT NULL
                             AND OLD.queued_at IS NULL
                             AND NEW.queued_at IS NOT NULL
-                          )
-                          OR (
-                            NEW.state IS OLD.state
-                            AND NEW.plan_version IS OLD.plan_version
-                            AND NEW.plan_sha256 IS OLD.plan_sha256
-                            AND NEW.queue_idempotency_key IS OLD.queue_idempotency_key
-                            AND OLD.work_plan_id IS NOT NULL
-                            AND NEW.work_plan_id IS NULL
-                            AND NEW.queued_at IS OLD.queued_at
-                            AND NOT EXISTS (
-                              SELECT 1 FROM work_plans AS plan
-                              WHERE plan.id = OLD.work_plan_id
-                            )
-                          )
+                          ){deleted_work_plan_unlink}
                         )
     THEN RAISE(ABORT, 'queued prompt expansion batches are immutable') END;
 END
 """
 
-ITEM_INSERT_TRIGGER = f"""
-CREATE TRIGGER prompt_expansion_item_insert_guard
-BEFORE INSERT ON prompt_expansion_items
-BEGIN
-  SELECT CASE WHEN NEW.ordinal IS NOT COALESCE((
-    SELECT max(existing.ordinal) + 1
-    FROM prompt_expansion_items AS existing
-    WHERE existing.batch_id = NEW.batch_id
-  ), 1)
-    THEN RAISE(ABORT, 'prompt expansion item ordinals are not contiguous') END;
-  SELECT CASE WHEN (
-    SELECT count(*) FROM prompt_expansion_items AS existing
-    WHERE existing.batch_id = NEW.batch_id
-  ) >= COALESCE((
-    SELECT json_extract(batch.request_json, '$.item_count')
-    FROM prompt_expansion_batches AS batch
-    WHERE batch.id = NEW.batch_id
-  ), 0)
-    THEN RAISE(ABORT, 'prompt expansion batch already has all items') END;
-  SELECT CASE WHEN NEW.review_version != 1
-                        OR NEW.reroll_count != 0
-                        OR typeof(NEW.selected) != 'integer'
-                        OR NEW.selected NOT IN (0, 1)
-                        OR NEW.selected != 1
-                        OR NEW.original_evidence_json IS NOT NEW.current_evidence_json
-                        OR NEW.original_rendered_prompt IS NOT NEW.reviewed_prompt
-                        OR NEW.original_rendered_sha256 IS NOT NEW.reviewed_sha256
-                        OR NOT json_valid(NEW.original_evidence_json)
-                        OR json_type(NEW.original_evidence_json) != 'array'
-                        OR length(NEW.original_evidence_json)
-                           > {MAX_EXPANSION_EVIDENCE_JSON_CHARS}
-                        OR NEW.work_step_id IS NOT NULL
-                        OR NEW.run_id IS NOT NULL
-                        OR NEW.media_seed IS NOT NULL
-    THEN RAISE(ABORT, 'prompt expansion item initial state is invalid') END;
-END
-"""
 
-ITEM_UPDATE_TRIGGER = f"""
+def _item_update_trigger(*, allow_deleted_run_unlink: bool) -> str:
+    deleted_run_unlink = (
+        """
+                          OR (
+                            NEW.current_evidence_json IS OLD.current_evidence_json
+                            AND NEW.reviewed_prompt IS OLD.reviewed_prompt
+                            AND NEW.reviewed_sha256 IS OLD.reviewed_sha256
+                            AND NEW.selected IS OLD.selected
+                            AND NEW.review_version IS OLD.review_version
+                            AND NEW.reroll_count IS OLD.reroll_count
+                            AND NEW.work_step_id IS OLD.work_step_id
+                            AND OLD.run_id IS NOT NULL
+                            AND NEW.run_id IS NULL
+                            AND NEW.media_seed IS OLD.media_seed
+                            AND NOT EXISTS (
+                              SELECT 1 FROM runs AS run
+                              WHERE run.id = OLD.run_id
+                            )
+                          )"""
+        if allow_deleted_run_unlink
+        else ""
+    )
+    deleted_work_step_unlink = (
+        """
+                          OR (
+                            NEW.current_evidence_json IS OLD.current_evidence_json
+                            AND NEW.reviewed_prompt IS OLD.reviewed_prompt
+                            AND NEW.reviewed_sha256 IS OLD.reviewed_sha256
+                            AND NEW.selected IS OLD.selected
+                            AND NEW.review_version IS OLD.review_version
+                            AND NEW.reroll_count IS OLD.reroll_count
+                            AND OLD.work_step_id IS NOT NULL
+                            AND NEW.work_step_id IS NULL
+                            AND NEW.run_id IS OLD.run_id
+                            AND NEW.media_seed IS OLD.media_seed
+                            AND NOT EXISTS (
+                              SELECT 1 FROM work_steps AS step
+                              WHERE step.id = OLD.work_step_id
+                            )
+                          )"""
+        if allow_deleted_run_unlink
+        else ""
+    )
+    return f"""
 CREATE TRIGGER prompt_expansion_item_update_guard
 BEFORE UPDATE ON prompt_expansion_items
 BEGIN
@@ -167,7 +158,7 @@ BEGIN
                              OR NOT json_valid(NEW.current_evidence_json)
                              OR json_type(NEW.current_evidence_json) != 'array'
                              OR length(NEW.current_evidence_json)
-                                > {MAX_EXPANSION_EVIDENCE_JSON_CHARS}
+                                > 262144
                              OR NEW.work_step_id IS NOT OLD.work_step_id
                              OR NEW.run_id IS NOT OLD.run_id
                              OR NEW.media_seed IS NOT OLD.media_seed)
@@ -192,7 +183,7 @@ BEGIN
                             AND OLD.media_seed IS NULL
                             AND typeof(NEW.media_seed) = 'integer'
                             AND NEW.media_seed >= 0
-                            AND NEW.media_seed < {MEDIA_SEED_SPACE}
+                            AND NEW.media_seed < 2147483648
                             AND (SELECT step.plan_id FROM work_steps AS step
                                  WHERE step.id = NEW.work_step_id) = (
                               SELECT batch.work_plan_id
@@ -201,39 +192,7 @@ BEGIN
                             )
                             AND (SELECT run.work_step_id FROM runs AS run
                                  WHERE run.id = NEW.run_id) = NEW.work_step_id
-                          )
-                          OR (
-                            NEW.current_evidence_json IS OLD.current_evidence_json
-                            AND NEW.reviewed_prompt IS OLD.reviewed_prompt
-                            AND NEW.reviewed_sha256 IS OLD.reviewed_sha256
-                            AND NEW.selected IS OLD.selected
-                            AND NEW.review_version IS OLD.review_version
-                            AND NEW.reroll_count IS OLD.reroll_count
-                            AND NEW.work_step_id IS OLD.work_step_id
-                            AND OLD.run_id IS NOT NULL
-                            AND NEW.run_id IS NULL
-                            AND NEW.media_seed IS OLD.media_seed
-                            AND NOT EXISTS (
-                              SELECT 1 FROM runs AS run
-                              WHERE run.id = OLD.run_id
-                            )
-                          )
-                          OR (
-                            NEW.current_evidence_json IS OLD.current_evidence_json
-                            AND NEW.reviewed_prompt IS OLD.reviewed_prompt
-                            AND NEW.reviewed_sha256 IS OLD.reviewed_sha256
-                            AND NEW.selected IS OLD.selected
-                            AND NEW.review_version IS OLD.review_version
-                            AND NEW.reroll_count IS OLD.reroll_count
-                            AND OLD.work_step_id IS NOT NULL
-                            AND NEW.work_step_id IS NULL
-                            AND NEW.run_id IS OLD.run_id
-                            AND NEW.media_seed IS OLD.media_seed
-                            AND NOT EXISTS (
-                              SELECT 1 FROM work_steps AS step
-                              WHERE step.id = OLD.work_step_id
-                            )
-                          )
+                          ){deleted_run_unlink}{deleted_work_step_unlink}
                         )
     THEN RAISE(ABORT, 'prompt expansion execution link is invalid') END;
   SELECT CASE WHEN COALESCE((
@@ -244,16 +203,17 @@ BEGIN
 END
 """
 
-CREATE_PROMPT_EXPANSION_TRIGGER_SQL = (
-    BATCH_INSERT_TRIGGER,
-    BATCH_UPDATE_TRIGGER,
-    ITEM_INSERT_TRIGGER,
-    ITEM_UPDATE_TRIGGER,
-)
 
-DROP_PROMPT_EXPANSION_TRIGGER_SQL = (
-    "DROP TRIGGER prompt_expansion_item_update_guard",
-    "DROP TRIGGER prompt_expansion_item_insert_guard",
-    "DROP TRIGGER prompt_expansion_batch_update_guard",
-    "DROP TRIGGER prompt_expansion_batch_insert_guard",
-)
+def _replace_update_triggers(*, allow_referential_unlink: bool) -> None:
+    op.execute("DROP TRIGGER prompt_expansion_item_update_guard")
+    op.execute("DROP TRIGGER prompt_expansion_batch_update_guard")
+    op.execute(_batch_update_trigger(allow_deleted_work_plan_unlink=allow_referential_unlink))
+    op.execute(_item_update_trigger(allow_deleted_run_unlink=allow_referential_unlink))
+
+
+def upgrade() -> None:
+    _replace_update_triggers(allow_referential_unlink=True)
+
+
+def downgrade() -> None:
+    _replace_update_triggers(allow_referential_unlink=False)

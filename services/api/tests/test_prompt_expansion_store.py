@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 from alembic import command
-from sqlalchemy import create_engine, event, func, select, text
+from sqlalchemy import create_engine, event, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -17,13 +17,18 @@ from local_lm import prompt_expansion_store as store_module
 from local_lm.config import Settings
 from local_lm.database_migrations import alembic_config
 from local_lm.db import Base
+from local_lm.domain import utcnow
 from local_lm.models import (
     ArtifactLibraryEntry,
     Chat,
+    Message,
     PromptExpansionBatch,
     PromptExpansionItem,
     PromptTemplateDefinition,
     PromptTemplateRevision,
+    Run,
+    WorkPlan,
+    WorkStep,
 )
 from local_lm.prompt_expansion import (
     ExpandedItem,
@@ -1173,6 +1178,85 @@ def test_chat_delete_cascades_batches_and_items(sessions: SessionFactory) -> Non
         assert session.scalar(select(func.count()).select_from(PromptExpansionItem)) == 0
 
 
+def test_queued_execution_links_follow_deleted_run_step_and_plan(
+    sessions: SessionFactory,
+) -> None:
+    with sessions() as session:
+        chat, _request, _plan, stored = _create(session)
+        user = Message(chat_id=chat.id, role="user", status="complete")
+        session.add(user)
+        session.flush()
+        assistant = Message(
+            chat_id=chat.id,
+            parent_id=user.id,
+            role="assistant",
+            status="complete",
+        )
+        work_plan = WorkPlan(chat_id=chat.id, transcript_sequence=1)
+        session.add_all((assistant, work_plan))
+        session.flush()
+        step = WorkStep(
+            plan_id=work_plan.id,
+            ordinal=1,
+            operation="image",
+            status="complete",
+            prompt=stored.items[0].reviewed_prompt,
+        )
+        session.add(step)
+        session.flush()
+        run = Run(
+            chat_id=chat.id,
+            user_message_id=user.id,
+            assistant_message_id=assistant.id,
+            work_plan_id=work_plan.id,
+            work_step_id=step.id,
+            operation="image",
+            status="complete",
+            standalone_prompt=stored.items[0].reviewed_prompt,
+        )
+        session.add(run)
+        session.flush()
+        step.run_id = run.id
+        session.flush()
+        session.execute(
+            update(PromptExpansionBatch)
+            .where(PromptExpansionBatch.id == stored.batch.id)
+            .values(
+                state="queued",
+                plan_version=stored.batch.plan_version + 1,
+                queue_idempotency_key="queue-delete-links",
+            )
+        )
+        session.execute(
+            update(PromptExpansionBatch)
+            .where(PromptExpansionBatch.id == stored.batch.id)
+            .values(work_plan_id=work_plan.id, queued_at=utcnow())
+        )
+        session.execute(
+            update(PromptExpansionItem)
+            .where(PromptExpansionItem.id == stored.items[0].id)
+            .values(work_step_id=step.id, run_id=run.id, media_seed=7)
+        )
+        session.commit()
+
+        session.delete(run)
+        session.flush()
+        session.delete(step)
+        session.flush()
+        session.delete(work_plan)
+        session.commit()
+
+        session.expire_all()
+        item = session.get(PromptExpansionItem, stored.items[0].id)
+        batch = session.get(PromptExpansionBatch, stored.batch.id)
+        assert item is not None
+        assert item.run_id is None
+        assert item.work_step_id is None
+        assert item.media_seed == 7
+        assert batch is not None
+        assert batch.work_plan_id is None
+
+
 def test_database_guards_reject_origin_changes_version_skips_and_queued_edits(
     sessions: SessionFactory,
 ) -> None:
@@ -1257,7 +1341,7 @@ def test_migration_is_self_contained_and_chat_delete_cascades(tmp_path: Path) ->
             "prompt_expansion_item_update_guard",
         }
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "b1d9e4c72f60",
+            "f2a7c9d41e63",
         )
         batch_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(prompt_expansion_batches)")
