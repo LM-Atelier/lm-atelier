@@ -9,7 +9,8 @@ from typing import Any, cast
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 
 from local_lm import api as api_module
 from local_lm import orchestrator as orchestrator_module
@@ -275,6 +276,36 @@ async def test_selected_prompt_batch_queues_one_atomic_exact_media_plan(
         )
         assert wrong_key.status_code == 409
         assert wrong_key.json()["code"] == "prompt-source-conflict"
+
+        linked_item = selected_outputs[0]
+        guarded_updates = (
+            update(PromptExpansionItem)
+            .where(PromptExpansionItem.id == linked_item["id"])
+            .values(run_id=None),
+            update(PromptExpansionItem)
+            .where(PromptExpansionItem.id == linked_item["id"])
+            .values(work_step_id=None),
+            update(PromptExpansionBatch)
+            .where(PromptExpansionBatch.id == batch["id"])
+            .values(work_plan_id=None),
+        )
+        for statement in guarded_updates:
+            with SessionLocal() as session, pytest.raises(IntegrityError):
+                session.execute(statement)
+                session.commit()
+
+        deleted = await client.delete(f"/api/chats/{chat['id']}")
+        assert deleted.status_code == 204, deleted.text
+        with SessionLocal() as session:
+            assert session.get(PromptExpansionBatch, batch["id"]) is None
+            assert (
+                session.scalar(
+                    select(PromptExpansionItem.id).where(
+                        PromptExpansionItem.batch_id == batch["id"]
+                    )
+                )
+                is None
+            )
 
 
 @pytest.mark.parametrize("strategy", ["round_robin", "random"])
