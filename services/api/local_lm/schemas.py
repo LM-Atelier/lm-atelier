@@ -15,7 +15,16 @@ from pydantic import (
     field_serializer,
 )
 
-from .domain import Operation, RoutingMode
+from .domain import (
+    ArtifactKind,
+    JobKind,
+    JobStatus,
+    MessageStatus,
+    Operation,
+    PartType,
+    RoutingMode,
+    RunStatus,
+)
 from .references import MAX_REFERENCES_PER_TURN, MAX_ROLE, MentionSource
 from .worker_failures import WorkerFailureCode
 
@@ -135,7 +144,7 @@ class GenerationIdentityOut(ApiModel):
 class ArtifactOut(ApiModel):
     id: str
     sha256: str
-    kind: str
+    kind: ArtifactKind
     media_type: str
     size_bytes: int
     original_name: str | None
@@ -215,7 +224,7 @@ class ArtifactDeleteResult(ApiModel):
 class MessagePartOut(ApiModel):
     id: str
     position: int
-    type: str
+    type: PartType
     text: str | None
     artifact_id: str | None
     metadata_json: dict[str, Any]
@@ -261,7 +270,7 @@ class MessageOut(ApiModel):
     chat_id: str
     parent_id: str | None
     role: str
-    status: str
+    status: MessageStatus
     transcript_visible: bool
     content_removed_at: datetime | None
     active_response_revision_id: str | None
@@ -302,7 +311,7 @@ class ChatOut(ApiModel):
     title: str
     archived: bool
     pinned: bool
-    routing_mode: str
+    routing_mode: RoutingMode
     confirm_uncertain_media: bool
     active_chat_profile_id: str | None
     active_vision_profile_id: str | None
@@ -852,7 +861,7 @@ class RunOut(ApiModel):
     work_plan_id: str | None
     work_step_id: str | None
     operation: str
-    status: str
+    status: RunStatus
     standalone_prompt: str
     profile_id: str | None
     vision_profile_id: str | None
@@ -904,8 +913,8 @@ class ProgressV2(ApiModel):
 
 class JobOut(ApiModel):
     id: str
-    kind: str
-    status: str
+    kind: JobKind
+    status: JobStatus
     run_id: str | None
     work_plan_id: str | None
     work_step_id: str | None
