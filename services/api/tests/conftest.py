@@ -10,11 +10,44 @@ import pytest_asyncio
 from fastapi import FastAPI
 from httpx2 import ASGITransport, AsyncClient
 
+import local_lm
 from local_lm import db
 from local_lm.config import Settings
 from local_lm.database_migrations import upgrade_database
 from local_lm.db import configure_database
 from local_lm.main import create_app
+
+#: Which tree these tests are about to measure.
+#:
+#: The virtualenv installs `local_lm` as an editable package pinned to whichever
+#: checkout created it. Run pytest from a second worktree without PYTHONPATH and
+#: the tests collected here are this worktree's while the modules under test are
+#: the other one's. Everything passes, every header prints this path, and the
+#: commit being verified was never executed.
+#:
+#: The failure direction is the dangerous one. A NEW module is absent from the
+#: other checkout, so its tests error loudly and somebody notices. A MODIFIED
+#: module silently resolves to the older copy and the suite goes green against
+#: code that is not in the commit.
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+_EXPECTED_PACKAGE = (_REPOSITORY_ROOT / "services" / "api" / "local_lm").resolve()
+_IMPORTED_FROM = Path(local_lm.__file__).resolve().parent
+
+# EXACT identity, not containment. This repository keeps its worktrees BELOW
+# the main checkout - .private/worktrees/* and temp/worktrees/* - so a nested
+# worktree's package is relative to the main root and a containment test says
+# yes to it. Measured: is_relative_to returns True for
+# <root>/temp/worktrees/x/services/api/local_lm against <root>, which is
+# precisely the wrong answer. Reported as codex/R1901.
+if _IMPORTED_FROM != _EXPECTED_PACKAGE:
+    raise RuntimeError(
+        "local_lm imports from a different tree than the one these tests "
+        "came from, so they would measure the wrong code.\n"
+        f"  imported from : {_IMPORTED_FROM}\n"
+        f"  expected      : {_EXPECTED_PACKAGE}\n"
+        "Set PYTHONPATH to this worktree before running:\n"
+        f"  PYTHONPATH={_REPOSITORY_ROOT / 'services' / 'api'}"
+    )
 
 
 @pytest.fixture(scope="session")

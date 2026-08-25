@@ -45,6 +45,35 @@ try {
     $Npm = (Get-Command npm.cmd -ErrorAction Stop).Source
     $Git = (Get-Command git.exe -ErrorAction Stop).Source
 
+    Write-Host "==> Import identity"
+    $ImportedDirectory = & $Python @(
+        "-c",
+        "import local_lm, pathlib; print(pathlib.Path(local_lm.__file__).resolve().parent)"
+    )
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not import local_lm, so which tree these gates would measure is unknown."
+    }
+    $Imported = (Resolve-Path -LiteralPath $ImportedDirectory).Path
+    $ExpectedPackage = (Resolve-Path -LiteralPath (
+        Join-Path $RepositoryRoot "services\api\local_lm"
+    )).Path
+    # EXACT identity, not containment. This repository keeps its worktrees BELOW
+    # the main checkout - .private/worktrees/* and temp/worktrees/* - so a
+    # nested worktree's package sits under the main root and any prefix or
+    # containment test calls it "inside this one". That is the wrong answer,
+    # and it is the one a run from the main checkout with PYTHONPATH pointed at
+    # a worktree would get.
+    if (-not $Imported.Equals($ExpectedPackage, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw (
+            "local_lm imports from a different tree than this one, so every gate " +
+            "below would test the wrong code.`n" +
+            "  imported from : $Imported`n" +
+            "  expected      : $ExpectedPackage`n" +
+            "Set PYTHONPATH to this worktree before running:`n" +
+            "  `$env:PYTHONPATH = `"$(Join-Path $RepositoryRoot 'services\api')`""
+        )
+    }
+
     Invoke-Checked "Ruff format" $Ruff @("format", "--check", "services/api")
     Invoke-Checked "Ruff lint" $Ruff @("check", "services/api")
     # Without the explicit config mypy does not discover the nested API
