@@ -4,6 +4,7 @@ import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event
 
@@ -85,7 +86,7 @@ def test_chat_item_content_tombstone_migration_round_trips(tmp_path: Path) -> No
             "AND name = 'ix_messages_content_removed_at'"
         ).fetchone() == ("ix_messages_content_removed_at",)
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "d6a8f1c42b90",
+            "e7b9c4d12f60",
         )
 
     engine = create_engine(f"sqlite:///{database}")
@@ -186,6 +187,85 @@ def test_chat_item_content_tombstone_migration_round_trips(tmp_path: Path) -> No
         assert "content_removed_at" not in restored
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
             "f2a7c9d41e63",
+        )
+
+
+def test_chat_item_removal_receipt_migration_preserves_replay_authority(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(data_dir=tmp_path / "chat-item-removal-receipts")
+    settings.prepare()
+    config = alembic_config(settings)
+    command.upgrade(config, "d6a8f1c42b90")
+    database = settings.state_dir / "local-lm.sqlite3"
+
+    with sqlite3.connect(database) as connection:
+        assert (
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'chat_item_removal_receipts'"
+            ).fetchone()
+            is None
+        )
+
+    command.upgrade(config, "head")
+    with sqlite3.connect(database) as connection:
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(chat_item_removal_receipts)")
+        }
+        assert columns == {
+            "id",
+            "chat_id",
+            "operation_key",
+            "message_id",
+            "request_sha256",
+            "message_revision_id",
+            "content_removed_at",
+            "created_at",
+            "updated_at",
+        }
+
+    engine = create_engine(f"sqlite:///{database}")
+    with Session(engine) as session:
+        chat = models.Chat(id="chat_receipt_migration", title="Constructed")
+        message = models.Message(
+            id="msg_receipt_migration",
+            chat=chat,
+            role="user",
+            status="complete",
+        )
+        session.add_all([chat, message])
+        session.flush()
+        session.add(
+            models.ChatItemRemovalReceipt(
+                id="rmreceipt_migration",
+                chat_id=chat.id,
+                operation_key="remove-once",
+                message_id=message.id,
+                request_sha256="1" * 64,
+                message_revision_id="2" * 64,
+                content_removed_at=datetime.now(UTC),
+            )
+        )
+        session.commit()
+
+    with pytest.raises(RuntimeError, match="durable replay receipts exist"):
+        command.downgrade(config, "d6a8f1c42b90")
+
+    with sqlite3.connect(database) as connection:
+        connection.execute("DELETE FROM chat_item_removal_receipts")
+        connection.commit()
+    command.downgrade(config, "d6a8f1c42b90")
+    with sqlite3.connect(database) as connection:
+        assert (
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'chat_item_removal_receipts'"
+            ).fetchone()
+            is None
+        )
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            "d6a8f1c42b90",
         )
 
 
@@ -477,7 +557,7 @@ def test_artifact_library_migration_fence_blocks_concurrent_dangling_writer(
             "SELECT count(*) FROM jobs WHERE id = 'migration-race-writer'"
         ).fetchone() == (0,)
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "d6a8f1c42b90",
+            "e7b9c4d12f60",
         )
         membership_schema = connection.execute(
             "SELECT sql FROM sqlite_master "

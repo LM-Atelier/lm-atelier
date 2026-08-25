@@ -19,7 +19,6 @@ import {
   MessageSquare,
   MoreHorizontal,
   Pin,
-  Pencil,
   Plus,
   Quote,
   RotateCcw,
@@ -30,7 +29,6 @@ import {
   Star,
   ThumbsDown,
   ThumbsUp,
-  Trash2,
   Upload,
   Wand2,
   Workflow as WorkflowIcon,
@@ -66,6 +64,7 @@ import { EmptyState } from "./EmptyState";
 import { AtelierMark } from "./AtelierMark";
 import { EditingStudio } from "./EditingStudio";
 import { MessageTimestamp } from "./MessageTimestamp";
+import { MessageRemovalConfirmation, UserMessageControls } from "./MessageRemovalControls";
 import { PendingResponseStatus } from "./PendingResponseStatus";
 import { MarkdownText } from "./MarkdownText";
 import { MentionText } from "./MentionText";
@@ -242,6 +241,7 @@ export function MessageBubble({
   onToggleFavorite,
   onQuote,
   onDeleteExchange,
+  onRemoveItem,
   onForkThread,
   onFeedback,
   compareSourceUrl,
@@ -261,6 +261,7 @@ export function MessageBubble({
   onToggleFavorite?: (part: MessagePart) => void;
   onQuote?: (text: string) => void;
   onDeleteExchange?: (messageId: string) => void;
+  onRemoveItem?: (messageId: string) => void;
   onForkThread?: (messageId: string) => void;
   onFeedback?: (messageId: string, revisionId: string | null, rating: "up" | "down" | null) => void;
   compareSourceUrl?: string | null;
@@ -288,7 +289,7 @@ export function MessageBubble({
     : visibleParts;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(userText);
-  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [confirmingRemoval, setConfirmingRemoval] = useState(false);
   const metadata = message.parts.find((part) => part.type === "generation_metadata")?.metadata_json;
   const context = metadata?.context as Record<string, unknown> | undefined;
   const provenance = metadata?.provenance as Record<string, unknown> | undefined;
@@ -346,7 +347,19 @@ export function MessageBubble({
   const regenerationPending = (message.response_revisions ?? []).some(
     (revision) => revision.status === "pending",
   );
-  const userMessageMeta = !contentRemoved && message.role === "user" && message.status === "complete" && !editing ? <div className="message-meta"><MessageTimestamp at={message.created_at} />{confirmingDelete ? <span className="delete-confirm"><span>Also deletes the answer and its media.</span><button className="danger" onClick={() => { setConfirmingDelete(false); onDeleteExchange?.(message.id); }}>Delete turn</button><button onClick={() => setConfirmingDelete(false)}>Keep</button></span> : <span className="message-actions">{onEdit && <button onClick={() => setEditing(true)} aria-label="Edit message" title="Edit"><Pencil size={14} /></button>}{copyableText && <CopyTextButton text={copyableText} label="Copy user message" buttonText="" />}{onDeleteExchange && <button aria-label="Delete this turn" title="Delete turn" onClick={() => setConfirmingDelete(true)}><Trash2 size={14} /></button>}</span>}</div> : null;
+  const removalConfirmation = confirmingRemoval ? (
+    <MessageRemovalConfirmation messageId={message.id} onRemove={(id) => { setConfirmingRemoval(false); onRemoveItem?.(id); }} onKeep={() => setConfirmingRemoval(false)} />
+  ) : null;
+  const userMessageMeta = !contentRemoved && message.role === "user" && message.status === "complete" && !editing ? (
+    <UserMessageControls
+      messageId={message.id}
+      createdAt={message.created_at}
+      copyableText={copyableText}
+      onEdit={onEdit ? () => setEditing(true) : undefined}
+      onRemoveItem={onRemoveItem}
+      onDeleteExchange={onDeleteExchange}
+    />
+  ) : null;
   const messageActionPartIndex = userMessageMeta ? renderedParts.map((part) => part.type).lastIndexOf("text") : -1;
   return (
     <article className={`message ${message.role}`}>
@@ -419,7 +432,7 @@ export function MessageBubble({
             )}
             {/* Revealed on hover, and on keyboard focus - hover alone would
                 put these actions out of reach without a mouse. */}
-            <span className="message-actions">
+            {removalConfirmation ?? <span className="message-actions">
               {onFeedback && (() => {
                 const displayed = completedRevisions[revisionIndex] ?? null;
                 const current = displayed ? displayed.feedback ?? null : message.feedback ?? null;
@@ -471,7 +484,12 @@ export function MessageBubble({
                   <GitBranch size={14} />
                 </button>
               )}
-            </span>
+              {onRemoveItem && (
+                <button aria-label="Remove this item, keep replies" title="Remove this item, keep replies" onClick={() => setConfirmingRemoval(true)}>
+                  <X size={14} />
+                </button>
+              )}
+            </span>}
           </div>
         )}
         {!contentRemoved && message.role === "assistant" && message.status !== "complete" && copyableText && (
@@ -1196,6 +1214,7 @@ function ChatView({
   onCancelStep,
   onRetryStep,
   onDeleteExchange,
+  onRemoveItem,
   onForkThread,
   libraryEdit,
   composerDraft,
@@ -1368,6 +1387,7 @@ function ChatView({
                 })}
                 onQuote={(text) => setQuoteTarget({ text, requestId: Date.now() })}
                 onDeleteExchange={busy ? undefined : onDeleteExchange}
+                onRemoveItem={busy ? undefined : onRemoveItem}
                 onForkThread={busy ? undefined : onForkThread}
               />
             </Fragment>
@@ -2165,7 +2185,7 @@ export default function App() {
     cancelWorkStep,
     retryWorkStep,
   } = useWorkPlanMutations(activeChatId);
-  const { deleteExchange, forkThread } = useMessageActions(setCurrentChatId, setView);
+  const { deleteExchange, removeItem, forkThread } = useMessageActions(setCurrentChatId, setView);
   const regenerate = useMutation({
     mutationFn: ({ messageId, settings }: { chatId: string; messageId: string; settings: Record<string, unknown> }) =>
       api.regenerateMessage(messageId, settings),
@@ -2392,7 +2412,7 @@ export default function App() {
       if (displayedChat) {
         send.mutate({ chatId: displayedChat.id, id: crypto.randomUUID(), text, mode, artifacts, settings, references, outputCount, promptSource, stopCurrent: true });
       }
-    }} onDeleteExchange={deleteExchange.mutate} onForkThread={forkThread.mutate} onCancelPlan={(planId) => {
+    }} onDeleteExchange={deleteExchange.mutate} onRemoveItem={removeItem.mutate} onForkThread={forkThread.mutate} onCancelPlan={(planId) => {
       cancelWorkPlan.mutate(planId);
     }} onRetryPlan={(planId) => {
       retryWorkPlan.mutate(planId);
@@ -2405,7 +2425,7 @@ export default function App() {
         send.mutate({ chatId: displayedChat.id, id: crypto.randomUUID(), text, mode, artifacts, settings, references, outputCount, promptSource });
       }
     }} />;
-  }, [studioSource, view, modelLibraryRole, engines.data, profiles.data, presets.data, workflows.data, applicationInfo.data, allProjects, chat.data, chatDrafts, autoSettingsRoles, composerDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, forkThread, client, openLibraryImage]);
+  }, [studioSource, view, modelLibraryRole, engines.data, profiles.data, presets.data, workflows.data, applicationInfo.data, allProjects, chat.data, chatDrafts, autoSettingsRoles, composerDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, removeItem, forkThread, client, openLibraryImage]);
 
   if (firstRunSetup && setupReadiness.data) {
     return <FirstRunSetup report={setupReadiness.data} onExit={exitFirstRunSetup} onOpenModels={(role) => { exitFirstRunSetup(); setModelLibraryRole(role); setView("models"); }} onOpenWorkflows={() => { exitFirstRunSetup(); setView("workflows"); }} />;
@@ -2436,7 +2456,7 @@ export default function App() {
         onOpenWorkflows={() => { setSetupOpen(false); openWorkflows(); }}
       />
       <JobsPanel />
-      <GlobalNotices connected={eventsConnected} mutations={[send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, createChat, createProject, exportProject, importProject, manageChat, deleteChat, updateProject, deleteProject, deleteExchange, forkThread]} />
+      <GlobalNotices connected={eventsConnected} mutations={[send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, createChat, createProject, exportProject, importProject, manageChat, deleteChat, updateProject, deleteProject, deleteExchange, removeItem, forkThread]} />
     </div>
   );
 }

@@ -614,6 +614,46 @@ export interface ExchangeDeletion {
   new_head_message_id: string | null;
 }
 
+export interface ChatItemRemovalReference {
+  id: string;
+  subject_name: string;
+  mention_slug: string;
+  subject_kind: string;
+}
+
+export interface ChatItemRemovalImpact {
+  chat_id: string;
+  message_id: string;
+  message_revision_id: string;
+  role: string;
+  already_removed: boolean;
+  has_replies: boolean;
+  source_backs_regeneration: boolean;
+  detached_message_part_count: number;
+  detached_response_revision_part_count: number;
+  detached_reference_count: number;
+  detached_references: ChatItemRemovalReference[];
+  detached_references_truncated: boolean;
+  released_artifact_count: number;
+  released_artifact_ids: string[];
+  released_artifacts_truncated: boolean;
+  retained_artifact_count: number;
+  retained_artifact_ids: string[];
+  retained_artifacts_truncated: boolean;
+  retained_witness_classes: string[];
+  forensic_erasure: false;
+  execute_authorized: false;
+}
+
+export interface ChatItemRemovalExecution {
+  operation_key: string;
+  chat_id: string;
+  message_id: string;
+  message_revision_id: string;
+  content_removed_at: string;
+  replayed: boolean;
+}
+
 export interface CatalogVersionRow {
   version_id: string;
   version_name?: string | null;
