@@ -1,11 +1,4 @@
-import {
-  Fragment,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Bot,
@@ -102,6 +95,7 @@ import { ProjectManager } from "./ProjectManager";
 import { SettingsView } from "./SettingsView";
 import { MediaLibraryView } from "./MediaLibraryView";
 import { PromptLibraryView } from "./PromptLibraryView";
+import { ComposerPromptTemplatesAction } from "./ComposerPromptTemplatesAction";
 import type { ChatViewProps, ComposerProps, PendingTurn } from "./chatComposerContracts";
 import {
   EMPTY_COMPOSER_DRAFT,
@@ -128,7 +122,6 @@ import { useComposerUploads } from "./useComposerUploads";
 import type { ComposerAttachment } from "./useComposerUploads";
 import { useDraftClassification } from "./useDraftClassification";
 import { useFirstRunSetup } from "./useFirstRunSetup";
-import { usePromptLibraryComposerInsertion } from "./usePromptLibraryComposerInsertion";
 import { recoverPromptSourceSend } from "./promptSourceSendRecovery";
 import { useWorkPlanMutations } from "./useWorkPlanMutations";
 import { useGenerationModeSelection } from "./useGenerationModeSelection";
@@ -869,7 +862,6 @@ function Composer({
         selections.data?.find((one) => one.selector_capability === drawerMode),
         project ? projectSelections.data?.find((one) => one.selector_capability === drawerMode) : null,
       );
-
   const submit = (stopCurrent = false) => {
     if (!text.trim()) return;
     const selectedMode = currentMode();
@@ -1023,6 +1015,7 @@ function Composer({
               >
                 <Sparkles size={18} />
               </button>
+              <ComposerPromptTemplatesAction chatId={chat.id} currentPrompt={text} maximum={maxMediaOutputsPerPlan} />
               <label className={`mode-select mode-${mode}`}>
                 {mode === "auto" && <Sparkles size={15} />}
                 {mode === "text" && <MessageSquare size={15} />}
@@ -1090,6 +1083,7 @@ function Composer({
         for (const item of attachments.filter((entry) => entry.kind === "image")) onSend(instruction, "image", [item.id], merged, []);
         setAttachments([]); setText(""); setTemplateSettings(null); setStudioOpen(false);
       }} />}
+
       {promptHelperDraft !== null && (
         <PromptHelperDialog
           sourceChat={chat}
@@ -2306,9 +2300,6 @@ export default function App() {
     setView("studio");
     focusMainContent();
   }, []);
-  const persistPromptImageMode = useCallback((chatId: string) => { updateChat.mutate({ id: chatId, values: { routing_mode: "image" } }); }, [updateChat]);
-  const insertPromptIntoComposer = usePromptLibraryComposerInsertion({ client, setComposerDrafts, setChatDrafts, setCurrentChatId, setView, persistImageMode: persistPromptImageMode, currentChatStorageKey: CURRENT_CHAT_KEY });
-
   const allChats = useMemo(() => chats.data ?? [], [chats.data]);
   const allProjects = useMemo(() => projects.data ?? [], [projects.data]);
   // One place that knows what opening the library means, since three
@@ -2325,7 +2316,7 @@ export default function App() {
           onClose={() => setStudioSource(null)}/>
       );
     }
-    const topLevelView = view === "media" ? <MediaLibraryView onEditImage={openLibraryImage} /> : view === "models" ? <ModelsView key={modelLibraryRole} initialRole={modelLibraryRole} /> : view === "references" ? <ReferencesLibrary /> : view === "prompts" ? <PromptLibraryView activeChatId={activeChatId} onInsertIntoComposer={insertPromptIntoComposer} /> : view === "workflows" ? <WorkflowsView /> : null;
+    const topLevelView = view === "media" ? <MediaLibraryView onEditImage={openLibraryImage} /> : view === "models" ? <ModelsView key={modelLibraryRole} initialRole={modelLibraryRole} /> : view === "references" ? <ReferencesLibrary /> : view === "prompts" ? <PromptLibraryView /> : view === "workflows" ? <WorkflowsView /> : null;
     if (topLevelView) return topLevelView;
     if (view === "settings") return <SettingsView engines={engines.data ?? []} />;
     const displayedChat = chat.data
@@ -2411,7 +2402,7 @@ export default function App() {
         send.mutate({ chatId: displayedChat.id, id: crypto.randomUUID(), text, mode, artifacts, settings, references, outputCount, promptSource });
       }
     }} />;
-  }, [studioSource, view, modelLibraryRole, activeChatId, engines.data, profiles.data, presets.data, workflows.data, applicationInfo.data, allProjects, chat.data, chatDrafts, autoSettingsRoles, composerDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, forkThread, client, openLibraryImage, insertPromptIntoComposer]);
+  }, [studioSource, view, modelLibraryRole, engines.data, profiles.data, presets.data, workflows.data, applicationInfo.data, allProjects, chat.data, chatDrafts, autoSettingsRoles, composerDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, forkThread, client, openLibraryImage]);
 
   if (firstRunSetup && setupReadiness.data) {
     return <FirstRunSetup report={setupReadiness.data} onExit={exitFirstRunSetup} onOpenModels={(role) => { exitFirstRunSetup(); setModelLibraryRole(role); setView("models"); }} onOpenWorkflows={() => { exitFirstRunSetup(); setView("workflows"); }} />;
