@@ -77,7 +77,6 @@ def decide(environment: Mapping[str, str], log: list[str]) -> int:
     # input" and the branch naming the real reason was UNREACHABLE in
     # production, while the matrix reached it by supplying a shape production
     # never sends. Fail-closed both times, and wrong about why both times.
-    # Reported as codex/R1930 for the draft case and codex/R1936 for the edit.
     preconditions = [
         f"{name}={value!r}"
         for name, value, domain in (
