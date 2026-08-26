@@ -1,4 +1,29 @@
 export type RoutingMode = "auto" | "text" | "image" | "video";
+export type JobKind =
+  | "chat"
+  | "image"
+  | "video"
+  | "edit_verify"
+  | "activate"
+  | "download"
+  | "registry_prepare"
+  | "export";
+export type JobStatus =
+  | "queued"
+  | "running"
+  | "paused"
+  | "complete"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
+export type RunStatus =
+  | "pending"
+  | "routing"
+  | "queued"
+  | "running"
+  | "complete"
+  | "failed"
+  | "cancelled";
 export type EngineRole = "chat" | "image" | "video";
 export type GenerationSettingsByRole = Partial<Record<EngineRole, Record<string, unknown>>>;
 export type GenerationPresetIdsByRole = Partial<Record<EngineRole, string | null>>;
@@ -182,7 +207,7 @@ export interface Run {
   work_plan_id?: string | null;
   work_step_id?: string | null;
   operation: string;
-  status: string;
+  status: RunStatus;
   standalone_prompt: string;
   profile_id: string | null;
   vision_profile_id?: string | null;
@@ -205,8 +230,8 @@ export interface TurnAccepted {
 
 export interface Job {
   id: string;
-  kind: string;
-  status: string;
+  kind: JobKind;
+  status: JobStatus;
   run_id: string | null;
   work_plan_id?: string | null;
   work_step_id?: string | null;
