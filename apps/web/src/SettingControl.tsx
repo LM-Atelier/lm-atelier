@@ -1,4 +1,5 @@
 import { LoraStackControl } from "./LoraStackControl";
+import { videoLengthDelivery } from "./settings";
 import type { SettingField } from "./types";
 
 export function SettingControl({
@@ -33,12 +34,19 @@ export function SettingControl({
     );
   }
   if (field.type === "number" || field.type === "integer") {
+    const numericValue = Number(value ?? field.default);
+    const delivery = videoLengthDelivery(field, numericValue);
+    const durationNote = delivery
+      ? Math.abs(delivery.deliveredSeconds - numericValue) > 1e-9
+        ? `Requested ${numericValue} seconds · delivers ${delivery.deliveredSeconds} seconds (${delivery.frames} frames).`
+        : `Delivers ${delivery.deliveredSeconds} seconds (${delivery.frames} frames).`
+      : "";
     return (
       <label className="setting-row">
-        <span><strong>{field.label}</strong>{field.help && <small>{field.help}</small>}</span>
+        <span><strong>{field.label}</strong>{field.help && <small>{field.help}</small>}{durationNote && <small>{durationNote}</small>}</span>
         <input
           type="number"
-          value={Number(value ?? field.default)}
+          value={numericValue}
           min={field.minimum ?? undefined}
           max={field.maximum ?? undefined}
           step={field.step ?? (field.type === "integer" ? 1 : 0.01)}

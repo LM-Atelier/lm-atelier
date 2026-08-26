@@ -483,6 +483,7 @@ from .studio_sessions import (
     studio_session_title,
 )
 from .verified_setup import build_verified_setup, resolve_verified_setup
+from .video_length import workflow_video_length
 from .workflow_asset_aliases import (
     WorkflowAssetAliasError,
     materialize_workflow_asset_aliases,
@@ -8172,6 +8173,7 @@ async def create_workflow(payload: WorkflowCreate, session: SessionDep) -> Workf
             payload.dependencies,
         )
         validate_workflow_edit_calibration(payload.input_schema)
+        workflow_video_length(payload.input_schema)
     except ValueError as exc:
         raise api_error(422, "workflow-invalid", str(exc)) from exc
     definition = WorkflowDefinition(
@@ -10805,6 +10807,7 @@ async def create_workflow_revision(
             payload.dependencies,
         )
         validate_workflow_edit_calibration(payload.input_schema)
+        workflow_video_length(payload.input_schema)
     except ValueError as exc:
         raise api_error(422, "workflow-revision-invalid", str(exc)) from exc
     version = (
@@ -10902,6 +10905,7 @@ async def validate_workflow(
         declared_fields = workflow_settings(base_fields, revision.input_schema_json)
         validate_settings(defaults(declared_fields), declared_fields)
         validate_workflow_edit_calibration(revision.input_schema_json)
+        workflow_video_length(revision.input_schema_json)
     except ValueError as exc:
         # Explaining why a schema is invalid is what this endpoint is for, so the
         # message survives - but it now comes only from our own validators,

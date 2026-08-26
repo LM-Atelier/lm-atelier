@@ -6,6 +6,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any, Final, Literal, cast
 
 from .schemas import EngineCapabilities, SettingField
+from .video_length import video_duration_field, workflow_video_length
 
 MAX_SETTING_FIELDS = 256
 MAX_SETTING_STRING_LENGTH = 65_536
@@ -862,9 +863,31 @@ def workflow_settings(
     if not isinstance(properties, Mapping):
         return base_fields
 
+    video_length = workflow_video_length(input_schema)
+
     definitions = {field.key: field for field in base_fields}
+    if video_length:
+        frames_field = definitions.get(video_length.frames_parameter)
+        fps_field = definitions.get(video_length.fps_parameter)
+        if not frames_field or frames_field.type != "integer":
+            raise ValueError("workflow video length frames_parameter is not an engine setting")
+        if not fps_field or fps_field.type not in {"integer", "number"}:
+            raise ValueError("workflow video length fps_parameter is not an engine setting")
+        if frames_field.minimum is not None and video_length.minimum_frames < frames_field.minimum:
+            raise ValueError("workflow video length cannot lower the engine frame minimum")
+        if frames_field.maximum is not None and video_length.maximum_frames > frames_field.maximum:
+            raise ValueError("workflow video length cannot raise the engine frame maximum")
+        if fps_field.minimum is not None and video_length.fps < fps_field.minimum:
+            raise ValueError("workflow video length cannot lower the engine FPS minimum")
+        if fps_field.maximum is not None and video_length.fps > fps_field.maximum:
+            raise ValueError("workflow video length cannot raise the engine FPS maximum")
     resolved: list[SettingField] = []
     for field in base_fields:
+        if video_length and field.key in {
+            video_length.frames_parameter,
+            video_length.fps_parameter,
+        }:
+            continue
         property_schema = properties.get(field.key)
         if isinstance(property_schema, Mapping) and property_schema.get("readOnly") is True:
             continue
@@ -882,10 +905,21 @@ def workflow_settings(
         else:
             resolved.append(field)
 
+    if video_length:
+        resolved.append(video_duration_field(video_length))
+
     for key, property_schema in properties.items():
         if (
             not isinstance(key, str)
             or key in definitions
+            or (
+                video_length
+                and key
+                in {
+                    video_length.frames_parameter,
+                    video_length.fps_parameter,
+                }
+            )
             or not isinstance(property_schema, Mapping)
             or not any(name in property_schema for name in ("default", "const", "enum"))
         ):

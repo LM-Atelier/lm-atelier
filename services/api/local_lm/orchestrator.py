@@ -180,6 +180,11 @@ from .studio_masks import (
     parse_mask_setting,
     split_mask_setting,
 )
+from .video_length import (
+    VIDEO_DURATION_SETTING_KEY,
+    resolve_video_length_settings,
+    workflow_video_length,
+)
 from .vision import PreparedVisualContext, VisionContextService, VisionInputError
 from .visual_prompt_compiler import (
     compilation_provenance,
@@ -1259,6 +1264,10 @@ class ConversationOrchestrator:
             ),
             turn_overrides=request_settings,
         )
+        effective_settings, video_length_resolution = resolve_video_length_settings(
+            effective_settings,
+            workflow_revision.input_schema_json if workflow_revision else None,
+        )
         if (
             prompt_source_resources is not None
             and prompt_source_resources.lora_settings is not None
@@ -1966,6 +1975,7 @@ class ConversationOrchestrator:
                 "workflow": output_workflow_provenance,
                 "resolved_settings": output_settings,
                 "generation_estimate": generation_estimate,
+                "video_length": video_length_resolution,
                 "media_plan_estimate": (
                     self._media_plan_estimate(plan.operation, output_settings, 1)
                     if output_context is not None
@@ -2314,6 +2324,10 @@ class ConversationOrchestrator:
                 ),
                 turn_overrides=step_overrides,
             )
+            effective_settings, video_length_resolution = resolve_video_length_settings(
+                effective_settings,
+                workflow_revision.input_schema_json if workflow_revision else None,
+            )
             lora_selection = None
             lora_setting_layers = (
                 profile.load_settings_json if profile else {},
@@ -2416,6 +2430,7 @@ class ConversationOrchestrator:
                     "effective_preset": preset_layers[-1] if preset_layers else None,
                     "estimate": estimate,
                     "generation_estimate": generation_estimate,
+                    "video_length": video_length_resolution,
                     "lora_resolution": lora_resolution,
                     "lora_selection": lora_selection,
                 }
@@ -2668,6 +2683,7 @@ class ConversationOrchestrator:
                     "workflow": workflow_provenance,
                     "resolved_settings": resolved["settings"],
                     "generation_estimate": resolved["generation_estimate"],
+                    "video_length": resolved["video_length"],
                     "plan_step_estimate": resolved["estimate"],
                     "image_edit": self._image_edit_provenance(
                         operation,
@@ -4638,6 +4654,7 @@ class ConversationOrchestrator:
                 if artifact:
                     input_paths.append(self.artifacts.resolve(artifact))
             workflow: dict[str, Any] = {}
+            revision: WorkflowRevision | None = None
             if run.workflow_revision_id:
                 revision = session.get(WorkflowRevision, run.workflow_revision_id)
                 if revision:
@@ -4685,6 +4702,8 @@ class ConversationOrchestrator:
             # as an input reference: it is instruction, not content, and must
             # not appear as an attachment or count toward edit lineage.
             parameters: dict[str, Any] = dict(run.settings_json)
+            if revision and workflow_video_length(revision.input_schema_json):
+                parameters.pop(VIDEO_DURATION_SETTING_KEY, None)
             mask_setting = run.settings_json.get(MASK_SETTING_KEY)
             if isinstance(mask_setting, dict):
                 mask_artifact = session.get(Artifact, str(mask_setting.get("artifact_id") or ""))
