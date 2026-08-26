@@ -242,6 +242,42 @@ def _declared_literals(source: str, expression: str | None) -> set[str] | None:
     return None
 
 
+def _admissible_values(spec: dict, schemas: dict[str, dict]) -> list[str] | None:
+    """The string values one field admits, following a component reference.
+
+    An inline `enum` is the shape a bare pydantic model produces. OpenAPI does
+    not use it for an enum-typed field - it emits a reference instead:
+
+        JobOut.status  ->  {"$ref": "#/components/schemas/JobStatus"}
+        JobStatus      ->  {"enum": [...], "type": "string"}
+
+    Reading only the inline form therefore saw NOTHING for every enum field in
+    every checked component - eight of them, which is the entire population
+    this check was written for. It had never failed because it had never
+    looked. Found by removing a member from a browser union and watching the
+    suite stay green.
+
+    One level of reference is followed, which is all the generator emits.
+    """
+
+    seen = spec
+    for _ in range(2):
+        values = seen.get("enum") or next(
+            (option.get("enum") for option in seen.get("anyOf", []) if option.get("enum")),
+            None,
+        )
+        if values:
+            return values
+        reference = seen.get("$ref") or next(
+            (option.get("$ref") for option in seen.get("allOf", []) if option.get("$ref")),
+            None,
+        )
+        if not reference:
+            return None
+        seen = schemas.get(reference.rsplit("/", 1)[-1]) or {}
+    return None
+
+
 @pytest.mark.parametrize(("interface", "component"), sorted(CHECKED_CONTRACTS.items()))
 def test_browser_can_represent_every_value_the_server_returns(
     interface: str,
@@ -259,10 +295,7 @@ def test_browser_can_represent_every_value_the_server_returns(
     """
     schema = schemas.get(component) or {}
     for field, spec in (schema.get("properties") or {}).items():
-        values = spec.get("enum") or next(
-            (option.get("enum") for option in spec.get("anyOf", []) if option.get("enum")),
-            None,
-        )
+        values = _admissible_values(spec, schemas)
         if not values:
             continue
         declared = _declared_literals(
@@ -270,8 +303,22 @@ def test_browser_can_represent_every_value_the_server_returns(
         )
         if declared is None:
             continue
-        missing = {value for value in values if isinstance(value, str)} - declared
+        served = {value for value in values if isinstance(value, str)}
+        missing = served - declared
         assert not missing, (
             f"{interface}.{field} in types.ts cannot represent {sorted(missing)}, which "
             f"{component} returns. Add the member, and handle it where the field is read."
+        )
+        # And the other direction. A member the server cannot produce is not a
+        # missed state, so it costs the user nothing directly - but it is still
+        # a false statement about the protocol, it makes dead branches look
+        # live, and a hand-maintained union drifts BOTH ways. Probing this test
+        # with a deliberately invented member showed the one-directional
+        # assertion accepted it silently, which is the same blind spot the
+        # declaration exists to remove.
+        invented = declared - served
+        assert not invented, (
+            f"{interface}.{field} in types.ts admits {sorted(invented)}, which "
+            f"{component} never returns. Remove the member, or correct the server "
+            f"if the browser is right about what can happen."
         )

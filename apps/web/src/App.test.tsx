@@ -795,7 +795,7 @@ describe("App", () => {
 
   it("applies durable job snapshots immediately without waiting for polling", async () => {
     const stamp = "2026-07-26T00:00:00Z";
-    const queued = {
+    const queued: Job = {
       id: "job-live",
       kind: "download",
       status: "queued",
@@ -1950,7 +1950,7 @@ describe("App", () => {
 
   it("resumes a paused model download from the job panel", async () => {
     const stamp = "2026-07-22T00:00:00Z";
-    const pausedJob = {
+    const pausedJob: Job = {
       id: "download-1",
       kind: "download",
       status: "paused",
@@ -2132,9 +2132,9 @@ describe("App", () => {
       .toHaveAttribute("aria-valuenow", "50");
   });
   it("shows a bounded list of unsuccessful jobs and retries one", async () => {
-    const failedJobs = Array.from({ length: 5 }, (_, index) => ({
+    const failedJobs = Array.from({ length: 5 }, (_, index): Job => ({
       id: `job-${index + 1}`,
-      kind: `image-${index + 1}`,
+      kind: (["chat", "image", "video", "download", "export"] as const)[index],
       status: index % 2 ? "interrupted" : "failed",
       run_id: `run-${index + 1}`,
       progress: 0.5,
@@ -2165,13 +2165,13 @@ describe("App", () => {
 
     expect(await screen.findByText("loader 5 crashed")).toBeInTheDocument();
     expect(screen.queryByText("loader 1 crashed")).not.toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: /Retry image-\d job/ })).toHaveLength(3);
-    fireEvent.click(screen.getByRole("button", { name: "Retry image-5 job" }));
+    expect(screen.getAllByRole("button", { name: /^Retry \w+ job$/ })).toHaveLength(3);
+    fireEvent.click(screen.getByRole("button", { name: "Retry export job" }));
     await waitFor(() => expect(vi.mocked(api.retryJob).mock.calls[0]?.[0]).toBe("job-5"));
   });
 
   it("clears recent job issues without deleting history and keeps them hidden", async () => {
-    const dismissedJob = {
+    const dismissedJob: Job = {
       id: "job-dismissed",
       kind: "image",
       status: "failed",
