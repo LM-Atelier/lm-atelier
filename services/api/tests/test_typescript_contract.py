@@ -322,3 +322,140 @@ def test_browser_can_represent_every_value_the_server_returns(
             f"{component} never returns. Remove the member, or correct the server "
             f"if the browser is right about what can happen."
         )
+
+
+# The last underscore-separated token of a field name that marks it as naming
+# a value from a fixed set rather than free text.
+VOCABULARY_TOKENS = frozenset(
+    {"code", "state", "status", "kind", "mode", "phase", "type", "severity", "category"}
+)
+# Fields whose name ends in a vocabulary word and whose type is still a plain
+# string. This is a RATCHET BASELINE, not an approval list: every entry is
+# known debt, the set must never grow, and it must shrink as fields are typed.
+#
+# The point is that an open string does not fail anywhere - it simply is not
+# checked. `test_browser_can_represent_every_value_the_server_returns` skips a
+# field whose declared literals are None, which is exactly what a plain string
+# produces, so declaring the union is what switches that check on. Until then
+# the browser can compare against prose and nothing notices, which is how the
+# readiness-wording break reached main.
+OPEN_VOCABULARY_BASELINE = frozenset(
+    {
+        "BoundWorkflowAssetOut.artifact_kind",
+        "BoundWorkflowAssetOut.kind",
+        "CatalogPreflight.auxiliary_kind",
+        "ChatItemRemovalReferenceOut.subject_kind",
+        "DeviceInfo.kind",
+        "EditTemplateOut.mask_mode",
+        "InstallPlanOut.failure_code",
+        "InstallPlanOut.status",
+        "JobOut.phase",
+        "MessageReferenceOut.subject_kind",
+        "ModelAssetOut.kind",
+        "ModelCapabilityEvidenceOut.failure_code",
+        "ModelUpdateOut.kind",
+        "ReferenceAssetOut.validation_state",
+        "ReferenceSubjectCreate.kind",
+        "ReferenceSubjectOut.kind",
+        "ResponseRevisionOut.status",
+        "SetupReadinessCheck.code",
+        "SetupVerificationOut.failure_code",
+        "StudioToolCapability.kind",
+        "WorkPlanOut.status",
+        "WorkStepOut.status",
+        "WorkflowDependencyImpactOut.resource_kind",
+        "WorkflowInstallOfferOut.invalidation_code",
+        "WorkflowMissingNodeOut.node_type",
+        "WorkflowPackageIssueOut.code",
+    }
+)
+
+# Names ending in a vocabulary word that are NOT vocabularies. Kept explicit so
+# the classifier does not have to guess, and so a reader can see what was
+# deliberately excluded rather than wonder.
+VOCABULARY_NAME_EXCLUSIONS = (
+    "identifiers - anything ending in _id, and a bare id",
+    "media and mime types - a content type is not a closed vocabulary",
+    "FastAPI validation models, which the application does not define",
+)
+
+
+def _is_closed_vocabulary(spec: dict) -> bool:
+    """An enum, a const, or a reference to something that is one."""
+
+    if "enum" in spec or "const" in spec or "$ref" in spec:
+        return True
+    return any(
+        _is_closed_vocabulary(sub)
+        for key in ("anyOf", "oneOf", "allOf")
+        for sub in spec.get(key, [])
+    )
+
+
+def _declared_types(spec: dict) -> set[str]:
+    """Every JSON type this field can take, following unions."""
+
+    found: set[str] = set()
+    if "type" in spec:
+        found.add(spec["type"])
+    for key in ("anyOf", "oneOf", "allOf"):
+        for sub in spec.get(key, []):
+            found |= _declared_types(sub)
+    return found
+
+
+def _open_vocabulary_fields(schemas: dict[str, dict]) -> set[str]:
+    """Vocabulary-named STRING fields that carry no closed vocabulary.
+
+    The string check is not decoration. Without it an integer exit_code counts
+    as an open vocabulary, because an integer is trivially not an enum - and a
+    check that cries wolf on a process exit status teaches people to skip the
+    whole report.
+    """
+
+    found: set[str] = set()
+    for component, spec in schemas.items():
+        if component in {"ValidationError", "HTTPValidationError"}:
+            continue
+        for field, field_spec in (spec.get("properties") or {}).items():
+            if field.split("_")[-1] not in VOCABULARY_TOKENS:
+                continue
+            lowered = field.lower()
+            if lowered == "id" or lowered.endswith("_id"):
+                continue
+            if "mime" in lowered or "media_type" in lowered or "content_type" in lowered:
+                continue
+            if _is_closed_vocabulary(field_spec):
+                continue
+            if "string" not in _declared_types(field_spec):
+                continue
+            found.add(f"{component}.{field}")
+    return found
+
+
+def test_no_new_api_field_is_a_vocabulary_typed_as_an_open_string(
+    schemas: dict[str, dict],
+) -> None:
+    """A new open vocabulary has to be argued for, not merely committed."""
+
+    appeared = sorted(_open_vocabulary_fields(schemas) - OPEN_VOCABULARY_BASELINE)
+    assert not appeared, (
+        "these API fields are a closed vocabulary typed as a plain string, and "
+        f"are not in the baseline: {appeared}. Declare the vocabulary, or add "
+        "the field to OPEN_VOCABULARY_BASELINE with the reason it cannot be."
+    )
+
+
+def test_the_open_vocabulary_baseline_does_not_rot(schemas: dict[str, dict]) -> None:
+    """Every baselined field must still be open, so the list shrinks.
+
+    Without this the baseline only ever holds: a field could be typed properly,
+    or renamed away, and its stale entry would keep silently excusing a name
+    that no longer exists. A ratchet that cannot tighten is a list.
+    """
+
+    fixed = sorted(OPEN_VOCABULARY_BASELINE - _open_vocabulary_fields(schemas))
+    assert not fixed, (
+        f"these baselined fields are no longer open strings: {fixed}. Remove "
+        "them from OPEN_VOCABULARY_BASELINE - the baseline is meant to shrink."
+    )
