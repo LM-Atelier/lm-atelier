@@ -17,12 +17,12 @@ the evidence, so an image that cannot be read cannot be promoted.
 The size floor is not arbitrary. The mechanism grounds at `grounding_px` 1024,
 so a short edge under half that is being upscaled past the point where identity
 survives - the run would succeed and return a picture of nobody in particular,
-which is the failure this lane exists to prevent. Refusing is actionable: the
-image is too small, and a bigger one fixes it.
+which is the failure this boundary exists to prevent. Refusing is actionable:
+the image is too small, and a bigger one fixes it.
 
 Measuring also fills `ReferenceAsset.width`/`height`, which no writer has ever
 populated. A rule that read them without populating them would refuse every
-asset forever, which is how a bound comes to reject all real data (codex/R905).
+asset forever, which is how a bound comes to reject all real data.
 
 What this does not record is *who* reviewed. The application has no notion of a
 user, so inventing a reviewer field would be recording a fiction. `updated_at`
@@ -60,24 +60,23 @@ MIN_SHORT_EDGE: Final = 512
 #: A refusal needs a reason, and a bounded number of bounded ones. The bound
 #: is the landed review trigger's: it refuses more than 16, and a boundary
 #: cap above it let 17 reasons pass validation and then explode at flush as
-#: an IntegrityError with the session left failed (codex/R1705).
+#: an IntegrityError with the session left failed.
 MAX_REASONS: Final = 16
 MAX_REASON_LENGTH: Final = 200
 #: The container formats this boundary accepts. GIF is refused: a
 #: frame-boundary cut presents as a complete still and five truncated
-#: prefixes gained authority (codex/R1728). PNG carries a full
-#: consumption proof: exact chunk walk plus a zlib stream terminating
-#: with zero unused bytes at the declared scanline structure. JPEG is
-#: accepted at the physical-EOI bar BY OWNER DECISION (2026-08-23):
-#: exact decoder-consumption proof needs a standards-complete MCU
-#: walker, logged as a low-priority successor; the injected-bytes
-#: residual that walker would close is accepted for a single-user
-#: deployment (codex/R1731 documented it).
+#: prefixes gained authority. PNG carries a full consumption proof:
+#: exact chunk walk plus a zlib stream terminating with zero unused
+#: bytes at the declared scanline structure. JPEG is accepted at the
+#: physical-EOI bar instead, because exact decoder-consumption proof
+#: needs a standards-complete MCU walker and this is not one. The
+#: injected-bytes residual such a walker would close is a known
+#: residual, recorded here rather than overlooked.
 STILL_FORMATS: Final = frozenset({"PNG", "JPEG"})
 #: The attributes this module owns and may refresh after its direct write.
 #: An unqualified expire also erased the caller's own pending edits to the
 #: same row - caption, purpose, view label, sort order - along with their
-#: ORM histories (codex/R1726). Review touches only these.
+#: ORM histories. Review touches only these.
 REVIEW_OWNED_ATTRIBUTES: Final = (
     "validation_state",
     "validation_reasons_json",
@@ -118,21 +117,20 @@ class ReviewRefusal(StrEnum):
     TOO_SMALL = "too_small"
     #: The outcome is not a ReviewOutcome. A module whose whole point is that
     #: usability cannot be asserted must not itself trust an annotation at
-    #: runtime while validating every other input (grok/R1178 reject): a
-    #: value-equal impostor such as a ValidationState would skip the
-    #: measurement and still land as usable.
+    #: runtime while validating every other input: a value-equal
+    #: impostor such as a ValidationState would skip the measurement
+    #: and still land as usable.
     OUTCOME_INVALID = "outcome_invalid"
     #: The bytes decode, but not as a format this boundary can prove
     #: complete (PNG or JPEG). A frame-boundary GIF truncation presents
     #: as a well-formed still, so animation-capable formats without a
-    #: container-completeness proof refuse outright (codex/R1728).
+    #: container-completeness proof refuse outright.
     UNSUPPORTED_FORMAT = "unsupported_format"
     #: The bytes are a readable image with more than one visible frame.
     #: A reference is a single still: Pillow's load() decodes only the
     #: CURRENT frame, so a three-frame GIF truncated after frame one lost
-    #: two thirds of its bytes and still measured (codex/R1727). Frames
-    #: beyond the first refuse explicitly rather than silently judging
-    #: frame one.
+    #: two thirds of its bytes and still measured. Frames beyond the
+    #: first refuse explicitly rather than silently judging frame one.
     MULTI_FRAME = "multi_frame"
     #: The asset moved between our snapshot and our write - a concurrent
     #: reviewer settled it, or the caller's view was stale - and the row was
@@ -196,14 +194,14 @@ def _png_complete_and_consumed(payload: bytes) -> bool:
     in full - framing alone was not enough.
 
     Pillow accepts a PNG missing one through four bytes of the IEND CRC,
-    reads through trailing junk (codex/R1730), and also ignores bytes
-    appended INSIDE a validly framed IDAT after the zlib stream ends,
-    with the chunk length and CRC recomputed (codex/R1731). So beyond
-    walking every chunk to an exact IEND CRC at physical end-of-file,
-    the concatenated IDAT stream must terminate with zero unused or
-    unconsumed bytes and decode to exactly the scanline structure the
-    header declares. Interlaced files and non-zero compression or
-    filter methods refuse: only what can be proven is accepted.
+    reads through trailing junk, and also ignores bytes appended INSIDE
+    a validly framed IDAT after the zlib stream ends, with the chunk
+    length and CRC recomputed. So beyond walking every chunk to an exact
+    IEND CRC at physical end-of-file, the concatenated IDAT stream must
+    terminate with zero unused or unconsumed bytes and decode to exactly
+    the scanline structure the header declares. Interlaced files and
+    non-zero compression or filter methods refuse: only what can be
+    proven is accepted.
     """
 
     if not payload.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -271,14 +269,13 @@ def _jpeg_frames_exactly(payload: bytes) -> bool:
     with its own embedded EOI - are stepped over whole, and legal 0xFF
     marker-fill runs are consumed, so a truncation, trailing junk, or a
     concatenated second image refuse while every file Pillow accepts is
-    accepted (codex/R1730; fill handling from the codex/R1731 note).
+    accepted, marker fill included.
 
-    KNOWN ACCEPTED RESIDUAL, by owner decision on 2026-08-23: bytes
-    injected inside the final entropy scan immediately before the
-    terminal EOI are not detected - proving exact decoder consumption
-    needs a standards-complete MCU walker. That work is logged as a
-    LOW-PRIORITY successor; physical-EOI framing is the accepted bar
-    for a single-user deployment today.
+    KNOWN RESIDUAL: bytes injected inside the final entropy scan
+    immediately before the terminal EOI are not detected. Proving exact
+    decoder consumption needs a standards-complete MCU walker, which
+    this is not. Physical-EOI framing is the bar this function holds,
+    and the residual is recorded here rather than overlooked.
     """
 
     if not payload.startswith(b"\xff\xd8"):
@@ -290,8 +287,8 @@ def _jpeg_frames_exactly(payload: bytes) -> bool:
         marker = payload[offset + 1]
         if marker == 0xFF:
             # Legal marker fill: any run of 0xFF bytes may pad before a
-            # marker; refusing them refused files Pillow accepts
-            # (codex/R1731 note, fixed on owner-directed restoration).
+            # marker; refusing them refused files Pillow accepts, so
+            # they are consumed rather than rejected.
             offset += 1
             continue
         if marker == 0xD9:
@@ -337,51 +334,50 @@ def _measure(payload: bytes) -> tuple[int, int] | ReviewRefusal:
         with warnings.catch_warnings():
             # Between MAX_IMAGE_PIXELS and twice it, Pillow only WARNS; a
             # 13 KB crafted header would sail through with a warning nobody
-            # is required to see (grok/R1178 reject). Promote it to the same
-            # refusal the outright bomb error gets.
+            # is required to see. Promote it to the same refusal the
+            # outright bomb error gets.
             warnings.simplefilter("error", Image.DecompressionBombWarning)
             with Image.open(io.BytesIO(payload)) as image:
                 width, height = image.size
                 # Format first: every later check trusts Pillow's parser,
                 # and that trust is only justified where the container has
-                # a completeness proof (codex/R1728).
+                # a completeness proof.
                 if image.format not in STILL_FORMATS:
                     return ReviewRefusal.UNSUPPORTED_FORMAT
                 # Byte-level completeness before any deeper parser
                 # trust: the whole submitted byte string must be exactly
                 # one complete container, proven by these bytes and not
-                # by what Pillow tolerates (codex/R1730, codex/R1731) -
-                # PNG to the consumption proof, JPEG to the physical-EOI
-                # bar the owner accepted.
+                # by what Pillow tolerates - PNG to the consumption
+                # proof, JPEG to the physical-EOI bar described above.
                 if not _CONTAINER_FRAMERS[image.format](payload):
                     return ReviewRefusal.UNREADABLE_IMAGE
                 # The lazy open reads only the header, so a truncated file
-                # with an intact header still measured (codex/R1705).
+                # with an intact header still measured.
                 # verify() walks the container structure - chunk lengths
                 # and CRCs - which load() alone would tolerate at the tail.
                 image.verify()
             # And verify() is not whole-stream proof either: a JPEG cut to
-            # half its bytes still verified and gained usable authority
-            # (codex/R1726). load() decodes every pixel - the bomb guard
-            # above bounds what that decode can cost - and it needs a
-            # fresh parse because verify() consumes the first one.
+            # half its bytes still verified and gained usable authority.
+            # load() decodes every pixel - the bomb guard above bounds
+            # what that decode can cost - and it needs a fresh parse
+            # because verify() consumes the first one.
             with Image.open(io.BytesIO(payload)) as image:
                 image.load()
                 # load() proves only the frame it decoded. A reference is
                 # a single still, so visible frames beyond the first
                 # refuse explicitly - which also catches a multi-frame
                 # file truncated after its first frame, whose remaining
-                # frame count is still above one (codex/R1727).
+                # frame count is still above one.
                 if getattr(image, "n_frames", 1) != 1:
                     return ReviewRefusal.MULTI_FRAME
     except Exception:
         # Deliberately everything: enumerating parser internals lost
-        # twice - SyntaxError escaped a PNG chunk cut (codex/R1705), then
-        # IndexError and struct.error escaped GIF frame cuts, 54 raw
-        # exceptions across 641 truncated prefixes (codex/R1728). The
-        # boundary's contract is that bytes it cannot prove are a typed
-        # refusal, never someone else's traceback; there is no parser
-        # exception that should propagate from here.
+        # twice - SyntaxError escaped a PNG chunk cut, then IndexError
+        # and struct.error escaped GIF frame cuts, 54 raw exceptions
+        # across 641 truncated prefixes. The boundary's contract is that
+        # bytes it cannot prove are a typed refusal, never someone else's
+        # traceback; there is no parser exception that should propagate
+        # from here.
         return ReviewRefusal.UNREADABLE_IMAGE
     if width <= 0 or height <= 0:
         return ReviewRefusal.UNREADABLE_IMAGE
@@ -403,8 +399,7 @@ def _conflict_refusal(
     when the target really settled or moved past the expected version. A row
     that vanished, changed subjects, or swapped its artifact binding is
     not-found - the asset as it was addressed and read no longer exists -
-    and anything else is not this module's failure to report (codex/R1717,
-    codex/R1722).
+    and anything else is not this module's failure to report.
     """
 
     row = connection.execute(
@@ -448,21 +443,21 @@ def review_asset(
     The write is scoped to the reviewed asset and the caller's session is
     never flushed here: unrelated pending state the caller owns stays pending
     and fails, if it fails, at the caller's own flush - not inside this call
-    wearing this module's label (codex/R1717).
+    wearing this module's label.
     """
 
     # The gate below compares by identity (`outcome is ReviewOutcome.USABLE`)
     # but the write went through `outcome.value`, so a value-equal impostor
     # skipped the measurement and still landed as usable. Strict mypy makes
     # that unreachable in checked code, but this boundary validates every
-    # other input at runtime and must not trust this one (grok/R1178).
+    # other input at runtime and must not trust this one.
     if type(outcome) is not ReviewOutcome:
         return ReviewRefused(ReviewRefusal.OUTCOME_INVALID)
 
     # Every query this call makes runs without autoflush: a lazy load or get
     # would otherwise flush the caller's unrelated dirty rows into the landed
     # triggers mid-call, surfacing the caller's own failure from inside this
-    # one - before any containment exists (codex/R1717).
+    # one - before any containment exists.
     with session.no_autoflush:
         asset = session.get(ReferenceAsset, asset_id)
         if asset is None or asset.reference_subject_id != subject.id:
@@ -493,7 +488,7 @@ def review_asset(
         # bytes about to be read and judged belong to THIS artifact, and
         # the write below binds it so a mid-read artifact swap cannot get
         # the old bytes' measurement recorded against a replacement the
-        # review never saw (codex/R1722).
+        # review never saw.
         artifact_key = asset.artifact_id
         expected_version = asset.review_version
         try:
@@ -503,14 +498,14 @@ def review_asset(
             # size mismatch, non-canonical, symlinked, and store-escaping
             # paths - exactly the corruption and tamper cases
             # UNREADABLE_IMAGE documents. Without it those raised out of the
-            # authoritative path as a 500 instead of a typed refusal
-            # (grok/R1178, the reject's headline).
+            # authoritative path as a 500 instead of the typed refusal
+            # this boundary promises.
             return ReviewRefused(ReviewRefusal.UNREADABLE_IMAGE)
         # The bytes judged must BE the artifact addressed: the event this
         # settle writes advertises exact-pixel evidence, and a callback
         # convention cannot establish that - the payload is hashed HERE
         # and must match the artifact row's digest, or the review refuses
-        # before a single pixel is decoded (codex/R1727).
+        # before a single pixel is decoded.
         payload_sha256 = hashlib.sha256(payload).hexdigest()
         connection = session.connection()
         stored_sha256 = connection.execute(
@@ -528,8 +523,8 @@ def review_asset(
         # One guarded UPDATE, scoped to exactly the reviewed row and never
         # the session's flush machinery: a session flush would carry the
         # caller's unrelated pending state along and a failure would poison
-        # the caller's transaction (codex/R1708, codex/R1717). Containment
-        # for a single statement is the database's own statement atomicity -
+        # the caller's transaction. Containment for a single
+        # statement is the database's own statement atomicity -
         # a trigger abort rolls back only this UPDATE and keeps the caller's
         # transaction open. A savepoint here would be worse than nothing:
         # pysqlite defers BEGIN past SELECTs, so releasing a savepoint
@@ -547,12 +542,12 @@ def review_asset(
                     # the OLD subject's authority - the settle statement does
                     # not change reference_subject_id, so no trigger stops
                     # it, and the conflict readback only runs after a miss.
-                    # The guard makes the re-parent race miss (codex/R1720).
+                    # The guard makes the re-parent race miss.
                     ReferenceAsset.reference_subject_id == subject.id,
                     # And the artifact binding: the identity trigger permits
                     # rebinding an unchecked row, so without this a mid-read
                     # artifact swap would record the OLD bytes' measurement
-                    # against the replacement (codex/R1722).
+                    # against the replacement.
                     ReferenceAsset.artifact_id == artifact_key,
                     ReferenceAsset.validation_state == ValidationState.UNCHECKED.value,
                 )
@@ -594,8 +589,8 @@ def review_asset(
             return refusal
         # The decision is not durable until its immutable event is: a
         # settle that commits without one leaves the schema's promised
-        # review evidence blank (codex/R1726). The event rides the SAME
-        # caller transaction as the guarded settle, and the digest it
+        # review evidence blank. The event rides the SAME caller
+        # transaction as the guarded settle, and the digest it
         # records is the hash of the judged payload, already proven equal
         # to the artifact row's digest before a pixel was decoded - so the
         # landed insert guard's row-digest comparison and the advertised
@@ -637,11 +632,11 @@ def review_asset(
             # The settle already succeeded in this transaction; if its
             # event cannot be written, the pair must be failure-atomic -
             # a raw raise alone left the session committable and an
-            # observer then saw a settled asset with zero events
-            # (codex/R1727). Invalidating the connection kills the wire
-            # transaction, so settle and event vanish together; the
-            # caller's rollback reconnects and the session is usable
-            # again afterwards.
+            # observer then saw a settled asset with zero events.
+            # Invalidating the connection kills the wire transaction,
+            # so settle and event vanish together; the caller's
+            # rollback reconnects and the session is usable again
+            # afterwards.
             connection.invalidate()
             raise
         session.expire(asset, REVIEW_OWNED_ATTRIBUTES)

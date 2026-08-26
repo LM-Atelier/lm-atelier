@@ -104,7 +104,7 @@ def test_a_pre_settled_row_without_its_event_refuses_the_upgrade(
 
     validation_state and validation_reasons_json are NOT NULL at the parent
     revision (verified by PRAGMA, so the preflight's != cannot be blinded by
-    NULL - the R1159 class does not apply here).
+    NULL - that class of defect does not apply here).
     """
     settings = Settings(data_dir=tmp_path / "reference-review-refusal")
     settings.prepare()
@@ -168,8 +168,8 @@ def test_a_tampered_reference_trigger_refuses_the_bootstrap(
 
     This locks the reference wiring specifically: the historical delta
     registered these six through raw DDL, which recreated blindly; routing
-    them through _install_sqlite_trigger is the whole point of this child
-    (grok/R1179 reject, codex/R1684 acceptance).
+    them through _install_sqlite_trigger is the whole point of this
+    child, so a weakened body must not survive a reinstall.
     """
     settings = Settings(data_dir=tmp_path / "reference-review-tamper", dev=True)
     settings.prepare()
@@ -300,7 +300,7 @@ def test_a9_write_fence_blocks_a_concurrent_settled_writer(tmp_path: Path) -> No
 
 # Pinned independently of the production tuples: an install test that derives
 # its expectations from the same mutable tuple shrinks with the bug it is
-# meant to catch (codex/R1690 item 3, R1691).
+# meant to catch.
 EXPECTED_TRIGGER_NAMES = frozenset(
     {
         "reference_asset_review_insert_guard",
@@ -424,8 +424,8 @@ def test_the_six_trigger_names_are_pinned_in_both_tuples() -> None:
 
 def test_each_guard_is_proved_by_the_operation_it_protects(tmp_path: Path) -> None:
     """One behavioral assertion per trigger, so a paired CREATE+DROP removal
-    of any guard fails HERE, not merely at teardown (codex/R1690 item 3,
-    R1691: five of six could previously vanish with the suite still green)."""
+    of any guard fails HERE, not merely at teardown: five of six could
+    previously vanish with the suite still green."""
     digest = "d" * 64
     database = _migrated_database(tmp_path, "behavioral")
     with sqlite3.connect(database) as connection:
@@ -496,7 +496,7 @@ def test_each_guard_is_proved_by_the_operation_it_protects(tmp_path: Path) -> No
 
 def test_downgrade_refuses_while_review_authority_exists(tmp_path: Path) -> None:
     """The old downgrade silently destroyed review history and left a database
-    that could never re-upgrade (codex/R1690 item 1)."""
+    that could never re-upgrade."""
     digest = "d" * 64
     settings = Settings(data_dir=tmp_path / "downgrade-refusal")
     settings.prepare()
@@ -528,7 +528,7 @@ def test_fresh_and_migrated_reference_tables_have_identical_pragmas(
     tmp_path: Path,
 ) -> None:
     """Column-level parity including server defaults - the trigger parity test
-    compares only triggers (codex/R1690 item 2)."""
+    compares only triggers."""
     migrated = _migrated_database(tmp_path, "pragma-migrated")
     fresh = tmp_path / "pragma-fresh.sqlite3"
     engine = create_engine(f"sqlite:///{fresh}")
@@ -540,7 +540,7 @@ def test_fresh_and_migrated_reference_tables_have_identical_pragmas(
     def by_name(rows: list[tuple]) -> dict[str, tuple]:
         # Column ORDER legitimately differs (batch add_column appends; fresh
         # metadata declares inline); type, nullability, default, and pk must
-        # not. The default mismatch was the R1690 item-2 defect.
+        # not. A server-default mismatch is the defect this pins.
         return {row[1]: row[2:] for row in rows}
 
     for table in ("reference_assets", "reference_asset_review_events"):
@@ -560,7 +560,7 @@ def test_fresh_and_migrated_reference_tables_have_identical_pragmas(
 
 def test_downgrade_fence_blocks_a_concurrent_settle_writer(tmp_path: Path) -> None:
     """The downgrade preflight is fenced like the upgrade: a racer cannot slip
-    review authority in after the emptiness read (codex/R1690 item 1)."""
+    review authority in after the emptiness read."""
     digest = "d" * 64
     settings = Settings(data_dir=tmp_path / "downgrade-race")
     settings.prepare()
@@ -631,8 +631,8 @@ def test_insert_or_replace_cannot_rewrite_a_review_event(tmp_path: Path) -> None
     default, asserted here rather than assumed - so immutability must not
     hang on that trigger alone. The insert guard refuses while ANY
     conflicting row exists, closing the rewrite at the schema boundary where
-    a connection-local PRAGMA cannot help (codex/R1696). Both conflict forms
-    are exercised on both construction paths, and the original event must
+    a connection-local PRAGMA cannot help. Both conflict forms are
+    exercised on both construction paths, and the original event must
     survive byte for byte under its original rowid."""
     digest = "d" * 64
     for label in ("migrated", "fresh"):
@@ -683,10 +683,10 @@ def test_downgrade_refuses_a_non_pristine_asset_even_without_events(
     """The downgrade preflight previously trusted events, state, and version
     alone, so a weakened same-name update trigger could leave an
     unchecked-but-dirty row that downgraded successfully - and the immediate
-    re-upgrade then refused, stranding the database at the parent revision
-    (codex/R1697, completing R1690 item 1). The preflight must be symmetric
-    with the upgrade preflight: reasons validity and emptiness and NULL
-    dimensions as well as state and version. The pristine control proves
+    re-upgrade then refused, stranding the database at the parent
+    revision. The preflight must be symmetric with the upgrade
+    preflight: reasons validity and emptiness and NULL dimensions as
+    well as state and version. The pristine control proves
     downgrade and immediate re-upgrade both still succeed."""
     digest = "d" * 64
     settings = Settings(data_dir=tmp_path / "downgrade-non-pristine")

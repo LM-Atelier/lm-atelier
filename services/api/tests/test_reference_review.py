@@ -310,8 +310,8 @@ def test_a_review_cannot_reach_into_another_subject(session: Session) -> None:
 def test_a_concurrent_settle_loses_with_a_typed_refusal(tmp_path: Path) -> None:
     """The ordinary two-reviewer race escaped raw: a session holding an
     unchecked snapshot whose rival settled mid-read hit the landed guard as
-    a bare IntegrityError, poisoning the caller's session (codex/R1708).
-    The loser now refuses ALREADY_SETTLED, the winner's decision stands,
+    a bare IntegrityError, poisoning the caller's session. The loser
+    now refuses ALREADY_SETTLED, the winner's decision stands,
     and the losing session stays usable."""
 
     engine_one = create_engine(f"sqlite:///{tmp_path / 'race.sqlite3'}")
@@ -385,10 +385,10 @@ def test_unrelated_dirty_state_is_never_flushed_or_mislabeled(
     A session carrying an unrelated pending change the landed trigger
     rejects used to have that change flushed from inside review_asset -
     first by query-invoked autoflush, then by the savepoint - and the
-    failure came back mislabeled ALREADY_SETTLED with the session dead
-    (codex/R1717). Now the call never flushes the caller's state: the
-    review succeeds, the garbage stays pending, and it fails at the
-    caller's own commit wearing its own name."""
+    failure came back mislabeled ALREADY_SETTLED with the session dead.
+    Now the call never flushes the caller's state: the review succeeds,
+    the garbage stays pending, and it fails at the caller's own commit
+    wearing its own name."""
 
     engine = create_engine(f"sqlite:///{tmp_path / 'dirty.sqlite3'}")
     Base.metadata.create_all(engine)
@@ -461,7 +461,7 @@ def test_an_asset_deleted_mid_review_refuses_not_found(tmp_path: Path) -> None:
     """A guarded miss is read back, not presumed settled.
 
     The conflict classifier distinguishes a row that settled from a row
-    that vanished: only the former is ALREADY_SETTLED (codex/R1717)."""
+    that vanished: only the former is ALREADY_SETTLED."""
 
     engine = create_engine(f"sqlite:///{tmp_path / 'gone.sqlite3'}")
     Base.metadata.create_all(engine)
@@ -502,9 +502,9 @@ def test_an_asset_reparented_mid_review_refuses_not_found(tmp_path: Path) -> Non
     An asset re-parented to another subject between the membership check
     and the write used to be settled under the OLD subject's authority:
     the settle statement does not change reference_subject_id, so no
-    trigger fires, and the conflict readback only runs after a miss
-    (codex/R1720). The subject guard in the predicate makes this race
-    miss, and the miss classifies as not-found."""
+    trigger fires, and the conflict readback only runs after a miss.
+    The subject guard in the predicate makes this race miss, and the
+    miss classifies as not-found."""
 
     engine = create_engine(f"sqlite:///{tmp_path / 'moved.sqlite3'}")
     Base.metadata.create_all(engine)
@@ -567,8 +567,8 @@ def test_an_artifact_swapped_mid_review_refuses_not_found(tmp_path: Path) -> Non
     The identity trigger permits rebinding an unchecked row's artifact,
     so an artifact swapped between the read and the write used to get
     the OLD bytes' measurement recorded against a replacement the review
-    never saw (codex/R1722). The artifact binding in the predicate makes
-    the swap miss, and the miss classifies as not-found."""
+    never saw. The artifact binding in the predicate makes the swap
+    miss, and the miss classifies as not-found."""
 
     engine = create_engine(f"sqlite:///{tmp_path / 'swapped.sqlite3'}")
     Base.metadata.create_all(engine)
@@ -640,8 +640,8 @@ def test_an_artifact_swapped_mid_review_refuses_not_found(tmp_path: Path) -> Non
 def test_the_reason_cap_is_the_schema_trigger_cap(session: Session) -> None:
     """The landed update trigger refuses more than 16 reasons; a boundary
     cap above it let 17 pass validation and explode at flush as an
-    IntegrityError with the session left failed (codex/R1705). Sixteen
-    settle; seventeen refuse typed, before any write."""
+    IntegrityError with the session left failed. Sixteen settle;
+    seventeen refuse typed, before any write."""
 
     person = subject(session)
     image = asset(session, person, 12, png(64, 64))
@@ -675,14 +675,14 @@ def test_a_truncated_image_with_an_intact_header_refuses(
 ) -> None:
     """The lazy open measured a 1024x768 PNG from 48 bytes; the review is
     the evidence boundary, so header-only bytes must refuse without
-    settling (codex/R1705)."""
+    settling."""
 
     person = subject(session)
     whole = png(1024, 768)
 
     # Pillow's verifier in fact tolerates up to FOUR missing bytes of the
-    # trailing IEND CRC (codex/R1730 corrected the earlier one-byte note);
-    # the byte-level framer refuses every one of those cuts, and the
+    # trailing IEND CRC, corrected from an earlier one-byte note; the
+    # byte-level framer refuses every one of those cuts, and the
     # exhaustive proof lives in the completeness sweep. Each cut here
     # binds its OWN asset so its digest gate passes and the refusal
     # proven is the container check's, not the digest check's.
@@ -715,7 +715,7 @@ def test_a_verifier_refusal_is_a_typed_review_refusal(session: Session) -> None:
     """The production reader raises ValueError for checksum, size, and path
     violations - the exact corruption and tamper cases UNREADABLE_IMAGE
     documents - and those raised straight out of the authoritative path as
-    a 500 instead of a refusal (grok/R1178, the reject's headline)."""
+    a 500 instead of the typed refusal this boundary promises."""
 
     person = subject(session)
     image = asset(session, person, 9)
@@ -741,7 +741,7 @@ def test_a_bomb_warning_range_image_refuses_without_a_warning(
 ) -> None:
     """Between MAX_IMAGE_PIXELS and twice it Pillow only WARNS, so a small
     crafted header escaped with a warning instead of refusing; past twice
-    it errors, which was already caught (grok/R1178)."""
+    it errors, which was already caught."""
 
     person = subject(session)
     payload = png(40, 40)  # 1600 pixels
@@ -786,7 +786,7 @@ def test_a_value_equal_impostor_outcome_refuses(session: Session) -> None:
     """The promotion gate is checked by identity but was written by value,
     so a ValidationState equal to "usable" skipped the measurement and
     still landed as usable. The boundary validates outcome at runtime like
-    every other input (grok/R1178)."""
+    every other input."""
 
     person = subject(session)
     image = asset(session, person, 11)
@@ -818,7 +818,7 @@ def test_a_settle_writes_its_immutable_event_in_the_same_transaction(
 
     review_asset settled the asset but never wrote the landed
     ReferenceAssetReviewEvent, so a committed review left the schema's
-    promised evidence blank (codex/R1726)."""
+    promised evidence blank."""
 
     engine = create_engine(f"sqlite:///{tmp_path / 'evented.sqlite3'}")
     Base.metadata.create_all(engine)
@@ -887,7 +887,7 @@ def test_caller_pending_changes_on_the_reviewed_row_survive(
 
     An unqualified expire after the direct write erased the caller's own
     pending caption, purpose, and sort order on the reviewed row along
-    with their ORM histories (codex/R1726)."""
+    with their ORM histories."""
 
     engine = create_engine(f"sqlite:///{tmp_path / 'pending.sqlite3'}")
     Base.metadata.create_all(engine)
@@ -936,7 +936,7 @@ def test_bytes_that_do_not_match_the_artifact_refuse(session: Session) -> None:
 
     A reader returning a valid image whose hash differs from the seeded
     artifact digest used to promote the asset while the event recorded
-    the row digest, not the judged payload digest (codex/R1727). The
+    the row digest, not the judged payload digest. The
     payload is hashed at this boundary and a mismatch refuses before a
     pixel is decoded."""
 
@@ -961,7 +961,7 @@ def test_an_event_write_failure_takes_the_settle_with_it(tmp_path: Path) -> None
 
     An event-insert failure used to propagate while the preceding settle
     stayed committable - a caller commit then produced a settled asset
-    with zero review events (codex/R1727). The connection is now
+    with zero review events. The connection is now
     invalidated on any event-write error, which kills the whole wire
     transaction; the caller's rollback reconnects and the session is
     usable again."""
@@ -1043,8 +1043,8 @@ def test_formats_without_a_completeness_proof_refuse(session: Session) -> None:
 
     A three-frame GIF cut exactly at a frame boundary presents as a
     complete one-frame still: five of its 641 truncated prefixes gained
-    review authority on the previous generation (codex/R1728). GIF has
-    no container-completeness proof, so the format refuses outright -
+    review authority on the previous generation. GIF has no
+    container-completeness proof, so the format refuses outright -
     including the exact frame-boundary prefix and a genuinely
     single-frame GIF."""
 
@@ -1084,12 +1084,11 @@ def test_only_the_exact_complete_payload_measures() -> None:
     """Byte-level completeness: every proper prefix refuses, only the
     whole payload measures, and nothing may ride behind it.
 
-    54 of 641 GIF prefixes escaped _measure as raw exceptions
-    (codex/R1728), and Pillow then accepted PNGs missing one through
-    four bytes of the mandatory IEND CRC plus payloads with trailing
-    junk or a concatenated second image (codex/R1730). The framers
-    prove the whole submitted byte string is exactly one complete
-    container."""
+    54 of 641 GIF prefixes escaped _measure as raw exceptions, and
+    Pillow then accepted PNGs missing one through four bytes of the
+    mandatory IEND CRC plus payloads with trailing junk or a
+    concatenated second image. The framers prove the whole submitted
+    byte string is exactly one complete container."""
 
     gif_bytes = gif(128, 96, 3)
     for cut in range(1, len(gif_bytes) + 1):
@@ -1115,8 +1114,8 @@ def test_a_multi_frame_image_refuses(session: Session) -> None:
 
     The multi-frame check lives on for formats the whitelist accepts:
     an APNG is PNG-format with visible extra frames, and load() decodes
-    only the current one (codex/R1727, codex/R1728). A truncated APNG
-    fails the chunk-structure verify instead."""
+    only the current one. A truncated APNG fails the chunk-structure
+    verify instead."""
 
     person = subject(session)
     whole = apng(64, 64, 3)
@@ -1202,13 +1201,13 @@ def _rebuild_idat(payload: bytes, data: bytes) -> bytes:
 
 
 def test_jpeg_settles_at_the_physical_eoi_bar(session: Session) -> None:
-    """JPEG is accepted again, by owner decision, at physical-EOI framing.
+    """JPEG settles at the physical-EOI bar.
 
     A truncated JPEG refuses at the framer, an intact one settles, and
     legal 0xFF marker-fill bytes before the terminal EOI are accepted -
-    the strict walker falsely refused files Pillow accepts
-    (codex/R1731's note). The injected-bytes residual behind this bar
-    is a documented, owner-accepted low-priority successor."""
+    the strict walker falsely refused files Pillow accepts. The
+    injected-bytes residual behind this bar is a known, recorded
+    residual."""
 
     person = subject(session)
     whole = jpeg(1024, 768)
@@ -1255,8 +1254,8 @@ def test_bytes_the_decoder_does_not_consume_refuse(session: Session) -> None:
     Appending junk after the completed zlib stream inside IDAT, with the
     chunk length increased and its CRC recomputed, passed the chunk
     walk, Pillow verify and load, and the public authority path with
-    unchanged pixels (codex/R1731). The consumption proof requires the
-    stream to terminate with zero unused bytes and decode to exactly
+    unchanged pixels. The consumption proof requires the stream to
+    terminate with zero unused bytes and decode to exactly
     the declared scanline structure."""
 
     person = subject(session)
