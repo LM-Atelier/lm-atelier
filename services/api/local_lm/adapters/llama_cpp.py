@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -13,6 +14,7 @@ from ..schemas import EngineCapabilities
 from ..settings_registry import CHAT_SETTINGS
 from .base import ChatEvent, ChatRequest, estimate_chat_tokens
 from .contracts import MAX_ADAPTER_EVENT_BYTES
+from .message_projection import project_chat_messages
 
 _CANCELLED = object()
 
@@ -128,6 +130,7 @@ class LlamaCppAdapter:
         )
 
     async def count_tokens(self, messages: list[dict[str, Any]]) -> int:
+        messages = project_chat_messages(messages).messages
         payload = {
             "model": "local-model",
             "messages": messages,
@@ -211,6 +214,7 @@ class LlamaCppAdapter:
         }
 
     async def stream(self, request: ChatRequest) -> AsyncIterator[ChatEvent]:
+        request = replace(request, messages=project_chat_messages(request.messages).messages)
         if request.run_id in self._cancelled:
             self._cancelled.discard(request.run_id)
             yield ChatEvent(type="cancelled")

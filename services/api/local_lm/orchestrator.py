@@ -21,6 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, object_session, selectinload
 
 from .adapters.base import ChatRequest, MediaEvent, MediaRequest
+from .adapters.message_projection import project_chat_messages
 from .artifact_library import ensure_library_entry
 from .artifacts import ArtifactStore
 from .auxiliary_assets import (
@@ -3746,11 +3747,20 @@ class ConversationOrchestrator:
         input_budget = max(64, context_limit - output_limit - safety_tokens)
 
         self._commit_before_await(session)
-        messages, input_tokens, omitted, compaction = await self._fit_chat_context(
+        (
+            messages,
+            input_tokens,
+            omitted,
+            compaction,
+            included_source_ids,
+        ) = await self._fit_chat_context(
             messages,
             source_message_ids,
             input_budget,
         )
+        original_message_count = len(messages)
+        adapter_projection = project_chat_messages(messages, included_source_ids)
+        messages = adapter_projection.messages
         if input_tokens > input_budget:
             raise ValueError(
                 "The current instructions and message exceed this profile's context window. "
@@ -3771,6 +3781,9 @@ class ConversationOrchestrator:
             "compaction": compaction,
             "output_adjusted": output_limit != requested_output,
             "vision": vision_metadata,
+            "adapter_projection": adapter_projection.metadata(
+                original_message_count=original_message_count
+            ),
         }
         return messages, request_settings, metadata, capabilities.tool_calling
 
@@ -3779,14 +3792,22 @@ class ConversationOrchestrator:
         messages: list[dict[str, Any]],
         source_message_ids: list[str | None],
         input_budget: int,
-    ) -> tuple[list[dict[str, Any]], int, int, dict[str, Any]]:
+    ) -> tuple[
+        list[dict[str, Any]],
+        int,
+        int,
+        dict[str, Any],
+        list[str | None],
+    ]:
         remaining = list(messages)
         remaining_sources = list(source_message_ids)
         removed: list[dict[str, Any]] = []
         removed_sources: list[str | None] = []
-        system_messages = (
-            1 if remaining and remaining[0].get("role") == MessageRole.SYSTEM.value else 0
-        )
+        system_messages = 0
+        for message in remaining:
+            if message.get("role") != MessageRole.SYSTEM.value:
+                break
+            system_messages += 1
 
         def remove_oldest() -> bool:
             if len(remaining) <= system_messages + 1:
@@ -3806,9 +3827,12 @@ class ConversationOrchestrator:
             del remaining_sources[system_messages : system_messages + remove_count]
             return True
 
-        input_tokens = await self.engines.chat.count_tokens(remaining)
+        async def count_projected(values: list[dict[str, Any]]) -> int:
+            return await self.engines.chat.count_tokens(project_chat_messages(values).messages)
+
+        input_tokens = await count_projected(remaining)
         while input_tokens > input_budget and remove_oldest():
-            input_tokens = await self.engines.chat.count_tokens(remaining)
+            input_tokens = await count_projected(remaining)
         if not removed:
             return (
                 remaining,
@@ -3821,6 +3845,7 @@ class ConversationOrchestrator:
                     "transcript_preserved": True,
                     "reversible": True,
                 },
+                remaining_sources,
             )
 
         max_characters = min(
@@ -3835,7 +3860,9 @@ class ConversationOrchestrator:
             )
             candidate = list(remaining)
             candidate.insert(system_messages, folded.message)
-            candidate_tokens = await self.engines.chat.count_tokens(candidate)
+            candidate_sources = list(remaining_sources)
+            candidate_sources.insert(system_messages, None)
+            candidate_tokens = await count_projected(candidate)
             if candidate_tokens <= input_budget:
                 return (
                     candidate,
@@ -3845,6 +3872,7 @@ class ConversationOrchestrator:
                         **folded.provenance,
                         "fold_tokens": max(0, candidate_tokens - input_tokens),
                     },
+                    candidate_sources,
                 )
             if max_characters > MIN_COMPACTION_CHARACTERS:
                 max_characters = max(
@@ -3854,9 +3882,9 @@ class ConversationOrchestrator:
                 continue
             if not remove_oldest():
                 break
-            input_tokens = await self.engines.chat.count_tokens(remaining)
+            input_tokens = await count_projected(remaining)
             while input_tokens > input_budget and remove_oldest():
-                input_tokens = await self.engines.chat.count_tokens(remaining)
+                input_tokens = await count_projected(remaining)
 
         return (
             remaining,
@@ -3870,6 +3898,7 @@ class ConversationOrchestrator:
                 "transcript_preserved": True,
                 "reversible": True,
             },
+            remaining_sources,
         )
 
     async def _attach_visual_context(

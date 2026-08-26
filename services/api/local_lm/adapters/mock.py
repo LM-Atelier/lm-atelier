@@ -5,6 +5,7 @@ import html
 import json
 import re
 import shutil
+from dataclasses import replace
 from typing import Any
 
 from ..domain import Operation
@@ -19,6 +20,7 @@ from .base import (
     MediaRequest,
     estimate_chat_tokens,
 )
+from .message_projection import project_chat_messages
 
 
 class MockChatAdapter:
@@ -42,9 +44,10 @@ class MockChatAdapter:
         )
 
     async def count_tokens(self, messages: list[dict[str, Any]]) -> int:
-        return estimate_chat_tokens(messages)
+        return estimate_chat_tokens(project_chat_messages(messages).messages)
 
     async def stream(self, request: ChatRequest):  # type: ignore[no-untyped-def]
+        request = replace(request, messages=project_chat_messages(request.messages).messages)
         self._cancelled.discard(request.run_id)
         tool_name = (
             str(request.tools[0].get("function", {}).get("name", "")) if request.tools else ""

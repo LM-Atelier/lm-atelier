@@ -6,6 +6,7 @@ import math
 from collections import defaultdict
 from collections.abc import AsyncIterator
 from contextlib import suppress
+from dataclasses import replace
 from typing import Any, Literal
 
 from ..schemas import EngineCapabilities, SettingField
@@ -20,6 +21,7 @@ from .base import (
     MediaRequest,
     estimate_chat_tokens,
 )
+from .message_projection import project_chat_messages
 
 ADAPTER_CONTRACT_VERSION = 1
 MAX_ADAPTER_EVENT_BYTES = 1024 * 1024
@@ -353,6 +355,7 @@ class GuardedChatAdapter:
         return capabilities
 
     async def count_tokens(self, messages: list[dict[str, Any]]) -> int:
+        messages = project_chat_messages(messages).messages
         try:
             async with asyncio.timeout(30):
                 count = await self._adapter.count_tokens(messages)
@@ -365,6 +368,7 @@ class GuardedChatAdapter:
         return count
 
     async def stream(self, request: ChatRequest) -> AsyncIterator[ChatEvent]:
+        request = replace(request, messages=project_chat_messages(request.messages).messages)
         try:
             events = self._adapter.stream(request)
         except asyncio.CancelledError:
