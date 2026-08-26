@@ -504,7 +504,7 @@ def test_an_item_choice_space_too_large_to_enumerate_refuses() -> None:
     assert str(caught.value) == PROMPT_EXPANSION_INVALID
 
 
-# --- codex/R1561: exactness, binding, and the restored acceptance gates ------
+# --- exactness, binding, and the restored acceptance gates -------------------
 
 
 def test_a_request_whose_digest_does_not_match_the_contract_refuses() -> None:
@@ -662,7 +662,7 @@ def test_the_plan_digest_covers_the_rendered_identity() -> None:
     assert expansion_plan_digest(plan) != expansion_plan_digest(other)
 
 
-# --- the plan receipt cannot be forged (codex/R1563) -------------------------
+# --- the plan receipt cannot be forged ---------------------------------------
 #
 # A frozen dataclass is not tamper-proof: `object.__setattr__` rewrites any
 # field on one. So a digest built by READING fields attests to whatever was
@@ -818,7 +818,7 @@ def test_a_model_slot_request_subclass_cannot_pass_as_the_real_type() -> None:
         expansion_plan_digest(plan)
 
 
-# --- the selection seed encodes its own boundaries (codex/R1563) -------------
+# --- the selection seed encodes its own boundaries ---------------------------
 
 
 def test_seed_material_cannot_be_reshaped_across_a_separator() -> None:
@@ -887,7 +887,7 @@ def test_a_list_subclass_is_not_accepted_as_seed_material() -> None:
         expansion_selection_seed(sneaky)
 
 
-# --- one error type at the template boundary (codex/R1563) -------------------
+# --- one error type at the template boundary ---------------------------------
 
 
 def test_a_value_the_request_accepts_but_the_renderer_refuses_raises_our_type() -> None:
@@ -1121,10 +1121,10 @@ def test_a_contract_whose_model_slot_has_no_guidance_never_reaches_expansion() -
 
 # --- the request inside the receipt is validated, not merely typed -----------
 #
-# codex/R1570. Checking that `plan.request` is an `ExpansionRequest` says
-# nothing about what is inside it. Every field below was accepted and hashed
-# before: `item_count` became `True` and serialised as JSON `true`, a seed
-# became a string, and an input value became an arbitrary object that escaped
+# Checking that `plan.request` is an `ExpansionRequest` says nothing about
+# what is inside it. Every field below was accepted and hashed before:
+# `item_count` became `True` and serialised as JSON `true`, a seed became a
+# string, and an input value became an arbitrary object that escaped
 # as a raw `TypeError` out of the JSON encoder rather than a refusal.
 
 
@@ -1215,7 +1215,7 @@ def test_the_inputs_a_receipt_declares_must_be_the_ones_its_evidence_records() -
         expansion_plan_digest(plan)
 
 
-# --- private text never reaches a repr (codex/R1570) -------------------------
+# --- private text never reaches a repr ---------------------------------------
 
 
 def test_no_repr_exposes_body_guidance_choices_values_or_rendered_text() -> None:
@@ -1290,7 +1290,7 @@ def test_no_repr_exposes_body_guidance_choices_values_or_rendered_text() -> None
     assert repr(complete.request).count("definition_id") == 1
 
 
-# --- a template with no slots is a valid shape (codex/R1571) -----------------
+# --- a template with no slots is a valid shape -------------------------------
 
 
 def _slotless_contract():
