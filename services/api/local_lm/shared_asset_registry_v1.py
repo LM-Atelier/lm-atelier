@@ -78,7 +78,7 @@ def _lowercase_hex(column: str, *, low: int, high: int) -> str:
 # handed that row back, while finalize_claim and release_claim correctly
 # refused its format - an accepted claim that can never be addressed, and a
 # claim is the deletion authority, so on a well-formed digest it would block
-# collection of those bytes for good. Reported as codex/R1884.
+# collection of those bytes for good.
 _REGISTRY_META_SQL: Final = (
     "CREATE TABLE registry_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT"
 )
@@ -101,9 +101,9 @@ _PACKAGE_CLAIMS_SQL: Final = (
 #: clause does not match - so the offending row would be counted as fine and
 #: the registry would validate. NOT NULL on the columns is not enough to rule
 #: that out, because a database can arrive with rows that were written under a
-#: different schema. Reported as codex/R1889 and reproduced: with
-#: `PRAGMA writable_schema=ON` the table text is swapped for one without NOT
-#: NULL, a row of NULLs is inserted, and the exact CREATE text is put back.
+#: different schema. With `PRAGMA writable_schema=ON` the table text is
+#: swapped for one without NOT NULL, a row of NULLs is inserted, and the
+#: exact CREATE text is put back.
 #: The row survives, `PRAGMA integrity_check` then says
 #: "NULL value in package_claims.consumer_id", and the stored text this module
 #: compares against is byte-identical to ours.
@@ -152,9 +152,9 @@ def _require_database_location(database: Path) -> tuple[Path, str]:
     absolute, free of NUL, and not a UNC share. They are deliberately not
     described as containment. The predecessor validated exactly this much and
     then USED the path, which let a junctioned parent redirect creation
-    without needing a race at all - measured in claude/R1346, where
-    reserve_claim on a junction's index.sqlite3 returned with no exception
-    and the foreign directory gained the database. Containment is the
+    without needing a race at all: reserve_claim on a junction's
+    index.sqlite3 returned with no exception and the foreign directory
+    gained the database. Containment is the
     anchor's job below; syntax was never going to do it.
     """
 
@@ -321,7 +321,7 @@ def _registry(database: Path) -> Iterator[sqlite3.Connection]:
     component by component and refuses a reparse point at any depth - on
     POSIX because every component is opened O_NOFOLLOW, on Windows because
     each opened handle is checked. So a junctioned parent is refused before
-    a single byte is written, which is the defect claude/R1346 measured.
+    a single byte is written, rather than after the file exists.
 
     One honest limit, stated rather than implied. SQLite cannot be handed a
     descriptor, so the connection below is opened by path while the anchor is

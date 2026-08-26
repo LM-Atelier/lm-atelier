@@ -57,8 +57,8 @@ def _query_terms(query: str) -> tuple[str, ...]:
     # The raw cap alone is not enough: Unicode casefold expansion can
     # triple a term (U+FB03 folds to "ffi"), so 100 legal raw characters
     # became a 300-character folded term whose whole-code-point match
-    # overran the snippet ceiling (codex/R1704). The cap binds the
-    # NORMALIZED term, which restores the reservation proof: the matched
+    # overran the snippet ceiling. The cap binds the NORMALIZED term,
+    # which restores the reservation proof: the matched
     # original slice never exceeds the folded term, and the folded term
     # never exceeds MAX_QUERY_CHARS, which is under MAX_SNIPPET_CHARS.
     if any(len(term) > MAX_QUERY_CHARS for term in terms):
@@ -135,7 +135,7 @@ def build_search_snippet(
             parts.append(SnippetSegmentV1(text=suffix, matched=False))
         # Reserve the COMPLETE match before any context: spending the
         # ceiling prefix-first truncated a maximum-legal match while still
-        # marking it matched, reopening the R986 invariant (codex/R1700).
+        # marking it matched, reopening the reservation invariant.
         # The reservation always fits: every original code point folds to at
         # least one character, so the matched slice never exceeds the folded
         # term - len(matched) <= len(term) <= MAX_QUERY_CHARS, which is

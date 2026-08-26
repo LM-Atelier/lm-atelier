@@ -1120,7 +1120,7 @@ AUDIT_REPORTS = (
         "Skipped, and expected to be: lm-atelier-api",
     ),
     (
-        # codex/R1959: `entry.get("vulns") or []` made a MISSING findings field
+        # `entry.get("vulns") or []` made a MISSING findings field
         # indistinguishable from an explicit empty list, so an entry that never
         # reported anything was announced as clean.
         "an entry that did not report its findings is not an entry that reported none",
@@ -1528,7 +1528,7 @@ def test_a_file_that_declares_it_must_not_ship_is_refused(tmp_path: Path) -> Non
 
 
 # --------------------------------------------------------------------------
-# Workflow policy: production-entry mutation matrix (codex/R803)
+# Workflow policy: production-entry mutation matrix
 #
 # Every case below enters at `validate_workflow_document`, the function `main`
 # calls for each file. Calling an individual validator proves the rule and
@@ -1846,7 +1846,7 @@ def test_workflow_policy_refuses_every_recorded_production_drift() -> None:
     tree_cases = _all_workflow_mutations()
     text_cases = _content_mutations()
     # Pinned exactly, so a case cannot be dropped while the suite stays green.
-    # codex/R803 requires at least 77 production-entry mutations; the extra
+    # The gate requires at least 77 production-entry mutations; the extra
     # cases are neighbours of accepted drifts that cost nothing to keep.
     assert len(tree_cases) + len(text_cases) == 101
     assert len(tree_cases) + len(text_cases) >= 77

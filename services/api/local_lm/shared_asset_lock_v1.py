@@ -283,8 +283,7 @@ def hold(
     # Cleanup starts HERE, not after the checks. Everything below can raise -
     # entry_identity() and the post-acquire re-check both call os.fstat - and
     # an exit that skips this leaves a held descriptor nothing can reach, which
-    # keeps the lease unavailable until the process ends. Reported as
-    # codex/R1908.
+    # keeps the lease unavailable until the process ends.
     acquired = False
     try:
         identity = entry_identity(descriptor)
@@ -345,8 +344,8 @@ def holder_is_gone(
         # on the object we opened then says nothing about the object the NAME
         # refers to - which is the one a caller about to steal the lease will
         # act on. Reporting absence there proves only that a detached object
-        # nobody can reach any more is free. Reported as codex/R1917: the
-        # window was closed in hold() and left open in the other public
+        # nobody can reach any more is free. The window was closed in
+        # hold() and left open in the other public
         # decision helper, which is the one a lease actually asks.
         return _current_entry_identity(anchor, name) == identity
     except SharedAssetLockError:

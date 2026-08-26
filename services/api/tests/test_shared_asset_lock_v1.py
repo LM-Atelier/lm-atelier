@@ -130,11 +130,12 @@ def test_a_hard_killed_holder_releases_the_lock(tmp_path: Path) -> None:
 def test_replacing_the_entry_cannot_hand_the_lease_to_a_second_holder(
     tmp_path: Path,
 ) -> None:
-    """codex/R1907, across two processes.
+    """Replacing the entry cannot hand the lease to a second holder.
 
-    Holder A owns the object. If the directory entry is replaced, a naive
-    implementation lets B lock the NEW object and believe the lease is free
-    while A is still running. Both questions must answer no.
+    Driven across two processes. Holder A owns the object. If the directory
+    entry is replaced, a naive implementation lets B lock the NEW object and
+    believe the lease is free while A is still running. Both questions must
+    answer no.
 
     On Windows the replacement itself is refused - the open omits delete
     sharing - so the property holds there by a different mechanism, and this
@@ -322,7 +323,7 @@ def test_the_entry_changing_between_open_and_lock_is_refused(
 def test_a_raise_after_acquiring_does_not_strand_the_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """codex/R1908.
+    """A raise after acquiring must not strand the lock.
 
     The post-acquire identity re-check calls os.fstat and can raise. If that
     happens outside the cleanup, the lock is already TAKEN and the descriptor
@@ -510,7 +511,7 @@ def test_the_guard_holds_when_the_filesystem_reuses_the_inode(
 def test_the_probe_refuses_when_the_name_changes_between_open_and_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """codex/R1917: the window hold() closes was left open in the other helper.
+    """The probe refuses when the entry name changes between open and lock.
 
     Between opening the entry and locking it, the name can be replaced on
     POSIX. The lock then proves that the object we OPENED is free - and that
