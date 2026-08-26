@@ -42,8 +42,7 @@ import { api } from "./api";
 import {
   formatBytes,
 } from "./format";
-import {
-} from "./imageEditStrength";
+import { videoLengthSummary } from "./videoLength";
 import { GlobalNotices } from "./GlobalNotices";
 import {
   artifactSource,
@@ -385,6 +384,7 @@ export function MessageBubble({
               </span>
             )}
             {appliedTriggerWords.length > 0 && <span>Added trigger words: {appliedTriggerWords.join(", ")}</span>}
+            {videoLengthSummary(provenance) && <span>{videoLengthSummary(provenance)}</span>}
             {contextLimit > 0 && (
               <span>
                 Context {inputTokens.toLocaleString()} / {contextLimit.toLocaleString()} tokens
