@@ -1749,7 +1749,7 @@ def _trigger_definitions(database: Path) -> dict[str, str]:
 
 
 def test_metadata_bootstrap_preserves_migrated_triggers(tmp_path: Path) -> None:
-    """Startup after Alembic preserves the exact guards and their behavior."""
+    """``create_all`` over a migrated database preserves its exact guards."""
 
     settings = Settings(data_dir=tmp_path / "migrated-trigger-bootstrap", dev=True)
     settings.prepare()

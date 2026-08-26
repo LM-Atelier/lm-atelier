@@ -88,10 +88,12 @@ def _lowercase_sha256_check(column: str) -> str:
 def _install_sqlite_trigger(statement: str) -> Callable[..., None]:
     """Create a missing canonical trigger and refuse an existing divergent one.
 
-    Alembic owns upgrades and deliberately uses strict trigger statements.
-    ``create_all`` is also called during application startup, where metadata
-    ``after_create`` events run even when no table is created. An existing
-    name is insufficient authority: a stale or weakened body must fail closed.
+    Alembic owns upgrades and deliberately uses strict trigger statements. In
+    a shipped install it is the only schema authority - startup calls
+    ``upgrade_database`` and never ``create_all`` - so these ``after_create``
+    hooks serve ``create_all`` callers alone, which today means tests and fresh
+    in-memory schemas. The refusal still matters for those: an existing name is
+    insufficient authority, and a stale or weakened body must fail closed.
     """
 
     parts = statement.split(None, 3)
