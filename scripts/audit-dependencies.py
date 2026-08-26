@@ -78,7 +78,6 @@ def decide(report: Mapping[str, Any], log: list[str]) -> int:
         # an explicit empty list, so an entry that never reported anything was
         # announced as clean - the same substitution this script exists to
         # refuse, one level further in than the skip it was written to catch.
-        # Reported as codex/R1959.
         version = entry.get("version")
         findings = entry.get("vulns")
         if (
