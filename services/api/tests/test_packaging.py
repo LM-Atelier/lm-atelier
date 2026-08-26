@@ -970,7 +970,10 @@ def test_ci_workflow_retains_required_check_for_every_pr_scope() -> None:
     assert "23 9 * * 2" in workflow
     assert "name: Scheduled dependency audit" in workflow
     assert "npm audit --audit-level=high" in workflow
-    assert ".venv/bin/python -m pip_audit" in workflow
+    # The audit decision moved into a tracked script so a test can run the same
+    # bytes. Pinning the old direct invocation here would fail the moment that
+    # happened, which is why this line changed rather than being deleted.
+    assert ".venv/bin/python scripts/audit-dependencies.py" in workflow
 
 
 def test_merge_gate_refuses_every_unverified_pull_request_shape() -> None:
@@ -1066,6 +1069,167 @@ def test_each_production_shape_reaches_the_branch_that_names_it(
     assert status == 1, label
     assert any(expected_reason in line for line in log), log
     assert not any("unknown input" in line for line in log), log
+
+
+# Every shape the audit report can take, with the verdict each must produce.
+# The exit code alone cannot separate "found an advisory" from "could not look",
+# which is the distinction the script exists to make, so these assert the reason
+# as well.
+AUDIT_REPORTS = (
+    (
+        "a clean closure with only our own package skipped",
+        {
+            "dependencies": [
+                {"name": "alembic", "version": "1.18.5", "vulns": []},
+                {"name": "lm-atelier-api", "skip_reason": "distribution marked as editable"},
+            ]
+        },
+        0,
+        "was audited and is clean",
+    ),
+    (
+        "a known advisory refuses",
+        {
+            "dependencies": [
+                {"name": "pip", "version": "26.1.2", "vulns": [{"id": "PYSEC-2026-3721"}]},
+            ]
+        },
+        1,
+        "carries a known advisory",
+    ),
+    (
+        "a dependency that could not be audited refuses",
+        {
+            "dependencies": [
+                {"name": "alembic", "version": "1.18.5", "vulns": []},
+                {"name": "somepackage", "skip_reason": "Dependency not found on PyPI"},
+            ]
+        },
+        1,
+        "could not be audited",
+    ),
+    (
+        "our own package skipped for a DIFFERENT reason is still expected",
+        {
+            "dependencies": [
+                {"name": "lm-atelier-api", "skip_reason": "Dependency not found on PyPI"},
+                {"name": "alembic", "version": "1.18.5", "vulns": []},
+            ]
+        },
+        0,
+        "Skipped, and expected to be: lm-atelier-api",
+    ),
+    (
+        # codex/R1959: `entry.get("vulns") or []` made a MISSING findings field
+        # indistinguishable from an explicit empty list, so an entry that never
+        # reported anything was announced as clean.
+        "an entry that did not report its findings is not an entry that reported none",
+        {"dependencies": [{"name": "alembic", "version": "1.18.5"}]},
+        1,
+        "carries no findings or no version",
+    ),
+    (
+        "an entry with no version is incomplete too",
+        {"dependencies": [{"name": "alembic", "vulns": []}]},
+        1,
+        "carries no findings or no version",
+    ),
+    (
+        # The emptiest form of the same mistake: entries present, none audited.
+        "a report of nothing but allowed skips audited nothing",
+        {
+            "dependencies": [
+                {"name": "lm-atelier-api", "skip_reason": "distribution marked as editable"},
+            ]
+        },
+        1,
+        "nothing audited is not the same as nothing found",
+    ),
+    (
+        "a report with no dependencies is not a clean report",
+        {"dependencies": []},
+        1,
+        "not a report that says clean",
+    ),
+    (
+        "an advisory outranks a skip when both are present",
+        {
+            "dependencies": [
+                {"name": "pip", "version": "26.1.2", "vulns": [{"id": "PYSEC-2026-3721"}]},
+                {"name": "somepackage", "skip_reason": "Dependency not found on PyPI"},
+            ]
+        },
+        1,
+        "carries a known advisory",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "report", "expected_status", "expected_reason"),
+    AUDIT_REPORTS,
+    ids=[shape[0] for shape in AUDIT_REPORTS],
+)
+def test_the_dependency_audit_separates_clean_from_unchecked(
+    label: str, report: dict[str, object], expected_status: int, expected_reason: str
+) -> None:
+    """`pip-audit` reports "clean" and "could not look" the same way.
+
+    Both leave the run at exit zero with a line of prose, which is the same
+    substitution a branch ruleset makes when it counts a skipped required check
+    as satisfied. The refusal is narrow on purpose: this repository's own
+    package has no published release and is skipped on every run, so failing on
+    THAT would make the gate permanently red and teach everyone to ignore it.
+    """
+    namespace = runpy.run_path(str(ROOT / "scripts/audit-dependencies.py"))
+    log: list[str] = []
+
+    status = namespace["decide"](report, log)
+
+    assert status == expected_status, (label, log)
+    assert any(expected_reason in line for line in log), (label, log)
+
+
+def test_the_audit_allowlist_is_exact_names_and_not_a_pattern() -> None:
+    """A prefix or substring rule is how a real skipped dependency slips through.
+
+    `lm-atelier-api-client` is not `lm-atelier-api`, and a rule that accepted it
+    because it starts the same way would excuse exactly the case this guard
+    exists to catch.
+    """
+    namespace = runpy.run_path(str(ROOT / "scripts/audit-dependencies.py"))
+    allowed = namespace["UNAUDITABLE_BY_NATURE"]
+
+    assert allowed == frozenset({"lm-atelier-api"})
+    log: list[str] = []
+    status = namespace["decide"](
+        {"dependencies": [{"name": "lm-atelier-api-client", "skip_reason": "not on PyPI"}]},
+        log,
+    )
+    assert status == 1, log
+    assert any("could not be audited" in line for line in log), log
+
+
+def test_the_workflow_runs_the_same_audit_decision() -> None:
+    """The rule that ships and the rule under test are one file.
+
+    Asserting the workflow calls the script is what keeps that true. A workflow
+    that went back to invoking pip-audit directly would pass every test above
+    while shipping the behaviour they exist to replace.
+    """
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    commands = [
+        step.get("run", "")
+        for job in workflow["jobs"].values()
+        for step in job.get("steps", [])
+        if isinstance(step, dict)
+    ]
+    audits = [command for command in commands if "audit" in command]
+
+    assert audits, "no audit step found at all"
+    for command in audits:
+        assert "scripts/audit-dependencies.py" in command, command
+        assert "-m pip_audit" not in command, command
 
 
 def test_public_repository_configuration_verifies_every_applied_control() -> None:
