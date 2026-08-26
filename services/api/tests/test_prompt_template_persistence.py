@@ -167,7 +167,7 @@ def test_migration_upgrade_downgrade_and_trigger_inventory(tmp_path: Path) -> No
             "prompt_template_import_winner_delete_guard",
         }
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "e7b9c4d12f60",
+            "c8e2f4a71d90",
         )
         columns = {
             row[1] for row in connection.execute("PRAGMA table_info(prompt_template_definitions)")
@@ -190,7 +190,7 @@ def test_migration_upgrade_downgrade_and_trigger_inventory(tmp_path: Path) -> No
     command.upgrade(config, "head")
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "e7b9c4d12f60",
+            "c8e2f4a71d90",
         )
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import (
@@ -35,6 +36,7 @@ from .domain import (
     CompatibilityLevel,
     JobKind,
     JobStatus,
+    MaskMode,
     MessageRole,
     MessageStatus,
     ModelRole,
@@ -61,6 +63,19 @@ from .reference_review_schema import (
     CREATE_REFERENCE_REVIEW_TRIGGER_SQL,
     DROP_REFERENCE_REVIEW_TRIGGER_SQL,
 )
+
+
+def _closed_vocabulary_check(column: str, vocabulary: type[StrEnum]) -> str:
+    """Membership SQL built FROM the enum rather than beside it.
+
+    Hand-listing the values here would be a second copy that drifts the
+    moment a member is added - which is the whole defect this constrains
+    against, one layer down. Deriving it means adding a member to the enum
+    updates the check, and the parity test asserts exactly that.
+    """
+
+    allowed = ", ".join(f"'{member.value}'" for member in vocabulary)
+    return f"{column} IN ({allowed})"
 
 
 def _lowercase_sha256_check(column: str) -> str:
@@ -133,6 +148,12 @@ class Project(TimestampMixin, Base):
 
 class Chat(TimestampMixin, Base):
     __tablename__ = "chats"
+    __table_args__ = (
+        CheckConstraint(
+            _closed_vocabulary_check("routing_mode", RoutingMode),
+            name="ck_chat_routing_mode",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("chat"))
     project_id: Mapped[str | None] = mapped_column(
@@ -1258,7 +1279,13 @@ class EditTemplate(TimestampMixin, Base):
     """
 
     __tablename__ = "edit_templates"
-    __table_args__ = (UniqueConstraint("name", name="uq_edit_template_name"),)
+    __table_args__ = (
+        UniqueConstraint("name", name="uq_edit_template_name"),
+        CheckConstraint(
+            _closed_vocabulary_check("mask_mode", MaskMode),
+            name="ck_edit_template_mask_mode",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("edittpl"))
     name: Mapped[str] = mapped_column(String(200), index=True)

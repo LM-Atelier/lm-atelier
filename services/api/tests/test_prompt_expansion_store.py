@@ -1388,7 +1388,7 @@ def test_migration_is_self_contained_and_chat_delete_cascades(tmp_path: Path) ->
             "prompt_expansion_item_update_guard",
         }
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "e7b9c4d12f60",
+            "c8e2f4a71d90",
         )
         batch_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(prompt_expansion_batches)")
