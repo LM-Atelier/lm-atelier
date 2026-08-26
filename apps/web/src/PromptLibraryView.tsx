@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Archive, ArchiveRestore, BookOpen, History, Pencil, Plus, Trash2 } from "lucide-react";
+import { Archive, ArchiveRestore, BookOpen, Copy, History, Pencil, Plus, Trash2 } from "lucide-react";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { api, ApiError } from "./api";
 import { EmptyState } from "./EmptyState";
@@ -73,6 +73,18 @@ function draftFromTemplate(template: PromptTemplateDetail): TemplateDraft {
     description: template.description,
     contract: structuredClone(template.current_revision.contract_json),
   };
+}
+
+function copyDraftFromTemplate(template: PromptTemplateDetail): TemplateDraft {
+  const draft = draftFromTemplate(template);
+  const suffix = " copy";
+  const maximumBaseLength = 200 - suffix.length;
+  let name = "";
+  for (const character of draft.name) {
+    if (name.length + character.length > maximumBaseLength) break;
+    name += character;
+  }
+  return { ...draft, name: `${name}${suffix}` };
 }
 
 function slotForMode(
@@ -743,7 +755,7 @@ export function PromptLibraryView() {
       <section className="workflow-detail prompt-template-detail" aria-live="polite">
         {detail.isPending && <div className="loading-line" />}
         {selected && <>
-          <div className="detail-title"><div><small>Image template · revision {selected.current_revision.version}</small><h2>{selected.name}</h2></div><div className="storage-actions"><button className="secondary" disabled={busy} onClick={() => { save.reset(); setEditor({ creating: false, draft: draftFromTemplate(selected), templateId: selected.id, expectedRevisionId: selected.current_revision_id }); }}><Pencil size={14} />Edit</button><button className="secondary" disabled={busy} onClick={() => archive.mutate(selected)}>{selected.archived ? <ArchiveRestore size={14} /> : <Archive size={14} />}{selected.archived ? "Unarchive" : "Archive"}</button><button className="danger" disabled={busy} onClick={() => void confirmRemoval(selected)}><Trash2 size={14} />Delete</button></div></div>
+          <div className="detail-title"><div><small>Image template · revision {selected.current_revision.version}</small><h2>{selected.name}</h2></div><div className="storage-actions"><button className="secondary" disabled={busy} onClick={() => { save.reset(); setEditor({ creating: false, draft: draftFromTemplate(selected), templateId: selected.id, expectedRevisionId: selected.current_revision_id }); }}><Pencil size={14} />Edit</button><button className="secondary" disabled={busy} onClick={() => { save.reset(); setEditor({ creating: true, draft: copyDraftFromTemplate(selected), templateId: null, expectedRevisionId: null }); }}><Copy size={14} />Copy</button><button className="secondary" disabled={busy} onClick={() => archive.mutate(selected)}>{selected.archived ? <ArchiveRestore size={14} /> : <Archive size={14} />}{selected.archived ? "Unarchive" : "Archive"}</button><button className="danger" disabled={busy} onClick={() => void confirmRemoval(selected)}><Trash2 size={14} />Delete</button></div></div>
           {selected.description && <p>{selected.description}</p>}
           <section className="prompt-template-body"><h3>Template body</h3><pre>{selected.current_revision.contract_json.body}</pre></section>
           <section className="prompt-template-slots"><h3>Slots</h3>{currentSlots.length ? <dl>{currentSlots.map((slot) => <div key={slot.name}><dt><code>{`{{${slot.name}}}`}</code><span className="badge">{slot.mode}</span><span className="badge">{slot.variation_scope}</span></dt><dd>{slot.mode === "choice" ? slot.choices.join(" · ") : slot.mode === "model" ? slot.guidance : slot.mode === "fixed" ? slot.fixed_value : "Provided when the template is used."}</dd></div>)}</dl> : <p className="muted">This template has no variable slots.</p>}</section>

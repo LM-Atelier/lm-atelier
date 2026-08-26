@@ -239,6 +239,47 @@ describe("Prompt Library Phase 1", () => {
     }));
   });
 
+  it("copies the selected template into an independent create draft", async () => {
+    const originalContract = structuredClone(detail.current_revision.contract_json);
+    renderLibrary();
+    await screen.findByRole("heading", { name: "Portrait variants" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+
+    expect(screen.getByRole("dialog", { name: "New prompt template" })).toBeVisible();
+    expect(screen.getByLabelText("Template name")).toHaveValue("Portrait variants copy");
+    expect(screen.getByLabelText("Template description")).toHaveValue("One controlled subject slot");
+    expect(screen.getByLabelText("Template body")).toHaveValue("A portrait of {{subject}}.");
+
+    fireEvent.change(screen.getByLabelText("Template description"), { target: { value: "A separate copy" } });
+    fireEvent.change(screen.getByLabelText("Template body"), { target: { value: "A painted portrait of {{subject}}." } });
+    fireEvent.click(screen.getByRole("button", { name: "Save revision" }));
+
+    await waitFor(() => expect(api.createPromptTemplate).toHaveBeenCalledTimes(1));
+    expect(api.updatePromptTemplate).not.toHaveBeenCalled();
+    expect(api.createPromptTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      idempotency_key: expect.any(String),
+      name: "Portrait variants copy",
+      description: "A separate copy",
+      contract: {
+        ...originalContract,
+        body: "A painted portrait of {{subject}}.",
+      },
+    }));
+    expect(detail.current_revision.contract_json).toEqual(originalContract);
+  });
+
+  it("keeps a copied template name within the create limit", async () => {
+    const maximumName = "x".repeat(200);
+    vi.mocked(api.promptTemplate).mockResolvedValue({ ...detail, name: maximumName });
+    renderLibrary();
+    await screen.findByRole("heading", { name: maximumName });
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+
+    expect(screen.getByLabelText("Template name")).toHaveValue(`${"x".repeat(195)} copy`);
+  });
+
   it("offers reusable choices by default and an explicit distinct mode", async () => {
     renderLibrary();
     await screen.findByRole("heading", { name: "Portrait variants" });
@@ -813,6 +854,25 @@ describe("Prompt Library Phase 1", () => {
 
     expect(await screen.findByText("A template with this name already exists. Choose a different name.")).toBeVisible();
     expect(screen.queryByText(/private\\duplicate-template/)).toBeNull();
+  });
+
+  it("keeps a copied draft open when its proposed name is already taken", async () => {
+    vi.mocked(api.createPromptTemplate).mockRejectedValue(new ApiError(
+      409,
+      { detail: "C:\\private\\duplicate-copy.json" },
+      "C:\\private\\duplicate-copy.json",
+      "prompt-template-name-taken",
+    ));
+    renderLibrary();
+    await screen.findByRole("heading", { name: "Portrait variants" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save revision" }));
+
+    const dialog = screen.getByRole("dialog", { name: "New prompt template" });
+    expect(await within(dialog).findByText("A template with this name already exists. Choose a different name.")).toBeVisible();
+    expect(within(dialog).getByLabelText("Template name")).toHaveValue("Portrait variants copy");
+    expect(screen.queryByText(/private\\duplicate-copy/)).toBeNull();
   });
 
   it("pages through a bounded template list", async () => {
