@@ -22,6 +22,8 @@ from .models import (
 LORA_GRAPH_TRANSFORM_VERSION = "lora-graph-v2"
 LORA_AUTO_SELECTION_VERSION = "lora-use-case-v1"
 MAX_LORA_STACK_SIZE = 8
+MAX_LORA_TRIGGER_WORDS = 100
+MAX_LORA_TRIGGER_WORD_LENGTH = 200
 AUXILIARY_ASSET_KINDS: frozenset[str] = frozenset(
     {
         "lora",
@@ -51,6 +53,42 @@ class ResolvedLoraStack:
 class AutomaticLoraSelection:
     settings: list[dict[str, Any]]
     provenance: dict[str, Any]
+
+
+def _invalid_lora_trigger_words() -> ValueError:
+    return ValueError("A selected LoRA has invalid trigger-word metadata.")
+
+
+def _installed_lora_trigger_words(metadata: object) -> list[str]:
+    """Return one bounded trigger-word vocabulary from stored LoRA metadata."""
+
+    if metadata is None:
+        return []
+    if not isinstance(metadata, dict):
+        raise _invalid_lora_trigger_words()
+
+    words: list[str] = []
+    seen: set[str] = set()
+    for key in ("trigger_words", "trained_words"):
+        if key not in metadata:
+            continue
+        declared = metadata[key]
+        if not isinstance(declared, list) or len(declared) > MAX_LORA_TRIGGER_WORDS:
+            raise _invalid_lora_trigger_words()
+        for value in declared:
+            if not isinstance(value, str):
+                raise _invalid_lora_trigger_words()
+            word = value.strip()
+            if not word or len(word) > MAX_LORA_TRIGGER_WORD_LENGTH:
+                raise _invalid_lora_trigger_words()
+            folded = word.casefold()
+            if folded in seen:
+                continue
+            if len(words) == MAX_LORA_TRIGGER_WORDS:
+                raise _invalid_lora_trigger_words()
+            seen.add(folded)
+            words.append(word)
+    return words
 
 
 _LORA_MATCH_STOP_WORDS = {
@@ -404,16 +442,7 @@ def resolve_lora_stack(
             "clip_strength": clip_strength,
             "enabled": enabled,
         }
-        metadata = asset.manifest_json.get("metadata")
-        trigger_words = (
-            [
-                word[:200]
-                for word in metadata.get("trigger_words", [])[:100]
-                if isinstance(word, str) and word
-            ]
-            if isinstance(metadata, dict) and isinstance(metadata.get("trigger_words"), list)
-            else []
-        )
+        trigger_words = _installed_lora_trigger_words(asset.manifest_json.get("metadata"))
         settings.append(normalized)
         provenance.append(
             {
