@@ -105,7 +105,7 @@ def test_unknown_or_hostile_states_are_refused(state: str) -> None:
     The consistency guards below the state check are written as
     ``narrowed == X and ...``, which is vacuously true for any state they do
     not name - so this refusal is the only thing standing between an unknown
-    state and a minted status (claude/R1177 review finding). The detail code
+    state and a minted status. The detail code
     here is one that is VALID for degraded: pairing with "ok" would let a
     coerce-to-degraded defect hide behind the degraded/ok consistency guard,
     which refuses "ok" anyway. With "version_mismatch", coercion mints a
@@ -124,7 +124,7 @@ def test_detail_code_cap_and_oversized_are_refused() -> None:
     """Pin the refusals at the cap, one past it, and far past it.
 
     The code orders the length ceiling before DETAIL_CODES membership so an
-    attacker-sized string is never hashed (codex/R984). That ordering is not
+    attacker-sized string is never hashed. That ordering is not
     observable from the outcome - membership would refuse these too - so this
     test pins the refusals and the ordering is asserted by reading the code,
     not by this name.
@@ -141,7 +141,7 @@ def test_detail_code_cap_and_oversized_are_refused() -> None:
 
 def test_an_attacker_sized_state_is_refused() -> None:
     """Oversized exact text refuses via the equality chain, which compares
-    against short literals and never hashes the input (codex/R984 class)."""
+    against short literals and never hashes the input."""
     with pytest.raises(SearchIndexStatusError):
         declare_search_index_status(
             state="ready" + "x" * 100_000,

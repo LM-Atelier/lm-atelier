@@ -66,8 +66,8 @@ def _reassembled(snippet: SearchSnippetV1) -> str:
 
 def test_expansions_before_the_match_do_not_shift_the_highlight() -> None:
     """The casefold of U+00DF (sharp s) is "ss": every folded index left of
-    the match used to shift the slice into unrelated text (codex/R986, the
-    R1176 reject). An ordinary German sentence reproduces it."""
+    the match used to shift the slice into unrelated text. An ordinary
+    German sentence reproduces it."""
     body = "gro\u00dfe Stra\u00dfe hello world"
     snippet = build_search_snippet(body, "hello")
     matched = [part for part in snippet.segments if part.matched]
@@ -132,8 +132,8 @@ def test_the_first_listed_term_with_a_hit_wins() -> None:
 def test_a_maximum_length_query_match_is_never_truncated() -> None:
     """The ceiling was spent prefix-first, so a maximum-legal 200-character
     term came back as a 189-character segment still marked matched - the
-    R986 invariant reopened at the legal boundary (codex/R1700). The match
-    is reserved in full before any context is allocated."""
+    same invariant reopened at the legal boundary. The match is reserved
+    in full before any context is allocated."""
     term = "x" * MAX_QUERY_CHARS
     body = "p" * 60 + term + "tail"
     snippet = build_search_snippet(body, term)
@@ -146,7 +146,7 @@ def test_a_maximum_length_query_match_is_never_truncated() -> None:
 def test_a_folded_term_larger_than_the_ceiling_still_matches_whole() -> None:
     """A legal term can FOLD past the snippet ceiling (100 sharp-s fold to
     200 characters); the matched original slice is provably shorter than
-    the folded term and must arrive complete (codex/R1700)."""
+    the folded term and must arrive complete."""
     term = "s" * 200
     body = "\u00df" * 100 + " tail"
     snippet = build_search_snippet(body, term)
@@ -160,9 +160,9 @@ def test_a_folded_term_larger_than_the_ceiling_still_matches_whole() -> None:
 def test_a_term_whose_fold_exceeds_the_query_cap_refuses() -> None:
     """Casefold expansion can TRIPLE a term: 100 raw U+FB03 are legal
     pre-fold but fold to 300 characters, and the whole-code-point match
-    then overran the snippet ceiling with a 300-character matched segment
-    (codex/R1704). The cap binds the normalized term, so this query
-    refuses instead of producing an over-ceiling snippet."""
+    then overran the snippet ceiling with a 300-character matched
+    segment. The cap binds the normalized term, so this query refuses
+    instead of producing an over-ceiling snippet."""
     with pytest.raises(SearchSnippetError, match=INVALID_SNIPPET):
         build_search_snippet("\ufb03" * 100 + " body", "\ufb03" * 100)
 

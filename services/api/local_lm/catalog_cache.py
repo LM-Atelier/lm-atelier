@@ -59,9 +59,8 @@ def is_partial_name(name: str) -> bool:
 
     Accepting anything that merely began with a dot and ended `.partial`
     deleted files this store could not have written - `.download.partial` among
-    them. That is the identical suffix-only reasoning this slice removed from
-    the cache branch, left in place one function below it. Reported as
-    codex/R1946.
+    them. The same suffix-only reasoning is still in place one function
+    below it, where it has the same effect.
     """
 
     if not name.startswith(".") or not name.endswith(PARTIAL_SUFFIX):

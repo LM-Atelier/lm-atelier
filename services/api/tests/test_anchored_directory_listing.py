@@ -389,7 +389,7 @@ def test_a_directory_record_that_cannot_be_decoded_refuses() -> None:
 def test_a_surrogate_path_component_never_reaches_the_native_open(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The caller codex/R1838 named, pinned by WHERE the refusal happens.
+    """An unencodable component never reaches the native open.
 
     `_walk_windows` hands each path component straight to the native open
     without going through `_require_entry_name`, so covering only the validator

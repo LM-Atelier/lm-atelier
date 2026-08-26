@@ -38,7 +38,7 @@ _IMPORTED_FROM = Path(local_lm.__file__).resolve().parent
 # worktree's package is relative to the main root and a containment test says
 # yes to it. Measured: is_relative_to returns True for
 # <root>/temp/worktrees/x/services/api/local_lm against <root>, which is
-# precisely the wrong answer. Reported as codex/R1901.
+# precisely the wrong answer.
 if _IMPORTED_FROM != _EXPECTED_PACKAGE:
     raise RuntimeError(
         "local_lm imports from a different tree than the one these tests "

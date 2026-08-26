@@ -65,10 +65,10 @@ def test_every_server_reason_has_browser_wording(browser_reasons: set[str]) -> N
 
 #: Reasons the browser can name before this base can send them.
 #:
-#: `dependency_contract_drift` is the tenth readiness reason, added on the
-#: workflow-dependency projection line (codex/R1070) and not yet on
-#: `origin/develop`. Wording it early is deliberate: the alternative is a build
-#: that renders a raw slug for the window between the server gaining a reason
+#: `dependency_contract_drift` is the tenth readiness reason, and the browser
+#: can already word it while the server cannot yet send it. Wording it early is
+#: deliberate: the alternative is a build that renders a raw slug for the
+#: window between the server gaining a reason
 #: and the browser gaining its sentence, which is the exact defect this file
 #: exists to prevent. Delete the entry when the reason lands.
 ALLOWED_AHEAD = {"dependency_contract_drift"}
