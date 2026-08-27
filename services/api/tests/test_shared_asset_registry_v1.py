@@ -281,7 +281,8 @@ def test_creation_stamps_identity_and_wal(tmp_path: Path) -> None:
     connection = sqlite3.connect(f"file:{database.as_posix()}?mode=ro", uri=True)
     try:
         assert connection.execute("PRAGMA application_id").fetchone()[0] == 0x4C4D4153
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert _tables_of(database) == {"registry_meta", "package_claims", "package_leases"}
         assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     finally:
         connection.close()
