@@ -1,4 +1,4 @@
-"""Requested reply-edge preserve policy after content tombstone (item 39).
+"""Requested reply-edge preserve policy after content tombstone.
 
 Records requested_policy only. This module does not rewrite parent
 edges or delete replies.

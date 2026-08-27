@@ -1,4 +1,4 @@
-"""Requested replay-refuse policy after content tombstone (item 39).
+"""Requested replay-refuse policy after content tombstone.
 
 Records requested_policy only. This module does not omit context or
 block a replay path.

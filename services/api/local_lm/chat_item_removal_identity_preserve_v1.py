@@ -1,4 +1,4 @@
-"""Requested message-identity preserve policy after content tombstone (item 39).
+"""Requested message-identity preserve policy after content tombstone.
 
 Records requested_policy only. This module does not delete or rewrite a
 message identity.

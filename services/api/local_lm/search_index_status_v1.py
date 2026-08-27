@@ -1,4 +1,4 @@
-"""Pure conversation-search index status facts (item 41).
+"""Pure conversation-search index status facts.
 
 Reports ready/building/degraded from caller-supplied generation facts.
 Never writes FTS, rebuilds an index, or echoes content.

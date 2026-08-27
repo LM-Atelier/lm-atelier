@@ -1,4 +1,4 @@
-"""Requested payload-detach policy after content tombstone (item 39).
+"""Requested payload-detach policy after content tombstone.
 
 Records requested_policy only. This module does not detach parts or
 delete a message identity.

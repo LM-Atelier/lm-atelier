@@ -1,4 +1,4 @@
-"""Pure prior-turn edit declaration (item 40).
+"""Pure prior-turn edit declaration.
 
 Records caller-supplied edit intent. This module does not accept, persist,
 or queue work.

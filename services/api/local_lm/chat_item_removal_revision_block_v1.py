@@ -1,4 +1,4 @@
-"""Requested revision-repopulation block after content tombstone (item 39).
+"""Requested revision-repopulation block after content tombstone.
 
 Records requested_policy only. This module does not select or block a
 revision.

@@ -1,4 +1,4 @@
-"""Pure chat-item removal declaration (item 39).
+"""Pure chat-item removal declaration.
 
 Records a candidate tombstone plan from caller-supplied facts. This
 module does not authorize mutation or verify a repository snapshot.
