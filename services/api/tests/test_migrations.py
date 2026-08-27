@@ -14,6 +14,7 @@ from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from alembic.util.exc import CommandError
+from alembic_head import EXPECTED_ALEMBIC_HEAD
 from sqlalchemy import UniqueConstraint, create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
@@ -86,7 +87,7 @@ def test_chat_item_content_tombstone_migration_round_trips(tmp_path: Path) -> No
             "AND name = 'ix_messages_content_removed_at'"
         ).fetchone() == ("ix_messages_content_removed_at",)
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "c8e2f4a71d90",
+            EXPECTED_ALEMBIC_HEAD,
         )
 
     engine = create_engine(f"sqlite:///{database}")
@@ -557,7 +558,7 @@ def test_artifact_library_migration_fence_blocks_concurrent_dangling_writer(
             "SELECT count(*) FROM jobs WHERE id = 'migration-race-writer'"
         ).fetchone() == (0,)
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "c8e2f4a71d90",
+            EXPECTED_ALEMBIC_HEAD,
         )
         membership_schema = connection.execute(
             "SELECT sql FROM sqlite_master "
@@ -1595,6 +1596,14 @@ def _parent_revision(settings: Settings) -> str:
     head = script.get_revision("head")
     assert head.down_revision, "expected the migration chain to have more than one revision"
     return str(head.down_revision)
+
+
+def test_expected_alembic_head_matches_script_directory(tmp_path: Path) -> None:
+    settings = Settings(data_dir=tmp_path / "expected-alembic-head")
+    settings.prepare()
+    script = ScriptDirectory.from_config(alembic_config(settings))
+
+    assert script.get_current_head() == EXPECTED_ALEMBIC_HEAD
 
 
 def test_a_failed_upgrade_gives_the_data_back_on_the_next_start(

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from alembic import command
+from alembic_head import EXPECTED_ALEMBIC_HEAD
 from sqlalchemy import create_engine, event, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -1388,7 +1389,7 @@ def test_migration_is_self_contained_and_chat_delete_cascades(tmp_path: Path) ->
             "prompt_expansion_item_update_guard",
         }
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "c8e2f4a71d90",
+            EXPECTED_ALEMBIC_HEAD,
         )
         batch_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(prompt_expansion_batches)")
