@@ -24,6 +24,7 @@ from local_lm.main import (
     maintain_automatic_recovery_backups,
 )
 from local_lm.runtime_provisioning import RuntimeProvisioner
+from local_lm.schemas import BackupInfo
 
 
 class VerificationConnection:
@@ -197,18 +198,78 @@ async def test_app_startup_creates_and_stops_automatic_backup_maintenance(
     app = create_app(settings)
 
     async with app.router.lifespan_context(app):
-        backups = BackupManager(settings).list()
         maintenance = next(
             task
             for task in asyncio.all_tasks()
             if task.get_name() == "maintain-automatic-recovery-backups"
         )
+
+        # The backup is no longer awaited before the lifespan yields, so it
+        # exists shortly after startup rather than at the moment of entry.
+        async def created() -> list[BackupInfo]:
+            while True:
+                existing = BackupManager(settings).list()
+                if existing:
+                    return existing
+                await asyncio.sleep(0.05)
+
+        backups = await asyncio.wait_for(created(), timeout=30)
         assert len(backups) == 1
         assert backups[0].media_included is False
         assert BackupManager(settings).verify(backups[0].name).verified is True
         assert maintenance.done() is False
 
     assert maintenance.cancelled() is True
+
+
+async def test_app_serves_while_daily_backup_verification_is_pending(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_ensure_daily_backup(self: BackupManager) -> None:
+        entered.set()
+        release.wait(timeout=30)
+
+    monkeypatch.setattr(BackupManager, "ensure_daily_backup", blocking_ensure_daily_backup)
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        dev=True,
+        chat_engine="mock",
+        media_engine="mock",
+    )
+    app = create_app(settings)
+
+    lifespan = app.router.lifespan_context(app)
+
+    # Startup must not wait on the verification. Bounded, because the failure
+    # this guards against is startup blocking for as long as the check takes,
+    # and an unbounded await would hang here rather than fail.
+    await asyncio.wait_for(lifespan.__aenter__(), timeout=10)
+
+    # Startup completed - the port would be open - while the verification is
+    # still running in its worker thread. This is the whole point of the
+    # change: an integrity check, a foreign-key check and a whole-file digest
+    # once held the port closed for as long as they took.
+    assert await asyncio.to_thread(entered.wait, 30) is True
+    maintenance = next(
+        task
+        for task in asyncio.all_tasks()
+        if task.get_name() == "maintain-automatic-recovery-backups"
+    )
+    assert maintenance.done() is False
+
+    # Shutdown must not cut a filesystem/SQLite operation midway: it waits for
+    # the shielded operation to finish rather than returning while it runs.
+    shutdown = asyncio.create_task(lifespan.__aexit__(None, None, None))
+    await asyncio.sleep(0.2)
+    assert shutdown.done() is False
+
+    release.set()
+    await asyncio.wait_for(shutdown, timeout=30)
+    assert maintenance.done() is True
 
 
 async def test_app_serves_while_managed_runtime_verification_is_pending(
