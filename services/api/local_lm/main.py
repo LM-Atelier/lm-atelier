@@ -291,8 +291,12 @@ async def maintain_automatic_recovery_backups(
     if interval_seconds <= 0:
         raise ValueError("automatic backup interval must be positive")
     while True:
-        await asyncio.sleep(interval_seconds)
+        # Check first, then sleep. The startup path used to await the first
+        # check before the lifespan yield, which held the port closed for as
+        # long as verification took - an integrity check, a foreign-key check
+        # and a whole-file digest, none of which needs the port shut.
         await ensure_automatic_recovery_backup(backups)
+        await asyncio.sleep(interval_seconds)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -321,7 +325,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     dry_run=False,
                 )
                 session.commit()
-            await ensure_automatic_recovery_backup(services.backups)
             services.orchestrator.recover_interrupted()
             services.downloads.recover_interrupted()
             logger.info(
