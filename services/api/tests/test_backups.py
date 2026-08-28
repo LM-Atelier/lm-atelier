@@ -651,3 +651,204 @@ def test_backup_prune_removes_only_stale_managed_transaction_files(tmp_path: Pat
     assert all(not path.exists() for path in stale)
     assert fresh.read_bytes() == b"preserve"
     assert unrelated.read_bytes() == b"preserve"
+
+
+def _verify_spy(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Record every structural verification, which is the cost being avoided."""
+
+    seen: list[Path] = []
+    original = BackupManager._verify_path
+
+    def spy(path: Path) -> None:
+        seen.append(path)
+        original(path)
+
+    monkeypatch.setattr(BackupManager, "_verify_path", staticmethod(spy))
+    return seen
+
+
+def test_a_same_day_relaunch_reuses_the_receipt_instead_of_verifying_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole point: the second start does not walk the database again.
+
+    `PRAGMA integrity_check` is a page-level structural walk and
+    `foreign_key_check` scans every foreign key, and both were being repeated
+    on every relaunch for a file already checked that day. This asserts the
+    structural check does not run the second time, rather than asserting the
+    result looks the same - a reused answer and a recomputed one are
+    indistinguishable from the outside, which is exactly why the spy is on the
+    work and not on the value.
+    """
+    settings = Settings(data_dir=tmp_path / "data")
+    settings.prepare()
+    _write_test_database(settings.state_dir / "local-lm.sqlite3", "current")
+    manager = BackupManager(settings)
+    today = datetime(2026, 7, 25, 1, 2, 3, tzinfo=UTC)
+
+    first = manager.ensure_daily_backup(now=today)
+    seen = _verify_spy(monkeypatch)
+    repeated = manager.ensure_daily_backup(now=today + timedelta(hours=20))
+
+    assert repeated.name == first.name
+    assert repeated.verified is True
+    assert seen == [], "the structural check ran again despite a matching receipt"
+
+
+def test_a_replaced_backup_cannot_inherit_the_earlier_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Different bytes under the same name must be verified on their own.
+
+    This is the failure the digest binding exists to prevent. A receipt keyed
+    on the file name, or on `(st_dev, st_ino)`, would match here: the name is
+    unchanged and an inode can be reused. The digest does not, so the
+    replacement is checked rather than trusted.
+    """
+    settings = Settings(data_dir=tmp_path / "data")
+    settings.prepare()
+    _write_test_database(settings.state_dir / "local-lm.sqlite3", "current")
+    manager = BackupManager(settings)
+    today = datetime(2026, 7, 25, 1, 2, 3, tzinfo=UTC)
+
+    first = manager.ensure_daily_backup(now=today)
+    backup_path = settings.backup_dir / first.name
+    # Replaced under the same name, which is precisely the case a name-keyed or
+    # inode-keyed receipt would wave through.
+    backup_path.unlink()
+    _write_test_database(backup_path, "replaced")
+
+    seen = _verify_spy(monkeypatch)
+    repeated = manager.ensure_daily_backup(now=today + timedelta(hours=1))
+
+    assert seen == [backup_path], "replaced bytes were not re-verified"
+    assert repeated.verified is True
+    assert _database_marker(settings.backup_dir / repeated.name) == "replaced"
+
+
+def test_a_damaged_receipt_causes_a_re_verification_rather_than_a_reuse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A receipt that cannot be read is no receipt, not a passing one."""
+    settings = Settings(data_dir=tmp_path / "data")
+    settings.prepare()
+    _write_test_database(settings.state_dir / "local-lm.sqlite3", "current")
+    manager = BackupManager(settings)
+    today = datetime(2026, 7, 25, 1, 2, 3, tzinfo=UTC)
+    first = manager.ensure_daily_backup(now=today)
+
+    receipt = manager._receipt_path(first.sha256)
+    assert receipt.is_file()
+    for damaged in ("", "not json at all", "[]", '{"schema": "wrong"}'):
+        receipt.write_text(damaged, encoding="utf-8")
+        seen = _verify_spy(monkeypatch)
+        assert manager.ensure_daily_backup(now=today + timedelta(hours=2)).verified is True
+        assert seen, f"a receipt reading {damaged!r} was treated as a pass"
+        monkeypatch.undo()
+
+
+def test_a_receipt_that_disagrees_about_size_is_not_reused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every recorded fact has to match, not only the one naming the file."""
+    settings = Settings(data_dir=tmp_path / "data")
+    settings.prepare()
+    _write_test_database(settings.state_dir / "local-lm.sqlite3", "current")
+    manager = BackupManager(settings)
+    today = datetime(2026, 7, 25, 1, 2, 3, tzinfo=UTC)
+    first = manager.ensure_daily_backup(now=today)
+
+    receipt = manager._receipt_path(first.sha256)
+    record = json.loads(receipt.read_text(encoding="utf-8"))
+    record["size_bytes"] = record["size_bytes"] + 1
+    receipt.write_text(json.dumps(record), encoding="utf-8")
+
+    seen = _verify_spy(monkeypatch)
+    assert manager.ensure_daily_backup(now=today + timedelta(hours=3)).verified is True
+    assert seen, "a receipt with the wrong size was accepted"
+
+
+def test_no_receipt_is_written_when_verification_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A receipt records a pass, so a failure must leave none behind."""
+    settings = Settings(data_dir=tmp_path / "data")
+    settings.prepare()
+    _write_test_database(settings.state_dir / "local-lm.sqlite3", "current")
+    manager = BackupManager(settings)
+    today = datetime(2026, 7, 25, 1, 2, 3, tzinfo=UTC)
+    first = manager.ensure_daily_backup(now=today)
+
+    for path in manager._receipt_dir().glob("*.json"):
+        path.unlink()
+
+    def always_fails(path: Path) -> None:
+        raise ValueError("backup failed SQLite integrity verification")
+
+    monkeypatch.setattr(BackupManager, "_verify_path", staticmethod(always_fails))
+    # The existing snapshot is skipped because it cannot be verified, so the
+    # call falls through to making a new one - and that failure propagates
+    # rather than returning an unverified backup.
+    with pytest.raises(ValueError):
+        manager.ensure_daily_backup(now=today + timedelta(hours=4))
+    monkeypatch.undo()
+
+    assert list(manager._receipt_dir().glob("*.json")) == [], (
+        "a receipt was written for a backup that did not pass"
+    )
+    assert first.sha256
+
+
+def test_receipts_older_than_every_retained_backup_are_pruned(tmp_path: Path) -> None:
+    """A receipt outlives its file, so something has to remove it.
+
+    Pruned on time rather than by digest deliberately: matching receipts to
+    retained backups would mean re-reading every retained backup in full,
+    which is the cost this change removes.
+    """
+    settings = Settings(data_dir=tmp_path / "data")
+    settings.prepare()
+    _write_test_database(settings.state_dir / "local-lm.sqlite3", "current")
+    manager = BackupManager(settings)
+    manager.ensure_daily_backup(now=datetime(2026, 7, 25, 1, 0, 0, tzinfo=UTC))
+
+    stale = manager._receipt_path("0" * 64)
+    stale.write_text(json.dumps({"schema": "old"}), encoding="utf-8")
+    ancient = datetime(2000, 1, 1, tzinfo=UTC).timestamp()
+    os.utime(stale, (ancient, ancient))
+    assert stale.is_file()
+
+    manager.prune()
+
+    assert not stale.exists(), "a receipt predating every retained backup survived"
+    assert list(manager._receipt_dir().glob("*.json")), "the live receipt was pruned too"
+
+
+def test_a_receipt_filed_under_one_digest_but_naming_another_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The recorded digest is checked, not merely the name it is filed under.
+
+    Receipts are content-addressed, so a wrong digest normally finds no file at
+    all and the body's `sha256` never gets consulted. That makes the field look
+    redundant - removing it passes every other test here, which is how it was
+    found. It is not redundant: it is the only thing binding identity if the
+    path scheme ever stops carrying the digest. This forges the one case the
+    filename cannot catch, a receipt sitting at the right path whose body
+    claims different bytes.
+    """
+    settings = Settings(data_dir=tmp_path / "data")
+    settings.prepare()
+    _write_test_database(settings.state_dir / "local-lm.sqlite3", "current")
+    manager = BackupManager(settings)
+    today = datetime(2026, 7, 25, 1, 2, 3, tzinfo=UTC)
+    first = manager.ensure_daily_backup(now=today)
+
+    receipt = manager._receipt_path(first.sha256)
+    record = json.loads(receipt.read_text(encoding="utf-8"))
+    record["sha256"] = "f" * 64
+    receipt.write_text(json.dumps(record), encoding="utf-8")
+
+    seen = _verify_spy(monkeypatch)
+    assert manager.ensure_daily_backup(now=today + timedelta(hours=5)).verified is True
+    assert seen, "a receipt naming different bytes was accepted at the right path"
