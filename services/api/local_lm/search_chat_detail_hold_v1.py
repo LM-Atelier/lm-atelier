@@ -1,4 +1,4 @@
-"""Requested legacy ChatDetail retention policy (item 41).
+"""Requested legacy ChatDetail retention policy.
 
 Records requested_policy and a caller-declared consumer count only.
 This module does not inventory consumers or remove an endpoint.

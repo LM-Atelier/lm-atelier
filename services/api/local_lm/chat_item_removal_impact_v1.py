@@ -1,4 +1,4 @@
-"""Requested removal-impact preview facts (item 39).
+"""Requested removal-impact preview facts.
 
 Records caller-declared reply, regeneration, and proposed detach
 identities. This module does not verify a repository snapshot or

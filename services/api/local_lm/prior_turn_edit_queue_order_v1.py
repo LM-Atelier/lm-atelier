@@ -1,4 +1,4 @@
-"""Requested queue-order policy for prior-turn edit (item 40).
+"""Requested queue-order policy for prior-turn edit.
 
 Records requested_policy only. This module does not reorder or activate
 the live queue.

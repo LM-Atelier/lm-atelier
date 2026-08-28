@@ -1,4 +1,4 @@
-"""Pure structured search snippet segments (item 41).
+"""Pure structured search snippet segments.
 
 Builds bounded ordered {text, matched} segments from already-visible body
 text. Never emits HTML or loads an entire chat. Matching runs over a
