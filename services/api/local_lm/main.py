@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
+import threading
+import time
 from collections.abc import Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass
@@ -61,6 +64,7 @@ AUTOMATIC_BACKUP_CHECK_INTERVAL_SECONDS = 60 * 60
 API_LOG_MAX_BYTES = 2 * 1024 * 1024
 API_LOG_BACKUP_COUNT = 3
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+STARTUP_STAGE_WARN_SECONDS = 30.0
 
 
 def _request_hostname(authority: str) -> str | None:
@@ -127,6 +131,65 @@ def _api_file_logging(settings: Settings) -> Iterator[None]:
     finally:
         root_logger.removeHandler(handler)
         handler.close()
+
+
+def _emit_startup_notice(message: str) -> None:
+    """Say it on both channels, because either one can be the missing one.
+
+    The api.log handler does not exist until the lifespan installs it, and the
+    stages that run before that are exactly the ones a silent hang hides. A
+    flushed stderr line survives both that gap and a wedged file handler.
+    """
+    logger.warning(message)
+    print(f"local_lm: {message}", file=sys.stderr, flush=True)
+
+
+@contextmanager
+def _startup_stage(name: str, *, warn_after: float = STARTUP_STAGE_WARN_SECONDS) -> Iterator[None]:
+    """Name a slow startup stage while it is still running, not after it ends.
+
+    Timing a stage and reporting the duration afterwards proves nothing about a
+    stage that never returns, which is the case worth diagnosing: a start that
+    hangs for seventy minutes reports no duration at all, because nothing
+    reaches the line that would log it. A watchdog thread reports from outside
+    the stage instead, so the last name emitted is the stage still running.
+
+    Bounded on purpose. A healthy start emits nothing, because a stage that
+    beats warn_after says nothing on entry or exit; only a stage that overruns
+    speaks, and then it repeats so the log shows the wait growing rather than
+    one line that could be mistaken for a completed step.
+
+    Emission is serialized with finalization because clearing the event is not
+    enough on its own. `finished.set()` stops another wait cycle, but a watchdog
+    that has already returned from `wait` is past that check and will still
+    write its line - after the stage has exited and recorded that it finished.
+    That inverts the one guarantee here, which is that the last stage named is
+    the stage still running. Holding the lock across the check and the write
+    means a watchdog either speaks while the stage is genuinely running or,
+    finding the stage finished ahead of it, does not speak at all.
+    """
+    finished = threading.Event()
+    speaking = threading.Lock()
+    started = time.perf_counter()
+
+    def watch() -> None:
+        while not finished.wait(warn_after):
+            with speaking:
+                if finished.is_set():
+                    return
+                waited = time.perf_counter() - started
+                _emit_startup_notice(f"startup stage {name} still running after {waited:.0f}s")
+
+    watcher = threading.Thread(target=watch, name=f"startup-stage-{name}", daemon=True)
+    watcher.start()
+    try:
+        yield
+    finally:
+        finished.set()
+        with speaking:
+            elapsed = time.perf_counter() - started
+            if elapsed >= warn_after:
+                _emit_startup_notice(f"startup stage {name} finished after {elapsed:.0f}s")
 
 
 async def _cancel_task(task: asyncio.Task[Any] | None) -> None:
@@ -301,32 +364,45 @@ async def maintain_automatic_recovery_backups(
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     _configure_console_logging()
-    active_settings = settings or get_settings()
-    active_settings.prepare()
-    instance_identity = load_or_create_instance_identity(active_settings.data_dir)
-    BackupManager(active_settings).apply_pending_restore()
-    configure_database(active_settings)
-    services = build_services(active_settings)
+    with _startup_stage("load-settings"):
+        active_settings = settings or get_settings()
+    with _startup_stage("settings-prepare"):
+        active_settings.prepare()
+    with _startup_stage("instance-identity"):
+        instance_identity = load_or_create_instance_identity(active_settings.data_dir)
+    with _startup_stage("pending-restore"):
+        BackupManager(active_settings).apply_pending_restore()
+    with _startup_stage("configure-database"):
+        configure_database(active_settings)
+    with _startup_stage("build-services"):
+        services = build_services(active_settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
         with _api_file_logging(active_settings):
-            upgrade_database(active_settings)
+            with _startup_stage("database-migrations"):
+                upgrade_database(active_settings)
             with SessionLocal() as session:
-                recover_model_delete_quarantines(
-                    session,
-                    active_settings.model_dir.resolve(),
-                )
-                seed_defaults(session, active_settings)
-                services.artifacts.cleanup_retention(
-                    session,
-                    retention_days=active_settings.artifact_retention_days,
-                    temporary_hours=active_settings.temporary_retention_hours,
-                    dry_run=False,
-                )
-                session.commit()
-            services.orchestrator.recover_interrupted()
-            services.downloads.recover_interrupted()
+                with _startup_stage("model-delete-quarantine-recovery"):
+                    recover_model_delete_quarantines(
+                        session,
+                        active_settings.model_dir.resolve(),
+                    )
+                with _startup_stage("seed-defaults"):
+                    seed_defaults(session, active_settings)
+                with _startup_stage("artifact-retention-cleanup"):
+                    services.artifacts.cleanup_retention(
+                        session,
+                        retention_days=active_settings.artifact_retention_days,
+                        temporary_hours=active_settings.temporary_retention_hours,
+                        dry_run=False,
+                    )
+                with _startup_stage("session-commit"):
+                    session.commit()
+            with _startup_stage("orchestrator-recovery"):
+                services.orchestrator.recover_interrupted()
+            with _startup_stage("download-recovery"):
+                services.downloads.recover_interrupted()
             logger.info(
                 "LM Atelier %s started on %s:%s",
                 __version__,
