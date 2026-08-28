@@ -542,6 +542,13 @@ h1, h2, h3 { margin: 0; }
 .segmented.compact { margin: 16px 22px 0; }
 .segmented button { flex: 1; border: 0; background: transparent; color: var(--ink-muted); border-radius: 6px; padding: 7px; text-transform: capitalize; cursor: pointer; }
 .segmented button.active { background: var(--panel-3); color: var(--cream); }
+/* The role tabs pick WHICH engine's settings are on screen; the visibility row
+   below picks how much of them to show. Both were the same segmented pill, so
+   two different kinds of choice looked like one control repeated. Drawn as a
+   tab strip instead: the shape now says "section", not "option". */
+.segmented.settings-role-tabs { background: none; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; padding: 0; margin: 14px 22px 0; gap: 2px; }
+.segmented.settings-role-tabs button { flex: 0 0 auto; padding: 8px 14px; border-radius: 0; border-bottom: 2px solid transparent; font-weight: 600; }
+.segmented.settings-role-tabs button.active { background: none; color: var(--cream); border-bottom-color: var(--accent); }
 .settings-list { overflow-y: auto; padding: 12px 22px 25px; }
 /* Rows: visibility segmented, scrolling settings, optional LoRA section, actions. */
 .generation-settings-panel { min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto; }
