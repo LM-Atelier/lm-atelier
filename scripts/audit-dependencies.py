@@ -30,16 +30,18 @@ it. Inputs are the parsed report; the exit code is the verdict.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 #: Distributions that cannot be audited and are expected not to be. Exact
 #: names, never a prefix or a pattern: this repository's own package has no
 #: published release to compare against, and nothing else here has that excuse.
 UNAUDITABLE_BY_NATURE = frozenset({"lm-atelier-api"})
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+AUDIT_CACHE_DIR = REPOSITORY_ROOT / "temp" / "pip-audit-cache"
 
 
 def decide(report: Mapping[str, Any], log: list[str]) -> int:
@@ -169,11 +171,17 @@ def _run_pip_audit(argv: Sequence[str]) -> Mapping[str, Any]:
     return report
 
 
+def prepare_audit_cache() -> Path:
+    """Create and return the one repository-owned audit cache directory."""
+
+    AUDIT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    return AUDIT_CACHE_DIR
+
+
 def main() -> int:
-    cache = os.environ.get("PIP_AUDIT_CACHE_DIR", "temp/pip-audit-cache")
-    os.makedirs(cache, exist_ok=True)
+    cache = prepare_audit_cache()
     report = _run_pip_audit(
-        ("--skip-editable", "--progress-spinner", "off", "--cache-dir", cache)
+        ("--skip-editable", "--progress-spinner", "off", "--cache-dir", str(cache))
     )
     log: list[str] = []
     status = decide(report, log)
