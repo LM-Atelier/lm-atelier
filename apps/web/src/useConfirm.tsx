@@ -6,7 +6,7 @@ type Request = {
   question: string;
   detail?: ReactNode;
   confirmLabel: string;
-  tone?: "danger" | "trust";
+  tone?: "action" | "danger" | "trust";
 };
 
 /** Ask a question and wait for the answer, the way window.confirm read.
