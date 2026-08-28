@@ -7,6 +7,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import tempfile
 import uuid
 from contextlib import suppress
@@ -221,6 +222,70 @@ class ArtifactStore:
                 raise ValueError("artifact file checksum does not match its record")
             self._verified_files[path] = fingerprint
         return path
+
+    def verified_bytes(self, artifact: Artifact, *, maximum_bytes: int) -> bytes:
+        """Read bounded artifact bytes from the descriptor that is verified.
+
+        A pathname check followed by a later pathname read does not bind both
+        operations to one file. This walk holds the store and both digest
+        shards, opens the digest entry through the held leaf, and derives the
+        size, digest, and returned bytes from that one descriptor. The ordinary
+        verified-path cache is intentionally irrelevant to an authorization
+        decision about exact bytes.
+        """
+
+        if maximum_bytes < 0:
+            raise ValueError("maximum artifact read size is invalid")
+        digest_value = artifact.sha256
+        if artifact.id != f"sha256:{digest_value}" or not _SHA256.fullmatch(digest_value):
+            raise ValueError("artifact identity is invalid")
+        expected_relative = PurePosixPath(
+            digest_value[:2],
+            digest_value[2:4],
+            digest_value,
+        ).as_posix()
+        if artifact.relative_path != expected_relative:
+            raise ValueError("artifact path is not canonical")
+
+        descriptor: int | None = None
+        try:
+            with (
+                AnchoredDirectory(self.root) as root,
+                open_child_directory(root, digest_value[:2]) as first,
+                open_child_directory(first, digest_value[2:4]) as second,
+            ):
+                descriptor = open_entry(second, digest_value)
+                if descriptor is None:
+                    raise FileNotFoundError("artifact file is missing")
+                measured = os.fstat(descriptor)
+                if not stat.S_ISREG(measured.st_mode):
+                    raise ValueError("artifact entry is not a regular file")
+                if measured.st_size != artifact.size_bytes:
+                    raise ValueError("artifact file size does not match its record")
+                if measured.st_size > maximum_bytes:
+                    raise ValueError("artifact is larger than this read allows")
+
+                content = bytearray()
+                content_digest = hashlib.sha256()
+                with os.fdopen(descriptor, "rb") as source:
+                    descriptor = None
+                    while chunk := source.read(1024 * 1024):
+                        content.extend(chunk)
+                        if len(content) > measured.st_size:
+                            raise ValueError("artifact file size does not match its record")
+                        content_digest.update(chunk)
+        except AnchoredDirectoryError as exc:
+            raise ValueError("artifact path could not be held for reading") from exc
+        finally:
+            if descriptor is not None:
+                with suppress(OSError):
+                    os.close(descriptor)
+
+        if len(content) != artifact.size_bytes:
+            raise ValueError("artifact file size does not match its record")
+        if content_digest.hexdigest() != digest_value:
+            raise ValueError("artifact file checksum does not match its record")
+        return bytes(content)
 
     def delivery_metadata(self, artifact: Artifact) -> tuple[Path, str, str]:
         path = self.verified_path(artifact)

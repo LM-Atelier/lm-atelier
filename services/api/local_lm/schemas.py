@@ -2219,6 +2219,24 @@ class ReferenceAssetOut(ApiModel):
     validation_state: str
 
 
+ReferenceReviewReason = Annotated[
+    StrictStr,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=200),
+]
+
+
+class ReferenceAssetReview(ApiModel):
+    outcome: StrictStr = Field(min_length=1, max_length=30)
+    reasons: list[ReferenceReviewReason] = Field(default_factory=list, max_length=16)
+
+
+class ReferenceAssetReviewed(ApiModel):
+    asset: ReferenceAssetOut
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+    review_version: int = Field(gt=1)
+
+
 class ReferenceSimilarAsset(ApiModel):
     """An image already held that closely resembles the one just added."""
 
