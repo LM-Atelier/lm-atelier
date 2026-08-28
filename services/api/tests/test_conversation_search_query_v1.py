@@ -81,6 +81,33 @@ def test_scoring_counts_distinct_terms_and_folds_case() -> None:
     assert term_coverage_score("nothing here", "alpha beta") == 0
 
 
+def test_a_repeated_query_term_counts_once() -> None:
+    """Distinct coverage is the contract; position counting inflated rank.
+
+    query_terms casefolds each part but keeps duplicate positions, so
+    "alpha alpha" and "ALPHA alpha" both scored 2 against a body that
+    contains alpha once.
+    """
+    assert term_coverage_score("alpha", "alpha") == 1
+    assert term_coverage_score("alpha", "alpha alpha") == 1
+    assert term_coverage_score("alpha", "alpha alpha alpha") == 1
+    assert term_coverage_score("alpha", "ALPHA alpha") == 1
+    assert term_coverage_score("alpha beta", "alpha alpha beta") == 2
+
+
+def test_a_padded_query_does_not_outrank_a_different_term() -> None:
+    """A repeated term must not rank above a document covering another term."""
+    ranked = rank_candidate_bodies(
+        [
+            ("narrow", "alpha"),
+            ("other", "beta gamma"),
+        ],
+        "alpha alpha beta",
+    )
+    scores = {row[0]: row[2] for row in ranked}
+    assert scores == {"narrow": 1, "other": 1}
+
+
 def test_fixed_location_facts_cannot_be_set_by_a_caller() -> None:
     """activates_branch and loads_entire_chat are facts, not defaults.
 
