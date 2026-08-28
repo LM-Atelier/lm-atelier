@@ -39,9 +39,7 @@ import { ActiveChatWorkflowSelector } from "./ActiveChatWorkflowSelector";
 import { CopyTextButton } from "./CopyTextButton";
 import { InstallConfirmDialog } from "./InstallConfirmDialog";
 import { api } from "./api";
-import {
-  formatBytes,
-} from "./format";
+import { formatBytes } from "./format";
 import { videoLengthSummary } from "./videoLength";
 import { GlobalNotices } from "./GlobalNotices";
 import {
@@ -73,6 +71,7 @@ import { mediaOutputCountForTurn, useMediaOutputCount } from "./mediaOutputCount
 import type { TurnReference } from "./mentionDraft";
 import { useComposerMentions } from "./useComposerMentions";
 import { useConfirm } from "./useConfirm";
+import { useTurnConfirmation } from "./useTurnConfirmation";
 import { drawerRoleView, focusMainContent, roleForMode } from "./viewHelpers";
 import { ArtifactPart } from "./ArtifactPart";
 import { ImageStudioIcon } from "./ImageStudioIcon";
@@ -2077,6 +2076,7 @@ function Sidebar({
 
 export default function App() {
   const client = useQueryClient();
+  const [turnConfirmDialog, requestTurnConfirmation] = useTurnConfirmation();
   const [view, setView] = useState<View>("chat");
   const { appearance, sidebar } = useWorkspaceChrome();
   const [studioSource, setStudioSource] = useState<{ artifactId: string; chatId: string | null } | null>(null);
@@ -2118,7 +2118,6 @@ export default function App() {
   const workflows = useQuery({ queryKey: ["workflows"], queryFn: api.workflows });
   const applicationInfo = useQuery({ queryKey: ["about"], queryFn: api.about });
   const eventsConnected = useLiveEvents(client, setLiveText);
-
   const createChat = useMutation({
     mutationFn: (projectId?: string | null) => api.createChat(projectId),
     onSuccess: (created) => {
@@ -2152,14 +2151,14 @@ export default function App() {
   };
   const send = useMutation({
     mutationFn: ({ chatId, id, text, mode, artifacts, settings, references, outputCount, promptSource, stopCurrent }: SendTurnVariables) => {
-      if (stopCurrent) {
-        if (promptSource) return api.stopAndSendTurn(chatId, text, mode, artifacts, settings, id, references, outputCount, promptSource);
-        if (outputCount !== undefined) return api.stopAndSendTurn(chatId, text, mode, artifacts, settings, id, references, outputCount);
-        return api.stopAndSendTurn(chatId, text, mode, artifacts, settings, id, references);
-      }
-      if (promptSource) return api.sendTurn(chatId, text, mode, artifacts, settings, id, "turns", undefined, references, outputCount, promptSource);
-      if (outputCount !== undefined) return api.sendTurn(chatId, text, mode, artifacts, settings, id, "turns", undefined, references, outputCount);
-      return api.sendTurn(chatId, text, mode, artifacts, settings, id, "turns", undefined, references);
+      if (stopCurrent) return api.stopAndSendTurn(
+        chatId, text, mode, artifacts, settings, id, references, outputCount,
+        promptSource, requestTurnConfirmation,
+      );
+      return api.sendTurn(
+        chatId, text, mode, artifacts, settings, id, "turns", undefined,
+        references, outputCount, promptSource, requestTurnConfirmation,
+      );
     },
     onMutate: ({ chatId, id, text, mode }) => {
       setPendingTurns((current) => ({
@@ -2456,6 +2455,7 @@ export default function App() {
         onOpenWorkflows={() => { setSetupOpen(false); openWorkflows(); }}
       />
       <JobsPanel />
+      {turnConfirmDialog}
       <GlobalNotices connected={eventsConnected} mutations={[send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, createChat, createProject, exportProject, importProject, manageChat, deleteChat, updateProject, deleteProject, deleteExchange, removeItem, forkThread]} />
     </div>
   );

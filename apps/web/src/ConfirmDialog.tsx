@@ -1,13 +1,13 @@
 import { useState, type ReactNode } from "react";
 import { AccessibleDialog } from "./AccessibleDialog";
 
-/** Ask before something irreversible, in the app rather than in OS chrome.
+/** Ask before an important action, in the app rather than in OS chrome.
  *
  * `window.confirm` cannot say what is about to be lost, cannot show the
  * count, and cannot look any different for "rename this project" than for
- * "run this code on your machine". Everything it guards here is either
- * destructive or a trust decision, so the question is asked where it can
- * carry its own weight.
+ * "run this code on your machine". Destructive, trust, and resource-bearing
+ * start decisions each get truthful treatment where their facts can carry
+ * their own weight.
  */
 export function ConfirmDialog({
   title,
@@ -25,7 +25,7 @@ export function ConfirmDialog({
   question: string;
   detail?: ReactNode;
   confirmLabel: string;
-  tone?: "danger" | "trust";
+  tone?: "action" | "danger" | "trust";
   confirmDisabled?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
@@ -33,7 +33,7 @@ export function ConfirmDialog({
   return (
     <AccessibleDialog
       title={title}
-      eyebrow={tone === "trust" ? "Trust decision" : "Cannot be undone"}
+      eyebrow={tone === "trust" ? "Trust decision" : tone === "action" ? "Confirm action" : "Cannot be undone"}
       closeLabel="Close without changing anything"
       onClose={onCancel}
       className="confirm-dialog"
@@ -45,7 +45,7 @@ export function ConfirmDialog({
           Cancel
         </button>
         <button
-          className={tone === "trust" ? "primary" : "secondary danger"}
+          className={tone === "trust" || tone === "action" ? "primary" : "secondary danger"}
           disabled={confirmDisabled}
           onClick={onConfirm}
         >

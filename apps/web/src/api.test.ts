@@ -417,8 +417,7 @@ it("returns the complete uploaded artifact for composer previews", async () => {
   expect(new Headers(fetchMock.mock.calls[1][1]?.headers).get("x-local-lm-csrf")).toBe("csrf");
 });
 it("confirms a bounded ordered plan without changing Auto mode", async () => {
-  const confirm = vi.fn(() => true);
-  vi.stubGlobal("confirm", confirm);
+  const confirmTurn = vi.fn(async () => true);
   const fetchMock = vi.fn()
     .mockResolvedValueOnce(
       new Response(JSON.stringify({ csrf_token: "csrf" }), {
@@ -465,15 +464,117 @@ it("confirms a bounded ordered plan without changing Auto mode", async () => {
     [],
     {},
     "ordered-key",
+    "turns",
+    undefined,
+    [],
+    undefined,
+    undefined,
+    confirmTurn,
   );
 
-  expect(confirm).toHaveBeenCalledWith(
-    "3-step plan: text → image → video · about 4 seconds of video · up to 2 GB working space. Start it?",
-  );
+  expect(confirmTurn).toHaveBeenCalledWith({
+    kind: "ordered_plan",
+    title: "Start ordered plan?",
+    question: "This request will run 3 steps in sequence.",
+    confirmLabel: "Start plan",
+    details: {
+      sequence: ["text", "image", "video"],
+      videoDurationSeconds: 4,
+      estimatedWorkingBytes: 2 * 1024 ** 3,
+    },
+  });
+  const firstBody = JSON.parse(String(fetchMock.mock.calls[1][1]?.body));
   const retryBody = JSON.parse(String(fetchMock.mock.calls[2][1]?.body));
+  expect(retryBody).toEqual({ ...firstBody, confirm_media: true });
   expect(retryBody.mode).toBe("auto");
   expect(retryBody.confirm_media).toBe(true);
   expect(retryBody.idempotency_key).toBe("ordered-key");
+});
+
+it("keeps recognized confirmation refusals typed when absent or canceled", async () => {
+  const orderedDetail = {
+    code: "ordered_plan_confirmation_required",
+    plan: { steps: [{ mode: "text" }, { mode: "image" }] },
+    estimate: {},
+  };
+  const routeDetail = {
+    code: "route_confirmation_required",
+    plan: { operation: "text_to_video" },
+    estimate: { duration_seconds: 6 },
+  };
+  const refused = (detail: object) => new Response(JSON.stringify({ detail }), {
+    status: 409,
+    headers: { "content-type": "application/json" },
+  });
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }))
+    .mockResolvedValueOnce(refused(orderedDetail))
+    .mockResolvedValueOnce(refused(routeDetail))
+    .mockResolvedValueOnce(refused(orderedDetail))
+    .mockResolvedValueOnce(refused(routeDetail));
+  vi.stubGlobal("fetch", fetchMock);
+  const { api } = await import("./api");
+
+  await expect(api.sendTurn("chat", "ordered", "auto", [], {}, "absent-ordered"))
+    .rejects.toMatchObject({ status: 409, detail: orderedDetail });
+  await expect(api.sendTurn("chat", "route", "auto", [], {}, "absent-route"))
+    .rejects.toMatchObject({ status: 409, detail: routeDetail });
+  const cancel = vi.fn(async () => false);
+  await expect(api.sendTurn(
+    "chat", "cancel-ordered", "auto", [], {}, "cancel-ordered", "turns", undefined,
+    [], undefined, undefined, cancel,
+  )).rejects.toMatchObject({ status: 409, detail: orderedDetail });
+  await expect(api.sendTurn(
+    "chat", "cancel", "auto", [], {}, "cancel-route", "turns", undefined,
+    [], undefined, undefined, cancel,
+  )).rejects.toMatchObject({ status: 409, detail: routeDetail });
+
+  expect(cancel).toHaveBeenCalledTimes(2);
+  expect(fetchMock).toHaveBeenCalledTimes(5);
+});
+
+it("forwards confirmation through stop-and-send and retries that endpoint once", async () => {
+  const accepted = new Response(JSON.stringify({ accepted: true }), {
+    status: 202,
+    headers: { "content-type": "application/json" },
+  });
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({
+      detail: {
+        code: "route_confirmation_required",
+        plan: { operation: "text_to_image" },
+        estimate: { estimated_intermediate_bytes: 2 * 1024 ** 3 },
+      },
+    }), {
+      status: 409,
+      headers: { "content-type": "application/json" },
+    }))
+    .mockResolvedValueOnce(accepted);
+  vi.stubGlobal("fetch", fetchMock);
+  const confirmTurn = vi.fn(async () => true);
+  const { api } = await import("./api");
+
+  await api.stopAndSendTurn(
+    "chat-stop", "replace it", "auto", [], {}, "stop-key", [], undefined,
+    undefined, confirmTurn,
+  );
+
+  expect(fetchMock.mock.calls[1][0]).toBe("/api/chats/chat-stop/stop-and-send");
+  expect(fetchMock.mock.calls[2][0]).toBe("/api/chats/chat-stop/stop-and-send");
+  const firstBody = JSON.parse(String(fetchMock.mock.calls[1][1]?.body));
+  const retryBody = JSON.parse(String(fetchMock.mock.calls[2][1]?.body));
+  expect(retryBody).toEqual({ ...firstBody, mode: "image", confirm_media: true });
+  expect(firstBody.idempotency_key).toBe("stop-key");
+  expect(retryBody.idempotency_key).toBe("stop-key");
+  expect(retryBody.confirm_media).toBe(true);
+  expect(confirmTurn).toHaveBeenCalledTimes(1);
 });
 
 it("opens the event socket from the sequence returned by session initialization", async () => {
@@ -1305,7 +1406,7 @@ it("sends Prompt Library authority as a dedicated top-level turn field", async (
 });
 
 it("sends an explicit media output count and never leaks it into Auto", async () => {
-  vi.stubGlobal("confirm", vi.fn(() => true));
+  const confirmTurn = vi.fn(async () => true);
   const accepted = () => new Response(JSON.stringify({ accepted: true }), {
     status: 202,
     headers: { "content-type": "application/json" },
@@ -1339,14 +1440,23 @@ it("sends an explicit media output count and never leaks it into Auto", async ()
   );
   await api.sendTurn(
     "chat-1", "choose for me", "auto", [], {}, "auto-count", "turns", undefined, [], 4,
+    undefined, confirmTurn,
   );
 
   const imageBody = JSON.parse(String(fetchMock.mock.calls[1][1]?.body));
   const autoBody = JSON.parse(String(fetchMock.mock.calls[2][1]?.body));
   const confirmedAutoBody = JSON.parse(String(fetchMock.mock.calls[3][1]?.body));
+  expect(confirmedAutoBody).toEqual({ ...autoBody, mode: "image", confirm_media: true });
   expect(imageBody.output_count).toBe(4);
   expect(autoBody).not.toHaveProperty("output_count");
   expect(confirmedAutoBody.mode).toBe("image");
   expect(confirmedAutoBody.confirm_media).toBe(true);
   expect(confirmedAutoBody).not.toHaveProperty("output_count");
+  expect(confirmTurn).toHaveBeenCalledWith({
+    kind: "media_route",
+    title: "Start image generation?",
+    question: "Auto mode suggests an image generation.",
+    confirmLabel: "Start image",
+    details: { operation: "image" },
+  });
 });

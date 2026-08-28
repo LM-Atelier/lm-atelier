@@ -95,6 +95,32 @@ import type {
   ProjectWorkflowSelectionInput,
 } from "./types";
 
+export type TurnConfirmationRequest = {
+  kind: "ordered_plan";
+  title: string;
+  question: string;
+  confirmLabel: string;
+  details: {
+    sequence: string[];
+    videoDurationSeconds?: number;
+    estimatedWorkingBytes?: number;
+  };
+} | {
+  kind: "media_route";
+  title: string;
+  question: string;
+  confirmLabel: string;
+  details: {
+    operation: "image" | "video";
+    durationSeconds?: number;
+    estimatedIntermediateBytes?: number;
+  };
+};
+
+export type TurnConfirmationHandler = (
+  request: TurnConfirmationRequest,
+) => Promise<boolean>;
+
 let csrfToken = "";
 let eventEpoch = "";
 let eventSequence = 0;
@@ -360,6 +386,7 @@ export const api = {
     references: TurnReference[] = [],
     outputCount?: number,
     promptSource?: ComposerPromptSource,
+    confirmTurn?: TurnConfirmationHandler,
   ) => {
     // The count belongs to the mode the person explicitly chose. Auto may
     // later confirm a media route, but that must not resurrect a hidden media
@@ -389,8 +416,6 @@ export const api = {
       const plan = detail?.plan && typeof detail.plan === "object" ? detail.plan as Record<string, unknown> : null;
       const operation = typeof plan?.operation === "string" ? plan.operation : "";
       const estimate = detail?.estimate && typeof detail.estimate === "object" ? detail.estimate as Record<string, unknown> : null;
-      const duration = typeof estimate?.duration_seconds === "number" ? `, about ${estimate.duration_seconds} seconds of output` : "";
-      const intermediate = typeof estimate?.estimated_intermediate_bytes === "number" ? ` and up to ${Math.ceil(estimate.estimated_intermediate_bytes / 1024 ** 3)} GB of intermediate data` : "";
       const orderedSteps = Array.isArray(plan?.steps)
         ? plan.steps.filter((step): step is Record<string, unknown> => (
           Boolean(step) && typeof step === "object"
@@ -402,34 +427,59 @@ export const api = {
         && detail?.code === "ordered_plan_confirmation_required"
         && orderedSteps.length >= 2
       ) {
-        const sequence = orderedSteps
-          .map((step) => typeof step.mode === "string" ? step.mode : "work")
-          .join(" → ");
         const orderedEstimate = detail.estimate && typeof detail.estimate === "object"
           ? detail.estimate as Record<string, unknown>
           : null;
-        const videoDuration = typeof orderedEstimate?.video_duration_seconds === "number"
-          && orderedEstimate.video_duration_seconds > 0
-          ? ` · about ${orderedEstimate.video_duration_seconds} seconds of video`
-          : "";
-        const workingBytes = typeof orderedEstimate?.estimated_bytes === "number"
-          && orderedEstimate.estimated_bytes > 0
-          ? ` · up to ${Math.ceil(orderedEstimate.estimated_bytes / 1024 ** 3)} GB working space`
-          : "";
-        if (window.confirm(
-          `${orderedSteps.length}-step plan: ${sequence}${videoDuration}${workingBytes}. Start it?`,
-        )) {
+        if (!confirmTurn) throw error;
+        const confirmed = await confirmTurn({
+          kind: "ordered_plan",
+          title: "Start ordered plan?",
+          question: `This request will run ${orderedSteps.length} steps in sequence.`,
+          confirmLabel: "Start plan",
+          details: {
+            sequence: orderedSteps.map((step) => (
+              typeof step.mode === "string" ? step.mode : "work"
+            )),
+            ...(typeof orderedEstimate?.video_duration_seconds === "number"
+              && orderedEstimate.video_duration_seconds > 0
+              ? { videoDurationSeconds: orderedEstimate.video_duration_seconds }
+              : {}),
+            ...(typeof orderedEstimate?.estimated_bytes === "number"
+              && orderedEstimate.estimated_bytes > 0
+              ? { estimatedWorkingBytes: orderedEstimate.estimated_bytes }
+              : {}),
+          },
+        });
+        if (confirmed) {
           return submit("auto", true);
         }
+        throw error;
       }
       if (
         error instanceof ApiError
         && error.status === 409
         && detail?.code === "route_confirmation_required"
         && (operation.includes("image") || operation.includes("video"))
-        && window.confirm(`Auto mode suggests a ${operation.includes("video") ? "video" : "image"} generation${duration}${intermediate}. Start it?`)
       ) {
-        return submit(operation.includes("video") ? "video" : "image", true);
+        if (!confirmTurn) throw error;
+        const selectedOperation = operation.includes("video") ? "video" : "image";
+        const confirmed = await confirmTurn({
+          kind: "media_route",
+          title: `Start ${selectedOperation} generation?`,
+          question: `Auto mode suggests ${selectedOperation === "image" ? "an" : "a"} ${selectedOperation} generation.`,
+          confirmLabel: `Start ${selectedOperation}`,
+          details: {
+            operation: selectedOperation,
+            ...(typeof estimate?.duration_seconds === "number"
+              ? { durationSeconds: estimate.duration_seconds }
+              : {}),
+            ...(typeof estimate?.estimated_intermediate_bytes === "number"
+              ? { estimatedIntermediateBytes: estimate.estimated_intermediate_bytes }
+              : {}),
+          },
+        });
+        if (confirmed) return submit(selectedOperation, true);
+        throw error;
       }
       throw error;
     }
@@ -444,6 +494,7 @@ export const api = {
     references: TurnReference[] = [],
     outputCount?: number,
     promptSource?: ComposerPromptSource,
+    confirmTurn?: TurnConfirmationHandler,
   ) => api.sendTurn(
     chatId,
     text,
@@ -456,6 +507,7 @@ export const api = {
     references,
     outputCount,
     promptSource,
+    confirmTurn,
   ),
   regenerateMessage: (messageId: string, settings: Record<string, unknown>) =>
     request<TurnAccepted>(`/api/messages/${messageId}/regenerate`, {

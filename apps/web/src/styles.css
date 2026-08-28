@@ -1204,6 +1204,7 @@ h1, h2, h3 { margin: 0; }
 .confirm-dialog { width: min(520px, 96vw); }
 .confirm-dialog p { color: var(--muted); line-height: 1.55; }
 .confirm-dialog footer { margin-top: 14px; }
+.confirm-details { margin: 12px 0; padding-left: 20px; color: var(--muted); line-height: 1.55; }
 .confirm-facts { display: grid; gap: 6px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); padding: 11px; margin: 12px 0; }
 .confirm-facts > div { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 8px; }
 .confirm-facts dt { color: var(--muted); font-size: 11px; }
