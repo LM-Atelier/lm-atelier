@@ -65,7 +65,7 @@ def test_each_input_that_moves_is_named_when_it_moves() -> None:
     stored = evidence(
         runtime_contract_sha256="b" * 64, launch_scope_sha256="c" * 64, runtime_managed=True
     )
-    cases = {
+    cases: dict[str, dict[str, object]] = {
         "the workflow itself changed since it was checked": {"artifact_sha256": "d" * 64},
         "the installed node types changed": {"node_inventory": ["KSampler"]},
         "the reviewed node list changed": {"whitelist": ["KSampler"]},

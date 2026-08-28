@@ -148,12 +148,13 @@ async def test_cursor_tamper_cross_filter_and_missing_anchor_are_fixed_422(
     assert isinstance(cursor, str)
 
     tampered = cursor[:-1] + ("A" if cursor[-1] != "A" else "B")
-    for params in (
+    invalid_params: tuple[dict[str, str | int], ...] = (
         {"limit": 1, "cursor": tampered},
         {"limit": 2, "cursor": cursor},
         {"limit": 1, "cursor": cursor, "kind": "image"},
         {"limit": 1, "cursor": cursor, "favorite": "true"},
-    ):
+    )
+    for params in invalid_params:
         response = await client.get("/api/artifact-library", params=params)
         assert response.status_code == 422
         assert response.json() == {

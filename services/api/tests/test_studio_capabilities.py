@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from httpx2 import AsyncClient
+
 from local_lm.studio_capabilities import tool_capabilities
 
 MASK_SCHEMA: dict[str, Any] = {
@@ -87,7 +89,9 @@ def test_a_workflow_without_a_schema_at_all_is_not_mask_capable() -> None:
     assert _by_kind([None])["instruct"].available is True
 
 
-async def test_the_report_reads_what_is_installed_on_this_machine(client) -> None:
+async def test_the_report_reads_what_is_installed_on_this_machine(
+    client: AsyncClient,
+) -> None:
     """Through the route, because the surface asks the route and not the module."""
     from local_lm.db import SessionLocal
     from local_lm.models import WorkflowDefinition, WorkflowRevision

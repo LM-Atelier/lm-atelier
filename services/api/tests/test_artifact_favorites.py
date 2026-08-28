@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from local_lm.domain import ArtifactKind
 
 
 @pytest.fixture
-def artifact_session(tmp_path: Path) -> tuple[ArtifactStore, Session]:
+def artifact_session(tmp_path: Path) -> Iterator[tuple[ArtifactStore, Session]]:
     settings = Settings(data_dir=tmp_path / "data")
     settings.prepare()
     engine = create_engine(f"sqlite:///{tmp_path / 'artifacts.sqlite3'}")

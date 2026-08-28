@@ -11,7 +11,9 @@ pytestmark = pytest.mark.asyncio
 async def _chat(client: AsyncClient, title: str) -> str:
     response = await client.post("/api/chats", json={"title": title})
     assert response.status_code == 201, response.text
-    return response.json()["id"]
+    identifier = response.json()["id"]
+    assert isinstance(identifier, str)
+    return identifier
 
 
 async def test_pinned_chats_sort_first_and_keep_recency_among_themselves(
