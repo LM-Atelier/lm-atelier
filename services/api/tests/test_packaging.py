@@ -1210,6 +1210,27 @@ def test_the_audit_allowlist_is_exact_names_and_not_a_pattern() -> None:
     assert any("could not be audited" in line for line in log), log
 
 
+def test_dependency_audit_cache_cannot_be_redirected_by_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    namespace = runpy.run_path(str(ROOT / "scripts/audit-dependencies.py"))
+    redirected = tmp_path / "redirected"
+    created: list[tuple[Path, dict[str, bool]]] = []
+
+    monkeypatch.setenv("PIP_AUDIT_CACHE_DIR", str(redirected))
+    monkeypatch.setattr(
+        Path,
+        "mkdir",
+        lambda self, **kwargs: created.append((self, kwargs)),
+    )
+
+    cache = namespace["prepare_audit_cache"]()
+
+    assert cache == ROOT / "temp" / "pip-audit-cache"
+    assert created == [(cache, {"parents": True, "exist_ok": True})]
+    assert cache != redirected
+
+
 def test_the_workflow_runs_the_same_audit_decision() -> None:
     """The rule that ships and the rule under test are one file.
 
