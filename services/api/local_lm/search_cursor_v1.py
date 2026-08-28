@@ -64,7 +64,22 @@ def _require_digest(value: object) -> str:
     return text
 
 
-def _require_int_text(value: str, *, maximum: int) -> int:
+def require_int_text(value: object, *, maximum: int) -> int:
+    """The one bounded-decimal parser. Public because it has two callers.
+
+    Four rules, and each exists for a measured reason. An explicit digit set
+    rather than a character-class predicate, because `str.isdigit` is true
+    for characters `int()` refuses. A length bound, because `int()` refuses a
+    decimal string longer than `sys.get_int_max_str_digits()` whatever its
+    characters are. No leading zero, because otherwise "2" and "002" are two
+    spellings of one position. A value ceiling, because an offset is a place
+    in a result set rather than an arbitrary integer.
+
+    It is public so that `search_page_v1` can call it instead of restating
+    it. A second copy agreeing with this one on a sampled table is not the
+    same guarantee: a fifth rule added here would drift silently past any
+    finite sample that did not happen to contain an input it changed.
+    """
     if type(value) is not str:
         _invalid()
     if len(value) > MAX_INT_DIGITS:
@@ -157,10 +172,10 @@ def decode_search_cursor(
     expected_generation = _require_int(index_generation, maximum=MAX_GENERATION)
     expected_digest = _require_digest(query_digest)
     parsed = bind_search_cursor(
-        index_generation=_require_int_text(generation_text, maximum=MAX_GENERATION),
+        index_generation=require_int_text(generation_text, maximum=MAX_GENERATION),
         query_digest=digest_text,
-        offset=_require_int_text(offset_text, maximum=MAX_OFFSET),
-        expires_at_unix=_require_int_text(expires_text, maximum=MAX_EXPIRES),
+        offset=require_int_text(offset_text, maximum=MAX_OFFSET),
+        expires_at_unix=require_int_text(expires_text, maximum=MAX_EXPIRES),
         now_unix=now_unix,
     )
     if parsed.index_generation != expected_generation or parsed.query_digest != expected_digest:
