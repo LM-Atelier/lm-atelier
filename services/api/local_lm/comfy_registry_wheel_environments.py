@@ -13,8 +13,8 @@ import stat
 import tempfile
 import unicodedata
 import zipfile
-from collections.abc import Mapping, Sequence
-from contextlib import suppress
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from email import policy
 from email.parser import BytesParser
@@ -35,8 +35,13 @@ from .comfy_registry_wheel_closure import (
     ComfyRegistryWheelClosureError,
     validate_comfy_registry_wheel_closure,
 )
-from .filesystem_links import is_link_or_reparse
+from .filesystem_links import (
+    AnchoredDirectory,
+    AnchoredDirectoryError,
+    is_link_or_reparse,
+)
 from .processes import WINDOWS_CREATE_NO_WINDOW
+from .shared_asset_lock_v1 import LOCK_UNAVAILABLE, SharedAssetLockError, hold
 from .subprocess_env import subprocess_environment
 
 MAX_REGISTRY_WHEEL_ENVIRONMENT_FILES = 100_000
@@ -141,46 +146,44 @@ async def assemble_comfy_registry_wheel_environment(
         )
     executable = _python_executable(python_executable)
     wheels = await asyncio.to_thread(_wheel_inputs, artifacts, wheel_files)
-    parent, lock = _destination(closure, destination)
-    lock_descriptor = _acquire_lock(lock)
-    staging: Path | None = None
-    try:
-        staging = Path(
-            tempfile.mkdtemp(
-                prefix=f".{destination.name}-",
-                dir=parent,
+    parent, lock_name = _destination(closure, destination)
+    with _hold_assembly_lock(parent, lock_name):
+        staging: Path | None = None
+        try:
+            staging = Path(
+                tempfile.mkdtemp(
+                    prefix=f".{destination.name}-",
+                    dir=parent,
+                )
             )
-        )
-        site_packages = staging / "site-packages"
-        site_packages.mkdir()
-        wheel_staging = staging / "wheels"
-        staged_wheels, ownership_plan = await asyncio.to_thread(
-            _stage_wheels, wheels, wheel_staging
-        )
-        if staged_wheels:
-            await _run_pip(executable, staged_wheels, site_packages)
-        await asyncio.to_thread(_remove_staged_wheels, wheel_staging)
-        report, encoded = await asyncio.to_thread(
-            _audit_environment,
-            closure,
-            artifacts,
-            site_packages,
-            ownership_plan,
-        )
-        _write_new(staging / "environment-manifest.json", encoded)
-        if destination.exists() or destination.is_symlink():
-            raise ComfyRegistryWheelEnvironmentError(
-                "environment_destination_exists",
-                "Wheel environment destination already exists",
+            site_packages = staging / "site-packages"
+            site_packages.mkdir()
+            wheel_staging = staging / "wheels"
+            staged_wheels, ownership_plan = await asyncio.to_thread(
+                _stage_wheels, wheels, wheel_staging
             )
-        os.rename(staging, destination)
-        staging = None
-        return report
-    finally:
-        if staging is not None:
-            shutil.rmtree(staging, ignore_errors=True)
-        os.close(lock_descriptor)
-        lock.unlink(missing_ok=True)
+            if staged_wheels:
+                await _run_pip(executable, staged_wheels, site_packages)
+            await asyncio.to_thread(_remove_staged_wheels, wheel_staging)
+            report, encoded = await asyncio.to_thread(
+                _audit_environment,
+                closure,
+                artifacts,
+                site_packages,
+                ownership_plan,
+            )
+            _write_new(staging / "environment-manifest.json", encoded)
+            if destination.exists() or destination.is_symlink():
+                raise ComfyRegistryWheelEnvironmentError(
+                    "environment_destination_exists",
+                    "Wheel environment destination already exists",
+                )
+            os.rename(staging, destination)
+            staging = None
+            return report
+        finally:
+            if staging is not None:
+                shutil.rmtree(staging, ignore_errors=True)
 
 
 def verify_comfy_registry_wheel_environment(
@@ -795,7 +798,7 @@ def _remove_staged_wheels(directory: Path) -> None:
 def _destination(
     closure: ComfyRegistryWheelClosure,
     destination: Path,
-) -> tuple[Path, Path]:
+) -> tuple[Path, str]:
     if not isinstance(destination, Path):
         raise ComfyRegistryWheelEnvironmentError(
             "invalid_environment_destination", "Wheel environment destination is invalid"
@@ -811,19 +814,38 @@ def _destination(
         raise ComfyRegistryWheelEnvironmentError(
             "invalid_environment_destination", "Wheel environment parent is invalid"
         )
-    return parent, parent / f".{expected_name}.lock"
+    return parent, f".{expected_name}.lock"
 
 
-def _acquire_lock(lock: Path) -> int:
+@contextmanager
+def _hold_assembly_lock(parent: Path, name: str) -> Iterator[None]:
+    """Hold a released-on-death lock for one assembly, or refuse.
+
+    The previous create-only sentinel file outlived a crashed holder, so the
+    next assembly stayed locked until a human deleted the file. An OS lock
+    is released when that process dies, including a hard kill.
+    """
+
     try:
-        return os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError as exc:
+        with AnchoredDirectory(parent) as anchor:
+            try:
+                with hold(anchor, name):
+                    yield
+                    return
+            except SharedAssetLockError as exc:
+                if str(exc) == LOCK_UNAVAILABLE:
+                    raise ComfyRegistryWheelEnvironmentError(
+                        "environment_locked",
+                        "Wheel environment assembly is already running",
+                    ) from exc
+                raise ComfyRegistryWheelEnvironmentError(
+                    "environment_lock_failed",
+                    "Wheel environment lock could not be created",
+                ) from exc
+    except AnchoredDirectoryError as exc:
         raise ComfyRegistryWheelEnvironmentError(
-            "environment_locked", "Wheel environment assembly is already running"
-        ) from exc
-    except OSError as exc:
-        raise ComfyRegistryWheelEnvironmentError(
-            "environment_lock_failed", "Wheel environment lock could not be created"
+            "environment_lock_failed",
+            "Wheel environment lock could not be created",
         ) from exc
 
 

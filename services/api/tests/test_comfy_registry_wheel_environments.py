@@ -6,8 +6,11 @@ import csv
 import hashlib
 import io
 import json
+import subprocess
 import sys
 import tempfile
+import textwrap
+import time
 import zipfile
 from dataclasses import replace
 from pathlib import Path
@@ -28,6 +31,8 @@ from local_lm.comfy_registry_wheel_environments import (
     assemble_comfy_registry_wheel_environment,
     verify_comfy_registry_wheel_environment,
 )
+from local_lm.filesystem_links import AnchoredDirectory
+from local_lm.shared_asset_lock_v1 import hold
 
 _TAG = "py3-none-any"
 
@@ -155,6 +160,15 @@ def _destination(tmp_path: Path, closure: ComfyRegistryWheelClosure) -> Path:
     return tmp_path / f"registry-wheels-v3-{closure.closure_sha256}"
 
 
+def _assert_assembly_lock_is_unheld(parent: Path, destination: Path) -> None:
+    """The lock entry stays; the next holder must be able to take it."""
+
+    lock_name = f".{destination.name}.lock"
+    assert (parent / lock_name).is_file()
+    with AnchoredDirectory(parent) as anchor, hold(anchor, lock_name):
+        pass
+
+
 def _installed_distribution(
     target: Path,
     wheel_content: bytes,
@@ -226,7 +240,7 @@ async def test_assembly_stages_verified_wheels_and_publishes_audited_overlay(
     assert len(observed) == 1
     assert destination.is_dir()
     assert not (destination / "wheels").exists()
-    assert not (tmp_path / f".{destination.name}.lock").exists()
+    _assert_assembly_lock_is_unheld(tmp_path, destination)
     assert report.closure_sha256 == closure.closure_sha256
     assert report.artifact_count == 1
     assert report.file_count == 7
@@ -834,7 +848,7 @@ async def test_install_failure_cleans_staging_lock_and_destination(
         )
     assert raised.value.code == "wheel_install_failed"
     assert not destination.exists()
-    assert not (tmp_path / f".{destination.name}.lock").exists()
+    _assert_assembly_lock_is_unheld(tmp_path, destination)
     assert not list(tmp_path.glob(f".{destination.name}-*"))
 
 
@@ -861,7 +875,7 @@ async def test_cancellation_cleans_staging_and_preserves_cancellation(
             media_worker_stopped=True,
         )
     assert not destination.exists()
-    assert not (tmp_path / f".{destination.name}.lock").exists()
+    _assert_assembly_lock_is_unheld(tmp_path, destination)
     assert not list(tmp_path.glob(f".{destination.name}-*"))
 
 
@@ -938,6 +952,50 @@ async def test_pth_content_is_inert_audited_and_tamper_evident(
     assert raised.value.code == "environment_inventory_mismatch"
 
 
+_ASSEMBLY_HOLDER = textwrap.dedent(
+    """
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, sys.argv[1])
+    from local_lm.filesystem_links import AnchoredDirectory
+    from local_lm.shared_asset_lock_v1 import hold
+
+    with AnchoredDirectory(Path(sys.argv[2])) as anchor:
+        with hold(anchor, sys.argv[3]):
+            print("HELD", flush=True)
+            import time
+
+            time.sleep(300)
+    """
+)
+
+
+def _start_assembly_holder(tmp_path: Path, lock_name: str) -> subprocess.Popen[str]:
+    script = tmp_path / "assembly-holder.py"
+    script.write_text(_ASSEMBLY_HOLDER, encoding="utf-8")
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            str(script),
+            str(Path(__file__).resolve().parents[1]),
+            str(tmp_path),
+            lock_name,
+        ],
+        stdout=subprocess.PIPE,
+        encoding="utf-8",
+    )
+    try:
+        assert child.stdout is not None
+        announced = child.stdout.readline().strip()
+        assert announced == "HELD", "the holder never took the lock"
+        return child
+    except BaseException:
+        child.kill()
+        child.wait(timeout=30)
+        raise
+
+
 async def test_existing_lock_and_destination_are_never_replaced(
     tmp_path: Path,
 ) -> None:
@@ -945,21 +1003,22 @@ async def test_existing_lock_and_destination_are_never_replaced(
     closure = _closure(content)
     source = _wheel_file(tmp_path, content)
     destination = _destination(tmp_path, closure)
-    lock = tmp_path / f".{destination.name}.lock"
-    lock.write_text("busy", encoding="utf-8")
+    lock_name = f".{destination.name}.lock"
+    child = _start_assembly_holder(tmp_path, lock_name)
+    try:
+        with pytest.raises(ComfyRegistryWheelEnvironmentError) as raised:
+            await assemble_comfy_registry_wheel_environment(
+                closure,
+                {source.name: source},
+                python_executable=Path(sys.executable),
+                destination=destination,
+                media_worker_stopped=True,
+            )
+        assert raised.value.code == "environment_locked"
+    finally:
+        child.kill()
+        child.wait(timeout=30)
 
-    with pytest.raises(ComfyRegistryWheelEnvironmentError) as raised:
-        await assemble_comfy_registry_wheel_environment(
-            closure,
-            {source.name: source},
-            python_executable=Path(sys.executable),
-            destination=destination,
-            media_worker_stopped=True,
-        )
-    assert raised.value.code == "environment_locked"
-    assert lock.read_text(encoding="utf-8") == "busy"
-
-    lock.unlink()
     destination.mkdir()
     with pytest.raises(ComfyRegistryWheelEnvironmentError) as raised:
         await assemble_comfy_registry_wheel_environment(
@@ -970,6 +1029,51 @@ async def test_existing_lock_and_destination_are_never_replaced(
             media_worker_stopped=True,
         )
     assert raised.value.code == "invalid_environment_destination"
+
+
+async def test_a_killed_holder_does_not_keep_environment_assembly_locked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    content = _wheel_content()
+    closure = _closure(content)
+    source = _wheel_file(tmp_path, content)
+    destination = _destination(tmp_path, closure)
+    lock_name = f".{destination.name}.lock"
+
+    async def fake_run_pip(_python: Path, _wheels: tuple[Path, ...], target: Path) -> None:
+        _installed_distribution(target, content)
+
+    monkeypatch.setattr(environment_module, "_run_pip", fake_run_pip)
+
+    child = _start_assembly_holder(tmp_path, lock_name)
+    child.kill()
+    child.wait(timeout=30)
+
+    deadline = time.monotonic() + 30
+    last_error: ComfyRegistryWheelEnvironmentError | None = None
+    while time.monotonic() < deadline:
+        try:
+            await assemble_comfy_registry_wheel_environment(
+                closure,
+                {source.name: source},
+                python_executable=Path(sys.executable),
+                destination=destination,
+                media_worker_stopped=True,
+            )
+            break
+        except ComfyRegistryWheelEnvironmentError as exc:
+            last_error = exc
+            if exc.code != "environment_locked":
+                raise
+            time.sleep(0.1)
+    else:
+        pytest.fail(
+            "assembly stayed locked after the holder died"
+            if last_error is None
+            else f"assembly stayed locked after the holder died: {last_error.code}"
+        )
+    assert destination.is_dir()
 
 
 async def test_mutated_closure_is_rejected_before_filesystem_changes(tmp_path: Path) -> None:
