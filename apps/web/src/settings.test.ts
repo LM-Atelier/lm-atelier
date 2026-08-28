@@ -4,6 +4,7 @@ import {
   promptPreviewSettings,
   resolveCapabilitySettings,
   resolveWorkflowSettings,
+  videoLengthDelivery,
 } from "./settings";
 import type { EngineCapabilities, SettingField } from "./types";
 
@@ -59,6 +60,79 @@ describe("resolveCapabilitySettings", () => {
 });
 
 describe("resolveWorkflowSettings", () => {
+  it("projects a workflow's measured frame window as one seconds control", () => {
+    const fpsField: SettingField = {
+      ...videoField,
+      key: "fps",
+      label: "FPS",
+      type: "number",
+      default: 24,
+      minimum: 1,
+      maximum: 120,
+    };
+    const fields = resolveWorkflowSettings(
+      [{ ...videoField, minimum: 1, maximum: 1024 }, fpsField],
+      {
+        type: "object",
+        properties: {
+          frames: { type: "integer", default: 49, minimum: 17, maximum: 81 },
+          fps: { type: "number", const: 16 },
+        },
+        "x-lm-atelier-video-length": {
+          version: 1,
+          frames_parameter: "frames",
+          fps_parameter: "fps",
+          fps_numerator: 16,
+          fps_denominator: 1,
+          frame_alignment: 16,
+          frame_offset: 1,
+        },
+      },
+    );
+
+    expect(fields.map((field) => field.key)).toEqual(["duration_seconds"]);
+    const length = fields[0]!;
+    expect(length).toMatchObject({
+      label: "Length (seconds)",
+      default: 49 / 16,
+      minimum: 17 / 16,
+      maximum: 81 / 16,
+    });
+    expect(videoLengthDelivery(length, 3)).toEqual({
+      frames: 49,
+      deliveredSeconds: 49 / 16,
+    });
+    expect(normalizeSettingsForFields({ duration_seconds: 3, frames: 49 }, fields)).toEqual({
+      duration_seconds: 3,
+    });
+  });
+
+  it("fails closed for extended or unreduced video-length contracts", () => {
+    const fpsField: SettingField = { ...videoField, key: "fps", type: "number", default: 16 };
+    const contract: Record<string, unknown> = {
+      version: 1,
+      frames_parameter: "frames",
+      fps_parameter: "fps",
+      fps_numerator: 32,
+      fps_denominator: 2,
+      frame_alignment: 16,
+      frame_offset: 1,
+      extra: true,
+    };
+    const schema = {
+      type: "object",
+      properties: {
+        frames: { type: "integer", default: 49, minimum: 17, maximum: 81 },
+        fps: { type: "number", const: 16 },
+      },
+      "x-lm-atelier-video-length": contract,
+    };
+
+    expect(resolveWorkflowSettings([videoField, fpsField], schema)).toHaveLength(2);
+    delete contract.extra;
+    expect(resolveWorkflowSettings([videoField, fpsField], schema)).toHaveLength(2);
+  });
+
   it("overlays workflow defaults and fixed values without dropping legacy controls", () => {
     const fields = resolveWorkflowSettings(
       [imageField, videoField],

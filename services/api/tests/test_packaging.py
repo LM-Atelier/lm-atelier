@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+import yaml
 
 from local_lm import __version__
 
@@ -969,7 +970,287 @@ def test_ci_workflow_retains_required_check_for_every_pr_scope() -> None:
     assert "23 9 * * 2" in workflow
     assert "name: Scheduled dependency audit" in workflow
     assert "npm audit --audit-level=high" in workflow
-    assert ".venv/bin/python -m pip_audit" in workflow
+    # The audit decision moved into a tracked script so a test can run the same
+    # bytes. Pinning the old direct invocation here would fail the moment that
+    # happened, which is why this line changed rather than being deleted.
+    assert ".venv/bin/python scripts/audit-dependencies.py" in workflow
+
+
+def test_merge_gate_refuses_every_unverified_pull_request_shape() -> None:
+    """Run the merge gate's own script, rather than reading the workflow text.
+
+    A ruleset counts a skipped required check as satisfied, so this job is the
+    only thing preventing a merge with no verification behind it. Asserting that
+    it *exists* would assert the wrong thing: the first version of it existed,
+    read correctly, and still exited zero on a draft, which handed the draft head
+    a green required context.
+
+    So the evaluator shared with `scripts/validate-workflows.py` executes the
+    real script across the event and result matrix and this pins the outcomes.
+    """
+    namespace = runpy.run_path(str(ROOT / "scripts/validate-workflows.py"))
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    problems = namespace["validate_merge_gate"](Path(".github/workflows/ci.yml"), workflow)
+    assert problems == [], "\n".join(problems)
+
+    matrix = namespace["MERGE_GATE_MATRIX"]
+    labels = {label for label, _environment, _expected in matrix}
+    # The two shapes that were wrong in the first attempt, named so that
+    # deleting either case fails here rather than silently narrowing coverage.
+    assert "draft must fail closed" in labels
+    assert "a plan-required Windows must not be skipped" in labels
+    # The third shape that was wrong, and the one that reads most like a
+    # formality: an `edited` event covers both a base change, which must
+    # reverify, and a title or body edit, which verified nothing. The earlier
+    # gate subscribed every edited event and authorized on green dependencies
+    # that had run for a text edit. Both halves are named so deleting either
+    # fails here.
+    assert "a title or body edit must not authorize" in labels
+    assert "an edited event that changed the base reverifies and may authorize" in labels
+    assert any(expected == 0 for _l, _e, expected in matrix), (
+        "a matrix that only ever expects failure would pass against a gate that rejects everything"
+    )
+
+
+# The shapes the WORKFLOW can actually deliver, with the branch each must
+# reach. Both entries were once fail-closed for the wrong reason: the general
+# domain check refused an empty WINDOWS_REQUIRED before the branch that names
+# the real cause could run, and the matrix reached those branches only by
+# supplying values production never sends. Exit code cannot tell the two apart
+# - every refusal is 1 - so these assert the REASON.
+PRODUCTION_GATE_SHAPES = (
+    (
+        "a draft, whose jobs are all skipped",
+        {
+            "DRAFT": "true",
+            "ACTION": "synchronize",
+            "BASE_CHANGED": "false",
+            "PLAN": "skipped",
+            "UBUNTU": "skipped",
+            "WINDOWS": "skipped",
+        },
+        "Draft pull request",
+    ),
+    (
+        "a title or body edit, where Ubuntu runs on always() and then refuses",
+        {
+            "DRAFT": "false",
+            "ACTION": "edited",
+            "BASE_CHANGED": "false",
+            "PLAN": "skipped",
+            "UBUNTU": "failure",
+            "WINDOWS": "skipped",
+        },
+        "Edited event that did not change the base branch",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "environment", "expected_reason"),
+    PRODUCTION_GATE_SHAPES,
+    ids=[shape[0] for shape in PRODUCTION_GATE_SHAPES],
+)
+def test_each_production_shape_reaches_the_branch_that_names_it(
+    label: str, environment: dict[str, str], expected_reason: str
+) -> None:
+    """The guard for a whole class, not for two incidents.
+
+    Every shape here omits WINDOWS_REQUIRED, because the job that would set it
+    was skipped - that absence is the shape, not a defect in the test. A branch
+    that only a synthetic environment can reach is a branch nobody has seen
+    work, however green its own case is.
+    """
+    namespace = runpy.run_path(str(ROOT / "scripts/ci-merge-gate.py"))
+    log: list[str] = []
+
+    status = namespace["decide"]({"HEAD_SHA": "0" * 40, **environment}, log)
+
+    assert status == 1, label
+    assert any(expected_reason in line for line in log), log
+    assert not any("unknown input" in line for line in log), log
+
+
+# Every shape the audit report can take, with the verdict each must produce.
+# The exit code alone cannot separate "found an advisory" from "could not look",
+# which is the distinction the script exists to make, so these assert the reason
+# as well.
+AUDIT_REPORTS = (
+    (
+        "a clean closure with only our own package skipped",
+        {
+            "dependencies": [
+                {"name": "alembic", "version": "1.18.5", "vulns": []},
+                {"name": "lm-atelier-api", "skip_reason": "distribution marked as editable"},
+            ]
+        },
+        0,
+        "was audited and is clean",
+    ),
+    (
+        "a known advisory refuses",
+        {
+            "dependencies": [
+                {"name": "pip", "version": "26.1.2", "vulns": [{"id": "PYSEC-2026-3721"}]},
+            ]
+        },
+        1,
+        "carries a known advisory",
+    ),
+    (
+        "a dependency that could not be audited refuses",
+        {
+            "dependencies": [
+                {"name": "alembic", "version": "1.18.5", "vulns": []},
+                {"name": "somepackage", "skip_reason": "Dependency not found on PyPI"},
+            ]
+        },
+        1,
+        "could not be audited",
+    ),
+    (
+        "our own package skipped for a DIFFERENT reason is still expected",
+        {
+            "dependencies": [
+                {"name": "lm-atelier-api", "skip_reason": "Dependency not found on PyPI"},
+                {"name": "alembic", "version": "1.18.5", "vulns": []},
+            ]
+        },
+        0,
+        "Skipped, and expected to be: lm-atelier-api",
+    ),
+    (
+        # `entry.get("vulns") or []` made a MISSING findings field
+        # indistinguishable from an explicit empty list, so an entry that never
+        # reported anything was announced as clean.
+        "an entry that did not report its findings is not an entry that reported none",
+        {"dependencies": [{"name": "alembic", "version": "1.18.5"}]},
+        1,
+        "carries no findings or no version",
+    ),
+    (
+        "an entry with no version is incomplete too",
+        {"dependencies": [{"name": "alembic", "vulns": []}]},
+        1,
+        "carries no findings or no version",
+    ),
+    (
+        # The emptiest form of the same mistake: entries present, none audited.
+        "a report of nothing but allowed skips audited nothing",
+        {
+            "dependencies": [
+                {"name": "lm-atelier-api", "skip_reason": "distribution marked as editable"},
+            ]
+        },
+        1,
+        "nothing audited is not the same as nothing found",
+    ),
+    (
+        "a report with no dependencies is not a clean report",
+        {"dependencies": []},
+        1,
+        "not a report that says clean",
+    ),
+    (
+        "an advisory outranks a skip when both are present",
+        {
+            "dependencies": [
+                {"name": "pip", "version": "26.1.2", "vulns": [{"id": "PYSEC-2026-3721"}]},
+                {"name": "somepackage", "skip_reason": "Dependency not found on PyPI"},
+            ]
+        },
+        1,
+        "carries a known advisory",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "report", "expected_status", "expected_reason"),
+    AUDIT_REPORTS,
+    ids=[shape[0] for shape in AUDIT_REPORTS],
+)
+def test_the_dependency_audit_separates_clean_from_unchecked(
+    label: str, report: dict[str, object], expected_status: int, expected_reason: str
+) -> None:
+    """`pip-audit` reports "clean" and "could not look" the same way.
+
+    Both leave the run at exit zero with a line of prose, which is the same
+    substitution a branch ruleset makes when it counts a skipped required check
+    as satisfied. The refusal is narrow on purpose: this repository's own
+    package has no published release and is skipped on every run, so failing on
+    THAT would make the gate permanently red and teach everyone to ignore it.
+    """
+    namespace = runpy.run_path(str(ROOT / "scripts/audit-dependencies.py"))
+    log: list[str] = []
+
+    status = namespace["decide"](report, log)
+
+    assert status == expected_status, (label, log)
+    assert any(expected_reason in line for line in log), (label, log)
+
+
+def test_the_audit_allowlist_is_exact_names_and_not_a_pattern() -> None:
+    """A prefix or substring rule is how a real skipped dependency slips through.
+
+    `lm-atelier-api-client` is not `lm-atelier-api`, and a rule that accepted it
+    because it starts the same way would excuse exactly the case this guard
+    exists to catch.
+    """
+    namespace = runpy.run_path(str(ROOT / "scripts/audit-dependencies.py"))
+    allowed = namespace["UNAUDITABLE_BY_NATURE"]
+
+    assert allowed == frozenset({"lm-atelier-api"})
+    log: list[str] = []
+    status = namespace["decide"](
+        {"dependencies": [{"name": "lm-atelier-api-client", "skip_reason": "not on PyPI"}]},
+        log,
+    )
+    assert status == 1, log
+    assert any("could not be audited" in line for line in log), log
+
+
+def test_dependency_audit_cache_cannot_be_redirected_by_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    redirected = tmp_path / "redirected"
+    created: list[tuple[Path, dict[str, bool]]] = []
+
+    monkeypatch.setenv("PIP_AUDIT_CACHE_DIR", str(redirected))
+    namespace = runpy.run_path(str(ROOT / "scripts/audit-dependencies.py"))
+    monkeypatch.setattr(
+        Path,
+        "mkdir",
+        lambda self, **kwargs: created.append((self, kwargs)),
+    )
+
+    cache = namespace["prepare_audit_cache"]()
+
+    assert cache == ROOT / "temp" / "pip-audit-cache"
+    assert created == [(cache, {"parents": True, "exist_ok": True})]
+    assert cache != redirected
+
+
+def test_the_workflow_runs_the_same_audit_decision() -> None:
+    """The rule that ships and the rule under test are one file.
+
+    Asserting the workflow calls the script is what keeps that true. A workflow
+    that went back to invoking pip-audit directly would pass every test above
+    while shipping the behaviour they exist to replace.
+    """
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    commands = [
+        step.get("run", "")
+        for job in workflow["jobs"].values()
+        for step in job.get("steps", [])
+        if isinstance(step, dict)
+    ]
+    audits = [command for command in commands if "audit" in command]
+
+    assert audits, "no audit step found at all"
+    for command in audits:
+        assert "scripts/audit-dependencies.py" in command, command
+        assert "-m pip_audit" not in command, command
 
 
 def test_public_repository_configuration_verifies_every_applied_control() -> None:
@@ -1265,3 +1546,435 @@ def test_a_file_that_declares_it_must_not_ship_is_refused(tmp_path: Path) -> Non
         '{"classification": "public", ' + committable + ": false}", encoding="utf-8"
     )
     assert not refused(str(ordinary))
+
+
+# --------------------------------------------------------------------------
+# Workflow policy: production-entry mutation matrix
+#
+# Every case below enters at `validate_workflow_document`, the function `main`
+# calls for each file. Calling an individual validator proves the rule and
+# proves nothing about whether it is still wired in, and a rule that stops
+# being called is indistinguishable from one that passes.
+# --------------------------------------------------------------------------
+
+
+def _workflow_namespace() -> dict[str, object]:
+    return runpy.run_path(str(ROOT / "scripts/validate-workflows.py"))
+
+
+def _shipped_ci() -> tuple[Path, str, dict]:
+    path = ROOT / ".github/workflows/ci.yml"
+    content = path.read_text(encoding="utf-8")
+    return Path("ci.yml"), content, yaml.safe_load(content)
+
+
+def _triggers(workflow: dict) -> dict:
+    return workflow.get("on") or workflow.get(True)
+
+
+def _merge_gate(workflow: dict) -> dict:
+    return workflow["jobs"]["merge-gate"]
+
+
+def _first_checkout(workflow: dict) -> dict:
+    for job in workflow["jobs"].values():
+        for step in job.get("steps") or []:
+            if str(step.get("uses", "")).startswith("actions/checkout@"):
+                return step
+    raise AssertionError("ci.yml has no checkout step")
+
+
+def _job_mutations() -> list[tuple[str, object]]:
+    """Merge-gate job and step drifts. Each edits the parsed workflow."""
+
+    def job(name, apply):  # noqa: ANN001, ANN202
+        return (name, lambda content, workflow: apply(_merge_gate(workflow)))
+
+    steps = lambda j: j["steps"]  # noqa: E731
+    return [
+        job("job continue-on-error", lambda j: j.update({"continue-on-error": True})),
+        job("job defaults shell", lambda j: j.update({"defaults": {"run": {"shell": "bash"}}})),
+        job("job container", lambda j: j.update({"container": "alpine:3"})),
+        job("job services", lambda j: j.update({"services": {"db": {"image": "postgres"}}})),
+        job("job environment", lambda j: j.update({"environment": "production"})),
+        job("job concurrency", lambda j: j.update({"concurrency": "merge-gate"})),
+        job("job strategy matrix", lambda j: j.update({"strategy": {"matrix": {"n": [1, 2]}}})),
+        job("job outputs", lambda j: j.update({"outputs": {"verdict": "x"}})),
+        job("job env", lambda j: j.update({"env": {"LEAK": "1"}})),
+        job("job permissions", lambda j: j.update({"permissions": {"contents": "read"}})),
+        job("self-hosted runner", lambda j: j.update({"runs-on": "self-hosted"})),
+        job("windows runner", lambda j: j.update({"runs-on": "windows-latest"})),
+        job("runner as list", lambda j: j.update({"runs-on": ["ubuntu-24.04"]})),
+        job("missing timeout", lambda j: j.pop("timeout-minutes")),
+        job("string timeout", lambda j: j.update({"timeout-minutes": "5"})),
+        job("boolean timeout", lambda j: j.update({"timeout-minutes": True})),
+        job("float timeout", lambda j: j.update({"timeout-minutes": 5.0})),
+        job("longer timeout", lambda j: j.update({"timeout-minutes": 6})),
+        job("renamed job", lambda j: j.update({"name": "Merge gate (advisory)"})),
+        job("missing name", lambda j: j.pop("name")),
+        job(
+            "condition without always",
+            lambda j: j.update({"if": "github.event_name == 'pull_request'"}),
+        ),
+        job("condition without event guard", lambda j: j.update({"if": "always()"})),
+        job("missing condition", lambda j: j.pop("if")),
+        job("extra needs entry", lambda j: j["needs"].append("compatibility")),
+        job("dropped needs entry", lambda j: j["needs"].pop()),
+        job("reordered needs", lambda j: j["needs"].reverse()),
+        job("needs as a string", lambda j: j.update({"needs": "verification-plan"})),
+        job("missing needs", lambda j: j.pop("needs")),
+        job("missing steps", lambda j: j.pop("steps")),
+        job("steps as a mapping", lambda j: j.update({"steps": {"run": "x"}})),
+        job("extra trailing step", lambda j: steps(j).append({"run": "echo drift"})),
+        job("extra leading step", lambda j: steps(j).insert(0, {"run": "echo drift"})),
+        job("dropped checkout", lambda j: steps(j).pop(0)),
+        job("dropped interpreter", lambda j: steps(j).pop(1)),
+        job("dropped decision", lambda j: steps(j).pop(2)),
+        job("reordered setup", lambda j: steps(j).insert(0, steps(j).pop(1))),
+        job("duplicated checkout", lambda j: steps(j).insert(1, dict(steps(j)[0]))),
+        job("step condition", lambda j: steps(j)[2].update({"if": "always()"})),
+        job("step continue-on-error", lambda j: steps(j)[2].update({"continue-on-error": True})),
+        job("step working-directory", lambda j: steps(j)[2].update({"working-directory": "."})),
+        job("step shell", lambda j: steps(j)[2].update({"shell": "bash"})),
+        job("step timeout", lambda j: steps(j)[2].update({"timeout-minutes": 1})),
+        job("step id", lambda j: steps(j)[2].update({"id": "gate"})),
+        job(
+            "step uses beside run",
+            lambda j: steps(j)[2].update({"uses": "actions/checkout@" + "0" * 40}),
+        ),
+        job("altered decision command", lambda j: steps(j)[2].update({"run": "python -c ''"})),
+        job(
+            "aliased decision path",
+            lambda j: steps(j)[2].update({"run": "python ./scripts/../scripts/ci-merge-gate.py"}),
+        ),
+        job("missing decision name", lambda j: steps(j)[2].pop("name")),
+        job("renamed decision step", lambda j: steps(j)[2].update({"name": "Advisory check"})),
+        job("mutable checkout ref", lambda j: steps(j)[0].update({"uses": "actions/checkout@v7"})),
+        job(
+            "unaudited checkout sha",
+            lambda j: steps(j)[0].update({"uses": "actions/checkout@" + "b" * 40}),
+        ),
+        job(
+            "merge ref instead of head",
+            lambda j: steps(j)[0]["with"].update(
+                {"ref": "${{ github.event.pull_request.base.sha }}"}
+            ),
+        ),
+        job("missing checkout ref", lambda j: steps(j)[0]["with"].pop("ref")),
+        job(
+            "persisted credentials",
+            lambda j: steps(j)[0]["with"].update({"persist-credentials": True}),
+        ),
+        job(
+            "integer for a boolean input",
+            lambda j: steps(j)[0]["with"].update({"persist-credentials": 0}),
+        ),
+        job(
+            "string for a boolean input",
+            lambda j: steps(j)[0]["with"].update({"persist-credentials": "false"}),
+        ),
+        job(
+            "missing persist-credentials", lambda j: steps(j)[0]["with"].pop("persist-credentials")
+        ),
+        job("extra checkout input", lambda j: steps(j)[0]["with"].update({"fetch-depth": 0})),
+        job("missing checkout with", lambda j: steps(j)[0].pop("with")),
+        job(
+            "mutable interpreter ref",
+            lambda j: steps(j)[1].update({"uses": "actions/setup-python@v7"}),
+        ),
+        job(
+            "unpinned interpreter", lambda j: steps(j)[1]["with"].update({"python-version": "3.x"})
+        ),
+        job(
+            "float interpreter version",
+            lambda j: steps(j)[1]["with"].update({"python-version": 3.12}),
+        ),
+        job("newer interpreter", lambda j: steps(j)[1]["with"].update({"python-version": "3.13"})),
+        job("extra interpreter input", lambda j: steps(j)[1]["with"].update({"cache": "pip"})),
+        job("missing interpreter with", lambda j: steps(j)[1].pop("with")),
+        job("dropped authority input", lambda j: steps(j)[2]["env"].pop("ACTION")),
+        job("dropped draft input", lambda j: steps(j)[2]["env"].pop("DRAFT")),
+        job("dropped windows policy", lambda j: steps(j)[2]["env"].pop("WINDOWS_REQUIRED")),
+        job("extra authority input", lambda j: steps(j)[2]["env"].update({"EXTRA": "x"})),
+        job(
+            "rebound draft input",
+            lambda j: steps(j)[2]["env"].update(
+                {"DRAFT": "${{ github.event.pull_request.merged }}"}
+            ),
+        ),
+        job(
+            "rebound head input",
+            lambda j: steps(j)[2]["env"].update({"HEAD_SHA": "${{ github.sha }}"}),
+        ),
+        job(
+            "rebound plan input",
+            lambda j: steps(j)[2]["env"].update({"PLAN": "${{ needs.compatibility.result }}"}),
+        ),
+        job("missing decision env", lambda j: steps(j)[2].pop("env")),
+    ]
+
+
+def _trigger_mutations() -> list[tuple[str, object]]:
+    def trig(name, apply):  # noqa: ANN001, ANN202
+        return (name, lambda content, workflow: apply(workflow))
+
+    return [
+        trig(
+            "extra pull request action",
+            lambda w: _triggers(w)["pull_request"]["types"].append("closed"),
+        ),
+        trig("duplicated action", lambda w: _triggers(w)["pull_request"]["types"].append("opened")),
+        trig(
+            "dropped ready_for_review",
+            lambda w: _triggers(w)["pull_request"]["types"].remove("ready_for_review"),
+        ),
+        trig(
+            "dropped converted_to_draft",
+            lambda w: _triggers(w)["pull_request"]["types"].remove("converted_to_draft"),
+        ),
+        trig("dropped edited", lambda w: _triggers(w)["pull_request"]["types"].remove("edited")),
+        trig("reordered actions", lambda w: _triggers(w)["pull_request"]["types"].reverse()),
+        trig("branch drift", lambda w: _triggers(w)["pull_request"]["branches"].append("other")),
+        trig(
+            "dropped protected branch",
+            lambda w: _triggers(w)["pull_request"]["branches"].remove("main"),
+        ),
+        trig(
+            "extra push trigger", lambda w: _triggers(w).update({"push": {"branches": ["develop"]}})
+        ),
+        trig(
+            "dispatch inputs contract",
+            lambda w: _triggers(w).update(
+                {"workflow_dispatch": {"inputs": {"why": {"required": False}}}}
+            ),
+        ),
+        trig("missing schedule", lambda w: _triggers(w).pop("schedule")),
+        trig(
+            "changed schedule",
+            lambda w: _triggers(w).update({"schedule": [{"cron": "23 9 * * 3"}]}),
+        ),
+        trig("missing dispatch", lambda w: _triggers(w).pop("workflow_dispatch")),
+        trig(
+            "truncated concurrency identity",
+            lambda w: w["concurrency"].update({"group": "${{ github.event.action }}"}),
+        ),
+        trig(
+            "concurrency without action",
+            lambda w: w["concurrency"].update({"group": "ci-${{ github.workflow }}"}),
+        ),
+        trig(
+            "cancellation disabled",
+            lambda w: w["concurrency"].update({"cancel-in-progress": False}),
+        ),
+        trig(
+            "cancellation as a string",
+            lambda w: w["concurrency"].update({"cancel-in-progress": "true"}),
+        ),
+        trig(
+            "cancellation as an integer",
+            lambda w: w["concurrency"].update({"cancel-in-progress": 1}),
+        ),
+        trig("missing cancellation", lambda w: w["concurrency"].pop("cancel-in-progress")),
+    ]
+
+
+def _policy_mutations() -> list[tuple[str, object]]:
+    """Drifts caught by the other validators the coordinator wires in.
+
+    These prove the coordinator calls more than the merge gate: each one is
+    invisible to the gate checks and must still be refused.
+    """
+
+    def doc(name, apply):  # noqa: ANN001, ANN202
+        return (name, apply)
+
+    def widen_permissions(content, workflow):
+        workflow["permissions"] = {"contents": "write"}
+
+    def drop_permissions(content, workflow):
+        workflow.pop("permissions")
+
+    def job_write_permission(content, workflow):
+        _merge_gate(workflow)["permissions"] = {"contents": "write"}
+
+    def runner_context_in_env(content, workflow):
+        _merge_gate(workflow)["env"] = {"TEMP_DIR": "${{ runner.temp }}"}
+
+    def persist_credentials_elsewhere(content, workflow):
+        _first_checkout(workflow)["with"]["persist-credentials"] = True
+
+    def drop_credentials_block_elsewhere(content, workflow):
+        _first_checkout(workflow).pop("with")
+
+    return [
+        doc("workflow-level write permission", widen_permissions),
+        doc("missing top-level permissions", drop_permissions),
+        doc("job-level write permission", job_write_permission),
+        doc("runner context in job env", runner_context_in_env),
+        doc("persisted credentials in another job", persist_credentials_elsewhere),
+        doc("missing credentials block in another job", drop_credentials_block_elsewhere),
+    ]
+
+
+def _content_mutations() -> list[tuple[str, str, str]]:
+    """Text-level drifts, since two validators read the file rather than the tree."""
+    return [
+        (
+            "docker action",
+            "      - uses: actions/checkout@",
+            "      - uses: docker://example.invalid/tool@sha256:"
+            + "a" * 64
+            + "\n      - uses: actions/checkout@",
+        ),
+        (
+            "action without a version comment",
+            "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1",
+            "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+        ),
+        (
+            "action pinned to a tag",
+            "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0",
+            "actions/setup-python@v7 # v7.0.0",
+        ),
+        (
+            "pull_request_target trigger",
+            "on:\n  pull_request:",
+            "on:\n  pull_request_target:\n    branches: [develop]\n  pull_request:",
+        ),
+    ]
+
+
+def _all_workflow_mutations() -> list[tuple[str, object]]:
+    return _job_mutations() + _trigger_mutations() + _policy_mutations()
+
+
+def test_workflow_policy_refuses_every_recorded_production_drift() -> None:
+    """Seventy-seven drifts, each entering where production enters.
+
+    Every case was accepted by some earlier version of this validator, or is
+    the immediate neighbour of one that was. They run through
+    `validate_workflow_document` - the function `main` calls per file - so a
+    rule that stops being wired in fails here rather than passing silently.
+    """
+    namespace = _workflow_namespace()
+    validate_document = namespace["validate_workflow_document"]
+    named, content, shipped = _shipped_ci()
+
+    # The shipped file must satisfy the whole coordinator, or every refusal
+    # below proves nothing.
+    assert validate_document(named, content, shipped) == []
+
+    tree_cases = _all_workflow_mutations()
+    text_cases = _content_mutations()
+    # Pinned exactly, so a case cannot be dropped while the suite stays green.
+    # The gate requires at least 77 production-entry mutations; the extra
+    # cases are neighbours of accepted drifts that cost nothing to keep.
+    assert len(tree_cases) + len(text_cases) == 101
+    assert len(tree_cases) + len(text_cases) >= 77
+
+    accepted: list[str] = []
+    for label, mutate in tree_cases:
+        workflow = yaml.safe_load(content)
+        mutate(content, workflow)
+        if not validate_document(named, content, workflow):
+            accepted.append(label)
+    for label, find, replace in text_cases:
+        assert find in content, label
+        mutated = content.replace(find, replace, 1)
+        workflow = yaml.safe_load(mutated)
+        if not validate_document(named, mutated, workflow):
+            accepted.append(label)
+    assert not accepted, f"workflow policy accepted: {accepted}"
+
+
+def test_exact_comparator_refuses_every_equal_but_differently_typed_value() -> None:
+    """Python equality is not identity of kind, and YAML exploits the gap.
+
+    False == 0, True == 1 and 1.0 == 1 all hold, so a pinned value can be
+    satisfied by a literal of another type. The collisions matter most inside
+    nested mappings, where a top-level type check never looks, and as mapping
+    *keys*, where two distinct-looking keys collapse into one entry.
+    """
+    namespace = _workflow_namespace()
+    exactly_equal = namespace["exactly_equal"]
+
+    scalar_pairs = [
+        (False, 0),
+        (True, 1),
+        (1, 1.0),
+        (0, 0.0),
+        (5, "5"),
+        (True, "true"),
+    ]
+    for expected, actual in scalar_pairs:
+        assert expected == actual or isinstance(actual, str), (expected, actual)
+        assert not exactly_equal(expected, actual), (expected, actual)
+        assert not exactly_equal(actual, expected), (actual, expected)
+
+    # Nested one level down, which is where `with:` and `env:` live.
+    assert not exactly_equal({"persist-credentials": False}, {"persist-credentials": 0})
+    assert not exactly_equal({"timeout-minutes": 5}, {"timeout-minutes": 5.0})
+    # Nested two levels down.
+    assert not exactly_equal({"with": {"flag": True}}, {"with": {"flag": 1}})
+    # Inside a list, which mappings of steps are.
+    assert not exactly_equal([{"flag": False}], [{"flag": 0}])
+    # A mapping whose *keys* collide: {False: "a"} and {0: "a"} are one entry
+    # each and compare equal under ordinary equality.
+    assert not exactly_equal({False: "a"}, {0: "a"})
+    assert not exactly_equal({True: "a"}, {1: "a"})
+
+    # And the positive direction still holds, or the checks above would be
+    # satisfied by a comparator that refuses everything.
+    assert exactly_equal({"with": {"flag": False, "n": 5}}, {"with": {"flag": False, "n": 5}})
+    assert exactly_equal([1, "a", True], [1, "a", True])
+
+
+def test_workflow_validator_wiring_is_intact() -> None:
+    """The coordinator must actually call each rule, and main must call it.
+
+    Every mutation above enters at the coordinator, so a rule silently dropped
+    from it would take a whole class of mutations down with it and leave the
+    suite green. These six checks pin the wiring itself.
+    """
+    source = (ROOT / "scripts/validate-workflows.py").read_text(encoding="utf-8")
+    namespace = _workflow_namespace()
+
+    # 1. The coordinator exists and is importable.
+    assert callable(namespace["validate_workflow_document"])
+    # 2. main delegates to it rather than inlining the rules again.
+    main_source = source[source.index("def main()") :]
+    assert "validate_workflow_document(path, content, workflow)" in main_source
+    # 3. main calls no per-rule validator directly any more.
+    assert not any(
+        f"errors.extend({rule}(" in main_source
+        for rule in (
+            "validate_permissions",
+            "validate_action_pins",
+            "validate_checkout_credentials",
+            "validate_environment_contexts",
+            "validate_untrusted_triggers",
+            "validate_pull_request_triggers",
+            "validate_merge_gate",
+        )
+    )
+    # 4. The coordinator wires in every rule.
+    coordinator = source[
+        source.index("def validate_workflow_document(") : source.index("def main()")
+    ]
+    for rule in (
+        "validate_permissions",
+        "validate_action_pins",
+        "validate_checkout_credentials",
+        "validate_environment_contexts",
+        "validate_untrusted_triggers",
+        "validate_pull_request_triggers",
+        "validate_merge_gate",
+    ):
+        assert f"errors.extend({rule}(" in coordinator, rule
+    # 5. The merge gate wrapper reaches both of its halves.
+    gate = source[source.index("def validate_merge_gate(") :]
+    assert "validate_merge_gate_schema(path, job)" in gate
+    assert "validate_merge_gate_steps(path, job)" in gate
+    # 6. The gate executes the shipped predicate rather than a description.
+    assert 'MERGE_GATE_COMMAND = "python scripts/ci-merge-gate.py"' in source
+    assert (ROOT / "scripts/ci-merge-gate.py").is_file()

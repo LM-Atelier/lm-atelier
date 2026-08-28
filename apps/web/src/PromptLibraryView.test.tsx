@@ -21,6 +21,7 @@ vi.mock("./api", async (importOriginal) => {
     promptTemplate: vi.fn(),
     createPromptTemplate: vi.fn(),
     updatePromptTemplate: vi.fn(),
+    deletePromptTemplate: vi.fn(),
     promptTemplateRevisions: vi.fn(),
     restorePromptTemplateRevision: vi.fn(),
     chat: vi.fn(),
@@ -177,6 +178,7 @@ beforeEach(() => {
   vi.mocked(api.promptTemplateRevisions).mockResolvedValue([currentRevision, previousRevision]);
   vi.mocked(api.createPromptTemplate).mockResolvedValue(writeResult);
   vi.mocked(api.updatePromptTemplate).mockResolvedValue(writeResult);
+  vi.mocked(api.deletePromptTemplate).mockResolvedValue(undefined);
   vi.mocked(api.restorePromptTemplateRevision).mockResolvedValue(writeResult);
 });
 
@@ -237,6 +239,47 @@ describe("Prompt Library Phase 1", () => {
     }));
   });
 
+  it("copies the selected template into an independent create draft", async () => {
+    const originalContract = structuredClone(detail.current_revision.contract_json);
+    renderLibrary();
+    await screen.findByRole("heading", { name: "Portrait variants" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+
+    expect(screen.getByRole("dialog", { name: "New prompt template" })).toBeVisible();
+    expect(screen.getByLabelText("Template name")).toHaveValue("Portrait variants copy");
+    expect(screen.getByLabelText("Template description")).toHaveValue("One controlled subject slot");
+    expect(screen.getByLabelText("Template body")).toHaveValue("A portrait of {{subject}}.");
+
+    fireEvent.change(screen.getByLabelText("Template description"), { target: { value: "A separate copy" } });
+    fireEvent.change(screen.getByLabelText("Template body"), { target: { value: "A painted portrait of {{subject}}." } });
+    fireEvent.click(screen.getByRole("button", { name: "Save revision" }));
+
+    await waitFor(() => expect(api.createPromptTemplate).toHaveBeenCalledTimes(1));
+    expect(api.updatePromptTemplate).not.toHaveBeenCalled();
+    expect(api.createPromptTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      idempotency_key: expect.any(String),
+      name: "Portrait variants copy",
+      description: "A separate copy",
+      contract: {
+        ...originalContract,
+        body: "A painted portrait of {{subject}}.",
+      },
+    }));
+    expect(detail.current_revision.contract_json).toEqual(originalContract);
+  });
+
+  it("keeps a copied template name within the create limit", async () => {
+    const maximumName = "x".repeat(200);
+    vi.mocked(api.promptTemplate).mockResolvedValue({ ...detail, name: maximumName });
+    renderLibrary();
+    await screen.findByRole("heading", { name: maximumName });
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+
+    expect(screen.getByLabelText("Template name")).toHaveValue(`${"x".repeat(195)} copy`);
+  });
+
   it("offers reusable choices by default and an explicit distinct mode", async () => {
     renderLibrary();
     await screen.findByRole("heading", { name: "Portrait variants" });
@@ -278,6 +321,22 @@ describe("Prompt Library Phase 1", () => {
       expected_current_revision_id: currentRevision.id,
       archived: true,
     }));
+  });
+
+  it("requires explicit retained-history confirmation before deletion", async () => {
+    renderLibrary();
+    await screen.findByRole("heading", { name: "Portrait variants" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    const dialog = screen.getByRole("dialog", { name: "Delete Portrait variants?" });
+    expect(within(dialog).getByText("Immutable revisions and existing batch/import history will remain for provenance. The template cannot be edited, restored, exported, or used for new batches after deletion.")).toBeVisible();
+    expect(api.deletePromptTemplate).not.toHaveBeenCalled();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete template" }));
+    await waitFor(() => expect(api.deletePromptTemplate).toHaveBeenCalledWith(
+      definition.id,
+      currentRevision.id,
+    ));
   });
 
   it("keeps edit authority bound to the template that opened the editor", async () => {
@@ -605,25 +664,42 @@ describe("Prompt Library Phase 1", () => {
   });
 
   it("refuses a fixed stack on another option once sixty-four LoRAs are pooled", async () => {
+    const loadedOptions = Array.from({ length: 8 }, (_, optionIndex) => ({
+      workflow_revision_id: "workflow-revision-1",
+      lora_policy: {
+        mode: "fixed" as const,
+        stack: installedLoraDigests
+          .slice(optionIndex * 8, (optionIndex + 1) * 8)
+          .map((sha256) => ({ sha256, model_strength: 1, clip_strength: 1 })),
+      },
+    }));
+    vi.mocked(api.promptTemplate).mockResolvedValue({
+      ...detail,
+      current_revision: {
+        ...currentRevision,
+        contract_json: {
+          ...contract,
+          resource_policy: {
+            mode: "pool",
+            strategy: "round_robin",
+            options: [
+              ...loadedOptions,
+              {
+                workflow_revision_id: "workflow-revision-1",
+                lora_policy: { mode: "inherited_auto" },
+              },
+            ],
+          },
+        },
+      },
+    });
     renderLibrary();
     await screen.findByRole("heading", { name: "Portrait variants" });
-    beginNewTemplate();
-    fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "pool" } });
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
-    // Nine options: eight carrying eight LoRAs each, and one still automatic.
-    // Eight per stack rather than sixteen on purpose - at sixteen the Add LoRA
-    // button is already disabled by the per-stack limit, so the pool cap would
-    // be masked and its own guard could be deleted unnoticed.
-    for (let option = 2; option < 9; option += 1) {
-      fireEvent.click(screen.getByRole("button", { name: "Add option" }));
-    }
-    for (let option = 1; option <= 8; option += 1) {
-      fireEvent.change(screen.getByLabelText(`Option ${option} LoRA policy`), { target: { value: "fixed" } });
-      if (option === 1) await screen.findByRole("option", { name: "Portrait LoRA 1 - Portrait styles" });
-      for (let lora = 1; lora < 8; lora += 1) {
-        fireEvent.click(screen.getAllByRole("button", { name: "Add LoRA" })[option - 1]);
-      }
-    }
+    // Load the valid contract boundary in one render instead of paying for 64
+    // sequential editor updates. Eight per stack keeps the aggregate cap
+    // distinct from the independent sixteen-per-stack guard.
     expect(screen.getByText("9 options · 64 paired LoRAs of 64")).toBeInTheDocument();
 
     // The ninth option may no longer take a stack, because doing so would mint
@@ -640,9 +716,7 @@ describe("Prompt Library Phase 1", () => {
     fireEvent.change(ninth, { target: { value: "fixed" } });
     expect(ninth).toHaveValue("inherited_auto");
     expect(screen.getByText("9 options · 64 paired LoRAs of 64")).toBeInTheDocument();
-    // Building a maximal pool is sixty-odd interactions, so this one case needs
-    // more than the default budget.
-  }, 30_000);
+  }, 15_000);
 
   it("keeps the pool between two and sixteen options and offers no nested LoRA pool", async () => {
     renderLibrary();
@@ -780,6 +854,25 @@ describe("Prompt Library Phase 1", () => {
 
     expect(await screen.findByText("A template with this name already exists. Choose a different name.")).toBeVisible();
     expect(screen.queryByText(/private\\duplicate-template/)).toBeNull();
+  });
+
+  it("keeps a copied draft open when its proposed name is already taken", async () => {
+    vi.mocked(api.createPromptTemplate).mockRejectedValue(new ApiError(
+      409,
+      { detail: "C:\\private\\duplicate-copy.json" },
+      "C:\\private\\duplicate-copy.json",
+      "prompt-template-name-taken",
+    ));
+    renderLibrary();
+    await screen.findByRole("heading", { name: "Portrait variants" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save revision" }));
+
+    const dialog = screen.getByRole("dialog", { name: "New prompt template" });
+    expect(await within(dialog).findByText("A template with this name already exists. Choose a different name.")).toBeVisible();
+    expect(within(dialog).getByLabelText("Template name")).toHaveValue("Portrait variants copy");
+    expect(screen.queryByText(/private\\duplicate-copy/)).toBeNull();
   });
 
   it("pages through a bounded template list", async () => {

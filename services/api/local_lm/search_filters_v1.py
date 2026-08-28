@@ -1,4 +1,4 @@
-"""Pure conversation search filter validation (item 41).
+"""Pure conversation search filter validation.
 
 Validates caller-supplied filter facts only. No SQL, FTS, or chat mutation.
 """

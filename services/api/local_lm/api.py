@@ -56,6 +56,16 @@ from .chat_deletion import (
     delete_exchange,
 )
 from .chat_forking import ForkSourceNotFound, fork_chat_from_message
+from .chat_item_removal import (
+    ChatItemRemovalActiveWork,
+    ChatItemRemovalAlreadyRemoved,
+    ChatItemRemovalIdempotencyConflict,
+    ChatItemRemovalIdentityMismatch,
+    ChatItemRemovalNotFound,
+    ChatItemRemovalRevisionConflict,
+    execute_chat_item_removal,
+    preview_chat_item_removal,
+)
 from .civitai_catalog import CivitaiCatalog
 from .comfy_editor_bridge import ComfyEditorBridgeError
 from .comfy_registry import ComfyRegistryClient
@@ -232,6 +242,8 @@ from .prompt_library import (
     PromptLibraryError,
     PromptTemplateWriteResult,
     create_prompt_template,
+    delete_prompt_template,
+    require_live_prompt_template_definition,
     restore_prompt_template_revision,
     update_prompt_template,
 )
@@ -294,6 +306,9 @@ from .schemas import (
     CatalogVersions,
     ChatCreate,
     ChatDetail,
+    ChatItemRemovalExecute,
+    ChatItemRemovalExecutionOut,
+    ChatItemRemovalImpactOut,
     ChatOut,
     ChatUpdate,
     ChatWorkflowSelectionIn,
@@ -468,6 +483,7 @@ from .studio_sessions import (
     studio_session_title,
 )
 from .verified_setup import build_verified_setup, resolve_verified_setup
+from .video_length import workflow_video_length
 from .workflow_asset_aliases import (
     WorkflowAssetAliasError,
     materialize_workflow_asset_aliases,
@@ -2007,7 +2023,9 @@ async def list_prompt_templates(
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0, le=10_000)] = 0,
 ) -> PromptTemplatePageOut:
-    filters = [] if include_archived else [PromptTemplateDefinition.archived.is_(False)]
+    filters = [PromptTemplateDefinition.deleted_at.is_(None)]
+    if not include_archived:
+        filters.append(PromptTemplateDefinition.archived.is_(False))
     total = session.scalar(
         select(func.count()).select_from(PromptTemplateDefinition).where(*filters)
     )
@@ -2211,13 +2229,10 @@ async def get_prompt_template(
     template_id: str,
     session: SessionDep,
 ) -> PromptTemplateDetailOut:
-    definition = session.get(PromptTemplateDefinition, template_id)
-    if definition is None:
-        raise api_error(
-            404,
-            "prompt-template-not-found",
-            "Prompt template does not exist.",
-        )
+    try:
+        definition = require_live_prompt_template_definition(session, template_id)
+    except PromptLibraryError as exc:
+        raise _prompt_template_error(exc) from exc
     return _prompt_template_detail_out(session, definition)
 
 
@@ -2255,6 +2270,23 @@ async def patch_prompt_template(
     return _prompt_template_write_out(session, result)
 
 
+@router.delete("/prompt-templates/{template_id}", status_code=204)
+async def delete_prompt_template_route(
+    template_id: str,
+    session: SessionDep,
+    expected_current_revision_id: Annotated[str, Query(min_length=1, max_length=40)],
+) -> Response:
+    try:
+        delete_prompt_template(
+            session,
+            definition_id=template_id,
+            expected_current_revision_id=expected_current_revision_id,
+        )
+    except PromptLibraryError as exc:
+        raise _prompt_template_error(exc) from exc
+    return Response(status_code=204)
+
+
 @router.get(
     "/prompt-templates/{template_id}/revisions",
     response_model=list[PromptTemplateRevisionOut],
@@ -2265,12 +2297,10 @@ async def list_prompt_template_revisions(
     limit: Annotated[int, Query(ge=1, le=100)] = 100,
     offset: Annotated[int, Query(ge=0, le=10_000)] = 0,
 ) -> list[PromptTemplateRevisionOut]:
-    if session.get(PromptTemplateDefinition, template_id) is None:
-        raise api_error(
-            404,
-            "prompt-template-not-found",
-            "Prompt template does not exist.",
-        )
+    try:
+        require_live_prompt_template_definition(session, template_id)
+    except PromptLibraryError as exc:
+        raise _prompt_template_error(exc) from exc
     revisions = session.scalars(
         select(PromptTemplateRevision)
         .where(PromptTemplateRevision.prompt_template_id == template_id)
@@ -2290,6 +2320,13 @@ async def get_prompt_template_revision(
     revision_id: str,
     session: SessionDep,
 ) -> PromptTemplateRevisionOut:
+    definition = session.get(PromptTemplateDefinition, template_id)
+    if definition is not None and definition.deleted_at is not None:
+        raise api_error(
+            410,
+            "prompt-template-deleted",
+            "Prompt template was deleted. Choose another template.",
+        )
     revision = session.get(PromptTemplateRevision, revision_id)
     if revision is None or revision.prompt_template_id != template_id:
         raise api_error(
@@ -2387,6 +2424,12 @@ async def _create_prompt_batch_locked(
             404, "prompt-template-revision-not-found", "Prompt template does not exist."
         )
     definition = session.get(PromptTemplateDefinition, revision.prompt_template_id)
+    if definition is not None and definition.deleted_at is not None:
+        raise api_error(
+            410,
+            "prompt-template-deleted",
+            "Prompt template was deleted. Choose another template.",
+        )
     if (
         definition is None
         or definition.archived
@@ -2960,6 +3003,87 @@ async def fork_thread_from_message(message_id: str, session: ConversationSession
     return created
 
 
+@router.get(
+    "/messages/{message_id}/removal-impact",
+    response_model=ChatItemRemovalImpactOut,
+)
+async def get_chat_item_removal_impact(
+    message_id: str,
+    session: ConversationSessionDep,
+) -> ChatItemRemovalImpactOut:
+    """Preview target-owned payload detachment without authorizing mutation."""
+
+    try:
+        impact = preview_chat_item_removal(session, message_id)
+    except ChatItemRemovalNotFound as exc:
+        raise api_error(404, "message-not-found", str(exc)) from exc
+    return ChatItemRemovalImpactOut.model_validate(impact)
+
+
+@router.post(
+    "/messages/{message_id}/remove-content",
+    response_model=ChatItemRemovalExecutionOut,
+)
+async def remove_chat_item_content(
+    message_id: str,
+    payload: ChatItemRemovalExecute,
+    request: Request,
+    session: ConversationSessionDep,
+) -> ChatItemRemovalExecutionOut:
+    """Detach one item's owned payload while preserving its graph identity."""
+
+    if payload.expected_message_id != message_id:
+        raise api_error(
+            409,
+            "message-identity-mismatch",
+            "message identity does not match the removal request",
+        )
+    message = session.get(Message, message_id)
+    if message is None:
+        raise api_error(404, "message-not-found", "message not found")
+    services = _services(request)
+    chat_id = message.chat_id
+    # End the path-to-chat lookup transaction before waiting for the lock.
+    # The locked lookup below must observe the latest committed graph, not a
+    # WAL snapshot opened while another mutation still held this chat guard.
+    session.rollback()
+    async with services.orchestrator.chat_guard(chat_id):
+        session.expire_all()
+        try:
+            result = execute_chat_item_removal(
+                session,
+                message_id,
+                expected_message_id=payload.expected_message_id,
+                expected_revision_id=payload.expected_revision_id,
+                operation_key=payload.operation_key,
+            )
+        except ChatItemRemovalIdentityMismatch as exc:
+            raise api_error(409, "message-identity-mismatch", str(exc)) from exc
+        except ChatItemRemovalNotFound as exc:
+            raise api_error(404, "message-not-found", str(exc)) from exc
+        except ChatItemRemovalIdempotencyConflict as exc:
+            raise api_error(409, "operation-key-conflict", str(exc)) from exc
+        except ChatItemRemovalAlreadyRemoved as exc:
+            raise api_error(409, "message-already-removed", str(exc)) from exc
+        except ChatItemRemovalActiveWork as exc:
+            raise api_error(
+                409,
+                "chat-removal-active-work",
+                str(exc),
+                job_count=exc.job_count,
+            ) from exc
+        except ChatItemRemovalRevisionConflict as exc:
+            raise api_error(409, "message-revision-conflict", str(exc)) from exc
+        session.commit()
+    if not result.replayed:
+        await services.events.publish(
+            "message.updated",
+            message_id,
+            {"chat_id": result.chat_id, "content_removed": True},
+        )
+    return ChatItemRemovalExecutionOut.model_validate(result)
+
+
 @router.delete("/messages/{message_id}/exchange", response_model=ExchangeDeletionOut)
 async def delete_message_exchange(
     message_id: str, session: ConversationSessionDep
@@ -3012,6 +3136,27 @@ def _run_prompt_source(run: Run) -> object | None:
     return None
 
 
+def _source_content_removed_error() -> ApiError:
+    return api_error(
+        409,
+        "source-content-removed",
+        "source content was removed and cannot be replayed",
+    )
+
+
+def _require_run_replay_sources(session: Session, run: Run) -> None:
+    removed_source = session.scalar(
+        select(Message.id)
+        .where(
+            Message.id.in_((run.user_message_id, run.assistant_message_id)),
+            Message.content_removed_at.is_not(None),
+        )
+        .limit(1)
+    )
+    if removed_source is not None:
+        raise _source_content_removed_error()
+
+
 @router.post("/messages/{message_id}/regenerate", response_model=TurnAccepted, status_code=202)
 async def regenerate_message(
     message_id: str,
@@ -3053,6 +3198,7 @@ async def regenerate_message(
         prior_run = session.scalar(select(Run).where(Run.assistant_message_id == message_id))
     if not prior_run:
         raise api_error(404, "assistant-run-not-found", "assistant run not found")
+    _require_run_replay_sources(session, prior_run)
     user_message = session.scalar(
         select(Message)
         .options(selectinload(Message.parts))
@@ -3066,6 +3212,8 @@ async def regenerate_message(
         if run_prompt_source is not None
         else "\n".join(part.text for part in user_message.parts if part.text).strip()
     )
+    if not text.strip():
+        raise _source_content_removed_error()
     mode = _mode_for_operation(Operation(prior_run.operation))
     prior_revision = (
         session.get(WorkflowRevision, prior_run.workflow_revision_id)
@@ -3348,6 +3496,10 @@ async def retry_work_plan(
     if not jobs:
         raise api_error(409, "work-plan-not-retryable", "work plan has no retryable steps")
     for job in jobs:
+        source_run = _job_replay_source_run(session, job)
+        if source_run is not None:
+            _require_run_replay_sources(session, source_run)
+    for job in jobs:
         await retry_job(job.id, request, session)
     session.expire_all()
     refreshed = session.scalar(
@@ -3574,6 +3726,14 @@ def _current_chat_job(session: Session, chat_id: str) -> Job | None:
     )
 
 
+def _job_replay_source_run(session: Session, job: Job) -> Run | None:
+    run_id = job.run_id
+    if run_id is None and job.kind == JobKind.EDIT_VERIFY.value:
+        candidate = job.payload_json.get("source_run_id")
+        run_id = candidate if isinstance(candidate, str) else None
+    return session.get(Run, run_id) if run_id else None
+
+
 @router.post("/jobs/{job_id}/retry", response_model=JobOut)
 async def retry_job(
     job_id: str,
@@ -3608,6 +3768,9 @@ async def retry_job(
         session.refresh(job)
         return job
     if not job.run_id:
+        source_run = _job_replay_source_run(session, job)
+        if source_run is not None:
+            _require_run_replay_sources(session, source_run)
         raise api_error(422, "job-not-retryable", "job has no retryable operation")
     run = session.get(Run, job.run_id)
     if not run:
@@ -3628,6 +3791,7 @@ async def retry_job(
         run = session.get(Run, job.run_id)
         if not run:
             raise api_error(422, "job-not-retryable", "job has no retryable operation")
+        _require_run_replay_sources(session, run)
         job.status = "queued"
         job.progress = 0
         job.error = None
@@ -8009,6 +8173,7 @@ async def create_workflow(payload: WorkflowCreate, session: SessionDep) -> Workf
             payload.dependencies,
         )
         validate_workflow_edit_calibration(payload.input_schema)
+        workflow_video_length(payload.input_schema)
     except ValueError as exc:
         raise api_error(422, "workflow-invalid", str(exc)) from exc
     definition = WorkflowDefinition(
@@ -10642,6 +10807,7 @@ async def create_workflow_revision(
             payload.dependencies,
         )
         validate_workflow_edit_calibration(payload.input_schema)
+        workflow_video_length(payload.input_schema)
     except ValueError as exc:
         raise api_error(422, "workflow-revision-invalid", str(exc)) from exc
     version = (
@@ -10739,6 +10905,7 @@ async def validate_workflow(
         declared_fields = workflow_settings(base_fields, revision.input_schema_json)
         validate_settings(defaults(declared_fields), declared_fields)
         validate_workflow_edit_calibration(revision.input_schema_json)
+        workflow_video_length(revision.input_schema_json)
     except ValueError as exc:
         # Explaining why a schema is invalid is what this endpoint is for, so the
         # message survives - but it now comes only from our own validators,

@@ -709,10 +709,10 @@ def test_an_in_place_reparse_after_anchoring_writes_nothing_through(
     """The attack that defeated the previous anchor, pinned.
 
     Holding the root open blocks rename and delete, and a junction needs
-    neither: the conversion happens in place. Measured against the earlier
-    construction, the foreign directory gained store.json. Publication is now
-    resolved against the held handle, so the create refuses rather than
-    following the new redirection - and nothing reaches the target.
+    neither: the conversion happens in place. Under the earlier construction
+    the foreign directory gained store.json. Publication is now resolved
+    against the held handle, so the create refuses rather than following the
+    new redirection - and nothing reaches the target.
     """
 
     root = tmp_path / "packages"

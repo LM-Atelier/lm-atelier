@@ -21,6 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, object_session, selectinload
 
 from .adapters.base import ChatRequest, MediaEvent, MediaRequest
+from .adapters.message_projection import project_chat_messages
 from .artifact_library import ensure_library_entry
 from .artifacts import ArtifactStore
 from .auxiliary_assets import (
@@ -178,6 +179,11 @@ from .studio_masks import (
     MaskContractError,
     parse_mask_setting,
     split_mask_setting,
+)
+from .video_length import (
+    VIDEO_DURATION_SETTING_KEY,
+    resolve_video_length_settings,
+    workflow_video_length,
 )
 from .vision import PreparedVisualContext, VisionContextService, VisionInputError
 from .visual_prompt_compiler import (
@@ -1258,6 +1264,10 @@ class ConversationOrchestrator:
             ),
             turn_overrides=request_settings,
         )
+        effective_settings, video_length_resolution = resolve_video_length_settings(
+            effective_settings,
+            workflow_revision.input_schema_json if workflow_revision else None,
+        )
         if (
             prompt_source_resources is not None
             and prompt_source_resources.lora_settings is not None
@@ -1965,6 +1975,7 @@ class ConversationOrchestrator:
                 "workflow": output_workflow_provenance,
                 "resolved_settings": output_settings,
                 "generation_estimate": generation_estimate,
+                "video_length": video_length_resolution,
                 "media_plan_estimate": (
                     self._media_plan_estimate(plan.operation, output_settings, 1)
                     if output_context is not None
@@ -2313,6 +2324,10 @@ class ConversationOrchestrator:
                 ),
                 turn_overrides=step_overrides,
             )
+            effective_settings, video_length_resolution = resolve_video_length_settings(
+                effective_settings,
+                workflow_revision.input_schema_json if workflow_revision else None,
+            )
             lora_selection = None
             lora_setting_layers = (
                 profile.load_settings_json if profile else {},
@@ -2415,6 +2430,7 @@ class ConversationOrchestrator:
                     "effective_preset": preset_layers[-1] if preset_layers else None,
                     "estimate": estimate,
                     "generation_estimate": generation_estimate,
+                    "video_length": video_length_resolution,
                     "lora_resolution": lora_resolution,
                     "lora_selection": lora_selection,
                 }
@@ -2667,6 +2683,7 @@ class ConversationOrchestrator:
                     "workflow": workflow_provenance,
                     "resolved_settings": resolved["settings"],
                     "generation_estimate": resolved["generation_estimate"],
+                    "video_length": resolved["video_length"],
                     "plan_step_estimate": resolved["estimate"],
                     "image_edit": self._image_edit_provenance(
                         operation,
@@ -3746,11 +3763,20 @@ class ConversationOrchestrator:
         input_budget = max(64, context_limit - output_limit - safety_tokens)
 
         self._commit_before_await(session)
-        messages, input_tokens, omitted, compaction = await self._fit_chat_context(
+        (
+            messages,
+            input_tokens,
+            omitted,
+            compaction,
+            included_source_ids,
+        ) = await self._fit_chat_context(
             messages,
             source_message_ids,
             input_budget,
         )
+        original_message_count = len(messages)
+        adapter_projection = project_chat_messages(messages, included_source_ids)
+        messages = adapter_projection.messages
         if input_tokens > input_budget:
             raise ValueError(
                 "The current instructions and message exceed this profile's context window. "
@@ -3771,6 +3797,9 @@ class ConversationOrchestrator:
             "compaction": compaction,
             "output_adjusted": output_limit != requested_output,
             "vision": vision_metadata,
+            "adapter_projection": adapter_projection.metadata(
+                original_message_count=original_message_count
+            ),
         }
         return messages, request_settings, metadata, capabilities.tool_calling
 
@@ -3779,14 +3808,22 @@ class ConversationOrchestrator:
         messages: list[dict[str, Any]],
         source_message_ids: list[str | None],
         input_budget: int,
-    ) -> tuple[list[dict[str, Any]], int, int, dict[str, Any]]:
+    ) -> tuple[
+        list[dict[str, Any]],
+        int,
+        int,
+        dict[str, Any],
+        list[str | None],
+    ]:
         remaining = list(messages)
         remaining_sources = list(source_message_ids)
         removed: list[dict[str, Any]] = []
         removed_sources: list[str | None] = []
-        system_messages = (
-            1 if remaining and remaining[0].get("role") == MessageRole.SYSTEM.value else 0
-        )
+        system_messages = 0
+        for message in remaining:
+            if message.get("role") != MessageRole.SYSTEM.value:
+                break
+            system_messages += 1
 
         def remove_oldest() -> bool:
             if len(remaining) <= system_messages + 1:
@@ -3806,9 +3843,12 @@ class ConversationOrchestrator:
             del remaining_sources[system_messages : system_messages + remove_count]
             return True
 
-        input_tokens = await self.engines.chat.count_tokens(remaining)
+        async def count_projected(values: list[dict[str, Any]]) -> int:
+            return await self.engines.chat.count_tokens(project_chat_messages(values).messages)
+
+        input_tokens = await count_projected(remaining)
         while input_tokens > input_budget and remove_oldest():
-            input_tokens = await self.engines.chat.count_tokens(remaining)
+            input_tokens = await count_projected(remaining)
         if not removed:
             return (
                 remaining,
@@ -3821,6 +3861,7 @@ class ConversationOrchestrator:
                     "transcript_preserved": True,
                     "reversible": True,
                 },
+                remaining_sources,
             )
 
         max_characters = min(
@@ -3835,7 +3876,9 @@ class ConversationOrchestrator:
             )
             candidate = list(remaining)
             candidate.insert(system_messages, folded.message)
-            candidate_tokens = await self.engines.chat.count_tokens(candidate)
+            candidate_sources = list(remaining_sources)
+            candidate_sources.insert(system_messages, None)
+            candidate_tokens = await count_projected(candidate)
             if candidate_tokens <= input_budget:
                 return (
                     candidate,
@@ -3845,6 +3888,7 @@ class ConversationOrchestrator:
                         **folded.provenance,
                         "fold_tokens": max(0, candidate_tokens - input_tokens),
                     },
+                    candidate_sources,
                 )
             if max_characters > MIN_COMPACTION_CHARACTERS:
                 max_characters = max(
@@ -3854,9 +3898,9 @@ class ConversationOrchestrator:
                 continue
             if not remove_oldest():
                 break
-            input_tokens = await self.engines.chat.count_tokens(remaining)
+            input_tokens = await count_projected(remaining)
             while input_tokens > input_budget and remove_oldest():
-                input_tokens = await self.engines.chat.count_tokens(remaining)
+                input_tokens = await count_projected(remaining)
 
         return (
             remaining,
@@ -3870,6 +3914,7 @@ class ConversationOrchestrator:
                 "transcript_preserved": True,
                 "reversible": True,
             },
+            remaining_sources,
         )
 
     async def _attach_visual_context(
@@ -4609,6 +4654,7 @@ class ConversationOrchestrator:
                 if artifact:
                     input_paths.append(self.artifacts.resolve(artifact))
             workflow: dict[str, Any] = {}
+            revision: WorkflowRevision | None = None
             if run.workflow_revision_id:
                 revision = session.get(WorkflowRevision, run.workflow_revision_id)
                 if revision:
@@ -4656,6 +4702,8 @@ class ConversationOrchestrator:
             # as an input reference: it is instruction, not content, and must
             # not appear as an attachment or count toward edit lineage.
             parameters: dict[str, Any] = dict(run.settings_json)
+            if revision and workflow_video_length(revision.input_schema_json):
+                parameters.pop(VIDEO_DURATION_SETTING_KEY, None)
             mask_setting = run.settings_json.get(MASK_SETTING_KEY)
             if isinstance(mask_setting, dict):
                 mask_artifact = session.get(Artifact, str(mask_setting.get("artifact_id") or ""))
@@ -6044,6 +6092,7 @@ class ConversationOrchestrator:
             if (
                 message.role != MessageRole.ASSISTANT.value
                 or message.status != MessageStatus.COMPLETE.value
+                or message.content_removed_at is not None
             ):
                 continue
             run = session.scalar(
@@ -6110,6 +6159,7 @@ class ConversationOrchestrator:
             if (
                 message.role != MessageRole.ASSISTANT.value
                 or message.status != MessageStatus.COMPLETE.value
+                or message.content_removed_at is not None
             ):
                 continue
             run = session.scalar(
@@ -7290,6 +7340,8 @@ class ConversationOrchestrator:
             .options(selectinload(Message.parts))
             .where(Message.id == run.user_message_id, Message.chat_id == run.chat_id)
         )
+        if user_message and user_message.content_removed_at is not None:
+            return []
         durable_ids = (
             [
                 part.artifact_id
@@ -7415,7 +7467,7 @@ class ConversationOrchestrator:
     ) -> list[Artifact]:
         """Load a user's explicit inputs, including legacy provenance-only runs."""
 
-        if message.role != MessageRole.USER.value:
+        if message.role != MessageRole.USER.value or message.content_removed_at is not None:
             return []
         direct_ids = [
             part.artifact_id
@@ -7528,6 +7580,8 @@ class ConversationOrchestrator:
         message: Message,
         input_artifacts: list[Artifact] | None = None,
     ) -> str:
+        if message.content_removed_at is not None:
+            return ""
         text = "\n".join(part.text for part in message.parts if part.text).strip()
         attachment_lines: list[str] = []
         for artifact in input_artifacts or []:

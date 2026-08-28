@@ -242,6 +242,42 @@ def _declared_literals(source: str, expression: str | None) -> set[str] | None:
     return None
 
 
+def _admissible_values(spec: dict, schemas: dict[str, dict]) -> list[str] | None:
+    """The string values one field admits, following a component reference.
+
+    An inline `enum` is the shape a bare pydantic model produces. OpenAPI does
+    not use it for an enum-typed field - it emits a reference instead:
+
+        JobOut.status  ->  {"$ref": "#/components/schemas/JobStatus"}
+        JobStatus      ->  {"enum": [...], "type": "string"}
+
+    Reading only the inline form therefore saw NOTHING for every enum field in
+    every checked component - eight of them, which is the entire population
+    this check was written for. It had never failed because it had never
+    looked. Found by removing a member from a browser union and watching the
+    suite stay green.
+
+    One level of reference is followed, which is all the generator emits.
+    """
+
+    seen = spec
+    for _ in range(2):
+        values = seen.get("enum") or next(
+            (option.get("enum") for option in seen.get("anyOf", []) if option.get("enum")),
+            None,
+        )
+        if values:
+            return values
+        reference = seen.get("$ref") or next(
+            (option.get("$ref") for option in seen.get("allOf", []) if option.get("$ref")),
+            None,
+        )
+        if not reference:
+            return None
+        seen = schemas.get(reference.rsplit("/", 1)[-1]) or {}
+    return None
+
+
 @pytest.mark.parametrize(("interface", "component"), sorted(CHECKED_CONTRACTS.items()))
 def test_browser_can_represent_every_value_the_server_returns(
     interface: str,
@@ -259,10 +295,7 @@ def test_browser_can_represent_every_value_the_server_returns(
     """
     schema = schemas.get(component) or {}
     for field, spec in (schema.get("properties") or {}).items():
-        values = spec.get("enum") or next(
-            (option.get("enum") for option in spec.get("anyOf", []) if option.get("enum")),
-            None,
-        )
+        values = _admissible_values(spec, schemas)
         if not values:
             continue
         declared = _declared_literals(
@@ -270,8 +303,274 @@ def test_browser_can_represent_every_value_the_server_returns(
         )
         if declared is None:
             continue
-        missing = {value for value in values if isinstance(value, str)} - declared
+        served = {value for value in values if isinstance(value, str)}
+        missing = served - declared
         assert not missing, (
             f"{interface}.{field} in types.ts cannot represent {sorted(missing)}, which "
             f"{component} returns. Add the member, and handle it where the field is read."
         )
+        # And the other direction. A member the server cannot produce is not a
+        # missed state, so it costs the user nothing directly - but it is still
+        # a false statement about the protocol, it makes dead branches look
+        # live, and a hand-maintained union drifts BOTH ways. Probing this test
+        # with a deliberately invented member showed the one-directional
+        # assertion accepted it silently, which is the same blind spot the
+        # declaration exists to remove.
+        invented = declared - served
+        assert not invented, (
+            f"{interface}.{field} in types.ts admits {sorted(invented)}, which "
+            f"{component} never returns. Remove the member, or correct the server "
+            f"if the browser is right about what can happen."
+        )
+
+
+# The last underscore-separated token of a field name that marks it as naming
+# a value from a fixed set rather than free text.
+VOCABULARY_TOKENS = frozenset(
+    {"code", "state", "status", "kind", "mode", "phase", "type", "severity", "category"}
+)
+# Fields whose name ends in a vocabulary word and whose type is still a plain
+# string. This is a RATCHET BASELINE, not an approval list: every entry is
+# known debt, the set must never grow, and it must shrink as fields are typed.
+#
+# The point is that an open string does not fail anywhere - it simply is not
+# checked. `test_browser_can_represent_every_value_the_server_returns` skips a
+# field whose declared literals are None, which is exactly what a plain string
+# produces, so declaring the union is what switches that check on. Until then
+# the browser can compare against prose and nothing notices, which is how the
+# readiness-wording break reached main.
+OPEN_VOCABULARY_BASELINE = frozenset(
+    {
+        "BoundWorkflowAssetOut.artifact_kind",
+        "BoundWorkflowAssetOut.kind",
+        "CatalogPreflight.auxiliary_kind",
+        "ChatItemRemovalReferenceOut.subject_kind",
+        "DeviceInfo.kind",
+        "EditTemplateOut.mask_mode",
+        "InstallPlanOut.failure_code",
+        "InstallPlanOut.status",
+        "JobOut.phase",
+        "MessageReferenceOut.subject_kind",
+        "ModelAssetOut.kind",
+        "ModelCapabilityEvidenceOut.failure_code",
+        "ModelUpdateOut.kind",
+        "ReferenceAssetOut.validation_state",
+        "ReferenceSubjectCreate.kind",
+        "ReferenceSubjectOut.kind",
+        "ResponseRevisionOut.status",
+        "SetupReadinessCheck.code",
+        "SetupVerificationOut.failure_code",
+        "StudioToolCapability.kind",
+        "WorkPlanOut.status",
+        "WorkStepOut.status",
+        "WorkflowDependencyImpactOut.resource_kind",
+        "WorkflowInstallOfferOut.invalidation_code",
+        "WorkflowMissingNodeOut.node_type",
+        "WorkflowPackageIssueOut.code",
+    }
+)
+
+# Names ending in a vocabulary word that are NOT vocabularies. Kept explicit so
+# the classifier does not have to guess, and so a reader can see what was
+# deliberately excluded rather than wonder.
+VOCABULARY_NAME_EXCLUSIONS = (
+    "identifiers - anything ending in _id, and a bare id",
+    "media and mime types - a content type is not a closed vocabulary",
+    "FastAPI validation models, which the application does not define",
+)
+
+
+def _resolve_reference(
+    spec: dict, schemas: dict[str, dict], seen: frozenset[str]
+) -> tuple[dict, frozenset[str]]:
+    """Follow a local component reference to the schema it names.
+
+    Returns the spec unchanged when it is not a reference, when the target is
+    not a local component, or when following it would revisit a component
+    already on this chain. The cycle guard is not decoration: a component whose
+    property refers back to its own container is ordinary in a tree-shaped
+    schema, and without the guard the first one recurses until the interpreter
+    gives up.
+    """
+
+    reference = spec.get("$ref")
+    if not isinstance(reference, str):
+        return spec, seen
+    prefix = "#/components/schemas/"
+    if not reference.startswith(prefix):
+        return spec, seen
+    name = reference[len(prefix) :]
+    if name in seen or name not in schemas:
+        return spec, seen
+    return schemas[name], seen | {name}
+
+
+def _is_closed_vocabulary(
+    spec: dict, schemas: dict[str, dict], seen: frozenset[str] = frozenset()
+) -> bool:
+    """An enum, a const, or a reference to something that is one.
+
+    The reference is FOLLOWED. An earlier version read the presence of `$ref`
+    as proof of closure, which let any field naming an open string component
+    past the ratchet - the exact class it exists to stop. A reference that
+    cannot be resolved, because the target is unknown or the chain loops, is
+    treated as NOT closed, so an unknown target surfaces instead of being waved
+    through.
+    """
+
+    resolved, seen = _resolve_reference(spec, schemas, seen)
+    if resolved is not spec:
+        return _is_closed_vocabulary(resolved, schemas, seen)
+    if "enum" in spec or "const" in spec:
+        return True
+    return any(
+        _is_closed_vocabulary(sub, schemas, seen)
+        for key in ("anyOf", "oneOf", "allOf")
+        for sub in spec.get(key, [])
+    )
+
+
+def _declared_types(
+    spec: dict, schemas: dict[str, dict], seen: frozenset[str] = frozenset()
+) -> set[str]:
+    """Every JSON type this field can take, following unions AND references.
+
+    References matter here for the same reason they matter above: a field whose
+    schema is a reference to a string component has no `type` of its own, so
+    without resolution it reports no types at all and fails the string check
+    that decides whether it is a vocabulary worth reporting.
+    """
+
+    resolved, seen = _resolve_reference(spec, schemas, seen)
+    if resolved is not spec:
+        return _declared_types(resolved, schemas, seen)
+    found: set[str] = set()
+    if "type" in spec:
+        found.add(spec["type"])
+    for key in ("anyOf", "oneOf", "allOf"):
+        for sub in spec.get(key, []):
+            found |= _declared_types(sub, schemas, seen)
+    return found
+
+
+def _open_vocabulary_fields(schemas: dict[str, dict]) -> set[str]:
+    """Vocabulary-named STRING fields that carry no closed vocabulary.
+
+    The string check is not decoration. Without it an integer exit_code counts
+    as an open vocabulary, because an integer is trivially not an enum - and a
+    check that cries wolf on a process exit status teaches people to skip the
+    whole report.
+    """
+
+    found: set[str] = set()
+    for component, spec in schemas.items():
+        if component in {"ValidationError", "HTTPValidationError"}:
+            continue
+        for field, field_spec in (spec.get("properties") or {}).items():
+            if field.split("_")[-1] not in VOCABULARY_TOKENS:
+                continue
+            lowered = field.lower()
+            if lowered == "id" or lowered.endswith("_id"):
+                continue
+            if "mime" in lowered or "media_type" in lowered or "content_type" in lowered:
+                continue
+            if _is_closed_vocabulary(field_spec, schemas):
+                continue
+            if "string" not in _declared_types(field_spec, schemas):
+                continue
+            found.add(f"{component}.{field}")
+    return found
+
+
+def test_no_new_api_field_is_a_vocabulary_typed_as_an_open_string(
+    schemas: dict[str, dict],
+) -> None:
+    """A new open vocabulary has to be argued for, not merely committed."""
+
+    appeared = sorted(_open_vocabulary_fields(schemas) - OPEN_VOCABULARY_BASELINE)
+    assert not appeared, (
+        "these API fields are a closed vocabulary typed as a plain string, and "
+        f"are not in the baseline: {appeared}. Declare the vocabulary, or add "
+        "the field to OPEN_VOCABULARY_BASELINE with the reason it cannot be."
+    )
+
+
+def test_the_open_vocabulary_baseline_does_not_rot(schemas: dict[str, dict]) -> None:
+    """Every baselined field must still be open, so the list shrinks.
+
+    Without this the baseline only ever holds: a field could be typed properly,
+    or renamed away, and its stale entry would keep silently excusing a name
+    that no longer exists. A ratchet that cannot tighten is a list.
+    """
+
+    fixed = sorted(OPEN_VOCABULARY_BASELINE - _open_vocabulary_fields(schemas))
+    assert not fixed, (
+        f"these baselined fields are no longer open strings: {fixed}. Remove "
+        "them from OPEN_VOCABULARY_BASELINE - the baseline is meant to shrink."
+    )
+
+
+def test_a_referenced_open_vocabulary_is_not_hidden_from_the_ratchet() -> None:
+    """A reference must be followed, not taken as proof of closure.
+
+    This is the case the first version let through: it read the presence of
+    `$ref` as closure without resolving it, so a field naming a string
+    component was absent from the report entirely. Named root schemas and
+    generator changes both produce references, so this is ordinary schema
+    evolution rather than a speculative edge.
+    """
+
+    schemas: dict[str, dict] = {
+        "OpenString": {"type": "string"},
+        "ClosedEnum": {"type": "string", "enum": ["ready", "failed"]},
+        "Widget": {
+            "properties": {
+                "referenced_status": {"$ref": "#/components/schemas/OpenString"},
+                "referenced_kind": {"$ref": "#/components/schemas/ClosedEnum"},
+                "nullable_referenced_state": {
+                    "anyOf": [
+                        {"$ref": "#/components/schemas/OpenString"},
+                        {"type": "null"},
+                    ]
+                },
+                "nullable_referenced_mode": {
+                    "anyOf": [
+                        {"$ref": "#/components/schemas/ClosedEnum"},
+                        {"type": "null"},
+                    ]
+                },
+            }
+        },
+    }
+
+    found = _open_vocabulary_fields(schemas)
+    assert "Widget.referenced_status" in found, "a referenced open string must be reported"
+    assert "Widget.nullable_referenced_state" in found, "nullable does not close it"
+    assert "Widget.referenced_kind" not in found, "a referenced enum is closed"
+    assert "Widget.nullable_referenced_mode" not in found, "nullable does not open it"
+
+
+def test_a_reference_cycle_terminates_instead_of_recursing() -> None:
+    """A component chain that loops must stop, not exhaust the stack.
+
+    Both shapes appear in real documents: a component that refers to itself,
+    and two that refer to each other.
+    """
+
+    schemas: dict[str, dict] = {
+        "Loop": {"$ref": "#/components/schemas/Loop"},
+        "Ping": {"$ref": "#/components/schemas/Pong"},
+        "Pong": {"$ref": "#/components/schemas/Ping"},
+        "Widget": {
+            "properties": {
+                "self_status": {"$ref": "#/components/schemas/Loop"},
+                "mutual_kind": {"$ref": "#/components/schemas/Ping"},
+            }
+        },
+    }
+
+    # Terminating at all is the assertion. Neither resolves to a string, so
+    # neither is reported, and an unresolvable target counts as NOT closed.
+    assert _open_vocabulary_fields(schemas) == set()
+    assert not _is_closed_vocabulary({"$ref": "#/components/schemas/Loop"}, schemas)
+    assert not _is_closed_vocabulary({"$ref": "#/components/schemas/Missing"}, schemas)

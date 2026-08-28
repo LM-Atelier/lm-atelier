@@ -25,6 +25,8 @@ import type {
   CatalogPreflight,
   CatalogVersions,
   Chat,
+  ChatItemRemovalExecution,
+  ChatItemRemovalImpact,
   ContentRating,
   ExchangeDeletion,
   ChatDetail,
@@ -294,6 +296,15 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(payload),
     }),
+  deletePromptTemplate: (id: string, expectedCurrentRevisionId: string) => {
+    const parameters = new URLSearchParams({
+      expected_current_revision_id: expectedCurrentRevisionId,
+    });
+    return request<void>(
+      `/api/prompt-templates/${encodeURIComponent(id)}?${parameters}`,
+      { method: "DELETE" },
+    );
+  },
   promptTemplateRevisions: (id: string) =>
     request<PromptTemplateRevision[]>(
       `/api/prompt-templates/${encodeURIComponent(id)}/revisions`,
@@ -455,6 +466,20 @@ export const api = {
     request<Chat>(`/api/messages/${messageId}/fork`, { method: "POST" }),
   deleteExchange: (messageId: string) =>
     request<ExchangeDeletion>(`/api/messages/${messageId}/exchange`, { method: "DELETE" }),
+  chatItemRemovalImpact: (messageId: string) =>
+    request<ChatItemRemovalImpact>(`/api/messages/${messageId}/removal-impact`),
+  removeChatItemContent: (
+    messageId: string,
+    expectedRevisionId: string,
+    operationKey: string,
+  ) => request<ChatItemRemovalExecution>(`/api/messages/${messageId}/remove-content`, {
+    method: "POST",
+    body: JSON.stringify({
+      expected_message_id: messageId,
+      expected_revision_id: expectedRevisionId,
+      operation_key: operationKey,
+    }),
+  }),
   selectResponseRevision: (messageId: string, revisionId: string) =>
     request<Message>(`/api/messages/${messageId}/revisions/${revisionId}/select`, {
       method: "POST",

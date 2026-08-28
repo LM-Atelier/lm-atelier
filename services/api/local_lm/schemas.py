@@ -15,7 +15,16 @@ from pydantic import (
     field_serializer,
 )
 
-from .domain import Operation, RoutingMode
+from .domain import (
+    ArtifactKind,
+    JobKind,
+    JobStatus,
+    MessageStatus,
+    Operation,
+    PartType,
+    RoutingMode,
+    RunStatus,
+)
 from .references import MAX_REFERENCES_PER_TURN, MAX_ROLE, MentionSource
 from .worker_failures import WorkerFailureCode
 
@@ -135,7 +144,7 @@ class GenerationIdentityOut(ApiModel):
 class ArtifactOut(ApiModel):
     id: str
     sha256: str
-    kind: str
+    kind: ArtifactKind
     media_type: str
     size_bytes: int
     original_name: str | None
@@ -215,7 +224,7 @@ class ArtifactDeleteResult(ApiModel):
 class MessagePartOut(ApiModel):
     id: str
     position: int
-    type: str
+    type: PartType
     text: str | None
     artifact_id: str | None
     metadata_json: dict[str, Any]
@@ -261,8 +270,9 @@ class MessageOut(ApiModel):
     chat_id: str
     parent_id: str | None
     role: str
-    status: str
+    status: MessageStatus
     transcript_visible: bool
+    content_removed_at: datetime | None
     active_response_revision_id: str | None
     parts: list[MessagePartOut]
     # Empty for every message that named nothing, which is almost all of them.
@@ -272,9 +282,11 @@ class MessageOut(ApiModel):
     created_at: datetime
     updated_at: datetime
 
-    @field_serializer("created_at", "updated_at", when_used="json")
-    def serialize_timestamp_as_utc(self, value: datetime) -> str:
+    @field_serializer("content_removed_at", "created_at", "updated_at", when_used="json")
+    def serialize_timestamp_as_utc(self, value: datetime | None) -> str | None:
         """Keep SQLite-naive UTC instants explicit at the browser boundary."""
+        if value is None:
+            return None
         normalized = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
         return normalized.isoformat().replace("+00:00", "Z")
 
@@ -299,7 +311,7 @@ class ChatOut(ApiModel):
     title: str
     archived: bool
     pinned: bool
-    routing_mode: str
+    routing_mode: RoutingMode
     confirm_uncertain_media: bool
     active_chat_profile_id: str | None
     active_vision_profile_id: str | None
@@ -331,6 +343,56 @@ class ExchangeDeletionOut(ApiModel):
     released_artifact_ids: list[str]
     retained_artifact_ids: list[str]
     new_head_message_id: str | None = None
+
+
+class ChatItemRemovalReferenceOut(ApiModel):
+    id: str
+    subject_name: str
+    mention_slug: str
+    subject_kind: str
+
+
+class ChatItemRemovalImpactOut(ApiModel):
+    chat_id: str
+    message_id: str
+    message_revision_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    role: str
+    already_removed: bool
+    has_replies: bool
+    source_backs_regeneration: bool
+    detached_message_part_count: int
+    detached_response_revision_part_count: int
+    detached_reference_count: int
+    detached_references: list[ChatItemRemovalReferenceOut]
+    detached_references_truncated: bool
+    released_artifact_count: int
+    released_artifact_ids: list[str]
+    released_artifacts_truncated: bool
+    retained_artifact_count: int
+    retained_artifact_ids: list[str]
+    retained_artifacts_truncated: bool
+    retained_witness_classes: list[str]
+    forensic_erasure: Literal[False]
+    execute_authorized: Literal[False]
+
+
+class ChatItemRemovalExecute(ApiModel):
+    expected_message_id: str = Field(min_length=1, max_length=40)
+    expected_revision_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    operation_key: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    )
+
+
+class ChatItemRemovalExecutionOut(ApiModel):
+    operation_key: str
+    chat_id: str
+    message_id: str
+    message_revision_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    content_removed_at: datetime
+    replayed: bool
 
 
 class StudioSessionCreate(ApiModel):
@@ -799,7 +861,7 @@ class RunOut(ApiModel):
     work_plan_id: str | None
     work_step_id: str | None
     operation: str
-    status: str
+    status: RunStatus
     standalone_prompt: str
     profile_id: str | None
     vision_profile_id: str | None
@@ -851,8 +913,8 @@ class ProgressV2(ApiModel):
 
 class JobOut(ApiModel):
     id: str
-    kind: str
-    status: str
+    kind: JobKind
+    status: JobStatus
     run_id: str | None
     work_plan_id: str | None
     work_step_id: str | None

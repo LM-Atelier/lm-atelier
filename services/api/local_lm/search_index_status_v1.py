@@ -1,4 +1,4 @@
-"""Pure conversation-search index status facts (item 41).
+"""Pure conversation-search index status facts.
 
 Reports ready/building/degraded from caller-supplied generation facts.
 Never writes FTS, rebuilds an index, or echoes content.
@@ -87,10 +87,10 @@ def declare_search_index_status(
     if type(state) is not str:
         _invalid()
     # Equality against short literals rather than frozenset membership: an
-    # equality check refuses an attacker-sized string without hashing it first
-    # (codex/R984), and each branch proves the Literal to mypy instead of
-    # asserting it past a membership test it cannot narrow (claude/R1177). The
-    # else arm keeps an unknown state fail-closed on its own, so losing any one
+    # equality check refuses an attacker-sized string without hashing it
+    # first, and each branch proves the Literal to mypy instead of
+    # asserting it past a membership test it cannot narrow. The else arm
+    # keeps an unknown state fail-closed on its own, so losing any one
     # branch refuses that state rather than minting it.
     narrowed: IndexState
     if state == "ready":

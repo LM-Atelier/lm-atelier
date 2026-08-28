@@ -20,7 +20,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-MASK_MODES = frozenset({"none", "selection", "inverse"})
+from .domain import MaskMode
+
+MASK_MODES = frozenset(mode.value for mode in MaskMode)
 #: Settings that describe one particular picture rather than how to make one.
 #: A recipe carrying these would reproduce the seed of a result someone liked
 #: and none of the reason they liked it.
@@ -72,5 +74,7 @@ def _mask_mode(mask: object) -> str:
     which is what decides whether applying it can be a single click.
     """
     if not isinstance(mask, dict):
-        return "none"
-    return "inverse" if mask.get("invert") is True else "selection"
+        return MaskMode.NONE.value
+    if mask.get("invert") is True:
+        return MaskMode.INVERSE.value
+    return MaskMode.SELECTION.value

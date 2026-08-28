@@ -1,4 +1,4 @@
-"""Pure chat message URL anchor encoding (item 41).
+"""Pure chat message URL anchor encoding.
 
 Builds and parses device-local fragment anchors. Does not touch history API or
 change active branch.

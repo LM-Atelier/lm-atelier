@@ -27,6 +27,7 @@ from .models import (
     MessageReference,
     ReferenceAsset,
     ReferenceSubject,
+    ResponseRevision,
     ResponseRevisionPart,
     Run,
     SetupVerification,
@@ -585,8 +586,17 @@ def guard_artifact_reference_flush(
         raise ArtifactReferenceDataError(REFERENCE_CORRUPT)
 
 
-def referenced_artifact_ids(session: Session) -> set[str]:
-    """Return the complete strong-reference graph or fail closed on corrupt JSON."""
+def referenced_artifact_ids(
+    session: Session,
+    *,
+    exclude_message_payload_for: str | None = None,
+) -> set[str]:
+    """Return the complete strong-reference graph or fail closed on corrupt JSON.
+
+    ``exclude_message_payload_for`` models one selective-removal preview. It
+    excludes only that message's owned parts, revision parts, and historical
+    references while leaving every independently retained edge in the graph.
+    """
 
     found: set[str] = set()
     counted_tables = (
@@ -616,8 +626,6 @@ def referenced_artifact_ids(session: Session) -> set[str]:
     # A subject cover is a replaceable selector, not a retention edge. Its
     # foreign key is deliberately SET NULL when those bytes are removed.
     direct_columns = (
-        MessagePart.artifact_id,
-        ResponseRevisionPart.artifact_id,
         ReferenceAsset.artifact_id,
         SetupVerification.input_artifact_id,
         ArtifactLibraryEntry.artifact_id,
@@ -625,7 +633,24 @@ def referenced_artifact_ids(session: Session) -> set[str]:
     for column in direct_columns:
         retain({value for value in session.scalars(select(column)) if value})
 
-    for value in session.scalars(select(MessageReference.artifact_ids_json)):
+    part_query = select(MessagePart.artifact_id)
+    revision_part_query = select(ResponseRevisionPart.artifact_id).join(
+        ResponseRevision,
+        ResponseRevisionPart.response_revision_id == ResponseRevision.id,
+    )
+    reference_query = select(MessageReference.artifact_ids_json)
+    if exclude_message_payload_for is not None:
+        part_query = part_query.where(MessagePart.message_id != exclude_message_payload_for)
+        revision_part_query = revision_part_query.where(
+            ResponseRevision.message_id != exclude_message_payload_for
+        )
+        reference_query = reference_query.where(
+            MessageReference.message_id != exclude_message_payload_for
+        )
+    retain({value for value in session.scalars(part_query) if value})
+    retain({value for value in session.scalars(revision_part_query) if value})
+
+    for value in session.scalars(reference_query):
         retain(_ids(value))
     for value in session.scalars(select(Run.provenance_json)):
         retain(_run_ids(value))

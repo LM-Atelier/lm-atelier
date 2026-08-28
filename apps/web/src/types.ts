@@ -1,4 +1,29 @@
 export type RoutingMode = "auto" | "text" | "image" | "video";
+export type JobKind =
+  | "chat"
+  | "image"
+  | "video"
+  | "edit_verify"
+  | "activate"
+  | "download"
+  | "registry_prepare"
+  | "export";
+export type JobStatus =
+  | "queued"
+  | "running"
+  | "paused"
+  | "complete"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
+export type RunStatus =
+  | "pending"
+  | "routing"
+  | "queued"
+  | "running"
+  | "complete"
+  | "failed"
+  | "cancelled";
 export type EngineRole = "chat" | "image" | "video";
 export type GenerationSettingsByRole = Partial<Record<EngineRole, Record<string, unknown>>>;
 export type GenerationPresetIdsByRole = Partial<Record<EngineRole, string | null>>;
@@ -97,6 +122,7 @@ export interface Message {
   role: "user" | "assistant" | "system" | "tool";
   status: "complete" | "pending" | "failed" | "cancelled";
   transcript_visible?: boolean;
+  content_removed_at?: string | null;
   active_response_revision_id?: string | null;
   parts: MessagePart[];
   /** What this turn referred to, as it stood when the turn was accepted.
@@ -181,7 +207,7 @@ export interface Run {
   work_plan_id?: string | null;
   work_step_id?: string | null;
   operation: string;
-  status: string;
+  status: RunStatus;
   standalone_prompt: string;
   profile_id: string | null;
   vision_profile_id?: string | null;
@@ -204,8 +230,8 @@ export interface TurnAccepted {
 
 export interface Job {
   id: string;
-  kind: string;
-  status: string;
+  kind: JobKind;
+  status: JobStatus;
   run_id: string | null;
   work_plan_id?: string | null;
   work_step_id?: string | null;
@@ -611,6 +637,46 @@ export interface ExchangeDeletion {
   released_artifact_ids: string[];
   retained_artifact_ids: string[];
   new_head_message_id: string | null;
+}
+
+export interface ChatItemRemovalReference {
+  id: string;
+  subject_name: string;
+  mention_slug: string;
+  subject_kind: string;
+}
+
+export interface ChatItemRemovalImpact {
+  chat_id: string;
+  message_id: string;
+  message_revision_id: string;
+  role: string;
+  already_removed: boolean;
+  has_replies: boolean;
+  source_backs_regeneration: boolean;
+  detached_message_part_count: number;
+  detached_response_revision_part_count: number;
+  detached_reference_count: number;
+  detached_references: ChatItemRemovalReference[];
+  detached_references_truncated: boolean;
+  released_artifact_count: number;
+  released_artifact_ids: string[];
+  released_artifacts_truncated: boolean;
+  retained_artifact_count: number;
+  retained_artifact_ids: string[];
+  retained_artifacts_truncated: boolean;
+  retained_witness_classes: string[];
+  forensic_erasure: false;
+  execute_authorized: false;
+}
+
+export interface ChatItemRemovalExecution {
+  operation_key: string;
+  chat_id: string;
+  message_id: string;
+  message_revision_id: string;
+  content_removed_at: string;
+  replayed: boolean;
 }
 
 export interface CatalogVersionRow {

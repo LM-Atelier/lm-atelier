@@ -4,6 +4,7 @@ import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event
 
@@ -16,10 +17,15 @@ from alembic.util.exc import CommandError
 from sqlalchemy import UniqueConstraint, create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
+from sqlalchemy.orm import Session
 
 from local_lm import db, models  # noqa: F401 - importing registers every table to compare
 from local_lm.artifact_library_schema import CREATE_TRIGGER_SQL
 from local_lm.backups import BackupManager
+from local_lm.chat_item_removal_schema import (
+    CREATE_CHAT_ITEM_REMOVAL_TRIGGER_SQL,
+    DROP_CHAT_ITEM_REMOVAL_TRIGGER_SQL,
+)
 from local_lm.config import Settings
 from local_lm.database_migrations import (
     DatabaseUpgradeError,
@@ -28,6 +34,9 @@ from local_lm.database_migrations import (
     upgrade_database,
 )
 from local_lm.db import Base, configure_database
+from local_lm.migrations.versions import (
+    c5a8e1d72f40_chat_item_content_tombstones as chat_item_tombstone_migration,
+)
 
 
 def test_unknown_database_revision_has_actionable_error(tmp_path: Path) -> None:
@@ -52,6 +61,211 @@ def test_unknown_database_revision_has_actionable_error(tmp_path: Path) -> None:
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
             unknown_revision,
+        )
+
+
+def test_chat_item_content_tombstone_migration_round_trips(tmp_path: Path) -> None:
+    assert chat_item_tombstone_migration._CREATE_TRIGGER_SQL == CREATE_CHAT_ITEM_REMOVAL_TRIGGER_SQL
+    assert chat_item_tombstone_migration._DROP_TRIGGER_SQL == DROP_CHAT_ITEM_REMOVAL_TRIGGER_SQL
+    settings = Settings(data_dir=tmp_path / "chat-item-content-tombstone")
+    settings.prepare()
+    config = alembic_config(settings)
+    command.upgrade(config, "f2a7c9d41e63")
+    database = settings.state_dir / "local-lm.sqlite3"
+
+    with sqlite3.connect(database) as connection:
+        before = {row[1]: row for row in connection.execute("PRAGMA table_info(messages)")}
+        assert "content_removed_at" not in before
+
+    command.upgrade(config, "head")
+    with sqlite3.connect(database) as connection:
+        after = {row[1]: row for row in connection.execute("PRAGMA table_info(messages)")}
+        assert after["content_removed_at"][3] == 0
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' "
+            "AND name = 'ix_messages_content_removed_at'"
+        ).fetchone() == ("ix_messages_content_removed_at",)
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            "c8e2f4a71d90",
+        )
+
+    engine = create_engine(f"sqlite:///{database}")
+    with Session(engine) as session:
+        chat = models.Chat(id="chat_tombstone_guard", title="Tombstone guard")
+        empty = models.Message(
+            id="msg_tombstone_empty",
+            chat_id=chat.id,
+            role="user",
+            status="complete",
+        )
+        carrying = models.Message(
+            id="msg_tombstone_payload",
+            chat_id=chat.id,
+            role="user",
+            status="complete",
+            parts=[
+                models.MessagePart(
+                    position=0,
+                    type="text",
+                    text="must detach first",
+                )
+            ],
+        )
+        revision_source = models.Message(
+            id="msg_tombstone_revision_source",
+            chat_id=chat.id,
+            role="assistant",
+            status="complete",
+        )
+        revision = models.ResponseRevision(
+            id="revision_tombstone_payload",
+            message_id=revision_source.id,
+            sequence=1,
+            status="complete",
+            parts=[
+                models.ResponseRevisionPart(
+                    position=0,
+                    type="text",
+                    text="must not cross the tombstone boundary",
+                )
+            ],
+        )
+        session.add_all([chat, empty, carrying, revision_source, revision])
+        session.commit()
+        empty.content_removed_at = empty.updated_at
+        session.commit()
+
+    with Session(engine) as session:
+        loaded_empty = session.get(models.Message, "msg_tombstone_empty")
+        assert loaded_empty is not None
+        loaded_empty.parts.append(
+            models.MessagePart(position=0, type="text", text="must stay absent")
+        )
+        with pytest.raises(
+            SAIntegrityError,
+            match="removed chat item cannot receive message parts",
+        ):
+            session.flush()
+
+    with Session(engine) as session:
+        loaded_revision = session.get(
+            models.ResponseRevision,
+            "revision_tombstone_payload",
+        )
+        assert loaded_revision is not None
+        loaded_revision.message_id = "msg_tombstone_empty"
+        with pytest.raises(
+            SAIntegrityError,
+            match="removed chat item cannot receive a populated revision",
+        ):
+            session.flush()
+
+    with Session(engine) as session:
+        loaded_carrying = session.get(models.Message, "msg_tombstone_payload")
+        assert loaded_carrying is not None
+        loaded_carrying.content_removed_at = loaded_carrying.updated_at
+        with pytest.raises(
+            SAIntegrityError,
+            match="chat item payload must be detached before tombstoning",
+        ):
+            session.flush()
+
+    with Session(engine) as session:
+        reloaded_empty = session.get(models.Message, "msg_tombstone_empty")
+        assert reloaded_empty is not None
+        reloaded_empty.content_removed_at = None
+        with pytest.raises(
+            SAIntegrityError,
+            match="chat item content tombstone is immutable",
+        ):
+            session.flush()
+    engine.dispose()
+
+    command.downgrade(config, "f2a7c9d41e63")
+    with sqlite3.connect(database) as connection:
+        restored = {row[1]: row for row in connection.execute("PRAGMA table_info(messages)")}
+        assert "content_removed_at" not in restored
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            "f2a7c9d41e63",
+        )
+
+
+def test_chat_item_removal_receipt_migration_preserves_replay_authority(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(data_dir=tmp_path / "chat-item-removal-receipts")
+    settings.prepare()
+    config = alembic_config(settings)
+    command.upgrade(config, "d6a8f1c42b90")
+    database = settings.state_dir / "local-lm.sqlite3"
+
+    with sqlite3.connect(database) as connection:
+        assert (
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'chat_item_removal_receipts'"
+            ).fetchone()
+            is None
+        )
+
+    command.upgrade(config, "head")
+    with sqlite3.connect(database) as connection:
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(chat_item_removal_receipts)")
+        }
+        assert columns == {
+            "id",
+            "chat_id",
+            "operation_key",
+            "message_id",
+            "request_sha256",
+            "message_revision_id",
+            "content_removed_at",
+            "created_at",
+            "updated_at",
+        }
+
+    engine = create_engine(f"sqlite:///{database}")
+    with Session(engine) as session:
+        chat = models.Chat(id="chat_receipt_migration", title="Constructed")
+        message = models.Message(
+            id="msg_receipt_migration",
+            chat=chat,
+            role="user",
+            status="complete",
+        )
+        session.add_all([chat, message])
+        session.flush()
+        session.add(
+            models.ChatItemRemovalReceipt(
+                id="rmreceipt_migration",
+                chat_id=chat.id,
+                operation_key="remove-once",
+                message_id=message.id,
+                request_sha256="1" * 64,
+                message_revision_id="2" * 64,
+                content_removed_at=datetime.now(UTC),
+            )
+        )
+        session.commit()
+
+    with pytest.raises(RuntimeError, match="durable replay receipts exist"):
+        command.downgrade(config, "d6a8f1c42b90")
+
+    with sqlite3.connect(database) as connection:
+        connection.execute("DELETE FROM chat_item_removal_receipts")
+        connection.commit()
+    command.downgrade(config, "d6a8f1c42b90")
+    with sqlite3.connect(database) as connection:
+        assert (
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'chat_item_removal_receipts'"
+            ).fetchone()
+            is None
+        )
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            "d6a8f1c42b90",
         )
 
 
@@ -343,7 +557,7 @@ def test_artifact_library_migration_fence_blocks_concurrent_dangling_writer(
             "SELECT count(*) FROM jobs WHERE id = 'migration-race-writer'"
         ).fetchone() == (0,)
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "f2a7c9d41e63",
+            "c8e2f4a71d90",
         )
         membership_schema = connection.execute(
             "SELECT sql FROM sqlite_master "
@@ -1535,7 +1749,7 @@ def _trigger_definitions(database: Path) -> dict[str, str]:
 
 
 def test_metadata_bootstrap_preserves_migrated_triggers(tmp_path: Path) -> None:
-    """Startup after Alembic preserves the exact guards and their behavior."""
+    """``create_all`` over a migrated database preserves its exact guards."""
 
     settings = Settings(data_dir=tmp_path / "migrated-trigger-bootstrap", dev=True)
     settings.prepare()

@@ -228,6 +228,84 @@ async def test_lora_stack_is_validated_and_transformed_deterministically(
     assert LORA_GRAPH_TRANSFORM_VERSION == "lora-graph-v2"
 
 
+async def test_lora_trigger_word_sources_have_stable_bounded_precedence(
+    client: AsyncClient,
+) -> None:
+    del client
+    with SessionLocal() as session:
+        revision = _workflow(session)
+        asset = _asset(session, "Ink", "c" * 64)
+        asset.manifest_json["metadata"] = {
+            "trigger_words": [" ink wash ", "Soft Light"],
+            "trained_words": ["soft light", "provider ink"],
+        }
+        stack = [{"asset_id": asset.id, "model_strength": 1, "clip_strength": 1}]
+
+        resolved = resolve_lora_stack(session, revision, stack)
+
+    assert resolved.provenance[0]["trigger_words"] == [
+        "ink wash",
+        "Soft Light",
+        "provider ink",
+    ]
+    assert prompt_trigger_word_provenance(
+        None,
+        resolved.provenance,
+        "An ink wash portrait",
+    ) == {
+        "model_trigger_words_applied": [],
+        "lora_trigger_words_applied": ["Soft Light", "provider ink"],
+        "trigger_words_applied": ["Soft Light", "provider ink"],
+    }
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"trained_words": "private provider text"},
+        {"trained_words": ["private provider text", 7]},
+        {"trained_words": ["x" * 201]},
+        {"trained_words": [f"word-{index}" for index in range(101)]},
+        {
+            "trigger_words": [f"manifest-{index}" for index in range(100)],
+            "trained_words": ["provider-overflow"],
+        },
+        "private provider text",
+    ],
+)
+async def test_lora_trigger_word_metadata_refuses_malformed_or_unbounded_values(
+    client: AsyncClient,
+    metadata: object,
+) -> None:
+    del client
+    with SessionLocal() as session:
+        revision = _workflow(session)
+        asset = _asset(session, "Ink", "c" * 64)
+        asset.manifest_json["metadata"] = metadata
+        stack = [{"asset_id": asset.id, "model_strength": 1, "clip_strength": 1}]
+
+        with pytest.raises(ValueError) as raised:
+            resolve_lora_stack(session, revision, stack)
+
+    assert str(raised.value) == "A selected LoRA has invalid trigger-word metadata."
+    assert "private provider text" not in str(raised.value)
+
+
+async def test_lora_without_declared_trigger_words_keeps_an_empty_vocabulary(
+    client: AsyncClient,
+) -> None:
+    del client
+    with SessionLocal() as session:
+        revision = _workflow(session)
+        asset = _asset(session, "Ink", "c" * 64)
+        asset.manifest_json["metadata"] = {"network_type": "networks.lora"}
+        stack = [{"asset_id": asset.id, "model_strength": 1, "clip_strength": 1}]
+
+        resolved = resolve_lora_stack(session, revision, stack)
+
+    assert resolved.provenance[0]["trigger_words"] == []
+
+
 async def test_lora_stack_rejects_duplicates_incompatible_and_unavailable_assets(
     client: AsyncClient,
 ) -> None:

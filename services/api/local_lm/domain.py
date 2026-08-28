@@ -57,6 +57,21 @@ class RoutingMode(StrEnum):
     VIDEO = "video"
 
 
+class MaskMode(StrEnum):
+    """Whether a saved edit expects a selection, and which way round.
+
+    These three values already existed, produced by one function in
+    `edit_recipes` and stored as a bare string. Declaring them here gives
+    the database something to check against that is the SAME vocabulary the
+    server produces, rather than a fourth hand-copied list that can drift
+    from it silently.
+    """
+
+    NONE = "none"
+    SELECTION = "selection"
+    INVERSE = "inverse"
+
+
 class Operation(StrEnum):
     TEXT = "text"
     TEXT_TO_IMAGE = "text_to_image"

@@ -14,9 +14,18 @@ from local_lm import models  # noqa: F401 - registers metadata
 from local_lm.config import Settings
 from local_lm.database_migrations import alembic_config
 from local_lm.db import Base
+from local_lm.migrations.versions import (
+    d6a8f1c42b90_prompt_template_deletion_tombstones as deletion_migration,
+)
 from local_lm.models import (
     PromptTemplateDefinition,
     PromptTemplateRevision,
+)
+from local_lm.prompt_template_schema import (
+    DEFINITION_DELETE_TRIGGER,
+    DEFINITION_INSERT_TRIGGER,
+    DEFINITION_UPDATE_TRIGGER,
+    IMPORT_WINNER_INSERT_TRIGGER,
 )
 from local_lm.prompt_templates import (
     parse_prompt_template_contract,
@@ -119,6 +128,10 @@ def _insert_revision(
 
 
 def test_migration_upgrade_downgrade_and_trigger_inventory(tmp_path: Path) -> None:
+    assert deletion_migration._LIVE_INSERT_TRIGGER == DEFINITION_INSERT_TRIGGER
+    assert deletion_migration._LIVE_UPDATE_TRIGGER == DEFINITION_UPDATE_TRIGGER
+    assert deletion_migration._DEFINITION_DELETE_TRIGGER == DEFINITION_DELETE_TRIGGER
+    assert deletion_migration._IMPORT_WINNER_INSERT_TRIGGER == IMPORT_WINNER_INSERT_TRIGGER
     settings = Settings(data_dir=tmp_path / "prompt-template-migration")
     settings.prepare()
     config = alembic_config(settings)
@@ -154,8 +167,16 @@ def test_migration_upgrade_downgrade_and_trigger_inventory(tmp_path: Path) -> No
             "prompt_template_import_winner_delete_guard",
         }
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "f2a7c9d41e63",
+            "c8e2f4a71d90",
         )
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(prompt_template_definitions)")
+        }
+        assert "deleted_at" in columns
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' "
+            "AND name = 'ix_prompt_template_definitions_deleted_at'"
+        ).fetchone() == ("ix_prompt_template_definitions_deleted_at",)
 
     command.downgrade(config, "a9c4e7d21b60")
     with sqlite3.connect(database) as connection:
@@ -169,7 +190,7 @@ def test_migration_upgrade_downgrade_and_trigger_inventory(tmp_path: Path) -> No
     command.upgrade(config, "head")
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "f2a7c9d41e63",
+            "c8e2f4a71d90",
         )
 
 
@@ -229,6 +250,82 @@ def test_revisions_are_append_only_and_definitions_archive_instead_of_delete(
             (1, _canonical_contract()[1]),
             (2, _canonical_contract()[1]),
         ]
+
+
+def test_definition_deletion_tombstone_is_validated_and_one_way(tmp_path: Path) -> None:
+    settings = Settings(data_dir=tmp_path / "prompt-template-deletion-guard")
+    settings.prepare()
+    config = alembic_config(settings)
+    command.upgrade(config, "head")
+    database = settings.state_dir / "local-lm.sqlite3"
+
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        _insert_definition(connection)
+        _insert_revision(connection, revision_id="ptrev_1", version=1)
+        connection.execute(
+            "UPDATE prompt_template_definitions "
+            "SET current_revision_id = 'ptrev_1' WHERE id = 'ptdef_test'"
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="deletion tombstone is invalid"):
+            connection.execute(
+                "UPDATE prompt_template_definitions SET deleted_at = CURRENT_TIMESTAMP "
+                "WHERE id = 'ptdef_test'"
+            )
+        connection.execute(
+            "UPDATE prompt_template_definitions "
+            "SET name = '__deleted_prompt_template__:' || id, description = '', "
+            "archived = 1, deleted_at = CURRENT_TIMESTAMP WHERE id = 'ptdef_test'"
+        )
+        tombstone = connection.execute(
+            "SELECT name, description, archived, deleted_at, current_revision_id "
+            "FROM prompt_template_definitions WHERE id = 'ptdef_test'"
+        ).fetchone()
+        assert tombstone is not None
+        assert tombstone[:3] == ("__deleted_prompt_template__:ptdef_test", "", 1)
+        assert tombstone[3] is not None
+        assert tombstone[4] == "ptrev_1"
+        with pytest.raises(sqlite3.IntegrityError, match="deleted prompt template is immutable"):
+            connection.execute(
+                "UPDATE prompt_template_definitions SET archived = 0 WHERE id = 'ptdef_test'"
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="name is reserved"):
+            _insert_definition(
+                connection,
+                definition_id="ptdef_reserved",
+                name="__deleted_prompt_template__:not-a-tombstone",
+            )
+        assert connection.execute(
+            "SELECT id FROM prompt_template_revisions WHERE prompt_template_id = 'ptdef_test'"
+        ).fetchall() == [("ptrev_1",)]
+
+    with pytest.raises(RuntimeError, match="deleted template metadata cannot be restored"):
+        command.downgrade(config, "c5a8e1d72f40")
+
+
+def test_deletion_migration_refuses_preexisting_reserved_names(tmp_path: Path) -> None:
+    settings = Settings(data_dir=tmp_path / "prompt-template-reserved-name")
+    settings.prepare()
+    config = alembic_config(settings)
+    command.upgrade(config, "c5a8e1d72f40")
+    database = settings.state_dir / "local-lm.sqlite3"
+    with sqlite3.connect(database) as connection:
+        _insert_definition(
+            connection,
+            name="__deleted_prompt_template__:constructed",
+        )
+
+    with pytest.raises(RuntimeError, match="reserved name prefix"):
+        command.upgrade(config, "head")
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            "c5a8e1d72f40",
+        )
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(prompt_template_definitions)")
+        }
+        assert "deleted_at" not in columns
 
 
 def test_current_revision_must_be_the_latest_revision_of_that_definition(

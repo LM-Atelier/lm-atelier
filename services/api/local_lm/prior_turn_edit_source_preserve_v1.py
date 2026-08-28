@@ -1,4 +1,4 @@
-"""Requested source-preserve policy for prior-turn edit (item 40).
+"""Requested source-preserve policy for prior-turn edit.
 
 Records requested_policy only. This module does not mutate or cancel
 the source turn.

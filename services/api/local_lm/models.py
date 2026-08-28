@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import (
@@ -25,12 +26,17 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Mapped, Session, mapped_column, relationship
 
 from .artifact_library_schema import CREATE_TRIGGER_SQL, DROP_TRIGGER_SQL
+from .chat_item_removal_schema import (
+    CREATE_CHAT_ITEM_REMOVAL_TRIGGER_SQL,
+    DROP_CHAT_ITEM_REMOVAL_TRIGGER_SQL,
+)
 from .db import Base
 from .domain import (
     ArtifactKind,
     CompatibilityLevel,
     JobKind,
     JobStatus,
+    MaskMode,
     MessageRole,
     MessageStatus,
     ModelRole,
@@ -59,6 +65,19 @@ from .reference_review_schema import (
 )
 
 
+def _closed_vocabulary_check(column: str, vocabulary: type[StrEnum]) -> str:
+    """Membership SQL built FROM the enum rather than beside it.
+
+    Hand-listing the values here would be a second copy that drifts the
+    moment a member is added - which is the whole defect this constrains
+    against, one layer down. Deriving it means adding a member to the enum
+    updates the check, and the parity test asserts exactly that.
+    """
+
+    allowed = ", ".join(f"'{member.value}'" for member in vocabulary)
+    return f"{column} IN ({allowed})"
+
+
 def _lowercase_sha256_check(column: str) -> str:
     remainder = column
     for character in "0123456789abcdef":
@@ -69,10 +88,12 @@ def _lowercase_sha256_check(column: str) -> str:
 def _install_sqlite_trigger(statement: str) -> Callable[..., None]:
     """Create a missing canonical trigger and refuse an existing divergent one.
 
-    Alembic owns upgrades and deliberately uses strict trigger statements.
-    ``create_all`` is also called during application startup, where metadata
-    ``after_create`` events run even when no table is created. An existing
-    name is insufficient authority: a stale or weakened body must fail closed.
+    Alembic owns upgrades and deliberately uses strict trigger statements. In
+    a shipped install it is the only schema authority - startup calls
+    ``upgrade_database`` and never ``create_all`` - so these ``after_create``
+    hooks serve ``create_all`` callers alone, which today means tests and fresh
+    in-memory schemas. The refusal still matters for those: an existing name is
+    insufficient authority, and a stale or weakened body must fail closed.
     """
 
     parts = statement.split(None, 3)
@@ -129,6 +150,12 @@ class Project(TimestampMixin, Base):
 
 class Chat(TimestampMixin, Base):
     __tablename__ = "chats"
+    __table_args__ = (
+        CheckConstraint(
+            _closed_vocabulary_check("routing_mode", RoutingMode),
+            name="ck_chat_routing_mode",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("chat"))
     project_id: Mapped[str | None] = mapped_column(
@@ -184,6 +211,15 @@ class Message(TimestampMixin, Base):
         Boolean,
         default=True,
         server_default="1",
+        index=True,
+    )
+    # Logical removal keeps the message identity and graph position while
+    # target-owned parts and references are detached by the removal service.
+    # This is deliberately separate from transcript_visible: graph walkers
+    # cross the node, but no removed payload may be projected from it.
+    content_removed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
         index=True,
     )
     active_response_revision_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
@@ -482,6 +518,47 @@ class TurnCreationClaim(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class ChatItemRemovalReceipt(TimestampMixin, Base):
+    """Durable result authority for one selective-removal operation key."""
+
+    __tablename__ = "chat_item_removal_receipts"
+    __table_args__ = (
+        UniqueConstraint(
+            "chat_id",
+            "operation_key",
+            name="uq_chat_item_removal_receipt_chat_operation",
+        ),
+        CheckConstraint(
+            "length(operation_key) BETWEEN 1 AND 128 "
+            "AND operation_key GLOB '[A-Za-z0-9]*' "
+            "AND operation_key NOT GLOB '*[^A-Za-z0-9_.:-]*'",
+            name="ck_chat_item_removal_receipt_operation_key",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("request_sha256"),
+            name="ck_chat_item_removal_receipt_request_sha256",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("message_revision_id"),
+            name="ck_chat_item_removal_receipt_revision_id",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(48), primary_key=True, default=lambda: new_id("rmreceipt")
+    )
+    chat_id: Mapped[str] = mapped_column(
+        ForeignKey("chats.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    operation_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    message_id: Mapped[str] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    message_revision_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    content_removed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class Artifact(TimestampMixin, Base):
     __tablename__ = "artifacts"
 
@@ -654,6 +731,10 @@ class PromptTemplateDefinition(TimestampMixin, Base):
             "name",
             "id",
         ),
+        Index(
+            "ix_prompt_template_definitions_deleted_at",
+            "deleted_at",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("ptdef"))
@@ -661,6 +742,7 @@ class PromptTemplateDefinition(TimestampMixin, Base):
     description: Mapped[str] = mapped_column(Text, default="")
     archived: Mapped[bool] = mapped_column(Boolean, default=False)
     current_revision_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     revisions: Mapped[list[PromptTemplateRevision]] = relationship(
         back_populates="definition",
@@ -960,6 +1042,18 @@ for _statement in DROP_PROMPT_TEMPLATE_TRIGGER_SQL:
         "before_drop",
         DDL(_statement).execute_if(dialect="sqlite"),  # type: ignore[no-untyped-call]
     )
+for _statement in CREATE_CHAT_ITEM_REMOVAL_TRIGGER_SQL:
+    event.listen(
+        Base.metadata,
+        "after_create",
+        _install_sqlite_trigger(_statement),
+    )
+for _statement in DROP_CHAT_ITEM_REMOVAL_TRIGGER_SQL:
+    event.listen(
+        Base.metadata,
+        "before_drop",
+        DDL(_statement).execute_if(dialect="sqlite"),  # type: ignore[no-untyped-call]
+    )
 
 
 class ModelSource(TimestampMixin, Base):
@@ -1187,7 +1281,13 @@ class EditTemplate(TimestampMixin, Base):
     """
 
     __tablename__ = "edit_templates"
-    __table_args__ = (UniqueConstraint("name", name="uq_edit_template_name"),)
+    __table_args__ = (
+        UniqueConstraint("name", name="uq_edit_template_name"),
+        CheckConstraint(
+            _closed_vocabulary_check("mask_mode", MaskMode),
+            name="ck_edit_template_mask_mode",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("edittpl"))
     name: Mapped[str] = mapped_column(String(200), index=True)

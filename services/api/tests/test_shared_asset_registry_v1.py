@@ -281,7 +281,8 @@ def test_creation_stamps_identity_and_wal(tmp_path: Path) -> None:
     connection = sqlite3.connect(f"file:{database.as_posix()}?mode=ro", uri=True)
     try:
         assert connection.execute("PRAGMA application_id").fetchone()[0] == 0x4C4D4153
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert _tables_of(database) == {"registry_meta", "package_claims", "package_leases"}
         assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     finally:
         connection.close()
@@ -358,13 +359,13 @@ def _make_link_dir(link: Path, target: Path) -> bool:
 def test_a_junctioned_parent_is_refused_and_the_foreign_directory_gains_nothing(
     tmp_path: Path,
 ) -> None:
-    """The rejection this successor exists for, kept as a standing control.
+    """A junctioned parent is refused and the foreign directory gains nothing.
 
-    Measured against the predecessor in claude/R1346: reserve_claim on
-    <junction>/index.sqlite3 returned WITHOUT an exception and the foreign
-    directory gained index.sqlite3. No race was needed - the parent was a
-    junction before the call, and a syntax-only path check walked straight
-    through it.
+    This is kept as a standing control. An earlier implementation accepted
+    it: reserve_claim on <junction>/index.sqlite3 returned WITHOUT an
+    exception and the foreign directory gained index.sqlite3. No race was
+    needed - the parent was a junction before the call, and a syntax-only
+    path check walked straight through it.
     """
 
     outside = tmp_path / "outside"
@@ -621,10 +622,11 @@ MALFORMED_ROWS = [
 def test_every_entry_point_refuses_a_registry_holding_a_malformed_claim(
     tmp_path: Path, label: str, claim_id: str, consumer_id: str, package_digest: str
 ) -> None:
-    """codex/R1884, kept as a standing control.
+    """Every entry point refuses a registry holding a malformed claim.
 
-    The exact schema constrained nullability, state and per-consumer
-    uniqueness, and left the three identifier formats to the entry points. So
+    This is kept as a standing control. The exact schema constrained
+    nullability, state and per-consumer uniqueness, and left the three
+    identifier formats to the entry points. So
     an otherwise exact registry could hold a normal SQL row with a valid
     consumer and state and a claim id no public call could have produced.
     claims_for_consumer handed it back as a PackageClaim while finalize_claim
@@ -796,9 +798,10 @@ NULL_ROWS = [
 def test_a_stored_null_does_not_escape_the_malformed_check(
     tmp_path: Path, label: str, row: tuple[object, ...]
 ) -> None:
-    """codex/R1889, kept as a standing control.
+    """A stored NULL does not escape the malformed-claim check.
 
-    The check was `WHERE NOT (conditions)`. SQL is three-valued, so a NULL
+    This is kept as a standing control. The check was
+    `WHERE NOT (conditions)`. SQL is three-valued, so a NULL
     column made the comparison NULL, `NOT NULL` NULL, and a NULL WHERE clause
     matches nothing - the offending row counted as fine and the registry
     validated. COALESCE(..., 0) is what makes the predicate total.

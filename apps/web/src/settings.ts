@@ -1,5 +1,39 @@
 import type { EngineCapabilities, EngineRole, SettingField } from "./types";
 
+export interface VideoLengthControl {
+  frames_parameter: string;
+  fps_parameter: string;
+  fps_numerator: number;
+  fps_denominator: number;
+  frame_alignment: number;
+  frame_offset: number;
+  minimum_frames: number;
+  maximum_frames: number;
+}
+
+type VideoLengthSettingField = SettingField & {
+  video_length?: VideoLengthControl | null;
+};
+
+const VIDEO_LENGTH_CONTRACT_KEYS = new Set([
+  "version",
+  "frames_parameter",
+  "fps_parameter",
+  "fps_numerator",
+  "fps_denominator",
+  "frame_alignment",
+  "frame_offset",
+]);
+const MAX_VIDEO_LENGTH_COMPONENT = 1_000_000;
+const MAX_VIDEO_LENGTH_FRAMES = 2_147_483_647;
+
+function greatestCommonDivisor(left: number, right: number): number {
+  let a = Math.abs(left);
+  let b = Math.abs(right);
+  while (b !== 0) [a, b] = [b, a % b];
+  return a;
+}
+
 export function resolveCapabilitySettings(
   engine: EngineCapabilities | undefined,
   role: EngineRole,
@@ -12,16 +46,23 @@ export function resolveWorkflowSettings(
   inputSchema: Record<string, unknown> | undefined,
 ): SettingField[] {
   const properties = isRecord(inputSchema?.properties) ? inputSchema.properties : null;
-  if (!properties) return fields;
+  if (!inputSchema || !properties) return fields;
+
+  const videoLength = workflowVideoLengthField(fields, inputSchema, properties);
+  const hiddenVideoKeys = videoLength?.video_length
+    ? new Set([videoLength.video_length.frames_parameter, videoLength.video_length.fps_parameter])
+    : new Set<string>();
 
   const baseKeys = new Set(fields.map((field) => field.key));
-  const resolved = fields.map((field) => {
+  const resolved = fields.filter((field) => !hiddenVideoKeys.has(field.key)).map((field) => {
     const property = properties[field.key];
     return isRecord(property) ? workflowField(field.key, property, field) ?? field : field;
   });
+  if (videoLength) resolved.push(videoLength);
   for (const [key, property] of Object.entries(properties)) {
     if (
       baseKeys.has(key)
+      || hiddenVideoKeys.has(key)
       || !isRecord(property)
       || isReservedSettingKey(key)
       || !("default" in property || "const" in property || Array.isArray(property.enum))
@@ -30,6 +71,134 @@ export function resolveWorkflowSettings(
     if (custom) resolved.push(custom);
   }
   return resolved;
+}
+
+function workflowVideoLengthField(
+  fields: SettingField[],
+  inputSchema: Record<string, unknown>,
+  properties: Record<string, unknown>,
+): VideoLengthSettingField | null {
+  const raw = inputSchema["x-lm-atelier-video-length"];
+  if (
+    !isRecord(raw)
+    || raw.version !== 1
+    || Object.keys(raw).length !== VIDEO_LENGTH_CONTRACT_KEYS.size
+    || Object.keys(raw).some((key) => !VIDEO_LENGTH_CONTRACT_KEYS.has(key))
+  ) return null;
+  const framesParameter = raw.frames_parameter;
+  const fpsParameter = raw.fps_parameter;
+  const numerator = raw.fps_numerator;
+  const denominator = raw.fps_denominator;
+  const alignment = raw.frame_alignment;
+  const offset = raw.frame_offset;
+  if (
+    typeof framesParameter !== "string"
+    || typeof fpsParameter !== "string"
+    || framesParameter.length === 0
+    || framesParameter.length > 200
+    || fpsParameter.length === 0
+    || fpsParameter.length > 200
+    || framesParameter === fpsParameter
+    || framesParameter === "duration_seconds"
+    || fpsParameter === "duration_seconds"
+    || ![numerator, denominator, alignment, offset].every(Number.isInteger)
+    || Number(numerator) <= 0
+    || Number(numerator) > MAX_VIDEO_LENGTH_COMPONENT
+    || Number(denominator) <= 0
+    || Number(denominator) > MAX_VIDEO_LENGTH_COMPONENT
+    || greatestCommonDivisor(Number(numerator), Number(denominator)) !== 1
+    || Number(alignment) <= 0
+    || Number(alignment) > MAX_VIDEO_LENGTH_FRAMES
+    || Number(offset) < 0
+    || Number(offset) > MAX_VIDEO_LENGTH_FRAMES
+    || Number(offset) >= Number(alignment)
+  ) return null;
+  const framesSchema = properties[framesParameter];
+  const fpsSchema = properties[fpsParameter];
+  if (!isRecord(framesSchema) || !isRecord(fpsSchema) || "duration_seconds" in properties) {
+    return null;
+  }
+  const minimumFrames = framesSchema.minimum;
+  const maximumFrames = framesSchema.maximum;
+  const defaultFrames = framesSchema.default;
+  const declaredFps = "const" in fpsSchema ? fpsSchema.const : fpsSchema.default;
+  if (
+    framesSchema.type !== "integer"
+    || ![minimumFrames, maximumFrames, defaultFrames].every(Number.isInteger)
+    || fpsSchema.type !== "integer" && fpsSchema.type !== "number"
+    || typeof declaredFps !== "number"
+    || !Number.isFinite(declaredFps)
+    || Math.abs(declaredFps - Number(numerator) / Number(denominator)) > 1e-12
+  ) return null;
+  const minimum = Number(minimumFrames);
+  const maximum = Number(maximumFrames);
+  const defaultValue = Number(defaultFrames);
+  const frameBase = fields.find((field) => field.key === framesParameter && field.type === "integer");
+  const fpsBase = fields.find((field) => field.key === fpsParameter && ["integer", "number"].includes(field.type));
+  if (
+    !frameBase
+    || !fpsBase
+    || minimum < 0
+    || maximum > MAX_VIDEO_LENGTH_FRAMES
+    || minimum > defaultValue
+    || defaultValue > maximum
+    || [minimum, maximum, defaultValue].some((value) => (value - Number(offset)) % Number(alignment) !== 0)
+    || frameBase.minimum != null && minimum < frameBase.minimum
+    || frameBase.maximum != null && maximum > frameBase.maximum
+    || fpsBase.minimum != null && declaredFps < fpsBase.minimum
+    || fpsBase.maximum != null && declaredFps > fpsBase.maximum
+  ) return null;
+  const fps = Number(numerator) / Number(denominator);
+  return {
+    key: "duration_seconds",
+    label: "Length (seconds)",
+    type: "number",
+    default: defaultValue / fps,
+    minimum: minimum / fps,
+    maximum: maximum / fps,
+    step: 0.01,
+    multiple_of: null,
+    choices: [],
+    scope: "workflow",
+    visibility: "basic",
+    restart_required: false,
+    available: true,
+    unavailable_reason: null,
+    help: "Choose a length in seconds. This workflow aligns the request to a supported frame count and shows the delivered length.",
+    video_length: {
+      frames_parameter: framesParameter,
+      fps_parameter: fpsParameter,
+      fps_numerator: Number(numerator),
+      fps_denominator: Number(denominator),
+      frame_alignment: Number(alignment),
+      frame_offset: Number(offset),
+      minimum_frames: minimum,
+      maximum_frames: maximum,
+    },
+  };
+}
+
+export function videoLengthDelivery(
+  field: SettingField,
+  requestedSeconds: number,
+): { frames: number; deliveredSeconds: number } | null {
+  const control = (field as VideoLengthSettingField).video_length;
+  if (!control || !Number.isFinite(requestedSeconds)) return null;
+  const fps = control.fps_numerator / control.fps_denominator;
+  const target = requestedSeconds * fps;
+  const lower = control.frame_offset
+    + Math.floor((target - control.frame_offset) / control.frame_alignment)
+      * control.frame_alignment;
+  const upper = target === lower ? lower : lower + control.frame_alignment;
+  const candidates = [lower, upper].filter(
+    (value) => value >= control.minimum_frames && value <= control.maximum_frames,
+  );
+  const frames = candidates.length
+    ? candidates.sort((left, right) => Math.abs(left - target) - Math.abs(right - target) || left - right)[0]!
+    : target < control.minimum_frames
+      ? control.minimum_frames
+      : control.maximum_frames;
+  return { frames, deliveredSeconds: frames / fps };
 }
 
 export function normalizeSettingsForFields(

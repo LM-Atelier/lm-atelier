@@ -78,7 +78,7 @@ def _lowercase_hex(column: str, *, low: int, high: int) -> str:
 # handed that row back, while finalize_claim and release_claim correctly
 # refused its format - an accepted claim that can never be addressed, and a
 # claim is the deletion authority, so on a well-formed digest it would block
-# collection of those bytes for good. Reported as codex/R1884.
+# collection of those bytes for good.
 _REGISTRY_META_SQL: Final = (
     "CREATE TABLE registry_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT"
 )
@@ -92,6 +92,25 @@ _PACKAGE_CLAIMS_SQL: Final = (
     "state TEXT NOT NULL CHECK (state IN ('provisional', 'final')), "
     "UNIQUE (consumer_id, package_digest)) STRICT"
 )
+_PACKAGE_LEASES_SQL: Final = (
+    "CREATE TABLE package_leases (lease_id TEXT PRIMARY KEY "
+    f"CHECK ({_lowercase_hex('lease_id', low=32, high=32)}), "
+    "consumer_id TEXT NOT NULL "
+    f"CHECK ({_lowercase_hex('consumer_id', low=32, high=64)}), "
+    "package_digest TEXT NOT NULL "
+    f"CHECK ({_lowercase_hex('package_digest', low=64, high=64)}), "
+    "lock_device TEXT NOT NULL "
+    f"CHECK ({_lowercase_hex('lock_device', low=1, high=64)}), "
+    "lock_inode TEXT NOT NULL "
+    f"CHECK ({_lowercase_hex('lock_inode', low=1, high=64)}), "
+    "lock_token BLOB NOT NULL "
+    "CHECK (typeof(lock_token) = 'blob' AND length(lock_token) = 16), "
+    "holder_pid INTEGER NOT NULL CHECK (holder_pid > 0), "
+    "holder_executable TEXT NOT NULL "
+    "CHECK (length(holder_executable) BETWEEN 1 AND 4096), "
+    "expires_at INTEGER NOT NULL CHECK (expires_at >= 0), "
+    "UNIQUE (consumer_id, package_digest)) STRICT"
+)
 
 #: One query rather than a row-by-row read: a registry with many claims should
 #: not be pulled into memory to be checked, and COUNT is byte-preserving.
@@ -101,9 +120,9 @@ _PACKAGE_CLAIMS_SQL: Final = (
 #: clause does not match - so the offending row would be counted as fine and
 #: the registry would validate. NOT NULL on the columns is not enough to rule
 #: that out, because a database can arrive with rows that were written under a
-#: different schema. Reported as codex/R1889 and reproduced: with
-#: `PRAGMA writable_schema=ON` the table text is swapped for one without NOT
-#: NULL, a row of NULLs is inserted, and the exact CREATE text is put back.
+#: different schema. With `PRAGMA writable_schema=ON` the table text is
+#: swapped for one without NOT NULL, a row of NULLs is inserted, and the
+#: exact CREATE text is put back.
 #: The row survives, `PRAGMA integrity_check` then says
 #: "NULL value in package_claims.consumer_id", and the stored text this module
 #: compares against is byte-identical to ours.
@@ -115,16 +134,34 @@ _MALFORMED_CLAIMS_SQL: Final = (
     " AND state IN ('provisional', 'final')"
     ", 0)"
 )
+_MALFORMED_LEASES_SQL: Final = (
+    "SELECT COUNT(*) FROM package_leases WHERE NOT COALESCE("
+    f"{_lowercase_hex('lease_id', low=32, high=32)}"
+    f" AND {_lowercase_hex('consumer_id', low=32, high=64)}"
+    f" AND {_lowercase_hex('package_digest', low=64, high=64)}"
+    " AND typeof(lock_device) = 'text'"
+    f" AND {_lowercase_hex('lock_device', low=1, high=64)}"
+    " AND typeof(lock_inode) = 'text'"
+    f" AND {_lowercase_hex('lock_inode', low=1, high=64)}"
+    " AND typeof(lock_token) = 'blob' AND length(lock_token) = 16"
+    " AND typeof(holder_pid) = 'integer' AND holder_pid > 0"
+    " AND typeof(holder_executable) = 'text'"
+    " AND length(holder_executable) BETWEEN 1 AND 4096"
+    " AND typeof(expires_at) = 'integer' AND expires_at >= 0"
+    ", 0)"
+)
 
 
-_EXPECTED_TABLES: Final = {
+_V1_TABLES: Final = {
     "registry_meta": _REGISTRY_META_SQL,
     "package_claims": _PACKAGE_CLAIMS_SQL,
 }
+_V2_TABLES: Final = {**_V1_TABLES, "package_leases": _PACKAGE_LEASES_SQL}
+_EXPECTED_TABLES_BY_VERSION: Final = {1: _V1_TABLES, 2: _V2_TABLES}
 # Stamped at creation, verified on every open: schema markers can be
 # counterfeited, so the application id and version are part of identity.
 _APPLICATION_ID: Final = 0x4C4D4153
-_USER_VERSION: Final = 1
+_USER_VERSION: Final = 2
 
 
 class SharedAssetRegistryError(ValueError):
@@ -152,9 +189,9 @@ def _require_database_location(database: Path) -> tuple[Path, str]:
     absolute, free of NUL, and not a UNC share. They are deliberately not
     described as containment. The predecessor validated exactly this much and
     then USED the path, which let a junctioned parent redirect creation
-    without needing a race at all - measured in claude/R1346, where
-    reserve_claim on a junction's index.sqlite3 returned with no exception
-    and the foreign directory gained the database. Containment is the
+    without needing a race at all: reserve_claim on a junction's
+    index.sqlite3 returned with no exception and the foreign directory
+    gained the database. Containment is the
     anchor's job below; syntax was never going to do it.
     """
 
@@ -204,6 +241,7 @@ def _build_registry_bytes() -> bytes:
         connection.execute(f"PRAGMA user_version={_USER_VERSION}")
         connection.execute(_REGISTRY_META_SQL)
         connection.execute(_PACKAGE_CLAIMS_SQL)
+        connection.execute(_PACKAGE_LEASES_SQL)
         connection.execute(
             "INSERT INTO registry_meta (key, value) VALUES ('schema', ?)",
             (SCHEMA_ID,),
@@ -249,7 +287,40 @@ def _create_new_registry(anchor: AnchoredDirectory, leaf: str) -> None:
             discard_entry(anchor, staging)
 
 
-def _validate_registry(path: Path) -> None:
+def _validate_connection(connection: sqlite3.Connection) -> int:
+    """Validate one already-open connection and return its schema version."""
+
+    application_id = connection.execute("PRAGMA application_id").fetchone()
+    user_version = connection.execute("PRAGMA user_version").fetchone()
+    if application_id is None or application_id[0] != _APPLICATION_ID:
+        _invalid()
+    if user_version is None or user_version[0] not in _EXPECTED_TABLES_BY_VERSION:
+        _invalid()
+    version = int(user_version[0])
+    rows = connection.execute("SELECT type, name, sql FROM sqlite_master ORDER BY name").fetchall()
+    tables = {name: sql for kind, name, sql in rows if kind == "table"}
+    if tables != _EXPECTED_TABLES_BY_VERSION[version]:
+        _invalid()
+    for kind, name, _sql in rows:
+        if kind == "table":
+            continue
+        if kind == "index" and name.startswith("sqlite_autoindex_"):
+            continue
+        _invalid()
+    marker = connection.execute("SELECT value FROM registry_meta WHERE key = 'schema'").fetchone()
+    if marker is None or marker[0] != SCHEMA_ID:
+        _invalid()
+    malformed = connection.execute(_MALFORMED_CLAIMS_SQL).fetchone()
+    if malformed is None or malformed[0] != 0:
+        _invalid()
+    if version >= 2:
+        malformed_leases = connection.execute(_MALFORMED_LEASES_SQL).fetchone()
+        if malformed_leases is None or malformed_leases[0] != 0:
+            _invalid()
+    return version
+
+
+def _validate_registry(path: Path) -> int:
     """Prove the database is OURS before any writable open.
 
     Read-only by construction (a mode=ro URI connection): a foreign,
@@ -271,49 +342,38 @@ def _validate_registry(path: Path) -> None:
     except sqlite3.Error:
         _invalid()
     try:
-        application_id = connection.execute("PRAGMA application_id").fetchone()
-        user_version = connection.execute("PRAGMA user_version").fetchone()
-        if application_id is None or application_id[0] != _APPLICATION_ID:
-            _invalid()
-        if user_version is None or user_version[0] != _USER_VERSION:
-            _invalid()
-        rows = connection.execute(
-            "SELECT type, name, sql FROM sqlite_master ORDER BY name"
-        ).fetchall()
-        tables = {name: sql for kind, name, sql in rows if kind == "table"}
-        if tables != _EXPECTED_TABLES:
-            _invalid()
-        for kind, name, _sql in rows:
-            if kind == "table":
-                continue
-            if kind == "index" and name.startswith("sqlite_autoindex_"):
-                continue
-            _invalid()
-        marker = connection.execute(
-            "SELECT value FROM registry_meta WHERE key = 'schema'"
-        ).fetchone()
-        if marker is None or marker[0] != SCHEMA_ID:
-            _invalid()
-        # The SCHEMA being exact does not make the DATA well formed. A CHECK
-        # constraint is enforced when a row is written, and a writer can turn
-        # that off - `PRAGMA ignore_check_constraints=ON` inserts straight past
-        # every constraint above, and a table built by hand need never have had
-        # them. So the rows are checked here too, under this same read-only
-        # connection, before anything opens the database for writing.
-        #
-        # Not belt and braces: the constraints stop US and any ordinary writer
-        # from creating such a row, and this stops us from ADOPTING one.
-        malformed = connection.execute(_MALFORMED_CLAIMS_SQL).fetchone()
-        if malformed is None or malformed[0] != 0:
-            _invalid()
+        # The schema being exact does not make the data well formed. Row
+        # validation is shared with the locked upgrade path below so an old
+        # registry is proved before a single schema byte changes.
+        return _validate_connection(connection)
     except sqlite3.Error:
         _invalid()
     finally:
         connection.close()
 
 
+def _ensure_lease_schema(connection: sqlite3.Connection) -> None:
+    """Upgrade an exact v1 claims registry to the v2 lease schema in place."""
+
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        version = _validate_connection(connection)
+        if version == 1:
+            connection.execute(_PACKAGE_LEASES_SQL)
+            connection.execute(f"PRAGMA user_version={_USER_VERSION}")
+        elif version != _USER_VERSION:
+            _invalid()
+        connection.execute("COMMIT")
+        if _validate_connection(connection) != _USER_VERSION:
+            _invalid()
+    except (sqlite3.Error, SharedAssetRegistryError):
+        with contextlib.suppress(sqlite3.Error):
+            connection.execute("ROLLBACK")
+        raise
+
+
 @contextlib.contextmanager
-def _registry(database: Path) -> Iterator[sqlite3.Connection]:
+def _registry(database: Path, *, require_leases: bool = False) -> Iterator[sqlite3.Connection]:
     """Hold the registry's directory itself for the whole operation.
 
     Every public entry point goes through here, and the anchor is what makes
@@ -321,7 +381,7 @@ def _registry(database: Path) -> Iterator[sqlite3.Connection]:
     component by component and refuses a reparse point at any depth - on
     POSIX because every component is opened O_NOFOLLOW, on Windows because
     each opened handle is checked. So a junctioned parent is refused before
-    a single byte is written, which is the defect claude/R1346 measured.
+    a single byte is written, rather than after the file exists.
 
     One honest limit, stated rather than implied. SQLite cannot be handed a
     descriptor, so the connection below is opened by path while the anchor is
@@ -387,7 +447,9 @@ def _registry(database: Path) -> Iterator[sqlite3.Connection]:
             # above covers the contention.
             with contextlib.suppress(sqlite3.Error):
                 connection.execute("PRAGMA journal_mode=WAL")
-        except sqlite3.Error:
+            if require_leases:
+                _ensure_lease_schema(connection)
+        except (sqlite3.Error, SharedAssetRegistryError):
             connection.close()
             _invalid()
         try:

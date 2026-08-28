@@ -5078,6 +5078,108 @@ async def test_pinned_workflow_schema_drives_generation_settings(client: AsyncCl
     assert "codec must be one of" in incompatible.json()["detail"]
 
 
+async def test_workflow_seconds_resolve_before_video_dispatch(
+    client: AsyncClient,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    captured: list[MediaRequest] = []
+    original_generate = MockMediaAdapter.generate
+
+    async def capture_generate(
+        self: MockMediaAdapter,
+        request: MediaRequest,
+    ) -> AsyncIterator[MediaEvent]:
+        captured.append(request)
+        async for event in original_generate(self, request):
+            yield event
+
+    monkeypatch.setattr(MockMediaAdapter, "generate", capture_generate)
+    workflow_response = await client.post(
+        "/api/workflows",
+        json={
+            "name": "Measured video window",
+            "operation": "text_to_video",
+            "engine": "mock",
+            "api_graph": {"node": {"class_type": "Mock"}},
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "frames": {
+                        "type": "integer",
+                        "default": 49,
+                        "minimum": 17,
+                        "maximum": 81,
+                    },
+                    "fps": {"type": "number", "const": 16},
+                },
+                "x-lm-atelier-video-length": {
+                    "version": 1,
+                    "frames_parameter": "frames",
+                    "fps_parameter": "fps",
+                    "fps_numerator": 16,
+                    "fps_denominator": 1,
+                    "frame_alignment": 16,
+                    "frame_offset": 1,
+                },
+            },
+            "trusted": True,
+        },
+    )
+    assert workflow_response.status_code == 201, workflow_response.json()
+    workflow = workflow_response.json()
+    project = (
+        await client.post(
+            "/api/projects",
+            json={
+                "name": "Measured video project",
+                "video_workflow_revision_id": workflow["current_revision_id"],
+            },
+        )
+    ).json()
+    chat = (
+        await client.post(
+            "/api/chats",
+            json={"title": "Seconds control", "project_id": project["id"]},
+        )
+    ).json()
+
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={
+            "text": "Create a measured clip",
+            "mode": "video",
+            "settings": {"duration_seconds": 3},
+        },
+    )
+    assert turn.status_code == 202, turn.json()
+    run = turn.json()["run"]
+    assert run["settings_json"]["duration_seconds"] == 3
+    assert run["settings_json"]["frames"] == 49
+    assert run["settings_json"]["fps"] == 16
+    assert run["provenance_json"]["video_length"] == {
+        "requested_seconds": 3.0,
+        "delivered_seconds": 49 / 16,
+        "frames": 49,
+        "fps": 16.0,
+    }
+
+    await wait_for_run(client, run["id"])
+    assert len(captured) == 1
+    assert "duration_seconds" not in captured[0].parameters
+    assert captured[0].parameters["frames"] == 49
+    assert captured[0].parameters["fps"] == 16
+
+    detail = (await client.get(f"/api/chats/{chat['id']}")).json()
+    assistant = next(
+        message for message in detail["messages"] if message["id"] == run["assistant_message_id"]
+    )
+    metadata = next(part for part in assistant["parts"] if part["type"] == "generation_metadata")
+    assert (
+        metadata["metadata_json"]["provenance"]["video_length"]
+        == run["provenance_json"]["video_length"]
+    )
+
+
 async def test_adapter_capability_settings_cover_profile_preset_scopes_and_turn_reuse(
     client: AsyncClient,
     app: FastAPI,
