@@ -110,7 +110,12 @@ jobs:
             "https://github.com/gitleaks/gitleaks/releases/download/v$version/$archive_name"
           echo "$expected_hash  $archive" | sha256sum --check --strict
           tar -xzf "$archive" -C "$RUNNER_TEMP" gitleaks
-          "$RUNNER_TEMP/gitleaks" git . --redact
+          # -v prints RuleID, File and Line for each finding. Without it the
+          # step fails with only "leaks found: 1" and names nothing, so a
+          # refusal on a false positive costs a person a manual bisect. Secret
+          # and Match stay redacted, so nothing candidate-secret reaches a
+          # public log.
+          "$RUNNER_TEMP/gitleaks" git . --redact -v
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         if: needs.verification-plan.outputs.mode == 'full'
         with:
