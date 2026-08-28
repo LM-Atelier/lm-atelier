@@ -1478,6 +1478,17 @@ def test_strict_mypy_gates_load_the_strict_api_config() -> None:
     assert step is not None
     assert "--config-file" in step.group(0)
     assert "services/api/pyproject.toml" in step.group(0)
+    assert "services/api/local_lm" in step.group(0)
+
+    linux_platform_step = re.search(
+        r'Invoke-Checked "Strict mypy \(Linux platform\)".*?\)', script, re.S
+    )
+    assert linux_platform_step is not None
+    linux_platform_command = linux_platform_step.group(0)
+    assert "--config-file" in linux_platform_command
+    assert "services/api/pyproject.toml" in linux_platform_command
+    assert "services/api/local_lm" in linux_platform_command
+    assert re.search(r'"--platform"\s*,\s*"linux"', linux_platform_command) is not None
 
     linux = (ROOT / "scripts" / "verify.sh").read_text(encoding="utf-8")
     linux_step = linux.split('run_checked "Strict mypy"', 1)[1].split(

@@ -83,6 +83,10 @@ try {
     Invoke-Checked "Strict mypy" $Mypy @(
         "--config-file", "services/api/pyproject.toml", "services/api/local_lm"
     )
+    Invoke-Checked "Strict mypy (Linux platform)" $Mypy @(
+        "--platform", "linux",
+        "--config-file", "services/api/pyproject.toml", "services/api/local_lm"
+    )
     Invoke-Checked "Bandit high-severity scan" $Bandit @(
         "-q", "-lll", "-r", "services/api/local_lm"
     )
