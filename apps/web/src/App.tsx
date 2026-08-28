@@ -103,6 +103,7 @@ import {
   withoutComposerDraft,
   type ComposerDraft, type ComposerPromptSource,
 } from "./composerPromptSource";
+import { useAutoSettingsRoles } from "./useAutoSettingsRoles";
 import { ReferencesLibrary } from "./ReferencesLibrary";
 import { MediaOutputPlan } from "./MediaOutputPlan";
 import { ModelCard } from "./ModelCard";
@@ -2088,7 +2089,6 @@ export default function App() {
   // Which role's settings the drawer edits while a chat routes in auto: the
   // last role picked in that chat's drawer, chat until one is picked. In every
   // other mode the role follows the mode and this map is ignored.
-  const [autoSettingsRoles, setAutoSettingsRoles] = useState<Record<string, EngineRole>>({});
   const [composerDrafts, setComposerDrafts] = useState<Record<string, ComposerDraft>>({});
   const [pendingTurns, setPendingTurns] = useState<Record<string, PendingTurn[]>>({});
   const setupReadiness = useQuery({
@@ -2323,6 +2323,7 @@ export default function App() {
     focusMainContent();
   }, []);
   const allChats = useMemo(() => chats.data ?? [], [chats.data]);
+  const [autoSettingsRoles, rememberSettingsRole] = useAutoSettingsRoles(chats.data);
   const allProjects = useMemo(() => projects.data ?? [], [projects.data]);
   // One place that knows what opening the library means, since three
   // different surfaces send people there.
@@ -2365,10 +2366,7 @@ export default function App() {
       ));
       updateChat.mutate({ id: displayedChat.id, values });
     };
-    return <ChatView key={displayedChat?.id ?? "empty-chat"} onOpenStudio={(artifactId) => { setStudioSource({ artifactId, chatId: displayedChat?.id ?? null }); setView("studio"); focusMainContent(); }} chat={displayedChat} engines={engines.data ?? []} profiles={profiles.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} project={allProjects.find((item) => item.id === displayedChat?.project_id)} liveText={liveText} pendingTurns={displayedChat ? pendingTurns[displayedChat.id] ?? [] : []} workPlans={workPlans.data ?? []} settings={scopedSettings} settingsRole={selectedRole} onSettingsRole={(role) => {
-      if (!displayedChat) return;
-      setAutoSettingsRoles((current) => ({ ...current, [displayedChat.id]: role }));
-    }} presetId={presetId} maxMediaOutputsPerPlan={applicationInfo.data?.max_media_outputs_per_plan ?? 1} composerDraft={displayedChat ? composerDrafts[displayedChat.id] ?? EMPTY_COMPOSER_DRAFT : EMPTY_COMPOSER_DRAFT} onComposerDraft={(update) => {
+    return <ChatView key={displayedChat?.id ?? "empty-chat"} onOpenStudio={(artifactId) => { setStudioSource({ artifactId, chatId: displayedChat?.id ?? null }); setView("studio"); focusMainContent(); }} chat={displayedChat} engines={engines.data ?? []} profiles={profiles.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} project={allProjects.find((item) => item.id === displayedChat?.project_id)} liveText={liveText} pendingTurns={displayedChat ? pendingTurns[displayedChat.id] ?? [] : []} workPlans={workPlans.data ?? []} settings={scopedSettings} settingsRole={selectedRole} onSettingsRole={(role) => { if (displayedChat) rememberSettingsRole(displayedChat.id, role); }} presetId={presetId} maxMediaOutputsPerPlan={applicationInfo.data?.max_media_outputs_per_plan ?? 1} composerDraft={displayedChat ? composerDrafts[displayedChat.id] ?? EMPTY_COMPOSER_DRAFT : EMPTY_COMPOSER_DRAFT} onComposerDraft={(update) => {
       if (!displayedChat) return;
       setComposerDrafts((current) => updatedComposerDrafts(current, displayedChat.id, update));
     }} onSettings={(settings) => {
@@ -2424,7 +2422,7 @@ export default function App() {
         send.mutate({ chatId: displayedChat.id, id: crypto.randomUUID(), text, mode, artifacts, settings, references, outputCount, promptSource });
       }
     }} />;
-  }, [studioSource, view, modelLibraryRole, engines.data, profiles.data, presets.data, workflows.data, applicationInfo.data, allProjects, chat.data, chatDrafts, autoSettingsRoles, composerDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, removeItem, forkThread, client, openLibraryImage]);
+  }, [studioSource, view, modelLibraryRole, engines.data, profiles.data, presets.data, workflows.data, applicationInfo.data, allProjects, chat.data, chatDrafts, autoSettingsRoles, rememberSettingsRole, composerDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, removeItem, forkThread, client, openLibraryImage]);
 
   if (firstRunSetup && setupReadiness.data) {
     return <FirstRunSetup report={setupReadiness.data} onExit={exitFirstRunSetup} onOpenModels={(role) => { exitFirstRunSetup(); setModelLibraryRole(role); setView("models"); }} onOpenWorkflows={() => { exitFirstRunSetup(); setView("workflows"); }} />;

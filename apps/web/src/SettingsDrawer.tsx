@@ -67,8 +67,12 @@ export function SettingsDrawer({
           ))}
         </div>
       )}
+      {/* No key={role} here. The panel derives its engine, presets and
+          capability settings from the role prop on every render, so the key
+          was resetting exactly one thing: the reader's basic/advanced/expert
+          choice, which is a disclosure level and has nothing to do with which
+          role is being edited. */}
       <GenerationSettingsPanel
-        key={role}
         role={role}
         engines={engines}
         values={values}

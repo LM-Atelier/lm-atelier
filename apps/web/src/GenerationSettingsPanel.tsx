@@ -191,7 +191,7 @@ export function GenerationSettingsPanel({
   const resolvedEditSteps = stepsField ? effectiveValue(stepsField) : undefined;
   return (
     <div className="generation-settings-panel">
-      <div className="segmented compact">
+      <div className="segmented compact" role="group" aria-label="Settings detail level">
         {(["basic", "advanced", "expert"] as Visibility[]).map((level) => (
           <button
             key={level}
