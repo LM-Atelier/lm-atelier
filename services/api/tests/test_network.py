@@ -3,6 +3,8 @@ from __future__ import annotations
 import ssl
 from unittest.mock import Mock, call
 
+import httpx
+
 from local_lm import network
 
 
@@ -11,7 +13,7 @@ def test_tls_context_is_reused_until_trust_environment_changes(monkeypatch) -> N
     second = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     isolated = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     factory = Mock(side_effect=[first, second, isolated])
-    monkeypatch.setattr(network.httpx, "create_ssl_context", factory)
+    monkeypatch.setattr(httpx, "create_ssl_context", factory)
     monkeypatch.delenv("SSL_CERT_FILE", raising=False)
     monkeypatch.delenv("SSL_CERT_DIR", raising=False)
     network._tls_context_for_environment.cache_clear()

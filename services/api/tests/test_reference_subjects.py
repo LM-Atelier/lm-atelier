@@ -55,7 +55,7 @@ def _subject(session: Session, name: str = "Ada Lovelace", **changes: object) ->
         "kind": ReferenceKind.PERSON.value,
     }
     values.update(changes)
-    subject = ReferenceSubject(**values)  # type: ignore[arg-type]
+    subject = ReferenceSubject(**values)
     session.add(subject)
     session.flush()
     return subject

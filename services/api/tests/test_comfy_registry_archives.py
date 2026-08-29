@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
 import stat
 import zipfile
 from collections.abc import Iterable
@@ -369,7 +370,7 @@ def test_insufficient_disk_space_is_rejected_before_extraction(
 ) -> None:
     source = write_archive(tmp_path / "node.zip", [("node.py", b"123456789")])
     monkeypatch.setattr(
-        registry_archives.shutil,
+        shutil,
         "disk_usage",
         lambda _path: SimpleNamespace(free=8),
     )
