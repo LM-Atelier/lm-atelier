@@ -4318,6 +4318,16 @@ class ConversationOrchestrator:
         else:
             self._schedule_media_restart()
 
+    def schedule_media_restart(self) -> None:
+        """Bring the media worker back after something borrowed the device.
+
+        The media handoff inside this class already does this for its own
+        borrow. The prompt-batch path borrows the device the same way and from
+        outside this class, and leaving it to reach for the private method would
+        make an internal detail part of the API surface by accident.
+        """
+        self._schedule_media_restart()
+
     def _schedule_media_restart(self) -> None:
         if self._media_restart_task and not self._media_restart_task.done():
             return
