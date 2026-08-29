@@ -74,7 +74,9 @@ def _add_revision(session, identifier: str, operation: str, artifact: str, insta
     session.flush()
 
 
-def _evidence(settings: Settings, install: ModelInstall, contract: str | None):
+def _evidence(
+    settings: Settings, install: ModelInstall, contract: str | None
+) -> ModelCapabilityEvidence:
     return ModelCapabilityEvidence(
         model_install_id=install.id,
         evidence_key=f"{install.id:e<64}"[:64],
