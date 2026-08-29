@@ -2501,9 +2501,15 @@ async def _prepare_chat_worker_for_model_slots(
 
     profile_id = _chat_profile_for_model_slots(services, session, chat)
     if not profile_id:
+        # A DISTINCT CODE, because the remedy is distinct. Every other refusal
+        # under prompt-model-worker-unavailable means a model exists and cannot
+        # be used; this one means none has been chosen. The browser keys on the
+        # code and carries its own message, so sharing a code here made it tell
+        # the user to START a ready chat model - advice that stopped being true
+        # when this endpoint began starting one for them.
         raise api_error(
             409,
-            "prompt-model-worker-unavailable",
+            "prompt-model-profile-unset",
             "Choose a chat model for this chat before using model-guided template slots.",
         )
 

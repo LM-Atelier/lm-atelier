@@ -1253,7 +1253,10 @@ async def test_prompt_batch_request_is_strict_and_model_slots_fail_without_rows(
         },
     )
     assert unavailable.status_code == 409
-    assert unavailable.json()["code"] == "prompt-model-worker-unavailable"
+    # No chat model has been chosen for this chat, which is its own refusal now:
+    # the endpoint starts a model when one is chosen, so "start one" is no longer
+    # the remedy and no longer the code.
+    assert unavailable.json()["code"] == "prompt-model-profile-unset"
     with SessionLocal() as session:
         assert session.query(PromptExpansionBatch).count() == 0
 
@@ -2509,7 +2512,7 @@ async def test_the_auto_profile_sentinel_is_not_treated_as_a_loadable_profile(
     refused = await _model_slot_batch(client, chat["id"], "auto-sentinel")
 
     assert refused.status_code == 409
-    assert refused.json()["code"] == "prompt-model-worker-unavailable"
+    assert refused.json()["code"] == "prompt-model-profile-unset"
     assert state["loaded"] == [], "the sentinel was passed through as a profile id"
 
 
