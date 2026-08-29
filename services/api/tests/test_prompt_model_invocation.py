@@ -871,3 +871,76 @@ async def test_hostile_subclasses_and_repr_or_equality_hooks_are_never_called() 
 
     hostile_event = HostileEvent(type="tool_delta")
     await _failed(SequenceAdapter([[hostile_event], [hostile_event]]))
+
+
+@pytest.mark.asyncio
+async def test_reasoning_narration_before_the_call_is_ignored_rather_than_refused() -> None:
+    """A model that thinks aloud must still be able to answer.
+
+    Narration arrives as a `delta` carrying text. Refusing it meant a reasoning
+    model was rejected for its chain of thought and never reached its tool call,
+    so the failure looked identical whether one value was requested or eight.
+    """
+    adapter = SequenceAdapter(
+        [
+            [
+                ChatEvent(type="delta", text="First I will pick a medium, then the light."),
+                ChatEvent(type="delta", text="Oil paint suits this subject."),
+                _call(),
+                ChatEvent(type="complete"),
+            ]
+        ]
+    )
+
+    result = await invoke_prompt_model_values(adapter, contract=_contract(), data=_data())
+
+    assert result.values.batch_values == (("style", "oil paint"),)
+    assert result.values.items[1].values == (("lighting", "hard rim light"),)
+    assert "oil paint" not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_narration_without_a_tool_call_is_still_refused() -> None:
+    """Tolerating narration must not turn silence into success."""
+    events = [
+        ChatEvent(type="delta", text="I would rather describe the answer than call the tool."),
+        ChatEvent(type="complete"),
+    ]
+    adapter = SequenceAdapter([list(events), list(events)])
+    await _failed(adapter)
+
+
+@pytest.mark.asyncio
+async def test_oversized_narration_still_trips_the_aggregate_cap() -> None:
+    """Allowing narration removes a refusal, not a bound.
+
+    The text is measured before it is judged, so an unbounded stream of thought
+    still fails on the same aggregate cap that bounds every other string here.
+    """
+    events = [
+        ChatEvent(type="delta", text="x" * (MAX_TEMPLATE_DOCUMENT_CHARS + 1)),
+        _call(),
+        ChatEvent(type="complete"),
+    ]
+    adapter = SequenceAdapter([list(events), list(events)])
+    await _failed(adapter)
+
+
+@pytest.mark.asyncio
+async def test_only_a_tool_delta_may_carry_calls() -> None:
+    """A non-tool_delta event carrying calls is refused, not quietly dropped.
+
+    The discriminating case is a VALID call followed by a terminal event that
+    also carries `tool_calls`. Without the guard the terminal event is simply
+    ignored and the earlier call still satisfies the collector, so the run
+    succeeds while silently discarding a second set of calls. An earlier
+    version of this test put the calls on an ignored `delta` and passed with the
+    guard deleted, because the run then failed for the unrelated reason that no
+    call was ever seen.
+    """
+    events = [
+        _call(),
+        ChatEvent(type="complete", data={"tool_calls": [{"index": 0, "function": {}}]}),
+    ]
+    adapter = SequenceAdapter([list(events), list(events)])
+    await _failed(adapter)
