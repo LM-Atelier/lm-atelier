@@ -42,7 +42,11 @@ def test_synthetic_prompt_fixture(case: dict[str, object]) -> None:
     assert first == second
     assert first.scope == case["scope"]
     assert first.confidence == case["confidence"]
-    assert float(case["minimum"]) <= first.value <= float(case["maximum"])
+    minimum = case["minimum"]
+    maximum = case["maximum"]
+    assert isinstance(minimum, int | float)
+    assert isinstance(maximum, int | float)
+    assert float(minimum) <= first.value <= float(maximum)
     assert [reason.value for reason in first.reason_codes] == case["reasons"]
     provenance = first.provenance()
     assert provenance["estimator_version"] == ESTIMATOR_VERSION
