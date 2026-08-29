@@ -2254,3 +2254,326 @@ async def test_prompt_template_missing_and_pagination_boundaries(client: AsyncCl
 
     assert (await client.get("/api/prompt-templates", params={"limit": 0})).status_code == 422
     assert (await client.get("/api/prompt-templates", params={"offset": 10_001})).status_code == 422
+
+
+def _model_slot_contract() -> dict[str, Any]:
+    contract = _contract()
+    contract["slots"] = [
+        {
+            "name": "subject",
+            "mode": "model",
+            "variation_scope": "item",
+            "guidance": "one concrete subject",
+        }
+    ]
+    return contract
+
+
+def _installed_chat_profile(app: FastAPI) -> str:
+    """A chat profile with an active install, and no worker running it."""
+
+    with SessionLocal() as session:
+        install = ModelInstall(
+            name="Idle prompt chat model",
+            role="chat",
+            engine=app.state.services.settings.chat_engine,
+            local_path="managed/idle-prompt-chat-model",
+            active=True,
+        )
+        session.add(install)
+        session.flush()
+        profile = ModelProfile(
+            name="Idle prompt chat profile",
+            role="chat",
+            engine=app.state.services.settings.chat_engine,
+            model_install_id=install.id,
+        )
+        session.add(profile)
+        session.commit()
+        return cast(str, profile.id)
+
+
+def _stopped_workers(
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    media_running: bool,
+) -> dict[str, Any]:
+    """Drive the worker set by hand, and record what the endpoint does to it.
+
+    The chat worker starts stopped, which is the state the owner reported: the
+    feature refused rather than starting it. The fake load_chat flips it to
+    ready the way the real one does, so the endpoint's second read sees what a
+    real load would have produced rather than a status that was ready all along.
+    """
+
+    processes = app.state.services.processes
+    if media_running:
+        # The suite runs the mock media engine, and the device is only borrowed
+        # from a managed ComfyUI. Without this the endpoint correctly declines to
+        # stop anything and the test would assert against a path it never took.
+        monkeypatch.setattr(app.state.services.settings, "media_engine", "comfyui")
+    state: dict[str, Any] = {
+        "loaded": [],
+        "stopped": [],
+        "restarts": 0,
+        "chat": WorkerStatus(
+            name="chat", state="stopped", managed=True, running=False, profile_id=None
+        ),
+        "media": WorkerStatus(
+            name="media",
+            state="ready" if media_running else "stopped",
+            managed=True,
+            running=media_running,
+            profile_id=None,
+        ),
+    }
+
+    monkeypatch.setattr(processes, "statuses", lambda: [state["chat"], state["media"]])
+
+    async def load_chat(profile: Any, install: Any) -> WorkerStatus:
+        state["loaded"].append(profile.id)
+        state["chat"] = WorkerStatus(
+            name="chat", state="ready", managed=True, running=True, profile_id=profile.id
+        )
+        return cast(WorkerStatus, state["chat"])
+
+    async def stop(name: str) -> None:
+        state["stopped"].append(name)
+        if name == "media":
+            state["media"] = WorkerStatus(
+                name="media", state="stopped", managed=True, running=False, profile_id=None
+            )
+
+    def schedule_media_restart() -> None:
+        state["restarts"] += 1
+
+    monkeypatch.setattr(processes, "load_chat", load_chat)
+    monkeypatch.setattr(processes, "stop", stop)
+    monkeypatch.setattr(
+        app.state.services.orchestrator, "schedule_media_restart", schedule_media_restart
+    )
+    return state
+
+
+def _fill_slots_with(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def invoke(_adapter: object, *, contract: Any, data: Any) -> PromptModelInvocationResult:
+        values = parse_prompt_model_values(
+            {
+                "version": 1,
+                "batch_values": {},
+                "items": [
+                    {"ordinal": item.ordinal, "values": {"subject": f"subject {item.ordinal}"}}
+                    for item in data.items
+                ],
+            },
+            contract=contract,
+        )
+        return PromptModelInvocationResult(
+            values=values,
+            values_sha256=prompt_model_values_sha256(values, contract=contract),
+            attempts=(),
+        )
+
+    monkeypatch.setattr(api_module, "invoke_prompt_model_values", invoke)
+
+
+def _select_chat_profile(chat_id: str, profile_id: str) -> None:
+    with SessionLocal() as session:
+        chat = session.get(Chat, chat_id)
+        assert chat is not None
+        chat.active_chat_profile_id = profile_id
+        session.commit()
+
+
+async def _model_slot_batch(client: AsyncClient, chat_id: str, key: str) -> Any:
+    template = (
+        await client.post(
+            "/api/prompt-templates",
+            json=_create_payload(
+                key=f"{key}-template",
+                name=f"Template {key}",
+                contract=_model_slot_contract(),
+            ),
+        )
+    ).json()
+    revision = template["revision"]
+    return await client.post(
+        f"/api/chats/{chat_id}/prompt-batches",
+        json={
+            "idempotency_key": key,
+            "template_revision_id": revision["id"],
+            "contract_sha256": revision["contract_sha256"],
+            "item_count": 1,
+            "selection_seed": 3,
+            "inputs": {},
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_model_slot_batch_loads_the_chat_model_rather_than_refusing(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The owner's report: the feature must not require a trip to Settings.
+
+    Filling one model-guided slot used to mean unloading ComfyUI by hand,
+    pressing Load on a profile row, and coming back. Every other path that needs
+    a different model loads it; this asserts this one does too.
+    """
+    profile_id = _installed_chat_profile(app)
+    state = _stopped_workers(app, monkeypatch, media_running=False)
+    _fill_slots_with(monkeypatch)
+
+    chat = (await client.post("/api/chats", json={"title": "Loads its own model"})).json()
+    _select_chat_profile(chat["id"], profile_id)
+
+    created = await _model_slot_batch(client, chat["id"], "loads-the-model")
+
+    assert created.status_code == 201, created.text
+    assert state["loaded"] == [profile_id], "the endpoint refused instead of loading"
+    assert created.json()["items"][0]["rendered_prompt"]
+
+
+@pytest.mark.asyncio
+async def test_preparing_the_chat_model_returns_the_device_to_the_media_worker(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Borrowing the device is only acceptable if it is given back.
+
+    Stopping ComfyUI and leaving it stopped would move the manual step rather
+    than remove it - the owner's report names restarting it as part of the cost.
+    """
+    profile_id = _installed_chat_profile(app)
+    state = _stopped_workers(app, monkeypatch, media_running=True)
+    _fill_slots_with(monkeypatch)
+
+    chat = (await client.post("/api/chats", json={"title": "Hands the device back"})).json()
+    _select_chat_profile(chat["id"], profile_id)
+
+    created = await _model_slot_batch(client, chat["id"], "returns-the-device")
+
+    assert created.status_code == 201, created.text
+    assert state["stopped"] == ["media"]
+    assert state["restarts"] == 1, "the media worker was stopped and never restarted"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_model_invocation_still_returns_the_device(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 503 that also left ComfyUI stopped is the manual cleanup, reintroduced."""
+
+    profile_id = _installed_chat_profile(app)
+    state = _stopped_workers(app, monkeypatch, media_running=True)
+
+    async def refuse(_adapter: object, *, contract: Any, data: Any) -> PromptModelInvocationResult:
+        raise PromptModelInvocationError
+
+    monkeypatch.setattr(api_module, "invoke_prompt_model_values", refuse)
+
+    chat = (await client.post("/api/chats", json={"title": "Fails cleanly"})).json()
+    _select_chat_profile(chat["id"], profile_id)
+
+    failed = await _model_slot_batch(client, chat["id"], "fails-cleanly")
+
+    assert failed.status_code == 503
+    assert state["stopped"] == ["media"]
+    assert state["restarts"] == 1, "a failed invocation kept the device"
+
+
+@pytest.mark.asyncio
+async def test_the_auto_profile_sentinel_is_not_treated_as_a_loadable_profile(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The auto sentinel means decide for me, not a profile that can be loaded.
+
+    Passing it through would look up a profile that does not exist and report it
+    as a missing install - a 404 about something the user never chose.
+    """
+    _installed_chat_profile(app)
+    state = _stopped_workers(app, monkeypatch, media_running=False)
+    _fill_slots_with(monkeypatch)
+
+    chat = (await client.post("/api/chats", json={"title": "Auto profile"})).json()
+    _select_chat_profile(chat["id"], api_module.AUTO_PROFILE_ID)
+
+    refused = await _model_slot_batch(client, chat["id"], "auto-sentinel")
+
+    assert refused.status_code == 409
+    assert refused.json()["code"] == "prompt-model-worker-unavailable"
+    assert state["loaded"] == [], "the sentinel was passed through as a profile id"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_chat_model_load_still_returns_the_device(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stopping ComfyUI and then failing to load leaves the device with nobody.
+
+    The first version of this change stopped media INSIDE the helper and only
+    then entered the caller's try/finally, so a load that raised propagated past
+    the cleanup and the media worker stayed stopped. The invocation-failure test
+    did not catch it because it fails a later step - the device had already been
+    borrowed and handed back by then.
+    """
+    profile_id = _installed_chat_profile(app)
+    state = _stopped_workers(app, monkeypatch, media_running=True)
+
+    async def refuse_to_load(profile: Any, install: Any) -> WorkerStatus:
+        state["loaded"].append(profile.id)
+        raise RuntimeError("the runtime is not installed")
+
+    monkeypatch.setattr(app.state.services.processes, "load_chat", refuse_to_load)
+
+    chat = (await client.post("/api/chats", json={"title": "Load fails"})).json()
+    _select_chat_profile(chat["id"], profile_id)
+
+    failed = await _model_slot_batch(client, chat["id"], "load-fails")
+
+    assert failed.status_code == 422
+    assert failed.json()["code"] == "chat-worker-start-failed"
+    assert state["stopped"] == ["media"]
+    assert state["restarts"] == 1, "the load failed and the device was never returned"
+
+
+@pytest.mark.asyncio
+async def test_a_busy_media_worker_is_not_stopped_for_a_model_slot_batch(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Borrowing the device out from under a running job is not the endpoint's call.
+
+    Every other control that changes a worker checks the worker is idle first and
+    refuses with 409 worker-busy. This path reached straight for
+    _load_chat_profile, so a running image job did not stop it and ComfyUI was
+    stopped mid-job.
+    """
+    profile_id = _installed_chat_profile(app)
+    state = _stopped_workers(app, monkeypatch, media_running=True)
+    _fill_slots_with(monkeypatch)
+
+    with SessionLocal() as session:
+        session.add(Job(kind="image", status="running", phase="running", payload_json={}))
+        session.commit()
+
+    chat = (await client.post("/api/chats", json={"title": "Media is busy"})).json()
+    _select_chat_profile(chat["id"], profile_id)
+
+    refused = await _model_slot_batch(client, chat["id"], "media-busy")
+
+    assert refused.status_code == 409
+    assert refused.json()["code"] == "worker-busy"
+    assert state["stopped"] == [], "a running job's device was taken anyway"
+    assert state["loaded"] == []

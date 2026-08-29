@@ -2417,6 +2417,118 @@ async def create_prompt_batch(
         )
 
 
+def _chat_worker_status(services: Services) -> WorkerStatus | None:
+    return next(
+        (status for status in services.processes.statuses() if status.name == "chat"),
+        None,
+    )
+
+
+def _chat_worker_can_fill_slots(worker: WorkerStatus | None) -> bool:
+    """Whether the chat worker can fill model-guided slots exactly as it stands."""
+
+    return (
+        worker is not None
+        and worker.managed
+        and worker.running
+        and worker.state == "ready"
+        and bool(worker.profile_id)
+    )
+
+
+def _chat_profile_for_model_slots(services: Services, session: Session, chat: Chat) -> str | None:
+    """The chat profile this chat would use, resolved the way the app resolves it.
+
+    Three sources in the order the rest of the application already prefers them:
+    the chat's own selection, then whatever the worker last carried, then the
+    last profile loaded anywhere. The worker restart endpoint uses the second
+    and third of these, and its comment gives the reason - a crashed worker
+    still knows what it was running.
+
+    ``active_chat_profile_id`` may hold ``AUTO_PROFILE_ID`` rather than a real
+    profile, which means "decide for me" and is not something that can be
+    loaded. Passing that sentinel through would look up a profile that does not
+    exist and report it as a missing install, so it is skipped rather than
+    resolved.
+    """
+
+    worker = _chat_worker_status(services)
+    setting = session.get(AppSetting, LAST_CHAT_PROFILE_KEY)
+    for candidate in (
+        chat.active_chat_profile_id,
+        worker.profile_id if worker else None,
+        setting.value_json if setting else None,
+    ):
+        if isinstance(candidate, str) and candidate and candidate != AUTO_PROFILE_ID:
+            return candidate
+    return None
+
+
+async def _prepare_chat_worker_for_model_slots(
+    services: Services, session: Session, chat: Chat, borrowed: list[str]
+) -> WorkerStatus | None:
+    """Load a chat model so model-guided slots can be filled, and say if media stopped.
+
+    WHY THIS EXISTS. Every other path in the application that needs a different
+    model loads it - the chat run path, the media run path, the ordered-plan
+    prewarm, the install probes, the image-edit verification. This one path used
+    to refuse instead, with a 409 that named no action, and the owner reported
+    the consequence after exercising the feature end to end: filling one slot
+    meant opening Settings, unloading ComfyUI, pressing Load on a profile row,
+    coming back, running the batch, and remembering to restart ComfyUI
+    afterwards. Two controls in two sections of one page to satisfy a refusal.
+
+    The borrow-the-device shape is taken from the image-edit verification path
+    rather than invented: check the media worker is a managed running ComfyUI,
+    stop it, load the chat profile. The caller schedules the restart, because
+    only the caller knows when the model is finished with the device.
+
+    ``borrowed`` IS A CAUTION, not a style. The first version returned a flag
+    saying whether media had stopped, so the caller could only learn about the
+    borrow if this function RETURNED - and a load that raised propagated past
+    the caller's cleanup with ComfyUI stopped and nothing scheduled to bring it
+    back. The list is appended the instant the stop succeeds, so every later
+    failure, here or in the caller, is covered by one ``finally``.
+
+    IT ALSO TAKES THE SAME LOCKS AS EVERY OTHER WORKER CONTROL. Reaching
+    straight for ``_load_chat_profile`` skipped the idle check and the primary
+    lease, so a running image job did not stop this path and ComfyUI could be
+    stopped out from under it. The idle check runs BEFORE the lease for the
+    reason the worker endpoints give: a wedged job holds the lease indefinitely,
+    and a request that hangs there cannot even report the 409 that explains it.
+    Lock order is chat_guard then primary, which nothing takes the other way.
+    """
+
+    profile_id = _chat_profile_for_model_slots(services, session, chat)
+    if not profile_id:
+        raise api_error(
+            409,
+            "prompt-model-worker-unavailable",
+            "Choose a chat model for this chat before using model-guided template slots.",
+        )
+
+    _ensure_worker_idle(session, "chat")
+    _ensure_worker_idle(session, "media")
+    async with services.scheduler.lease("primary"):
+        session.expire_all()
+        _ensure_worker_idle(session, "chat")
+        _ensure_worker_idle(session, "media")
+        media = next(
+            (status for status in services.processes.statuses() if status.name == "media"),
+            None,
+        )
+        if (
+            services.settings.media_engine == "comfyui"
+            and media is not None
+            and media.managed
+            and media.running
+        ):
+            await services.processes.stop("media")
+            borrowed.append("media")
+        await _load_chat_profile(services, session, profile_id)
+    return _chat_worker_status(services)
+
+
 async def _create_prompt_batch_locked(
     chat_id: str,
     payload: PromptExpansionCreate,
@@ -2496,76 +2608,88 @@ async def _create_prompt_batch_locked(
 
     snapshot = PromptExpansionModelSnapshot(version=1, kind="deterministic")
     if not plan.complete:
-        worker = next(
-            (status for status in services.processes.statuses() if status.name == "chat"),
-            None,
-        )
-        if (
-            worker is None
-            or not worker.managed
-            or not worker.running
-            or worker.state != "ready"
-            or not worker.profile_id
-        ):
-            raise api_error(
-                409,
-                "prompt-model-worker-unavailable",
-                "Start a ready chat model before using model-guided template slots.",
-            )
-        profile = session.get(ModelProfile, worker.profile_id)
-        if (
-            profile is None
-            or profile.role != ModelRole.CHAT.value
-            or not profile.model_install_id
-            or profile.engine != services.settings.chat_engine
-        ):
-            raise api_error(
-                409,
-                "prompt-model-worker-unavailable",
-                "Start a ready chat model before using model-guided template slots.",
-            )
-        install = session.get(ModelInstall, profile.model_install_id)
-        if (
-            install is None
-            or not install.active
-            or install.role != ModelRole.CHAT.value
-            or install.engine != profile.engine
-        ):
-            raise api_error(
-                409,
-                "prompt-model-worker-unavailable",
-                "Start a ready chat model before using model-guided template slots.",
-            )
+        worker = _chat_worker_status(services)
+        # Collected by the preparation itself the moment a stop succeeds, so the
+        # finally below covers a failure INSIDE the preparation as well as one
+        # after it. A returned flag could not: the caller never sees it when the
+        # call raises.
+        borrowed: list[str] = []
         try:
-            model_contract = prompt_model_slot_contract(
-                contract,
-                item_count=expansion_request.item_count,
+            if not _chat_worker_can_fill_slots(worker):
+                worker = await _prepare_chat_worker_for_model_slots(
+                    services, session, chat, borrowed
+                )
+            if worker is None or not worker.profile_id:
+                raise api_error(
+                    409,
+                    "prompt-model-worker-unavailable",
+                    "The chat model did not become ready, so the template slots "
+                    "could not be filled.",
+                )
+            profile = session.get(ModelProfile, worker.profile_id)
+            if (
+                profile is None
+                or profile.role != ModelRole.CHAT.value
+                or not profile.model_install_id
+                or profile.engine != services.settings.chat_engine
+            ):
+                raise api_error(
+                    409,
+                    "prompt-model-worker-unavailable",
+                    "Start a ready chat model before using model-guided template slots.",
+                )
+            install = session.get(ModelInstall, profile.model_install_id)
+            if (
+                install is None
+                or not install.active
+                or install.role != ModelRole.CHAT.value
+                or install.engine != profile.engine
+            ):
+                raise api_error(
+                    409,
+                    "prompt-model-worker-unavailable",
+                    "Start a ready chat model before using model-guided template slots.",
+                )
+            try:
+                model_contract = prompt_model_slot_contract(
+                    contract,
+                    item_count=expansion_request.item_count,
+                )
+                invocation_data = prompt_model_invocation_data(contract, plan)
+                result = await invoke_prompt_model_values(
+                    services.engines.chat,
+                    contract=model_contract,
+                    data=invocation_data,
+                )
+                plan = complete_prompt_expansion_with_model_values(
+                    contract,
+                    plan,
+                    result.values,
+                )
+            except (
+                PromptExpansionError,
+                PromptModelValuesError,
+                PromptModelInvocationError,
+            ) as exc:
+                raise api_error(
+                    503,
+                    "prompt-model-invocation-failed",
+                    "The chat model could not fill the template slots. Retry, or use authored "
+                    "inputs and choices instead.",
+                ) from exc
+            snapshot = PromptExpansionModelSnapshot(
+                version=1,
+                kind="model",
+                adapter_id=profile.engine,
+                model_id=install.id,
+                values_sha256=result.values_sha256,
             )
-            invocation_data = prompt_model_invocation_data(contract, plan)
-            result = await invoke_prompt_model_values(
-                services.engines.chat,
-                contract=model_contract,
-                data=invocation_data,
-            )
-            plan = complete_prompt_expansion_with_model_values(
-                contract,
-                plan,
-                result.values,
-            )
-        except (PromptExpansionError, PromptModelValuesError, PromptModelInvocationError) as exc:
-            raise api_error(
-                503,
-                "prompt-model-invocation-failed",
-                "The chat model could not fill the template slots. Retry, or use authored "
-                "inputs and choices instead.",
-            ) from exc
-        snapshot = PromptExpansionModelSnapshot(
-            version=1,
-            kind="model",
-            adapter_id=profile.engine,
-            model_id=install.id,
-            values_sha256=result.values_sha256,
-        )
+        finally:
+            # The device was borrowed, so give it back whether the model
+            # answered or not. A 503 that also left ComfyUI stopped would be
+            # the same manual cleanup this change exists to remove.
+            if borrowed:
+                services.orchestrator.schedule_media_restart()
 
     try:
         stored = create_or_replay_expansion(
