@@ -723,11 +723,17 @@ async def system_info(request: Request) -> SystemInfo:
 
 @router.get("/about", response_model=ApplicationInfo)
 async def application_info(request: Request) -> ApplicationInfo:
-    settings: Settings = _services(request).settings
+    services = _services(request)
+    settings: Settings = services.settings
+    store = services.artifacts
     return ApplicationInfo(
         version=__version__,
         data_directory=str(settings.data_dir.resolve()),
         log_directory=str(settings.log_dir.resolve()),
+        artifact_directory=str(store.root),
+        artifact_directory_requested=(
+            str(store.requested_root) if store.root_followed_a_link else None
+        ),
         max_media_outputs_per_plan=settings.max_media_outputs_per_plan,
         web_access_enabled=settings.web_access_enabled,
     )

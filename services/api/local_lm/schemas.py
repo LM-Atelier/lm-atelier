@@ -25,7 +25,7 @@ from .domain import (
     RoutingMode,
     RunStatus,
 )
-from .references import MAX_REFERENCES_PER_TURN, MAX_ROLE, MentionSource
+from .references import MAX_REFERENCES_PER_TURN, MAX_ROLE, MentionSource, ValidationState
 from .worker_failures import WorkerFailureCode
 
 
@@ -2216,7 +2216,7 @@ class ReferenceAssetOut(ApiModel):
     purpose: str
     view_label: str | None
     sort_order: int
-    validation_state: str
+    validation_state: ValidationState
 
 
 ReferenceReviewReason = Annotated[
@@ -2396,6 +2396,10 @@ class ApplicationInfo(ApiModel):
     version: str
     data_directory: str
     log_directory: str
+    artifact_directory: str
+    # Present only when construction followed a filesystem link to reach
+    # artifact_directory. A relative path or a case change is not a link.
+    artifact_directory_requested: str | None = None
     max_media_outputs_per_plan: int = Field(ge=1, le=16)
     # The installation-wide gate. When this is false no chat can open its
     # own, and the UI says so rather than offering a switch that does

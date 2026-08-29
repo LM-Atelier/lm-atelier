@@ -6,6 +6,14 @@ import { api, connectEvents } from "./api";
 import type { BackupInfo, Chat, ChatDetail, EngineCapabilities, EngineRole, Job, SettingField, SetupReadinessReport, SetupRoleReadiness, TurnAccepted } from "./types";
 import { DEFAULT_CHAT_WORKFLOW_SELECTIONS, DEFAULT_PROJECT_WORKFLOW_SELECTIONS, familiesForWorkflows } from "./workflowSelectionFixtures";
 const clipboardWrite = vi.fn();
+
+function renderApp() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={client}><App /></QueryClientProvider>,
+  );
+}
+
 const imageSetting: SettingField = {
   key: "negative_prompt",
   label: "Negative prompt",
@@ -182,6 +190,8 @@ vi.mock("./api", () => ({
       version: "0.1.7",
       data_directory: "C:\\LM Atelier\\data",
       log_directory: "C:\\LM Atelier\\data\\logs",
+      artifact_directory: "C:\\LM Atelier\\data\\artifacts",
+      artifact_directory_requested: null,
     }),
     platforms: vi.fn().mockResolvedValue([]),
     createDiagnostics: vi.fn(),
@@ -2293,12 +2303,7 @@ describe("App", () => {
     vi.mocked(api.createBackup).mockImplementation(
       () => new Promise<BackupInfo>((resolve) => { finishBackup = resolve; }),
     );
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(
-      <QueryClientProvider client={client}>
-        <App />
-      </QueryClientProvider>,
-    );
+    renderApp();
 
     fireEvent.click(await screen.findByText("Settings"));
     const create = await screen.findByRole("button", { name: "Back up state" });
@@ -2357,12 +2362,7 @@ describe("App", () => {
       state: "installing",
       message: "Preparing download.",
     });
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(
-      <QueryClientProvider client={client}>
-        <App />
-      </QueryClientProvider>,
-    );
+    renderApp();
 
     fireEvent.click(await screen.findByText("Settings"));
     expect(await screen.findByText("v0.28.0 · Manual setup required")).toBeInTheDocument();
@@ -2380,6 +2380,8 @@ describe("App", () => {
       version: "0.1.7",
       data_directory: "C:\\Users\\someone\\LM Atelier\\data",
       log_directory: "C:\\Users\\someone\\LM Atelier\\data\\logs",
+      artifact_directory: "C:\\Users\\someone\\LM Atelier\\data\\artifacts",
+      artifact_directory_requested: null,
       max_media_outputs_per_plan: 8,
       web_access_enabled: false,
     });
@@ -2422,16 +2424,14 @@ describe("App", () => {
         messages: [],
       },
     });
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(
-      <QueryClientProvider client={client}>
-        <App />
-      </QueryClientProvider>,
-    );
+    renderApp();
 
     fireEvent.click(await screen.findByText("Settings"));
     expect(await screen.findByText("Version 0.1.7")).toBeInTheDocument();
     expect(screen.getByText("C:\\Users\\someone\\LM Atelier\\data")).toBeInTheDocument();
+    expect(screen.getByText("C:\\Users\\someone\\LM Atelier\\data\\artifacts")).toBeInTheDocument();
+    expect(screen.getByText("Artifact folder")).toBeInTheDocument();
+    expect(screen.queryByText("Artifact folder requested as")).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Issues" })).toHaveAttribute(
       "href",
       "https://github.com/ajccarlson/lm-atelier/issues",
