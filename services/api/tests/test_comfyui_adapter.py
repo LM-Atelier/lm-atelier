@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -270,7 +271,7 @@ async def test_binary_previews_retain_the_latest_sampler_progress(
 
     class Socket:
         def __init__(self) -> None:
-            self.messages = iter(
+            self.messages: Iterator[str | bytes] = iter(
                 [
                     json.dumps(
                         {

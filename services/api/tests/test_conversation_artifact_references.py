@@ -5,6 +5,7 @@ import io
 import json
 import zipfile
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from httpx2 import AsyncClient
 from sqlalchemy import select
@@ -21,7 +22,7 @@ async def _wait_for_run(client: AsyncClient, run_id: str) -> dict:  # type: igno
     while asyncio.get_running_loop().time() < deadline:
         response = await client.get(f"/api/runs/{run_id}")
         assert response.status_code == 200
-        run = response.json()
+        run: dict[str, Any] = response.json()
         if run["status"] in {"complete", "failed", "cancelled"}:
             assert run["status"] == "complete", run
             return run
