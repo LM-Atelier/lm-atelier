@@ -39,6 +39,10 @@ class ApiModel(BaseModel):
 
 
 ContentRating = Literal["general", "mature", "unknown"]
+#: What a compute device is. Produced only by hardware.py, which builds every
+#: DeviceInfo and passes one of these three literals; there is no stored column
+#: behind it and so no constraint to derive. Bound to those producers by test.
+DeviceKind = Literal["accelerator", "cpu", "gpu"]
 
 GenerationSettingsByRole = dict[
     Literal["chat", "image", "video"],
@@ -2343,7 +2347,7 @@ class ToolCapabilityProbe(ApiModel):
 class DeviceInfo(ApiModel):
     id: str
     name: str
-    kind: str
+    kind: DeviceKind
     total_memory_bytes: int | None = None
     available_memory_bytes: int | None = None
     backend: str | None = None

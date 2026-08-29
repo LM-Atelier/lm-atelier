@@ -939,15 +939,7 @@ export interface SystemInfo {
   disk_free_bytes: number;
   ffmpeg_available: boolean;
   support: PlatformAssessment;
-  devices: Array<{
-    id: string;
-    name: string;
-    kind: string;
-    total_memory_bytes: number | null;
-    available_memory_bytes: number | null;
-    backend: string | null;
-    details: Record<string, unknown>;
-  }>;
+  devices: DeviceInfo[];
 }
 
 export interface ApplicationInfo {
@@ -1252,6 +1244,18 @@ export type ProjectWorkflowSelectionInput =
   | { mode: "automatic" }
   | { mode: "family"; workflow_family_id: string }
   | { mode: "revision"; workflow_revision_id: string };
+
+export type DeviceKind = "accelerator" | "cpu" | "gpu";
+
+export interface DeviceInfo {
+  id: string;
+  name: string;
+  kind: DeviceKind;
+  total_memory_bytes: number | null;
+  available_memory_bytes: number | null;
+  backend: string | null;
+  details: Record<string, unknown>;
+}
 
 export type WorkflowDependencyResourceKind =
   | "model_profile"
