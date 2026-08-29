@@ -1,3 +1,53 @@
+"""The SQLAlchemy models, and one policy that is not visible from any single one.
+
+STORED VOCABULARIES ARE ENFORCED BY THE APPLICATION. THE DATABASE IS NOT THE
+AUTHORITY ON THEM, AND MOST OF THEM CARRY NO CONSTRAINT AT ALL.
+
+A vocabulary column - a status, a kind, a state, a phase, a failure code - holds
+one of a closed set of strings, defined in Python and usually as a StrEnum. The
+writer is trusted to honour it.
+
+The practice here is MIXED, and saying so is the point of writing this down. A
+small set of columns carries a ``CheckConstraint`` naming them; the rest, the
+overwhelming majority, carry nothing. No column anywhere uses SQLAlchemy's
+``Enum`` type.
+
+NO COUNT OF VOCABULARY COLUMNS APPEARS HERE, and that is deliberate rather than
+vague. Identifying "a vocabulary column" by its name needs a heuristic, and the
+total moves with the heuristic - 44 columns under one suffix list, 45 under
+another, 53 under a third. Worse, every heuristic tried has MISSED real closed
+vocabularies: ``message_references.source``, ``runs.operation``,
+``prompt_template_import_winners.authority_rule`` and
+``workflow_dependency_slots.satisfaction`` are all closed sets of strings whose
+names match no reasonable suffix list. A count would be a fact about the regex
+rather than about the schema, and a wrong one.
+
+What is stated instead is a fact the schema can answer exactly: which columns a
+``CheckConstraint`` names at all. Those are enumerated in
+``test_stored_vocabulary_policy.py``, found by looking for each table's real
+column names inside its own constraints, so no classifier decides what counts.
+Most of them are format and range checks - digest lengths, positive counters,
+bounded text - and only a minority pin a column to a set of string literals:
+``kind = 'manual'``, ``reviewer_kind = 'local-human'``,
+``state IN ('draft', 'queued')``. A few of those guard a relationship between
+columns, which is a different job again from listing a vocabulary.
+
+THE POLICY: application-level enforcement is the intended direction. A new
+vocabulary column does not need a ``CheckConstraint``, and adding one to a
+column that lacks it is not a fix worth making on its own. Enforce the set where
+it is written.
+
+WHAT IT MEANS IF YOU ARE READING ONE. A stored vocabulary value is trusted, not
+guaranteed. Declaring an API response field as a closed enum turns any
+unexpected stored value into a serialization failure on read rather than an odd
+string passed through, so tighten the response type only where the write path is
+genuinely the sole writer.
+
+``test_stored_vocabulary_policy.py`` pins what is described above. It fails if the
+documentation is removed AND if the schema drifts away from what is described
+here, so this cannot quietly stop being true.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Callable
