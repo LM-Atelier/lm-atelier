@@ -362,7 +362,6 @@ OPEN_VOCABULARY_BASELINE = frozenset(
         "StudioToolCapability.kind",
         "WorkPlanOut.status",
         "WorkStepOut.status",
-        "WorkflowDependencyImpactOut.resource_kind",
         "WorkflowInstallOfferOut.invalidation_code",
         "WorkflowMissingNodeOut.node_type",
         "WorkflowPackageIssueOut.code",

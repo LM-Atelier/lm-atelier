@@ -10,6 +10,8 @@ from urllib.parse import parse_qsl, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from .domain import ResourceKind
+
 WORKFLOW_DEPENDENCY_CONTRACT_VERSION = 1
 MAX_WORKFLOW_DEPENDENCY_SLOTS = 64
 MAX_WORKFLOW_DEPENDENCY_REQUIREMENTS_PER_SLOT = 64
@@ -19,6 +21,8 @@ MAX_WORKFLOW_DEPENDENCY_JSON_NODES = 8_192
 MAX_WORKFLOW_DEPENDENCY_JSON_DEPTH = 12
 MAX_WORKFLOW_DEPENDENCY_JSON_ARRAY_ITEMS = 4_096
 
+#: Bound to ResourceKind by test rather than aliased to it - the models here
+#: validate strictly and would refuse the wire's plain strings.
 WorkflowDependencyResourceKind = Literal[
     "model_profile",
     "model_install",
@@ -27,16 +31,10 @@ WorkflowDependencyResourceKind = Literal[
     "registry_package",
     "runtime",
 ]
-WORKFLOW_DEPENDENCY_RESOURCE_KINDS = frozenset(
-    {
-        "model_profile",
-        "model_install",
-        "model_asset",
-        "custom_node",
-        "registry_package",
-        "runtime",
-    }
-)
+#: Derived, so a seventh kind is added to ResourceKind and nowhere else. This
+#: set and the type alias above it were two more hand-written copies of the same
+#: six values; the enum is the one place they now come from.
+WORKFLOW_DEPENDENCY_RESOURCE_KINDS = frozenset(member.value for member in ResourceKind)
 WorkflowDependencySatisfaction = Literal["all_of", "any_of"]
 
 _NAME = re.compile(r"^[a-z][a-z0-9_.-]{0,99}$")

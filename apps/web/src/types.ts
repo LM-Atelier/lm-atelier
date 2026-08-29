@@ -1278,7 +1278,7 @@ export interface WorkflowFamilyPreferenceUpdate {
 
 /** One thing a family depends on, and whether anything else depends on it too. */
 export interface WorkflowDependencyImpact {
-  resource_kind: string;
+  resource_kind: WorkflowDependencyResourceKind;
   resource_id: string;
   resource_name: string;
   binding_count: number;
