@@ -85,6 +85,13 @@ def _lowercase_sha256_check(column: str) -> str:
     return f"length({column}) = 64 AND lower({column}) = {column} AND {remainder} = ''"
 
 
+def _lowercase_git_commit_check(column: str) -> str:
+    remainder = column
+    for character in "0123456789abcdef":
+        remainder = f"replace({remainder}, '{character}', '')"
+    return f"length({column}) = 40 AND lower({column}) = {column} AND {remainder} = ''"
+
+
 def _install_sqlite_trigger(statement: str) -> Callable[..., None]:
     """Create a missing canonical trigger and refuse an existing divergent one.
 
@@ -2134,6 +2141,80 @@ class ReferenceAssetReviewEvent(Base):
     height: Mapped[int] = mapped_column(Integer)
     decision_sha256: Mapped[str] = mapped_column(String(64), unique=True)
     reviewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ComfyRegistrySourceArtifactReview(TimestampMixin, Base):
+    """One local-human review of an exact-commit wheel artifact."""
+
+    __tablename__ = "comfy_registry_source_artifact_reviews"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_declaration_sha256",
+            name="uq_registry_source_review_declaration",
+        ),
+        UniqueConstraint("artifact_id", name="uq_registry_source_review_artifact"),
+        UniqueConstraint("review_sha256", name="uq_registry_source_review_digest"),
+        CheckConstraint(
+            _lowercase_sha256_check("source_declaration_sha256"),
+            name="ck_registry_source_review_declaration_sha256",
+        ),
+        CheckConstraint(
+            _lowercase_git_commit_check("source_commit"),
+            name="ck_registry_source_review_commit",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("artifact_sha256"),
+            name="ck_registry_source_review_artifact_sha256",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("review_sha256"),
+            name="ck_registry_source_review_sha256",
+        ),
+        CheckConstraint(
+            "artifact_size_bytes > 0",
+            name="ck_registry_source_review_artifact_size",
+        ),
+        CheckConstraint(
+            "reviewer_kind = 'local-human'",
+            name="ck_registry_source_review_reviewer",
+        ),
+        Index(
+            "ix_comfy_registry_source_artifact_reviews_source_declaration_sha256",
+            "source_declaration_sha256",
+        ),
+        Index(
+            "ix_comfy_registry_source_artifact_reviews_artifact_id",
+            "artifact_id",
+        ),
+        Index(
+            "ix_comfy_registry_source_artifact_reviews_artifact_sha256",
+            "artifact_sha256",
+        ),
+        Index(
+            "ix_comfy_registry_source_artifact_reviews_review_sha256",
+            "review_sha256",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(80), primary_key=True, default=lambda: new_id("srcreview")
+    )
+    source_declaration: Mapped[str] = mapped_column(Text)
+    source_declaration_sha256: Mapped[str] = mapped_column(String(64))
+    repository: Mapped[str] = mapped_column(String(300))
+    source_commit: Mapped[str] = mapped_column(String(40))
+    artifact_id: Mapped[str] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="RESTRICT")
+    )
+    artifact_sha256: Mapped[str] = mapped_column(String(64))
+    artifact_size_bytes: Mapped[int] = mapped_column(Integer)
+    wheel_filename: Mapped[str] = mapped_column(String(500))
+    wheel_distribution: Mapped[str] = mapped_column(String(200))
+    wheel_version: Mapped[str] = mapped_column(String(200))
+    evidence_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    reviewer_kind: Mapped[str] = mapped_column(String(32))
+    review_sha256: Mapped[str] = mapped_column(String(64))
+    reviewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class MessageReference(TimestampMixin, Base):
