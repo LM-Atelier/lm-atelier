@@ -1380,7 +1380,7 @@ export interface ReferenceAsset {
   purpose: string;
   view_label: string | null;
   sort_order: number;
-  validation_state: string;
+  validation_state: "unchecked" | "usable" | "weak" | "rejected";
 }
 
 export type PromptTemplateSlotMode = "input" | "choice" | "model" | "fixed";

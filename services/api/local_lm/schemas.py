@@ -25,7 +25,7 @@ from .domain import (
     RoutingMode,
     RunStatus,
 )
-from .references import MAX_REFERENCES_PER_TURN, MAX_ROLE, MentionSource
+from .references import MAX_REFERENCES_PER_TURN, MAX_ROLE, MentionSource, ValidationState
 from .worker_failures import WorkerFailureCode
 
 
@@ -2216,7 +2216,7 @@ class ReferenceAssetOut(ApiModel):
     purpose: str
     view_label: str | None
     sort_order: int
-    validation_state: str
+    validation_state: ValidationState
 
 
 ReferenceReviewReason = Annotated[

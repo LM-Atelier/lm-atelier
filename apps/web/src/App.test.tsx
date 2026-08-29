@@ -6,6 +6,14 @@ import { api, connectEvents } from "./api";
 import type { BackupInfo, Chat, ChatDetail, EngineCapabilities, EngineRole, Job, SettingField, SetupReadinessReport, SetupRoleReadiness, TurnAccepted } from "./types";
 import { DEFAULT_CHAT_WORKFLOW_SELECTIONS, DEFAULT_PROJECT_WORKFLOW_SELECTIONS, familiesForWorkflows } from "./workflowSelectionFixtures";
 const clipboardWrite = vi.fn();
+
+function renderApp() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={client}><App /></QueryClientProvider>,
+  );
+}
+
 const imageSetting: SettingField = {
   key: "negative_prompt",
   label: "Negative prompt",
@@ -2295,12 +2303,7 @@ describe("App", () => {
     vi.mocked(api.createBackup).mockImplementation(
       () => new Promise<BackupInfo>((resolve) => { finishBackup = resolve; }),
     );
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(
-      <QueryClientProvider client={client}>
-        <App />
-      </QueryClientProvider>,
-    );
+    renderApp();
 
     fireEvent.click(await screen.findByText("Settings"));
     const create = await screen.findByRole("button", { name: "Back up state" });
@@ -2359,12 +2362,7 @@ describe("App", () => {
       state: "installing",
       message: "Preparing download.",
     });
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(
-      <QueryClientProvider client={client}>
-        <App />
-      </QueryClientProvider>,
-    );
+    renderApp();
 
     fireEvent.click(await screen.findByText("Settings"));
     expect(await screen.findByText("v0.28.0 · Manual setup required")).toBeInTheDocument();
@@ -2426,12 +2424,7 @@ describe("App", () => {
         messages: [],
       },
     });
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(
-      <QueryClientProvider client={client}>
-        <App />
-      </QueryClientProvider>,
-    );
+    renderApp();
 
     fireEvent.click(await screen.findByText("Settings"));
     expect(await screen.findByText("Version 0.1.7")).toBeInTheDocument();
