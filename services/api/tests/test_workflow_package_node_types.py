@@ -138,7 +138,7 @@ async def test_refuses_browser_supplied_node_identities(client: AsyncClient) -> 
     )
 
     assert response.status_code == 422
-    assert any(
-        error["type"] == "extra_forbidden" and error["loc"][-1] == "node_types"
-        for error in response.json()["detail"]
-    )
+    assert response.json() == {
+        "code": "request-validation-invalid",
+        "detail": "Request is invalid.",
+    }
