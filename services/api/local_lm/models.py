@@ -2203,9 +2203,7 @@ class ComfyRegistrySourceArtifactReview(TimestampMixin, Base):
     source_declaration_sha256: Mapped[str] = mapped_column(String(64))
     repository: Mapped[str] = mapped_column(String(300))
     source_commit: Mapped[str] = mapped_column(String(40))
-    artifact_id: Mapped[str] = mapped_column(
-        ForeignKey("artifacts.id", ondelete="RESTRICT")
-    )
+    artifact_id: Mapped[str] = mapped_column(ForeignKey("artifacts.id", ondelete="RESTRICT"))
     artifact_sha256: Mapped[str] = mapped_column(String(64))
     artifact_size_bytes: Mapped[int] = mapped_column(Integer)
     wheel_filename: Mapped[str] = mapped_column(String(500))
