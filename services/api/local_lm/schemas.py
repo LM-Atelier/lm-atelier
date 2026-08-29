@@ -19,6 +19,7 @@ from .domain import (
     ArtifactKind,
     JobKind,
     JobStatus,
+    MaskMode,
     MessageStatus,
     Operation,
     PartType,
@@ -1535,7 +1536,7 @@ class EditTemplateOut(ApiModel):
     settings_json: dict[str, Any]
     workflow_revision_id: str | None
     model_profile_id: str | None
-    mask_mode: str
+    mask_mode: MaskMode
     trigger_words_json: list[str]
     content_rating: ContentRating
     builtin: bool

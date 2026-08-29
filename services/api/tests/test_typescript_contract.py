@@ -347,7 +347,6 @@ OPEN_VOCABULARY_BASELINE = frozenset(
         "CatalogPreflight.auxiliary_kind",
         "ChatItemRemovalReferenceOut.subject_kind",
         "DeviceInfo.kind",
-        "EditTemplateOut.mask_mode",
         "InstallPlanOut.failure_code",
         "InstallPlanOut.status",
         "JobOut.phase",
