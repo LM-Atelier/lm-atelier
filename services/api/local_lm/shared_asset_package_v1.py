@@ -246,26 +246,32 @@ def publish_package(*, root: Path, members: dict[str, str]) -> str:
     _invalid()
 
 
-def _load_package(*, root: Path, digest: str) -> tuple[tuple[str, str], ...]:
+def _load_package_from_store(
+    *, store: AnchoredDirectory, digest: str
+) -> tuple[tuple[str, str], ...]:
     chosen = _require_digest(digest)
+    with _published_descriptor(store, chosen) as descriptor:
+        raw = _read_descriptor(descriptor)
+        if hashlib.sha256(raw).hexdigest() != chosen:
+            _invalid()
+    try:
+        value = json.loads(raw.decode("ascii"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        _invalid()
+    if type(value) is not dict or set(value) != {"members", "schema", "version"}:
+        _invalid()
+    if value.get("schema") != SCHEMA_ID or type(value.get("version")) is not int:
+        _invalid()
+    if value["version"] != SCHEMA_VERSION:
+        _invalid()
+    loaded = _canonical_members(value.get("members"), store)
+    return tuple(loaded.items())
+
+
+def _load_package(*, root: Path, digest: str) -> tuple[tuple[str, str], ...]:
     chosen_root = _require_absolute_root(root)
     with AnchoredDirectory(chosen_root) as store:
-        with _published_descriptor(store, chosen) as descriptor:
-            raw = _read_descriptor(descriptor)
-            if hashlib.sha256(raw).hexdigest() != chosen:
-                _invalid()
-        try:
-            value = json.loads(raw.decode("ascii"))
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
-            _invalid()
-        if type(value) is not dict or set(value) != {"members", "schema", "version"}:
-            _invalid()
-        if value.get("schema") != SCHEMA_ID or type(value.get("version")) is not int:
-            _invalid()
-        if value["version"] != SCHEMA_VERSION:
-            _invalid()
-        loaded = _canonical_members(value.get("members"), store)
-        return tuple(loaded.items())
+        return _load_package_from_store(store=store, digest=digest)
 
 
 def load_package(*, root: Path, digest: str) -> tuple[tuple[str, str], ...]:
