@@ -15,6 +15,7 @@ from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import InvalidWheelFilename, canonicalize_name, parse_wheel_filename
 from packaging.version import InvalidVersion, Version
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .artifacts import ArtifactStore
@@ -269,6 +270,30 @@ def _review_payload(
     }
 
 
+def _review_matches(
+    existing: ComfyRegistrySourceArtifactReview,
+    *,
+    source: _SourceIdentity,
+    artifact: Artifact,
+    inspection: _WheelInspection,
+    review_sha256: str,
+) -> bool:
+    return (
+        existing.source_declaration == source.declaration
+        and existing.repository == source.source.repository
+        and existing.source_commit == source.source.commit
+        and existing.artifact_id == artifact.id
+        and existing.artifact_sha256 == artifact.sha256
+        and existing.artifact_size_bytes == artifact.size_bytes
+        and existing.wheel_filename == inspection.filename
+        and existing.wheel_distribution == inspection.distribution
+        and existing.wheel_version == inspection.version
+        and existing.evidence_json == inspection.evidence
+        and existing.reviewer_kind == REVIEWER_KIND
+        and existing.review_sha256 == review_sha256
+    )
+
+
 def record_local_source_artifact_review(
     session: Session,
     store: ArtifactStore,
@@ -294,21 +319,29 @@ def record_local_source_artifact_review(
         )
     )
     if existing is not None:
-        if (
-            existing.source_declaration == source.declaration
-            and existing.repository == source.source.repository
-            and existing.source_commit == source.source.commit
-            and existing.artifact_id == artifact.id
-            and existing.artifact_sha256 == artifact.sha256
-            and existing.artifact_size_bytes == artifact.size_bytes
-            and existing.wheel_filename == inspection.filename
-            and existing.wheel_distribution == inspection.distribution
-            and existing.wheel_version == inspection.version
-            and existing.evidence_json == inspection.evidence
-            and existing.reviewer_kind == REVIEWER_KIND
-            and existing.review_sha256 == review_sha256
+        if _review_matches(
+            existing,
+            source=source,
+            artifact=artifact,
+            inspection=inspection,
+            review_sha256=review_sha256,
         ):
             return existing
+        _fail("source_artifact_review_conflict")
+    existing_artifact_review = session.scalar(
+        select(ComfyRegistrySourceArtifactReview).where(
+            ComfyRegistrySourceArtifactReview.artifact_id == artifact.id
+        )
+    )
+    if existing_artifact_review is not None:
+        if _review_matches(
+            existing_artifact_review,
+            source=source,
+            artifact=artifact,
+            inspection=inspection,
+            review_sha256=review_sha256,
+        ):
+            return existing_artifact_review
         _fail("source_artifact_review_conflict")
     review = ComfyRegistrySourceArtifactReview(
         source_declaration=source.declaration,
@@ -326,9 +359,36 @@ def record_local_source_artifact_review(
         review_sha256=review_sha256,
         reviewed_at=utcnow(),
     )
-    session.add(review)
-    session.flush()
-    return review
+    conflicted = False
+    try:
+        with session.begin_nested():
+            session.add(review)
+            session.flush()
+    except IntegrityError:
+        conflicted = True
+    if not conflicted:
+        return review
+    winner = session.scalar(
+        select(ComfyRegistrySourceArtifactReview).where(
+            ComfyRegistrySourceArtifactReview.artifact_id == artifact.id
+        )
+    )
+    if winner is None:
+        winner = session.scalar(
+            select(ComfyRegistrySourceArtifactReview).where(
+                ComfyRegistrySourceArtifactReview.source_declaration_sha256
+                == source.declaration_sha256
+            )
+        )
+    if winner is not None and _review_matches(
+        winner,
+        source=source,
+        artifact=artifact,
+        inspection=inspection,
+        review_sha256=review_sha256,
+    ):
+        return winner
+    _fail("source_artifact_review_conflict")
 
 
 def verified_reviewed_source_wheel(

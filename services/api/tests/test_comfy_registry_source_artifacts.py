@@ -6,7 +6,7 @@ from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import Select, create_engine
 from sqlalchemy.orm import Session
 
 from local_lm import comfy_registry_source_artifacts as source_artifacts
@@ -26,7 +26,9 @@ from local_lm.domain import ArtifactKind
 from local_lm.models import Artifact, ComfyRegistrySourceArtifactReview
 
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
+ALT_COMMIT = "fedcba9876543210fedcba9876543210fedcba98"
 DECLARATION = f"example-pkg @ git+https://github.com/example/project@{COMMIT}"
+ALT_DECLARATION = f"example-pkg @ git+https://github.com/example/project@{ALT_COMMIT}"
 
 
 @pytest.fixture
@@ -206,6 +208,148 @@ def test_exact_retry_is_idempotent_and_does_not_rewrite_review_time(
     assert second.id == first.id
     assert second.reviewed_at == reviewed_at
     assert session.query(ComfyRegistrySourceArtifactReview).count() == 1
+
+
+def test_same_artifact_under_a_different_declaration_is_a_coded_conflict(
+    source_review_context: tuple[Session, ArtifactStore],
+) -> None:
+    session, store = source_review_context
+    artifact = _artifact(session, store)
+    first = record_local_source_artifact_review(
+        session, store, declaration=DECLARATION, artifact_id=artifact.id
+    )
+    session.commit()
+
+    with pytest.raises(ComfyRegistrySourceArtifactError) as caught:
+        record_local_source_artifact_review(
+            session,
+            store,
+            declaration=ALT_DECLARATION,
+            artifact_id=artifact.id,
+        )
+
+    assert caught.value.code == "source_artifact_review_conflict"
+    assert str(caught.value) == "Reviewed source artifact evidence is invalid."
+    assert session.query(ComfyRegistrySourceArtifactReview).count() == 1
+    assert session.get(ComfyRegistrySourceArtifactReview, first.id) is first
+    exact_retry = record_local_source_artifact_review(
+        session, store, declaration=DECLARATION, artifact_id=artifact.id
+    )
+    assert exact_retry is first
+
+
+def test_late_artifact_uniqueness_race_is_coded_without_poisoning_session(
+    source_review_context: tuple[Session, ArtifactStore],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session, store = source_review_context
+    artifact = _artifact(session, store)
+    first = record_local_source_artifact_review(
+        session, store, declaration=DECLARATION, artifact_id=artifact.id
+    )
+    session.commit()
+    real_scalar = session.scalar
+    scalar_calls = 0
+
+    def hide_artifact_preflight(
+        statement: Select[tuple[ComfyRegistrySourceArtifactReview]],
+    ) -> ComfyRegistrySourceArtifactReview | None:
+        nonlocal scalar_calls
+        scalar_calls += 1
+        result = real_scalar(statement)
+        if scalar_calls == 2:
+            return None
+        return result
+
+    monkeypatch.setattr(session, "scalar", hide_artifact_preflight)
+    with pytest.raises(ComfyRegistrySourceArtifactError) as caught:
+        record_local_source_artifact_review(
+            session,
+            store,
+            declaration=ALT_DECLARATION,
+            artifact_id=artifact.id,
+        )
+
+    assert scalar_calls == 3
+    assert caught.value.code == "source_artifact_review_conflict"
+    assert str(caught.value) == "Reviewed source artifact evidence is invalid."
+    assert session.query(ComfyRegistrySourceArtifactReview).count() == 1
+    assert session.get(ComfyRegistrySourceArtifactReview, first.id) is first
+    exact_retry = record_local_source_artifact_review(
+        session, store, declaration=DECLARATION, artifact_id=artifact.id
+    )
+    assert exact_retry is first
+    assert scalar_calls == 4
+
+
+def test_exact_retry_race_returns_the_existing_review(
+    source_review_context: tuple[Session, ArtifactStore],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session, store = source_review_context
+    artifact = _artifact(session, store)
+    first = record_local_source_artifact_review(
+        session, store, declaration=DECLARATION, artifact_id=artifact.id
+    )
+    session.commit()
+    real_scalar = session.scalar
+    scalar_calls = 0
+
+    def hide_declaration_preflight(
+        statement: Select[tuple[ComfyRegistrySourceArtifactReview]],
+    ) -> ComfyRegistrySourceArtifactReview | None:
+        nonlocal scalar_calls
+        scalar_calls += 1
+        result = real_scalar(statement)
+        if scalar_calls == 1:
+            return None
+        return result
+
+    monkeypatch.setattr(session, "scalar", hide_declaration_preflight)
+    second = record_local_source_artifact_review(
+        session, store, declaration=DECLARATION, artifact_id=artifact.id
+    )
+
+    assert scalar_calls == 2
+    assert second is first
+    assert session.query(ComfyRegistrySourceArtifactReview).count() == 1
+
+
+def test_exact_retry_after_uniqueness_conflict_returns_the_existing_review(
+    source_review_context: tuple[Session, ArtifactStore],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session, store = source_review_context
+    artifact = _artifact(session, store)
+    first = record_local_source_artifact_review(
+        session, store, declaration=DECLARATION, artifact_id=artifact.id
+    )
+    session.commit()
+    real_scalar = session.scalar
+    scalar_calls = 0
+
+    def hide_both_preflights(
+        statement: Select[tuple[ComfyRegistrySourceArtifactReview]],
+    ) -> ComfyRegistrySourceArtifactReview | None:
+        nonlocal scalar_calls
+        scalar_calls += 1
+        result = real_scalar(statement)
+        if scalar_calls <= 2:
+            return None
+        return result
+
+    monkeypatch.setattr(session, "scalar", hide_both_preflights)
+    second = record_local_source_artifact_review(
+        session, store, declaration=DECLARATION, artifact_id=artifact.id
+    )
+
+    assert scalar_calls == 3
+    assert second is first
+    assert session.query(ComfyRegistrySourceArtifactReview).count() == 1
+    exact_retry = record_local_source_artifact_review(
+        session, store, declaration=DECLARATION, artifact_id=artifact.id
+    )
+    assert exact_retry is first
 
 
 @pytest.mark.parametrize(
