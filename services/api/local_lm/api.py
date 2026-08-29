@@ -277,6 +277,7 @@ from .reference_library import (
     set_details,
     set_favorite,
 )
+from .reference_review import ReviewOutcome, ReviewRefusal, ReviewRefused, review_asset
 from .references import ReferenceError, ReferenceNotFoundError
 from .routing import RouteConfirmationRequired
 from .runtime_config import persist_runtime_values
@@ -376,6 +377,8 @@ from .schemas import (
     ReferenceAssetAttach,
     ReferenceAssetAttached,
     ReferenceAssetOut,
+    ReferenceAssetReview,
+    ReferenceAssetReviewed,
     ReferenceCoverIn,
     ReferenceDeletionImpact,
     ReferenceRecipe,
@@ -5706,6 +5709,82 @@ async def attach_reference_asset(
             )
             for item in attached.similar
         ],
+    )
+
+
+_MAX_REFERENCE_REVIEW_BYTES = 64 * 1024 * 1024
+
+
+@router.post(
+    "/references/{subject_id}/assets/{asset_id}/review",
+    response_model=ReferenceAssetReviewed,
+)
+async def review_reference_asset(
+    subject_id: str,
+    asset_id: str,
+    payload: ReferenceAssetReview,
+    request: Request,
+    session: SessionDep,
+) -> ReferenceAssetReviewed:
+    """Settle one unchecked image against its exact retained bytes."""
+
+    subject = _subject_or_404(session, subject_id)
+    services = _services(request)
+    try:
+        outcome = ReviewOutcome(payload.outcome)
+    except ValueError as exc:
+        raise api_error(
+            422,
+            "reference-review-outcome-unsupported",
+            "Choose usable, weak, or rejected.",
+        ) from exc
+
+    def read_verified(artifact_id: str) -> bytes:
+        artifact = session.get(Artifact, artifact_id)
+        if artifact is None:
+            raise KeyError(artifact_id)
+        return services.artifacts.verified_bytes(
+            artifact,
+            maximum_bytes=_MAX_REFERENCE_REVIEW_BYTES,
+        )
+
+    result = review_asset(
+        session,
+        subject,
+        asset_id=asset_id,
+        outcome=outcome,
+        reasons=payload.reasons,
+        read_bytes=read_verified,
+    )
+    if isinstance(result, ReviewRefused):
+        if result.refusal is ReviewRefusal.ASSET_NOT_FOUND:
+            raise api_error(
+                404,
+                "reference-asset-not-attached",
+                "That image is not attached to this reference.",
+            )
+        if result.refusal is ReviewRefusal.ALREADY_SETTLED:
+            raise api_error(
+                409,
+                "reference-review-already-settled",
+                "This image has already been reviewed.",
+            )
+        detail = f"Review refused: {result.refusal.value.replace('_', ' ')}."
+        if result.measured is not None:
+            detail = f"{detail[:-1]} ({result.measured[0]}x{result.measured[1]})."
+        raise api_error(422, "reference-review-refused", detail)
+
+    if result.width is None or result.height is None:  # pragma: no cover - service invariant
+        raise api_error(500, "reference-review-incomplete", "The review was not recorded.")
+    session.commit()
+    asset = session.get(ReferenceAsset, result.reference_asset_id)
+    if asset is None:  # pragma: no cover - the successful settle just updated it
+        raise api_error(404, "reference-asset-not-attached", "That image is no longer attached.")
+    return ReferenceAssetReviewed(
+        asset=ReferenceAssetOut.model_validate(asset, from_attributes=True),
+        width=result.width,
+        height=result.height,
+        review_version=asset.review_version,
     )
 
 
