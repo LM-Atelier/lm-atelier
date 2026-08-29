@@ -22,6 +22,7 @@ from .models import (
     Artifact,
     ArtifactLibraryEntry,
     Chat,
+    ComfyRegistrySourceArtifactReview,
     Job,
     MessagePart,
     MessageReference,
@@ -607,6 +608,7 @@ def referenced_artifact_ids(
         SetupVerification,
         ArtifactLibraryEntry,
         MessageReference,
+        ComfyRegistrySourceArtifactReview,
         Run,
         WorkStep,
         Chat,
@@ -629,6 +631,7 @@ def referenced_artifact_ids(
         ReferenceAsset.artifact_id,
         SetupVerification.input_artifact_id,
         ArtifactLibraryEntry.artifact_id,
+        ComfyRegistrySourceArtifactReview.artifact_id,
     )
     for column in direct_columns:
         retain({value for value in session.scalars(select(column)) if value})
@@ -688,3 +691,29 @@ def referenced_artifact_ids(
                     retain({linked_id})
                     pending.append(linked_id)
     return found
+
+
+def deletion_restricted_artifact_ids(session: Session) -> set[str]:
+    """Ids deletion must refuse.
+
+    SET NULL pointers are clearable only when no RESTRICT relationship also
+    names the same artifact. Cover/part pointers do not excuse deleting a
+    ReferenceAsset, library membership, or reviewed source-wheel row.
+    """
+
+    blocked = referenced_artifact_ids(session)
+    clearable: set[str] = set()
+    for column in (
+        MessagePart.artifact_id,
+        ResponseRevisionPart.artifact_id,
+        ReferenceSubject.cover_artifact_id,
+    ):
+        clearable.update(value for value in session.scalars(select(column)) if value)
+    restricted: set[str] = set()
+    for column in (
+        ReferenceAsset.artifact_id,
+        ArtifactLibraryEntry.artifact_id,
+        ComfyRegistrySourceArtifactReview.artifact_id,
+    ):
+        restricted.update(value for value in session.scalars(select(column)) if value)
+    return blocked - (clearable - restricted)
