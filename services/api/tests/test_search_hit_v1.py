@@ -27,7 +27,7 @@ def _hit(**overrides: object) -> SearchHitV1 | None:
         "query": "alpha",
     }
     kwargs.update(overrides)
-    return build_search_hit(**kwargs)  # type: ignore[arg-type]
+    return build_search_hit(**kwargs)
 
 
 def test_a_hit_carries_structured_segments_not_rendered_text() -> None:

@@ -300,7 +300,7 @@ def test_failed_atomic_stage_leaves_no_partial_bridge(
     def fail_rename(_source: Path, _destination: Path) -> None:
         raise OSError("locked")
 
-    monkeypatch.setattr(editor_bridge.os, "rename", fail_rename)
+    monkeypatch.setattr(os, "rename", fail_rename)
 
     with pytest.raises(ComfyEditorBridgeError) as refused:
         _stage(custom_nodes)
