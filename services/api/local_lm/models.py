@@ -92,6 +92,7 @@ from .domain import (
     ModelRole,
     Operation,
     PartType,
+    ResourceKind,
     RoutingMode,
     RunStatus,
     new_id,
@@ -1698,8 +1699,7 @@ class WorkflowDependencySlot(TimestampMixin, Base):
             name="ck_workflow_dependency_slot_name_nonempty",
         ),
         CheckConstraint(
-            "resource_kind IN ('model_profile', 'model_install', 'model_asset', "
-            "'custom_node', 'registry_package', 'runtime')",
+            _closed_vocabulary_check("resource_kind", ResourceKind),
             name="ck_workflow_dependency_slot_resource_kind",
         ),
         CheckConstraint(

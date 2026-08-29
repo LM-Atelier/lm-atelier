@@ -13,9 +13,12 @@ asserts they have not.
 
 from __future__ import annotations
 
+import inspect
+import re
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
+from typing import get_args
 
 import pytest
 from alembic import command
@@ -26,11 +29,18 @@ from sqlalchemy.orm import Session, sessionmaker
 from local_lm.config import Settings
 from local_lm.database_migrations import alembic_config
 from local_lm.db import Base
-from local_lm.domain import MaskMode, RoutingMode
+from local_lm.domain import MaskMode, ResourceKind, RoutingMode
 from local_lm.migrations.versions import (
     c8e2f4a71d90_closed_storage_vocabularies as vocabulary_migration,
 )
-from local_lm.models import Chat, EditTemplate
+from local_lm.models import Chat, EditTemplate, _closed_vocabulary_check
+from local_lm.schemas import WorkflowDependencyResourceKind as SchemasResourceKind
+from local_lm.workflow_dependencies import (
+    WORKFLOW_DEPENDENCY_RESOURCE_KINDS,
+)
+from local_lm.workflow_dependencies import (
+    WorkflowDependencyResourceKind as DependenciesResourceKind,
+)
 
 
 @pytest.fixture
@@ -222,3 +232,85 @@ def test_a_clean_database_upgrades_and_carries_both_constraints(
         assert "ck_chat_routing_mode" in str(caught.value)
     finally:
         engine.dispose()
+
+
+def test_the_resource_kind_check_still_matches_the_table_it_was_created_with() -> None:
+    """Deriving a constraint must change where it comes from, not what it says.
+
+    The resource_kind vocabulary used to be a SQL string written out inside
+    models.py, with a second copy of the same string inside the migration that
+    created the table. It is now generated from ResourceKind, so a seventh kind
+    is added in one place instead of three.
+
+    That is only safe if the generated text is what the table already has.
+    SQLite fixes a CHECK at table creation, so a changed string would leave a
+    running database and the models disagreeing about a constraint they both
+    claim to hold, and nothing else in the suite would notice. This reads the
+    literal out of the creating migration rather than retyping it here, because
+    a retyped copy is the third copy this change exists to remove.
+    """
+    from local_lm.migrations.versions import (
+        c8f2d7a91e64_workflow_dependency_bindings as creating_migration,
+    )
+
+    generated = _closed_vocabulary_check("resource_kind", ResourceKind)
+
+    source = inspect.getsource(creating_migration)
+    match = re.search(
+        r'"(resource_kind IN \([^"]*)"\s*\n\s*"([^"]*\))"',
+        source,
+    )
+    assert match is not None, "the creating migration no longer spells the check out"
+    original = match.group(1) + match.group(2)
+
+    assert generated == original, (
+        f"the derived check no longer matches the one the table was created with."
+        f"\n  generated: {generated}\n  migration: {original}"
+    )
+
+
+def test_every_resource_kind_spelling_agrees_with_the_enum() -> None:
+    """Four places name this vocabulary. Only one of them can be the source.
+
+    ResourceKind is that source: the database CHECK is generated from it, the
+    frozenset in workflow_dependencies is derived from it, and the schemas alias
+    IS it. Exactly one copy cannot be derived - the Literal in
+    workflow_dependencies, consumed by a model that validates strictly, where
+    the enum makes pydantic refuse the plain strings the wire carries ("Input
+    should be an instance of ResourceKind") and changes the contract digest
+    computed from those inputs.
+
+    An earlier revision of this test asserted that BOTH aliases were unavoidable
+    and bound both as ordered tuples. That was wrong: the schemas models use
+    ApiModel, which is not strict, and a focused compatibility probe proved the
+    enum works there. A seventh kind added to the enum and nowhere else fails here,
+    naming the spelling that was missed - which is the whole point, because the
+    alternative is discovering it when one API surface accepts a value another
+    rejects.
+    """
+    expected = tuple(member.value for member in ResourceKind)
+
+    assert SchemasResourceKind is ResourceKind, (
+        "schemas.WorkflowDependencyResourceKind is no longer ResourceKind itself"
+    )
+    assert get_args(DependenciesResourceKind) == expected, (
+        "workflow_dependencies.WorkflowDependencyResourceKind has drifted from ResourceKind"
+    )
+    assert frozenset(expected) == WORKFLOW_DEPENDENCY_RESOURCE_KINDS, (
+        "the derived resource-kind set no longer matches ResourceKind"
+    )
+
+
+def test_the_resource_kind_order_is_load_bearing_not_cosmetic() -> None:
+    """The generated database CHECK is compared character-for-character.
+
+    Reordering the enum changes the SQL the models declare while the table keeps
+    the constraint it was created with, so the two would silently disagree about
+    a rule they both claim to hold. The one remaining Literal alias is compared
+    as an ordered tuple above for the same reason.
+    """
+    generated = _closed_vocabulary_check("resource_kind", ResourceKind)
+    assert generated.startswith("resource_kind IN ('model_profile', 'model_install'"), (
+        "the enum order changed; the generated CHECK no longer leads with the "
+        "order the table was created with"
+    )

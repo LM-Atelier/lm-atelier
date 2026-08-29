@@ -23,6 +23,7 @@ from .domain import (
     MessageStatus,
     Operation,
     PartType,
+    ResourceKind,
     RoutingMode,
     RunStatus,
 )
@@ -1269,14 +1270,13 @@ class WorkflowOut(ApiModel):
 
 
 WorkflowSelectorCapability = Literal["chat", "vision", "image", "video"]
-WorkflowDependencyResourceKind = Literal[
-    "model_profile",
-    "model_install",
-    "model_asset",
-    "custom_node",
-    "registry_package",
-    "runtime",
-]
+#: ResourceKind itself, not a restatement of it. The models that consume this
+#: alias use ApiModel, whose config is not strict, so the enum validates the
+#: plain strings the wire carries. An earlier revision kept a hand-maintained
+#: Literal here and claimed the copy was unavoidable; a focused compatibility
+#: probe proved otherwise. Only the strict parser in workflow_dependencies still
+#: needs its own Literal. See test_closed_storage_vocabularies.
+WorkflowDependencyResourceKind = ResourceKind
 WorkflowVariantReadiness = Literal[
     "ready",
     "setup_required",
@@ -1345,7 +1345,7 @@ class WorkflowFamilyPreferenceUpdate(ApiModel):
 
 
 class WorkflowDependencyImpactOut(ApiModel):
-    resource_kind: str
+    resource_kind: ResourceKind
     resource_id: str
     resource_name: str
     binding_count: int
