@@ -182,6 +182,8 @@ vi.mock("./api", () => ({
       version: "0.1.7",
       data_directory: "C:\\LM Atelier\\data",
       log_directory: "C:\\LM Atelier\\data\\logs",
+      artifact_directory: "C:\\LM Atelier\\data\\artifacts",
+      artifact_directory_requested: null,
     }),
     platforms: vi.fn().mockResolvedValue([]),
     createDiagnostics: vi.fn(),
@@ -2380,6 +2382,8 @@ describe("App", () => {
       version: "0.1.7",
       data_directory: "C:\\Users\\someone\\LM Atelier\\data",
       log_directory: "C:\\Users\\someone\\LM Atelier\\data\\logs",
+      artifact_directory: "C:\\Users\\someone\\LM Atelier\\data\\artifacts",
+      artifact_directory_requested: null,
       max_media_outputs_per_plan: 8,
       web_access_enabled: false,
     });
@@ -2432,6 +2436,9 @@ describe("App", () => {
     fireEvent.click(await screen.findByText("Settings"));
     expect(await screen.findByText("Version 0.1.7")).toBeInTheDocument();
     expect(screen.getByText("C:\\Users\\someone\\LM Atelier\\data")).toBeInTheDocument();
+    expect(screen.getByText("C:\\Users\\someone\\LM Atelier\\data\\artifacts")).toBeInTheDocument();
+    expect(screen.getByText("Artifact folder")).toBeInTheDocument();
+    expect(screen.queryByText("Artifact folder requested as")).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Issues" })).toHaveAttribute(
       "href",
       "https://github.com/ajccarlson/lm-atelier/issues",

@@ -2396,6 +2396,10 @@ class ApplicationInfo(ApiModel):
     version: str
     data_directory: str
     log_directory: str
+    artifact_directory: str
+    # Present only when construction followed a filesystem link to reach
+    # artifact_directory. A relative path or a case change is not a link.
+    artifact_directory_requested: str | None = None
     max_media_outputs_per_plan: int = Field(ge=1, le=16)
     # The installation-wide gate. When this is false no chat can open its
     # own, and the UI says so rather than offering a switch that does
