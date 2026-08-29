@@ -269,6 +269,8 @@ async def test_about_reports_version_and_local_support_paths(
         "version": __version__,
         "data_directory": str(settings.data_dir.resolve()),
         "log_directory": str(settings.log_dir.resolve()),
+        "artifact_directory": str(settings.artifact_dir.resolve()),
+        "artifact_directory_requested": None,
         "max_media_outputs_per_plan": settings.max_media_outputs_per_plan,
         # Reported so the UI can explain a switch it cannot offer. Shut unless
         # the installation says otherwise.

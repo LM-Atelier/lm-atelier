@@ -168,9 +168,34 @@ class StagedArtifactFile:
         self.path.unlink(missing_ok=True)
 
 
+def _path_follows_a_link(path: Path) -> bool:
+    """True when resolving this path would traverse a link or reparse point.
+
+    `.resolve()` also absolutizes and normalizes case, so a string comparison
+    of requested versus resolved is not this question. Walk the named path and
+    its parents with the existing inspection primitive instead.
+    """
+
+    cursor = path if path.is_absolute() else Path.cwd() / path
+    while True:
+        if is_link_or_reparse(
+            cursor,
+            missing="assume_regular",
+            unreadable="assume_link",
+        ):
+            return True
+        parent = cursor.parent
+        if parent == cursor:
+            return False
+        cursor = parent
+
+
 class ArtifactStore:
     def __init__(self, settings: Settings, *, root: Path | None = None) -> None:
-        self.root = (root or settings.artifact_dir).resolve()
+        requested = root or settings.artifact_dir
+        self.requested_root = requested
+        self.root_followed_a_link = _path_follows_a_link(requested)
+        self.root = requested.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self._verified_files: dict[Path, tuple[int, int]] = {}
 

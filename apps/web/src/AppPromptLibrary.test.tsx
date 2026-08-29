@@ -66,6 +66,8 @@ beforeEach(() => {
     web_access_enabled: false,
     data_directory: "C:\\LM Atelier\\data",
     log_directory: "C:\\LM Atelier\\data\\logs",
+    artifact_directory: "C:\\LM Atelier\\data\\artifacts",
+    artifact_directory_requested: null,
   });
   vi.mocked(api.jobs).mockResolvedValue([]);
 });

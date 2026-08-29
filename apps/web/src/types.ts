@@ -954,6 +954,9 @@ export interface ApplicationInfo {
   version: string;
   data_directory: string;
   log_directory: string;
+  artifact_directory: string;
+  // Present only when construction followed a filesystem link.
+  artifact_directory_requested: string | null;
   max_media_outputs_per_plan: number;
   // The installation-wide gate. False means no chat can open its own, and
   // the UI says so rather than offering a switch that does nothing.
@@ -1377,7 +1380,7 @@ export interface ReferenceAsset {
   purpose: string;
   view_label: string | null;
   sort_order: number;
-  validation_state: string;
+  validation_state: "unchecked" | "usable" | "weak" | "rejected";
 }
 
 export type PromptTemplateSlotMode = "input" | "choice" | "model" | "fixed";
