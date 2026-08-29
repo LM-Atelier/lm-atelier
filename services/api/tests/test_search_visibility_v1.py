@@ -167,3 +167,33 @@ def test_filter_drops_ineligible_and_keeps_visible_bodies() -> None:
         ]
     )
     assert kept == (("keep", "hello"),)
+
+
+def test_a_verdict_cannot_be_minted_without_the_evaluator_witness() -> None:
+    """The authority guard: only the evaluator may declare a visibility verdict.
+
+    SearchVisibilityV1 is a decision about whether a message body may appear in
+    search, so a caller that can construct one directly can assert eligibility
+    the evaluator never granted. The witness is a module-private sentinel and is
+    the only thing standing between those two situations.
+
+    It was unbound: deleting the check left the entire API suite green, because
+    every legitimate path goes through evaluate_search_visibility and therefore
+    passes the right witness. Only a forgery attempt can tell the difference.
+    """
+    from local_lm import search_visibility_v1 as module
+
+    with pytest.raises(SearchVisibilityError, match=INVALID_VISIBILITY):
+        module._visibility_from_evaluator(witness=object(), code="eligible")
+
+    # And the real evaluator still works, so the guard refuses forgery rather
+    # than refusing everything.
+    verdict = evaluate_search_visibility(
+        message_id="m" * 8,
+        transcript_visible=True,
+        content_removed=False,
+        private_session=False,
+        helper_session=False,
+        secret_payload=False,
+    )
+    assert verdict.eligible is True
