@@ -870,12 +870,11 @@ class ArtifactStore:
         transactions, passes nothing and pays for its own check - that guard is
         the safety property for explicit deletion and is deliberately kept.
 
-        Removing the wrapper call alone is not enough, and an earlier attempt at
-        this was rejected for exactly that reason (codex/R2326). The flush below
-        fires a listener that independently walks the same graph for every
-        deleted artifact, so the snapshot is lent to that listener too; otherwise
-        the per-deletion walk survives untouched behind a test that cannot see
-        it.
+        Removing the wrapper call alone is NOT enough. The flush below fires a
+        listener that independently walks the same graph for every deleted
+        artifact, so the snapshot is lent to that listener too; otherwise the
+        per-deletion walk survives untouched behind a test that cannot see it,
+        because each module binds its own reference to that function.
         """
 
         begin_artifact_write_fence(session)
