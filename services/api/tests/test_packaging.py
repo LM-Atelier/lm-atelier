@@ -1989,3 +1989,389 @@ def test_workflow_validator_wiring_is_intact() -> None:
     # 6. The gate executes the shipped predicate rather than a description.
     assert 'MERGE_GATE_COMMAND = "python scripts/ci-merge-gate.py"' in source
     assert (ROOT / "scripts/ci-merge-gate.py").is_file()
+
+
+def _hygiene_namespace() -> dict[str, object]:
+    return runpy.run_path(str(ROOT / "scripts/check-repository-hygiene.py"))
+
+
+def _forbidden(*fragments: str) -> str:
+    """Assemble a forbidden token at run time.
+
+    Spelling one literally in this file would make the checker reject its own
+    test suite, which is the correct behaviour and a useless test.
+    """
+
+    return "".join(fragments)
+
+
+def test_private_coordination_is_detected_in_its_three_real_shapes(tmp_path: Path) -> None:
+    """All three shapes come from candidates a reader actually rejected.
+
+    A request identifier in a source comment, an agent named as the actor behind
+    a change, and the private record of authority cited as the reason for one.
+    Each is a line that reached tracked public text and was caught only by a
+    human reading the diff.
+    """
+
+    private_coordination_lines = _hygiene_namespace()["private_coordination_lines"]
+
+    identifier = f"{_forbidden('co', 'dex')}/R2250"
+    attribution = f"{_forbidden('cla', 'ude')} requested"
+    authority = _forbidden("own", "er") + " " + _forbidden("deci", "sion")
+
+    fixture = tmp_path / "public.py"
+    fixture.write_text(
+        "\n".join(
+            (
+                "# a first line that is perfectly fine",
+                f"# the guard exists because of {identifier}",
+                "value = 1",
+                f"# {attribution} this be split out",
+                f'"""The policy was adopted by {authority}."""',
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    found = private_coordination_lines(str(fixture))
+
+    assert found == [f"{fixture}:2", f"{fixture}:4", f"{fixture}:5"]
+
+
+def test_the_refusal_names_the_location_and_never_the_line(tmp_path: Path) -> None:
+    """Echoing the match would copy the identifier into the build log.
+
+    The whole point of the rule is to keep these tokens out of anything public,
+    and a CI log is public. Reporting the location is enough to fix it.
+    """
+
+    private_coordination_lines = _hygiene_namespace()["private_coordination_lines"]
+
+    identifier = f"{_forbidden('gr', 'ok')}/R1339"
+    fixture = tmp_path / "leaky.md"
+    fixture.write_text(f"See {identifier} for the rationale.\n", encoding="utf-8")
+
+    found = private_coordination_lines(str(fixture))
+
+    assert found == [f"{fixture}:1"]
+    assert identifier not in "".join(found)
+
+
+def test_a_bare_agent_name_is_not_a_match(tmp_path: Path) -> None:
+    """Bare names occur legitimately, so matching them would be unusable.
+
+    Tracked design notes name branches after the agent that opened them, and the
+    repository documents the models it can run. The rule matches the identifier
+    SHAPE and a narrow set of actor phrasings, not a name anywhere in a file.
+    """
+
+    private_coordination_lines = _hygiene_namespace()["private_coordination_lines"]
+
+    name = _forbidden("gr", "ok")
+    fixture = tmp_path / "design.md"
+    fixture.write_text(
+        "\n".join(
+            (
+                f"Branch: {name}-search-http-ledger-retention-qx-v1",
+                f"The {name} worker runs under its own principal.",
+                f"Supported models include {_forbidden('cla', 'ude')}-opus-5.",
+                "The file owner and the decision to keep it are unrelated.",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    assert private_coordination_lines(str(fixture)) == []
+
+
+def test_binary_payloads_are_skipped(tmp_path: Path) -> None:
+    """A binary file is not prose, and decoding one would raise rather than skip."""
+
+    private_coordination_lines = _hygiene_namespace()["private_coordination_lines"]
+
+    identifier = f"{_forbidden('co', 'dex')}/R1".encode()
+    fixture = tmp_path / "payload.bin"
+    fixture.write_bytes(b"\x00\x01" + identifier)
+
+    assert private_coordination_lines(str(fixture)) == []
+
+
+def test_main_refuses_a_candidate_carrying_private_coordination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The helper must be wired in, not merely present.
+
+    A check nothing calls is green and inert, which is indistinguishable from a
+    clean tree in exactly the case that matters.
+    """
+
+    namespace = _hygiene_namespace()
+    main = namespace["main"]
+
+    # A repository-relative path under a temporary working directory. An
+    # absolute path is refused earlier as a runtime artifact, so the candidate
+    # would never reach the rule under test.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "docs").mkdir()
+    fixture = "docs/candidate.py"
+    (tmp_path / fixture).write_text(
+        f"# {_forbidden('co', 'dex')}/R2250 explains this\n", encoding="utf-8"
+    )
+    monkeypatch.setitem(main.__globals__, "candidate_paths", lambda: [fixture])
+
+    with pytest.raises(SystemExit) as refusal:
+        main()
+
+    message = str(refusal.value)
+    assert "Private coordination text" in message
+    assert f"{fixture}:1" in message
+    assert _forbidden("co", "dex") + "/R2250" not in message
+
+
+def test_main_passes_a_clean_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The control. Without it, a rule that refused everything would also pass."""
+
+    namespace = _hygiene_namespace()
+    main = namespace["main"]
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "docs").mkdir()
+    fixture = "docs/clean.py"
+    (tmp_path / fixture).write_text("value = 1\n", encoding="utf-8")
+    monkeypatch.setitem(main.__globals__, "candidate_paths", lambda: [fixture])
+
+    assert main() == 0
+
+
+def test_a_forbidden_pathname_is_caught_even_when_the_contents_are_clean(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tracked pathname is already published in repository metadata.
+
+    Checking only the bytes inside a file misses the case where the file is
+    named after the identifier: the contents can be entirely ordinary and the
+    token is public anyway, in the tree listing, in every diff that touches the
+    file, and in the URL.
+    """
+
+    private_coordination_lines = _hygiene_namespace()["private_coordination_lines"]
+
+    monkeypatch.chdir(tmp_path)
+    sender = _forbidden("co", "dex")
+    (tmp_path / "docs" / sender).mkdir(parents=True)
+    fixture = f"docs/{sender}/R2250.md"
+    (tmp_path / fixture).write_text("Nothing unusual in here at all.\n", encoding="utf-8")
+
+    found = private_coordination_lines(fixture)
+
+    assert found == ["docs/[redacted].md: the path itself"]
+    assert f"{sender}/R2250" not in "".join(found)
+
+
+def test_a_forbidden_pathname_with_triggering_contents_reports_neither_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The content finding must not smuggle the path back into the log.
+
+    Content findings are reported as location plus line number, and the location
+    is the path. When the path is itself forbidden, reporting it verbatim beside
+    every matching line publishes the identifier once per line - through the rule
+    that exists to prevent exactly that.
+    """
+
+    private_coordination_lines = _hygiene_namespace()["private_coordination_lines"]
+
+    monkeypatch.chdir(tmp_path)
+    sender = _forbidden("gr", "ok")
+    (tmp_path / "docs" / sender).mkdir(parents=True)
+    fixture = f"docs/{sender}/R1339.md"
+    (tmp_path / fixture).write_text(
+        f"first line is fine\nsee {_forbidden('cla', 'ude')}/R1848 for the rationale\n",
+        encoding="utf-8",
+    )
+
+    found = private_coordination_lines(fixture)
+
+    assert found == [
+        "docs/[redacted].md: the path itself",
+        "docs/[redacted].md:2",
+    ]
+    joined = "".join(found)
+    assert f"{sender}/R1339" not in joined
+    assert f"{_forbidden('cla', 'ude')}/R1848" not in joined
+
+
+def test_an_ordinary_path_is_reported_unchanged(tmp_path: Path) -> None:
+    """Redaction must not fire on safe paths, or every location becomes useless.
+
+    The control for the two tests above: a location with nothing forbidden in it
+    is reported exactly as before, so the refusal still names a file a reader can
+    open.
+    """
+
+    private_coordination_lines = _hygiene_namespace()["private_coordination_lines"]
+
+    fixture = tmp_path / "ordinary.md"
+    fixture.write_text(f"see {_forbidden('co', 'dex')}/R1 here\n", encoding="utf-8")
+
+    assert private_coordination_lines(str(fixture)) == [f"{fixture}:1"]
+
+
+def test_a_native_windows_pathname_is_redacted_not_just_detected(
+    tmp_path: Path,
+) -> None:
+    """Detection and redaction must normalise the same way.
+
+    The identifier shape contains a slash, so a native path has to be normalised
+    before it can be matched at all. Normalising only for the match and then
+    substituting against the original replaces nothing: the token is found and
+    then reported verbatim, which is the worst of both.
+    """
+
+    private_coordination_lines = _hygiene_namespace()["private_coordination_lines"]
+
+    sender = _forbidden("co", "dex")
+    directory = tmp_path / "docs" / sender
+    directory.mkdir(parents=True)
+    fixture = directory / "R2250.md"
+    fixture.write_text("ordinary contents\n", encoding="utf-8")
+
+    native = str(fixture)
+    found = private_coordination_lines(native)
+
+    assert found, "a native path carrying the identifier was not detected"
+    assert f"{sender}/R2250" not in "".join(found)
+    assert f"{sender}\\R2250" not in "".join(found)
+    assert "[redacted]" in found[0]
+
+
+def test_an_earlier_path_gate_cannot_publish_a_forbidden_pathname(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The coordination refusal must come before anything that prints a path.
+
+    A file can trip more than one rule. If a forbidden pathname also has, say,
+    trailing whitespace, whichever diagnostic runs first writes the path into the
+    build log - and every other diagnostic reports paths verbatim.
+    """
+
+    namespace = _hygiene_namespace()
+    main = namespace["main"]
+
+    monkeypatch.chdir(tmp_path)
+    sender = _forbidden("cla", "ude")
+    (tmp_path / "docs" / sender).mkdir(parents=True)
+    fixture = f"docs/{sender}/R1848.md"
+    # Trailing whitespace: a rule that runs before the coordination rule did.
+    (tmp_path / fixture).write_text("a line with a trailing space \n", encoding="utf-8")
+    monkeypatch.setitem(main.__globals__, "candidate_paths", lambda: [fixture])
+
+    with pytest.raises(SystemExit) as refusal:
+        main()
+
+    message = str(refusal.value)
+    assert f"{sender}/R1848" not in message
+    assert "docs/[redacted].md" in message
+
+
+def test_the_mojibake_rule_cannot_publish_a_forbidden_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The mojibake rule echoes the offending LINE, not just its location.
+
+    That is the right behaviour for its own purpose - the whole point is to show
+    which characters were mangled - and it is why the coordination rule has to
+    run first. A single line carrying both a mojibake marker and a forbidden
+    token would otherwise be printed in full.
+    """
+
+    namespace = _hygiene_namespace()
+    main = namespace["main"]
+    marker = namespace["MOJIBAKE_MARKERS"][0]
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "docs").mkdir()
+    fixture = "docs/mangled.md"
+    identifier = f"{_forbidden('gr', 'ok')}/R1339"
+    (tmp_path / fixture).write_text(
+        f"a line {marker} mangled and citing {identifier}\n", encoding="utf-8"
+    )
+    monkeypatch.setitem(main.__globals__, "candidate_paths", lambda: [fixture])
+
+    with pytest.raises(SystemExit) as refusal:
+        main()
+
+    message = str(refusal.value)
+    assert identifier not in message
+    assert "Private coordination text" in message, (
+        "the mojibake rule answered first, so the forbidden line was printed"
+    )
+
+
+def test_the_refusal_formatter_masks_a_forbidden_location() -> None:
+    """The second line of defence needs its own test, because ordering hides it.
+
+    The coordination rule runs first, so no other diagnostic can currently be
+    reached with a forbidden path - which means nothing exercises the shared
+    formatter they all now use. A mutation making that formatter join raw
+    strings passed the entire suite. Testing it directly is what makes the
+    net real for the day someone reorders `main`, rather than decorative.
+    """
+
+    listed = _hygiene_namespace()["_listed"]
+    sender = _forbidden("co", "dex")
+
+    rendered = listed([f"docs/{sender}/R2250.md", "docs/ordinary.md"])
+
+    assert f"{sender}/R2250" not in rendered
+    assert "docs/[redacted].md" in rendered
+    assert "docs/ordinary.md" in rendered, "a safe location must survive unchanged"
+
+
+def test_an_unsafe_candidate_is_refused_before_anything_reads_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing may open a candidate the unsafe rule is going to reject.
+
+    The unsafe rule is the only one here that decides whether a file may be read
+    at all: it answers from the path and a symlink test and opens nothing. Every
+    other rule reads bytes, so running one first would follow a candidate link
+    before the link could be refused, and would inspect the private tree before
+    the rule that owns excluding it.
+
+    Asserted by observation rather than by a real symlink, because creating one
+    needs a privilege the runner may not have, and a test that silently skips
+    proves nothing about the ordering it exists to pin.
+    """
+
+    namespace = _hygiene_namespace()
+    main = namespace["main"]
+    real_reader = namespace["private_coordination_lines"]
+    opened: list[str] = []
+
+    def recording_reader(path: str) -> list[str]:
+        opened.append(path)
+        return real_reader(path)
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".private").mkdir()
+    fixture = ".private/notes.md"
+    (tmp_path / fixture).write_text("ordinary\n", encoding="utf-8")
+    monkeypatch.setitem(main.__globals__, "candidate_paths", lambda: [fixture])
+    monkeypatch.setitem(main.__globals__, "private_coordination_lines", recording_reader)
+
+    with pytest.raises(SystemExit) as refusal:
+        main()
+
+    assert "Private, generated, executable, or runtime artifacts" in str(refusal.value)
+    assert opened == [], f"the coordination rule opened {opened} before the unsafe rule refused it"
