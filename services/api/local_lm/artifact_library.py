@@ -7,10 +7,12 @@ import hashlib
 import hmac
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from collections.abc import Set as AbstractSet
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, NoReturn, cast
+from typing import Any, Final, NoReturn, cast
 
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert
@@ -562,6 +564,42 @@ def _pending_json_reference_ids(session: Session) -> set[str]:
     return found
 
 
+#: Key under which a caller that already holds the write fence publishes the
+#: reference graph it computed under that fence, so this listener can reuse it.
+_FENCED_REFERENCE_SNAPSHOT: Final = "artifact_reference_ids_under_write_fence"
+
+
+@contextmanager
+def fenced_reference_snapshot(
+    session: Session, snapshot: AbstractSet[str] | None
+) -> Iterator[None]:
+    """Lend an already-fenced reference graph to the flush listener.
+
+    The listener below runs on EVERY flush that deletes an Artifact and, left to
+    itself, walks the whole reference graph again each time. A sweep deleting
+    thousands of artifacts therefore paid for that walk per deletion even after
+    its caller had computed the same graph once - removing only the caller's own
+    recompute leaves the listener untouched, which is why an earlier attempt at
+    this was rejected (codex/R2326).
+
+    Lending is only sound while the writer reservation is held in the same
+    transaction, because BEGIN IMMEDIATE is what stops another connection
+    creating a reference underneath the snapshot. The lend is therefore scoped to
+    one flush and removed in a finally: it cannot outlive the fence that makes it
+    true, and a caller with no snapshot passes None and the listener pays as
+    before.
+    """
+
+    if snapshot is None:
+        yield
+        return
+    session.info[_FENCED_REFERENCE_SNAPSHOT] = frozenset(snapshot)
+    try:
+        yield
+    finally:
+        session.info.pop(_FENCED_REFERENCE_SNAPSHOT, None)
+
+
 def guard_artifact_reference_flush(
     session: Session,
     _flush_context: object,
@@ -574,7 +612,9 @@ def guard_artifact_reference_flush(
     if not referenced and not deleted:
         return
     begin_artifact_write_fence(session)
-    if deleted & referenced_artifact_ids(session):
+    lent = session.info.get(_FENCED_REFERENCE_SNAPSHOT)
+    known = lent if isinstance(lent, frozenset) else referenced_artifact_ids(session)
+    if deleted & known:
         raise ArtifactReferenceDataError(REFERENCE_CORRUPT)
     available = {
         value.id for value in session.new if isinstance(value, Artifact) and value.id not in deleted
