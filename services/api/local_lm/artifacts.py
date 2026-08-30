@@ -377,7 +377,7 @@ class ArtifactStore:
         original_name: str | None,
         metadata: dict[str, object] | None,
     ) -> Artifact:
-        sha256, size = self._publish_under_its_digest(source)
+        sha256, size = self._publish_under_its_digest(source, session)
         destination_path = self._destination(sha256)
         # The verified-file cache is NOT primed here, and that is deliberate.
         # _remember_verified stats by pathname, so priming it immediately after
@@ -429,7 +429,7 @@ class ArtifactStore:
         session.flush()
         return artifact
 
-    def _publish_under_its_digest(self, source: IO[bytes]) -> tuple[str, int]:
+    def _publish_under_its_digest(self, source: IO[bytes], session: Session) -> tuple[str, int]:
         """Consume the stream into the store and publish it under its digest.
 
         Everything from the store root down is HELD. The two digest directories
@@ -472,6 +472,22 @@ class ArtifactStore:
                     sink.flush()
                     os.fsync(sink.fileno())
                 sha256 = digest.hexdigest()
+                # The writer reservation is taken HERE: after the bytes are
+                # staged and before they are published, and it is held through
+                # the caller's row work.
+                #
+                # The sweep takes the same reservation, so it cannot run between
+                # the moment these bytes appear under their digest and the moment
+                # a row exists to protect them. Without it the deduplication path
+                # can return having written nothing at all - no insert, no update,
+                # no fence - so a live request holds nothing the sweep can see,
+                # and the sweep deletes the row and the bytes underneath it.
+                #
+                # Taken here rather than at the top of the ingest, because the
+                # streaming above is the expensive part and holding SQLite's
+                # single writer slot for the length of an upload would block
+                # every other write for as long as the upload takes.
+                begin_artifact_write_fence(session)
                 first = open_child_directory(root_anchor, sha256[:2], create=True)
                 try:
                     second = open_child_directory(first, sha256[2:4], create=True)
