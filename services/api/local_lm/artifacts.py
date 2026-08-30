@@ -10,6 +10,7 @@ import shutil
 import stat
 import tempfile
 import uuid
+from collections.abc import Set as AbstractSet
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -19,7 +20,11 @@ from typing import IO, Final
 from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session
 
-from .artifact_library import begin_artifact_write_fence, referenced_artifact_ids
+from .artifact_library import (
+    begin_artifact_write_fence,
+    fenced_reference_snapshot,
+    referenced_artifact_ids,
+)
 from .config import Settings
 from .domain import ArtifactKind, MessageRole, PartType
 from .filesystem_links import (
@@ -686,7 +691,7 @@ class ArtifactStore:
                 removed_count += 1
                 reclaimed_bytes += artifact.size_bytes
                 if not dry_run:
-                    self._delete_artifact(session, artifact)
+                    self._delete_artifact(session, artifact, retained=referenced)
                 continue
             if not temporary:
                 pending_count += 1
@@ -696,7 +701,13 @@ class ArtifactStore:
                         metadata["unreferenced_at"] = current.isoformat()
                         artifact.metadata_json = metadata
         if not dry_run:
-            session.flush()
+            # Marking `unreferenced_at` makes an artifact dirty, and if its
+            # metadata names a poster then _pending_json_reference_ids is
+            # non-empty here, so the listener walks the graph again on this final
+            # flush. That is O(1) rather than the per-deletion walk, but "once per
+            # sweep" is only true if this flush lends the snapshot too.
+            with fenced_reference_snapshot(session, referenced):
+                session.flush()
         orphan_count, orphan_bytes = self._cleanup_orphan_files(
             session,
             current=current,
@@ -841,16 +852,43 @@ class ArtifactStore:
             removed += removed_count
         return removed
 
-    def _delete_artifact(self, session: Session, artifact: Artifact) -> None:
+    def _delete_artifact(
+        self,
+        session: Session,
+        artifact: Artifact,
+        *,
+        retained: AbstractSet[str] | None = None,
+    ) -> None:
+        """Remove one artifact, staging its bytes so a failed flush can restore them.
+
+        `retained` is an optimisation with a safety condition, not a shortcut. A
+        caller may pass the reference graph ONLY when it computed that graph
+        after taking this same write fence, in the same transaction: BEGIN
+        IMMEDIATE holds the writer reservation, so no other connection can create
+        a reference while it is held and the snapshot cannot go stale underneath
+        us. A caller that has not taken the fence, or that spans several
+        transactions, passes nothing and pays for its own check - that guard is
+        the safety property for explicit deletion and is deliberately kept.
+
+        Removing the wrapper call alone is not enough, and an earlier attempt at
+        this was rejected for exactly that reason (codex/R2326). The flush below
+        fires a listener that independently walks the same graph for every
+        deleted artifact, so the snapshot is lent to that listener too; otherwise
+        the per-deletion walk survives untouched behind a test that cannot see
+        it.
+        """
+
         begin_artifact_write_fence(session)
-        if artifact.id in self.referenced_artifact_ids(session):
+        known = self.referenced_artifact_ids(session) if retained is None else retained
+        if artifact.id in known:
             raise ValueError("This artifact is still retained.")
         try:
             path = self.resolve(artifact)
         except ValueError:
             # Invalid metadata must never redirect deletion to another file.
             session.delete(artifact)
-            session.flush()
+            with fenced_reference_snapshot(session, retained):
+                session.flush()
             return
         staged: Path | None = None
         if path.exists():
@@ -865,7 +903,10 @@ class ArtifactStore:
             self._verified_files.pop(path, None)
         try:
             session.delete(artifact)
-            session.flush()
+            # The listener on this flush walks the whole reference graph unless a
+            # caller that already holds the fence lends it the graph it computed.
+            with fenced_reference_snapshot(session, retained):
+                session.flush()
         except Exception:
             if staged is not None:
                 self._restore_staged_file(staged, path)
