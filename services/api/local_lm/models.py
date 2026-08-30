@@ -324,7 +324,7 @@ class MessagePart(TimestampMixin, Base):
     type: Mapped[str] = mapped_column(String(32), default=PartType.TEXT.value)
     text: Mapped[str | None] = mapped_column(Text, nullable=True)
     artifact_id: Mapped[str | None] = mapped_column(
-        ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True, index=True
     )
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
@@ -547,7 +547,7 @@ class ResponseRevisionPart(TimestampMixin, Base):
     type: Mapped[str] = mapped_column(String(32), default=PartType.TEXT.value)
     text: Mapped[str | None] = mapped_column(Text, nullable=True)
     artifact_id: Mapped[str | None] = mapped_column(
-        ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True, index=True
     )
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
@@ -2087,7 +2087,7 @@ class ReferenceSubject(TimestampMixin, Base):
     # Cleared rather than cascading: losing a cover image must not lose the
     # subject, because the images are replaceable and the identity is not.
     cover_artifact_id: Mapped[str | None] = mapped_column(
-        ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True, index=True
     )
     favorite: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     # Archive is the normal way to remove a subject. Permanent deletion has to

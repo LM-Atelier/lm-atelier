@@ -1894,3 +1894,220 @@ def _is_the_recorded_uniqueness_allowance(entry: object) -> bool:
     return (
         operation == "remove_index" and getattr(obj, "name", None) == "uq_runs_work_step_id"
     ) or (operation == "add_constraint" and isinstance(obj, UniqueConstraint))
+
+
+def _fk_usable_index(connection: sqlite3.Connection, table: str, column: str) -> str | None:
+    """The name of an index SQLite can use for this table's foreign-key lookup.
+
+    Three properties, all necessary, and none of them visible from a probe query.
+    An index is usable for the equality lookup that `ON DELETE SET NULL` performs
+    only when it is NOT partial, `column` is its LEADING term, and that term
+    carries the column's own collation.
+
+    Checking the definition is what makes this sound. An earlier version asked
+    the query planner instead, with a bound literal, and a partial index whose
+    predicate happened to match that literal planned as SEARCH while the real
+    foreign-key lookup still scanned. The probe answered a different question
+    from the one being asked.
+    """
+
+    for _seq, name, _unique, _origin, partial in connection.execute(
+        f"PRAGMA index_list('{table}')"
+    ):
+        if partial:
+            continue
+        terms = list(connection.execute(f"PRAGMA index_xinfo('{name}')"))
+        if not terms:
+            continue
+        _seqno, _cid, term_name, _desc, collation, _key = terms[0]
+        if term_name == column and (collation or "").upper() == "BINARY":
+            return str(name)
+    return None
+
+
+def test_every_artifact_foreign_key_has_an_index_the_delete_can_use(tmp_path: Path) -> None:
+    """Deleting an artifact must not scan a table to find its referrers.
+
+    SQLite applies `ON DELETE SET NULL` by finding every row referring to the
+    dying artifact. Without a usable index on the referring column that is a full
+    scan, once per deleted artifact, per table, and the retention sweep deletes in
+    thousands.
+
+    "Usable" is checked against the index DEFINITION, because two shapes this
+    codebase uses idiomatically are indistinguishable from a real index by any
+    cheaper means:
+
+        a PARTIAL index - `sqlite_where=...` appears on several models and one
+        already sits on artifact_library_entries, which carries a foreign key to
+        artifacts.id;
+
+        an index whose leading term carries a different COLLATE than the column.
+
+    Neither can serve the foreign-key lookup. `PRAGMA index_info` reports the bare
+    column name for both, and asking the query planner is not a way out either: a
+    partial index whose predicate matches the probe's bound value plans as SEARCH
+    while the real delete still scans. That was measured, not assumed.
+
+    The assertion is universal, so a foreign key added later without a usable
+    index fails here rather than quietly costing a scan per deletion.
+    """
+
+    settings = Settings(data_dir=tmp_path / "data")
+    settings.prepare()
+    upgrade_database(settings)
+
+    database = next(iter(sorted((tmp_path / "data").rglob("*.sqlite3"))), None)
+    assert database is not None, "the migrations produced no database to inspect"
+
+    unusable: list[str] = []
+    examined: list[str] = []
+    with closing(sqlite3.connect(database)) as connection:
+        tables = [
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        ]
+        for table in tables:
+            referring = [
+                row[3]
+                for row in connection.execute(f"PRAGMA foreign_key_list('{table}')")
+                if row[2] == "artifacts"
+            ]
+            if not referring:
+                continue
+            # The BINARY expectation above is only right while no referring
+            # column declares its own collation. Assert that rather than assume
+            # it, so a future COLLATE on one of these columns fails loudly here
+            # instead of silently making every index look wrong.
+            declaration = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name = ?",
+                (table,),
+            ).fetchone()
+            for column in referring:
+                examined.append(f"{table}.{column}")
+                assert "COLLATE" not in (declaration[0] or "").upper(), (
+                    f"{table} declares a column collation, so the BINARY "
+                    f"expectation in _fk_usable_index no longer holds"
+                )
+                if _fk_usable_index(connection, table, column) is None:
+                    unusable.append(f"{table}.{column}")
+
+    # A floor on what was examined. Without it the final assertion is satisfied
+    # by a discovery loop that found nothing, which is the classic vacuous pass.
+    assert "message_parts.artifact_id" in examined, (
+        f"the discovery loop did not find a foreign key it should have; it "
+        f"examined {sorted(examined)}, so this test is measuring nothing"
+    )
+
+    assert unusable == [], (
+        f"these foreign keys to artifacts.id have no index the delete can use, "
+        f"so every artifact deletion scans their tables: {sorted(unusable)}"
+    )
+
+
+_ARTIFACT_INDEX_REVISION = "b41e7c0a92d5"
+_ARTIFACT_INDEX_PRIOR = "c9e1d4a70b82"
+
+
+def _migrated_to(tmp_path: Path, revision: str) -> tuple[Settings, object, Path]:
+    """Bring a fresh database to an exact revision and hand back its handles."""
+
+    settings = Settings(data_dir=tmp_path / "data")
+    settings.prepare()
+    config = alembic_config(settings)
+    command.upgrade(config, revision)
+    database = next(iter(sorted((tmp_path / "data").rglob("*.sqlite3"))))
+    return settings, config, database
+
+
+def test_the_artifact_index_guard_accepts_an_exact_replay(tmp_path: Path) -> None:
+    """A partially applied migration must be able to finish on the next start.
+
+    SQLite commits each CREATE INDEX, but a failure part-way rolls
+    alembic_version back, so the schema can hold indexes the version row says
+    were never created. Without a guard the replay dies on "already exists" and
+    the application never starts again - which was reproduced before the guard
+    existed. This pins the recovery as a repository test rather than a
+    throwaway script.
+    """
+
+    _settings, config, database = _migrated_to(tmp_path, _ARTIFACT_INDEX_PRIOR)
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute(
+            "CREATE INDEX ix_message_parts_artifact_id ON message_parts (artifact_id)"
+        )
+        connection.commit()
+
+    command.upgrade(config, "head")
+
+    with closing(sqlite3.connect(database)) as connection:
+        version = connection.execute("SELECT version_num FROM alembic_version").fetchone()
+    assert version == (_ARTIFACT_INDEX_REVISION,), (
+        "the replay did not advance the revision, so the next start replays again"
+    )
+
+
+def test_the_artifact_index_guard_refuses_a_same_name_index_of_another_shape(
+    tmp_path: Path,
+) -> None:
+    """Advancing over an index this migration did not create is the failure mode.
+
+    `CREATE INDEX IF NOT EXISTS` returns success against a same-name index on a
+    different column and leaves the wrong one in place, so the revision advances
+    without the index it claims to create. Refusing loudly is the point: the
+    guard compares the exact definition, not the name.
+    """
+
+    _settings, config, database = _migrated_to(tmp_path, _ARTIFACT_INDEX_PRIOR)
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("CREATE INDEX ix_message_parts_artifact_id ON message_parts (id)")
+        connection.commit()
+
+    with pytest.raises(Exception, match="already exists with a different definition"):
+        command.upgrade(config, "head")
+
+    with closing(sqlite3.connect(database)) as connection:
+        version = connection.execute("SELECT version_num FROM alembic_version").fetchone()
+        columns = [
+            row[2]
+            for row in connection.execute("PRAGMA index_info('ix_message_parts_artifact_id')")
+        ]
+    assert version == (_ARTIFACT_INDEX_PRIOR,), (
+        "the revision advanced without creating the index it claims to create"
+    )
+    assert columns == ["id"], "the pre-existing index was altered or removed"
+
+
+def test_the_artifact_index_downgrade_preserves_a_differently_shaped_namesake(
+    tmp_path: Path,
+) -> None:
+    """Downgrade must not delete an index of another shape that shares the name.
+
+    The guarantee is specifically about a DIFFERENT definition. An index of the
+    exact same shape is indistinguishable from one this revision created -
+    SQLite records only that it came from an explicit CREATE INDEX, not which
+    migration ran it - so that case is deliberately not claimed.
+    """
+
+    _settings, config, database = _migrated_to(tmp_path, "head")
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("DROP INDEX ix_reference_subjects_cover_artifact_id")
+        connection.execute(
+            "CREATE INDEX ix_reference_subjects_cover_artifact_id ON reference_subjects (id)"
+        )
+        connection.commit()
+
+    command.downgrade(config, _ARTIFACT_INDEX_PRIOR)
+
+    with closing(sqlite3.connect(database)) as connection:
+        columns = [
+            row[2]
+            for row in connection.execute(
+                "PRAGMA index_info('ix_reference_subjects_cover_artifact_id')"
+            )
+        ]
+    assert columns == ["id"], (
+        "downgrade deleted a same-name index of a different shape, which this "
+        "revision did not create and has no authority to remove"
+    )
