@@ -578,9 +578,9 @@ def fenced_reference_snapshot(
     The listener below runs on EVERY flush that deletes an Artifact and, left to
     itself, walks the whole reference graph again each time. A sweep deleting
     thousands of artifacts therefore paid for that walk per deletion even after
-    its caller had computed the same graph once - removing only the caller's own
-    recompute leaves the listener untouched, which is why an earlier attempt at
-    this was rejected (codex/R2326).
+    its caller had computed the same graph once. Removing only the caller's own
+    recompute is not enough: it leaves the listener untouched, and the walk
+    survives behind a change that looks like it removed it.
 
     Lending is only sound while the writer reservation is held in the same
     transaction, because BEGIN IMMEDIATE is what stops another connection

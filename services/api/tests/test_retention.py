@@ -37,10 +37,9 @@ def test_the_sweep_walks_the_reference_graph_once_not_once_per_deletion(
     snapshot into _delete_artifact removes one recompute per deletion, but it is
     not sufficient on its own: _delete_artifact flushes for every artifact, and
     the registered before_flush listener independently walks the same graph each
-    time. An earlier candidate was rejected for exactly that (codex/R2326), and
-    its test could not see the problem because it patched only the ArtifactStore
-    wrapper while the listener resolves the module-level function in
-    artifact_library.
+    time. A test that patches only the ArtifactStore wrapper cannot see that,
+    because the listener resolves the module-level function in artifact_library
+    and each module binds its own reference at import.
 
     So this counts BOTH bindings. Each module resolves its own global, so
     patching one proves nothing about the other, and counting only the wrapper is
@@ -122,8 +121,6 @@ def test_a_poster_bearing_artifact_does_not_buy_a_second_graph_walk(
     is a constant extra walk rather than the per-deletion N+1 that was rejected,
     but "the graph is computed once per sweep" is not true while it happens, and
     a claim that is nearly true is the kind that gets believed.
-
-    Found by Codex before routing, at codex/R2330.
     """
 
     store, session = sweepable
