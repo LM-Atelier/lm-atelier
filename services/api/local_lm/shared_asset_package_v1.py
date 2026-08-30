@@ -1,8 +1,10 @@
 """Immutable package membership for Shared Asset Library objects.
 
 A package maps closed runtime roles to already-published object digests and is
-itself published as a digest-addressed object. Callers pass an explicit root;
-this module performs no discovery, API, Settings, migration, or profile work.
+itself published as a digest-addressed object. Role labels classify membership;
+consumers validate the member bytes through the role-specific codec. Callers
+pass an explicit root; this module performs no discovery, API, Settings,
+migration, or profile work.
 """
 
 from __future__ import annotations
@@ -33,6 +35,8 @@ from .shared_asset_contract_v1 import SharedAssetContractError, _require_absolut
 
 SCHEMA_ID: Final = "lm-atelier-shared-asset-package-v1"
 SCHEMA_VERSION: Final = 1
+SCHEMA_ID_V2: Final = "lm-atelier-shared-asset-package-v2"
+SCHEMA_VERSION_V2: Final = 2
 INVALID_PACKAGE: Final = "shared asset package is invalid"
 PACKAGE_ROLES: Final = frozenset(
     {
@@ -50,6 +54,7 @@ PACKAGE_ROLES: Final = frozenset(
         "vae",
     }
 )
+PACKAGE_ROLES_V2: Final = PACKAGE_ROLES | {"workflow"}
 MAX_PACKAGE_BYTES: Final = 16 * 1024
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _CHUNK = 1024 * 1024
@@ -63,8 +68,8 @@ def _invalid() -> NoReturn:
     raise SharedAssetPackageError(INVALID_PACKAGE) from None
 
 
-def _require_role(value: object) -> str:
-    if type(value) is not str or value not in PACKAGE_ROLES:
+def _require_role(value: object, roles: frozenset[str]) -> str:
+    if type(value) is not str or value not in roles:
         _invalid()
     return value
 
@@ -132,16 +137,30 @@ def _require_published(store: AnchoredDirectory, digest: str) -> None:
             _invalid()
 
 
-def _canonical_members(members: object, store: AnchoredDirectory) -> dict[str, str]:
-    if type(members) is not dict or not members or len(members) > len(PACKAGE_ROLES):
+def _canonical_members(
+    members: object, store: AnchoredDirectory, roles: frozenset[str]
+) -> dict[str, str]:
+    if type(members) is not dict or not members or len(members) > len(roles):
         _invalid()
     ordered: dict[str, str] = {}
     for key, digest in members.items():
-        role = _require_role(key)
+        role = _require_role(key, roles)
         chosen = _require_digest(digest)
         _require_published(store, chosen)
         ordered[role] = chosen
     return dict(sorted(ordered.items()))
+
+
+def _canonical_package_payload(*, members: dict[str, str], schema: str, version: int) -> bytes:
+    encoded = json.dumps(
+        {"members": members, "schema": schema, "version": version},
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    if len(encoded) > MAX_PACKAGE_BYTES:
+        _invalid()
+    return encoded
 
 
 def _write_all(descriptor: int, payload: bytes) -> None:
@@ -216,16 +235,13 @@ def _publish_payload(store: AnchoredDirectory, payload: bytes, digest: str) -> N
 def _publish_package(*, root: Path, members: dict[str, str]) -> str:
     chosen_root = _require_absolute_root(root)
     with AnchoredDirectory(chosen_root) as store:
-        payload = {
-            "members": _canonical_members(members, store),
-            "schema": SCHEMA_ID,
-            "version": SCHEMA_VERSION,
-        }
-        encoded = json.dumps(
-            payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True
-        ).encode("ascii")
-        if len(encoded) > MAX_PACKAGE_BYTES:
-            _invalid()
+        uses_workflow_role = type(members) is dict and "workflow" in members
+        roles = PACKAGE_ROLES_V2 if uses_workflow_role else PACKAGE_ROLES
+        encoded = _canonical_package_payload(
+            members=_canonical_members(members, store, roles),
+            schema=SCHEMA_ID_V2 if uses_workflow_role else SCHEMA_ID,
+            version=SCHEMA_VERSION_V2 if uses_workflow_role else SCHEMA_VERSION,
+        )
         digest = hashlib.sha256(encoded).hexdigest()
         _publish_payload(store, encoded, digest)
         return digest
@@ -246,8 +262,8 @@ def publish_package(*, root: Path, members: dict[str, str]) -> str:
     _invalid()
 
 
-def _load_package_from_store(
-    *, store: AnchoredDirectory, digest: str
+def _load_package_from_store_versions(
+    *, store: AnchoredDirectory, digest: str, allow_v2: bool
 ) -> tuple[tuple[str, str], ...]:
     chosen = _require_digest(digest)
     with _published_descriptor(store, chosen) as descriptor:
@@ -256,26 +272,55 @@ def _load_package_from_store(
             _invalid()
     try:
         value = json.loads(raw.decode("ascii"))
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
-        _invalid()
+    except (
+        OverflowError,
+        RecursionError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ValueError,
+    ):
+        value = None
     if type(value) is not dict or set(value) != {"members", "schema", "version"}:
         _invalid()
-    if value.get("schema") != SCHEMA_ID or type(value.get("version")) is not int:
+    version = value.get("version")
+    if type(version) is not int:
         _invalid()
-    if value["version"] != SCHEMA_VERSION:
+    identity = (value.get("schema"), version)
+    if identity == (SCHEMA_ID, SCHEMA_VERSION):
+        roles = PACKAGE_ROLES
+    elif allow_v2 and identity == (SCHEMA_ID_V2, SCHEMA_VERSION_V2):
+        roles = PACKAGE_ROLES_V2
+    else:
         _invalid()
-    loaded = _canonical_members(value.get("members"), store)
+    loaded = _canonical_members(value.get("members"), store, roles)
+    if identity == (SCHEMA_ID_V2, SCHEMA_VERSION_V2) and "workflow" not in loaded:
+        _invalid()
+    canonical = _canonical_package_payload(
+        members=loaded,
+        schema=identity[0],
+        version=version,
+    )
+    if raw != canonical:
+        _invalid()
     return tuple(loaded.items())
+
+
+def _load_package_from_store(
+    *, store: AnchoredDirectory, digest: str
+) -> tuple[tuple[str, str], ...]:
+    """Load the package-v1 contract used by existing v1 role views."""
+
+    return _load_package_from_store_versions(store=store, digest=digest, allow_v2=False)
 
 
 def _load_package(*, root: Path, digest: str) -> tuple[tuple[str, str], ...]:
     chosen_root = _require_absolute_root(root)
     with AnchoredDirectory(chosen_root) as store:
-        return _load_package_from_store(store=store, digest=digest)
+        return _load_package_from_store_versions(store=store, digest=digest, allow_v2=True)
 
 
 def load_package(*, root: Path, digest: str) -> tuple[tuple[str, str], ...]:
-    """Return sorted ``(role, object-digest)`` pairs for one package."""
+    """Return sorted pairs from a canonical supported v1 or v2 package."""
 
     try:
         return _load_package(root=root, digest=digest)

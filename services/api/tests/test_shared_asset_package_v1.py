@@ -12,8 +12,12 @@ from local_lm.filesystem_links import AnchoredDirectory, open_child_directory, o
 from local_lm.shared_asset_package_v1 import (
     INVALID_PACKAGE,
     MAX_PACKAGE_BYTES,
+    PACKAGE_ROLES,
+    PACKAGE_ROLES_V2,
     SCHEMA_ID,
+    SCHEMA_ID_V2,
     SCHEMA_VERSION,
+    SCHEMA_VERSION_V2,
     SharedAssetPackageError,
     load_package,
     publish_package,
@@ -59,6 +63,8 @@ def test_package_schema_identity_and_version_are_pinned(tmp_path: Path) -> None:
         ("lm-atelier-shared-asset-package-v2", 1),
         (SCHEMA_ID, 2),
         (SCHEMA_ID, "1"),
+        (SCHEMA_ID, True),
+        (SCHEMA_ID_V2, True),
     ],
 )
 def test_load_refuses_other_schema_identities_and_versions(
@@ -79,6 +85,57 @@ def test_load_refuses_other_schema_identities_and_versions(
 
     with pytest.raises(SharedAssetPackageError, match=INVALID_PACKAGE):
         load_package(root=root, digest=digest)
+
+
+def test_load_refuses_noncanonical_v1_and_v2_documents(tmp_path: Path) -> None:
+    root, weights = _published(tmp_path, "model.bin", b"weights")
+    workflow_source = tmp_path / "workflow.json"
+    workflow_source.write_bytes(b"workflow")
+    workflow = publish_file(root=root, source=workflow_source)
+    documents = (
+        {
+            "schema": SCHEMA_ID,
+            "version": SCHEMA_VERSION,
+            "members": {"unet": weights},
+        },
+        {
+            "schema": SCHEMA_ID_V2,
+            "version": SCHEMA_VERSION_V2,
+            "members": {"workflow": workflow, "unet": weights},
+        },
+    )
+
+    for index, value in enumerate(documents):
+        descriptor = tmp_path / f"noncanonical-{index}.json"
+        descriptor.write_text(json.dumps(value), encoding="ascii")
+        digest = publish_file(root=root, source=descriptor)
+
+        with pytest.raises(SharedAssetPackageError, match=INVALID_PACKAGE):
+            load_package(root=root, digest=digest)
+
+
+@pytest.mark.parametrize("failure", [RecursionError, OverflowError])
+def test_package_json_failures_expose_only_the_fixed_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: type[BaseException],
+) -> None:
+    root, _weights = _published(tmp_path, "ok.bin", b"ok")
+    descriptor = tmp_path / "package.json"
+    descriptor.write_bytes(b"{}")
+    digest = publish_file(root=root, source=descriptor)
+
+    def fail_decode(_raw: object) -> object:
+        raise failure
+
+    monkeypatch.setattr(json, "loads", fail_decode)
+
+    with pytest.raises(SharedAssetPackageError) as caught:
+        load_package(root=root, digest=digest)
+    assert type(caught.value) is SharedAssetPackageError
+    assert str(caught.value) == INVALID_PACKAGE
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
 
 
 def test_package_does_not_discover_or_write_the_desktop_library(
@@ -241,3 +298,96 @@ def test_package_digest_is_the_canonical_document_hash(tmp_path: Path) -> None:
     payload = object_path(root=root, digest=digest).read_bytes()
 
     assert hashlib.sha256(payload).hexdigest() == digest
+
+
+def test_package_v1_wire_vocabulary_and_bytes_remain_frozen(tmp_path: Path) -> None:
+    assert (
+        frozenset(
+            {
+                "checkpoint",
+                "clip_vision",
+                "controlnet",
+                "diffusion_model",
+                "embedding",
+                "gguf_model",
+                "ip_adapter",
+                "lora",
+                "text_encoder",
+                "unet",
+                "upscaler",
+                "vae",
+            }
+        )
+        == PACKAGE_ROLES
+    )
+    assert "workflow" not in PACKAGE_ROLES
+    assert PACKAGE_ROLES | {"workflow"} == PACKAGE_ROLES_V2
+
+    root, weights = _published(tmp_path, "model.bin", b"weights")
+    digest = publish_package(root=root, members={"unet": weights})
+    payload = object_path(root=root, digest=digest).read_bytes()
+    expected = json.dumps(
+        {
+            "members": {"unet": weights},
+            "schema": SCHEMA_ID,
+            "version": SCHEMA_VERSION,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+
+    assert payload == expected
+    assert hashlib.sha256(expected).hexdigest() == digest
+
+
+def test_package_v2_is_selected_only_for_workflow_members(tmp_path: Path) -> None:
+    assert SCHEMA_ID_V2 == "lm-atelier-shared-asset-package-v2"
+    assert SCHEMA_VERSION_V2 == 2
+    root, workflow = _published(tmp_path, "workflow.json", b"workflow")
+    model_source = tmp_path / "model.bin"
+    model_source.write_bytes(b"weights")
+    model = publish_file(root=root, source=model_source)
+    digest = publish_package(root=root, members={"workflow": workflow, "unet": model})
+    payload = object_path(root=root, digest=digest).read_bytes()
+
+    expected = json.dumps(
+        {
+            "members": {"unet": model, "workflow": workflow},
+            "schema": "lm-atelier-shared-asset-package-v2",
+            "version": 2,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    assert payload == expected
+    assert hashlib.sha256(payload).hexdigest() == digest
+    assert load_package(root=root, digest=digest) == (
+        ("unet", model),
+        ("workflow", workflow),
+    )
+
+
+def test_package_v2_refuses_a_document_without_a_workflow_member(
+    tmp_path: Path,
+) -> None:
+    root, weights = _published(tmp_path, "model.bin", b"weights")
+    descriptor = tmp_path / "package-v2.json"
+    descriptor.write_text(
+        json.dumps(
+            {
+                "members": {"unet": weights},
+                "schema": SCHEMA_ID_V2,
+                "version": SCHEMA_VERSION_V2,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        encoding="ascii",
+    )
+    digest = publish_file(root=root, source=descriptor)
+
+    with pytest.raises(SharedAssetPackageError, match=INVALID_PACKAGE):
+        load_package(root=root, digest=digest)
