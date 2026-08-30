@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import math
 import secrets
+import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
@@ -33,6 +34,11 @@ if TYPE_CHECKING:
 _CLAIM_SECONDS = 15
 _HEARTBEAT_SECONDS = 5
 _QUEUE_POLL_SECONDS = 0.2
+#: How long one eligibility scan may be shared between waiters, a quarter of the
+#: poll interval. This bounds RESIDENCY, meaning how long a completed answer may
+#: go on being served. It does not bound the AGE of that answer, which is the
+#: scan duration plus the residency and has no poll-interval bound at all.
+_ELIGIBILITY_SHARE_SECONDS = _QUEUE_POLL_SECONDS / 4
 _AGING_SECONDS = 30
 _TERMINAL_STATUSES = {
     JobStatus.COMPLETE.value,
@@ -55,6 +61,7 @@ class ResourceScheduler:
         self._locks: dict[str, asyncio.Semaphore] = resource_pool._locks if resource_pool else {}
         self._capacities: dict[str, int] = resource_pool._capacities if resource_pool else {}
         self._queue_events: dict[str, asyncio.Event] = {}
+        self._eligibility: dict[str, tuple[float, tuple[str, ...]]] = {}
         self._owner = f"dispatcher_{secrets.token_hex(16)}"
         self._events = events
         self.session_factory = session_factory
@@ -102,6 +109,70 @@ class ResourceScheduler:
             await self._release_job(job_id, token, group)
             lock.release()
 
+    def _invalidate_eligibility(self, group: str) -> None:
+        """Drop the shared scan because the queue actually changed."""
+
+        self._eligibility.pop(group, None)
+
+    def _eligible_job_ids(self, session: Session, group: str, now: datetime) -> tuple[str, ...]:
+        """Ordered eligible job ids, shared by every waiter in one poll window.
+
+        One task per QUEUED job calls this on every pass, and the underlying scan
+        inspects each queued job's dependencies, so an unshared epoch costs N * N
+        dependency inspections at depth N. Waiters wake together, so sharing one
+        scan across a window makes an epoch cost N instead.
+
+        The share is bounded by TIME, not by an invalidation the callers must
+        remember. A missed invalidation would otherwise pin a stale answer and
+        strand a queue forever.
+
+        What the window bounds is RESIDENCY, not the age of the answer. The ids
+        are computed before the completion stamp, so a waiter can act on a
+        snapshot as old as one scan plus one window, not one window. A slow scan
+        makes that answer older without making it unshared, and nothing here
+        bounds it against the poll interval; the slow-scan test below permits
+        exactly that. It is tolerable only because this answer reports progress.
+        `_fresh_eligible_job_ids` is what authorizes a start. Real transitions -
+        a claim, a release, an expiry - drop the share immediately, so a freed
+        slot is never waited on.
+
+        Only ids are shared. The rows themselves belong to the caller's session
+        and must not outlive it.
+        """
+
+        cached = self._eligibility.get(group)
+        if cached is not None and time.monotonic() - cached[0] < _ELIGIBILITY_SHARE_SECONDS:
+            return cached[1]
+        return self._fresh_eligible_job_ids(session, group, now)
+
+    def _fresh_eligible_job_ids(
+        self, session: Session, group: str, now: datetime
+    ) -> tuple[str, ...]:
+        """Scan now, ignoring any share, and publish the result as the new share.
+
+        Required wherever the answer AUTHORIZES A STATE TRANSITION rather than
+        describing progress. The share is bounded by time rather than by
+        invalidation, so a shared answer can be one scan plus one window old -
+        long enough for a dependency to stop being complete, or for a
+        higher-priority job to be enqueued ahead of this one. The claim
+        statement guards only that the row is still QUEUED and unclaimed, so it
+        catches neither. A waiter may render a slightly old position; a job may
+        not START on one.
+
+        One scan per claim is O(N) once per job rather than once per poll, and
+        it authorizes compute lasting seconds to minutes, so it does not
+        reintroduce the cost the share exists to remove.
+        """
+
+        ids = tuple(job.id for job in self._eligible_jobs(session, group, now))
+        # Stamp when the scan COMPLETED, not when it started. Stamping the start
+        # publishes an entry that is already stale by however long the scan took,
+        # so a scan costing more than the share window would expire before the
+        # next waiter could use it - and every waiter would rescan, restoring the
+        # quadratic exactly where the sharing is most needed.
+        self._eligibility[group] = (time.monotonic(), ids)
+        return ids
+
     async def _acquire_job(
         self,
         job_id: str,
@@ -130,9 +201,9 @@ class ResourceScheduler:
                 job.queue_priority = priority
                 job.queue_ticket = job.queue_ticket or job.id
 
-                candidates = self._eligible_jobs(session, group, now)
+                candidates = self._eligible_job_ids(session, group, now)
                 position = next(
-                    (index for index, candidate in enumerate(candidates) if candidate.id == job.id),
+                    (index for index, candidate in enumerate(candidates) if candidate == job.id),
                     None,
                 )
                 if position is None:
@@ -222,12 +293,15 @@ class ResourceScheduler:
                     with self.session_factory() as session:
                         current = session.get(Job, job_id)
                         claimed_at = utcnow()
-                        candidates = self._eligible_jobs(session, group, claimed_at)
+                        # Fresh, never shared: this decides whether the job
+                        # STARTS, and the update below guards only QUEUED and
+                        # unclaimed.
+                        candidates = self._fresh_eligible_job_ids(session, group, claimed_at)
                         position = next(
                             (
                                 index
                                 for index, candidate in enumerate(candidates)
-                                if current and candidate.id == current.id
+                                if current and candidate == current.id
                             ),
                             None,
                         )
@@ -276,6 +350,7 @@ class ResourceScheduler:
                                     )
                                 session.commit()
                                 claimed = True
+                                self._invalidate_eligibility(group)
                             else:
                                 session.rollback()
                 finally:
@@ -429,6 +504,7 @@ class ResourceScheduler:
                 job.error = error
                 job.completed_at = now
                 job.claim_owner = None
+                self._invalidate_eligibility(group)
                 job.claim_expires_at = None
                 job.heartbeat_at = None
                 update_job_progress(
@@ -510,6 +586,7 @@ class ResourceScheduler:
                 )
             )
             session.commit()
+        self._invalidate_eligibility(group)
         self._queue_event(group).set()
         await self._publish_job(job_id)
 
