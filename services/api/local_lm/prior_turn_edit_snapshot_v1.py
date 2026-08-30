@@ -91,9 +91,13 @@ def _require_context_ids(raw_ids: object) -> tuple[str, ...]:
         _invalid()
     if len(raw_ids) > MAX_CONTEXT_COUNT:
         _invalid()
+    captured_ids = tuple(raw_ids)
+    if len(captured_ids) > MAX_CONTEXT_COUNT:
+        _invalid()
+
     total = 0
     collected: list[str] = []
-    for raw_item in raw_ids:
+    for raw_item in captured_ids:
         if len(collected) >= MAX_CONTEXT_COUNT:
             _invalid()
         item = _require_id(raw_item)

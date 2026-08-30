@@ -172,7 +172,7 @@ def test_context_collection_is_owned_ordered_and_unique() -> None:
         _declare(context_message_ids=["c1", "c1"])
 
 
-def test_context_bounds_cover_items_added_during_collection(
+def test_context_snapshot_is_owned_before_later_collection_growth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = ["c1"]
@@ -187,8 +187,33 @@ def test_context_bounds_cover_items_added_during_collection(
         return original_utf8_size(value)
 
     monkeypatch.setattr(snapshot_module, "_utf8_size", mutate_during_first_item)
-    with pytest.raises(PriorTurnEditSnapshotError, match=INVALID_SNAPSHOT):
-        _declare(context_message_ids=context)
+    snapshot = _declare(context_message_ids=context)
+
+    assert snapshot.context_message_ids == ("c1",)
+
+
+def test_context_snapshot_does_not_mix_replaced_or_removed_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = ["c1", "c2"]
+    original_utf8_size = snapshot_module._utf8_size
+    mutated = False
+
+    def replace_and_remove_during_first_item(value: str) -> int:
+        nonlocal mutated
+        if not mutated:
+            mutated = True
+            context[:] = ["late-c1"]
+        return original_utf8_size(value)
+
+    monkeypatch.setattr(
+        snapshot_module,
+        "_utf8_size",
+        replace_and_remove_during_first_item,
+    )
+    snapshot = _declare(context_message_ids=context)
+
+    assert snapshot.context_message_ids == ("c1", "c2")
 
 
 def test_refusal_never_echoes_hostile_input() -> None:
