@@ -2304,7 +2304,7 @@ def _stopped_workers(
 ) -> dict[str, Any]:
     """Drive the worker set by hand, and record what the endpoint does to it.
 
-    The chat worker starts stopped, which is the state the owner reported: the
+    The chat worker starts stopped, reproducing the observed failure: the
     feature refused rather than starting it. The fake load_chat flips it to
     ready the way the real one does, so the endpoint's second read sees what a
     real load would have produced rather than a status that was ready all along.
@@ -2420,7 +2420,7 @@ async def test_a_model_slot_batch_loads_the_chat_model_rather_than_refusing(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The owner's report: the feature must not require a trip to Settings.
+    """The feature must load what it needs without a trip to Settings.
 
     Filling one model-guided slot used to mean unloading ComfyUI by hand,
     pressing Load on a profile row, and coming back. Every other path that needs
@@ -2449,7 +2449,7 @@ async def test_preparing_the_chat_model_returns_the_device_to_the_media_worker(
     """Borrowing the device is only acceptable if it is given back.
 
     Stopping ComfyUI and leaving it stopped would move the manual step rather
-    than remove it - the owner's report names restarting it as part of the cost.
+    than remove it, because the media worker must be restarted for later work.
     """
     profile_id = _installed_chat_profile(app)
     state = _stopped_workers(app, monkeypatch, media_running=True)

@@ -167,8 +167,8 @@ def _dependency(value: object) -> ComfyRegistryDependency:
         ) from exc
     if parsed.url is not None:
         # Still refused, every one of them. What changed is that the refusal
-        # says which situation the package is in: an exact commit that a later
-        # slice could resolve, a branch that no slice can make exact, or a URL
+        # says which situation the package is in: an exact commit that can be
+        # resolved, a branch that cannot be made exact, or a URL
         # that was never allowed.
         code, message = source_refusal(classify_source_url(parsed.url))
         raise ComfyRegistryDependencyError(code, message)

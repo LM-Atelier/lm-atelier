@@ -1,4 +1,4 @@
-"""Content-addressed object storage for the Shared Asset Library (item 58).
+"""Content-addressed object storage for the Shared Asset Library.
 
 Callers pass an explicit root. This module never discovers the desktop
 library. Bytes are staged on the destination filesystem, hashed, and

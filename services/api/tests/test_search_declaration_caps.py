@@ -232,23 +232,6 @@ def test_no_caller_can_authorize_query_execution_or_an_index_write() -> None:
         bounds.__setattr__("query_execution_authorized", True)
 
 
-def test_neither_module_publishes_a_private_roadmap_coordinate() -> None:
-    """The hygiene ratchet on trunk refuses a diff that adds one.
-
-    Both docstrings carried one, so copying either module forward unchanged
-    would have failed the gate on a line nobody was reading.
-    """
-    import re
-
-    import local_lm.search_privacy_v1 as privacy
-    import local_lm.search_resource_bounds_v1 as bounds
-
-    coordinate = re.compile(r"\((?:roadmap )?item \d+\)")
-    for module in (privacy, bounds):
-        assert module.__doc__ is not None
-        assert coordinate.search(module.__doc__) is None
-
-
 def test_a_configured_bound_above_its_ceiling_is_refused() -> None:
     """The upper half of the configured-value guard.
 

@@ -9,8 +9,8 @@ One blanket refusal was enough while the answer was always no. It is not
 enough now, because the live cases differ in what would fix them:
 
 - `git+https://github.com/owner/repo@<40-hex>` names an exact immutable
-  object. It cannot be installed yet - content-binding a resolved source to a
-  reviewed artifact is the next slice - but it is resolvable in principle,
+  object. It cannot be installed until the resolved source is content-bound to
+  an accepted artifact, but it is resolvable in principle,
   and saying so is different from saying never.
 - `git+https://github.com/owner/repo` and the same with a branch or tag name
   no immutable object at all. Impact Pack declares one of these and WAS 3.0.1

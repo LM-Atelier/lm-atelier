@@ -1,7 +1,7 @@
 """A message hands back what it referred to, as it stood at the time.
 
 The transcript needs this to render mentions from the record rather than by
-scanning the message text. Scanning is the failure the whole lane refuses: a
+scanning the message text. Scanning is the failure this contract refuses: a
 message can contain `@ada-lovelace` that nobody chose - typed by hand, pasted,
 or left after the reference was dropped from the draft - and highlighting it
 would claim a binding that does not exist.

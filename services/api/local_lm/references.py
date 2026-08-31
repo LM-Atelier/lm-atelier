@@ -2,8 +2,8 @@
 
 A Reference is a subject the user has taught the application about - a person, a
 character, an object, a style - which they then name in a chat with `@`. These
-are the contracts every later slice inherits, written before any table exists so
-that the parts hardest to change are settled first.
+are the foundational contracts, kept independent of persistence so the parts
+hardest to change remain explicit.
 
 The rule that shapes most of this: **the backend never rediscovers a Reference
 by reparsing prompt text.** A request carries identifiers and roles as data. A

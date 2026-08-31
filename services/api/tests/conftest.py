@@ -33,9 +33,8 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 _EXPECTED_PACKAGE = (_REPOSITORY_ROOT / "services" / "api" / "local_lm").resolve()
 _IMPORTED_FROM = Path(local_lm.__file__).resolve().parent
 
-# EXACT identity, not containment. This repository keeps its worktrees BELOW
-# the main checkout - .private/worktrees/* and temp/worktrees/* - so a nested
-# worktree's package is relative to the main root and a containment test says
+# EXACT identity, not containment. Linked worktrees can live below the main
+# checkout, so a nested worktree's package is relative to the main root and a containment test says
 # yes to it. Measured: is_relative_to returns True for
 # <root>/temp/worktrees/x/services/api/local_lm against <root>, which is
 # precisely the wrong answer.

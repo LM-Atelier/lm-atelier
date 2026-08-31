@@ -41,8 +41,8 @@ def test_this_run_is_measuring_its_own_tree() -> None:
 def test_a_nested_worktree_is_not_this_tree(tmp_path: Path) -> None:
     """Containment was the wrong rule, and a nested worktree is why.
 
-    Worktrees live under the main checkout here - `.private/worktrees/*` and
-    `temp/worktrees/*` - so their package IS relative to the main root. Run the
+    Linked worktrees can live under the main checkout, so their package IS
+    relative to the main root. Run the
     main checkout's tests with PYTHONPATH pointed at one of them and a
     containment check happily agrees while a different tree is measured.
     """

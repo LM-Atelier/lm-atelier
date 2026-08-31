@@ -1,4 +1,4 @@
-"""Opaque consumer identity for the Shared Asset Library (item 58, Phase 0).
+"""Opaque consumer identity for the Shared Asset Library.
 
 A consumer is one application profile's stable, opaque handle in the neutral
 registry: claims and leases key on it, and one profile must never be able to

@@ -52,7 +52,7 @@ def test_a_recoloured_subject_counts_as_a_change() -> None:
 
 
 def test_a_hue_change_at_equal_brightness_counts_as_a_change() -> None:
-    """The owner's mug: blue recoloured burgundy.
+    """A mug recoloured from blue to burgundy.
 
     These two colours have nearly identical luminance, so a greyscale
     comparison scored the edit below the threshold and called a real change

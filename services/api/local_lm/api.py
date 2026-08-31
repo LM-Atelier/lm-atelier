@@ -2472,8 +2472,8 @@ async def _prepare_chat_worker_for_model_slots(
     WHY THIS EXISTS. Every other path in the application that needs a different
     model loads it - the chat run path, the media run path, the ordered-plan
     prewarm, the install probes, the image-edit verification. This one path used
-    to refuse instead, with a 409 that named no action, and the owner reported
-    the consequence after exercising the feature end to end: filling one slot
+    to refuse instead, with a 409 that named no action. End-to-end use exposed
+    the consequence: filling one slot
     meant opening Settings, unloading ComfyUI, pressing Load on a profile row,
     coming back, running the batch, and remembering to restart ComfyUI
     afterwards. Two controls in two sections of one page to satisfy a refusal.

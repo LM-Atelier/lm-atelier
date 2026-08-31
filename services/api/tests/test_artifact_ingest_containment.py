@@ -253,4 +253,4 @@ def test_a_link_at_the_artifact_name_is_replaced_not_followed(tmp_path: Path) ->
 # That is a real finding and a separate one: it is about which directory the
 # store decides to be, not about how ingest publishes into it. Widening this
 # slice to cover it would change the meaning of every caller's root. Recorded
-# on tasks/artifact-ingest-writes-through-a-junction.md.
+# by the captured-path containment contract.

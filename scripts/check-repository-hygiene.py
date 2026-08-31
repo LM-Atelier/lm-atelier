@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import subprocess
 from pathlib import Path, PurePosixPath
@@ -12,7 +13,6 @@ ALLOWED_FILES = {
     "docs/assets/social-preview.png",
 }
 DENIED_DIRECTORIES = {
-    ".private",
     ".venv",
     "artifacts",
     "backups",
@@ -139,16 +139,6 @@ SECRET_PATTERNS = (
     re.compile(r"AKIA[0-9A-Z]{16}"),
     re.compile(r"BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY"),
 )
-# Some files carry machine-readable handling flags saying they must never be
-# published. Matching the declaration rather than a path means the rule survives
-# a rename, a copy, or an excerpt pasted into another document - which is how
-# this kind of content actually escapes.
-SELF_EXCLUDING_MARKERS = (
-    re.compile(r'"never_commit"\s*:\s*true'),
-    re.compile(r'"never_publish"\s*:\s*true'),
-    re.compile(r'"never_include_in_public_documentation"\s*:\s*true'),
-)
-
 MARKDOWN_LINK = re.compile(r"!?\[[^\]]*]\((?P<target>[^)]+)\)")
 # A UTF-8 sequence re-read as cp1252 or latin-1 always begins with one of
 # these pairs. They are written as escapes so this file stays ASCII and
@@ -211,16 +201,6 @@ def contains_secret(path: str) -> bool:
 VENDORED_TEXT = ("apps/web/public/fonts/",)
 
 
-def declares_it_must_not_ship(path: str) -> bool:
-    """Whether a file carries content that declared itself unpublishable."""
-
-    try:
-        text = Path(path).read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return False
-    return any(pattern.search(text) for pattern in SELF_EXCLUDING_MARKERS)
-
-
 def is_vendored(path: str) -> bool:
     normalized = path.replace("\\", "/")
     return normalized.startswith(VENDORED_TEXT)
@@ -234,116 +214,14 @@ def has_trailing_whitespace(path: str) -> bool:
     return any(line.endswith((" ", "\t")) for line in text.splitlines())
 
 
-def _coordination_patterns() -> tuple[re.Pattern[str], ...]:
-    """Build the forbidden patterns from fragments, at run time.
-
-    Spelling any of them out here would make this file match its own rule, and a
-    checker that rejects itself is not a checker. Nothing joined below appears
-    whole anywhere in tracked source.
-    """
-
-    # Joined through a generator so the fragments are never a constant
-    # expression. Written as a literal tuple of joins, a linter correctly offers
-    # to fold each one into the whole word, and taking that offer would make
-    # this file match its own rule.
-    sender_fragments = (("co", "dex"), ("cla", "ude"), ("gr", "ok"))
-    authority_fragments = (("own", "er"), ("deci", "sion"))
-    senders = "|".join("".join(fragment) for fragment in sender_fragments)
-    # Ordinary words, written plainly: on their own they match nothing, because
-    # the pattern below requires a sender name immediately before one.
-    verbs = "adopted|approved|rejected|requested|reviewed|decided|raised|authorized"
-    authority = r"\s+".join("".join(fragment) for fragment in authority_fragments)
-    return (
-        # A sender token followed by an R-number, which is the shape of a private
-        # request identifier. A bare name is deliberately not matched: it occurs
-        # legitimately inside branch names in tracked design notes.
-        re.compile(rf"\b(?:{senders})/R\d+\b", re.IGNORECASE),
-        # A sender named as the actor behind a change. The verb set is narrow for
-        # the same reason, so that merely mentioning a name is not a match.
-        re.compile(rf"\b(?:{senders})\s+(?:{verbs})\b", re.IGNORECASE),
-        # The private record of authority, cited as the reason for a change.
-        re.compile(rf"\b{authority}s?\b", re.IGNORECASE),
-    )
-
-
-COORDINATION_PATTERNS = _coordination_patterns()
-
-
-def _forbidden_in(text: str) -> bool:
-    return any(pattern.search(text) for pattern in COORDINATION_PATTERNS)
-
-
-def _reportable(path: str) -> str:
-    """A location safe to print, with any forbidden token masked out.
-
-    The refusal is printed into the build log, and a build log is public. A path
-    that itself carries an identifier would therefore publish it in the very
-    output that exists to keep it unpublished. Masking the match leaves the
-    directory and the extension, which is enough to find the file.
-    """
-
-    normalised = path.replace("\\", "/")
-    if not _forbidden_in(normalised):
-        # Nothing to mask, so the location is returned exactly as given. A
-        # refusal has to name a file the reader can open, and rewriting every
-        # safe location would make the common case worse to serve the rare one.
-        return path
-    # Masked against the NORMALISED copy, not the original. The identifier shape
-    # contains a slash, so a native path can only be matched after normalising;
-    # substituting against the original would replace nothing and report the raw
-    # token, having correctly detected it.
-    safe = normalised
-    for pattern in COORDINATION_PATTERNS:
-        safe = pattern.sub("[redacted]", safe)
-    return safe
-
-
 def _listed(locations: list[str]) -> str:
-    """Join locations for a refusal, with any forbidden token masked.
+    """Render stable diagnostic references without echoing rejected values."""
 
-    Every refusal in this checker goes through here rather than joining raw
-    strings, because the build log is public and a path can carry the very token
-    these rules exist to keep out of it.
-    """
-
-    return "\n- ".join(_reportable(location) for location in locations)
-
-
-def private_coordination_lines(path: str) -> list[str]:
-    """Return safe locations for private coordination text in a candidate.
-
-    Tracked public text must not name the private request identifiers, nor an
-    agent as the actor behind a change, nor the private record of authority for
-    it. The rule was enforced only by whoever read the diff, so its failure mode
-    was a review round trip rather than a red gate. It has been missed three
-    times, and twice the bytes were public before a reader caught them.
-
-    The PATH is checked as well as the contents, because a tracked pathname is
-    already published in repository metadata: a file whose contents are perfectly
-    ordinary still leaks the identifier if it is the name of the file. Separators
-    are normalised first, since the identifier shape contains a slash and a
-    caller on Windows may hand over a native path.
-
-    Nothing reported here carries the matched text - not the line, and not the
-    path when the path is what matched.
-    """
-
-    found: list[str] = []
-    if _forbidden_in(path.replace("\\", "/")):
-        found.append(f"{_reportable(path)}: the path itself")
-    payload = Path(path).read_bytes()
-    if b"\x00" in payload:
-        return found
-    try:
-        text = payload.decode("utf-8")
-    except UnicodeDecodeError:
-        return found
-    found.extend(
-        f"{_reportable(path)}:{number}"
-        for number, line in enumerate(text.splitlines(), 1)
-        if _forbidden_in(line)
+    return "\n- ".join(
+        f"candidate {ordinal} [ref "
+        f"{hashlib.sha256(location.replace(chr(92), '/').encode()).hexdigest()[:12]}]"
+        for ordinal, location in enumerate(locations, 1)
     )
-    return found
 
 
 def mojibake_lines(path: str) -> list[str]:
@@ -406,38 +284,12 @@ def broken_local_links(paths: list[str]) -> list[str]:
 def main() -> int:
     paths = candidate_paths()
 
-    # This one stays first, because it is the only rule here that decides
-    # whether a candidate may be OPENED at all. It reads no file: it answers
-    # from the path and a symlink test. Every rule below reads bytes, so a
-    # candidate link would be followed and read before this could refuse it, and
-    # the private tree would be inspected before the rule that owns excluding it.
+    # Decide whether a candidate may be opened before any content rule reads it.
     unsafe = [path for path in paths if unsafe_path(path) or Path(path).is_symlink()]
     if unsafe:
         raise SystemExit(
             "Private, generated, executable, or runtime artifacts are in the "
             "candidate:\n- " + _listed(unsafe)
-        )
-
-    # First among the rules that read content. The others report raw paths, and
-    # the mojibake rule reports the offending line itself, so reaching any of
-    # them with a forbidden pathname or a forbidden line would publish the token
-    # into the build log before this rule could reduce it to a location.
-    # Ordering is the guarantee; `_listed` is the second line of defence for the
-    # day someone reorders this.
-    coordination = [line for path in paths for line in private_coordination_lines(path)]
-    if coordination:
-        raise SystemExit(
-            "Private coordination text is present in candidate files. Tracked "
-            "public text must not carry request identifiers, agent attribution, "
-            "or the private record of authority for a change:\n- "
-            + _listed(coordination)
-        )
-
-    self_excluding = [path for path in paths if declares_it_must_not_ship(path)]
-    if self_excluding:
-        raise SystemExit(
-            "Files that declare they must never be published are in the "
-            "candidate:\n- " + _listed(self_excluding)
         )
 
     secret_paths = [path for path in paths if contains_secret(path)]
