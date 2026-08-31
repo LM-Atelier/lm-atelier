@@ -6,6 +6,7 @@ import enum
 import os
 import stat
 import sys
+from collections.abc import Callable, Generator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final, Literal, NoReturn
@@ -155,6 +156,15 @@ class AnchoredDirectoryError(Exception):
 
     Carries no path. Callers that promise a fixed non-echoing refusal can
     translate this into their own message without stripping anything.
+    """
+
+
+class AnchoredListingStopped(AnchoredDirectoryError):
+    """A held-directory listing observed its caller's stop request.
+
+    This is distinct from a containment refusal so a lifecycle owner can treat
+    an expected shutdown as such. Like every other listing failure, it is
+    raised before a tuple is returned; callers never receive a partial listing.
     """
 
 
@@ -712,7 +722,10 @@ class AnchoredEntry:
 
 
 def list_entries(
-    anchor: AnchoredDirectory, *, limit: int = _MAX_LISTED_ENTRIES
+    anchor: AnchoredDirectory,
+    *,
+    limit: int = _MAX_LISTED_ENTRIES,
+    should_stop: Callable[[], bool] | None = None,
 ) -> tuple[AnchoredEntry, ...]:
     """List a held directory, taking each name and kind from one record.
 
@@ -737,31 +750,73 @@ def list_entries(
     through the held parent and measured with `fstat` - one anchored lookup
     after the enumeration. Unsafe kinds are never measured on either platform,
     and an entry that vanished or refused carries no metadata.
+
+    When `should_stop` is supplied, it is observed before and after native
+    record reads and around POSIX's anchored metadata work. A request raises
+    AnchoredListingStopped and abandons the whole result. The callback should
+    therefore be a cheap, side-effect-free readiness query such as
+    `threading.Event.is_set`.
     """
 
     if limit < 1:
         _refuse()
+    entries: list[AnchoredEntry] = []
+    seen: set[str] = set()
+    posix_metadata = anchor.descriptor is not None
+    records = _iter_anchored_entries(anchor, limit, should_stop)
+    with contextlib.closing(records):
+        while True:
+            # An explicit check BEFORE next() is what prevents a caller that
+            # stopped after validating one record from forcing another native
+            # record to be requested.
+            _raise_if_listing_stopped(should_stop)
+            try:
+                entry = next(records)
+            except StopIteration:
+                _raise_if_listing_stopped(should_stop)
+                break
+            _raise_if_listing_stopped(should_stop)
+
+            # A single-component name is what every other operation on this
+            # anchor requires. Refuse it and duplicates before POSIX performs
+            # the extra anchored metadata lookup for this record.
+            _require_entry_name(entry.name)
+            _raise_if_listing_stopped(should_stop)
+            if entry.name in seen or len(entries) >= limit:
+                _refuse()
+            seen.add(entry.name)
+
+            if posix_metadata:
+                entry = _with_posix_metadata(anchor, entry, should_stop=should_stop)
+            _raise_if_listing_stopped(should_stop)
+            entries.append(entry)
+    return tuple(entries)
+
+
+def _raise_if_listing_stopped(
+    should_stop: Callable[[], bool] | None,
+) -> None:
+    """Raise the fixed, distinguishable whole-list stop result when requested."""
+
+    if should_stop is not None and should_stop():
+        raise AnchoredListingStopped("directory listing stopped") from None
+
+
+def _iter_anchored_entries(
+    anchor: AnchoredDirectory,
+    limit: int,
+    should_stop: Callable[[], bool] | None,
+) -> Generator[AnchoredEntry, None, None]:
+    """Yield native name/kind records without any second lookup by name."""
+
     descriptor = anchor.descriptor
     if descriptor is not None:
-        # Two jobs, kept apart. _list_posix answers name and kind from the
-        # enumeration record and touches nothing else; the metadata pass is
-        # what pays POSIX's one anchored lookup, and only for safe kinds.
-        entries = [_with_posix_metadata(anchor, entry) for entry in _list_posix(descriptor, limit)]
-    else:
-        handle = anchor.handle
-        if handle is None:
-            _refuse()
-        entries = _list_windows(handle, limit)
-    seen: set[str] = set()
-    for entry in entries:
-        # A single-component name is what every other operation on this anchor
-        # requires. A directory that hands back "a/b" or ".." is either broken
-        # or hostile, and either way nothing downstream should carry it.
-        _require_entry_name(entry.name)
-        if entry.name in seen:
-            _refuse()
-        seen.add(entry.name)
-    return tuple(entries)
+        yield from _iter_posix_entries(descriptor, limit, should_stop)
+        return
+    handle = anchor.handle
+    if handle is None:
+        _refuse()
+    yield from _iter_windows_entries(handle, limit, should_stop)
 
 
 def _kind_from_dirent_type(raw: int) -> AnchoredEntryKind:
@@ -805,7 +860,26 @@ def _list_posix(descriptor: int, limit: int) -> list[AnchoredEntry]:
     ]
 
 
-def _with_posix_metadata(anchor: AnchoredDirectory, entry: AnchoredEntry) -> AnchoredEntry:
+def _iter_posix_entries(
+    descriptor: int,
+    limit: int,
+    should_stop: Callable[[], bool] | None,
+) -> Generator[AnchoredEntry, None, None]:
+    """Yield POSIX name/kind pairs from one dirent apiece."""
+
+    records = _iter_dirents(descriptor, limit, should_stop)
+    with contextlib.closing(records):
+        for name, raw in records:
+            _raise_if_listing_stopped(should_stop)
+            yield AnchoredEntry(name, _kind_from_dirent_type(raw))
+
+
+def _with_posix_metadata(
+    anchor: AnchoredDirectory,
+    entry: AnchoredEntry,
+    *,
+    should_stop: Callable[[], bool] | None = None,
+) -> AnchoredEntry:
     """Attach size and modification time to a safe entry, or leave it as it is.
 
     This is where POSIX pays what Windows does not. A `dirent` carries a name
@@ -820,14 +894,20 @@ def _with_posix_metadata(anchor: AnchoredDirectory, entry: AnchoredEntry) -> Anc
     between, or that refuses, keeps its kind and carries no metadata.
     """
 
-    size, modified = _posix_metadata(anchor, entry.name, entry.kind)
+    _raise_if_listing_stopped(should_stop)
+    size, modified = _posix_metadata(anchor, entry.name, entry.kind, should_stop=should_stop)
+    _raise_if_listing_stopped(should_stop)
     if size is None or modified is None:
         return entry
     return AnchoredEntry(entry.name, entry.kind, size, modified)
 
 
 def _posix_metadata(
-    anchor: AnchoredDirectory, name: str, kind: AnchoredEntryKind
+    anchor: AnchoredDirectory,
+    name: str,
+    kind: AnchoredEntryKind,
+    *,
+    should_stop: Callable[[], bool] | None = None,
 ) -> tuple[int | None, datetime | None]:
     """Size and modification time for a safe entry, or (None, None).
 
@@ -836,36 +916,50 @@ def _posix_metadata(
     refuses, because a measurement that could not be taken is not a zero.
     """
 
+    _raise_if_listing_stopped(should_stop)
     if kind is AnchoredEntryKind.FILE:
         try:
             opened = open_entry(anchor, name)
         except AnchoredDirectoryError:
+            _raise_if_listing_stopped(should_stop)
             return None, None
         if opened is None:
+            _raise_if_listing_stopped(should_stop)
             return None, None
         try:
+            # open_entry validates the descriptor with fstat. Check here, while
+            # the descriptor is owned by this try/finally, so a stop observed
+            # during that anchored open closes it before leaving.
+            _raise_if_listing_stopped(should_stop)
             measured = os.fstat(opened)
+            _raise_if_listing_stopped(should_stop)
         except OSError:
             return None, None
         finally:
             with contextlib.suppress(OSError):
                 os.close(opened)
+        _raise_if_listing_stopped(should_stop)
         return _from_stat(measured)
     if kind is AnchoredEntryKind.DIRECTORY:
         try:
             child = open_child_directory(anchor, name)
         except AnchoredDirectoryError:
+            _raise_if_listing_stopped(should_stop)
             return None, None
         try:
+            _raise_if_listing_stopped(should_stop)
             held = child.descriptor
             if held is None:  # pragma: no cover - POSIX branch only
                 return None, None
             measured = os.fstat(held)
+            _raise_if_listing_stopped(should_stop)
         except OSError:
             return None, None
         finally:
             child.close()
+        _raise_if_listing_stopped(should_stop)
         return _from_stat(measured)
+    _raise_if_listing_stopped(should_stop)
     return None, None
 
 
@@ -893,6 +987,16 @@ def _from_filetime(raw: int) -> datetime | None:
 
 
 def _read_dirents(descriptor: int, limit: int) -> list[tuple[str, int]]:
+    """Collect the streaming dirent reader for compatibility with callers."""
+
+    return list(_iter_dirents(descriptor, limit, None))
+
+
+def _iter_dirents(
+    descriptor: int,
+    limit: int,
+    should_stop: Callable[[], bool] | None,
+) -> Generator[tuple[str, int], None, None]:
     """Name and raw d_type per entry, straight from the directory stream.
 
     `fdopendir` takes ownership of the descriptor it is given and `closedir`
@@ -916,6 +1020,7 @@ def _read_dirents(descriptor: int, limit: int) -> list[tuple[str, int]]:
     and classifies silently, which is worse than not answering.
     """
 
+    _raise_if_listing_stopped(should_stop)
     if not sys.platform.startswith("linux"):  # pragma: no cover - CI is Linux
         _refuse()
 
@@ -948,18 +1053,20 @@ def _read_dirents(descriptor: int, limit: int) -> list[tuple[str, int]]:
         os.close(owned)
         _refuse()
 
-    found: list[tuple[str, int]] = []
+    found = 0
     try:
         while True:
+            _raise_if_listing_stopped(should_stop)
             ctypes.set_errno(0)
             record = libc.readdir(stream)
+            _raise_if_listing_stopped(should_stop)
             if not record:
                 # NULL is both end-of-stream and failure; errno separates them,
                 # and a partial listing reported as complete would be a caller
                 # deciding on a directory it has only half seen.
                 if ctypes.get_errno():
                     _refuse()
-                return found
+                return
             # d_reclen first, and read exactly that many bytes. A fixed read
             # of the maximum name length would run past the LAST record in
             # the kernel's buffer, because glibc sizes each record to its
@@ -985,14 +1092,26 @@ def _read_dirents(descriptor: int, limit: int) -> list[tuple[str, int]]:
                 _refuse()
             if name in (".", ".."):
                 continue
-            if len(found) >= limit:
+            if found >= limit:
                 _refuse()
-            found.append((name, entry_type))
+            found += 1
+            _raise_if_listing_stopped(should_stop)
+            yield name, entry_type
     finally:
         libc.closedir(stream)
 
 
 def _list_windows(handle: int, limit: int) -> list[AnchoredEntry]:
+    """Collect the streaming Windows reader for compatibility with callers."""
+
+    return list(_iter_windows_entries(handle, limit, None))
+
+
+def _iter_windows_entries(
+    handle: int,
+    limit: int,
+    should_stop: Callable[[], bool] | None,
+) -> Generator[AnchoredEntry, None, None]:
     """Enumerate through the held handle with NtQueryDirectoryFile.
 
     One buffer, queried until STATUS_NO_MORE_FILES. Each record carries its own
@@ -1003,9 +1122,10 @@ def _list_windows(handle: int, limit: int) -> list[AnchoredEntry]:
     api = _windows_api()
     buffer = api.ctypes.create_string_buffer(_DIRECTORY_QUERY_BUFFER)
     status_block = api.IoStatusBlock()
-    found: list[AnchoredEntry] = []
+    found = 0
     restart = True
     while True:
+        _raise_if_listing_stopped(should_stop)
         status = api.ntdll.NtQueryDirectoryFile(
             api.ctypes.c_void_p(handle),
             None,
@@ -1019,21 +1139,38 @@ def _list_windows(handle: int, limit: int) -> list[AnchoredEntry]:
             None,
             api.ctypes.c_ubyte(1 if restart else 0),
         )
+        _raise_if_listing_stopped(should_stop)
         restart = False
         masked = status & 0xFFFFFFFF
         if masked == _STATUS_NO_MORE_FILES:
-            return found
+            return
         if masked != _STATUS_SUCCESS:
             _refuse()
-        found.extend(_read_directory_records(buffer.raw, limit, len(found)))
+        records = _iter_directory_records(buffer.raw, limit, found, should_stop)
+        with contextlib.closing(records):
+            for entry in records:
+                found += 1
+                yield entry
 
 
 def _read_directory_records(raw: bytes, limit: int, already: int) -> list[AnchoredEntry]:
+    """Collect one streaming Windows record buffer for compatibility."""
+
+    return list(_iter_directory_records(raw, limit, already, None))
+
+
+def _iter_directory_records(
+    raw: bytes,
+    limit: int,
+    already: int,
+    should_stop: Callable[[], bool] | None,
+) -> Generator[AnchoredEntry, None, None]:
     """Walk one buffer of FILE_DIRECTORY_INFORMATION records."""
 
-    found: list[AnchoredEntry] = []
+    found = 0
     offset = 0
     while True:
+        _raise_if_listing_stopped(should_stop)
         if offset + _FILE_DIRECTORY_INFORMATION_HEADER > len(raw):
             _refuse()
         next_offset = int.from_bytes(raw[offset : offset + 4], "little")
@@ -1067,13 +1204,15 @@ def _read_directory_records(raw: bytes, limit: int, already: int) -> list[Anchor
         except UnicodeDecodeError:
             _refuse()
         if name not in (".", ".."):
-            if already + len(found) >= limit:
+            if already + found >= limit:
                 _refuse()
             kind = _windows_kind(attributes)
             size, modified = _windows_metadata(kind, end_of_file, written)
-            found.append(AnchoredEntry(name, kind, size, modified))
+            found += 1
+            _raise_if_listing_stopped(should_stop)
+            yield AnchoredEntry(name, kind, size, modified)
         if next_offset == 0:
-            return found
+            return
         offset += next_offset
 
 
