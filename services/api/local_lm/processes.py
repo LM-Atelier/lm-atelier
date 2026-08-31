@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import ctypes
+import ipaddress
 import json
 import logging
 import os
@@ -172,6 +173,16 @@ WORKER_LIVENESS_FAILURE_THRESHOLD = 3
 COMFY_OBJECT_INFO_MAX_BYTES = 64 * 1024 * 1024
 WINDOWS_CREATE_NO_WINDOW = 0x08000000
 WINDOWS_SO_EXCLUSIVEADDRUSE = int(getattr(socket, "SO_EXCLUSIVEADDRUSE", -5))
+#: How many times the bind is retried after reclaiming a port, and the gap
+#: between attempts. A terminated listener can leave the address briefly
+#: unbindable, and one attempt would report that transient as a refusal.
+_PORT_RECLAIM_ATTEMPTS = 10
+_PORT_RECLAIM_INTERVAL_SECONDS = 0.2
+# What `localhost` stands for. The loopback address of each family and nothing
+# else: the rest of 127.0.0.0/8 is loopback but is not localhost, and treating
+# it as such would put a descendant on 127.0.0.2 back in range of termination.
+_LOCALHOST_ADDRESSES = ("127.0.0.1", "::1")
+
 
 # The official Windows ComfyUI runtime uses Python's isolated ``._pth`` layout,
 # which deliberately ignores PYTHONPATH. Insert only the already verified
@@ -1197,6 +1208,7 @@ class ProcessSupervisor:
             ):
                 return
             await self._stop_unlocked(name)
+            await self._reclaim_port_from_our_own_children(name, health_url)
             await self._ensure_port_available(name, health_url)
             startup_started_at = time.perf_counter()
             log_path = self.settings.log_dir / f"{name}-worker.log"
@@ -1459,6 +1471,300 @@ class ProcessSupervisor:
                 "exit_code": exit_code,
             },
         )
+
+    @staticmethod
+    def _target_addresses(
+        host: str,
+    ) -> tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...]:
+        """The literal addresses this host names, or empty if it names none we can prove.
+
+        `localhost` is admitted because the settings validator admits it: worker
+        URLs must be loopback and it accepts `localhost` alongside literal
+        loopback addresses, so it is a supported configuration rather than an
+        exotic one. Refusing it here would have left the recovery silently
+        inoperative for anyone who wrote their URLs that way, which a mutation
+        found before a reader would have.
+
+        It stands for the loopback address of each family and nothing else. The
+        rest of 127.0.0.0/8 is loopback but is not localhost, so a descendant on
+        127.0.0.2 stays out of range exactly as it is for a literal target.
+
+        Any other name resolves through machinery this code does not control,
+        and an endpoint it cannot prove is not a basis for terminating anything.
+        """
+
+        if host == "localhost":
+            return tuple(ipaddress.ip_address(alias) for alias in _LOCALHOST_ADDRESSES)
+        try:
+            return (ipaddress.ip_address(host),)
+        except ValueError:
+            return ()
+
+    @staticmethod
+    def _own_descendants() -> list[psutil.Process]:
+        """Every process this one parented, at any depth.
+
+        Its own method so the selection above can be exercised without spawning
+        a real process tree. The platform decides which listeners can coexist at
+        one port, so a test that had to arrange a real exact holder AND a real
+        wildcard holder together could only run on the platform where that is
+        possible - and the rule it would be checking is the one that must hold
+        on both.
+        """
+
+        try:
+            return list(psutil.Process(os.getpid()).children(recursive=True))
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            return []
+
+    @staticmethod
+    def _listening_match(process: psutil.Process, host: str, port: int) -> str | None:
+        """How this process's listeners relate to host:port - exact, wildcard, or not.
+
+        The PORT NUMBER IS NOT THE ENDPOINT, and matching on it alone authorises
+        a termination this cannot justify. A sibling of ours listening on
+        another loopback address at the same number is not what stands between
+        the worker and the address it is about to bind: killing it frees nothing
+        and destroys something that was working. An earlier version of this did
+        exactly that, because it compared `laddr.port` and discarded the host it
+        had already parsed.
+
+        The two kinds are reported separately rather than merged into one
+        boolean because whether a wildcard listener BLOCKS a specific bind is a
+        property of the platform, not of this application. Measured here rather
+        than assumed, on the machine the incident came from:
+
+            holder 0.0.0.0    -> binding 127.0.0.1 at the same port SUCCEEDS
+            holder 127.0.0.2  -> binding 127.0.0.1 at the same port SUCCEEDS
+            holder 127.0.0.1  -> binding 127.0.0.1 at the same port FAILS
+
+        with and without SO_REUSEADDR on the holder, so it is the wildcard rule
+        itself and not a socket option. On Windows a specific address may be
+        bound alongside a wildcard; on POSIX it may not. `_own_descendants_
+        blocking` uses the distinction rather than guessing which platform it is
+        on.
+
+        WILDCARD EVIDENCE IS SAME-FAMILY ONLY, and this fails closed on purpose.
+        A socket bound to `::` accepts IPv4 connections wherever the platform
+        leaves IPV6_V6ONLY off - but psutil cannot report that flag, so whether a
+        particular `::` listener holds an IPv4 endpoint is exactly what this
+        cannot observe. An earlier version accepted it anyway and reasoned that
+        the endpoint had already been measured busy; that reasoning is wrong,
+        because the thing making it busy can be a FOREIGN IPv4 holder while an
+        IPv6-only child of ours sits innocently at the same number. It would then
+        be selected and killed for a bind it could never have blocked. Unprovable
+        evidence must not authorise a termination, so cross-family wildcards
+        report nothing.
+        """
+
+        # BOUND TO THE FAMILY THE PROBE ACTUALLY USES. `_port_is_free` and
+        # `_ensure_port_available` both choose the family from whether the host
+        # text contains a colon, so `localhost` is probed as IPv4 only. Selecting
+        # against both families while probing one would let an IPv4 busy result
+        # authorise terminating an exact ::1 descendant that had nothing to do
+        # with it. The evidence and the decision must be about one endpoint.
+        probed_version = 6 if ":" in host else 4
+        targets = tuple(
+            address
+            for address in ProcessSupervisor._target_addresses(host)
+            if address.version == probed_version
+        )
+        if not targets:
+            return None
+        families = {target.version for target in targets}
+        try:
+            connections = process.net_connections(kind="tcp")
+        except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+            return None
+        wildcard = False
+        for connection in connections:
+            if connection.status != psutil.CONN_LISTEN:
+                continue
+            address = connection.laddr
+            listening_host = getattr(address, "ip", None)
+            listening_port = getattr(address, "port", None)
+            if listening_host is None and len(address) > 1:
+                listening_host, listening_port = address[0], address[1]
+            if listening_port != port or not listening_host:
+                continue
+            try:
+                # A scope id makes an address unparsable and says nothing about
+                # which address it is, so it is dropped rather than guessed at.
+                listening = ipaddress.ip_address(str(listening_host).split("%", 1)[0])
+            except ValueError:
+                continue
+            if listening in targets:
+                return "exact"
+            if listening.is_unspecified and listening.version in families:
+                wildcard = True
+        return "wildcard" if wildcard else None
+
+    def _pids_of_other_workers(self, name: str) -> set[int]:
+        """Every process another managed worker owns, live or persisted.
+
+        Nothing requires two workers to be configured on DIFFERENT endpoints.
+        `validate_worker_url` checks each URL is loopback and stops there, so
+        `llama_url` and `comfy_url` may name the same host and port. If they do,
+        the other worker is a descendant of ours listening on exactly the address
+        this one is about to bind - indistinguishable, by endpoint alone, from
+        the lost worker being reclaimed.
+
+        Endpoint ownership is therefore not enough to authorise a termination:
+        it establishes that a process is in the way, not that it is THIS
+        worker's to remove. A live sibling is something the ordinary preflight
+        would have refused over; killing it first turns a clean refusal into a
+        stopped service.
+        """
+
+        pids: set[int] = set()
+        for worker, record in self._workers.items():
+            if worker == name:
+                continue
+            pid = getattr(getattr(record, "process", None), "pid", None)
+            if isinstance(pid, int):
+                pids.add(pid)
+        for worker, identities in self._worker_identities.items():
+            if worker == name:
+                continue
+            for identity in identities:
+                pid = getattr(identity, "pid", None)
+                if isinstance(pid, int):
+                    pids.add(pid)
+        return pids
+
+    @staticmethod
+    def _within_any(process: psutil.Process, pids: set[int]) -> bool:
+        """Whether this process IS, or is inside the tree of, one of those pids.
+
+        The subtree matters as much as the process. `_terminate_processes` takes
+        the whole tree below whatever it is given, so selecting a CHILD of
+        another worker would tear down part of that worker just as surely as
+        selecting the worker itself.
+        """
+
+        if process.pid in pids:
+            return True
+        try:
+            return any(parent.pid in pids for parent in process.parents())
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            # Unreadable ancestry cannot prove the process is ours to take.
+            return True
+
+    def _own_descendants_blocking(self, name: str, host: str, port: int) -> list[psutil.Process]:
+        """Our own descendants blocking the endpoint, most specific evidence first.
+
+        Asked of OUR process tree rather than of the endpoint. A global
+        connection table lookup needs privileges this application does not have
+        on Windows, and it would answer a different question anyway: who holds
+        the address, rather than whether we own them. Walking down from
+        `os.getpid()` answers only the second, which is the only one that
+        authorises a termination.
+
+        An exact holder is preferred and a wildcard holder is only a fallback,
+        which makes this correct on both platforms without either being named.
+        Where a wildcard does not block - Windows - an exact holder is the only
+        thing that can be holding the address, so the fallback is never reached
+        and a wildcard child of ours is left running. Where a wildcard does
+        block - POSIX - the two cannot coexist at one port, so an empty exact
+        tier is positive evidence that the wildcard is the blocker. Selecting
+        both tiers at once would terminate a working bystander on Windows for
+        no gain, which is the same class of harm as matching on the port alone.
+        """
+
+        others = self._pids_of_other_workers(name)
+        # Skipped entirely when no other worker owns anything. Walking ancestry
+        # to answer "is this inside an empty set" is work that cannot change the
+        # answer, and asking a process for its parents is the one step here that
+        # can refuse.
+        candidates = [
+            process
+            for process in self._own_descendants()
+            if not others or not self._within_any(process, others)
+        ]
+        matched = [(self._listening_match(process, host, port), process) for process in candidates]
+        exact = [process for kind, process in matched if kind == "exact"]
+        if exact:
+            return exact
+        return [process for kind, process in matched if kind == "wildcard"]
+
+    async def _reclaim_port_from_our_own_children(self, name: str, url: str) -> None:
+        """Free the port when this application is what is holding it.
+
+        The persisted identities are the first way a lost worker is recognised,
+        but they are not sufficient and assuming they were is what made an
+        earlier version of this fix narrower than it claimed. They can be absent
+        entirely - `_load_worker_identities` returns an empty mapping on a read
+        error or malformed JSON - and they can be emptied while a process still
+        holds the port, because the snapshot only ever covers the tree as it
+        stood when it was taken, and `_refresh_worker_identities_after_stop`
+        drops every recorded identity once those exact processes are gone. A
+        descendant that appeared after the last snapshot is invisible to them.
+
+        So ownership is established a second way, which needs no record at all:
+        the process is a descendant of THIS process and is listening on an
+        address that blocks the endpoint we are about to bind. That was true of
+        the measured incident, where the listener's parent was the application
+        itself. Both tests are required together - a descendant that blocks no
+        endpoint of ours is left alone, and a listener we did not parent is not
+        ours to kill.
+
+        The first of those is narrower than it sounds and the limit is worth
+        stating. Once a blocking descendant is selected, `_terminate_processes`
+        takes its whole subtree, including members holding nothing. So what is
+        left alone is every descendant OUTSIDE the selected process's own tree;
+        a child of the blocker goes with it. That is intended - a worker's own
+        children are part of the worker - but it is not the same claim.
+
+        Not reached unless the endpoint is actually busy. The ordinary start
+        path therefore pays one extra bind probe here, and then the preflight's
+        own bind: two attempts on a free port, not one.
+        """
+
+        parsed = urlparse(url)
+        host = parsed.hostname
+        port = parsed.port
+        if not host or not port:
+            return
+        if await asyncio.to_thread(self._port_is_free, host, port):
+            return
+        holders = await asyncio.to_thread(self._own_descendants_blocking, name, host, port)
+        if not holders:
+            # Something else holds it. Refusing is correct: we cannot prove we
+            # own it, and killing by endpoint is not a recovery.
+            return
+        logger.info(
+            "Reclaiming %s:%s from %s process(es) this application parented",
+            host,
+            port,
+            len(holders),
+        )
+        await asyncio.to_thread(
+            self._terminate_processes, holders, self.settings.worker_shutdown_seconds
+        )
+        self._refresh_worker_identities_after_stop(name)
+        # A terminated listener can leave the address briefly unbindable, so the
+        # bind is retried rather than judged on one attempt. Bounded: this only
+        # runs when the port was busy and we have just terminated its owner.
+        for _attempt in range(_PORT_RECLAIM_ATTEMPTS):
+            if await asyncio.to_thread(self._port_is_free, host, port):
+                return
+            await asyncio.sleep(_PORT_RECLAIM_INTERVAL_SECONDS)
+
+    @staticmethod
+    def _port_is_free(host: str, port: int) -> bool:
+        family = socket.AF_INET6 if ":" in host else socket.AF_INET
+        address: tuple[str, int] | tuple[str, int, int, int]
+        address = (host, port, 0, 0) if family == socket.AF_INET6 else (host, port)
+        try:
+            with socket.socket(family, socket.SOCK_STREAM) as probe:
+                if os.name == "nt":
+                    probe.setsockopt(socket.SOL_SOCKET, WINDOWS_SO_EXCLUSIVEADDRUSE, 1)
+                else:
+                    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                probe.bind(address)
+        except OSError:
+            return False
+        return True
 
     async def _ensure_port_available(self, name: str, url: str) -> None:
         parsed = urlparse(url)
@@ -1731,9 +2037,50 @@ class ProcessSupervisor:
 
     async def _stop_unlocked(self, name: str) -> None:
         record = self._workers.pop(name, None)
-        if not record:
+        if record:
+            await self._terminate_record(record)
             return
-        await self._terminate_record(record)
+        # No in-memory record does NOT mean nothing is running, and treating it
+        # that way is what made this unrecoverable from inside the product.
+        #
+        # Measured on a live install: /api/workers reported the media worker
+        # stopped with pid=None while the ComfyUI process the app itself had
+        # launched was still alive, still a child of the app, and still holding
+        # 127.0.0.1:8289. Returning here made stop a no-op, so the port preflight
+        # in _replace then refused every start and restart with "already in use".
+        # There was no sequence of supported actions that recovered it; the
+        # process had to be killed from outside the app.
+        #
+        # The identities are persisted precisely so a worker can be recognised
+        # after the handle is lost, and _terminate_record already consults them.
+        # This reaches the same machinery on the path where the record is gone.
+        await self._terminate_persisted_worker(name)
+
+    async def _terminate_persisted_worker(self, name: str) -> None:
+        """Stop worker processes we can still identify without a live record.
+
+        Matching is by persisted identity - pid plus creation time - so a pid
+        that has since been reused by an unrelated process is not matched and
+        not killed. That check lives in `_matching_process`, and it is the reason
+        this can be done safely at all.
+        """
+
+        persisted = await asyncio.to_thread(self._matching_worker_processes, name)
+        if not persisted:
+            return
+        logger.info(
+            "Stopping %s orphaned %s worker process(es) with no live record",
+            len(persisted),
+            name,
+        )
+        try:
+            await asyncio.to_thread(
+                self._terminate_processes,
+                persisted,
+                self.settings.worker_shutdown_seconds,
+            )
+        finally:
+            self._refresh_worker_identities_after_stop(name)
 
     async def _terminate_record(
         self,
