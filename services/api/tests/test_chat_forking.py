@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 from httpx2 import AsyncClient
@@ -12,19 +13,19 @@ from local_lm.db import SessionLocal
 from local_lm.models import Chat, Message
 
 
-async def wait_for_run(client: AsyncClient, run_id: str) -> dict:  # type: ignore[type-arg]
+async def wait_for_run(client: AsyncClient, run_id: str) -> dict[str, Any]:
     for _ in range(400):
-        payload = (await client.get(f"/api/runs/{run_id}")).json()
+        payload: dict[str, Any] = (await client.get(f"/api/runs/{run_id}")).json()
         if payload["status"] in {"complete", "failed", "cancelled"}:
             return payload
         await asyncio.sleep(0.01)
     raise AssertionError("run did not finish in time")
 
 
-async def _turn(client: AsyncClient, chat_id: str, text: str) -> dict:  # type: ignore[type-arg]
+async def _turn(client: AsyncClient, chat_id: str, text: str) -> dict[str, Any]:
     accepted = await client.post(f"/api/chats/{chat_id}/turns", json={"text": text, "mode": "text"})
     assert accepted.status_code == 202
-    payload = accepted.json()
+    payload: dict[str, Any] = accepted.json()
     await wait_for_run(client, payload["run"]["id"])
     return payload
 
