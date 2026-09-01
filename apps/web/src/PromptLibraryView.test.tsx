@@ -187,7 +187,7 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("Prompt Library Phase 1", () => {
+describe("Prompt Library", () => {
   it("starts each new template unnamed and requires an intentional name", async () => {
     renderLibrary();
     await screen.findByRole("heading", { name: "Portrait variants" });

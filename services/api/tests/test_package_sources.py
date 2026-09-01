@@ -79,7 +79,7 @@ def test_the_unpinned_refusal_names_the_repository_and_what_would_fix_it() -> No
 
 
 def test_a_pinned_source_is_refused_as_unresolved_rather_than_as_forbidden() -> None:
-    """Fail-closed, but distinguishable: this one a later slice can resolve."""
+    """Fail closed while distinguishing a resolvable pinned source."""
     code, message = source_refusal(classify_source_url(PINNED))
 
     assert code == "unresolved_source_dependency"

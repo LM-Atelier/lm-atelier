@@ -1,6 +1,6 @@
 # Automatic image-edit change strength
 
-Status: Accepted for E0-E3.
+Status: Accepted.
 
 ## Decision
 
@@ -26,4 +26,4 @@ Single and ordered media paths use the same resolver. Provenance records only bo
 
 ## Limits
 
-The estimator recognizes a conservative English signal set. Ambiguous or unsupported-language prompts receive the fallback value and low confidence. Synthetic real-runtime calibration and optional vision-assisted estimation are later phases and must not weaken Manual authority.
+The estimator recognizes a conservative English signal set. Ambiguous or unsupported-language prompts receive the fallback value and low confidence. Synthetic real-runtime calibration and optional vision-assisted estimation are not currently supported and must not weaken Manual authority if added.

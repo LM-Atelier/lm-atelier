@@ -132,7 +132,7 @@ async def test_the_flag_toggles_filters_and_library_membership_blocks_legacy_del
     assert cleared.json()["favorite"] is False
     assert (await client.get("/api/artifacts", params={"favorites": "true"})).json() == []
 
-    # Phase A has no Trash yet: legacy hard deletion cannot bypass membership.
+    # Without Trash support, legacy hard deletion cannot bypass membership.
     await client.patch("/api/artifacts/art_favorite_flow", json={"favorite": True})
     deleted = await client.delete("/api/artifacts/art_favorite_flow")
     assert deleted.status_code == 409

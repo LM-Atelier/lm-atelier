@@ -486,7 +486,7 @@ def test_workflow_resource_pool_allocation_is_fixed_deterministic_and_domain_sep
         "options": options,
     }
     # Seed 0 / ordinal 2 selects index 0 in the workflow-pool domain. The
-    # Phase-4a LoRA-stack domain selects index 2 for the same material, so this
+    # The LoRA-stack domain selects index 2 for the same material, so this
     # pins domain separation rather than only repeatability.
     first = _allocate_resource_policy(random, 0, 2)
     assert first["workflow_revision_id"] == "revision-a"

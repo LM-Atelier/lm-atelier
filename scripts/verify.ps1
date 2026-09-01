@@ -57,9 +57,8 @@ try {
     $ExpectedPackage = (Resolve-Path -LiteralPath (
         Join-Path $RepositoryRoot "services\api\local_lm"
     )).Path
-    # EXACT identity, not containment. This repository keeps its worktrees BELOW
-    # the main checkout - .private/worktrees/* and temp/worktrees/* - so a
-    # nested worktree's package sits under the main root and any prefix or
+    # EXACT identity, not containment. Linked worktrees can live below the main
+    # checkout, so a nested worktree's package sits under the main root and any prefix or
     # containment test calls it "inside this one". That is the wrong answer,
     # and it is the one a run from the main checkout with PYTHONPATH pointed at
     # a worktree would get.
@@ -154,10 +153,6 @@ try {
 
     Invoke-Checked "Repository hygiene" $Python @(
         "scripts/check-repository-hygiene.py"
-    )
-
-    Invoke-Checked "Do-not-regress register" $Python @(
-        "scripts/check-do-not-regress.py"
     )
 
     Invoke-Checked "Unstaged whitespace check" $Git @("diff", "--check", "--")

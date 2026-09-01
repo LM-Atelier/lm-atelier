@@ -1,4 +1,4 @@
-"""Pure MiniMax H3 workflow node observation (S2).
+"""Pure MiniMax H3 workflow node observation.
 
 Records exact core node type names from an already-parsed list. This
 module does not authorize install, runtime, execution, geometry, or

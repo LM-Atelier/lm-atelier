@@ -77,7 +77,7 @@ MAX_EXPANSION_ITEMS = 16
 SELECTION_SEED_SPACE = 2_147_483_648
 
 # Public compatibility name for the request codec. The template contract is
-# the single authority for how many slots a Phase-1 expansion can describe.
+# the single authority for how many slots an expansion can describe.
 MAX_EXPANSION_INPUT_SLOTS = MAX_TEMPLATE_SLOTS
 
 #: How large an item-scoped choice space may be before the codec refuses to
@@ -650,7 +650,7 @@ def expand_prompt_template(
         ModelSlotRequest(
             name=slot.name,
             variation_scope=slot.variation_scope,
-            # Phase 1 guarantees a model slot carries guidance, and the
+            # The contract guarantees a model slot carries guidance, and the
             # model-values codec on the other side of this seam types it `str`.
             # Admitting None here would describe a state neither side can reach.
             #
@@ -1135,7 +1135,7 @@ def expansion_plan_payload(plan: ExpansionPlan) -> dict[str, Any]:
             _invalid()
         if type(item.ordinal) is not int or item.ordinal != position:
             _invalid()
-        # Not `or not item.evidence`. Phase 1 permits a fixed literal
+        # Not `or not item.evidence`. The contract permits a fixed literal
         # template with zero slots and the editor displays that shape, so an
         # item with no evidence is legitimate. Requiring evidence here refused a
         # valid one-item plan. A count above one still refuses, but for the

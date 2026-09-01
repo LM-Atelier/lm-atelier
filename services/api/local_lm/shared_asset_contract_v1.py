@@ -1,4 +1,4 @@
-"""Shared Asset Library store identity and root contract (item 58, Phase 0).
+"""Shared Asset Library store identity and root contract.
 
 Completes the store contract over the existing pure slices: a durable
 `store.json` identity with reader/writer version negotiation, a

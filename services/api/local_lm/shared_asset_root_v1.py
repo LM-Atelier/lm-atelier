@@ -1,4 +1,4 @@
-"""Pure Shared Asset Library root resolution (item 58, first slice).
+"""Pure Shared Asset Library root resolution.
 
 Desktop launches that use the default application data directory share one
 library folder inside that directory. An explicit per-app root isolates that

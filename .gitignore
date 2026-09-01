@@ -48,7 +48,6 @@ test-results/
 blob-report/
 
 # Local application state
-.private/
 backups/
 cache/
 caches/

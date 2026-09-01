@@ -70,7 +70,7 @@ isolated browser golden path with `npm run e2e`. It uses mock engines and a
 fresh operating-system temporary data directory.
 
 Never commit credentials, model weights, generated media, databases, caches,
-logs, diagnostics, or anything under `.private`.
+logs, diagnostics, or local-only workspace state.
 
 By participating, you agree to follow the
 [Code of Conduct](CODE_OF_CONDUCT.md).
