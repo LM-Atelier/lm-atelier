@@ -6,6 +6,7 @@ import secrets
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
@@ -48,6 +49,24 @@ _TERMINAL_STATUSES = {
 }
 
 
+@dataclass(frozen=True)
+class JobClaim:
+    """The identity a claim mints: release token plus the claimed attempt.
+
+    An execution that produces engine-provenance writes must present this
+    identity, captured AT CLAIM TIME, on every such write. The Job row is
+    mutable - the scheduler can expire a foreign claim and a new claimant
+    then increments the row's attempt while an old backend request is still
+    alive - so a writer that re-reads the row labels a stale producer's late
+    event with the NEW attempt, refreshing liveness the new engine never
+    produced. The token names the exact claim; the attempt is what the
+    provenance stamp binds to.
+    """
+
+    token: str
+    attempt: int
+
+
 class ResourceScheduler:
     """Durable job tickets plus legacy leases for non-job administration."""
 
@@ -86,9 +105,9 @@ class ResourceScheduler:
         group: str,
         priority: int = 0,
         capacity: int = 1,
-    ) -> AsyncIterator[None]:
+    ) -> AsyncIterator[JobClaim]:
         lock = self._lock(group, capacity)
-        token = await self._acquire_job(
+        claim = await self._acquire_job(
             job_id,
             resource=resource,
             group=group,
@@ -97,16 +116,19 @@ class ResourceScheduler:
             local_lock=lock,
         )
         heartbeat = asyncio.create_task(
-            self._heartbeat(job_id, token),
+            self._heartbeat(job_id, claim.token),
             name=f"job-heartbeat-{job_id}",
         )
         try:
-            yield
+            # The claim identity is YIELDED so the execution can bind its
+            # engine-provenance writes to the attempt it was claimed for; a
+            # bare `async with` caller that ignores it is unchanged.
+            yield claim
         finally:
             heartbeat.cancel()
             with suppress(asyncio.CancelledError):
                 await heartbeat
-            await self._release_job(job_id, token, group)
+            await self._release_job(job_id, claim.token, group)
             lock.release()
 
     def _invalidate_eligibility(self, group: str) -> None:
@@ -182,7 +204,7 @@ class ResourceScheduler:
         priority: int,
         capacity: int,
         local_lock: asyncio.Semaphore,
-    ) -> str:
+    ) -> JobClaim:
         token = f"{self._owner}_{secrets.token_hex(12)}"
         while True:
             for expired_job_id in self._expire_foreign_claims(group):
@@ -289,6 +311,7 @@ class ResourceScheduler:
                 # SQLite session (and its read transaction) open while waiting.
                 await local_lock.acquire()
                 claimed = False
+                claimed_attempt = 0
                 try:
                     with self.session_factory() as session:
                         current = session.get(Job, job_id)
@@ -339,6 +362,12 @@ class ResourceScheduler:
                             if result.rowcount == 1:
                                 claimed_job = session.get(Job, job_id)
                                 if claimed_job:
+                                    # The ORM-enabled UPDATE synchronizes the
+                                    # identity map (evaluate strategy), so the
+                                    # cached row already shows the incremented
+                                    # attempt; a refresh here would re-read
+                                    # what the session already holds.
+                                    claimed_attempt = claimed_job.attempt
                                     update_job_progress(
                                         claimed_job,
                                         stage="starting",
@@ -358,7 +387,7 @@ class ResourceScheduler:
                         local_lock.release()
                 if claimed:
                     await self._publish_job(job_id)
-                    return token
+                    return JobClaim(token=token, attempt=claimed_attempt)
 
             if changed:
                 await self._publish_job(job_id)
@@ -539,6 +568,13 @@ class ResourceScheduler:
                         ]
                         for part in progress_parts:
                             message.parts.remove(part)
+                        # The error part takes the position the progress
+                        # part vacated, and the unit of work would otherwise
+                        # INSERT it before DELETING the old row: the
+                        # (message, position) uniqueness then refuses the
+                        # interruption itself. Flushing the removals first
+                        # keeps the expiry a single-order write.
+                        session.flush()
                         error_part = next(
                             (part for part in message.parts if part.type == PartType.ERROR.value),
                             None,

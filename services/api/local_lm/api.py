@@ -12,6 +12,7 @@ import re
 import shutil
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 from contextlib import suppress
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
@@ -834,9 +835,71 @@ async def worker_status(request: Request, session: SessionDep) -> list[WorkerSta
             or 0
         )
         statuses[index] = status.model_copy(
-            update={"active_jobs": active_jobs, "queued_jobs": queued_jobs}
+            update={
+                "active_jobs": active_jobs,
+                "queued_jobs": queued_jobs,
+                "progress_age_seconds": _reported_progress_age(session, kinds),
+            }
         )
     return statuses
+
+
+def _reported_progress_age(session: Session, kinds: list[str]) -> float | None:
+    """Seconds since a running job for these kinds last reported forward motion.
+
+    None when nothing is running, and None when something is running that has
+    not reported at all yet - starting is not stalling, and a number invented for
+    that case would be indistinguishable from a real stall at the same value.
+
+    With several jobs running this reports the MOST RECENT report across them,
+    so the age is smallest. That is deliberate: the question is whether the
+    worker is making progress, and one job moving answers it. Taking the oldest
+    would report a worker as stalled whenever any single job happened to be
+    between reports, which on a deep queue is almost always.
+
+    IT READS `engine_reported_at`, NOT `updated_at`, and that distinction is the
+    whole correctness of this field. `updated_at` advances whenever anything
+    writes progress - and the scheduler writes it at CLAIM time, with
+    stage="starting", before the engine has produced anything. A reader using it
+    would report a numeric age for a job with zero engine reports, which is
+    exactly the None case this promises. `engine_reported_at` is stamped only by
+    a caller relaying an event from the engine.
+
+    `Job.heartbeat_at` is the obvious source and is the wrong one. The scheduler
+    advances it every few seconds for as long as the ASYNCIO TASK holding the
+    claim is alive - including through a stall, where that task waits forever;
+    `Job.updated_at` is written by that same heartbeat and is no better. Only the
+    `updated_at` inside `progress_json` moves when the engine actually reports
+    something, because `update_job_progress` is what writes it.
+    """
+
+    latest: datetime | None = None
+    for progress, attempt in session.execute(
+        select(Job.progress_json, Job.attempt).where(Job.kind.in_(kinds), Job.status == "running")
+    ):
+        if not isinstance(progress, dict):
+            continue
+        if progress.get("engine_report_attempt") != attempt:
+            # A stamp whose embedded attempt is not the row's current
+            # attempt was minted by a previous attempt; reading it as
+            # liveness would report a producer that is not there.
+            continue
+        reported = progress.get("engine_reported_at")
+        if not isinstance(reported, str):
+            continue
+        try:
+            stamp = datetime.fromisoformat(reported.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=UTC)
+        if latest is None or stamp > latest:
+            latest = stamp
+    if latest is None:
+        return None
+    # Clamped at zero: a stamp written a moment ahead of this clock is a clock
+    # detail, not a worker that reported progress in the future.
+    return max(0.0, (utcnow() - latest).total_seconds())
 
 
 @router.get("/workers/settings", response_model=WorkerSettings)

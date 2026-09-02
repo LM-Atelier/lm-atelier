@@ -12,11 +12,12 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 import httpx
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, object_session, selectinload
 
@@ -130,7 +131,7 @@ from .outpaint_workflows import (
 )
 from .processes import ProcessSupervisor
 from .profile_service import AUTO_PROFILE_ID
-from .progress import completed_progress, update_job_progress
+from .progress import apply_engine_progress, completed_progress, update_job_progress
 from .prompt_expansion_use import (
     PROMPT_SOURCE_INVALID,
     PromptBatchQueueSelection,
@@ -148,7 +149,7 @@ from .prompt_expansion_use import (
 from .prompt_helpers import PROMPT_HELPER_SCOPE, prompt_helper_system_message
 from .references import parse_reference_requests
 from .routing import ModalityRouter, RouteConfirmationRequired
-from .scheduler import ResourceScheduler
+from .scheduler import JobClaim, ResourceScheduler
 from .schemas import (
     EngineCapabilities,
     GenerationOffer,
@@ -356,6 +357,10 @@ def _require_consistent_workflow_witness(work_step: WorkStep, run: Run) -> None:
     witness_revision_id = witness.get("revision_id") if isinstance(witness, dict) else None
     if not (work_step.workflow_revision_id == run.workflow_revision_id == witness_revision_id):
         raise RuntimeError("Queued workflow execution identity is inconsistent.")
+
+
+class ClaimLost(RuntimeError):
+    """The presented claim no longer owns the row at a claim-bound effect."""
 
 
 class ResponseRevisionConflict(ValueError):
@@ -607,6 +612,7 @@ class ConversationOrchestrator:
         inherited_image_edit_strength: dict[str, Any] | None = None,
         inherited_prompt_source: object | None = None,
         reference_source_message_id: str | None = None,
+        before_commit: Callable[[Session, Run], None] | None = None,
     ) -> TurnAccepted:
         if not self._admission_open:
             raise RuntimeError(
@@ -623,6 +629,7 @@ class ConversationOrchestrator:
                 inherited_image_edit_strength=inherited_image_edit_strength,
                 inherited_prompt_source=inherited_prompt_source,
                 reference_source_message_id=reference_source_message_id,
+                before_commit=before_commit,
             )
 
     async def create_prompt_batch_turn(
@@ -704,6 +711,7 @@ class ConversationOrchestrator:
         inherited_image_edit_strength: dict[str, Any] | None = None,
         inherited_prompt_source: object | None = None,
         reference_source_message_id: str | None = None,
+        before_commit: Callable[[Session, Run], None] | None = None,
     ) -> TurnAccepted:
         # Never resolve an idempotency key until its URL-scoped chat has been
         # validated. Otherwise a key from one chat could disclose another
@@ -743,6 +751,7 @@ class ConversationOrchestrator:
                 inherited_image_edit_strength=inherited_image_edit_strength,
                 inherited_prompt_source=inherited_prompt_source,
                 reference_source_message_id=reference_source_message_id,
+                before_commit=before_commit,
             )
 
         owner_token, replay = await self._claim_or_replay_turn(
@@ -774,6 +783,7 @@ class ConversationOrchestrator:
                 inherited_image_edit_strength=inherited_image_edit_strength,
                 inherited_prompt_source=inherited_prompt_source,
                 reference_source_message_id=reference_source_message_id,
+                before_commit=before_commit,
             )
         finally:
             self._release_turn_claim(session, chat_id, key, owner_token)
@@ -905,6 +915,7 @@ class ConversationOrchestrator:
         inherited_prompt_source: object | None = None,
         reference_source_message_id: str | None = None,
         prompt_batch_selection: PromptBatchQueueSelection | None = None,
+        before_commit: Callable[[Session, Run], None] | None = None,
     ) -> TurnAccepted:
         chat = session.get(Chat, chat_id)
         if not chat:
@@ -1102,6 +1113,7 @@ class ConversationOrchestrator:
                 pending_count=pending_count or 0,
                 source_action=source_action,
                 reference_source_message_id=reference_source_message_id,
+                before_commit=before_commit,
             )
         prior_image, prior_image_prompt = self._latest_image_context(
             session,
@@ -2133,6 +2145,11 @@ class ConversationOrchestrator:
             )
         if chat.title == "New chat":
             chat.title = request.text.strip().replace("\n", " ")[:72] or "New chat"
+        if before_commit is not None:
+            # The caller's claim-bound assertion joins THIS transaction,
+            # after every await above: the turn becomes durable only if
+            # the claim still owns its row at the commit.
+            before_commit(session, runs[0])
         session.commit()
         accepted = self._accepted_for_run(session, runs[0])
         await self.events.publish(
@@ -2168,6 +2185,7 @@ class ConversationOrchestrator:
         pending_count: int,
         source_action: str,
         reference_source_message_id: str | None,
+        before_commit: Callable[[Session, Run], None] | None = None,
     ) -> TurnAccepted:
         intent = OrderedPlanCompiler.validate(intent)
         if pending_count + len(intent.steps) > MAX_PENDING_WORK_PER_CHAT:
@@ -2772,6 +2790,11 @@ class ConversationOrchestrator:
         }
         if chat.title == "New chat":
             chat.title = request.text.strip().replace("\n", " ")[:72] or "New chat"
+        if before_commit is not None:
+            # The caller's claim-bound assertion joins THIS transaction,
+            # after every await above: the turn becomes durable only if
+            # the claim still owns its row at the commit.
+            before_commit(session, runs[0])
         session.commit()
         accepted = self._accepted_for_run(session, runs[0])
         await self.events.publish(
@@ -3076,6 +3099,7 @@ class ConversationOrchestrator:
     async def _execute(self, job_id: str, run_id: str | None) -> None:
         verification_job = False
         queued_verification_job_id: str | None = None
+        claim: JobClaim | None = None
         try:
             with self.session_factory() as session:
                 job = session.get(Job, job_id)
@@ -3098,9 +3122,9 @@ class ConversationOrchestrator:
                 resource=resource,
                 group=group,
                 priority=priority,
-            ):
+            ) as claim:
                 if verification_job:
-                    await self._execute_image_edit_verification(job_id)
+                    await self._execute_image_edit_verification(job_id, claim)
                     return
                 assert run_id is not None
                 with self.session_factory() as session:
@@ -3127,7 +3151,10 @@ class ConversationOrchestrator:
                         run_id=run.id,
                         job_id=job.id,
                     )
-                    session.commit()
+                    if claim is not None:
+                        self._commit_owned(session, job_id, claim)
+                    else:
+                        session.commit()
                     event_payload = {
                         "job_id": job_id,
                         "plan_id": run.work_plan_id,
@@ -3149,14 +3176,22 @@ class ConversationOrchestrator:
                 )
                 resume_chat_profile = await self._prepare_device_handoff(
                     operation,
+                    claim=claim,
                     job_id=job_id,
                     run_id=run_id,
                 )
                 try:
                     if operation == Operation.TEXT.value:
-                        await self._execute_chat(job_id, run_id)
+                        try:
+                            await self._execute_chat(job_id, run_id, claim)
+                        except ClaimLost as lost:
+                            # The row belongs to a later attempt; this
+                            # execution writes and publishes nothing more.
+                            logger.info("Chat execution for job %s stopped: %s", job_id, lost)
                     else:
-                        queued_verification_job_id = await self._execute_media(job_id, run_id)
+                        queued_verification_job_id = await self._execute_media(
+                            job_id, run_id, claim
+                        )
                 finally:
                     if operation == Operation.TEXT.value:
                         self._release_deferred_media_restart()
@@ -3168,7 +3203,36 @@ class ConversationOrchestrator:
         except asyncio.CancelledError:
             with self.session_factory() as session:
                 job = session.get(Job, job_id)
-                if job and job.status != JobStatus.CANCELLED.value:
+                owns = job is not None and job.status != JobStatus.CANCELLED.value
+                if owns and claim is not None:
+                    # A cancellation delivered to an execution whose claim
+                    # expired and was re-claimed must not cancel the new
+                    # claimant's attempt; assert ownership at the database.
+                    owns = self._claim_terminal_transition(
+                        session, job_id, claim, attempt=claim.attempt
+                    )
+                elif owns:
+                    # No claim was ever captured, so this execution may
+                    # cancel only a row no claim has touched: still QUEUED
+                    # and unowned. The scheduler's waiter raises on ANY
+                    # terminal observation, and another dispatcher's
+                    # terminal result is not this waiter's to rewrite.
+                    owns = (
+                        cast(
+                            "CursorResult[Any]",
+                            session.execute(
+                                update(Job)
+                                .where(
+                                    Job.id == job_id,
+                                    Job.status == JobStatus.QUEUED.value,
+                                    Job.claim_owner.is_(None),
+                                )
+                                .values(claim_owner=None)
+                            ),
+                        ).rowcount
+                        == 1
+                    )
+                if owns and job is not None:
                     if verification_job and job_id in self._preempted_image_edit_verifications:
                         self._finish_image_edit_verification(
                             session,
@@ -3184,7 +3248,28 @@ class ConversationOrchestrator:
                 logger.warning("Image edit verification dispatch failed", exc_info=True)
                 with self.session_factory() as session:
                     job = session.get(Job, job_id)
-                    if job and job.status != JobStatus.CANCELLED.value:
+                    owns = job is not None and job.status != JobStatus.CANCELLED.value
+                    if owns and claim is not None:
+                        owns = self._claim_terminal_transition(
+                            session, job_id, claim, attempt=claim.attempt
+                        )
+                    elif owns:
+                        owns = (
+                            cast(
+                                "CursorResult[Any]",
+                                session.execute(
+                                    update(Job)
+                                    .where(
+                                        Job.id == job_id,
+                                        Job.status == JobStatus.QUEUED.value,
+                                        Job.claim_owner.is_(None),
+                                    )
+                                    .values(claim_owner=None)
+                                ),
+                            ).rowcount
+                            == 1
+                        )
+                    if owns and job is not None:
                         self._finish_image_edit_verification(
                             session,
                             job,
@@ -3195,11 +3280,13 @@ class ConversationOrchestrator:
                 return
             assert run_id is not None
             detail = str(exc).strip() or f"Generation failed ({type(exc).__name__})"
-            await self._fail(job_id, run_id, detail)
+            await self._fail(job_id, run_id, detail, claim=claim)
         if run_id is not None:
-            await self._finalize_setup_verification_run(job_id, run_id)
+            await self._finalize_setup_verification_run(job_id, run_id, claim)
 
-    async def _finalize_setup_verification_run(self, job_id: str, run_id: str) -> None:
+    async def _finalize_setup_verification_run(
+        self, job_id: str, run_id: str, claim: JobClaim | None = None
+    ) -> None:
         finalized = False
         state: str | None = None
         role: str | None = None
@@ -3208,6 +3295,22 @@ class ConversationOrchestrator:
             run = session.get(Run, run_id)
             chat_id = getattr(run, "chat_id", None)
             if not job or not run or not chat_id:
+                return
+            if claim is not None and (
+                job.attempt != claim.attempt
+                or (
+                    job.claim_owner != claim.token
+                    and job.status
+                    not in {
+                        JobStatus.COMPLETE.value,
+                        JobStatus.FAILED.value,
+                        JobStatus.CANCELLED.value,
+                    }
+                )
+            ):
+                # The row was requeued or reclaimed by a later attempt: its
+                # outcome is that attempt's to finalize, and this execution
+                # deletes nothing on its behalf.
                 return
             verification = setup_verification_for_chat(session, chat_id)
             if verification:
@@ -3227,10 +3330,10 @@ class ConversationOrchestrator:
                 {"role": role, "state": state},
             )
 
-    async def _execute_chat(self, job_id: str, run_id: str) -> None:
-        await self._set_chat_phase(job_id, run_id, "Preparing chat model")
+    async def _execute_chat(self, job_id: str, run_id: str, claim: JobClaim) -> None:
+        await self._require_phase(job_id, run_id, "Preparing chat model", claim)
         worker = await self._ensure_chat_worker(run_id)
-        await self._set_chat_phase(job_id, run_id, "Preparing conversation")
+        await self._require_phase(job_id, run_id, "Preparing conversation", claim)
         with self.session_factory() as session:
             run = session.get(Run, run_id)
             if not run:
@@ -3240,7 +3343,7 @@ class ConversationOrchestrator:
                 request_settings,
                 context_metadata,
                 tool_calling_available,
-            ) = await self._prepare_chat_context(session, run)
+            ) = await self._prepare_chat_context(session, run, claim, job_id=job_id)
             chat = session.get(Chat, run.chat_id)
             web_allowed = may_fetch_urls(
                 # Absent reads as shut. A gate that cannot find its own
@@ -3252,12 +3355,18 @@ class ConversationOrchestrator:
         # Retrieval runs with no session held. A fetch may take the whole
         # timeout, and a database session open across it blocks every other
         # writer for that long.
-        web_source = await self._read_linked_page(messages, run_id, job_id) if web_allowed else None
+        web_source = (
+            await self._read_linked_page(messages, run_id, job_id, claim) if web_allowed else None
+        )
 
         with self.session_factory() as session:
             run = session.get(Run, run_id)
             if not run:
                 return
+            # The worker, context and page awaits above are where a claim
+            # expires; the provenance write is this execution's speech and
+            # lands only if the row is still its own, asserted inside the
+            # transaction that commits it.
             run.provenance_json = {
                 **run.provenance_json,
                 "context": context_metadata,
@@ -3273,7 +3382,7 @@ class ConversationOrchestrator:
                     else {}
                 ),
             }
-            session.commit()
+            self._commit_owned(session, job_id, claim)
             request = ChatRequest(
                 run_id=run.id,
                 messages=messages,
@@ -3283,7 +3392,7 @@ class ConversationOrchestrator:
             )
             assistant_id = run.assistant_message_id
 
-        await self._set_chat_phase(job_id, run_id, "Waiting for first token")
+        await self._require_phase(job_id, run_id, "Waiting for first token", claim)
         # Advanced once, on the first delta. Without this the phase says the
         # model has not started for the entire generation, so a long answer that
         # is streaming perfectly well reads as a stall.
@@ -3297,16 +3406,28 @@ class ConversationOrchestrator:
                 if event.type == "delta":
                     if not streaming_announced:
                         streaming_announced = True
-                        await self._set_chat_phase(job_id, run_id, "Writing the response")
+                        if not await self._set_chat_phase(
+                            job_id, run_id, "Writing the response", claim
+                        ):
+                            # The row moved before the first token was
+                            # shown; this producer stops speaking.
+                            return
                     self._release_deferred_media_restart()
                     self._begin_step_prewarm()
                     accumulated += event.text
+                    # Every delta is checked against the row BEFORE it is
+                    # heard: a claim lost between two persistence points must
+                    # not speak even once more, so the check cannot ride the
+                    # persistence throttle.
+                    if not self._claim_still_owns(job_id, claim):
+                        return
                     await self.events.publish(
                         "text.delta",
                         run_id,
                         {
                             "text": event.text,
                             "job_id": job_id,
+                            "attempt": claim.attempt,
                             "assistant_message_id": assistant_id,
                         },
                     )
@@ -3316,13 +3437,27 @@ class ConversationOrchestrator:
                         or len(accumulated) - last_persisted_length >= 32
                         or now - last_persisted_at >= 0.25
                     ):
-                        self._persist_streamed_text(assistant_id, accumulated)
+                        if not self._persist_streamed_text(
+                            assistant_id, accumulated, job_id=job_id, claim=claim
+                        ):
+                            return
+                        # ONE stamping site, riding the persistence throttle.
+                        # The throttle's first branch fires on the very first
+                        # delta, so the first token stamps immediately, and a
+                        # long stream refreshes every few hundred milliseconds
+                        # after that - an age measured from the first token
+                        # alone would grow through a healthy generation. The
+                        # per-delta ownership check above is a read; this is
+                        # the write, and one site keeps it observable.
+                        self._stamp_chat_engine_report(job_id, claim)
                         last_persisted_length = len(accumulated)
                         last_persisted_at = now
 
                 elif event.type == "cancelled":
                     if accumulated:
-                        self._persist_streamed_text(assistant_id, accumulated.rstrip())
+                        self._persist_streamed_text(
+                            assistant_id, accumulated.rstrip(), job_id=job_id, claim=claim
+                        )
                     return
                 elif event.type == "error":
                     detail = str(event.data.get("error") or "").strip()
@@ -3331,11 +3466,15 @@ class ConversationOrchestrator:
                     completion_metadata.update(event.data)
         except asyncio.CancelledError:
             if accumulated:
-                self._persist_streamed_text(assistant_id, accumulated.rstrip())
+                self._persist_streamed_text(
+                    assistant_id, accumulated.rstrip(), job_id=job_id, claim=claim
+                )
             raise
         except Exception:
             if accumulated:
-                self._persist_streamed_text(assistant_id, accumulated.rstrip())
+                self._persist_streamed_text(
+                    assistant_id, accumulated.rstrip(), job_id=job_id, claim=claim
+                )
             raise
 
         text_output = accumulated.rstrip()
@@ -3345,11 +3484,12 @@ class ConversationOrchestrator:
             and should_extract_generation_offer(message["content"])
             for message in messages[-2:]
         )
-        offer = (
-            await extract_generation_offer(self.engines.chat, text_output)
-            if tool_calling_available and offer_relevant
-            else None
-        )
+        offer = None
+        if tool_calling_available and offer_relevant:
+            # The stream is over; the offer is more model work, spent only
+            # by an execution that still owns the row.
+            await self._require_phase(job_id, run_id, "Finishing the response", claim)
+            offer = await extract_generation_offer(self.engines.chat, text_output)
         # The question is appended so the user actually sees it - that is the
         # feature. It is withheld only when the reply is itself the deliverable,
         # where a trailing sentence would stop it parsing and would be joined
@@ -3379,12 +3519,19 @@ class ConversationOrchestrator:
             context_metadata = dict(run.provenance_json.get("context", {}))
             if usage := completion_metadata.get("usage"):
                 context_metadata["usage"] = usage
-            self._complete(
+            if not self._complete(
                 session,
                 run,
                 job,
                 {"characters": len(text_output), "context": context_metadata},
-            )
+                claim=claim,
+            ):
+                session.rollback()
+                logger.warning(
+                    "Refusing chat completion: the claim no longer owns job %s",
+                    job_id,
+                )
+                return
             run.provenance_json = {
                 **run.provenance_json,
                 "context": context_metadata,
@@ -3439,6 +3586,7 @@ class ConversationOrchestrator:
         messages: list[dict[str, Any]],
         run_id: str,
         job_id: str,
+        claim: JobClaim,
     ) -> dict[str, Any] | None:
         """Read one page this conversation linked, if one is wanted.
 
@@ -3459,11 +3607,14 @@ class ConversationOrchestrator:
             for message in messages
             if isinstance(content := message.get("content"), str) and message.get("role") == "user"
         ]
+        # Choosing a page is model work; it is spent only by an execution
+        # that still owns the row.
+        await self._require_phase(job_id, run_id, "Choosing a page to read", claim)
         chosen = await choose_from_conversation(self.engines.chat, texts=texts, run_id=run_id)
         if chosen is None:
             return None
         host = urlparse(chosen.url).hostname or chosen.url
-        await self._set_chat_phase(job_id, run_id, f"Reading {host}")
+        await self._require_phase(job_id, run_id, f"Reading {host}", claim)
         try:
             async with httpx.AsyncClient(
                 follow_redirects=False,
@@ -3487,7 +3638,39 @@ class ConversationOrchestrator:
             "truncated": source.truncated,
         }
 
-    async def _set_chat_phase(self, job_id: str, run_id: str, label: str) -> None:
+    async def _require_phase(
+        self, job_id: str, run_id: str, label: str, claim: JobClaim, *, media: bool = False
+    ) -> None:
+        """A claim-bound phase write that stops its caller when refused.
+
+        The phase writers answer False when the row is no longer this
+        execution's - terminal, missing, or owned by a later attempt. A
+        caller about to act on the row, load or stop a worker, or run
+        inference must stop there: a superseded execution may make no
+        further side effect, in the database or in the processes.
+        """
+
+        writer = self._set_media_phase if media else self._set_chat_phase
+        if not await writer(job_id, run_id, label, claim):
+            raise ClaimLost(f"job {job_id} is no longer this execution's at {label!r}")
+
+    def _commit_owned(self, session: Session, job_id: str, claim: JobClaim) -> None:
+        """Commit only what this execution still owns.
+
+        The ownership assertion joins the transaction being committed,
+        after every await that preceded it; a refused assertion rolls the
+        pending writes back and stops the caller, so nothing written after
+        an await can land for a row a later attempt now owns.
+        """
+
+        if not session.in_transaction():
+            return
+        if not self._claim_owns_row(session, job_id, claim):
+            session.rollback()
+            raise ClaimLost(f"job {job_id} is no longer this execution's at a commit")
+        session.commit()
+
+    async def _set_chat_phase(self, job_id: str, run_id: str, label: str, claim: JobClaim) -> bool:
         assistant_id = ""
         with self.session_factory() as session:
             job = session.get(Job, job_id)
@@ -3502,7 +3685,12 @@ class ConversationOrchestrator:
                     JobStatus.CANCELLED.value,
                 }
             ):
-                return
+                return False
+            if not self._claim_owns_row(session, job_id, claim):
+                # A phase is this execution's speech about the row; a
+                # superseded execution neither writes it nor publishes it.
+                session.rollback()
+                return False
             assistant_id = run.assistant_message_id
             update_job_progress(
                 job,
@@ -3557,8 +3745,9 @@ class ConversationOrchestrator:
                 "label": label,
             },
         )
+        return True
 
-    async def _set_media_phase(self, job_id: str, run_id: str, label: str) -> None:
+    async def _set_media_phase(self, job_id: str, run_id: str, label: str, claim: JobClaim) -> bool:
         event = MediaEvent(
             type="progress",
             progress=0,
@@ -3579,7 +3768,10 @@ class ConversationOrchestrator:
                     JobStatus.INTERRUPTED.value,
                 }
             ):
-                return
+                return False
+            if not self._claim_owns_row(session, job_id, claim):
+                session.rollback()
+                return False
             message = session.get(Message, run.assistant_message_id)
             update_job_progress(
                 job,
@@ -3596,6 +3788,7 @@ class ConversationOrchestrator:
             run_id,
             {"progress": 0, "phase": label, "job_id": job_id},
         )
+        return True
 
     async def _ensure_chat_worker(self, run_id: str) -> WorkerStatus | None:
         if self.engines.settings.chat_engine not in {"llama.cpp", "vllm"}:
@@ -3674,15 +3867,19 @@ class ConversationOrchestrator:
         )
 
     async def _prepare_chat_context(
-        self, session: Session, run: Run
+        self, session: Session, run: Run, claim: JobClaim, *, job_id: str | None = None
     ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any], bool]:
         messages, source_message_ids = self._context_messages_with_sources(session, run)
-        self._commit_before_await(session)
+        # The executing job's own id: a run can carry more than one job row,
+        # and the claim answers only for the one this execution holds.
+        if job_id is None:
+            job_id = self._job_id_for_run(session, run)
+        self._commit_owned(session, job_id, claim)
         capabilities = await self.engines.chat_capabilities()
         candidates = self._visual_context_artifacts(
             session, run, lookback=self.engines.settings.vision_prior_visual_lookback
         )
-        self._commit_before_await(session)
+        self._commit_owned(session, job_id, claim)
         direct_profile_selected = run.vision_profile_id == run.profile_id and bool(run.profile_id)
         if (
             self.engines.settings.chat_engine == "mock"
@@ -3698,12 +3895,12 @@ class ConversationOrchestrator:
             "visual_contents_inspected": False,
         }
         if candidates and vision_metadata["available"] and direct_profile_selected:
-            job_id = self._job_id_for_run(session, run)
-            self._commit_before_await(session)
-            await self._set_chat_phase(
+            self._commit_owned(session, job_id, claim)
+            await self._require_phase(
                 job_id,
                 run.id,
                 "Preparing visual context",
+                claim,
             )
             messages, vision_metadata = await self._attach_visual_context(
                 session,
@@ -3726,9 +3923,11 @@ class ConversationOrchestrator:
             )
         elif candidates and run.vision_profile_id and run.vision_profile_id != run.profile_id:
             observation, bridge_metadata = await self._bridge_visual_context(
+                claim,
                 session,
                 run,
                 candidates,
+                job_id=job_id,
             )
             vision_metadata = bridge_metadata
             vision_metadata["profile"] = self._vision_profile_provenance(
@@ -3762,7 +3961,7 @@ class ConversationOrchestrator:
         output_limit = min(requested_output, maximum_output)
         input_budget = max(64, context_limit - output_limit - safety_tokens)
 
-        self._commit_before_await(session)
+        self._commit_owned(session, job_id, claim)
         (
             messages,
             input_tokens,
@@ -3991,10 +4190,15 @@ class ConversationOrchestrator:
 
     async def _bridge_visual_context(
         self,
+        claim: JobClaim,
         session: Session,
         run: Run,
         candidates: list[Artifact],
+        *,
+        job_id: str | None = None,
     ) -> tuple[str, dict[str, Any]]:
+        if job_id is None:
+            job_id = self._job_id_for_run(session, run)
         bridge_profile = session.get(ModelProfile, run.vision_profile_id)
         bridge_install = (
             session.get(ModelInstall, bridge_profile.model_install_id)
@@ -4033,12 +4237,12 @@ class ConversationOrchestrator:
             "artifact_ids": [],
         }
         try:
-            job_id = self._job_id_for_run(session, run)
-            self._commit_before_await(session)
-            await self._set_chat_phase(
+            self._commit_owned(session, job_id, claim)
+            await self._require_phase(
                 job_id,
                 run.id,
                 "Loading vision model",
+                claim,
             )
             await self.processes.load_chat(bridge_profile, bridge_install)
             capabilities = await self.engines.chat_capabilities()
@@ -4072,13 +4276,13 @@ class ConversationOrchestrator:
             )
             if not metadata["visual_contents_inspected"]:
                 return "", metadata
-            job_id = self._job_id_for_run(session, run)
-            self._commit_before_await(session)
-            await self._set_chat_phase(
+            self._commit_owned(session, job_id, claim)
+            await self._require_phase(
                 job_id,
                 run.id,
                 f"Analyzing {metadata['images_included']} visual frame"
                 f"{'' if metadata['images_included'] == 1 else 's'}",
+                claim,
             )
             max_tokens = self.engines.settings.vision_bridge_max_tokens
             completion_seen = False
@@ -4112,12 +4316,12 @@ class ConversationOrchestrator:
             metadata["completion"] = completion_metadata
             return observation, metadata
         finally:
-            job_id = self._job_id_for_run(session, run)
             self._commit_before_await(session)
             await self._set_chat_phase(
                 job_id,
                 run.id,
                 "Restoring chat model",
+                claim,
             )
             if text_profile and text_install:
                 await self.processes.load_chat(text_profile, text_install)
@@ -4210,6 +4414,7 @@ class ConversationOrchestrator:
         self,
         operation: str,
         *,
+        claim: JobClaim,
         job_id: str | None = None,
         run_id: str | None = None,
     ) -> str | None:
@@ -4225,7 +4430,7 @@ class ConversationOrchestrator:
         if profile_id:
             self._chat_planner_ready.clear()
         if job_id and run_id:
-            await self._set_media_phase(job_id, run_id, "Releasing chat model")
+            await self._require_phase(job_id, run_id, "Releasing chat model", claim, media=True)
         try:
             await self.processes.stop("chat")
         except asyncio.CancelledError:
@@ -4444,6 +4649,7 @@ class ConversationOrchestrator:
     async def _ensure_media_worker(
         self,
         *,
+        claim: JobClaim,
         job_id: str | None = None,
         run_id: str | None = None,
         activation_scope: WorkflowActivationLaunchScope | None = None,
@@ -4451,14 +4657,26 @@ class ConversationOrchestrator:
         restart_task = self._media_restart_task
         if restart_task and not restart_task.done():
             if job_id and run_id:
-                await self._set_media_phase(job_id, run_id, "Waiting for media worker")
+                await self._require_phase(
+                    job_id, run_id, "Waiting for media worker", claim, media=True
+                )
             await asyncio.shield(restart_task)
         status = next(item for item in self.processes.statuses() if item.name == "media")
         if activation_scope is not None or not status.running or status.state != "ready":
             if job_id and run_id:
+                # The start is a process effect: it is earned only by a
+                # phase write the row still accepts, and a phase the row
+                # refuses during the start ends this execution before any
+                # inference - the supervisor swallows what its callback
+                # raises, so the refusal is carried out of the start here.
+                await self._require_phase(
+                    job_id, run_id, "Starting media worker", claim, media=True
+                )
+                refused: list[str] = []
 
                 async def report_phase(phase: str) -> None:
-                    await self._set_media_phase(job_id, run_id, phase)
+                    if not await self._set_media_phase(job_id, run_id, phase, claim):
+                        refused.append(phase)
 
                 if activation_scope is not None:
                     await self.processes.start_media(
@@ -4467,6 +4685,8 @@ class ConversationOrchestrator:
                     )
                 else:
                     await self.processes.start_media(phase_callback=report_phase)
+                if refused:
+                    raise ClaimLost(f"job {job_id} is no longer this execution's at {refused[0]!r}")
             else:
                 if activation_scope is not None:
                     await self.processes.start_media(activation_scope=activation_scope)
@@ -4635,7 +4855,7 @@ class ConversationOrchestrator:
         )
         return evidence.evidence_key
 
-    async def _execute_media(self, job_id: str, run_id: str) -> str | None:
+    async def _execute_media(self, job_id: str, run_id: str, claim: JobClaim) -> str | None:
         activation_scope: WorkflowActivationLaunchScope | None = None
         if self.engines.settings.media_engine == "comfyui":
             with self.session_factory() as session:
@@ -4649,11 +4869,12 @@ class ConversationOrchestrator:
                     raise
                 session.commit()
             await self._ensure_media_worker(
+                claim=claim,
                 job_id=job_id,
                 run_id=run_id,
                 activation_scope=activation_scope,
             )
-        await self._set_media_phase(job_id, run_id, "Validating media workflow")
+        await self._require_phase(job_id, run_id, "Validating media workflow", claim, media=True)
         with self.session_factory() as session:
             run = session.get(Run, run_id)
             if not run:
@@ -4738,86 +4959,153 @@ class ConversationOrchestrator:
 
         completed_assets = []
         preview_artifact_id: str | None = None
-        async for event in self.engines.media.generate(request):
-            if event.type in {"progress", "queued"}:
-                indeterminate = event.type == "queued" or bool(event.data.get("indeterminate"))
-                with self.session_factory() as session:
-                    job = session.get(Job, job_id)
-                    message = session.get(Message, assistant_id)
-                    if job and message:
-                        update_job_progress(
-                            job,
-                            stage=event.phase,
-                            stage_progress=event.progress,
-                            queue_resource=job.queue_resource,
-                            indeterminate=indeterminate,
-                        )
-                        self._replace_parts(message, self._media_progress_parts(message, event))
-                        session.commit()
-                await self.scheduler.publish_job(job_id)
-                await self.events.publish(
-                    "generation.progress",
-                    run_id,
-                    {"progress": event.progress, "phase": event.phase, "job_id": job_id},
-                )
-            elif event.type == "preview" and event.preview:
-                with self.session_factory() as session:
-                    message = session.get(Message, assistant_id)
-                    job = session.get(Job, job_id)
-                    if message and job:
-                        update_job_progress(
-                            job,
-                            stage=event.phase or "preview",
-                            stage_progress=event.progress,
-                            queue_resource=job.queue_resource,
-                        )
-                        preview = self.artifacts.ingest_bytes(
-                            session,
-                            event.preview,
-                            kind=ArtifactKind.THUMBNAIL,
-                            media_type=_preview_media_type(event.preview),
-                            original_name="generation-preview",
-                            metadata={
-                                "run_id": run_id,
-                                "temporary_preview": True,
-                            },
-                        )
-                        preview_artifact_id = preview.id
-                        self._replace_parts(
-                            message,
-                            [
-                                MessagePart(
-                                    position=0,
-                                    type=PartType.PROGRESS.value,
-                                    text=event.phase.title() or "Preview",
-                                    metadata_json={
-                                        "progress": event.progress,
-                                        "phase": event.phase or "preview",
-                                    },
-                                ),
-                                MessagePart(
-                                    position=1,
-                                    type=PartType.IMAGE.value,
-                                    artifact_id=preview.id,
-                                    metadata_json={"preview": True},
-                                ),
-                            ],
-                        )
-                        session.commit()
-                await self.scheduler.publish_job(job_id)
-                await self.events.publish(
-                    "generation.preview",
-                    run_id,
-                    {
-                        "job_id": job_id,
-                        "bytes": len(event.preview),
-                        "artifact_id": preview_artifact_id,
-                    },
-                )
-            elif event.type == "cancelled":
-                return None
-            elif event.type == "complete":
-                completed_assets.extend(event.assets)
+        # The producer is closed the moment a write refuses: a refused
+        # progress, preview or completion means the row belongs to a later
+        # attempt, and a superseded execution neither consumes nor holds
+        # the backend's stream any longer.
+        producer = self.engines.media.generate(request)
+        try:
+            async for event in producer:
+                if event.type in {"progress", "queued"}:
+                    indeterminate = event.type == "queued" or bool(event.data.get("indeterminate"))
+                    with self.session_factory() as session:
+                        job = session.get(Job, job_id)
+                        message = session.get(Message, assistant_id)
+                        if not job or not message:
+                            continue
+                        if job and message:
+                            # Provenance comes from the ADAPTER, which knows
+                            # which events the backend originated: only a
+                            # backend-originated event mints the liveness
+                            # stamp. Either way the write is conditional on
+                            # the claim at the database itself - a stale
+                            # producer's event refuses whole, parts included.
+                            snapshot = apply_engine_progress(
+                                session,
+                                job_id=job_id,
+                                claim_attempt=claim.attempt,
+                                claim_owner=claim.token,
+                                stage=event.phase,
+                                stage_progress=event.progress,
+                                queue_resource=job.queue_resource,
+                                indeterminate=indeterminate,
+                                stamp_engine_report=event.engine_sourced,
+                            )
+                            if snapshot is None:
+                                session.rollback()
+                                raise ClaimLost(
+                                    f"job {job_id} is no longer this execution's at "
+                                    f"{event.phase or 'progress'!r}"
+                                )
+                            self._replace_parts(message, self._media_progress_parts(message, event))
+                            session.commit()
+                    # A refused row refuses the broadcast too: clients
+                    # must not hear a superseded producer's progress.
+                    await self.scheduler.publish_job(job_id)
+                    await self.events.publish(
+                        "generation.progress",
+                        run_id,
+                        {
+                            "progress": event.progress,
+                            "phase": event.phase,
+                            "job_id": job_id,
+                        },
+                    )
+                elif event.type == "preview" and event.preview:
+                    with self.session_factory() as session:
+                        message = session.get(Message, assistant_id)
+                        job = session.get(Job, job_id)
+                        if message and job:
+                            snapshot = apply_engine_progress(
+                                session,
+                                job_id=job_id,
+                                claim_attempt=claim.attempt,
+                                claim_owner=claim.token,
+                                stage=event.phase or "preview",
+                                stage_progress=event.progress,
+                                queue_resource=job.queue_resource,
+                                stamp_engine_report=event.engine_sourced,
+                            )
+                            if snapshot is None:
+                                # A stale producer's preview must not be
+                                # persisted either, and the producer is done.
+                                session.rollback()
+                                raise ClaimLost(
+                                    f"job {job_id} is no longer this execution's at a preview"
+                                )
+                            preview = self.artifacts.ingest_bytes(
+                                session,
+                                event.preview,
+                                kind=ArtifactKind.THUMBNAIL,
+                                media_type=_preview_media_type(event.preview),
+                                original_name="generation-preview",
+                                metadata={
+                                    "run_id": run_id,
+                                    "temporary_preview": True,
+                                },
+                            )
+                            preview_artifact_id = preview.id
+                            self._replace_parts(
+                                message,
+                                [
+                                    MessagePart(
+                                        position=0,
+                                        type=PartType.PROGRESS.value,
+                                        text=event.phase.title() or "Preview",
+                                        metadata_json={
+                                            "progress": event.progress,
+                                            "phase": event.phase or "preview",
+                                        },
+                                    ),
+                                    MessagePart(
+                                        position=1,
+                                        type=PartType.IMAGE.value,
+                                        artifact_id=preview.id,
+                                        metadata_json={"preview": True},
+                                    ),
+                                ],
+                            )
+                            session.commit()
+                    await self.scheduler.publish_job(job_id)
+                    await self.events.publish(
+                        "generation.preview",
+                        run_id,
+                        {
+                            "job_id": job_id,
+                            "bytes": len(event.preview),
+                            "artifact_id": preview_artifact_id,
+                        },
+                    )
+                elif event.type == "cancelled":
+                    return None
+                elif event.type == "complete":
+                    completed_assets.extend(event.assets)
+                    if event.engine_sourced:
+                        # The backend's completion is the engine speaking too:
+                        # it stamps under the same attempt-owner identity as
+                        # every other engine write, and the completion
+                        # transition's own write then carries the stamp
+                        # forward within the attempt.
+                        with self.session_factory() as session:
+                            job = session.get(Job, job_id)
+                            if job:
+                                snapshot = apply_engine_progress(
+                                    session,
+                                    job_id=job_id,
+                                    claim_attempt=claim.attempt,
+                                    claim_owner=claim.token,
+                                    stage=event.phase or "complete",
+                                    queue_resource=job.queue_resource,
+                                )
+                                if snapshot is None:
+                                    session.rollback()
+                                    raise ClaimLost(
+                                        f"job {job_id} is no longer this execution's "
+                                        "at its completion"
+                                    )
+                                session.commit()
+        finally:
+            await producer.aclose()
 
         media_capabilities = (
             await self._successful_media_capabilities() if completed_assets else None
@@ -4834,6 +5122,16 @@ class ConversationOrchestrator:
             artifact_ids: list[str] = []
             output_provenance: list[dict[str, Any]] = []
             for generated in completed_assets:
+                # Asserted at the transaction that persists this asset,
+                # never across an await: the ingest and commit follow
+                # with no external work in between.
+                if not self._claim_owns_row(session, job_id, claim):
+                    session.rollback()
+                    logger.warning(
+                        "Refusing media persistence: the claim no longer owns job %s",
+                        job_id,
+                    )
+                    return None
                 kind = ArtifactKind(generated.kind)
                 artifact = self.artifacts.ingest_bytes(
                     session,
@@ -4867,6 +5165,14 @@ class ConversationOrchestrator:
                 if generated.kind == "video":
                     playback_artifact = artifact
                     proxy_result = await self.artifacts.browser_video_proxy(artifact)
+                    if proxy_result and not self._claim_owns_row(session, job_id, claim):
+                        proxy_result.discard()
+                        session.rollback()
+                        logger.warning(
+                            "Refusing media persistence: the claim no longer owns job %s",
+                            job_id,
+                        )
+                        return None
                     if proxy_result:
                         try:
                             proxy = self.artifacts.ingest_path(
@@ -4894,6 +5200,13 @@ class ConversationOrchestrator:
                         # unreferenced and are handled by normal retention.
                         session.commit()
                     poster_content = await self.artifacts.video_poster(playback_artifact)
+                    if poster_content and not self._claim_owns_row(session, job_id, claim):
+                        session.rollback()
+                        logger.warning(
+                            "Refusing media persistence: the claim no longer owns job %s",
+                            job_id,
+                        )
+                        return None
                     if poster_content:
                         poster = self.artifacts.ingest_bytes(
                             session,
@@ -4949,7 +5262,13 @@ class ConversationOrchestrator:
                     **run.provenance_json,
                     "capability_evidence_key": evidence_key,
                 }
-            self._complete(session, run, job, {"artifact_ids": artifact_ids})
+            if not self._complete(session, run, job, {"artifact_ids": artifact_ids}, claim=claim):
+                session.rollback()
+                logger.warning(
+                    "Refusing media completion: the claim no longer owns job %s",
+                    job_id,
+                )
+                return None
             run.provenance_json = {
                 **run.provenance_json,
                 "outputs": output_provenance,
@@ -5145,11 +5464,30 @@ class ConversationOrchestrator:
         result: dict[str, Any],
         *,
         job_status: str = JobStatus.COMPLETE.value,
-    ) -> None:
+        claim: JobClaim | None = None,
+    ) -> bool:
+        """Terminal verification write, bound to the presented claim.
+
+        With a claim, the status transition is the conditional write and a
+        refusal persists nothing. None means the CALLER has already
+        asserted ownership inside this same transaction - the cancellation
+        handlers do - and the writes proceed under that assertion.
+        """
+
         now = utcnow()
-        job.status = job_status
+        if claim is not None:
+            if not self._claim_terminal_transition(
+                session, job.id, claim, status=job_status, completed_at=now
+            ):
+                logger.warning(
+                    "Refusing verification write: the claim no longer owns job %s",
+                    job.id,
+                )
+                return False
+        else:
+            job.status = job_status
+            job.completed_at = now
         job.error = None
-        job.completed_at = now
         job.result_json = result
         if job_status == JobStatus.COMPLETE.value:
             completed_progress(job, now=now)
@@ -5175,10 +5513,10 @@ class ConversationOrchestrator:
         try:
             payload = ImageEditVerificationJobPayload.model_validate(job.payload_json)
         except ValueError:
-            return
+            return True
         run = session.get(Run, payload.source_run_id)
         if not run:
-            return
+            return True
         run.provenance_json = {
             **run.provenance_json,
             "image_edit_verification": result,
@@ -5201,6 +5539,7 @@ class ConversationOrchestrator:
                         "run_id": run.id,
                         "provenance": run.provenance_json,
                     }
+        return True
 
     def _finish_image_edit_verification(
         self,
@@ -5209,8 +5548,16 @@ class ConversationOrchestrator:
         reason: VerificationReason,
         *,
         job_status: str = JobStatus.COMPLETE.value,
-    ) -> None:
-        self._persist_image_edit_verification(
+        claim: JobClaim | None = None,
+    ) -> bool:
+        """Skipped-verification terminal write, bound to the presented claim.
+
+        Returns whether the write landed: with a claim the transition is the
+        conditional write and a refusal persists nothing, so the caller must
+        not commit as if it had.
+        """
+
+        return self._persist_image_edit_verification(
             session,
             job,
             {
@@ -5220,15 +5567,75 @@ class ConversationOrchestrator:
                 "automatic_retry_executed": False,
             },
             job_status=job_status,
+            claim=claim,
         )
+
+    def _bound_retry(self, session: Session, source_run: Run) -> TurnAccepted | None:
+        """The retry this source already bound durably, or None.
+
+        The creation transaction writes the retry's identity onto the source
+        run's verification record together with the turn, so a retry that
+        exists is found here on any later pass - after a publication that
+        failed once the turn was durable, after a crash, after a reclaim -
+        and is announced and started again rather than created twice.
+        """
+
+        record = source_run.provenance_json.get("image_edit_verification")
+        retry_run_id = record.get("retry_run_id") if isinstance(record, dict) else None
+        if not isinstance(retry_run_id, str) or not retry_run_id:
+            return None
+        retry_run = session.get(Run, retry_run_id)
+        if retry_run is None:
+            return None
+        return self._accepted_for_run(session, retry_run)
+
+    async def _resume_bound_retry(self, session: Session, accepted: TurnAccepted) -> TurnAccepted:
+        """Announce and start a retry that is already durable, once more:
+        every announcement and start is idempotent for a queued job."""
+
+        run = session.get(Run, accepted.run.id)
+        plan = session.get(WorkPlan, run.work_plan_id) if run and run.work_plan_id else None
+        if run is None or plan is None:
+            return accepted
+        steps = list(session.scalars(select(WorkStep).where(WorkStep.plan_id == plan.id)))
+        runs = [
+            candidate
+            for candidate in session.scalars(select(Run).where(Run.work_plan_id == plan.id))
+        ]
+        jobs = [job for job in session.scalars(select(Job).where(Job.work_plan_id == plan.id))]
+        await self.events.publish(
+            "work_plan.created",
+            plan.id,
+            {
+                "plan_id": plan.id,
+                "step_id": run.work_step_id,
+                "run_id": run.id,
+                "job_id": next((job.id for job in jobs if job.run_id == run.id), None),
+                "step_ids": [step.id for step in steps],
+                "run_ids": [candidate.id for candidate in runs],
+                "job_ids": [job.id for job in jobs],
+                "chat_id": run.chat_id,
+            },
+        )
+        for job in jobs:
+            if job.status == JobStatus.QUEUED.value and job.claim_owner is None:
+                self.start(job.id, job.run_id)
+        return accepted
 
     async def _create_image_edit_verification_retry(
         self,
         session: Session,
         payload: ImageEditVerificationJobPayload,
         decision: ImageEditRetryDecision,
+        *,
+        claim: JobClaim | None = None,
+        source_record: dict[str, object] | None = None,
     ) -> TurnAccepted:
         source_run = session.get(Run, payload.source_run_id)
+        if source_run is not None:
+            bound = self._bound_retry(session, source_run)
+            if bound is not None:
+                return await self._resume_bound_retry(session, bound)
         if (
             not source_run
             or source_run.operation != Operation.IMAGE_TO_IMAGE.value
@@ -5286,6 +5693,52 @@ class ConversationOrchestrator:
         if not verification_job or verification_job.status == JobStatus.CANCELLED.value:
             raise asyncio.CancelledError
         settings[decision.parameter] = decision.value_after
+        verification_job_id = image_edit_verification_job_id(source_run_id)
+
+        def bound_to_claim(turn_session: Session, retry_run: Run) -> None:
+            # Evaluated inside the turn creator immediately before the commit
+            # that makes the retry durable, after every await that precedes
+            # it: a claim that expired during assembly must not create and
+            # announce a replacement turn. The retry's binding provenance is
+            # written here too, so the turn and the record of what it
+            # retries become durable together or not at all.
+            if claim is not None and not self._claim_owns_row(
+                turn_session, verification_job_id, claim
+            ):
+                raise ClaimLost(verification_job_id)
+            retry_run.provenance_json = {
+                **retry_run.provenance_json,
+                "image_edit_verification_retry": {
+                    "version": VERIFICATION_VERSION,
+                    "source_run_id": source_run_id,
+                    "source_job_id": payload.source_job_id,
+                    "source_verification_job_id": verification_job_id,
+                    "attempt": decision.attempt,
+                    "strength_parameter": decision.parameter,
+                    "strength_before": decision.value_before,
+                    "strength_after": decision.value_after,
+                },
+            }
+            # The source's verification record names its retry in the same
+            # transaction: the turn and the record of what it retries are
+            # durable together, and a later pass finds the retry by it.
+            source = turn_session.get(Run, source_run_id)
+            if source is not None:
+                existing = source.provenance_json.get("image_edit_verification")
+                source.provenance_json = {
+                    **source.provenance_json,
+                    "image_edit_verification": {
+                        **(existing if isinstance(existing, dict) else {}),
+                        **(source_record or {}),
+                        "automatic_retry_executed": True,
+                        "retry_run_id": retry_run.id,
+                        "retry_work_plan_id": retry_run.work_plan_id,
+                        "retry_revision_id": retry_run.provenance_json.get(
+                            "response_replacement", {}
+                        ).get("revision_id"),
+                    },
+                }
+
         accepted = await self.create_turn(
             session,
             source_chat_id,
@@ -5301,26 +5754,11 @@ class ConversationOrchestrator:
             source_action="image_edit_verification_retry",
             inherited_image_edit_strength=inherited_strength,
             reference_source_message_id=source_user.id,
+            before_commit=bound_to_claim,
         )
-        retry_run = session.get(Run, accepted.run.id)
-        if retry_run:
-            retry_run.provenance_json = {
-                **retry_run.provenance_json,
-                "image_edit_verification_retry": {
-                    "version": VERIFICATION_VERSION,
-                    "source_run_id": source_run_id,
-                    "source_job_id": payload.source_job_id,
-                    "source_verification_job_id": image_edit_verification_job_id(source_run_id),
-                    "attempt": decision.attempt,
-                    "strength_parameter": decision.parameter,
-                    "strength_before": decision.value_before,
-                    "strength_after": decision.value_after,
-                },
-            }
-            session.commit()
         return accepted
 
-    async def _execute_image_edit_verification(self, job_id: str) -> None:
+    async def _execute_image_edit_verification(self, job_id: str, claim: JobClaim) -> None:
         media_stopped_for_verification = False
         previous_profile_id = next(
             (
@@ -5340,10 +5778,12 @@ class ConversationOrchestrator:
                 try:
                     payload = ImageEditVerificationJobPayload.model_validate(job.payload_json)
                 except ValueError:
-                    self._finish_image_edit_verification(
-                        session, job, VerificationReason.ASSESSMENT_UNAVAILABLE
-                    )
-                    session.commit()
+                    if self._finish_image_edit_verification(
+                        session, job, VerificationReason.ASSESSMENT_UNAVAILABLE, claim=claim
+                    ):
+                        session.commit()
+                    else:
+                        session.rollback()
                     return
                 run = session.get(Run, payload.source_run_id)
                 chat = session.get(Chat, payload.chat_id)
@@ -5356,20 +5796,28 @@ class ConversationOrchestrator:
                     else None
                 )
                 if not run or run.status != RunStatus.COMPLETE.value or not chat:
-                    self._finish_image_edit_verification(
-                        session, job, VerificationReason.SOURCE_UNAVAILABLE
-                    )
-                    session.commit()
+                    if self._finish_image_edit_verification(
+                        session, job, VerificationReason.SOURCE_UNAVAILABLE, claim=claim
+                    ):
+                        session.commit()
+                    else:
+                        session.rollback()
                     return
                 if chat.vision_settings_json.get("verify_image_edits") is not True:
-                    self._finish_image_edit_verification(session, job, VerificationReason.DISABLED)
-                    session.commit()
+                    if self._finish_image_edit_verification(
+                        session, job, VerificationReason.DISABLED, claim=claim
+                    ):
+                        session.commit()
+                    else:
+                        session.rollback()
                     return
                 if not source or not result:
-                    self._finish_image_edit_verification(
-                        session, job, VerificationReason.ARTIFACT_UNAVAILABLE
-                    )
-                    session.commit()
+                    if self._finish_image_edit_verification(
+                        session, job, VerificationReason.ARTIFACT_UNAVAILABLE, claim=claim
+                    ):
+                        session.commit()
+                    else:
+                        session.rollback()
                     return
                 if (
                     not profile
@@ -5377,10 +5825,12 @@ class ConversationOrchestrator:
                     or not install.active
                     or not self._profile_has_verified_vision(session, profile)
                 ):
-                    self._finish_image_edit_verification(
-                        session, job, VerificationReason.VISION_PROFILE_UNAVAILABLE
-                    )
-                    session.commit()
+                    if self._finish_image_edit_verification(
+                        session, job, VerificationReason.VISION_PROFILE_UNAVAILABLE, claim=claim
+                    ):
+                        session.commit()
+                    else:
+                        session.rollback()
                     return
                 if previous_profile_id and previous_profile_id != profile.id:
                     restore_profile = session.get(ModelProfile, previous_profile_id)
@@ -5406,6 +5856,9 @@ class ConversationOrchestrator:
                     if step:
                         step.status = JobStatus.RUNNING.value
                         refresh_plan_status(session, step.plan_id)
+                if not self._claim_owns_row(session, job_id, claim):
+                    session.rollback()
+                    return
                 update_job_progress(
                     job,
                     stage="Loading vision model",
@@ -5424,20 +5877,27 @@ class ConversationOrchestrator:
                 with self.session_factory() as session:
                     job = session.get(Job, job_id)
                     if job:
-                        self._finish_image_edit_verification(
-                            session, job, VerificationReason.VISION_INPUT_UNAVAILABLE
-                        )
-                        session.commit()
+                        if self._finish_image_edit_verification(
+                            session, job, VerificationReason.VISION_INPUT_UNAVAILABLE, claim=claim
+                        ):
+                            session.commit()
+                        else:
+                            session.rollback()
                 return
             if visual.inspected_artifact_ids != [source.id, result.id]:
                 with self.session_factory() as session:
                     job = session.get(Job, job_id)
                     if job:
-                        self._finish_image_edit_verification(
-                            session, job, VerificationReason.VISION_INPUT_UNAVAILABLE
-                        )
-                        session.commit()
+                        if self._finish_image_edit_verification(
+                            session, job, VerificationReason.VISION_INPUT_UNAVAILABLE, claim=claim
+                        ):
+                            session.commit()
+                        else:
+                            session.rollback()
                 return
+            # The preparation was an await; the workers are moved only by
+            # an execution that still owns the row after it.
+            self._require_ownership(job_id, claim, "after preparation")
 
             chat_status = next(
                 status for status in self.processes.statuses() if status.name == "chat"
@@ -5458,15 +5918,18 @@ class ConversationOrchestrator:
                     await self.processes.stop("media")
                     media_stopped_for_verification = True
                 await self.processes.load_chat(profile, install)
+            self._require_ownership(job_id, claim, "after its workers")
             capabilities = await self.engines.chat_capabilities()
             if "image" not in capabilities.input_modalities:
                 with self.session_factory() as session:
                     job = session.get(Job, job_id)
                     if job:
-                        self._finish_image_edit_verification(
-                            session, job, VerificationReason.VISION_PROFILE_UNAVAILABLE
-                        )
-                        session.commit()
+                        if self._finish_image_edit_verification(
+                            session, job, VerificationReason.VISION_PROFILE_UNAVAILABLE, claim=claim
+                        ):
+                            session.commit()
+                        else:
+                            session.rollback()
                 return
 
             with self.session_factory() as session:
@@ -5475,12 +5938,17 @@ class ConversationOrchestrator:
                     return
                 run = session.get(Run, payload.source_run_id)
                 if not run:
-                    self._finish_image_edit_verification(
-                        session, job, VerificationReason.SOURCE_UNAVAILABLE
-                    )
-                    session.commit()
+                    if self._finish_image_edit_verification(
+                        session, job, VerificationReason.SOURCE_UNAVAILABLE, claim=claim
+                    ):
+                        session.commit()
+                    else:
+                        session.rollback()
                     return
                 prompt = build_image_edit_verification_prompt(run.standalone_prompt)
+                if not self._claim_owns_row(session, job_id, claim):
+                    session.rollback()
+                    return
                 update_job_progress(
                     job,
                     stage="Checking image edit",
@@ -5510,6 +5978,9 @@ class ConversationOrchestrator:
                         scope_id=self.scope_id,
                     )
                 ):
+                    # Every event of the assessment is this execution's to
+                    # consume only while it owns the row.
+                    self._require_ownership(job_id, claim, "mid-assessment")
                     if event.type == "delta":
                         raw += event.text
                         if len(raw) > MAX_ASSESSMENT_CHARACTERS:
@@ -5530,10 +6001,12 @@ class ConversationOrchestrator:
                 with self.session_factory() as session:
                     job = session.get(Job, job_id)
                     if job:
-                        self._finish_image_edit_verification(
-                            session, job, VerificationReason.INVALID_ASSESSMENT
-                        )
-                        session.commit()
+                        if self._finish_image_edit_verification(
+                            session, job, VerificationReason.INVALID_ASSESSMENT, claim=claim
+                        ):
+                            session.commit()
+                        else:
+                            session.rollback()
                 return
             decision = decide_image_edit_retry(
                 assessment,
@@ -5560,16 +6033,28 @@ class ConversationOrchestrator:
                         retry_session,
                         payload,
                         decision,
+                        claim=claim,
+                        source_record=persisted,
                     )
                 except asyncio.CancelledError:
                     raise
+                except ClaimLost:
+                    # The row moved while the retry was being assembled; the
+                    # replacement attempt owns any retry now, and nothing
+                    # from this execution may announce one.
+                    retry_session.rollback()
+                    return
                 except Exception:
                     retry_session.rollback()
-                    retry_unavailable = True
                     logger.warning(
                         "Automatic image edit retry was unavailable",
                         exc_info=True,
                     )
+                    # The turn may already be durable - a publication or a
+                    # start that failed after the commit - in which case the
+                    # source record names it and recovery converges on it.
+                    accepted_retry = await self._converge_on_bound_retry(payload)
+                    retry_unavailable = accepted_retry is None
                 finally:
                     retry_session.close()
             with self.session_factory() as session:
@@ -5590,22 +6075,33 @@ class ConversationOrchestrator:
                                 ).get("revision_id"),
                             }
                         )
-                    self._persist_image_edit_verification(session, job, persisted)
-                    session.commit()
+                    if self._persist_image_edit_verification(session, job, persisted, claim=claim):
+                        session.commit()
+                    else:
+                        session.rollback()
         except asyncio.CancelledError:
+            raise
+        except ClaimLost:
+            # The row is another attempt's now; nothing here settles it.
             raise
         except Exception:
             logger.warning("Image edit verification was unavailable", exc_info=True)
             with self.session_factory() as session:
                 job = session.get(Job, job_id)
                 if job and job.status != JobStatus.CANCELLED.value:
-                    self._finish_image_edit_verification(
-                        session, job, VerificationReason.ASSESSMENT_UNAVAILABLE
-                    )
-                    session.commit()
+                    if self._finish_image_edit_verification(
+                        session, job, VerificationReason.ASSESSMENT_UNAVAILABLE, claim=claim
+                    ):
+                        session.commit()
+                    else:
+                        session.rollback()
         finally:
             preempted = job_id in self._preempted_image_edit_verifications
-            if restore_profile and restore_install and not preempted:
+            # Recovery of the workers this execution moved belongs to the
+            # attempt that still owns the row: an expired or reclaimed
+            # attempt leaves chat and media to its successor.
+            recovers = not preempted and self._attempt_current(job_id, claim)
+            if restore_profile and restore_install and recovers:
                 try:
                     await self.processes.load_chat(restore_profile, restore_install)
                 except Exception:
@@ -5613,22 +6109,57 @@ class ConversationOrchestrator:
                         "Could not restore the previous chat profile after image edit verification",
                         exc_info=True,
                     )
-            if media_stopped_for_verification and not preempted:
+            if media_stopped_for_verification and recovers:
                 self._schedule_media_restart()
-            elif not preempted:
+            elif recovers:
                 self._release_deferred_media_restart()
         await self.scheduler.publish_job(job_id)
 
-    async def _fail(self, job_id: str, run_id: str, error: str) -> None:
+    async def _fail(self, job_id: str, run_id: str, error: str, *, claim: JobClaim | None) -> None:
         with self.session_factory() as session:
             job = session.get(Job, job_id)
             run = session.get(Run, run_id)
             if not job or not run:
                 return
             now = utcnow()
-            job.status = JobStatus.FAILED.value
-            job.error = error
-            job.completed_at = now
+            if claim is not None:
+                owned = self._claim_terminal_transition(
+                    session,
+                    job_id,
+                    claim,
+                    status=JobStatus.FAILED.value,
+                    error=error,
+                    completed_at=now,
+                )
+            else:
+                # A failure before any claim exists may only fail a row no
+                # claim has touched: still QUEUED, with no owner.
+                owned = (
+                    cast(
+                        "CursorResult[Any]",
+                        session.execute(
+                            update(Job)
+                            .where(
+                                Job.id == job_id,
+                                Job.status == JobStatus.QUEUED.value,
+                                Job.claim_owner.is_(None),
+                            )
+                            .values(
+                                status=JobStatus.FAILED.value,
+                                error=error,
+                                completed_at=now,
+                            )
+                        ),
+                    ).rowcount
+                    == 1
+                )
+            if not owned:
+                session.rollback()
+                logger.warning(
+                    "Refusing failure write: this execution no longer owns job %s",
+                    job_id,
+                )
+                return
             run.status = RunStatus.FAILED.value
             run.error = error
             run.completed_at = now
@@ -5676,8 +6207,156 @@ class ConversationOrchestrator:
         await self.scheduler.publish_job(job_id)
         await self.events.publish("run.failed", run_id, {"job_id": job_id, "error": error})
 
-    def _complete(self, session: Session, run: Run, job: Job, result: dict[str, Any]) -> None:
+    def _claim_still_owns(self, job_id: str, claim: JobClaim) -> bool:
+        """A read-only ownership probe for effects that are not database
+        writes - publishing a delta. It reads the row's committed status,
+        attempt and owner without taking the write lock, so a token never
+        waits behind another writer. The event it guards also carries its
+        attempt, and the reader fences an older attempt's late word; a
+        durable effect never relies on this probe, it asserts inside its
+        own transaction."""
+
+        with self.session_factory() as session:
+            row = session.execute(
+                select(Job.status, Job.attempt, Job.claim_owner).where(Job.id == job_id)
+            ).first()
+        return row is not None and tuple(row) == (
+            JobStatus.RUNNING.value,
+            claim.attempt,
+            claim.token,
+        )
+
+    def _require_ownership(self, job_id: str, claim: JobClaim, where: str) -> None:
+        """Stop a long effect the moment the row is no longer this
+        execution's: the read-only probe, raised as ClaimLost."""
+
+        if not self._claim_still_owns(job_id, claim):
+            raise ClaimLost(f"job {job_id} is no longer this execution's {where}")
+
+    async def _converge_on_bound_retry(
+        self, payload: ImageEditVerificationJobPayload
+    ) -> TurnAccepted | None:
+        """After a retry creation that raised, the retry the source already
+        bound - a turn durable before its publication or start failed - is
+        announced and started again; None when nothing was bound."""
+
+        with self.session_factory() as session:
+            source = session.get(Run, payload.source_run_id)
+            bound = self._bound_retry(session, source) if source is not None else None
+            if bound is None:
+                return None
+            try:
+                return await self._resume_bound_retry(session, bound)
+            except Exception:
+                logger.warning("The bound retry could not be announced again", exc_info=True)
+                return bound
+
+    def _attempt_current(self, job_id: str, claim: JobClaim) -> bool:
+        """Whether the row still belongs to this claim's attempt: owned by
+        this claim, or finished under this attempt. An expired or reclaimed
+        row is another attempt's to recover, and this execution may move no
+        global worker on its behalf."""
+
+        with self.session_factory() as session:
+            row = session.execute(
+                select(Job.status, Job.attempt, Job.claim_owner).where(Job.id == job_id)
+            ).first()
+        if row is None:
+            return False
+        status, attempt, owner = row
+        if attempt != claim.attempt:
+            return False
+        if owner == claim.token:
+            return True
+        return status in {
+            JobStatus.COMPLETE.value,
+            JobStatus.FAILED.value,
+            JobStatus.CANCELLED.value,
+        }
+
+    def _claim_owns_row(self, session: Session, job_id: str, claim: JobClaim) -> bool:
+        """Assert claim ownership AT the database, inside this transaction.
+
+        A conditional no-op UPDATE bound to the job id, the RUNNING status,
+        and the claim-captured attempt and owner. A rowcount of one means
+        the claim still owns the row at this write, and SQLite's single
+        writer holds that fact until this session commits; zero means a
+        foreign expiry and re-claim moved the row, and nothing derived from
+        this execution may be persisted.
+        """
+
+        result = cast(
+            "CursorResult[Any]",
+            session.execute(
+                update(Job)
+                .where(
+                    Job.id == job_id,
+                    Job.status == JobStatus.RUNNING.value,
+                    Job.attempt == claim.attempt,
+                    Job.claim_owner == claim.token,
+                )
+                .values(claim_owner=claim.token)
+            ),
+        )
+        return result.rowcount == 1
+
+    def _claim_terminal_transition(
+        self,
+        session: Session,
+        job_id: str,
+        claim: JobClaim,
+        **values: Any,
+    ) -> bool:
+        """Write a terminal job transition bound to the captured claim.
+
+        The lease release that runs when an execution's scope exits clears
+        claim_owner while leaving status and attempt, so terminal writers
+        that run after the lease accept an ownerless row - but never a row
+        whose attempt moved or that another claim currently owns.
+        """
+
+        result = cast(
+            "CursorResult[Any]",
+            session.execute(
+                update(Job)
+                .where(
+                    Job.id == job_id,
+                    Job.status == JobStatus.RUNNING.value,
+                    Job.attempt == claim.attempt,
+                    or_(Job.claim_owner == claim.token, Job.claim_owner.is_(None)),
+                )
+                .values(**values)
+            ),
+        )
+        return result.rowcount == 1
+
+    def _complete(
+        self,
+        session: Session,
+        run: Run,
+        job: Job,
+        result: dict[str, Any],
+        *,
+        claim: JobClaim,
+    ) -> bool:
+        """Terminal completion, or False when the claim no longer owns the row.
+
+        The COMPLETE transition itself is the guard: a conditional write
+        bound to the captured claim. Once it lands, the row is terminal and
+        unclaimable, so the remaining fields may be ordinary writes; if it
+        refuses, an expiry and re-claim own the row and nothing here - run,
+        message, progress or results - may be persisted.
+        """
+
         now = utcnow()
+        if not self._claim_terminal_transition(
+            session,
+            job.id,
+            claim,
+            status=JobStatus.COMPLETE.value,
+            completed_at=now,
+        ):
+            return False
         run.status = RunStatus.COMPLETE.value
         run.completed_at = now
         if run.started_at:
@@ -5685,11 +6364,10 @@ class ConversationOrchestrator:
         message = session.get(Message, run.assistant_message_id)
         if message:
             message.status = MessageStatus.COMPLETE.value
-        job.status = JobStatus.COMPLETE.value
         completed_progress(job, now=now)
         job.result_json = result
-        job.completed_at = now
         self._set_work_status(session, run, JobStatus.COMPLETE.value)
+        return True
 
     def _mark_cancelled(self, session: Session, job: Job) -> None:
         now = utcnow()
@@ -5811,11 +6489,53 @@ class ConversationOrchestrator:
             )
         return parts
 
-    def _persist_streamed_text(self, message_id: str, text: str) -> None:
+    def _stamp_chat_engine_report(self, job_id: str, claim: JobClaim) -> None:
+        """Record that the chat engine produced tokens, just now.
+
+        Deltas do not otherwise touch job progress - text goes to the message
+        row - so this is the chat path's only engine-provenance writer. The
+        stage is left as whatever the phase writer last set; this records WHEN
+        the engine last spoke, not a new lifecycle step.
+
+        Bound to the CLAIM, not the row: a stale stream that outlived its
+        expired claim reloads the row, finds the new claimant's RUNNING state,
+        and would otherwise refresh the new attempt's liveness before the new
+        engine has spoken. The writer's conditional UPDATE enforces the
+        claim identity at the database itself.
+        """
+
         with self.session_factory() as session:
+            job = session.get(Job, job_id)
+            if not job or job.status != JobStatus.RUNNING.value:
+                return
+            # No duplicate site-level identity check: the writer's own
+            # conditional UPDATE is the single guard, and one guard keeps
+            # the refusal observable.
+            snapshot = apply_engine_progress(
+                session,
+                job_id=job_id,
+                claim_attempt=claim.attempt,
+                claim_owner=claim.token,
+                stage=job.phase or "writing the response",
+                queue_resource=job.queue_resource,
+            )
+            if snapshot is None:
+                session.rollback()
+                return
+            session.commit()
+
+    def _persist_streamed_text(
+        self, message_id: str, text: str, *, job_id: str, claim: JobClaim
+    ) -> bool:
+        with self.session_factory() as session:
+            if not self._claim_owns_row(session, job_id, claim):
+                # A stale stream that outlived its claim must not replace
+                # the message text the current attempt is producing.
+                session.rollback()
+                return False
             message = session.get(Message, message_id)
             if not message:
-                return
+                return True
             ConversationOrchestrator._remove_chat_progress(message)
             text_part = next(
                 (part for part in message.parts if part.type == PartType.TEXT.value), None
@@ -5828,6 +6548,7 @@ class ConversationOrchestrator:
                     [MessagePart(position=0, type=PartType.TEXT.value, text=text)],
                 )
             session.commit()
+        return True
 
     @staticmethod
     def _remove_chat_progress(message: Message) -> None:

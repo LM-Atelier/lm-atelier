@@ -258,7 +258,7 @@ class MockMediaAdapter:
                 self._cancelled.discard(request.run_id)
                 yield MediaEvent(type="cancelled", progress=progress, phase="cancelled")
                 return
-            yield MediaEvent(type="progress", progress=progress, phase=phase)
+            yield MediaEvent(type="progress", progress=progress, phase=phase, engine_sourced=True)
             await asyncio.sleep(0.05)
 
         preview = self._mock_image(request)
@@ -267,12 +267,15 @@ class MockMediaAdapter:
             progress=0.85,
             phase="preview",
             preview=preview.content,
+            engine_sourced=True,
         )
         if "video" in request.operation:
             asset = await self._mock_video(request)
         else:
             asset = self._mock_image(request)
-        yield MediaEvent(type="complete", progress=1, phase="complete", assets=[asset])
+        yield MediaEvent(
+            type="complete", progress=1, phase="complete", assets=[asset], engine_sourced=True
+        )
 
     def _mock_image(self, request: MediaRequest) -> GeneratedAsset:
         prompt = html.escape(request.prompt[:240])

@@ -259,6 +259,77 @@ def test_expired_foreign_claim_is_interrupted_without_replay(settings: Settings)
         assert local.status == JobStatus.RUNNING.value
 
 
+def test_expiring_a_dispatched_turn_replaces_its_progress_part_in_one_order(
+    settings: Settings,
+) -> None:
+    """A dispatched turn's message carries a progress part at position 0.
+
+    Interruption removes that part and records an error part in the same
+    position; the removal must reach the database before the insert, or the
+    (message, position) uniqueness refuses the interruption itself and the
+    abandoned claim is never expired.
+    """
+
+    from local_lm.domain import PartType
+    from local_lm.models import Chat, Message, MessagePart, Run
+
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    scheduler = ResourceScheduler()
+    now = utcnow()
+    with SessionLocal() as session:
+        chat = Chat()
+        session.add(chat)
+        session.flush()
+        user = Message(chat_id=chat.id, role="user")
+        assistant = Message(chat_id=chat.id, role="assistant", status="pending")
+        session.add_all([user, assistant])
+        session.flush()
+        assistant.parts.append(
+            MessagePart(
+                position=0,
+                type=PartType.PROGRESS.value,
+                text="Rendering",
+                metadata_json={"progress": 0.4, "phase": "running"},
+            )
+        )
+        run = Run(
+            chat_id=chat.id,
+            user_message_id=user.id,
+            assistant_message_id=assistant.id,
+            status="running",
+            operation="text_to_image",
+        )
+        session.add(run)
+        session.flush()
+        session.add(
+            Job(
+                id="job_dispatched",
+                kind="image",
+                status=JobStatus.RUNNING.value,
+                queue_group="primary",
+                run_id=run.id,
+                claim_owner="other-dispatcher_token",
+                claim_expires_at=now - timedelta(seconds=1),
+            )
+        )
+        session.commit()
+        assistant_id = assistant.id
+
+    assert scheduler._expire_foreign_claims("primary") == ["job_dispatched"]
+
+    with SessionLocal() as session:
+        job = session.get(Job, "job_dispatched")
+        message = session.get(Message, assistant_id)
+        assert job is not None and message is not None
+        assert job.status == JobStatus.INTERRUPTED.value
+        types = [part.type for part in message.parts]
+        assert PartType.PROGRESS.value not in types, "the progress part survived interruption"
+        assert PartType.ERROR.value in types, "the interruption recorded no error part"
+        assert len({part.position for part in message.parts}) == len(message.parts)
+
+
 async def test_waiting_for_local_capacity_does_not_keep_a_database_session_open(
     settings: Settings,
 ) -> None:
@@ -637,7 +708,7 @@ def test_the_claim_path_scans_fresh_rather_than_trusting_the_share(
     The share is warm and the clock is frozen, so the progress path inside
     `_acquire_job` answers from the share without scanning. Any scan that then
     happens is the claim path scanning fresh. The probe raises at that scan,
-    which both proves it happened and ends the loop without a timer.
+    which both records that it happened and ends the loop without a timer.
 
     Trusting the share here would let a job START on an answer up to one scan
     plus one window old, while the claim statement guards only that the row is

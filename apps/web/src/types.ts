@@ -423,6 +423,7 @@ export interface WorkerStatus {
   peak_memory_bytes: number | null;
   active_jobs: number;
   queued_jobs: number;
+  progress_age_seconds?: number | null;
   failure_detail?: string | null;
   failure_code?:
     | "oom_vram"
