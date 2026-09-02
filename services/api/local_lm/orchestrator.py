@@ -8,9 +8,9 @@ import re
 import secrets
 import shutil
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -225,6 +225,13 @@ from .workflow_selection import (
 logger = logging.getLogger(__name__)
 
 IDEMPOTENCY_CLAIM_WAIT_SECONDS = 120.0
+# Every operation that runs on the media device: anything in Operation
+# that is not TEXT. Derived from the enum rather than listed, so the
+# membership is the enum's own - and since "not media" is the answer
+# that skips releasing the device, the derivation includes everything
+# it does not positively know to be text.
+_MEDIA_OPERATIONS = frozenset(member.value for member in Operation if member is not Operation.TEXT)
+_MEDIA_JOB_KINDS = frozenset({JobKind.IMAGE.value, JobKind.VIDEO.value})
 MAX_PENDING_WORK_PER_CHAT = 32
 MEDIA_SEED_SPACE = 2_147_483_648
 PENDING_OUTPUT_REFERENCE = re.compile(
@@ -362,6 +369,52 @@ class ResponseRevisionConflict(ValueError):
     """A stable response cannot accept the requested revision transition."""
 
 
+@dataclass(frozen=True)
+class _DeferredHandoff:
+    """What a deferred device handoff still owes, and who it was taken for.
+
+    `profile_id` is the chat profile that was displaced and must eventually be
+    restored. `continuation_job_id` is the queued media job the deferral was
+    taken FOR, when one is known: settlement by a task that holds no lease is
+    gated on it, so a stranger's cancellation cannot consume a debt the bound
+    continuation is about to pay. Liveness of the bound continuation is judged
+    by its in-process dispatch task FIRST and its durable status second,
+    because a media job commits COMPLETE before its handoff completion runs -
+    the durable status alone calls a still-finalizing owner dead.
+    Lease-holding paths - a text takeover, a media job's own preparation -
+    legitimately supersede the binding.
+
+    Activation scope is carried AND re-read: a payer that finds the worker
+    still running prefers the fresh `launch_scope_sha256` answer, but a payer
+    that finds it already stopped has only what was captured while the scope
+    was readable - cancellation after a scoped stop otherwise leaves a debt
+    whose settler cannot know a broad restart is forbidden.
+    """
+
+    profile_id: str | None
+    continuation_job_id: str | None
+    #: True once the recycle half has been paid (or was never owed). A debt
+    #: whose recycle is unpaid must survive a successful chat takeover as a
+    #: recycle-only obligation (profile_id None) instead of being erased.
+    recycle_paid: bool = False
+    #: The launch scope of the worker this debt concerns, captured while it
+    #: was still readable. None means unknown, and unknown FAILS CLOSED at pay
+    #: time: a settler that finds media already down cannot re-read the scope
+    #: of a process that no longer exists, and must not broad-start on a
+    #: guess.
+    scoped: bool | None = None
+    #: Monotonic mint order. Every write of the slot carries a fresh
+    #: generation, so a failed settlement's rollback can tell "the slot holds
+    #: something newer than what I checked out" from "older truth a concurrent
+    #: rollback restored first". A bare occupancy check cannot: whichever
+    #: of two failed checkouts rolls back second sees the slot occupied and
+    #: skips, and the newer obligation is the one permanently lost when
+    #: the older rollback happens to run first. Excluded from equality:
+    #: two records that owe the same thing ARE the same obligation, and the
+    #: generation is rollback bookkeeping, not identity.
+    generation: int = field(default=0, compare=False)
+
+
 class ProjectWorkflowPinInvalid(ValueError):
     """A project pins a workflow revision that cannot run as pinned.
 
@@ -466,7 +519,43 @@ class ConversationOrchestrator:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._preempted_image_edit_verifications: set[str] = set()
         self._media_restart_task: asyncio.Task[None] | None = None
-        self._media_restart_after_chat_activity = False
+        # Who minted the live restart task - a give-back or a step prewarm -
+        # and under which give-back generation: a task minted before a
+        # scoped supersession owes nothing when it ends, and a prewarm
+        # cancels only a task it minted itself.
+        self._media_restart_owner: str = "give-back"
+        self._media_restart_minting_owner: str = "give-back"
+        # A give-back that found a prewarm's task in flight joined it: that
+        # task's cancellation then still owes the device back.
+        self._media_give_back_joined: bool = False
+        # A restart task that could not act - the device leased to a
+        # dispatch, or a status it could not read - hands the give-back
+        # to the pump without spending an attempt.
+        self._media_give_back_deferred: bool = False
+        self._media_restart_task_generation: int = 0
+        self._media_give_back_generation: int = 0
+        self._media_restart_intent: str | None = None
+        # A give-back the worker refused is retained here until a restart
+        # succeeds or the bounded retries run out; a logged failure alone
+        # never discharges it.
+        self._media_give_back_owed: bool = False
+        self._media_give_back_attempts: int = 0
+        self._settlement_retry_task: asyncio.Task[None] | None = None
+        # Foreground settlement checks the debt OUT (clears it before its
+        # awaits); the live checkout GENERATIONS let the pump tell "paid"
+        # from "in someone else's hands", and let two failed settlements roll
+        # back in either order without the older restore erasing the newer
+        # obligation. The closing flag stops any task being minted while
+        # close() tears down.
+        self._settlement_checkouts: set[int] = set()
+        self._debt_generation = 0
+        self._closing = False
+        # The chat profile a media job displaced and did NOT put back, because
+        # another media job was next. Held so the eventual resume still knows
+        # which profile to load: only the FIRST media job of a run sees the chat
+        # worker running, so if that job does not record the profile, every
+        # later job in the queue has nothing to restore.
+        self._deferred_handoff: _DeferredHandoff | None = None
         self._step_prewarm_plan_id: str | None = None
         self._step_prewarm_task: asyncio.Task[None] | None = None
         self._chat_guards: dict[str, asyncio.Lock] = {}
@@ -2795,10 +2884,17 @@ class ConversationOrchestrator:
     def start(self, job_id: str, run_id: str | None) -> None:
         if job_id in self._tasks and not self._tasks[job_id].done():
             return
-        task = asyncio.create_task(
+        # Through the close-aware mint: a create_turn that passed admission
+        # and then awaited its event publications can reach here after close()
+        # snapshotted the live tasks, and a bare create_task then would be a
+        # dispatch nothing ever cancels. Refused, the job stays QUEUED for the
+        # next process - exactly what shutdown wants.
+        task = self._mint_task(
             self._execute_after_preempting_verification(job_id, run_id),
             name=f"local-lm-{job_id}",
         )
+        if task is None:
+            return
         self._tasks[job_id] = task
         task.add_done_callback(lambda finished: self._task_done(job_id, finished))
 
@@ -2995,9 +3091,74 @@ class ConversationOrchestrator:
         task = self._tasks.get(job_id)
         return task is not None and not task.done()
 
+    def _minted_debt(
+        self,
+        profile_id: str | None,
+        continuation_job_id: str | None,
+        *,
+        recycle_paid: bool = False,
+        scoped: bool | None = None,
+    ) -> _DeferredHandoff:
+        """The only constructor for slot writes: every record gets a fresh
+        generation, rebinds included - a rebind is newer truth about who owns
+        the obligation, and rollback ordering keys on that order.
+        """
+
+        self._debt_generation += 1
+        return _DeferredHandoff(
+            profile_id,
+            continuation_job_id,
+            recycle_paid=recycle_paid,
+            scoped=scoped,
+            generation=self._debt_generation,
+        )
+
+    def _restore_debt(self, debt: _DeferredHandoff) -> None:
+        """Put a checked-out obligation back without erasing newer truth.
+
+        Empty slot: the checkout returns unchanged. Occupied slot: the record
+        with the NEWER generation stands, whichever order the rollbacks ran
+        in - and the other record's unpaid halves survive into it. Recycle
+        stays owed unless BOTH said paid, and a known scope fills an unknown
+        one, because unknown fails closed into "scoped" and a broad give-back
+        must never be earned by forgetting. The merge keeps the newer
+        generation, so a third rollback still orders correctly against it.
+        """
+
+        current = self._deferred_handoff
+        if current is None:
+            self._deferred_handoff = debt
+            return
+        newer, older = (current, debt) if current.generation >= debt.generation else (debt, current)
+        self._deferred_handoff = _DeferredHandoff(
+            newer.profile_id,
+            newer.continuation_job_id,
+            recycle_paid=newer.recycle_paid and older.recycle_paid,
+            scoped=newer.scoped if newer.scoped is not None else older.scoped,
+            generation=newer.generation,
+        )
+
+    def _mint_task(
+        self, coroutine: Coroutine[Any, Any, None], *, name: str
+    ) -> asyncio.Task[None] | None:
+        """The close-aware mint: a task minted here refuses once closing.
+
+        close() flips _closing and then snapshots the live tasks in the same
+        synchronous stretch, so a mint that checks the flag synchronously here
+        can never slip a task past the snapshot: either the mint ran first and
+        the snapshot contains it, or the flag was already set and the mint
+        refuses. A refused coroutine is closed, not leaked.
+        """
+
+        if self._closing:
+            coroutine.close()
+            return None
+        return asyncio.create_task(coroutine, name=name)
+
     def _task_done(self, job_id: str, task: asyncio.Task[None]) -> None:
         if self._tasks.get(job_id) is task:
             self._tasks.pop(job_id, None)
+        self._recover_owned_media_state(job_id)
         if task.cancelled():
             return
         exception = task.exception()
@@ -3055,6 +3216,11 @@ class ConversationOrchestrator:
         return True
 
     async def close(self) -> None:
+        # The gate comes FIRST: while close awaits the old restart task, a
+        # concurrently completing settlement could otherwise schedule a
+        # replacement into the slot close is about to clear - a live task
+        # nothing would ever cancel.
+        self._closing = True
         self._admission_open = False
         tasks = tuple(self._tasks.values())
         for task in tasks:
@@ -3066,7 +3232,19 @@ class ConversationOrchestrator:
             self._media_restart_task.cancel()
             await asyncio.gather(self._media_restart_task, return_exceptions=True)
             self._media_restart_task = None
-        self._media_restart_after_chat_activity = False
+        if self._settlement_retry_task:
+            self._settlement_retry_task.cancel()
+            await asyncio.gather(self._settlement_retry_task, return_exceptions=True)
+            self._settlement_retry_task = None
+        self._media_restart_intent = None
+        self._media_give_back_owed = False
+        self._media_give_back_attempts = 0
+        # A deferral outstanding at shutdown is not owed to anyone afterwards:
+        # the process is going away and the workers with it. Clearing it stops a
+        # restarted orchestrator inheriting a debt against a worker that no
+        # longer exists, which would recycle a freshly started media worker on
+        # the first text job for no reason.
+        self._deferred_handoff = None
         self._step_prewarm_plan_id = None
         self._step_prewarm_task = None
 
@@ -3076,6 +3254,17 @@ class ConversationOrchestrator:
     async def _execute(self, job_id: str, run_id: str | None) -> None:
         verification_job = False
         queued_verification_job_id: str | None = None
+        # ONE OWNER for a deferred handoff, discharged in the finally below.
+        # Every exit before or INSIDE `_prepare_device_handoff` has to give
+        # back what a previous job's deferral borrowed, and there are more of
+        # those exits than are obvious: a missing job, a missing run, a
+        # verification job, a terminal status, an exception, cancellation while
+        # waiting for the lease or between the pre-handoff event publications,
+        # and a stop that fails or is cancelled partway through preparation
+        # itself. Settling at each exit individually is bound to miss some;
+        # the single finally covers them all.
+        handoff_prepared = False
+        text_completed = False
         try:
             with self.session_factory() as session:
                 job = session.get(Job, job_id)
@@ -3103,6 +3292,7 @@ class ConversationOrchestrator:
                     await self._execute_image_edit_verification(job_id)
                     return
                 assert run_id is not None
+                stale_job = False
                 with self.session_factory() as session:
                     job = session.get(Job, job_id)
                     run = session.get(Run, run_id)
@@ -3116,26 +3306,40 @@ class ConversationOrchestrator:
                             JobStatus.INTERRUPTED.value,
                         }
                     ):
-                        return
-                    self._resolve_step_inputs(session, run)
-                    run.status = RunStatus.RUNNING.value
-                    run.started_at = job.started_at or utcnow()
-                    self._set_work_status(session, run, JobStatus.RUNNING.value)
-                    mark_setup_verification_running(
-                        session,
-                        run.chat_id,
-                        run_id=run.id,
-                        job_id=job.id,
-                    )
-                    session.commit()
-                    event_payload = {
-                        "job_id": job_id,
-                        "plan_id": run.work_plan_id,
-                        "step_id": run.work_step_id,
-                    }
-                    operation = run.operation
-                    prompt = run.standalone_prompt
-                    self._arm_step_prewarm(session, run)
+                        # Decided here, ACTED ON AFTER THE SESSION CLOSES. This
+                        # return is before `_prepare_device_handoff`, so nothing
+                        # downstream pays a deferral this job was peeked as the
+                        # reason for: a queue whose next job is cancelled
+                        # between the peek and the wake would leave the chat
+                        # worker down and ComfyUI holding a finished
+                        # generation's allocations, with no later handoff to
+                        # notice. But stopping a worker is a slow await and this
+                        # is inside an open database session; a slow await must
+                        # never hold a write transaction open, so the stop runs
+                        # after the session closes.
+                        stale_job = True
+                    else:
+                        self._resolve_step_inputs(session, run)
+                        run.status = RunStatus.RUNNING.value
+                        run.started_at = job.started_at or utcnow()
+                        self._set_work_status(session, run, JobStatus.RUNNING.value)
+                        mark_setup_verification_running(
+                            session,
+                            run.chat_id,
+                            run_id=run.id,
+                            job_id=job.id,
+                        )
+                        session.commit()
+                        event_payload = {
+                            "job_id": job_id,
+                            "plan_id": run.work_plan_id,
+                            "step_id": run.work_step_id,
+                        }
+                        operation = run.operation
+                        prompt = run.standalone_prompt
+                        self._arm_step_prewarm(session, run)
+                if stale_job:
+                    return
                 await self.events.publish("run.created", run_id, event_payload)
                 await self.events.publish(
                     "plan.selected",
@@ -3152,17 +3356,49 @@ class ConversationOrchestrator:
                     job_id=job_id,
                     run_id=run_id,
                 )
+                # AFTER the await, never before it. A failure or cancellation
+                # inside preparation must leave this False so the finally
+                # settles the debt preparation recorded - flipped early, that
+                # settlement is skipped and both workers can end down on an
+                # idle queue with nobody left to notice.
+                handoff_prepared = True
                 try:
                     if operation == Operation.TEXT.value:
+                        # BEFORE the chat model loads, not after. A deferred
+                        # handoff left the media worker holding a finished
+                        # generation's allocations, and this is the last point
+                        # where that can be undone without the load landing on
+                        # top of them.
+                        await self._release_media_device_for_chat(job_id)
                         await self._execute_chat(job_id, run_id)
+                        # The takeover COMMITS here, not at the release: only
+                        # a completed chat execution discharges the rebound
+                        # debt, so any raise above leaves it on the books.
+                        self._discharge_deferred_handoff(job_id)
+                        text_completed = True
                     else:
                         queued_verification_job_id = await self._execute_media(job_id, run_id)
                 finally:
                     if operation == Operation.TEXT.value:
-                        self._release_deferred_media_restart()
+                        # An intent this job owns is fired here even when the
+                        # job failed before its first delta: the handoff that
+                        # armed it was fully paid, so nobody else owes the
+                        # device back. fire=False only while a debt bound to
+                        # this continuation is retained - the settlement owns
+                        # recovery then, and a broad start during an
+                        # unresolved debt would race its settlement.
+                        debt = self._deferred_handoff
+                        settlement_owns_recovery = (
+                            debt is not None and debt.continuation_job_id == job_id
+                        )
+                        self._discharge_media_restart_intent(
+                            job_id,
+                            fire=text_completed or not settlement_owns_recovery,
+                            allow_vacated=True,
+                        )
                         await self._settle_step_prewarm(job_id)
                     if resume_chat_profile:
-                        await self._complete_media_handoff(resume_chat_profile)
+                        await self._complete_media_handoff(resume_chat_profile, job_id)
                 if queued_verification_job_id:
                     self.start(queued_verification_job_id, None)
         except asyncio.CancelledError:
@@ -3196,6 +3432,15 @@ class ConversationOrchestrator:
             assert run_id is not None
             detail = str(exc).strip() or f"Generation failed ({type(exc).__name__})"
             await self._fail(job_id, run_id, detail)
+        finally:
+            # Reached on every path, including the two cancellation windows that
+            # raise past every return above. If the handoff never ran, nothing
+            # downstream will load a chat model, so the owed profile is RESTORED
+            # and the media worker scheduled behind it - erasing the debt here
+            # would leave both workers down on an idle queue with nobody left to
+            # notice. Idempotent, so the ordinary path costs one flag read.
+            if not handoff_prepared:
+                await self._settle_deferred_handoff(job_id=job_id)
         if run_id is not None:
             await self._finalize_setup_verification_run(job_id, run_id)
 
@@ -3298,7 +3543,7 @@ class ConversationOrchestrator:
                     if not streaming_announced:
                         streaming_announced = True
                         await self._set_chat_phase(job_id, run_id, "Writing the response")
-                    self._release_deferred_media_restart()
+                    self._discharge_media_restart_intent(job_id, fire=True)
                     self._begin_step_prewarm()
                     accumulated += event.text
                     await self.events.publish(
@@ -4220,23 +4465,69 @@ class ConversationOrchestrator:
             return None
         chat_worker = next(item for item in self.processes.statuses() if item.name == "chat")
         if not chat_worker.running or not chat_worker.managed:
-            return None
+            # Chat is already down. Normally that means nothing was displaced and
+            # there is nothing to put back. But a previous media job in this same
+            # queue may have displaced it and deliberately left it down because
+            # this job was next - in which case the profile it owes is still
+            # outstanding, and returning it here is what keeps the completion
+            # path running for the rest of the queue. Without this, only the
+            # first media job would ever reach `_complete_media_handoff` and the
+            # chat worker would never come back.
+            debt = self._deferred_handoff
+            if debt is None:
+                return None
+            if job_id is not None:
+                # This media job is taking the device: the debt is REBOUND to
+                # it, so a bystander's exit cannot settle - and stop a worker -
+                # underneath an active generation. The job's own completion
+                # handoff pays or re-defers what it inherited.
+                self._deferred_handoff = self._minted_debt(
+                    debt.profile_id, job_id, recycle_paid=debt.recycle_paid, scoped=debt.scoped
+                )
+            return debt.profile_id
         profile_id = chat_worker.profile_id
-        if profile_id:
-            self._chat_planner_ready.clear()
         if job_id and run_id:
             await self._set_media_phase(job_id, run_id, "Releasing chat model")
+        # Cleared HERE, after the last unguarded await: cancelled at the phase
+        # write above, the event has not been touched and needs no restoring.
+        if profile_id:
+            self._chat_planner_ready.clear()
         try:
             await self.processes.stop("chat")
         except asyncio.CancelledError:
+            # The stop may have partially completed, so the displaced profile
+            # is recorded as the deferral debt rather than dropped - the
+            # dispatch finally has not seen `handoff_prepared` flip, and its
+            # settlement is the one place that knows how to restore it. Losing
+            # it here would leave the chat worker down with nothing anywhere
+            # remembering what to load. Bound to THIS job: its own finally is
+            # the settler, and a stranger must not race it for the debt.
+            if profile_id:
+                self._deferred_handoff = self._minted_debt(
+                    profile_id, job_id, scoped=self._media_launch_scoped()
+                )
             self._chat_planner_ready.set()
             raise
         except Exception:
+            if profile_id:
+                self._deferred_handoff = self._minted_debt(
+                    profile_id, job_id, scoped=self._media_launch_scoped()
+                )
             self._chat_planner_ready.set()
             raise
         return profile_id
 
-    async def _resume_chat_worker(self, profile_id: str) -> None:
+    async def _resume_chat_worker(self, profile_id: str) -> bool:
+        """Reload the displaced chat profile. True only when the load COMMITTED.
+
+        Missing profile or install rows and ordinary load failures return
+        False rather than raising, and callers treat False as "the
+        restoration did not happen" and keep their obligation - a swallowed
+        failure that read as success would erase a debt the settlement
+        never paid. Cancellation
+        propagates; the planner event is set on every exit.
+        """
+
         try:
             with self.session_factory() as session:
                 profile = session.get(ModelProfile, profile_id)
@@ -4246,77 +4537,226 @@ class ConversationOrchestrator:
                     else None
                 )
                 if not profile or not install:
-                    return
+                    return False
                 session.expunge(profile)
                 session.expunge(install)
             await self.processes.load_chat(profile, install)
         except Exception:
             logger.exception("Could not reload chat profile %s after media handoff", profile_id)
+            return False
+        else:
+            return True
         finally:
             self._chat_planner_ready.set()
 
-    def _handoff_chat_target(self, fallback_profile_id: str) -> tuple[str, bool]:
-        """Prefer the profile required by the next dispatchable text job."""
+    def _handoff_chat_target(self, fallback_profile_id: str) -> tuple[str, str, str | None]:
+        """Prefer the profile required by the next dispatchable text job.
+
+        Returns that profile, WHICH OF THREE THINGS comes next - "text",
+        "media", or "other" - and the peeked job's id for the text and media
+        answers, so a deferral or a restart intent can be bound to the exact
+        continuation it is taken for. A boolean "a text job is next" cannot
+        carry this decision: it is false in two situations that want opposite
+        handling - the next job is media, and there is no next job at all.
+
+        Those want opposite handling because the recycle exists to release
+        ComfyUI's retained allocations before a chat model is loaded onto the
+        same device. An idle queue is when that release is most worth doing and
+        nothing is lost by it. Media-next is when doing it destroys the model
+        about to be used. So reading `not text_next` as "media is next" would
+        stop an idle queue releasing anything, which is the paging failure the
+        recycle exists to prevent.
+
+        "other" deliberately keeps two things together: an empty queue, and
+        anything this cannot classify - a peek that raised, a shape it did
+        not expect, a run it could not load, an operation in neither set.
+        Unclassifiable answers must share the empty-queue branch, not the
+        "text" branch: "text" defers the media restart, and deferring on a
+        misread would leave the machine unrestored where scheduling the
+        restart immediately is the safe default.
+
+        An unknown case must never be guessed into "media": that is the one
+        answer that skips releasing the device.
+        """
 
         try:
             candidate = self.scheduler.peek_next_eligible_job("primary")
         except Exception:
             logger.exception("Could not inspect the next job during media handoff")
-            return fallback_profile_id, False
+            return fallback_profile_id, "other", None
         if not isinstance(candidate, tuple) or len(candidate) != 2:
-            return fallback_profile_id, False
+            return fallback_profile_id, "other", None
         with self.session_factory() as session:
             if candidate[1] is None:
                 job = session.get(Job, candidate[0])
                 if job and job.kind == JobKind.EDIT_VERIFY.value:
                     profile_id = job.payload_json.get("vision_profile_id")
                     if isinstance(profile_id, str):
-                        return profile_id, True
-                return fallback_profile_id, False
+                        return profile_id, "text", candidate[0]
+                return fallback_profile_id, "other", None
             run = session.get(Run, candidate[1])
-            if run and run.operation == Operation.TEXT.value and isinstance(run.profile_id, str):
-                return run.profile_id, True
-        return fallback_profile_id, False
+            if run is None:
+                return fallback_profile_id, "other", None
+            if run.operation == Operation.TEXT.value and isinstance(run.profile_id, str):
+                return run.profile_id, "text", candidate[0]
+            if run.operation in _MEDIA_OPERATIONS:
+                return fallback_profile_id, "media", candidate[0]
+        return fallback_profile_id, "other", None
 
-    async def _complete_media_handoff(self, chat_profile_id: str) -> None:
+    async def _complete_media_handoff(
+        self, chat_profile_id: str, job_id: str | None = None
+    ) -> None:
         """Release retained Comfy state before restoring a managed chat model."""
 
-        selected_chat_profile_id, queued_text_next = self._handoff_chat_target(chat_profile_id)
-        recycle_managed_media = False
-        recycled_activation_scope = False
+        selected_chat_profile_id, next_work, continuation_job_id = self._handoff_chat_target(
+            chat_profile_id
+        )
+
+        if next_work == "media":
+            # Another media job is next, so both halves of this handoff are not
+            # merely wasted but actively harmful: the recycle destroys the model
+            # that is about to be used again, and the resume loads a chat model
+            # that the very next job will immediately unload.
+            #
+            # BOTH ARE SKIPPED TOGETHER, and they cannot be separated. Skipping
+            # only the recycle would leave ComfyUI's retained allocations in
+            # place while a large chat model is loaded onto the same device,
+            # which is precisely the paging failure the recycle exists to
+            # prevent.
+            #
+            # The profile is remembered because this may be the only job that
+            # ever saw the chat worker running: `_prepare_device_handoff` finds
+            # chat already stopped for every later job in the queue, and hands
+            # this id back so the eventual resume still knows what to load.
+            self._deferred_handoff = self._minted_debt(
+                chat_profile_id,
+                continuation_job_id,
+                scoped=self._media_launch_scoped(),
+            )
+            # `_prepare_device_handoff` cleared this before stopping chat, and
+            # the resume that normally sets it is exactly what is being skipped.
+            # Left cleared with no owner it makes `_chat_planner_available`
+            # answer False for a chat worker that is genuinely ready - an
+            # out-of-band load never touches the event - and one AUTO turn
+            # silently drops to the heuristic router. The worker-state check
+            # beside it still gates correctly while chat is down.
+            self._chat_planner_ready.set()
+            return
+
+        self._deferred_handoff = None
+        await self._finish_media_handoff(
+            selected_chat_profile_id, next_work, continuation_job_id, job_id
+        )
+
+    async def _finish_media_handoff(
+        self,
+        selected_chat_profile_id: str,
+        next_work: str,
+        continuation_job_id: str | None,
+        job_id: str | None = None,
+    ) -> None:
+        """The recycle, restore, and restart tail of a completed media handoff.
+
+        EVERY exit that leaves a required side effect uncommitted records a
+        debt carrying exactly what is still owed - the profile when the
+        restore did not commit, a profile-less recycle-only obligation when
+        the stop quietly failed under a successful restore, both plus payment
+        state on cancellation - and no restart of any kind is scheduled while
+        payment is incomplete, because a start before payment inverts the
+        recycle, restore, restart order.
+        """
+
+        queued_text_next = next_work == "text"
+        recycle_attempted = False
+        recycle_paid = False
+        scoped: bool | None = None
         try:
-            media_worker = next(item for item in self.processes.statuses() if item.name == "media")
-            if self.engines.settings.media_engine == "comfyui" and media_worker.managed:
-                # ComfyUI retains model allocations after generation. Loading a
-                # large chat model alongside that cache can push Windows/WDDM
-                # into system-memory paging; the next media run then appears
-                # stalled before sampling. A managed worker recycle releases
-                # both VRAM and host allocations while preserving the automatic
-                # Ready media service expected by the desktop application.
-                launch_scope = getattr(self.processes, "launch_scope_sha256", None)
-                recycled_activation_scope = bool(launch_scope and launch_scope("media") is not None)
-                await self.processes.stop("media")
-                recycle_managed_media = True
-        except Exception:
-            logger.exception("Could not recycle the media worker after device handoff")
+            try:
+                media_worker = next(
+                    (item for item in self.processes.statuses() if item.name == "media"),
+                    None,
+                )
+                managed = (
+                    media_worker is not None
+                    and self.engines.settings.media_engine == "comfyui"
+                    and media_worker.managed
+                )
+                if managed and media_worker is not None and media_worker.running:
+                    recycle_attempted = True
+                    # ComfyUI retains model allocations after generation.
+                    # Loading a large chat model alongside that cache can push
+                    # Windows/WDDM into system-memory paging; the next media
+                    # run then appears stalled before sampling. Scope is read
+                    # BEFORE the stop - the last moment it is readable.
+                    scoped = self._media_launch_scoped()
+                    await self.processes.stop("media")
+                    recycle_paid = True
+                elif managed:
+                    # A managed worker that is not running retains nothing,
+                    # so the recycle is trivially paid - and it cannot answer
+                    # for the scope it ran under, which fails closed below.
+                    recycle_attempted = True
+                    recycle_paid = True
+                    scoped = None
+                else:
+                    # No managed worker to recycle: the half is trivially paid.
+                    recycle_paid = True
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Could not recycle the media worker after device handoff")
+                # A reported failure is not permission to cross the boundary:
+                # the worker may still hold its allocations, and chat loads
+                # beside them only once the recycle is paid. The whole
+                # obligation - the recycle and the restore - is retained for
+                # the settlement pump, which pays the recycle first.
+                self._deferred_handoff = self._minted_debt(
+                    selected_chat_profile_id, job_id, recycle_paid=False, scoped=scoped
+                )
+                self._arm_settlement_retry()
+                return
 
-        if not recycle_managed_media:
-            await self._resume_chat_worker(selected_chat_profile_id)
+            # Restore chat without competing with Python/Torch startup for
+            # disk and CPU.
+            restored = await self._resume_chat_worker(selected_chat_profile_id)
+        except asyncio.CancelledError:
+            # This is the media job's own dispatch, whose finally will NOT
+            # settle (preparation succeeded): without this record the
+            # cancellation would strand chat down with nothing owed anywhere.
+            # Payment state and scope travel with the debt so the settler
+            # knows what remains and what it may restart.
+            self._deferred_handoff = self._minted_debt(
+                selected_chat_profile_id, job_id, recycle_paid=recycle_paid, scoped=scoped
+            )
+            raise
+        if not restored:
+            self._deferred_handoff = self._minted_debt(
+                selected_chat_profile_id, job_id, recycle_paid=recycle_paid, scoped=scoped
+            )
+            self._arm_settlement_retry()
             return
-
-        # Restore chat without competing with Python/Torch startup for disk and
-        # CPU. Once chat is ready, warm the empty ComfyUI service in a tracked
-        # background task so the queued text job can proceed immediately.
-        await self._resume_chat_worker(selected_chat_profile_id)
-        if recycled_activation_scope:
-            # A broad empty-worker restart would expose dependencies outside the
-            # activation that just ran. The next contract-backed media step will
-            # revalidate and start its own exact scope instead.
+        if not recycle_paid:
+            # Chat is up, but the stop quietly failed: the recycle is still
+            # owed, and erasing it here would make the failure permanent.
+            self._deferred_handoff = self._minted_debt(
+                None, job_id, recycle_paid=False, scoped=scoped
+            )
+            self._arm_settlement_retry()
             return
-        if queued_text_next:
-            self._media_restart_after_chat_activity = True
+        if not recycle_attempted:
+            return
+        if scoped is None or scoped:
+            # A broad empty-worker restart would expose dependencies outside
+            # the activation that just ran. The next contract-backed media
+            # step will revalidate and start its own exact scope instead - and
+            # any OLDER broad intent or retained give-back is superseded by
+            # this newer scoped truth. Unknown fails closed.
+            self._supersede_give_back()
+            return
+        if queued_text_next and continuation_job_id is not None:
+            self._media_restart_intent = continuation_job_id
         else:
-            self._schedule_media_restart()
+            self._schedule_give_back()
 
     def schedule_media_restart(self) -> None:
         """Bring the media worker back after something borrowed the device.
@@ -4326,23 +4766,709 @@ class ConversationOrchestrator:
         outside this class, and leaving it to reach for the private method would
         make an internal detail part of the API surface by accident.
         """
+        self._schedule_give_back()
+
+    def _restore_media_after_verification(self, *, scoped: bool) -> None:
+        """A media worker stopped so verification could load its vision model
+        comes back only if it was broad: a scoped worker stays down and the
+        next contract-backed step starts its exact scope."""
+
+        if scoped:
+            self._supersede_give_back()
+        else:
+            self._schedule_give_back()
+
+    def _supersede_give_back(self) -> None:
+        """Newer scoped truth: after a scoped stop or a scoped launch no broad
+        restart is owed to anyone - not from a remembered intent, not from a
+        restart the supervisor refused earlier, and not from a broad restart
+        still in flight, whose outcome belongs to the generation it was
+        minted under and writes nothing back once that generation is past."""
+
+        self._media_restart_intent = None
+        self._media_give_back_owed = False
+        self._media_give_back_attempts = 0
+        self._media_give_back_generation += 1
+
+    def _media_worker_state(self) -> str:
+        """ "running", "down" or "unknown": whether a managed media worker is
+        live right now.
+
+        Unknown is a failed status read. It neither earns a broad restart
+        nor stands for the device given back: a give-back decided under it
+        stays owed and is read again later.
+        """
+
+        try:
+            media = next(
+                (item for item in self.processes.statuses() if item.name == "media"),
+                None,
+            )
+        except Exception:
+            logger.exception("Could not read the media worker status")
+            return "unknown"
+        if media is not None and bool(media.managed) and bool(media.running):
+            return "running"
+        return "down"
+
+    def _media_worker_running(self) -> bool:
+        return self._media_worker_state() == "running"
+
+    def _give_back_pending(self) -> bool:
+        return self._media_give_back_owed and (
+            self._media_give_back_attempts < self._GIVE_BACK_ATTEMPTS
+        )
+
+    def _schedule_give_back(self, *, retry: bool = False) -> None:
+        """Bring the media worker back only where that gives the device back.
+
+        Every path that earns a broad restart - a consumed intent, a dead
+        owner's recovery, a paid unscoped settlement, the step prewarm, the
+        give-back retry - comes through here, and the answer is read at fire
+        time rather than when the intent was armed. A media worker running
+        now, under an activation scope or already broad, is newer truth than
+        any remembered intent and is never replaced, and it is also the
+        device given back: an obligation retained from a refused restart is
+        met by it. A status that cannot be read is neither: the give-back
+        stays owed, no start is earned by it, no attempt is spent on it, and
+        the pump reads again at its bounded rate. A queued media dispatch is
+        warmed, not raced - launches serialize in the supervisor and a later
+        scoped launch replaces a broad worker - so only a worker that is
+        down is restarted. A fresh give-back starts the bounded retry count
+        over; the pump's own retries do not.
+        """
+
+        state = self._media_worker_state()
+        if state == "running":
+            self._media_give_back_owed = False
+            self._media_give_back_attempts = 0
+            return
+        if state == "unknown":
+            self._media_give_back_owed = True
+            self._arm_settlement_retry()
+            return
+        if retry and not self._give_back_pending():
+            return
+        if not retry:
+            self._media_give_back_attempts = 0
         self._schedule_media_restart()
 
     def _schedule_media_restart(self) -> None:
         if self._media_restart_task and not self._media_restart_task.done():
+            # A live task already gives the device back; the caller joins
+            # it. It keeps its owner: a prewarm that finds a give-back in
+            # flight does not become its owner and never cancels it - and a
+            # give-back that finds a prewarm in flight is remembered, so
+            # that prewarm's cancellation still owes the device back.
+            if self._media_restart_minting_owner == "give-back":
+                self._media_give_back_joined = True
             return
-        task = asyncio.create_task(
-            self._restart_media_worker(),
+        # The close-aware mint carries the closing refusal: close() may
+        # already have awaited and cleared the old restart task, and a
+        # replacement scheduled now would escape the teardown.
+        generation = self._media_give_back_generation
+        task = self._mint_task(
+            self._restart_media_worker(generation),
             name="media-worker-handoff-restart",
         )
+        if task is None:
+            return
         self._media_restart_task = task
+        self._media_restart_owner = self._media_restart_minting_owner
+        self._media_restart_task_generation = generation
+        self._media_give_back_joined = False
         task.add_done_callback(self._media_restart_finished)
 
-    def _release_deferred_media_restart(self) -> None:
-        if not self._media_restart_after_chat_activity:
+    def _discharge_deferred_handoff(self, job_id: str) -> None:
+        """Settle a debt this job owns, after its chat takeover has committed.
+
+        Only a FULLY PAID debt clears. A takeover whose release quietly failed
+        to stop the media worker committed the chat half by its own load, but
+        the recycle is still owed: the record narrows to a profile-less
+        recycle-only obligation instead of being erased: erasure makes a
+        swallowed stop failure permanent.
+        """
+
+        debt = self._deferred_handoff
+        if debt is None or debt.continuation_job_id != job_id:
             return
-        self._media_restart_after_chat_activity = False
-        self._schedule_media_restart()
+        if debt.recycle_paid:
+            self._deferred_handoff = None
+            return
+        self._deferred_handoff = self._minted_debt(
+            None, None, recycle_paid=False, scoped=debt.scoped
+        )
+        self._arm_settlement_retry()
+
+    def _continuation_can_still_pay(self, job_id: str) -> bool:
+        """Whether the bound continuation is still alive enough to settle.
+
+        The in-process dispatch task is the primary signal, because a durable
+        COMPLETE is written and committed BEFORE the handoff completion runs:
+        judging by the business status alone calls a still-executing
+        continuation dead and lets a bystander settle concurrently with the
+        rightful owner. The durable status covers the other half - a job that
+        is QUEUED or RUNNING but has no dispatch task yet still intends to
+        run. The session closes before the caller does any awaiting.
+        """
+
+        task = self._tasks.get(job_id)
+        if task is not None and not task.done():
+            return True
+        with self.session_factory() as session:
+            job = session.get(Job, job_id)
+            return job is not None and job.status in {
+                JobStatus.QUEUED.value,
+                JobStatus.RUNNING.value,
+            }
+
+    def _media_launch_scoped(self) -> bool:
+        """Whether the media worker was launched under an activation scope.
+
+        FAIL CLOSED: unknown reads as scoped. A broad start of a scoped
+        context exposes dependencies outside the activation that ran, so when
+        the introspection is unavailable or raises, the answer that never
+        earns a broad restart is the only safe one.
+        """
+
+        launch_scope = getattr(self.processes, "launch_scope_sha256", None)
+        if launch_scope is None:
+            return True
+        try:
+            return launch_scope("media") is not None
+        except Exception:
+            logger.exception("Could not determine the media launch scope")
+            return True
+
+    def _discharge_media_restart_intent(
+        self, job_id: str | None, *, fire: bool, allow_vacated: bool = False
+    ) -> None:
+        """Consume a broad-restart intent this caller may rightfully fire.
+
+        The intent is bound to the text job whose chat activity it waits for,
+        so a stale intent from a cancelled waiter cannot be consumed by an
+        unrelated job into a broad start the current context never asked for.
+        The owner fires it - or drops it with fire=False when its own path
+        failed, because the retained debt owns recovery then. Another job may
+        fire it only where allow_vacated is set AND the owner can no longer
+        pay: the completion backstops, never the hot streaming path, which
+        would otherwise pay a database read per delta for a foreign intent.
+        """
+
+        owner = self._media_restart_intent
+        if owner is None:
+            return
+        if owner != job_id and (not allow_vacated or self._continuation_can_still_pay(owner)):
+            return
+        self._media_restart_intent = None
+        if fire:
+            self._schedule_give_back()
+
+    def _recover_owned_media_state(self, job_id: str) -> None:
+        """Recovery for state whose owning dispatch task just ended.
+
+        Runs from every task's done-callback. An owner that discharged its
+        state normally makes this a no-op; an owner that died mid-flight must
+        not take recovery with it - a restart intent with a dead owner fires
+        now (the give-back is owed regardless), and a debt bound to the dead
+        owner gets a settlement task, whose binding check passes precisely
+        because it settles in the dead owner's name.
+        """
+
+        debt = self._deferred_handoff
+        debt_owner_died = debt is not None and debt.continuation_job_id == job_id
+        if debt_owner_died:
+            if self._settlement_retry_task is None or self._settlement_retry_task.done():
+                # The pump, not a bare settlement call: a recovery payment
+                # that fails must keep an owner, and a one-shot task cannot
+                # re-arm past its own live-task guard. Minted through the
+                # close-aware gate: this done-callback can run while close()
+                # gathers the dispatches it cancelled, and a recovery pump
+                # created after close() has already passed the retry-task
+                # slot would survive teardown unowned.
+                task = self._mint_task(
+                    self._settlement_retry_pump(first_delay=0.0),
+                    name="deferred-handoff-owner-recovery",
+                )
+                if task is not None:
+                    self._settlement_retry_task = task
+            return
+        owner = self._media_restart_intent
+        if owner is None:
+            return
+        if owner == job_id or not self._continuation_can_still_pay(owner):
+            # The owner is this ending task, or one that ended before it
+            # could fire: the give-back is owed regardless of who noticed.
+            self._media_restart_intent = None
+            self._schedule_give_back()
+
+    _SETTLEMENT_RETRY_SECONDS = 30.0
+    _GIVE_BACK_ATTEMPTS = 3
+
+    def _arm_settlement_retry(self) -> None:
+        """A retained debt on an idle queue needs an owner that will return.
+
+        Retention keeps the books honest but is not liveness: when a payment
+        fails and no later job ever arrives, nothing would retry. The armed
+        task is a PUMP that owns the debt until it is paid or the task is
+        cancelled. A one-shot task cannot own it: its failed settlement
+        re-arms into the live-task guard below, which sees the still-running
+        retry task and returns - the task then exits, leaving a done pointer
+        and unpaid debt on an idle queue.
+        """
+
+        if self._settlement_retry_task is not None and not self._settlement_retry_task.done():
+            return
+        # The close-aware mint owns the closing refusal: close() owns
+        # teardown, and a pump armed now would escape it.
+        task = self._mint_task(
+            self._settlement_retry_pump(first_delay=self._SETTLEMENT_RETRY_SECONDS),
+            name="deferred-handoff-settlement-retry",
+        )
+        if task is not None:
+            self._settlement_retry_task = task
+
+    async def _settlement_retry_pump(self, *, first_delay: float) -> None:
+        """Retry settlement at a bounded rate until the debt is gone.
+
+        One pump owns the whole obligation: each round sleeps, re-reads the
+        debt, and attempts settlement; a failed payment retains the debt
+        (settlement's own retention arms nothing new here - the guard sees
+        this live task) and the NEXT round belongs to this same loop, so no
+        relinquish-and-rearm window exists for the debt to fall through.
+        Cancellation ends the pump with the debt retained; a payment error
+        is logged and retried rather than killing the owner, because an
+        exception must not do what a reported failure is not allowed to do.
+        """
+
+        delay = first_delay
+        while True:
+            if delay:
+                await asyncio.sleep(delay)
+            delay = self._SETTLEMENT_RETRY_SECONDS
+            debt = self._deferred_handoff
+            if debt is None and not self._give_back_pending():
+                if self._settlement_checkouts:
+                    # A foreground settler holds the checkout; leaving now
+                    # would orphan the debt its rollback may restore.
+                    continue
+                return
+            if debt is not None:
+                try:
+                    # No borrowed identity: settlement's own guard defers to
+                    # a continuation that can still pay, which the pump must
+                    # not bypass by impersonating it.
+                    await self._settle_deferred_handoff()
+                except Exception:
+                    logger.exception(
+                        "deferred-handoff settlement retry failed; "
+                        "debt retained, next attempt in %ss",
+                        self._SETTLEMENT_RETRY_SECONDS,
+                    )
+            if self._deferred_handoff is None and self._give_back_pending():
+                # The retained give-back is retried only once the debt itself
+                # is settled, through the same fire-time gate, and the pump
+                # waits for the attempt so the next round judges its outcome.
+                self._schedule_give_back(retry=True)
+                restart = self._media_restart_task
+                if restart is not None:
+                    await asyncio.gather(restart, return_exceptions=True)
+            if self._deferred_handoff is None and not self._give_back_pending():
+                if self._settlement_checkouts:
+                    continue
+                return
+
+    def _media_dispatch_is_active(self) -> bool:
+        """Whether a live dispatch task currently owns the media device.
+
+        Read and CLOSED before the caller awaits anything. While an active
+        media generation runs, settlement must not stop the worker under it
+        or load chat beside it - that job's own completion handoff pays,
+        supersedes, or re-defers whatever is owed.
+
+        Judged by LIVE TASK and media KIND, never by durable status: a media
+        job commits COMPLETE before its handoff completion runs, so a durable
+        filter on RUNNING calls a still-publishing owner dead and lets
+        settlement stop the worker under its finalization. A QUEUED job whose
+        dispatch task is already waiting on the lease likewise intends to run
+        and is counted.
+        """
+
+        live = [job_id for job_id in self._tasks if self._task_is_active(job_id)]
+        if not live:
+            return False
+        with self.session_factory() as session:
+            media_kind = session.scalars(
+                select(Job.id).where(
+                    Job.id.in_(live),
+                    Job.kind.in_(list(_MEDIA_JOB_KINDS)),
+                )
+            ).all()
+        return bool(media_kind)
+
+    async def _settle_deferred_handoff(self, job_id: str | None = None) -> None:
+        """Give back what a deferral borrowed, when no chat job will load it.
+
+        `_release_media_device_for_chat` is for the case where a text job IS
+        about to load chat: it stops media and lets that job bring chat up. This
+        is the OTHER case, and the difference is the whole point. If the job the
+        deferral was taken for never runs - cancelled, missing, or terminal
+        before dispatch - then nothing downstream will load anything, and
+        clearing the flag there would leave chat down, media down, the owed
+        profile erased, and no automatic recovery for either worker. An idle
+        queue has nobody left to notice.
+
+        So this RESTORES, and in a specific order: the recycle the deferral
+        skipped is paid first, then the chat worker comes back on the profile
+        that was displaced, then the media worker is scheduled to come back
+        after it. The deferral deliberately left the media worker RUNNING with
+        the finished generation's allocations retained, and no chat job is
+        coming to pay that recycle through `_release_media_device_for_chat` -
+        restoring chat first would load the model beside those allocations,
+        which is the same paging failure the recycle exists to prevent, moved
+        onto the recovery path. It is the settlement for every exit before or
+        inside device handoff, including cancellation, which is why it lives in
+        one place rather than at each return.
+
+        Idempotent and safe when nothing is outstanding: the debt is taken
+        first, so a second call does nothing and a concurrent one cannot resume
+        twice - and it is RESTORED if paying it fails or is cancelled, so a
+        settlement that did not complete leaves the obligation on the books
+        rather than erasing it with the work unpaid.
+
+        A caller passing its `job_id` holds no lease: it is a dispatch finally
+        on the way out, and it may settle only a debt bound to it or one
+        whose bound continuation can no longer pay, judged by the in-process
+        dispatch task first and the durable status second because a media
+        job commits COMPLETE before its handoff completion runs. A cancelled
+        lease-waiter therefore cannot consume the deferral the queued media
+        continuation is about to redeem and load a chat model in front of
+        the media job that will unload it. Shutdown clears the debt directly
+        in close(); the retry pump passes no job_id and defers like everyone
+        else.
+
+        Settlement runs under the same lock dispatch holds - scheduler
+        try_lease on the primary device - acquired without waiting: busy
+        defers to the owner and arms the bounded pump, and every guard is
+        revalidated after acquisition because anything sampled before it is
+        stale the moment a queued job takes the lease.
+
+        The recycle and the chat restoration each report success; the debt
+        is cleared only when both committed, retained when either quietly
+        did not, restored when either raised, and the media restart is
+        scheduled only after full unscoped payment, through the fire-time
+        gate, never from a finally on the way out of a failure.
+        """
+
+        if self._deferred_handoff is None:
+            return
+        async with self.scheduler.try_lease() as held:
+            if not held:
+                # The device is owned: a live dispatch, a borrowed device
+                # hold, or a concurrent settler. A snapshot check would let a
+                # borrow-time settlement proceed concurrently; deferring is
+                # the point of taking the SAME lock dispatch holds. The
+                # bounded pump keeps liveness: an owner that pays clears the
+                # debt and the pump exits, one that cannot leaves it for the
+                # next round.
+                self._arm_settlement_retry()
+                return
+            await self._settle_holding_device(job_id)
+
+    async def _settle_holding_device(self, job_id: str | None) -> None:
+        """The payment half, entered only with the device lock held.
+
+        REVALIDATES everything under the lock: the debt, the bound
+        continuation and the live-dispatch check are all re-read after
+        acquisition, because a queued job could acquire the lease and become
+        the device's owner between any earlier snapshot and the awaits below
+        - stopping the worker under the new generation, or loading the old
+        chat profile beside a new text dispatch, is exactly what a
+        snapshot-then-await sequence permits. While this runs, no dispatch
+        in the default queue group can take the device; a job in another
+        queue group is not excluded by the lease, and the live-task check
+        covers it at revalidation time.
+        """
+
+        debt = self._deferred_handoff
+        if not debt:
+            return
+        if (
+            debt.continuation_job_id is not None
+            and debt.continuation_job_id != job_id
+            and self._continuation_can_still_pay(debt.continuation_job_id)
+        ):
+            # This is the pump's guard too: an ownerless caller (job_id
+            # None) may pay a BOUND debt only when its continuation
+            # provably cannot. A pump supplying the continuation's own
+            # id here would be accepted by construction -
+            # impersonation - and a QUEUED or COMPLETE-but-live
+            # continuation would have its debt paid out from under it.
+            return
+        if self._media_dispatch_is_active():
+            # A COMPLETE-but-live media task no longer holds the scheduler
+            # lease, so the device lock alone cannot exclude it - this
+            # live-task check is what does, for every queue group and any
+            # durable status. That job's own completion handoff pays,
+            # supersedes, or re-defers whatever is owed; the debt waits.
+            return
+        self._deferred_handoff = None
+        # The checkout is otherwise invisible: without the recorded
+        # generation, the pump reads None during a foreground settler's
+        # awaits, exits, and a rollback then restores a debt with no owner
+        # left alive.
+        self._settlement_checkouts.add(debt.generation)
+        media_running = False
+        scoped_effective: bool
+        # The freshest OBSERVED scope, fail-closed at checkout: rollbacks
+        # must carry what settlement LEARNED, never revert to what the debt
+        # remembered. A rollback restoring debt.scoped after a scoped worker
+        # was observed and stopped reverts the obligation to broad, and the
+        # worker-down retry - unable to re-read a stopped worker's scope -
+        # then broad-starts what the scoped context requires to stay down.
+        observed_scoped = debt.scoped
+        recycle_paid = debt.recycle_paid
+        restored = False
+        try:
+            media = next(
+                (item for item in self.processes.statuses() if item.name == "media"),
+                None,
+            )
+            media_running = (
+                media is not None
+                and self.engines.settings.media_engine == "comfyui"
+                and media.managed
+                and media.running
+            )
+            if not media_running:
+                # Nothing retained to release: a worker that is down cannot be
+                # holding allocations, so the recycle half is trivially paid.
+                # Its SCOPE, however, is no longer readable - what the debt
+                # captured while the worker lived is all there is, and unknown
+                # fails closed.
+                recycle_paid = True
+                scoped_effective = debt.scoped if debt.scoped is not None else True
+            else:
+                scoped_effective = self._media_launch_scoped()
+                observed_scoped = scoped_effective
+                if not recycle_paid:
+                    try:
+                        await self.processes.stop("media")
+                        recycle_paid = True
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.exception(
+                            "Could not recycle the media worker before settling a deferred handoff"
+                        )
+            if debt.profile_id is None:
+                # A recycle-only obligation has no restore half.
+                restored = True
+            else:
+                restored = await self._resume_chat_worker(debt.profile_id)
+        except BaseException:
+            # The transition did not complete; the debt survives, carrying any
+            # payment that DID commit. If a newer one was recorded meanwhile,
+            # the generation-ordered merge keeps the newer truth standing
+            # while this obligation's unpaid halves survive into it - in
+            # EITHER rollback order.
+            self._restore_debt(
+                _DeferredHandoff(
+                    debt.profile_id,
+                    debt.continuation_job_id,
+                    recycle_paid=recycle_paid,
+                    scoped=observed_scoped,
+                    generation=debt.generation,
+                )
+            )
+            self._settlement_checkouts.discard(debt.generation)
+            if not self._closing:
+                # A foreground settler dying here restored a debt with no
+                # owner: task-done recovery matches only bound debts, and
+                # the pump may already have left. Arming is a no-op when
+                # the pump is alive, and refused during close().
+                self._arm_settlement_retry()
+            raise
+        if not (recycle_paid and restored):
+            # A required side effect did not commit - a swallowed stop failure
+            # or a resume that reported failure. RETAIN the debt rather than
+            # erasing it, schedule nothing (a restart before payment inverts
+            # the recycle -> restore -> restart order), and arm the delayed
+            # retry so an idle queue is not a permanent stall.
+            self._restore_debt(
+                _DeferredHandoff(
+                    debt.profile_id,
+                    debt.continuation_job_id,
+                    recycle_paid=recycle_paid,
+                    scoped=observed_scoped,
+                    generation=debt.generation,
+                )
+            )
+            self._settlement_checkouts.discard(debt.generation)
+            self._arm_settlement_retry()
+            return
+        if scoped_effective:
+            # Newer scoped truth supersedes any older broad intent, and a
+            # broad empty restart of a scoped context is never scheduled: the
+            # next contract-backed media step starts its own exact scope.
+            self._settlement_checkouts.discard(debt.generation)
+            self._supersede_give_back()
+            return
+        # Paid in full and unscoped: the give-back is scheduled NOW, through
+        # the fire-time gate, and any older broad intent is redundant
+        # beside it.
+        self._settlement_checkouts.discard(debt.generation)
+        self._media_restart_intent = None
+        self._schedule_give_back()
+
+    async def _release_media_device_for_chat(self, job_id: str | None = None) -> None:
+        """Pay the recycle a deferred handoff owes, before a chat model loads.
+
+        A deferred handoff leaves the media worker holding the finished
+        generation's allocations. That is correct while the next job is another
+        media job - it is the whole point - but if a TEXT job runs instead,
+        because the peeked job failed before dispatch or a higher-priority text
+        job overtook it, the chat model is about to load beside those
+        allocations. That is the WDDM paging failure the recycle exists to
+        prevent, and the next media run then appears stalled before sampling.
+
+        So the recycle is paid HERE, before `_execute_chat`. Discharging the
+        deferral in the dispatch `finally` instead would run after the load
+        has already happened and would not recycle at all - it would merely
+        reload the chat worker the text job had just loaded, killing and
+        relaunching the server the user was talking to.
+
+        This guard covers the scheduled dispatch path, and only that: a
+        load that reaches the worker without passing here is outside its
+        reach, and a chat model loaded beside retained allocations during
+        a deferral is the same paging failure wherever the load came from.
+        The guard's honest scope is the path that runs through it.
+
+        Gated on the debt rather than stopping media unconditionally: an EMPTY
+        warm media worker beside a chat model is fine, and is exactly what the
+        step prewarm arranges. The debt means precisely "a generation finished
+        and was deliberately not recycled".
+        """
+
+        debt = self._deferred_handoff
+        if not debt:
+            return
+        # REBOUND, not cleared. A text takeover holds the lease, so it
+        # supersedes the peeked continuation the debt was bound to - but the
+        # obligation itself survives until the chat takeover COMMITS, which is
+        # `_execute_chat` returning, not this stop. Cancellation at the phase
+        # write or inside the ensure/load path arrives with `handoff_prepared`
+        # already true and the outer settlement suppressed; the rebound debt
+        # is then the only thing anywhere remembering the displaced profile,
+        # and the vacancy rule frees it for the next settler once this task
+        # is gone.
+        self._deferred_handoff = self._minted_debt(
+            debt.profile_id, job_id, recycle_paid=debt.recycle_paid, scoped=debt.scoped
+        )
+        try:
+            media = next(
+                (item for item in self.processes.statuses() if item.name == "media"),
+                None,
+            )
+            if (
+                media is not None
+                and self.engines.settings.media_engine == "comfyui"
+                and media.managed
+                and media.running
+            ):
+                # Read BEFORE the stop, which is the last moment the running
+                # worker can answer, and FAIL CLOSED: an unknown scope must
+                # never earn a broad restart.
+                scoped = self._media_launch_scoped()
+                # The stop tears down the live worker record before its
+                # fallible termination await, so a stop that raises or is
+                # cancelled leaves a worker that can no longer answer for
+                # its own scope. The observation is persisted FIRST: the
+                # rebound debt carries the scope read while the worker
+                # could still answer, and the worker-down retry acts on
+                # that instead of an older remembered answer.
+                self._deferred_handoff = self._minted_debt(
+                    debt.profile_id,
+                    job_id,
+                    recycle_paid=debt.recycle_paid,
+                    scoped=scoped,
+                )
+                await self.processes.stop("media")
+                # The recycle COMMITTED: recorded on the debt, so the
+                # discharge after a successful chat takeover knows the whole
+                # obligation is paid - and a scoped stop supersedes any older
+                # broad intent a dead waiter left behind.
+                self._deferred_handoff = self._minted_debt(
+                    debt.profile_id, job_id, recycle_paid=True, scoped=scoped
+                )
+                if scoped:
+                    self._supersede_give_back()
+                # Borrowing the device by stopping a managed worker carries
+                # the duty to arrange its give-back. Without this the broken
+                # chain ends with media stopped and nothing warming it, so the
+                # next media step cold-starts - the exact cost the deferred
+                # restart exists to remove, resurfacing on the recovery path.
+                # The step prewarm
+                # cannot cover it: `_arm_step_prewarm` already ran and declined
+                # BECAUSE the deferral left the worker up. The intent is BOUND
+                # to this job: a stale one must not become a stranger's broad
+                # restart.
+                if not scoped:
+                    self._media_restart_intent = job_id
+            else:
+                # No running managed worker: nothing retained, so the recycle
+                # half is trivially paid. The scope is no longer readable -
+                # what the debt captured while the worker lived is all there
+                # is, and unknown fails closed to scoped. The give-back is
+                # still owed for an UNSCOPED context: the worker is down and
+                # a successful text takeover will discharge this paid debt,
+                # so its broad-restart intent must be armed here exactly as
+                # the running branch arms it. Without it the discharge clears
+                # the debt, the dispatch finally finds no intent to fire, and
+                # media stays down where settlement over the same worker-down
+                # unscoped obligation would have restarted it.
+                down_scoped = debt.scoped if debt.scoped is not None else True
+                self._deferred_handoff = self._minted_debt(
+                    debt.profile_id, job_id, recycle_paid=True, scoped=down_scoped
+                )
+                if down_scoped:
+                    # A scoped or unknown context must stay down, and an
+                    # older broad intent a dead waiter left behind must not
+                    # outlive this takeover: the dispatch finally consumes a
+                    # vacated owner's intent and would schedule exactly the
+                    # broad restart the carried scope forbids.
+                    self._supersede_give_back()
+                else:
+                    self._media_restart_intent = job_id
+        except asyncio.CancelledError:
+            # The recycle was not paid; the rebound debt survives this task.
+            raise
+        except Exception as exc:
+            logger.exception("Could not release the media device before loading a chat model")
+            rebound = self._deferred_handoff
+            if rebound is None or not rebound.recycle_paid:
+                # The worker may still hold its allocations and its status
+                # could not be read or its stop failed: the chat model does
+                # not load beside them. The text job fails honestly with the
+                # rebound debt on the books, and the pump pays the recycle.
+                self._arm_settlement_retry()
+                raise RuntimeError(
+                    "The media worker could not be recycled before loading the chat model; "
+                    "the text job was not run beside its retained allocations."
+                ) from exc
+            # The recycle was paid earlier - media is already down - and
+            # only the status read failed: chat may load, and the device is
+            # still owed back. The takeover's discharge clears the paid
+            # debt, so the give-back is retained on its own books for the
+            # pump instead of dying with the debt.
+            self._media_give_back_owed = True
+            self._arm_settlement_retry()
+        finally:
+            # The clear in `_prepare_device_handoff` gets its owner back. The
+            # deferral skipped the resume that would normally have set it, and a
+            # cleared event with no owner makes `_chat_planner_available` answer
+            # False for a worker that is actually ready.
+            self._chat_planner_ready.set()
 
     def _arm_step_prewarm(self, session: Session, run: Run) -> None:
         """Remember that the following ordered step will need the media worker.
@@ -4401,8 +5527,20 @@ class ConversationOrchestrator:
 
         if self._step_prewarm_plan_id is None or self._step_prewarm_task is not None:
             return
-        self._schedule_media_restart()
-        self._step_prewarm_task = self._media_restart_task
+        live = self._media_restart_task
+        if live is not None and not live.done():
+            # A give-back already in flight warms the successor as well; it
+            # is owed to the device, not to this plan, and a failing step
+            # must not cancel it.
+            return
+        self._media_restart_minting_owner = "prewarm"
+        try:
+            self._schedule_give_back()
+        finally:
+            self._media_restart_minting_owner = "give-back"
+        task = self._media_restart_task
+        if task is not None and task is not live and self._media_restart_owner == "prewarm":
+            self._step_prewarm_task = task
 
     async def _settle_step_prewarm(self, job_id: str) -> None:
         """Finish or abort a plan prewarm once its triggering step stops."""
@@ -4429,17 +5567,106 @@ class ConversationOrchestrator:
             if self._media_restart_task is task:
                 self._media_restart_task = None
 
-    async def _restart_media_worker(self) -> None:
-        try:
-            await self.processes.start_media()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Could not restart the managed media worker after device handoff")
+    async def _restart_media_worker(self, generation: int) -> None:
+        """The broad restart, fenced at the effect.
+
+        The fence is read where the start happens, not where it was
+        scheduled: under the scheduler's device lease - a dispatch that
+        holds the device pays, supersedes or re-defers whatever is owed
+        through its own handoff, so a leased device defers this give-back
+        to the pump - and against the worker state and the give-back
+        generation read once the lease is held. A worker running by then is
+        the device given back; an unreadable status keeps the give-back
+        owed for the pump; a generation superseded by then owes nothing.
+        A start that succeeded for a generation superseded while it ran
+        is undone: scoped truth said no broad worker is wanted.
+        """
+
+        async with self.scheduler.try_lease("primary") as held:
+            if not held:
+                if generation == self._media_give_back_generation:
+                    self._media_give_back_owed = True
+                    self._media_give_back_deferred = True
+                return
+            if generation != self._media_give_back_generation:
+                return
+            state = self._media_worker_state()
+            if state == "running":
+                self._media_give_back_owed = False
+                self._media_give_back_attempts = 0
+                return
+            if state == "unknown":
+                self._media_give_back_owed = True
+                self._media_give_back_deferred = True
+                return
+            try:
+                await self.processes.start_media()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Could not restart the managed media worker after device handoff")
+                if generation != self._media_give_back_generation:
+                    # Superseded by scoped truth while in flight: this broad
+                    # restart's failure owes nothing to the scope that
+                    # replaced it, and writes no debt back.
+                    return
+                # Still owed: the failure is retained for the bounded retry
+                # rather than logged out of existence.
+                self._media_give_back_owed = True
+                self._media_give_back_attempts += 1
+                return
+            if generation != self._media_give_back_generation:
+                # Scoped truth arrived while the broad start ran: the broad
+                # worker it produced is not wanted, and is stopped rather
+                # than left standing in for a scope it does not carry.
+                try:
+                    await self.processes.stop("media")
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "Could not stop a broad media worker started for a superseded give-back"
+                    )
+                return
+            self._media_give_back_owed = False
+            self._media_give_back_attempts = 0
 
     def _media_restart_finished(self, task: asyncio.Task[None]) -> None:
         if self._media_restart_task is task:
             self._media_restart_task = None
+        if self._media_restart_task_generation != self._media_give_back_generation:
+            # Superseded while in flight: its outcome arms nothing.
+            return
+        if task.cancelled():
+            # A speculative prewarm cut short - minted only to warm a queued
+            # successor, joined by no give-back - owes nothing. A give-back
+            # cut short, or a prewarm a give-back had joined, still owes the
+            # device back and spent no attempt; the pump owns that
+            # obligation exactly as it owns a retained debt. Under close()
+            # the mint refuses and close() clears the books.
+            if self._media_restart_owner == "prewarm" and not self._media_give_back_joined:
+                return
+            self._media_give_back_owed = True
+            self._arm_settlement_retry()
+            return
+        if self._media_give_back_deferred:
+            # The task could not act - the device was leased, or the status
+            # unreadable - and handed the give-back to the pump unspent.
+            self._media_give_back_deferred = False
+            self._arm_settlement_retry()
+            return
+        if not self._media_give_back_owed:
+            return
+        if self._give_back_pending():
+            # The pump owns the retained give-back exactly as it owns a
+            # retained debt: one loop, bounded rate, bounded count.
+            self._arm_settlement_retry()
+            return
+        logger.error(
+            "The media worker give-back was abandoned after %s failed restarts; "
+            "the managed media worker stays down until the next media job starts it",
+            self._media_give_back_attempts,
+        )
 
     async def _ensure_media_worker(
         self,
@@ -4448,11 +5675,21 @@ class ConversationOrchestrator:
         run_id: str | None = None,
         activation_scope: WorkflowActivationLaunchScope | None = None,
     ) -> None:
+        if activation_scope is not None:
+            # The scoped worker about to run is newer truth than any broad
+            # intent a dead waiter left behind or any restart refused earlier.
+            self._supersede_give_back()
         restart_task = self._media_restart_task
         if restart_task and not restart_task.done():
             if job_id and run_id:
                 await self._set_media_phase(job_id, run_id, "Waiting for media worker")
             await asyncio.shield(restart_task)
+            if activation_scope is not None:
+                # The awaited broad restart belonged to a superseded
+                # generation and wrote nothing back; anything armed between
+                # the supersession and now is superseded again before the
+                # scoped start, so no broad recovery can race it.
+                self._supersede_give_back()
         status = next(item for item in self.processes.statuses() if item.name == "media")
         if activation_scope is not None or not status.running or status.state != "ready":
             if job_id and run_id:
@@ -5322,6 +6559,7 @@ class ConversationOrchestrator:
 
     async def _execute_image_edit_verification(self, job_id: str) -> None:
         media_stopped_for_verification = False
+        verification_stop_scoped = True
         previous_profile_id = next(
             (
                 status.profile_id
@@ -5455,6 +6693,7 @@ class ConversationOrchestrator:
                     and media_status.managed
                     and media_status.running
                 ):
+                    verification_stop_scoped = self._media_launch_scoped()
                     await self.processes.stop("media")
                     media_stopped_for_verification = True
                 await self.processes.load_chat(profile, install)
@@ -5614,9 +6853,9 @@ class ConversationOrchestrator:
                         exc_info=True,
                     )
             if media_stopped_for_verification and not preempted:
-                self._schedule_media_restart()
+                self._restore_media_after_verification(scoped=verification_stop_scoped)
             elif not preempted:
-                self._release_deferred_media_restart()
+                self._discharge_media_restart_intent(job_id, fire=True, allow_vacated=True)
         await self.scheduler.publish_job(job_id)
 
     async def _fail(self, job_id: str, run_id: str, error: str) -> None:

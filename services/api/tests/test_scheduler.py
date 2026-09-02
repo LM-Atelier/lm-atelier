@@ -877,3 +877,22 @@ def test_a_job_overtaken_during_the_share_window_is_not_claimed(
         assert job is not None
         assert job.status == JobStatus.QUEUED.value
         assert job.claim_owner is None
+
+
+async def test_try_lease_reports_busy_without_waiting_and_holds_when_free() -> None:
+    """The settlement primitive: same lock as dispatch, never a queue slot.
+
+    Busy yields False immediately - a settler must defer to the device's
+    owner, not wait behind it and act on stale state. Free yields True with
+    the device exclusively held for the block, and exit releases it.
+    """
+
+    scheduler = ResourceScheduler()
+    async with scheduler.lease("primary"), scheduler.try_lease("primary") as held:
+        assert held is False, "a held device must read busy, not queue the caller"
+    async with scheduler.try_lease("primary") as held:
+        assert held is True
+        async with scheduler.try_lease("primary") as inner:
+            assert inner is False, "the try-holder must exclude a second claimant"
+    async with scheduler.try_lease("primary") as held_again:
+        assert held_again is True, "release on exit did not free the device"

@@ -78,6 +78,30 @@ class ResourceScheduler:
             lock.release()
 
     @asynccontextmanager
+    async def try_lease(self, device_id: str = "primary") -> AsyncIterator[bool]:
+        """Non-blocking claim of the SAME lock dispatch and lease() hold.
+
+        Yields True only when the device was free and is now held for the
+        caller's whole block. Busy yields False without waiting: settlement
+        must defer to a live owner's own completion handoff rather than queue
+        behind a generation and act on state read before it. The check and
+        the take run in one synchronous stretch of this coroutine -
+        locked(), then acquire(), with no await between them - so within
+        this event loop the answer cannot go stale between the check and
+        the take.
+        """
+
+        lock = self._lock(device_id, 1)
+        if lock.locked():
+            yield False
+            return
+        await lock.acquire()
+        try:
+            yield True
+        finally:
+            lock.release()
+
+    @asynccontextmanager
     async def job_lease(
         self,
         job_id: str,
