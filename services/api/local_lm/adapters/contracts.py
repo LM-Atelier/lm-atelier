@@ -414,7 +414,7 @@ class GuardedChatAdapter:
             yield self._error_event()
             return
         finally:
-            await _close_iterator(events)
+            await close_iterator(events)
         yield self._error_event()
 
     async def cancel(self, run_id: str) -> None:
@@ -544,7 +544,7 @@ class GuardedMediaAdapter:
         except Exception:
             raise self._runtime_error() from None
         finally:
-            await _close_iterator(events)
+            await close_iterator(events)
         raise self._runtime_error()
 
     async def cancel(self, run_id: str) -> None:
@@ -581,7 +581,16 @@ class GuardedMediaAdapter:
         )
 
 
-async def _close_iterator(events: AsyncIterator[Any]) -> None:
+async def close_iterator(events: AsyncIterator[Any]) -> None:
+    """Close a producer this process is done with, without letting the close
+    itself become the failure.
+
+    The adapter contract types a producer as an iterator, so a close is only
+    attempted when the object offers one. A close that raises or hangs must
+    not replace the reason the caller stopped consuming - a refused write, a
+    lost claim, a contract violation - so the attempt is bounded and its
+    failure suppressed."""
+
     close = getattr(events, "aclose", None)
     if not callable(close):
         return

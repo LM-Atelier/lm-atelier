@@ -21,9 +21,10 @@ from local_lm.adapters.message_projection import (
 from local_lm.adapters.mock import MockChatAdapter
 from local_lm.adapters.vllm import VllmAdapter
 from local_lm.db import SessionLocal
-from local_lm.domain import MessageRole, MessageStatus, Operation, utcnow
-from local_lm.models import Chat, Message, MessagePart, Run
+from local_lm.domain import JobStatus, MessageRole, MessageStatus, Operation, utcnow
+from local_lm.models import Chat, Job, Message, MessagePart, Run
 from local_lm.orchestrator import ConversationOrchestrator
+from local_lm.scheduler import JobClaim
 
 
 def test_projection_coalesces_in_order_with_bounded_source_attribution() -> None:
@@ -247,6 +248,21 @@ async def test_removed_item_creates_one_attributed_adapter_safe_message(
             settings_json={"max_tokens": 64},
         )
         session.add(run)
+        session.flush()
+        # The chat context asserts, at its own commit, that this execution
+        # still owns the job it was dispatched for; production always has one.
+        session.add(
+            Job(
+                id="job-adjacency",
+                run_id=run.id,
+                kind="chat",
+                status=JobStatus.RUNNING.value,
+                phase="running",
+                payload_json={},
+                attempt=1,
+                claim_owner="projection",
+            )
+        )
         session.commit()
 
         engines = SimpleNamespace(
@@ -271,7 +287,9 @@ async def test_removed_item_creates_one_attributed_adapter_safe_message(
             _request_settings,
             metadata,
             _tool_calling,
-        ) = await orchestrator._prepare_chat_context(session, run)
+        ) = await orchestrator._prepare_chat_context(
+            session, run, JobClaim(token="projection", attempt=1)
+        )
 
     assert messages == [
         {

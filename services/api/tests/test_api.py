@@ -11,23 +11,26 @@ from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import FastAPI
 from httpx2 import ASGITransport, AsyncClient
 from PIL import Image
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 import local_lm.api as api_module
 from local_lm import __version__
 from local_lm.adapters.base import ChatEvent, ChatRequest, GeneratedAsset, MediaEvent, MediaRequest
 from local_lm.adapters.mock import MockChatAdapter, MockMediaAdapter
+from local_lm.api import _reported_progress_age
 from local_lm.auxiliary_assets import checkpoint_lora_extension
 from local_lm.catalog import HuggingFaceCatalog
 from local_lm.config import Settings
 from local_lm.db import SessionLocal
-from local_lm.domain import JobStatus, utcnow
+from local_lm.domain import JobKind, JobStatus, utcnow
 from local_lm.downloads import DownloadManager
 from local_lm.hardware import hardware_capability_class
 from local_lm.main import create_app
@@ -55,6 +58,7 @@ from local_lm.models import (
     WorkStepDependency,
 )
 from local_lm.orchestrator import ConversationOrchestrator
+from local_lm.progress import apply_engine_progress, reduce_progress, update_job_progress
 from local_lm.runtime_provisioning import RuntimeProvisioner
 from local_lm.scheduler import ResourceScheduler
 from local_lm.schemas import (
@@ -65,6 +69,7 @@ from local_lm.schemas import (
     SettingField,
     TurnRequest,
     VisionSettings,
+    WorkerStatus,
 )
 
 ONE_PIXEL_PNG = base64.b64decode(
@@ -8310,3 +8315,2778 @@ async def test_an_image_outside_the_store_cannot_be_attached(client: AsyncClient
     )
     assert refused.status_code == 422
     assert refused.json()["code"] == "reference-asset-invalid"
+
+
+def _media_worker(payload: list[dict[str, object]]) -> dict[str, object]:
+    return next(worker for worker in payload if worker["name"] == "media")
+
+
+async def _one_pass_real_claim(monkeypatch: pytest.MonkeyPatch, job_id: str) -> None:
+    """One claim pass of ResourceScheduler._acquire_job, stopped before a second.
+
+    This is the production claim transition - attempt increment, claim fields,
+    and the stage="starting" progress write - not a hand-made imitation of it.
+    The pattern is the scheduler suite's own: counting _expire_foreign_claims
+    bounds the loop deterministically.
+    """
+
+    from local_lm.scheduler import ResourceScheduler
+
+    passes = {"n": 0}
+
+    class _SecondPassReached(Exception):
+        pass
+
+    def stop_after_one(self: object, group: str) -> list[str]:
+        passes["n"] += 1
+        if passes["n"] > 1:
+            raise _SecondPassReached
+        return []
+
+    async def _no_publish(self: object, publish_job_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(ResourceScheduler, "_expire_foreign_claims", stop_after_one)
+    monkeypatch.setattr(ResourceScheduler, "_publish_job", _no_publish)
+    scheduler = ResourceScheduler()
+    try:
+        await scheduler._acquire_job(
+            job_id,
+            resource="media_compute",
+            group="primary",
+            priority=0,
+            capacity=1,
+            local_lock=asyncio.Semaphore(1),
+        )
+    except _SecondPassReached as exc:  # pragma: no cover - a second pass is stopped above
+        raise AssertionError("the one claim pass declined to claim the job") from exc
+
+
+async def test_the_real_claim_transition_resets_a_prior_attempts_stamp(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The claim itself is the boundary: one scheduler claim pass.
+
+    A starting-SHAPED payload written by hand never enters
+    ResourceScheduler._acquire_job, so it cannot discriminate what the
+    claim's own write does. This one seeds a queued media
+    job whose previous attempt reported an hour ago, runs one claim pass,
+    and requires: the attempt incremented, the claim's own progress write
+    landed (stage starting), and the age is None - the prior attempt's stamp
+    must not survive into the attempt that has not spoken yet.
+    """
+
+    stale = datetime.now(UTC) - timedelta(hours=1)
+    with SessionLocal() as session:
+        job = Job(
+            kind="image",
+            status="queued",
+            phase="queued",
+            payload_json={},
+            queue_group="primary",
+            queue_ticket="ticket-provenance",
+            enqueued_at=datetime.now(UTC),
+        )
+        session.add(job)
+        session.flush()
+        job.attempt = 1
+        _engine_stamp(job, stage="generating", now=stale)
+        session.commit()
+        job_id = job.id
+        assert isinstance(job.progress_json, dict)
+        assert job.progress_json.get("engine_reported_at"), "fixture must carry the stamp"
+
+    await _one_pass_real_claim(monkeypatch, job_id)
+
+    with SessionLocal() as session:
+        claimed = session.get(Job, job_id)
+        assert claimed is not None
+        assert claimed.attempt == 2, "a second claim increments the attempt"
+        assert claimed.status == "running"
+        assert isinstance(claimed.progress_json, dict)
+        assert claimed.progress_json.get("stage") == "starting", (
+            "the claim's own progress write did not land"
+        )
+        assert claimed.progress_json.get("engine_reported_at") is None, (
+            "the new attempt inherited the previous attempt's engine stamp "
+            "through the claim transition"
+        )
+        age = _reported_progress_age(session, ["image", "video"])
+        assert age is None, f"a freshly claimed retry reported age {age} before its engine spoke"
+
+        # The new attempt's first engine report re-establishes the reading.
+        _engine_stamp(claimed, stage="generating")
+        session.commit()
+        assert _reported_progress_age(session, ["image", "video"]) is not None
+
+
+async def test_a_real_media_run_stamps_and_a_retried_one_starts_silent(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Retry through the endpoint, then a second claim.
+
+    A media turn through the mock engine leaves an engine stamp bound to
+    attempt 1, because the adapter marks its generation events
+    engine_sourced and the orchestrator forwards that provenance. The retry
+    endpoint then requeues THAT job, a second claim pass takes it, and the
+    new attempt starts silent.
+    """
+
+    chat = (await client.post("/api/chats", json={"title": "Provenance retry"})).json()
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Render provenance", "mode": "image"},
+    )
+    assert turn.status_code == 202
+    run_id = turn.json()["run"]["id"]
+    await wait_for_run(client, run_id)
+
+    with SessionLocal() as session:
+        job = session.scalar(select(Job).where(Job.run_id == run_id))
+        assert job is not None
+        job_id = job.id
+        first_attempt = job.attempt
+        assert isinstance(job.progress_json, dict)
+        assert job.progress_json.get("engine_reported_at"), (
+            "a completed media run through the mock engine carries no "
+            "engine stamp; the adapter/orchestrator provenance seam is broken"
+        )
+        assert job.progress_json.get("engine_report_attempt") == first_attempt
+        # Make it retryable, exactly as a failed generation would be.
+        job.status = "failed"
+        job.error = "synthetic failure for the retry barrier"
+        run = session.get(Run, run_id)
+        assert run is not None
+        run.status = "failed"
+        session.commit()
+
+    monkeypatch.setattr(app.state.services.orchestrator, "start", lambda *args: None)
+    retried = await client.post(f"/api/jobs/{job_id}/retry")
+    assert retried.status_code == 200
+
+    await _one_pass_real_claim(monkeypatch, job_id)
+
+    with SessionLocal() as session:
+        claimed = session.get(Job, job_id)
+        assert claimed is not None
+        assert claimed.attempt == first_attempt + 1
+        assert isinstance(claimed.progress_json, dict)
+        assert claimed.progress_json.get("engine_reported_at") is None, (
+            "the retried attempt inherited the finished attempt's stamp"
+        )
+        assert _reported_progress_age(session, ["image", "video"]) is None
+
+
+async def test_a_real_chat_stream_stamps_engine_provenance(client: AsyncClient) -> None:
+    """The chat path's deltas mint the stamp.
+
+    Without this seam, an actively streaming chat job reports
+    progress_age_seconds None for its whole run: deltas persist text and
+    never touch provenance. A text turn through the mock chat engine
+    leaves the stamp, bound to the attempt that streamed.
+    """
+
+    chat = (await client.post("/api/chats", json={"title": "Provenance chat"})).json()
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Say something", "mode": "text"},
+    )
+    assert turn.status_code == 202
+    run_id = turn.json()["run"]["id"]
+    await wait_for_run(client, run_id)
+
+    with SessionLocal() as session:
+        job = session.scalar(select(Job).where(Job.run_id == run_id))
+        assert job is not None
+        assert isinstance(job.progress_json, dict)
+        assert job.progress_json.get("engine_reported_at"), (
+            "a completed chat stream left no engine stamp; the delta path is "
+            "not wired to provenance"
+        )
+        assert job.progress_json.get("engine_report_attempt") == job.attempt
+
+
+async def test_a_long_stream_refreshes_the_stamp_through_the_persist_throttle(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One stamp at the first token is not enough for a long generation.
+
+    The age would grow through a perfectly healthy stream and cross any stall
+    threshold eventually. The stamp rides the existing text-persistence
+    throttle, so a stream that persists more than once stamps more than
+    once.
+    """
+
+    from local_lm.adapters.base import ChatEvent
+
+    async def chatty_stream(request: object):  # type: ignore[no-untyped-def]
+        yield ChatEvent(type="delta", text="x" * 40)
+        yield ChatEvent(type="delta", text="y" * 40)
+        yield ChatEvent(type="complete", data={})
+
+    monkeypatch.setattr(app.state.services.engines.chat, "stream", chatty_stream)
+
+    orchestrator = app.state.services.orchestrator
+    stamps = {"n": 0}
+    original = orchestrator._stamp_chat_engine_report
+
+    def counting_stamp(job_id: str, claim: object) -> None:
+        stamps["n"] += 1
+        original(job_id, claim)
+
+    monkeypatch.setattr(orchestrator, "_stamp_chat_engine_report", counting_stamp)
+
+    chat = (await client.post("/api/chats", json={"title": "Long stream"})).json()
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Stream at length", "mode": "text"},
+    )
+    assert turn.status_code == 202
+    await wait_for_run(client, turn.json()["run"]["id"])
+
+    assert stamps["n"] >= 2, (
+        f"expected the first-token stamp plus at least one throttled refresh, got {stamps['n']}"
+    )
+
+
+async def test_the_chat_worker_reports_age_from_a_stamped_running_job(
+    client: AsyncClient,
+) -> None:
+    """/workers computes the field for chat kinds too, from the same stamp."""
+
+    with SessionLocal() as session:
+        job = Job(kind="chat", status="running", phase="running", payload_json={})
+        session.add(job)
+        session.flush()
+        _engine_stamp(
+            job,
+            stage="writing the response",
+            now=datetime.now(UTC) - timedelta(seconds=45),
+        )
+        session.commit()
+
+    workers = (await client.get("/api/workers")).json()
+    chat_worker = next(worker for worker in workers if worker["name"] == "chat")
+    age = chat_worker["progress_age_seconds"]
+    assert age is not None and 35 <= age < 75, (
+        f"a stamped running chat job must age from its stamp, got {age}"
+    )
+
+
+async def test_an_adapter_local_event_cannot_mint_the_stamp(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Provenance is the adapter's to grant, and unmarked events grant nothing.
+
+    A stream that emits only local lifecycle events - engine_sourced left at
+    its fail-closed default - must complete without ever writing
+    engine_reported_at, even though every event flowed through the production
+    progress writer.
+    """
+
+    from local_lm.adapters.base import GeneratedAsset, MediaEvent
+
+    async def local_only_stream(request: object):  # type: ignore[no-untyped-def]
+        yield MediaEvent(
+            type="progress", phase="Preparing media workspace", data={"indeterminate": True}
+        )
+        yield MediaEvent(type="progress", progress=0.5, phase="staging locally")
+        yield MediaEvent(
+            type="preview",
+            progress=0.6,
+            phase="staging locally",
+            preview=b"local preview bytes",
+        )
+        yield MediaEvent(
+            type="complete",
+            progress=1,
+            phase="complete",
+            assets=[
+                GeneratedAsset(
+                    content=b"payload",
+                    media_type="image/png",
+                    kind="image",
+                    name="local.png",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(app.state.services.engines.media, "generate", local_only_stream)
+
+    chat = (await client.post("/api/chats", json={"title": "Local events only"})).json()
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Render locally", "mode": "image"},
+    )
+    assert turn.status_code == 202
+    run_id = turn.json()["run"]["id"]
+    await wait_for_run(client, run_id)
+
+    with SessionLocal() as session:
+        job = session.scalar(select(Job).where(Job.run_id == run_id))
+        assert job is not None
+        assert isinstance(job.progress_json, dict)
+        assert job.progress_json.get("engine_reported_at") is None, (
+            "adapter-local lifecycle events minted the backend-liveness stamp"
+        )
+
+
+async def test_comfyui_pre_submission_events_are_not_engine_sourced(
+    tmp_path: Path,
+) -> None:
+    """The adapter's first, locally synthesized event carries no provenance.
+
+    Everything before the backend's prompt acknowledgement is the adapter
+    talking to itself - preparing the workspace, staging inputs, submitting -
+    and the first of those is reachable without any server at all.
+    """
+
+    from local_lm.adapters.base import MediaRequest
+    from local_lm.adapters.comfyui import ComfyUIAdapter
+
+    adapter = ComfyUIAdapter("http://127.0.0.1:9", managed_output_root=tmp_path / "outputs")
+    stream = adapter.generate(
+        MediaRequest(
+            run_id="run-provenance",
+            operation="text_to_image",
+            prompt="never reaches a server",
+            negative_prompt=None,
+            input_paths=[],
+            workflow={},
+            parameters={},
+        )
+    )
+    try:
+        first = await stream.__anext__()
+    finally:
+        await stream.aclose()
+
+    assert first.type == "progress"
+    assert first.engine_sourced is False, "a pre-submission local event claimed backend provenance"
+
+
+async def test_progress_age_is_absent_until_a_running_job_reports_something(
+    client: AsyncClient,
+) -> None:
+    """Nothing running, and running-but-silent, are both reported as no age.
+
+    They are the same answer for different reasons and both are deliberate. With
+    nothing running there is no progress to be the age of. With something running
+    that has never reported, an age would have to be invented from the start
+    time, and at any given value it would be indistinguishable from a real stall
+    of the same length - so a worker still loading a model would read as wedged.
+    Absent says "this question does not apply yet", which is true in both cases.
+
+    The silent job is written with `update_job_progress` at stage
+    "starting" and no engine flag, which is what the scheduler writes at
+    claim time.
+    """
+
+    idle = _media_worker((await client.get("/api/workers")).json())
+    assert idle["progress_age_seconds"] is None, "an idle worker has no progress to age"
+
+    with SessionLocal() as session:
+        job = Job(kind="image", status="running", phase="running", payload_json={})
+        session.add(job)
+        session.flush()
+        update_job_progress(
+            job,
+            stage="starting",
+            queue_resource="media_compute",
+            queue_position=0,
+            queue_length=1,
+            indeterminate=True,
+        )
+        session.commit()
+        assert isinstance(job.progress_json, dict)
+        assert job.progress_json.get("updated_at"), "the claim-shape write sets updated_at"
+
+    silent = _media_worker((await client.get("/api/workers")).json())
+    assert silent["progress_age_seconds"] is None, (
+        "the scheduler's claim-time write was counted as an engine report: the "
+        "age was invented from updated_at, which stage=starting advances before "
+        "the engine has produced anything"
+    )
+
+
+async def test_progress_age_measures_the_engine_report_not_the_heartbeat(
+    client: AsyncClient,
+) -> None:
+    """THE point of the field, and the one way it can be quietly useless.
+
+    A wedged generation still reports state "ready" with one active job,
+    and the scheduler keeps writing Job.heartbeat_at every few seconds -
+    the heartbeat tracks the asyncio task holding the claim, which stays
+    alive while it waits. Job.updated_at is written by that same
+    heartbeat, so it moves too. Anything derived from either reports the
+    wedged worker as perfectly healthy.
+
+    This seeds exactly that state: a fresh heartbeat and a fresh
+    updated_at, with the engine's own last report an hour old. The age
+    must follow the engine; sourced from the heartbeat it would be about
+    zero.
+    """
+
+    stale = datetime.now(UTC) - timedelta(hours=1)
+    with SessionLocal() as session:
+        job = Job(
+            kind="image",
+            status="running",
+            phase="running",
+            payload_json={},
+            heartbeat_at=datetime.now(UTC),
+        )
+        session.add(job)
+        session.flush()
+        # The engine reported an hour ago, through the production seam.
+        _engine_stamp(job, stage="generating", stage_progress=0.5, now=stale)
+        # The scheduler then wrote a fresh lifecycle update - which is exactly
+        # what refreshes updated_at during the real stall. The provenance
+        # stamp must survive this write, carried forward rather than rebuilt.
+        update_job_progress(
+            job,
+            stage="generating",
+            queue_resource="media_compute",
+            queue_position=0,
+            queue_length=1,
+        )
+        session.commit()
+        assert isinstance(job.progress_json, dict)
+        fresh = job.progress_json.get("updated_at")
+        stamped = job.progress_json.get("engine_reported_at")
+        assert isinstance(fresh, str) and isinstance(stamped, str) and stamped < fresh, (
+            "the fixture must hold a fresh updated_at over a stale engine stamp, "
+            "or it does not model the stall"
+        )
+
+    age = _media_worker((await client.get("/api/workers")).json())["progress_age_seconds"]
+    assert age is not None
+    assert age > 3000, (
+        f"expected roughly an hour since the engine last reported, got {age}s - a "
+        "value near zero means this is following the heartbeat or updated_at, "
+        "both of which tick for a wedged worker"
+    )
+
+
+async def test_progress_age_follows_the_job_that_is_still_moving(
+    client: AsyncClient,
+) -> None:
+    """With several jobs running, one moving means the worker is moving.
+
+    Reporting the OLDEST report would call a worker stalled whenever any single
+    job happened to be between reports, which on a deep queue is almost always -
+    a signal that fires constantly is one nobody can act on. The question being
+    answered is whether the worker is progressing, so the most recent report
+    across its running jobs is the one that answers it.
+    """
+
+    now = datetime.now(UTC)
+    with SessionLocal() as session:
+        slow = Job(kind="image", status="running", phase="running", payload_json={})
+        quick = Job(kind="video", status="running", phase="running", payload_json={})
+        session.add(slow)
+        session.add(quick)
+        session.flush()
+        _engine_stamp(slow, stage="generating", now=now - timedelta(hours=2))
+        _engine_stamp(quick, stage="generating", now=now - timedelta(seconds=3))
+        session.commit()
+
+    age = _media_worker((await client.get("/api/workers")).json())["progress_age_seconds"]
+    assert age is not None
+    assert age < 120, (
+        f"expected the age to follow the job that reported three seconds ago, got {age}s"
+    )
+
+
+async def test_an_unreadable_progress_stamp_is_skipped_rather_than_guessed(
+    client: AsyncClient,
+) -> None:
+    """A stamp this cannot parse must not become a number.
+
+    progress_json is written by the engine reporting path and nothing constrains
+    its shape at the database, so a malformed or missing stamp is reachable. The
+    two wrong answers are crashing the whole worker listing over one bad row, and
+    substituting a default that reads as a real measurement. It skips the row: a
+    reading it does not have is not a reading it may invent.
+
+    The readable job here is what shows the endpoint still answered rather than
+    silently degrading everything to None, which would pass a weaker assertion.
+    """
+
+    broken_shapes = (
+        {"engine_reported_at": "not a timestamp"},
+        {"engine_reported_at": 12345},
+        {"updated_at": datetime.now(UTC).isoformat()},
+        {},
+    )
+    with SessionLocal() as session:
+        for broken in broken_shapes:
+            session.add(
+                Job(
+                    kind="image",
+                    status="running",
+                    phase="running",
+                    payload_json={},
+                    progress_json=broken,
+                )
+            )
+        session.commit()
+
+    malformed_only = await client.get("/api/workers")
+    assert malformed_only.status_code == 200, "one unparsable stamp took down the worker listing"
+    assert _media_worker(malformed_only.json())["progress_age_seconds"] is None, (
+        "with only malformed stamps - including a fresh updated_at with no "
+        "engine stamp - there is no reading, and none may be invented"
+    )
+
+    with SessionLocal() as session:
+        readable = Job(kind="image", status="running", phase="running", payload_json={})
+        session.add(readable)
+        session.flush()
+        _engine_stamp(
+            readable,
+            stage="generating",
+            now=datetime.now(UTC) - timedelta(seconds=30),
+        )
+        session.commit()
+
+    listing = await client.get("/api/workers")
+    assert listing.status_code == 200
+    age = _media_worker(listing.json())["progress_age_seconds"]
+    assert age is not None and 20 <= age < 60, (
+        f"the readable stamp is thirty seconds old and must be measured as such, "
+        f"got {age} - a loose anything-under-300 bound would pass a reader "
+        f"that substituted a wrong but recent source"
+    )
+
+
+async def _one_pass_claim_capture(monkeypatch: pytest.MonkeyPatch, job_id: str):  # type: ignore[no-untyped-def]
+    """Like _one_pass_real_claim, but returns the JobClaim the pass minted.
+
+    The claim identity is exactly what the attempt-owner barriers are about:
+    an execution captures it at claim time and presents it on every engine
+    write, so the tests hold the minted identity, not a guess.
+    """
+
+    from local_lm.scheduler import ResourceScheduler
+
+    passes = {"n": 0}
+
+    class _SecondPassReached(Exception):
+        pass
+
+    def stop_after_one(self: object, group: str) -> list[str]:
+        passes["n"] += 1
+        if passes["n"] > 1:
+            raise _SecondPassReached
+        return []
+
+    async def _no_publish(self: object, publish_job_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(ResourceScheduler, "_expire_foreign_claims", stop_after_one)
+    monkeypatch.setattr(ResourceScheduler, "_publish_job", _no_publish)
+    scheduler = ResourceScheduler()
+    return await scheduler._acquire_job(
+        job_id,
+        resource="media_compute",
+        group="primary",
+        priority=0,
+        capacity=1,
+        local_lock=asyncio.Semaphore(1),
+    )
+
+
+# Bound at import, before any test patches the class: the production expiry
+# must run even while a claim-capture stub is standing in for it.
+_PRODUCTION_EXPIRY = ResourceScheduler._expire_foreign_claims
+
+
+def _expire_claim_like_production(job_id: str) -> None:
+    """Run the dispatcher's own foreign-claim expiry over the row.
+
+    The claim's deadline is moved into the past and a scheduler with a
+    different owner sweeps its group, exactly as another dispatcher would:
+    the row becomes INTERRUPTED with its owner cleared. The old backend
+    request is NOT cancelled by expiry - the heartbeat merely stops winning -
+    which is precisely why a late event from it can arrive afterwards.
+    """
+
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None and job.claim_owner is not None
+        job.claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        group = job.queue_group or "primary"
+        session.commit()
+    expired = _PRODUCTION_EXPIRY(ResourceScheduler(), group)
+    assert job_id in expired, "the production expiry did not interrupt the row"
+    with SessionLocal() as session:
+        row = session.get(Job, job_id)
+        assert row is not None and row.status == "interrupted"
+        assert row.claim_owner is None
+
+
+def _requeue_like_retry(job_id: str, orch: object | None = None) -> None:
+    """Unit setup for rows the retry endpoint does not accept - a bare job
+    row with no run - mirroring the requeue writes a retry performs without
+    the endpoint's guards. Run-backed rows go through the endpoint itself in
+    _expire_and_retry."""
+
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None and job.status == "interrupted"
+        job.status = "queued"
+        job.progress = 0
+        job.error = None
+        job.started_at = None
+        job.completed_at = None
+        job.enqueued_at = datetime.now(UTC)
+        job.claim_owner = None
+        job.claim_expires_at = None
+        job.heartbeat_at = None
+        run = session.get(Run, job.run_id) if job.run_id else None
+        if run is not None:
+            run.status = "queued"
+            run.error = None
+            run.completed_at = None
+            if orch is not None:
+                orch.prepare_retry(session, run)  # type: ignore[attr-defined]
+        session.commit()
+
+
+def _simulate_claim_expiry(job_id: str, orch: object | None = None) -> None:
+    """Production expiry followed by the unit-setup requeue, for rows the
+    retry endpoint refuses."""
+
+    _expire_claim_like_production(job_id)
+    _requeue_like_retry(job_id, orch)
+
+
+async def _expire_and_retry(client: AsyncClient, orch: object, job_id: str) -> None:
+    """Production expiry, then the retry endpoint itself: its chat guard,
+    re-read, source validation, progress update, commit and start sequence,
+    with the start captured rather than dispatched: the second attempt is
+    claimed by the caller."""
+
+    _expire_claim_like_production(job_id)
+    started: list[tuple[str, str]] = []
+    original = orch.start  # type: ignore[attr-defined]
+    orch.start = lambda started_job, started_run: started.append(  # type: ignore[attr-defined]
+        (started_job, started_run)
+    )
+    try:
+        response = await client.post(f"/api/jobs/{job_id}/retry")
+    finally:
+        orch.start = original  # type: ignore[attr-defined]
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "queued"
+    assert started and started[0][0] == job_id, "the endpoint did not start the retried job"
+
+
+def _engine_stamp(
+    job: Job,
+    *,
+    stage: str,
+    stage_progress: float | None = None,
+    now: datetime | None = None,
+) -> None:
+    """Fixture-side stamp: the exact snapshot shape the engine writer mints.
+
+    Reader- and carry-focused tests need a row that already carries a prior
+    stamp; constructing it directly keeps them independent of the guarded
+    writer, whose refusal semantics have their own tests.
+    """
+
+    previous = job.progress_json if isinstance(job.progress_json, dict) else {}
+    snapshot = reduce_progress(previous, stage=stage, stage_progress=stage_progress, now=now)
+    job.progress_json = {
+        **snapshot,
+        "engine_reported_at": snapshot.get("updated_at"),
+        "engine_report_attempt": job.attempt if isinstance(job.attempt, int) else 0,
+    }
+    job.phase = stage
+
+
+async def test_the_writer_refuses_an_engine_report_without_claim_identity(
+    client: AsyncClient,
+) -> None:
+    """The identity is captured at claim time and must be PRESENTED.
+
+    Re-deriving the attempt from the mutable row would label a stale
+    producer's late event with a new claimant's attempt. The lifecycle
+    writer accepts no engine provenance at all, and the engine writer
+    cannot be called without the captured claim identity.
+    """
+
+    with SessionLocal() as session:
+        job = Job(kind="image", status="running", phase="running", payload_json={})
+        session.add(job)
+        session.flush()
+        with pytest.raises(TypeError):
+            update_job_progress(job, stage="generating", engine_report=True)  # type: ignore[call-arg]
+        with pytest.raises(TypeError):
+            apply_engine_progress(session, job_id=job.id, stage="generating")  # type: ignore[call-arg]
+
+
+async def test_an_old_producers_late_event_cannot_relabel_the_new_attempt(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An old media producer emits AFTER the next claim.
+
+    The scheduler expires a foreign claim and a new claimant increments the
+    row's attempt while the old backend request is still alive. The old
+    execution presents its captured claim; the row no longer matches, so its
+    event must neither mint nor refresh the new attempt's stamp - while the
+    new claimant, presenting the new claim, stamps normally.
+    """
+
+    with SessionLocal() as session:
+        job = Job(
+            kind="image",
+            status="queued",
+            phase="queued",
+            payload_json={},
+            queue_group="primary",
+            queue_ticket="ticket-old-producer",
+            enqueued_at=datetime.now(UTC),
+        )
+        session.add(job)
+        session.commit()
+        job_id = job.id
+
+    old_claim = await _one_pass_claim_capture(monkeypatch, job_id)
+    monkeypatch.undo()
+    _simulate_claim_expiry(job_id)
+    new_claim = await _one_pass_claim_capture(monkeypatch, job_id)
+    assert new_claim.attempt == old_claim.attempt + 1
+    assert new_claim.token != old_claim.token
+
+    with SessionLocal() as session:
+        row = session.get(Job, job_id)
+        assert row is not None and isinstance(row.progress_json, dict)
+        baseline = (dict(row.progress_json), row.phase, row.progress)
+    with SessionLocal() as session:
+        # The old producer's late event, through the production writer, with
+        # the identity it captured when IT was the claimant.
+        refused = apply_engine_progress(
+            session,
+            job_id=job_id,
+            claim_attempt=old_claim.attempt,
+            claim_owner=old_claim.token,
+            stage="generating",
+            stage_progress=0.9,
+        )
+        assert refused is None, "a stale producer's late event was accepted"
+        session.commit()
+    with SessionLocal() as session:
+        row = session.get(Job, job_id)
+        assert row is not None and isinstance(row.progress_json, dict)
+        assert row.progress_json.get("engine_reported_at") is None, (
+            "a stale producer's late event was relabelled with the new "
+            "claimant's attempt and refreshed its liveness"
+        )
+        assert (dict(row.progress_json), row.phase, row.progress) == baseline, (
+            "the refused event still changed the row: a mismatch must refuse "
+            "the WHOLE engine-derived write"
+        )
+
+    with SessionLocal() as session:
+        stamped = apply_engine_progress(
+            session,
+            job_id=job_id,
+            claim_attempt=new_claim.attempt,
+            claim_owner=new_claim.token,
+            stage="generating",
+        )
+        assert stamped is not None, "the rightful new claimant was refused"
+        session.commit()
+    with SessionLocal() as session:
+        row = session.get(Job, job_id)
+        assert row is not None and isinstance(row.progress_json, dict)
+        assert row.progress_json.get("engine_reported_at"), (
+            "the rightful new claimant could not stamp"
+        )
+        assert row.progress_json.get("engine_report_attempt") == new_claim.attempt
+
+
+async def test_an_old_chat_streams_stamp_is_refused_after_reclaim(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The chat cross-product: the stream outlives its claim and keeps talking.
+
+    The delta path reloads the row by job_id and finds the NEW claimant's
+    RUNNING state; an unbound stamp would happily land. The writer checks
+    the presented claim against the row's attempt AND owner at the database.
+    """
+
+    with SessionLocal() as session:
+        job = Job(
+            kind="chat",
+            status="queued",
+            phase="queued",
+            payload_json={},
+            queue_group="primary",
+            queue_ticket="ticket-old-chat",
+            enqueued_at=datetime.now(UTC),
+        )
+        session.add(job)
+        session.commit()
+        job_id = job.id
+
+    old_claim = await _one_pass_claim_capture(monkeypatch, job_id)
+    monkeypatch.undo()
+    _simulate_claim_expiry(job_id)
+    new_claim = await _one_pass_claim_capture(monkeypatch, job_id)
+
+    orchestrator = app.state.services.orchestrator
+    orchestrator._stamp_chat_engine_report(job_id, old_claim)
+    with SessionLocal() as session:
+        row = session.get(Job, job_id)
+        assert row is not None and isinstance(row.progress_json, dict)
+        assert row.progress_json.get("engine_reported_at") is None, (
+            "an expired chat stream stamped the new attempt's liveness"
+        )
+
+    orchestrator._stamp_chat_engine_report(job_id, new_claim)
+    with SessionLocal() as session:
+        row = session.get(Job, job_id)
+        assert row is not None and isinstance(row.progress_json, dict)
+        assert row.progress_json.get("engine_reported_at"), (
+            "the rightful claimant's chat stream could not stamp"
+        )
+        assert row.progress_json.get("engine_report_attempt") == new_claim.attempt
+
+
+async def test_real_adapter_backend_events_reach_the_writer_with_provenance(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The adapter-to-writer seam, with the ComfyUI adapter's event code.
+
+    Part one runs the adapter's generate() over a stubbed transport: the
+    prompt acknowledgement is built from its POST response handling, and a
+    backend progress frame plus the completion flow through its
+    socket-parsing loop, each carrying engine_sourced from the adapter
+    itself. Part two replays exactly those captured events through a media
+    turn, so the writer persists them under the claim identity and the stamp
+    appears.
+    """
+
+    import websockets as _websockets
+
+    from local_lm.adapters import comfyui as comfyui_module
+    from local_lm.adapters.base import GeneratedAsset, MediaRequest
+
+    adapter = comfyui_module.ComfyUIAdapter(
+        "http://127.0.0.1:9", managed_output_root=tmp_path / "outputs"
+    )
+
+    frames = [
+        json.dumps(
+            {"type": "progress", "data": {"value": 5, "max": 10, "prompt_id": "prompt-seam-1"}}
+        ),
+        json.dumps({"type": "execution_success", "data": {}}),
+    ]
+
+    class _StubSocket:
+        def __aiter__(self):  # type: ignore[no-untyped-def]
+            async def _frames():  # type: ignore[no-untyped-def]
+                for frame in frames:
+                    yield frame
+
+            return _frames()
+
+    class _StubConnect:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> _StubSocket:
+            return _StubSocket()
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    class _StubResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"prompt_id": "prompt-seam-1"}
+
+    async def _stub_post(url: str, **kwargs: object) -> _StubResponse:
+        return _StubResponse()
+
+    async def _no_sweep(self: object) -> None:
+        return None
+
+    async def _stub_parameters(self: object, request: object) -> dict[str, object]:
+        return {}
+
+    async def _stub_collect(self: object, prompt_id: str, operation: str):  # type: ignore[no-untyped-def]
+        return [
+            GeneratedAsset(
+                content=b"seam payload",
+                media_type="image/png",
+                kind="image",
+                name="seam.png",
+            )
+        ]
+
+    monkeypatch.setattr(comfyui_module.ComfyUIAdapter, "_sweep_stale_outputs", _no_sweep)
+    monkeypatch.setattr(comfyui_module.ComfyUIAdapter, "_request_parameters", _stub_parameters)
+    monkeypatch.setattr(
+        comfyui_module.ComfyUIAdapter, "_compile", lambda self, workflow, parameters: {"stub": 1}
+    )
+    monkeypatch.setattr(comfyui_module.ComfyUIAdapter, "_collect_outputs", _stub_collect)
+    monkeypatch.setattr(_websockets, "connect", _StubConnect)
+    monkeypatch.setattr(adapter, "_client", SimpleNamespace(post=_stub_post))
+
+    captured = []
+    async for event in adapter.generate(
+        MediaRequest(
+            run_id="run-seam",
+            operation="text_to_image",
+            prompt="seam",
+            negative_prompt=None,
+            input_paths=[],
+            workflow={"nodes": []},
+            parameters={},
+        )
+    ):
+        captured.append(event)
+
+    queued = next(event for event in captured if event.type == "queued")
+    assert queued.engine_sourced, "the prompt acknowledgement lost its provenance"
+    sampling = next(
+        event for event in captured if event.type == "progress" and event.phase == "sampling"
+    )
+    assert sampling.engine_sourced, "the backend progress frame lost its provenance"
+    complete = next(event for event in captured if event.type == "complete")
+    assert complete.engine_sourced, "the completion lost its provenance"
+    assert any(event.type == "progress" and not event.engine_sourced for event in captured), (
+        "the local pre-submission events must stay unmarked beside the backend ones"
+    )
+
+    async def replay_stream(request: object):  # type: ignore[no-untyped-def]
+        for event in captured:
+            yield event
+
+    monkeypatch.setattr(app.state.services.engines.media, "generate", replay_stream)
+
+    chat = (await client.post("/api/chats", json={"title": "Adapter seam"})).json()
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Render through the seam", "mode": "image"},
+    )
+    assert turn.status_code == 202
+    run_id = turn.json()["run"]["id"]
+    await wait_for_run(client, run_id)
+
+    with SessionLocal() as session:
+        job = session.scalar(select(Job).where(Job.run_id == run_id))
+        assert job is not None and isinstance(job.progress_json, dict)
+        assert job.progress_json.get("engine_reported_at"), (
+            "backend-originated adapter events flowed through the "
+            "production writer and left no stamp"
+        )
+        assert job.progress_json.get("engine_report_attempt") == job.attempt
+
+
+async def test_a_backend_completion_alone_stamps_the_attempt(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The completion marker is persisted, not carried and dropped.
+
+    The adapter marks its complete event engine_sourced; a complete branch
+    that discards the marker is a provenance claim that never reaches the
+    writer. A stream whose ONLY backend-originated
+    event is the completion must still leave the stamp, bound to the attempt
+    that ran; every earlier event here is local and unmarked, so nothing else
+    could have minted it.
+    """
+
+    from local_lm.adapters.base import GeneratedAsset, MediaEvent
+
+    async def completion_only_stream(request: object):  # type: ignore[no-untyped-def]
+        yield MediaEvent(
+            type="progress", phase="Preparing media workspace", data={"indeterminate": True}
+        )
+        yield MediaEvent(type="progress", progress=0.5, phase="staging locally")
+        yield MediaEvent(
+            type="complete",
+            progress=1,
+            phase="complete",
+            engine_sourced=True,
+            assets=[
+                GeneratedAsset(
+                    content=b"payload",
+                    media_type="image/png",
+                    kind="image",
+                    name="completed.png",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(app.state.services.engines.media, "generate", completion_only_stream)
+
+    chat = (await client.post("/api/chats", json={"title": "Completion marker"})).json()
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Finish quietly", "mode": "image"},
+    )
+    assert turn.status_code == 202
+    run_id = turn.json()["run"]["id"]
+    await wait_for_run(client, run_id)
+
+    with SessionLocal() as session:
+        job = session.scalar(select(Job).where(Job.run_id == run_id))
+        assert job is not None and isinstance(job.progress_json, dict)
+        assert job.progress_json.get("engine_reported_at"), (
+            "the backend completion's provenance was dropped instead of persisted"
+        )
+        assert job.progress_json.get("engine_report_attempt") == job.attempt
+
+
+def _queued_media_job(session, ticket: str) -> str:
+    job = Job(
+        kind="image",
+        status="queued",
+        phase="queued",
+        payload_json={},
+        queue_group="primary",
+        queue_ticket=ticket,
+        enqueued_at=datetime.now(UTC),
+    )
+    session.add(job)
+    session.commit()
+    return job.id
+
+
+def _row_state(session, job_id: str) -> tuple:  # type: ignore[type-arg]
+    row = session.get(Job, job_id)
+    assert row is not None
+    return (
+        dict(row.progress_json) if isinstance(row.progress_json, dict) else row.progress_json,
+        row.phase,
+        row.progress,
+        row.status,
+        row.attempt,
+        row.claim_owner,
+    )
+
+
+async def test_the_guard_reads_the_database_not_the_loaded_object(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale ORM object cannot smuggle a stale write past the guard.
+
+    expire_on_commit is False, so an old execution's session still shows the
+    attempt and owner it captured even after a foreign expiry and re-claim
+    commit new ones. An object-level comparison passes exactly then; the
+    conditional UPDATE, bound to the row as the database has it, must refuse
+    and leave every field untouched.
+    """
+
+    with SessionLocal() as session:
+        job_id = _queued_media_job(session, "ticket-stale-object")
+
+    old_claim = await _one_pass_claim_capture(monkeypatch, job_id)
+    monkeypatch.undo()
+
+    with SessionLocal() as stale_session:
+        stale_row = stale_session.get(Job, job_id)
+        assert stale_row is not None
+        assert stale_row.attempt == old_claim.attempt
+        assert stale_row.claim_owner == old_claim.token
+
+        _simulate_claim_expiry(job_id)
+        new_claim = await _one_pass_claim_capture(monkeypatch, job_id)
+        assert new_claim.attempt == old_claim.attempt + 1
+
+        # The stale session's identity map still answers with the captured
+        # identity - the exact state an object-level check would trust.
+        assert stale_row.attempt == old_claim.attempt
+        assert stale_row.claim_owner == old_claim.token
+        refused = apply_engine_progress(
+            stale_session,
+            job_id=job_id,
+            claim_attempt=old_claim.attempt,
+            claim_owner=old_claim.token,
+            stage="generating",
+            stage_progress=0.7,
+        )
+        assert refused is None, "the guard accepted the stale identity the loaded object shows"
+        stale_session.rollback()
+
+    with SessionLocal() as session:
+        row = session.get(Job, job_id)
+        assert row is not None
+        assert row.attempt == new_claim.attempt
+        assert row.claim_owner == new_claim.token
+        assert isinstance(row.progress_json, dict)
+        assert row.progress_json.get("engine_reported_at") is None
+
+
+async def test_every_identity_mismatch_refuses_the_whole_engine_write(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Attempt, owner, and status each independently refuse the whole write."""
+
+    with SessionLocal() as session:
+        job_id = _queued_media_job(session, "ticket-cross-product")
+    claim = await _one_pass_claim_capture(monkeypatch, job_id)
+
+    with SessionLocal() as session:
+        baseline = _row_state(session, job_id)
+
+    cases = [
+        ("wrong attempt", claim.attempt + 1, claim.token),
+        ("wrong owner", claim.attempt, claim.token + "x"),
+        ("both wrong", claim.attempt + 1, claim.token + "x"),
+    ]
+    for label, attempt, owner in cases:
+        with SessionLocal() as session:
+            refused = apply_engine_progress(
+                session,
+                job_id=job_id,
+                claim_attempt=attempt,
+                claim_owner=owner,
+                stage="generating",
+                stage_progress=0.5,
+            )
+            assert refused is None, f"{label}: the guarded write was accepted"
+            session.commit()
+        with SessionLocal() as session:
+            assert _row_state(session, job_id) == baseline, (
+                f"{label}: a refused write still changed the row"
+            )
+
+    with SessionLocal() as session:
+        row = session.get(Job, job_id)
+        assert row is not None
+        row.status = "complete"
+        session.commit()
+    with SessionLocal() as session:
+        refused = apply_engine_progress(
+            session,
+            job_id=job_id,
+            claim_attempt=claim.attempt,
+            claim_owner=claim.token,
+            stage="generating",
+        )
+        assert refused is None, "a terminal row accepted an engine write"
+
+
+async def test_a_new_stamp_survives_a_stale_event(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The new claimant stamps FIRST; the old producer's event changes nothing.
+
+    The refused write must not carry the new stamp while replacing the rest
+    of the snapshot: after the stale event, the row is byte-identical to the
+    state the rightful stamp left.
+    """
+
+    with SessionLocal() as session:
+        job_id = _queued_media_job(session, "ticket-stamp-survives")
+    old_claim = await _one_pass_claim_capture(monkeypatch, job_id)
+    monkeypatch.undo()
+    _simulate_claim_expiry(job_id)
+    new_claim = await _one_pass_claim_capture(monkeypatch, job_id)
+
+    with SessionLocal() as session:
+        stamped = apply_engine_progress(
+            session,
+            job_id=job_id,
+            claim_attempt=new_claim.attempt,
+            claim_owner=new_claim.token,
+            stage="generating",
+            stage_progress=0.4,
+        )
+        assert stamped is not None
+        session.commit()
+    with SessionLocal() as session:
+        after_stamp = _row_state(session, job_id)
+
+    with SessionLocal() as session:
+        refused = apply_engine_progress(
+            session,
+            job_id=job_id,
+            claim_attempt=old_claim.attempt,
+            claim_owner=old_claim.token,
+            stage="finalizing",
+            stage_progress=0.99,
+        )
+        assert refused is None
+        session.commit()
+    with SessionLocal() as session:
+        assert _row_state(session, job_id) == after_stamp, (
+            "a late event from the previous attempt altered the snapshot the "
+            "rightful claimant stamped"
+        )
+
+
+async def test_the_reader_rejects_a_stamp_from_another_attempt(
+    client: AsyncClient,
+) -> None:
+    """A fresh-looking stamp minted by a previous attempt is not liveness."""
+
+    with SessionLocal() as session:
+        job = Job(kind="image", status="running", phase="generating", payload_json={})
+        session.add(job)
+        session.flush()
+        job.attempt = 2
+        _engine_stamp(job, stage="generating")
+        assert isinstance(job.progress_json, dict)
+        job.progress_json = {**job.progress_json, "engine_report_attempt": 1}
+        session.commit()
+        assert _reported_progress_age(session, ["image", "video"]) is None, (
+            "the reader trusted a stamp whose embedded attempt is not the row's current attempt"
+        )
+
+        job.progress_json = {**job.progress_json, "engine_report_attempt": 2}
+        session.commit()
+        assert _reported_progress_age(session, ["image", "video"]) is not None, (
+            "the reader rejected a stamp the current attempt minted"
+        )
+
+
+class _TerminalSeam:
+    """The terminal writers over a minimal object graph."""
+
+    session_factory = staticmethod(SessionLocal)
+    _claim_owns_row = ConversationOrchestrator._claim_owns_row
+    _claim_terminal_transition = ConversationOrchestrator._claim_terminal_transition
+    _complete = ConversationOrchestrator._complete
+    _fail = ConversationOrchestrator._fail
+    _persist_streamed_text = ConversationOrchestrator._persist_streamed_text
+    _finalize_response_revision = ConversationOrchestrator._finalize_response_revision
+    _ensure_response_revision = ConversationOrchestrator._ensure_response_revision
+    _revision_part_copy = staticmethod(ConversationOrchestrator._revision_part_copy)
+    _set_work_status = staticmethod(ConversationOrchestrator._set_work_status)
+    _temporary_preview_ids = staticmethod(ConversationOrchestrator._temporary_preview_ids)
+    _remove_chat_progress = staticmethod(ConversationOrchestrator._remove_chat_progress)
+    _replace_parts = staticmethod(ConversationOrchestrator._replace_parts)
+
+    class _Scheduler:
+        @staticmethod
+        async def publish_job(job_id: str) -> None:
+            return None
+
+    class _Events:
+        @staticmethod
+        async def publish(*args: object, **kwargs: object) -> None:
+            return None
+
+    class _Artifacts:
+        @staticmethod
+        def delete_temporary_preview(session: object, artifact_id: str) -> None:
+            return None
+
+    scheduler = _Scheduler()
+    events = _Events()
+    artifacts = _Artifacts()
+
+
+def _terminal_graph(session, job_id: str):  # type: ignore[no-untyped-def]
+    chat = Chat()
+    session.add(chat)
+    session.flush()
+    user = Message(chat_id=chat.id, role="user")
+    assistant = Message(chat_id=chat.id, role="assistant", status="pending")
+    session.add_all([user, assistant])
+    session.flush()
+    run = Run(
+        chat_id=chat.id,
+        user_message_id=user.id,
+        assistant_message_id=assistant.id,
+        status="running",
+    )
+    session.add(run)
+    session.flush()
+    return run, assistant
+
+
+async def test_an_old_producer_cannot_complete_the_new_attempt(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Terminal completion is bound to the claim that produced the output.
+
+    An old backend outliving expiry and re-claim must not commit COMPLETE,
+    results, run status or message status over the new claimant's attempt;
+    presenting the current claim, completion works.
+    """
+
+    with SessionLocal() as session:
+        job_id = _queued_media_job(session, "ticket-terminal-complete")
+    old_claim = await _one_pass_claim_capture(monkeypatch, job_id)
+    monkeypatch.undo()
+    _simulate_claim_expiry(job_id)
+    new_claim = await _one_pass_claim_capture(monkeypatch, job_id)
+
+    seam = _TerminalSeam()
+    with SessionLocal() as session:
+        run, assistant = _terminal_graph(session, job_id)
+        session.commit()
+        run_id, assistant_id = run.id, assistant.id
+
+    with SessionLocal() as session:
+        run = session.get(Run, run_id)
+        job = session.get(Job, job_id)
+        assert run is not None and job is not None
+        completed = seam._complete(session, run, job, {"characters": 3}, claim=old_claim)
+        assert completed is False, "an old producer's completion was accepted"
+        session.rollback()
+
+    with SessionLocal() as session:
+        row = session.get(Job, job_id)
+        run = session.get(Run, run_id)
+        assistant = session.get(Message, assistant_id)
+        assert row is not None and run is not None and assistant is not None
+        assert row.status == "running"
+        assert row.attempt == new_claim.attempt
+        assert not row.result_json
+        assert row.completed_at is None
+        assert run.status == "running"
+        assert assistant.status == "pending"
+
+    with SessionLocal() as session:
+        run = session.get(Run, run_id)
+        job = session.get(Job, job_id)
+        assert run is not None and job is not None
+        completed = seam._complete(session, run, job, {"characters": 3}, claim=new_claim)
+        assert completed is True, "the rightful claimant could not complete"
+        session.commit()
+    with SessionLocal() as session:
+        row = session.get(Job, job_id)
+        assert row is not None
+        assert row.status == "complete"
+        assert row.result_json == {"characters": 3}
+
+
+async def test_an_old_producer_cannot_fail_the_new_attempt(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_fail with a superseded claim leaves the new attempt untouched."""
+
+    with SessionLocal() as session:
+        job_id = _queued_media_job(session, "ticket-terminal-fail")
+    old_claim = await _one_pass_claim_capture(monkeypatch, job_id)
+    monkeypatch.undo()
+    _simulate_claim_expiry(job_id)
+    new_claim = await _one_pass_claim_capture(monkeypatch, job_id)
+
+    seam = _TerminalSeam()
+    with SessionLocal() as session:
+        run, _assistant = _terminal_graph(session, job_id)
+        session.commit()
+        run_id = run.id
+
+    await seam._fail(job_id, run_id, "stale failure", claim=old_claim)
+    with SessionLocal() as session:
+        row = session.get(Job, job_id)
+        run = session.get(Run, run_id)
+        assert row is not None and run is not None
+        assert row.status == "running", "an old producer failed the new attempt"
+        assert row.error is None
+        assert run.status == "running"
+
+    await seam._fail(job_id, run_id, "real failure", claim=new_claim)
+    with SessionLocal() as session:
+        row = session.get(Job, job_id)
+        run = session.get(Run, run_id)
+        assert row is not None and run is not None
+        assert row.status == "failed"
+        assert row.error == "real failure"
+        assert run.status == "failed"
+
+
+async def test_terminal_transitions_accept_a_released_but_current_claim(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lease release clears the owner; the attempt still binds.
+
+    Terminal writers run after the execution's lease scope exits, so an
+    ownerless row with the captured attempt is theirs - but a row whose
+    attempt moved is not, owner or no owner.
+    """
+
+    with SessionLocal() as session:
+        job_id = _queued_media_job(session, "ticket-released-claim")
+    claim = await _one_pass_claim_capture(monkeypatch, job_id)
+
+    with SessionLocal() as session:
+        row = session.get(Job, job_id)
+        assert row is not None
+        row.claim_owner = None
+        row.claim_expires_at = None
+        session.commit()
+
+    seam = _TerminalSeam()
+    with SessionLocal() as session:
+        accepted = seam._claim_terminal_transition(session, job_id, claim, status="cancelled")
+        assert accepted is True, "a released row refused its own claimant"
+        session.rollback()
+
+    with SessionLocal() as session:
+        row = session.get(Job, job_id)
+        assert row is not None
+        row.attempt = claim.attempt + 1
+        session.commit()
+    with SessionLocal() as session:
+        accepted = seam._claim_terminal_transition(session, job_id, claim, status="cancelled")
+        assert accepted is False, "an ownerless row with a moved attempt was accepted"
+        session.rollback()
+
+
+async def test_a_stale_stream_cannot_replace_the_new_attempts_text(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Streamed text persistence is bound to the claim that streams it."""
+
+    with SessionLocal() as session:
+        job_id = _queued_media_job(session, "ticket-stale-stream")
+    old_claim = await _one_pass_claim_capture(monkeypatch, job_id)
+    monkeypatch.undo()
+    _simulate_claim_expiry(job_id)
+    new_claim = await _one_pass_claim_capture(monkeypatch, job_id)
+
+    seam = _TerminalSeam()
+    with SessionLocal() as session:
+        _run, assistant = _terminal_graph(session, job_id)
+        session.commit()
+        assistant_id = assistant.id
+
+    seam._persist_streamed_text(assistant_id, "stale words", job_id=job_id, claim=old_claim)
+    with SessionLocal() as session:
+        message = session.get(Message, assistant_id)
+        assert message is not None
+        assert not any(part.text == "stale words" for part in message.parts), (
+            "a stale stream replaced the new attempt's text"
+        )
+
+    seam._persist_streamed_text(assistant_id, "current words", job_id=job_id, claim=new_claim)
+    with SessionLocal() as session:
+        message = session.get(Message, assistant_id)
+        assert message is not None
+        assert any(part.text == "current words" for part in message.parts), (
+            "the current claimant's stream did not persist"
+        )
+
+
+async def test_a_stale_execution_persists_no_artifacts_or_completion(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole media pipeline refuses under a claim the row outgrew.
+
+    An old execution that outlives expiry and re-claim drives the full real
+    path - mock engine, event loop, artifact finalization - presenting the
+    claim it captured. Nothing may persist: no progress stamp, no artifacts,
+    no message parts, no completion, and the new claimant's row untouched.
+    """
+
+    orch = app.state.services.orchestrator
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: None)
+    chat = (await client.post("/api/chats", json={"title": "Stale finalize"})).json()
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Render stale", "mode": "image"},
+    )
+    assert turn.status_code == 202
+    run_id = turn.json()["run"]["id"]
+
+    with SessionLocal() as session:
+        job = session.scalar(select(Job).where(Job.run_id == run_id))
+        assert job is not None and job.status == "queued"
+        job_id = job.id
+        artifact_baseline = session.scalar(select(func.count(Artifact.id))) or 0
+
+    old_claim = await _one_pass_claim_capture(monkeypatch, job_id)
+    monkeypatch.undo()
+    await _expire_and_retry(client, orch, job_id)
+    new_claim = await _one_pass_claim_capture(monkeypatch, job_id)
+
+    broadcast: list[str] = []
+    real_publish = orch.events.publish
+
+    async def recording_publish(name: str, *args: object, **kwargs: object) -> None:
+        broadcast.append(name)
+        await real_publish(name, *args, **kwargs)
+
+    monkeypatch.setattr(orch.events, "publish", recording_publish)
+
+    from local_lm.orchestrator import ClaimLost
+
+    with pytest.raises(ClaimLost):
+        await orch._execute_media(job_id, run_id, old_claim)
+    assert "generation.progress" not in broadcast, "clients heard a superseded producer's progress"
+    assert "generation.preview" not in broadcast, "clients saw a superseded producer's preview"
+
+    with SessionLocal() as session:
+        row = session.get(Job, job_id)
+        run = session.get(Run, run_id)
+        assert row is not None and run is not None
+        assert row.status == "running", "a stale execution moved the job status"
+        assert row.attempt == new_claim.attempt
+        assert not row.result_json, "a stale execution persisted results"
+        assert isinstance(row.progress_json, dict)
+        assert row.progress_json.get("engine_reported_at") is None, (
+            "a stale execution stamped the new attempt"
+        )
+        assert run.status != "complete", "a stale execution completed the run"
+        artifacts_now = session.scalar(select(func.count(Artifact.id))) or 0
+        assert artifacts_now == artifact_baseline, "a stale execution persisted generated artifacts"
+        message = session.get(Message, run.assistant_message_id)
+        assert message is not None
+        assert not any(part.type in {"image", "video"} for part in message.parts), (
+            "a stale execution attached generated media parts"
+        )
+
+
+async def test_a_duplicate_waiter_cannot_cancel_anothers_terminal_result(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A claimless cancellation may only touch a QUEUED, unowned row.
+
+    The scheduler's waiter raises CancelledError the moment it observes ANY
+    terminal status - including another dispatcher's COMPLETE. That waiter
+    never held a claim, so the terminal result is not its to rewrite: the
+    real _execute must propagate the cancellation and leave the row exactly
+    as the other dispatcher finished it.
+    """
+
+    orch = app.state.services.orchestrator
+
+    with SessionLocal() as session:
+        job_id = _queued_media_job(session, "ticket-duplicate-waiter")
+        run, _assistant = _terminal_graph(session, job_id)
+        job = session.get(Job, job_id)
+        assert job is not None
+        job.status = "complete"
+        job.completed_at = datetime.now(UTC)
+        job.result_json = {"artifact_ids": []}
+        session.commit()
+        run_id = run.id
+
+    from local_lm.scheduler import ResourceScheduler
+
+    async def observing_waiter(self: object, *args: object, **kwargs: object) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(ResourceScheduler, "_acquire_job", observing_waiter)
+
+    with pytest.raises(asyncio.CancelledError):
+        await orch._execute(job_id, run_id)
+
+    with SessionLocal() as session:
+        row = session.get(Job, job_id)
+        assert row is not None
+        assert row.status == "complete", (
+            "a claimless waiter rewrote another dispatcher's terminal result"
+        )
+        assert row.result_json == {"artifact_ids": []}
+
+
+async def test_a_stale_verification_cannot_finish_the_new_attempt(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The verification funnel's terminal write is bound to the claim."""
+
+    orch = app.state.services.orchestrator
+    with SessionLocal() as session:
+        job_id = _queued_media_job(session, "ticket-stale-verification")
+
+    old_claim = await _one_pass_claim_capture(monkeypatch, job_id)
+    monkeypatch.undo()
+    _simulate_claim_expiry(job_id)
+    new_claim = await _one_pass_claim_capture(monkeypatch, job_id)
+
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        persisted = orch._persist_image_edit_verification(
+            session, job, {"status": "complete"}, claim=old_claim
+        )
+        assert persisted is False, "a stale verification finished the new attempt"
+        session.rollback()
+
+    with SessionLocal() as session:
+        row = session.get(Job, job_id)
+        assert row is not None
+        assert row.status == "running"
+        assert row.attempt == new_claim.attempt
+
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        persisted = orch._persist_image_edit_verification(
+            session, job, {"status": "complete"}, claim=new_claim
+        )
+        assert persisted is True, "the rightful verification could not finish"
+        session.commit()
+    with SessionLocal() as session:
+        row = session.get(Job, job_id)
+        assert row is not None
+        assert row.status == "complete"
+
+
+async def test_a_stale_phase_write_neither_persists_nor_publishes(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A phase is the execution's speech; a superseded one says nothing.
+
+    The phase writers reload the row by id, so a stale execution finds the
+    new claimant's RUNNING state; the write must refuse at the database and
+    the refusal must silence the broadcast too.
+    """
+
+    orch = app.state.services.orchestrator
+    with SessionLocal() as session:
+        job_id = _queued_media_job(session, "ticket-stale-phase")
+        run, _assistant = _terminal_graph(session, job_id)
+        session.commit()
+        run_id = run.id
+
+    old_claim = await _one_pass_claim_capture(monkeypatch, job_id)
+    monkeypatch.undo()
+    _simulate_claim_expiry(job_id)
+    new_claim = await _one_pass_claim_capture(monkeypatch, job_id)
+
+    published: list[str] = []
+    real_publish = orch.events.publish
+
+    async def recording_publish(name: str, *args: object, **kwargs: object) -> None:
+        published.append(name)
+        await real_publish(name, *args, **kwargs)
+
+    monkeypatch.setattr(orch.events, "publish", recording_publish)
+
+    with SessionLocal() as session:
+        row = session.get(Job, job_id)
+        assert row is not None
+        baseline_phase = row.phase
+
+    accepted = await orch._set_media_phase(job_id, run_id, "Stale phase", old_claim)
+    assert accepted is False, "a stale execution wrote a phase"
+    assert published == [], "a refused phase write still broadcast progress"
+    with SessionLocal() as session:
+        row = session.get(Job, job_id)
+        assert row is not None
+        assert row.phase == baseline_phase
+
+    accepted = await orch._set_media_phase(job_id, run_id, "Live phase", new_claim)
+    assert accepted is True, "the rightful execution could not write its phase"
+    assert "generation.progress" in published
+    with SessionLocal() as session:
+        row = session.get(Job, job_id)
+        assert row is not None
+        assert row.phase == "Live phase"
+
+
+def _queued_verification_job(session, ticket: str) -> str:  # type: ignore[no-untyped-def]
+    """An EDIT_VERIFY job whose payload cannot validate: the real verifier
+    reaches its first terminal funnel without any vision worker."""
+
+    job = Job(
+        kind=JobKind.EDIT_VERIFY.value,
+        status="queued",
+        phase="queued",
+        payload_json={"not": "a verification payload"},
+        queue_group="primary",
+        queue_resource="interactive_compute",
+        queue_ticket=ticket,
+        enqueued_at=datetime.now(UTC),
+    )
+    session.add(job)
+    session.commit()
+    return job.id
+
+
+async def test_a_stale_verifier_cannot_finish_an_expired_row(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The verifier's terminal funnel is bound to the claim it captured.
+
+    Expiry leaves a verification row interrupted; a verifier that outlived
+    its claim then reaches a terminal funnel through the production path and
+    must write nothing - not a status, not a result - because the finish
+    carries the claim to the conditional transition.
+    """
+
+    orch = app.state.services.orchestrator
+    with SessionLocal() as session:
+        job_id = _queued_verification_job(session, "ticket-stale-verifier")
+
+    old_claim = await _one_pass_claim_capture(monkeypatch, job_id)
+    monkeypatch.undo()
+    _expire_claim_like_production(job_id)
+    with SessionLocal() as session:
+        before = _row_state(session, job_id)
+
+    await orch._execute_image_edit_verification(job_id, old_claim)
+
+    with SessionLocal() as session:
+        row = session.get(Job, job_id)
+        assert row is not None
+        assert row.status == "interrupted", "a stale verifier rewrote an expired row"
+        assert row.result_json in (None, {}), "a stale verifier persisted a result"
+        assert _row_state(session, job_id) == before, "a stale verifier touched the row"
+
+
+async def test_a_live_stream_stops_speaking_the_moment_its_claim_is_lost(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every delta is checked before it is heard, not on the persist throttle.
+
+    A real _execute_chat streams one delta, then the row expires and is
+    re-claimed while the stream is paused; the next delta must not be
+    published and the completion must not land on the new attempt.
+    """
+
+    from local_lm.adapters.base import ChatEvent
+
+    orch = app.state.services.orchestrator
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: None)
+    chat = (await client.post("/api/chats", json={"title": "Reclaimed stream"})).json()
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Keep talking", "mode": "text"},
+    )
+    assert turn.status_code == 202
+    run_id = turn.json()["run"]["id"]
+    with SessionLocal() as session:
+        job = session.scalar(select(Job).where(Job.run_id == run_id))
+        assert job is not None and job.status == "queued"
+        job_id = job.id
+
+    first_heard = asyncio.Event()
+    resume = asyncio.Event()
+
+    async def paused_stream(request: object):  # type: ignore[no-untyped-def]
+        yield ChatEvent(type="delta", text="first ")
+        first_heard.set()
+        await resume.wait()
+        yield ChatEvent(type="delta", text="second")
+        yield ChatEvent(type="complete", data={})
+
+    monkeypatch.setattr(app.state.services.engines.chat, "stream", paused_stream)
+
+    deltas: list[str] = []
+    attempts: list[object] = []
+    real_publish = orch.events.publish
+
+    async def recording_publish(name: str, *args: object, **kwargs: object) -> None:
+        if name == "text.delta":
+            payload = args[1] if len(args) > 1 else kwargs.get("payload")
+            deltas.append(str(payload.get("text")) if isinstance(payload, dict) else "?")
+            attempts.append(payload.get("attempt") if isinstance(payload, dict) else None)
+        await real_publish(name, *args, **kwargs)
+
+    monkeypatch.setattr(orch.events, "publish", recording_publish)
+
+    old_claim = await _one_pass_claim_capture(monkeypatch, job_id)
+    execution = asyncio.create_task(orch._execute_chat(job_id, run_id, old_claim))
+    await asyncio.wait_for(first_heard.wait(), timeout=10)
+    assert deltas == ["first "], "the first delta of a live claim was not heard"
+    assert attempts == [old_claim.attempt], "the delta must name the attempt that spoke it"
+
+    await _expire_and_retry(client, orch, job_id)
+    new_claim = await _one_pass_claim_capture(monkeypatch, job_id)
+    assert new_claim.attempt == old_claim.attempt + 1
+
+    resume.set()
+    await asyncio.wait_for(execution, timeout=10)
+
+    assert deltas == ["first "], "a delta was heard after the claim was lost"
+    with SessionLocal() as session:
+        row = session.get(Job, job_id)
+        assert row is not None
+        assert row.status == "running" and row.attempt == new_claim.attempt, (
+            "the stale stream completed the new attempt"
+        )
+
+
+async def test_a_stale_execution_cannot_write_provenance_after_its_awaits(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The post-await provenance write is this execution's speech too.
+
+    The claim is lost while the chat worker is being prepared; the
+    provenance commit that follows those awaits must refuse, and the
+    stream must never start.
+    """
+
+    from local_lm.adapters.base import ChatEvent
+
+    orch = app.state.services.orchestrator
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: None)
+    chat = (await client.post("/api/chats", json={"title": "Lost during prep"})).json()
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Prepare then vanish", "mode": "text"},
+    )
+    assert turn.status_code == 202
+    run_id = turn.json()["run"]["id"]
+    with SessionLocal() as session:
+        job = session.scalar(select(Job).where(Job.run_id == run_id))
+        assert job is not None
+        job_id = job.id
+        run = session.get(Run, run_id)
+        assert run is not None
+        provenance_before = dict(run.provenance_json)
+
+    old_claim = await _one_pass_claim_capture(monkeypatch, job_id)
+    real_ensure = orch._ensure_chat_worker
+
+    async def losing_ensure(run_identity: str):  # type: ignore[no-untyped-def]
+        worker = await real_ensure(run_identity)
+        await _expire_and_retry(client, orch, job_id)
+        await _one_pass_claim_capture(monkeypatch, job_id)
+        return worker
+
+    monkeypatch.setattr(orch, "_ensure_chat_worker", losing_ensure)
+    streamed = {"n": 0}
+
+    async def counting_stream(request: object):  # type: ignore[no-untyped-def]
+        streamed["n"] += 1
+        yield ChatEvent(type="complete", data={})
+
+    monkeypatch.setattr(app.state.services.engines.chat, "stream", counting_stream)
+
+    from local_lm.orchestrator import ClaimLost
+
+    with pytest.raises(ClaimLost):
+        await orch._execute_chat(job_id, run_id, old_claim)
+
+    assert streamed["n"] == 0, "a stale execution streamed after losing its claim"
+    with SessionLocal() as session:
+        run = session.get(Run, run_id)
+        assert run is not None
+        assert "context" not in run.provenance_json or run.provenance_json == provenance_before, (
+            "a stale execution committed provenance after its awaits"
+        )
+
+
+async def _claimed_text_job(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> tuple[str, str, object]:
+    """A chat with one queued text turn whose job is claimed by one real
+    scheduler pass; returns (chat id, job id, the minted claim)."""
+
+    chat = (await client.post("/api/chats", json={"title": "Bound creation"})).json()
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Hold the row", "mode": "text"},
+    )
+    assert turn.status_code == 202
+    run_id = turn.json()["run"]["id"]
+    with SessionLocal() as session:
+        job = session.scalar(select(Job).where(Job.run_id == run_id))
+        assert job is not None and job.status == "queued"
+        job_id = job.id
+    claim = await _one_pass_claim_capture(monkeypatch, job_id)
+    monkeypatch.undo()
+    return chat["id"], job_id, claim
+
+
+async def test_a_current_claim_makes_the_bound_turn_durable_with_its_provenance(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The creation hook runs inside the turn transaction: it asserts the
+    claim at the database and writes the run's provenance, and the turn,
+    its provenance and the announcement all follow that one commit."""
+
+    orch = app.state.services.orchestrator
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: None)
+    chat_id, job_id, claim = await _claimed_text_job(client, monkeypatch)
+    published: list[str] = []
+    real_publish = orch.events.publish
+
+    async def recording_publish(name: str, *args: object, **kwargs: object) -> None:
+        published.append(name)
+        await real_publish(name, *args, **kwargs)
+
+    monkeypatch.setattr(orch.events, "publish", recording_publish)
+    seen: dict[str, object] = {}
+
+    def bound(turn_session, created_run) -> None:  # type: ignore[no-untyped-def]
+        assert orch._claim_owns_row(turn_session, job_id, claim), "the claim no longer owns the row"
+        seen["announced_before_hook"] = list(published)
+        created_run.provenance_json = {**created_run.provenance_json, "bound_to": job_id}
+
+    with SessionLocal() as session:
+        accepted = await orch.create_turn(
+            session,
+            chat_id,
+            TurnRequest(text="Created under the claim", mode="text"),
+            before_commit=bound,
+        )
+        created_id = accepted.run.id
+
+    assert seen["announced_before_hook"] == [], "the turn was announced before its commit"
+    assert "work_plan.created" in published
+    with SessionLocal() as session:
+        created = session.get(Run, created_id)
+        assert created is not None
+        assert created.provenance_json.get("bound_to") == job_id, (
+            "the hook's provenance did not land in the creation transaction"
+        )
+
+
+async def test_a_lost_claim_leaves_no_turn_no_announcement_and_no_start(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the claim is gone at the commit, the hook refuses inside the real
+    transaction: no run row is created, nothing is published, and nothing is
+    started."""
+
+    from local_lm.orchestrator import ClaimLost
+
+    orch = app.state.services.orchestrator
+    started: list[object] = []
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: started.append(args))
+    chat_id, job_id, claim = await _claimed_text_job(client, monkeypatch)
+    started.clear()  # the setup turn's own start is not the stale claim's
+    _expire_claim_like_production(job_id)
+    published: list[str] = []
+    real_publish = orch.events.publish
+
+    async def recording_publish(name: str, *args: object, **kwargs: object) -> None:
+        published.append(name)
+        await real_publish(name, *args, **kwargs)
+
+    monkeypatch.setattr(orch.events, "publish", recording_publish)
+    with SessionLocal() as session:
+        runs_before = session.scalar(select(func.count()).select_from(Run))
+
+    def bound(turn_session, created_run) -> None:  # type: ignore[no-untyped-def]
+        if not orch._claim_owns_row(turn_session, job_id, claim):
+            raise ClaimLost(job_id)
+        created_run.provenance_json = {**created_run.provenance_json, "bound_to": job_id}
+
+    with SessionLocal() as session:
+        with pytest.raises(ClaimLost):
+            await orch.create_turn(
+                session,
+                chat_id,
+                TurnRequest(text="Created after the claim was lost", mode="text"),
+                before_commit=bound,
+            )
+        session.rollback()
+
+    with SessionLocal() as session:
+        runs_after = session.scalar(select(func.count()).select_from(Run))
+    assert runs_after == runs_before, "a stale claim created a turn"
+    assert "work_plan.created" not in published, "a stale claim announced a turn"
+    assert started == [], "a stale claim started a job"
+
+
+async def test_a_commit_under_a_lost_claim_rolls_back(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write staged after an await commits only under a claim that still
+    owns the row: with the claim gone, the assertion inside the committing
+    transaction rolls the write back and stops the caller."""
+
+    from local_lm.orchestrator import ClaimLost
+
+    orch = app.state.services.orchestrator
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: None)
+    _chat_id, job_id, claim = await _claimed_text_job(client, monkeypatch)
+
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        job.error = "written under the live claim"
+        orch._commit_owned(session, job_id, claim)
+    with SessionLocal() as session:
+        row = session.get(Job, job_id)
+        assert row is not None and row.error == "written under the live claim"
+
+    _expire_claim_like_production(job_id)
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        job.error = "written after the claim was lost"
+        with pytest.raises(ClaimLost):
+            orch._commit_owned(session, job_id, claim)
+    with SessionLocal() as session:
+        row = session.get(Job, job_id)
+        assert row is not None
+        assert row.error != "written after the claim was lost", "a lost claim's write landed"
+
+
+async def test_a_refused_phase_stops_its_caller(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The phase writers answer False when the row is no longer this
+    execution's; the phase requirement turns that answer into ClaimLost so
+    the caller stops there, names the phase it stopped at, and picks the
+    media writer when asked to."""
+
+    from local_lm.orchestrator import ClaimLost
+
+    orch = app.state.services.orchestrator
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: None)
+    _chat_id, job_id, claim = await _claimed_text_job(client, monkeypatch)
+    written: list[tuple[str, str]] = []
+
+    async def chat_phase(phase_job_id: str, run_id: str, label: str, phase_claim: object) -> bool:
+        written.append(("chat", label))
+        return label != "Refused"
+
+    async def media_phase(phase_job_id: str, run_id: str, label: str, phase_claim: object) -> bool:
+        written.append(("media", label))
+        return False
+
+    monkeypatch.setattr(orch, "_set_chat_phase", chat_phase)
+    monkeypatch.setattr(orch, "_set_media_phase", media_phase)
+    await orch._require_phase(job_id, "run", "Accepted", claim)
+    with pytest.raises(ClaimLost, match="Refused"):
+        await orch._require_phase(job_id, "run", "Refused", claim)
+    with pytest.raises(ClaimLost, match="Loading"):
+        await orch._require_phase(job_id, "run", "Loading", claim, media=True)
+    assert written == [("chat", "Accepted"), ("chat", "Refused"), ("media", "Loading")]
+
+
+async def test_a_claim_lost_after_the_context_is_prepared_writes_no_provenance(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The context is prepared and committed under the live claim; the claim
+    is then lost before the provenance write that follows. That write's own
+    transaction refuses, the execution stops, and the stream never starts."""
+
+    from local_lm.adapters.base import ChatEvent
+    from local_lm.orchestrator import ClaimLost
+
+    orch = app.state.services.orchestrator
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: None)
+    chat = (await client.post("/api/chats", json={"title": "Lost after context"})).json()
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Prepare, then vanish", "mode": "text"},
+    )
+    assert turn.status_code == 202
+    run_id = turn.json()["run"]["id"]
+    with SessionLocal() as session:
+        job = session.scalar(select(Job).where(Job.run_id == run_id))
+        assert job is not None
+        job_id = job.id
+        run = session.get(Run, run_id)
+        assert run is not None
+        provenance_before = dict(run.provenance_json)
+
+    old_claim = await _one_pass_claim_capture(monkeypatch, job_id)
+    real_prepare = orch._prepare_chat_context
+
+    async def prepare_then_lose(session, run, claim, *, job_id=None):  # type: ignore[no-untyped-def]
+        prepared = await real_prepare(session, run, claim, job_id=job_id)
+        await _expire_and_retry(client, orch, job_id)
+        await _one_pass_claim_capture(monkeypatch, job_id)
+        return prepared
+
+    monkeypatch.setattr(orch, "_prepare_chat_context", prepare_then_lose)
+    streamed = {"n": 0}
+
+    async def counting_stream(request: object):  # type: ignore[no-untyped-def]
+        streamed["n"] += 1
+        yield ChatEvent(type="complete", data={})
+
+    monkeypatch.setattr(app.state.services.engines.chat, "stream", counting_stream)
+
+    with pytest.raises(ClaimLost, match="at a commit"):
+        await orch._execute_chat(job_id, run_id, old_claim)
+
+    assert streamed["n"] == 0, "a stale execution streamed after losing its claim"
+    with SessionLocal() as session:
+        run = session.get(Run, run_id)
+        assert run is not None
+        assert "context" not in run.provenance_json or run.provenance_json == provenance_before, (
+            "a stale execution committed provenance after its awaits"
+        )
+
+
+async def _image_edit_source_under_verification(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> tuple[str, str, str, object]:
+    """A chat whose one turn is an image-to-image run with automatic
+    strength, plus its verification job claimed by one scheduler pass;
+    returns (chat id, source run id, verification job id, the claim)."""
+
+    from local_lm.domain import Operation, RunStatus
+    from local_lm.image_edit_verification import image_edit_verification_job_id
+
+    chat = (await client.post("/api/chats", json={"title": "Verified edit"})).json()
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Make the mug green", "mode": "text"},
+    )
+    assert turn.status_code == 202
+    run_id = turn.json()["run"]["id"]
+    verification_id = image_edit_verification_job_id(run_id)
+    with SessionLocal() as session:
+        run = session.get(Run, run_id)
+        assert run is not None
+        source_job = session.scalar(select(Job).where(Job.run_id == run_id))
+        assert source_job is not None
+        # The source turn has finished - its job, run and response are
+        # complete - so only the verification job is queued and the response
+        # is one a retry may replace.
+        source_job.status = JobStatus.COMPLETE.value
+        source_job.completed_at = utcnow()
+        run.status = RunStatus.COMPLETE.value
+        run.completed_at = utcnow()
+        assistant = session.get(Message, run.assistant_message_id)
+        assert assistant is not None
+        assistant.status = "complete"
+        run.operation = Operation.IMAGE_TO_IMAGE.value
+        run.settings_json = {**dict(run.settings_json or {}), "denoise": 0.5}
+        run.provenance_json = {
+            **run.provenance_json,
+            "image_edit": {
+                "strength": {
+                    "mode": "auto",
+                    "parameter": "denoise",
+                    "value": 0.5,
+                    "scope": "localized",
+                    "confidence": "high",
+                }
+            },
+        }
+        session.add(
+            Job(
+                id=verification_id,
+                kind=JobKind.EDIT_VERIFY.value,
+                status=JobStatus.QUEUED.value,
+                queue_resource="media_compute",
+                queue_group="primary",
+                enqueued_at=utcnow(),
+                payload_json={"source_run_id": run_id},
+            )
+        )
+        session.commit()
+    claim = await _one_pass_claim_capture(monkeypatch, verification_id)
+    monkeypatch.undo()
+    return chat["id"], run_id, verification_id, claim
+
+
+def _retry_inputs(chat_id: str, source_run_id: str) -> tuple[object, object]:
+    from local_lm.image_edit_verification import (
+        ImageEditRetryDecision,
+        ImageEditVerificationJobPayload,
+        VerificationReason,
+    )
+
+    payload = ImageEditVerificationJobPayload(
+        chat_id=chat_id,
+        source_run_id=source_run_id,
+        source_job_id="job-source",
+        source_artifact_id="artifact-original",
+        result_artifact_id="artifact-first-result",
+        vision_profile_id="profile-vision",
+        automatic_strength=True,
+        strength_parameter="denoise",
+        current_strength=0.5,
+        minimum=0.3,
+        maximum=0.8,
+    )
+    decision = ImageEditRetryDecision(
+        retry=True,
+        reason=VerificationReason.ELIGIBLE,
+        attempt=1,
+        parameter="denoise",
+        value_before=0.5,
+        value_after=0.62,
+        minimum=0.3,
+        maximum=0.8,
+    )
+    return payload, decision
+
+
+async def test_the_retry_hook_binds_the_turn_under_a_current_claim(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The automatic retry creates its replacement turn through the turn
+    creator with the claim-bound hook: inside that one transaction the hook
+    asserts the verification job is still this execution's and writes the
+    retry's binding provenance onto the new run, so the turn, its
+    provenance, its job and its announcement all follow the same commit."""
+
+    orch = app.state.services.orchestrator
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: None)
+    chat_id, source_run_id, verification_id, claim = await _image_edit_source_under_verification(
+        client, monkeypatch
+    )
+    published: list[str] = []
+    real_publish = orch.events.publish
+
+    async def recording_publish(name: str, *args: object, **kwargs: object) -> None:
+        published.append(name)
+        await real_publish(name, *args, **kwargs)
+
+    monkeypatch.setattr(orch.events, "publish", recording_publish)
+    payload, decision = _retry_inputs(chat_id, source_run_id)
+    from sqlalchemy import event
+
+    # At every commit of the creating session, read back from a fresh
+    # session whether a retry run exists yet and whether it already carries
+    # its binding: the run must never be durable without it.
+    durable_runs: list[tuple[bool, bool]] = []
+
+    def after_commit(_session: object) -> None:
+        with SessionLocal() as probe:
+            plan = probe.scalar(
+                select(WorkPlan).where(WorkPlan.source_action == "image_edit_verification_retry")
+            )
+            run = probe.scalar(select(Run).where(Run.work_plan_id == plan.id)) if plan else None
+            durable_runs.append(
+                (
+                    run is not None,
+                    bool(run and "image_edit_verification_retry" in run.provenance_json),
+                )
+            )
+
+    with SessionLocal() as session:
+        event.listen(session, "after_commit", after_commit)
+        try:
+            accepted = await orch._create_image_edit_verification_retry(
+                session,
+                payload,  # type: ignore[arg-type]
+                decision,  # type: ignore[arg-type]
+                claim=claim,  # type: ignore[arg-type]
+            )
+        finally:
+            event.remove(session, "after_commit", after_commit)
+        retry_run_id = accepted.run.id
+
+    assert durable_runs, "the creation committed nothing"
+    assert all(bound for exists, bound in durable_runs if exists), (
+        f"the retry run was durable before its binding provenance was: {durable_runs}"
+    )
+    with SessionLocal() as session:
+        retry_run = session.get(Run, retry_run_id)
+        assert retry_run is not None
+        binding = retry_run.provenance_json.get("image_edit_verification_retry")
+        assert binding is not None, "the retry's binding provenance did not land with its turn"
+        assert binding["source_run_id"] == source_run_id
+        assert binding["source_verification_job_id"] == verification_id
+        assert binding["attempt"] == 1
+        assert binding["strength_after"] == 0.62
+        plan = session.get(WorkPlan, retry_run.work_plan_id) if retry_run.work_plan_id else None
+        assert plan is not None and plan.source_action == "image_edit_verification_retry"
+        retry_job = session.scalar(select(Job).where(Job.run_id == retry_run_id))
+        assert retry_job is not None and retry_job.status in {"queued", "running"}, (
+            "the retry turn has no job to run"
+        )
+    assert "work_plan.created" in published, "the retry turn was not announced"
+
+
+async def test_the_retry_hook_refuses_the_turn_under_a_lost_claim(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the verification job's claim is gone by the time the replacement
+    turn would commit, the hook refuses inside the turn transaction: no run
+    is created, nothing is announced, nothing is started, and the source run
+    keeps its provenance."""
+
+    from local_lm.orchestrator import ClaimLost
+
+    orch = app.state.services.orchestrator
+    started: list[object] = []
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: started.append(args))
+    chat_id, source_run_id, _verification_id, claim = await _image_edit_source_under_verification(
+        client, monkeypatch
+    )
+    started.clear()
+    published: list[str] = []
+    real_publish = orch.events.publish
+
+    async def recording_publish(name: str, *args: object, **kwargs: object) -> None:
+        published.append(name)
+        await real_publish(name, *args, **kwargs)
+
+    monkeypatch.setattr(orch.events, "publish", recording_publish)
+    payload, decision = _retry_inputs(chat_id, source_run_id)
+    real_settings = orch.request_settings_for_operation
+
+    async def settings_then_lose(*args, **kwargs):  # type: ignore[no-untyped-def]
+        settings = await real_settings(*args, **kwargs)
+        _expire_claim_like_production(_verification_id)
+        return settings
+
+    monkeypatch.setattr(orch, "request_settings_for_operation", settings_then_lose)
+    with SessionLocal() as session:
+        runs_before = session.scalar(select(func.count()).select_from(Run))
+
+    with SessionLocal() as session:
+        with pytest.raises(ClaimLost):
+            await orch._create_image_edit_verification_retry(
+                session,
+                payload,  # type: ignore[arg-type]
+                decision,  # type: ignore[arg-type]
+                claim=claim,  # type: ignore[arg-type]
+            )
+        session.rollback()
+
+    with SessionLocal() as session:
+        runs_after = session.scalar(select(func.count()).select_from(Run))
+        source = session.get(Run, source_run_id)
+        assert source is not None
+        assert "image_edit_verification_retry" not in source.provenance_json
+    assert runs_after == runs_before, "a stale claim created a retry turn"
+    assert "work_plan.created" not in published, "a stale claim announced a retry turn"
+    assert started == [], "a stale claim started a retry"
+
+
+async def _claimed_media_job(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> tuple[str, str, object]:
+    """A chat with one queued image turn whose job is claimed by one
+    scheduler pass; returns (job id, run id, the minted claim)."""
+
+    chat = (await client.post("/api/chats", json={"title": "Bound media"})).json()
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Paint a lighthouse", "mode": "image"},
+    )
+    assert turn.status_code == 202
+    run_id = turn.json()["run"]["id"]
+    with SessionLocal() as session:
+        job = session.scalar(select(Job).where(Job.run_id == run_id))
+        assert job is not None and job.status == "queued"
+        job_id = job.id
+    claim = await _one_pass_claim_capture(monkeypatch, job_id)
+    monkeypatch.undo()
+    return job_id, run_id, claim
+
+
+async def test_a_refused_start_phase_enters_no_worker_and_no_engine(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the claim gone before the media execution begins, the first
+    phase write refuses and the execution stops there: the worker is never
+    started and the engine is never entered."""
+
+    from local_lm.orchestrator import ClaimLost
+
+    orch = app.state.services.orchestrator
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: None)
+    job_id, run_id, claim = await _claimed_media_job(client, monkeypatch)
+    _expire_claim_like_production(job_id)
+    entered: list[str] = []
+
+    async def never_generate(request: object):  # type: ignore[no-untyped-def]
+        entered.append("generate")
+        yield MediaEvent(type="complete", assets=[], data={})
+
+    monkeypatch.setattr(app.state.services.engines.media, "generate", never_generate)
+    started = AsyncMock()
+    monkeypatch.setattr(
+        orch,
+        "processes",
+        SimpleNamespace(
+            statuses=Mock(
+                return_value=[
+                    WorkerStatus(name="media", state="stopped", managed=True, running=False)
+                ]
+            ),
+            start_media=started,
+            stop=AsyncMock(),
+            runtimes=None,
+        ),
+    )
+
+    with pytest.raises(ClaimLost):
+        await orch._ensure_media_worker(claim=claim, job_id=job_id, run_id=run_id)
+    started.assert_not_awaited()
+    with pytest.raises(ClaimLost):
+        await orch._execute_media(job_id, run_id, claim)
+    assert entered == [], "a superseded execution entered the engine"
+    started.assert_not_awaited()
+
+
+async def test_a_refused_phase_during_the_start_ends_the_execution_before_inference(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A phase the row refuses while the worker is starting is carried out
+    of the start - the supervisor swallows what its callback raises - and
+    the execution ends before any inference; the started worker stays for
+    the attempt that owns the row now."""
+
+    from local_lm.orchestrator import ClaimLost
+
+    orch = app.state.services.orchestrator
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: None)
+    job_id, run_id, claim = await _claimed_media_job(client, monkeypatch)
+
+    async def start_media(*args: object, **kwargs: object) -> None:
+        callback = kwargs.get("phase_callback")
+        assert callback is not None
+        await callback("Launching")
+        _expire_claim_like_production(job_id)
+        await callback("Warming")
+
+    monkeypatch.setattr(
+        orch,
+        "processes",
+        SimpleNamespace(
+            statuses=Mock(
+                return_value=[
+                    WorkerStatus(name="media", state="stopped", managed=True, running=False)
+                ]
+            ),
+            start_media=AsyncMock(side_effect=start_media),
+            stop=AsyncMock(),
+            runtimes=None,
+        ),
+    )
+
+    with pytest.raises(ClaimLost, match="Warming"):
+        await orch._ensure_media_worker(claim=claim, job_id=job_id, run_id=run_id)
+
+
+async def test_a_refusal_mid_stream_closes_the_producer(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The row is lost after the producer's first progress event: the next
+    event's write refuses, the execution stops with ClaimLost, and the
+    producer is closed rather than consumed to its end."""
+
+    from local_lm.orchestrator import ClaimLost
+
+    orch = app.state.services.orchestrator
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: None)
+    job_id, run_id, claim = await _claimed_media_job(client, monkeypatch)
+    consumed: list[str] = []
+    closed: list[bool] = []
+
+    async def losing_generate(request: object):  # type: ignore[no-untyped-def]
+        try:
+            consumed.append("first")
+            yield MediaEvent(type="progress", progress=0.1, phase="sampling", data={})
+            await _expire_and_retry(client, orch, job_id)
+            await _one_pass_claim_capture(monkeypatch, job_id)
+            consumed.append("second")
+            yield MediaEvent(type="progress", progress=0.5, phase="sampling", data={})
+            consumed.append("third")
+            yield MediaEvent(type="progress", progress=0.9, phase="sampling", data={})
+        finally:
+            closed.append(True)
+
+    monkeypatch.setattr(app.state.services.engines.media, "generate", losing_generate)
+
+    with pytest.raises(ClaimLost):
+        await orch._execute_media(job_id, run_id, claim)
+
+    assert consumed == ["first", "second"], "the producer was consumed past the refused write"
+    assert closed == [True], "the producer was not closed"
+
+
+async def test_a_producer_whose_close_fails_does_not_mask_the_refusal(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The row is lost mid-stream and the producer's own close then fails.
+    The execution still ends with the refusal that stopped it, not with the
+    close's error: a backend that will not let go is not the reason this
+    execution ended, and the caller settles on the lost claim."""
+
+    from local_lm.orchestrator import ClaimLost
+
+    orch = app.state.services.orchestrator
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: None)
+    job_id, run_id, claim = await _claimed_media_job(client, monkeypatch)
+    closed: list[bool] = []
+
+    async def unclosable_generate(request: object):  # type: ignore[no-untyped-def]
+        try:
+            yield MediaEvent(type="progress", progress=0.1, phase="sampling", data={})
+            await _expire_and_retry(client, orch, job_id)
+            await _one_pass_claim_capture(monkeypatch, job_id)
+            yield MediaEvent(type="progress", progress=0.5, phase="sampling", data={})
+        finally:
+            closed.append(True)
+            raise RuntimeError("the producer refused to close")
+
+    monkeypatch.setattr(app.state.services.engines.media, "generate", unclosable_generate)
+
+    with pytest.raises(ClaimLost):
+        await orch._execute_media(job_id, run_id, claim)
+
+    assert closed == [True], "the producer was never closed"
+
+
+async def test_setup_finalization_skips_a_requeued_attempt(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An old execution finalizing after a later attempt took the row does
+    nothing: the finalization is bound to the dispatching attempt, and the
+    successor's job and chat stay."""
+
+    orch = app.state.services.orchestrator
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: None)
+    _chat_id, job_id, old_claim = await _claimed_text_job(client, monkeypatch)
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        run_id = job.run_id
+        job.attempt = old_claim.attempt + 1
+        job.claim_owner = "a-later-attempt"
+        session.commit()
+    published: list[str] = []
+
+    async def recording_publish(name: str, *args: object, **kwargs: object) -> None:
+        published.append(name)
+
+    monkeypatch.setattr(orch.events, "publish", recording_publish)
+    finalized = Mock(return_value=True)
+    monkeypatch.setitem(
+        orch._finalize_setup_verification_run.__globals__, "finalize_setup_verification", finalized
+    )
+    # The chat has a setup verification in flight, so an unbound finalizer
+    # would have something to finalize.
+    monkeypatch.setitem(
+        orch._finalize_setup_verification_run.__globals__,
+        "setup_verification_for_chat",
+        Mock(return_value=SimpleNamespace(role="setup", state="running")),
+    )
+
+    assert run_id is not None
+    await orch._finalize_setup_verification_run(job_id, run_id, old_claim)
+
+    finalized.assert_not_called()
+    assert published == []
+    with SessionLocal() as session:
+        assert session.get(Job, job_id) is not None, "the successor's job was finalized away"
+
+
+async def test_a_publication_failure_after_the_retry_commit_converges(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A publication that fails once the retry turn is durable leaves the
+    source's verification record bound to that retry in the same commit; a
+    later pass finds the bound retry, announces and starts it again, and
+    creates no second one."""
+
+    orch = app.state.services.orchestrator
+    started: list[object] = []
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: started.append(args))
+    chat_id, source_run_id, _verification_id, claim = await _image_edit_source_under_verification(
+        client, monkeypatch
+    )
+    # The setup undoes its own patches, the start stub among them; the
+    # starts this control observes are the ones after it.
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: started.append(args))
+    started.clear()
+    payload, decision = _retry_inputs(chat_id, source_run_id)
+    real_publish = orch.events.publish
+    failures = {"n": 0}
+
+    async def failing_first_announcement(name: str, *args: object, **kwargs: object) -> None:
+        if name == "work_plan.created" and failures["n"] == 0:
+            failures["n"] += 1
+            raise RuntimeError("the event broker was unavailable")
+        await real_publish(name, *args, **kwargs)
+
+    monkeypatch.setattr(orch.events, "publish", failing_first_announcement)
+    with SessionLocal() as session:
+        runs_before = session.scalar(select(func.count()).select_from(Run))
+        with pytest.raises(RuntimeError):
+            await orch._create_image_edit_verification_retry(
+                session,
+                payload,  # type: ignore[arg-type]
+                decision,  # type: ignore[arg-type]
+                claim=claim,  # type: ignore[arg-type]
+                source_record={"status": "complete"},
+            )
+        session.rollback()
+
+    with SessionLocal() as session:
+        source = session.get(Run, source_run_id)
+        assert source is not None
+        record = source.provenance_json.get("image_edit_verification")
+        assert isinstance(record, dict) and record.get("automatic_retry_executed") is True
+        bound_run_id = record.get("retry_run_id")
+        assert isinstance(bound_run_id, str) and session.get(Run, bound_run_id) is not None
+        assert session.scalar(select(func.count()).select_from(Run)) == runs_before + 1
+    assert started == [], "the failed announcement started the retry anyway"
+
+    converged = await orch._converge_on_bound_retry(payload)  # type: ignore[arg-type]
+    assert converged is not None and converged.run.id == bound_run_id
+    assert started, "the bound retry was not started on convergence"
+    with SessionLocal() as session:
+        again = await orch._create_image_edit_verification_retry(
+            session,
+            payload,  # type: ignore[arg-type]
+            decision,  # type: ignore[arg-type]
+            claim=claim,  # type: ignore[arg-type]
+        )
+        assert again.run.id == bound_run_id, "a second retry was created for the same source"
+        assert session.scalar(select(func.count()).select_from(Run)) == runs_before + 1
+
+
+async def test_retry_convergence_keeps_a_durable_binding_when_materialization_fails_once(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reading what to announce is part of the recovery, not of the binding.
+
+    Once the retry turn is durable the source names it. If the convergence's
+    own second-stage read then fails - the plan's steps, runs or jobs - the
+    recovery returns the retry the source already bound. Letting that failure
+    escape makes the caller record the verification unavailable, which
+    overwrites the binding, and no later pass can find the durable retry
+    again.
+    """
+
+    orch = app.state.services.orchestrator
+    started: list[object] = []
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: started.append(args))
+    chat_id, source_run_id, _verification_id, claim = await _image_edit_source_under_verification(
+        client, monkeypatch
+    )
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: started.append(args))
+    started.clear()
+    payload, decision = _retry_inputs(chat_id, source_run_id)
+    real_publish = orch.events.publish
+    failures = {"n": 0}
+
+    async def failing_first_announcement(name: str, *args: object, **kwargs: object) -> None:
+        if name == "work_plan.created" and failures["n"] == 0:
+            failures["n"] += 1
+            raise RuntimeError("the event broker was unavailable")
+        await real_publish(name, *args, **kwargs)
+
+    monkeypatch.setattr(orch.events, "publish", failing_first_announcement)
+    with SessionLocal() as session:
+        with pytest.raises(RuntimeError):
+            await orch._create_image_edit_verification_retry(
+                session,
+                payload,  # type: ignore[arg-type]
+                decision,  # type: ignore[arg-type]
+                claim=claim,  # type: ignore[arg-type]
+                source_record={"status": "complete"},
+            )
+        session.rollback()
+
+    with SessionLocal() as session:
+        source = session.get(Run, source_run_id)
+        assert source is not None
+        record = source.provenance_json.get("image_edit_verification")
+        assert isinstance(record, dict)
+        bound_run_id = record.get("retry_run_id")
+        assert isinstance(bound_run_id, str)
+
+    # One failure in the first second-stage read after the binding is durable.
+    real_scalars = Session.scalars
+    reads = {"n": 0}
+
+    def failing_first_materialization(self, statement, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if reads["n"] == 0:
+            reads["n"] += 1
+            raise OperationalError("database is locked", {}, Exception("database is locked"))
+        return real_scalars(self, statement, *args, **kwargs)
+
+    # Patched for the rest of the control: only the first read fails, and an
+    # undo here would also remove the start recorder above.
+    monkeypatch.setattr(Session, "scalars", failing_first_materialization)
+    converged = await orch._converge_on_bound_retry(payload)  # type: ignore[arg-type]
+
+    assert reads["n"] == 1, "the second-stage read was never reached"
+    assert converged is not None and converged.run.id == bound_run_id, (
+        "a transient read failure escaped the recovery instead of returning the bound retry"
+    )
+    with SessionLocal() as session:
+        source = session.get(Run, source_run_id)
+        assert source is not None
+        record = source.provenance_json.get("image_edit_verification")
+        assert isinstance(record, dict) and record.get("retry_run_id") == bound_run_id, (
+            "the source's binding to the durable retry was lost"
+        )
+
+    # The next pass, with the read healthy, still converges on the same retry.
+    started.clear()
+    again = await orch._converge_on_bound_retry(payload)  # type: ignore[arg-type]
+    assert again is not None and again.run.id == bound_run_id
+    assert started, "the bound retry was not started on the later pass"
+
+
+async def test_a_lost_claim_chooses_no_page(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Choosing a page to read is model work: with the claim gone, the
+    required phase before the choice refuses and the model is never asked."""
+
+    from local_lm.orchestrator import ClaimLost
+
+    orch = app.state.services.orchestrator
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: None)
+    _chat_id, job_id, claim = await _claimed_text_job(client, monkeypatch)
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None and job.run_id is not None
+        run_id = job.run_id
+    _expire_claim_like_production(job_id)
+    asked: list[object] = []
+
+    async def never_choose(*args: object, **kwargs: object) -> None:
+        asked.append(args)
+        return None
+
+    monkeypatch.setitem(
+        orch._read_linked_page.__globals__, "choose_from_conversation", never_choose
+    )
+
+    with pytest.raises(ClaimLost, match="Choosing a page"):
+        await orch._read_linked_page(
+            [{"role": "user", "content": "Read https://example.invalid/page"}],
+            run_id,
+            job_id,
+            claim,
+        )
+    assert asked == [], "a superseded execution asked the model to choose a page"
+
+
+async def test_a_claim_lost_after_the_completion_stamp_persists_no_asset(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The completion is stamped under the claim, then the capabilities read
+    is an await: a claim lost there is caught at the transaction that would
+    persist the assets, so a superseded execution stores no artifact and
+    completes nothing."""
+
+    orch = app.state.services.orchestrator
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: None)
+    job_id, run_id, claim = await _claimed_media_job(client, monkeypatch)
+    with SessionLocal() as session:
+        artifact_baseline = session.scalar(select(func.count()).select_from(Artifact))
+
+    async def complete_only(request: object):  # type: ignore[no-untyped-def]
+        yield MediaEvent(
+            type="complete",
+            assets=[
+                GeneratedAsset(
+                    content=ONE_PIXEL_PNG,
+                    media_type="image/png",
+                    kind="image",
+                    name="generated.png",
+                )
+            ],
+            data={},
+        )
+
+    monkeypatch.setattr(app.state.services.engines.media, "generate", complete_only)
+
+    async def lose_during_capabilities() -> None:
+        await _expire_and_retry(client, orch, job_id)
+        await _one_pass_claim_capture(monkeypatch, job_id)
+        return None
+
+    monkeypatch.setattr(orch, "_successful_media_capabilities", lose_during_capabilities)
+
+    result = await orch._execute_media(job_id, run_id, claim)
+
+    assert result is None
+    with SessionLocal() as session:
+        assert session.scalar(select(func.count()).select_from(Artifact)) == artifact_baseline, (
+            "a superseded execution persisted a generated asset"
+        )
+        row = session.get(Job, job_id)
+        assert row is not None and row.status == "running" and row.attempt == claim.attempt + 1
