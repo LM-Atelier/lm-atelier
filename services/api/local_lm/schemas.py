@@ -2427,6 +2427,26 @@ class WorkerStatus(ApiModel):
     peak_memory_bytes: int | None = None
     active_jobs: int = 0
     queued_jobs: int = 0
+    # How long ago the worker last reported forward motion on a job it is
+    # running. `state` cannot express this: a worker that has stopped
+    # progressing still reports `ready` with an active job, so a live stall
+    # is invisible without a measurement of the engine's own reports.
+    #
+    # None means NO MEASUREMENT, which covers two situations and deliberately
+    # does not distinguish them: nothing is running, or something is running that
+    # has not reported yet. A worker still loading, and a worker between jobs,
+    # are both "no answer" rather than an age. Reading None as "idle" is
+    # therefore wrong - only `active_jobs` says that. An age invented for the
+    # not-yet-reported case would be indistinguishable at any value from a
+    # real stall of the same length, making a worker that is merely starting
+    # up look wedged.
+    #
+    # Deliberately an AGE rather than a `stuck` flag. Where the line falls
+    # depends on the workflow - a video step legitimately reports nothing for far
+    # longer than an image step - so the number is reported and the threshold is
+    # left to whoever has that context, instead of being frozen into the wire
+    # format.
+    progress_age_seconds: float | None = Field(default=None, ge=0)
     failure_detail: str | None = None
     # What kind of failure this was, and what the user can do about it. Both are
     # derived from the same output `stderr_tail` carries; neither replaces it.

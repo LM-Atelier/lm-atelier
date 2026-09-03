@@ -54,6 +54,17 @@ export function useLiveEvents(
   const [connected, setConnected] = useState(true);
   useEffect(() => {
     let dispose: (() => void) | undefined;
+    // The newest attempt heard per assistant message. A delta names the
+    // attempt that produced it; an older attempt's word arriving after a
+    // newer attempt has spoken is dropped, and a newer attempt starts its
+    // message over rather than appending to the old one's text.
+    // The attempt fence is keyed by job: every authoritative job snapshot
+    // seeds it, so a later attempt announced by job.progress fences an
+    // earlier attempt's late delta before the later one speaks. The
+    // per-message map remembers which attempt last wrote a message's
+    // live text, so a newer attempt's first delta starts it over.
+    const latestAttemptByJob = new Map<string, number>();
+    const latestAttempt = new Map<string, number>();
     let mediaRefresh: number | undefined;
     let authoritativeRefresh: number | undefined;
     const scheduleMediaRefresh = () => {
@@ -82,11 +93,32 @@ export function useLiveEvents(
         if (event.type === "text.delta") {
           const messageId = String(event.payload.assistant_message_id ?? "");
           const text = String(event.payload.text ?? "");
-          if (messageId) setLiveText((current) => ({ ...current, [messageId]: `${current[messageId] ?? ""}${text}` }));
+          if (!messageId) return;
+          const attempt = typeof event.payload.attempt === "number" ? event.payload.attempt : undefined;
+          const jobId = typeof event.payload.job_id === "string" ? event.payload.job_id : "";
+          if (attempt !== undefined) {
+            const authoritative = jobId ? latestAttemptByJob.get(jobId) : undefined;
+            if (authoritative !== undefined && attempt < authoritative) return;
+            if (jobId) latestAttemptByJob.set(jobId, attempt);
+            const seen = latestAttempt.get(messageId);
+            if (seen !== undefined && attempt > seen) {
+              latestAttempt.set(messageId, attempt);
+              setLiveText((current) => ({ ...current, [messageId]: text }));
+              return;
+            }
+            latestAttempt.set(messageId, attempt);
+          }
+          setLiveText((current) => ({ ...current, [messageId]: `${current[messageId] ?? ""}${text}` }));
           return;
         }
         if (event.type === "job.progress") {
           const snapshot = event.payload.job as Job | undefined;
+          if (snapshot?.id && typeof snapshot.attempt === "number") {
+            const known = latestAttemptByJob.get(snapshot.id);
+            if (known === undefined || snapshot.attempt > known) {
+              latestAttemptByJob.set(snapshot.id, snapshot.attempt);
+            }
+          }
           if (snapshot?.id) {
             client.setQueryData<Job[]>(["jobs"], (current) => {
               if (!current) return [snapshot];

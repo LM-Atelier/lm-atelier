@@ -457,6 +457,9 @@ class ComfyUIAdapter:
                     progress=0,
                     phase="Queued in media runtime",
                     data={"prompt_id": prompt_id, "indeterminate": True},
+                    # The prompt id in this event CAME from the backend's
+                    # response: this is the first moment the engine has spoken.
+                    engine_sourced=True,
                 )
                 sampler_progress = 0.0
                 execution_started = False
@@ -485,6 +488,7 @@ class ComfyUIAdapter:
                                 progress=sampler_progress,
                                 phase="sampling",
                                 preview=preview,
+                                engine_sourced=True,
                             )
                         continue
                     if len(raw.encode("utf-8")) > MAX_ADAPTER_EVENT_BYTES:
@@ -509,6 +513,7 @@ class ComfyUIAdapter:
                             type="progress",
                             phase="Loading media model",
                             data={"prompt_id": prompt_id, "indeterminate": True},
+                            engine_sourced=True,
                         )
                     if message_type == "progress":
                         try:
@@ -530,6 +535,7 @@ class ComfyUIAdapter:
                                 "value": value,
                                 "max": maximum,
                             },
+                            engine_sourced=True,
                         )
                     elif (
                         message_type == "executing" and data.get("node") is None
@@ -554,7 +560,13 @@ class ComfyUIAdapter:
                 return
             assets = await self._collect_outputs(prompt_id, request.operation)
             outputs_collected = True
-            yield MediaEvent(type="complete", progress=1, phase="complete", assets=assets)
+            yield MediaEvent(
+                type="complete",
+                progress=1,
+                phase="complete",
+                assets=assets,
+                engine_sourced=True,
+            )
         except asyncio.CancelledError:
             raise
         except WebSocketException:

@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
+from sqlalchemy import update
+from sqlalchemy.engine import CursorResult
+from sqlalchemy.orm import Session
+
+from .domain import JobStatus
 from .models import Job
 from .schemas import ProgressStageTiming, ProgressV2
 
@@ -29,7 +34,19 @@ def update_job_progress(
     indeterminate: bool = False,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Persist one validated Progress v2 snapshot and derive legacy fields."""
+    """Persist one validated LIFECYCLE snapshot and derive legacy fields.
+
+    This writer is for callers that are not relaying the engine: the
+    scheduler queuing, blocking and starting a job; downloads and the API
+    writing their own lifecycles. It never mints the engine-liveness stamp.
+    An event relayed FROM the engine goes through `apply_engine_progress`,
+    whose ownership check happens at the database write itself.
+
+    A non-engine write carries an existing stamp forward only within the
+    attempt that minted it: the claim that starts a retry increments
+    `attempt`, and a stamp minted by the previous attempt must not survive
+    into the new one as evidence it never produced.
+    """
 
     previous = job.progress_json if isinstance(job.progress_json, dict) else {}
     snapshot = reduce_progress(
@@ -50,6 +67,12 @@ def update_job_progress(
         indeterminate=indeterminate,
         now=now,
     )
+    attempt = job.attempt if isinstance(job.attempt, int) else 0
+    # CARRIED FORWARD, not rebuilt - and only within the SAME attempt.
+    # `reduce_progress` constructs a fresh snapshot, so without the carry
+    # every non-engine write would erase the provenance stamp and a worker
+    # mid-generation would read as never having reported.
+    snapshot = _carry_engine_stamp(snapshot, previous=previous, attempt=attempt)
     job.progress_json = snapshot
     job.phase = stage
     normalized_overall = _optional_float(snapshot.get("overall_progress"))
@@ -58,6 +81,115 @@ def update_job_progress(
         job.progress = normalized_overall
     elif normalized_stage_progress is not None:
         job.progress = max(job.progress, normalized_stage_progress)
+    return snapshot
+
+
+def _carry_engine_stamp(
+    snapshot: dict[str, Any],
+    *,
+    previous: dict[str, Any],
+    attempt: int,
+) -> dict[str, Any]:
+    previous_stamp = previous.get("engine_reported_at")
+    if isinstance(previous_stamp, str) and previous.get("engine_report_attempt") == attempt:
+        return {
+            **snapshot,
+            "engine_reported_at": previous_stamp,
+            "engine_report_attempt": attempt,
+        }
+    return snapshot
+
+
+def apply_engine_progress(
+    session: Session,
+    *,
+    job_id: str,
+    claim_attempt: int,
+    claim_owner: str,
+    stage: str,
+    stage_progress: float | None = None,
+    overall_progress: float | None = None,
+    completed_units: int | None = None,
+    total_units: int | None = None,
+    unit: str | None = None,
+    queue_resource: str | None = None,
+    indeterminate: bool = False,
+    stamp_engine_report: bool = True,
+    now: datetime | None = None,
+) -> dict[str, Any] | None:
+    """Persist one engine-derived snapshot, guarded AT the database write.
+
+    The ownership comparison that matters is the one the UPDATE itself
+    makes. This issues a single conditional UPDATE bound to the job id, the
+    RUNNING status, and the claim-captured attempt and owner, and requires
+    a rowcount of exactly one. A comparison against a loaded ORM object
+    followed by an ordinary flush cannot give this guarantee: an old
+    producer passes the object check while a foreign expiry and re-claim
+    commit a new attempt and owner, and the flush then stamps the old
+    attempt onto the shared row. Here a row that moved refuses the WHOLE
+    write - no stamp, no phase, no progress fields - and the caller must
+    treat None as "this claim no longer owns the row" and persist nothing
+    else derived from the same event.
+
+    `stamp_engine_report` distinguishes the backend speaking (mint the
+    liveness stamp) from an adapter-local lifecycle relay riding the same
+    event stream (no stamp, carry within the claim's own attempt); both are
+    engine-derived and both are refused whole when the claim is stale.
+
+    The snapshot is computed from the row re-read inside this session's own
+    transaction. Under SQLite WAL a competing commit between that read and
+    this write surfaces as a busy error, never as a silent stale overwrite;
+    the per-claim writer is sequential, so that edge is crash-loud, not a
+    correctness path.
+    """
+
+    job_row = session.get(Job, job_id)
+    if job_row is None:
+        return None
+    previous = job_row.progress_json if isinstance(job_row.progress_json, dict) else {}
+    snapshot = reduce_progress(
+        previous,
+        stage=stage,
+        stage_progress=stage_progress,
+        overall_progress=overall_progress,
+        completed_units=completed_units,
+        total_units=total_units,
+        unit=unit,
+        queue_resource=queue_resource,
+        indeterminate=indeterminate,
+        now=now,
+    )
+    if stamp_engine_report:
+        snapshot = {
+            **snapshot,
+            "engine_reported_at": snapshot.get("updated_at"),
+            "engine_report_attempt": claim_attempt,
+        }
+    else:
+        snapshot = _carry_engine_stamp(snapshot, previous=previous, attempt=claim_attempt)
+    values: dict[str, Any] = {"progress_json": snapshot, "phase": stage}
+    normalized_overall = _optional_float(snapshot.get("overall_progress"))
+    normalized_stage_progress = _optional_float(snapshot.get("stage_progress"))
+    if normalized_overall is not None:
+        values["progress"] = normalized_overall
+    elif normalized_stage_progress is not None:
+        current = _optional_float(job_row.progress)
+        values["progress"] = max(current if current is not None else 0.0, normalized_stage_progress)
+    result = cast(
+        "CursorResult[Any]",
+        session.execute(
+            update(Job)
+            .where(
+                Job.id == job_id,
+                Job.status == JobStatus.RUNNING.value,
+                Job.attempt == claim_attempt,
+                Job.claim_owner == claim_owner,
+            )
+            .values(**values)
+        ),
+    )
+    if result.rowcount != 1:
+        return None
     return snapshot
 
 

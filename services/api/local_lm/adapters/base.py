@@ -80,6 +80,14 @@ class MediaEvent:
     preview: bytes | None = None
     assets: list[GeneratedAsset] = field(default_factory=list)
     data: dict[str, Any] = field(default_factory=dict)
+    #: True only for events the BACKEND originated - a queue acknowledgement,
+    #: sampler progress, a preview frame, collected outputs. Adapter-local
+    #: lifecycle announcements (preparing a workspace, staging inputs,
+    #: submitting) keep the default: they are progress about the job, not
+    #: evidence the engine is alive, and the liveness stamp downstream must
+    #: not be mintable before the backend has said anything. Fail closed - an
+    #: unmarked event never stamps.
+    engine_sourced: bool = False
 
 
 class ChatAdapter(Protocol):
