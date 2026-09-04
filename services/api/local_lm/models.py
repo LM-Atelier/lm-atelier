@@ -1297,7 +1297,9 @@ class SetupVerification(TimestampMixin, Base):
     chat_id: Mapped[str | None] = mapped_column(String(40), nullable=True, unique=True, index=True)
     run_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     job_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
-    input_artifact_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    input_artifact_id: Mapped[str | None] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     failure_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

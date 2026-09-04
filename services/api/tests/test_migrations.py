@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
@@ -2039,7 +2040,7 @@ def test_the_artifact_index_guard_accepts_an_exact_replay(tmp_path: Path) -> Non
         )
         connection.commit()
 
-    command.upgrade(config, "head")
+    command.upgrade(config, _ARTIFACT_INDEX_REVISION)
 
     with closing(sqlite3.connect(database)) as connection:
         version = connection.execute("SELECT version_num FROM alembic_version").fetchone()
@@ -2111,3 +2112,329 @@ def test_the_artifact_index_downgrade_preserves_a_differently_shaped_namesake(
         "downgrade deleted a same-name index of a different shape, which this "
         "revision did not create and has no authority to remove"
     )
+
+
+_STAMP = "2026-09-03 12:00:00"
+
+_INSERT_ARTIFACT = """
+INSERT INTO artifacts
+  (id, sha256, kind, media_type, size_bytes, relative_path, metadata_json,
+   created_at, updated_at)
+VALUES (?, ?, 'image', 'image/png', 1, ?, '{}', ?, ?)
+"""
+
+_INSERT_VERIFICATION = """
+INSERT INTO setup_verifications
+  (id, role, evidence_key, state, model_install_id, profile_id,
+   input_artifact_id, created_at, updated_at)
+VALUES (?, 'image', ?, ?, 'install-1', 'profile-1', ?, ?, ?)
+"""
+
+
+def _setup_verification_migrated_to(tmp_path: Path, name: str, revision: str) -> Path:
+    settings = Settings(data_dir=tmp_path / name)
+    settings.prepare()
+    command.upgrade(alembic_config(settings), revision)
+    return settings.state_dir / "local-lm.sqlite3"
+
+
+def test_deleting_an_artifact_nulls_the_setup_verification_that_named_it(
+    tmp_path: Path,
+) -> None:
+    """The database clears the reference, with no application code involved.
+
+    A delete that reaches the database directly must leave the column null
+    rather than a dangling identifier, and must leave the verification row
+    itself intact.
+
+    Rows are inserted with foreign keys off and the pragma is enabled only for
+    the delete. SQLite applies the constraint at statement time, so this
+    exercises exactly that contract without fabricating unrelated model install
+    and profile parents whose own schemas have nothing to do with it.
+    """
+
+    database = _setup_verification_migrated_to(tmp_path, "fk-nulls", "head")
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute(_INSERT_ARTIFACT, ("art-1", "a" * 64, "one.png", _STAMP, _STAMP))
+        connection.execute(
+            _INSERT_VERIFICATION, ("verify-1", "key-1", "running", "art-1", _STAMP, _STAMP)
+        )
+        connection.commit()
+
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("DELETE FROM artifacts WHERE id = 'art-1'")
+        connection.commit()
+
+        assert connection.execute(
+            "SELECT input_artifact_id FROM setup_verifications WHERE id = 'verify-1'"
+        ).fetchone() == (None,), "the deleted artifact left a dangling identifier behind"
+        assert connection.execute(
+            "SELECT COUNT(*) FROM setup_verifications WHERE id = 'verify-1'"
+        ).fetchone() == (1,), "clearing the reference must not remove the verification"
+
+
+def test_the_enforcement_migration_clears_only_identifiers_that_no_longer_resolve(
+    tmp_path: Path,
+) -> None:
+    """Dangling values are nulled; resolving ones are left exactly as they are.
+
+    The distinction is the whole of the migration's data behaviour. A dangling
+    identifier cannot be preserved - its target is already gone, and neither a
+    foreign key nor an invented artifact row would restore the relationship -
+    but a resolving one is a real reference and nulling it would discard what a
+    verification was run against.
+    """
+
+    database = _setup_verification_migrated_to(tmp_path, "fk-migration", "b41e7c0a92d5")
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute(_INSERT_ARTIFACT, ("art-live", "b" * 64, "live.png", _STAMP, _STAMP))
+        connection.execute(
+            _INSERT_VERIFICATION,
+            ("verify-resolving", "key-resolving", "running", "art-live", _STAMP, _STAMP),
+        )
+        connection.execute(
+            _INSERT_VERIFICATION,
+            ("verify-dangling", "key-dangling", "running", "art-gone", _STAMP, _STAMP),
+        )
+        connection.execute(
+            _INSERT_VERIFICATION,
+            ("verify-empty", "key-empty", "failed", None, _STAMP, _STAMP),
+        )
+        connection.commit()
+
+    settings = Settings(data_dir=tmp_path / "fk-migration")
+    command.upgrade(alembic_config(settings), "head")
+
+    with closing(sqlite3.connect(database)) as connection:
+        rows = {
+            row[0]: row[1:]
+            for row in connection.execute(
+                "SELECT id, input_artifact_id, state, evidence_key, model_install_id, role "
+                "FROM setup_verifications ORDER BY id"
+            )
+        }
+
+    # Adding the constraint rebuilds the table by copying it, so every column of
+    # every row has to survive that copy, not only the column the constraint is
+    # on.
+    assert rows == {
+        "verify-resolving": ("art-live", "running", "key-resolving", "install-1", "image"),
+        "verify-dangling": (None, "running", "key-dangling", "install-1", "image"),
+        "verify-empty": (None, "failed", "key-empty", "install-1", "image"),
+    }, "the migration must clear only the identifiers whose artifact is gone"
+
+    # PRAGMA foreign_key_check walks declared keys across stored rows, and the
+    # backup verifier fails a backup on any violation it reports. Alembic runs
+    # with foreign keys off and SQLite never revalidates stored rows, so this is
+    # the property the migration's clearing exists to hold.
+    with closing(sqlite3.connect(database)) as connection:
+        violations = [
+            row for row in connection.execute("PRAGMA foreign_key_check") if row[2] == "artifacts"
+        ]
+    # Scoped to the artifacts relationship. The fixture inserts with foreign keys
+    # off and creates no model_installs or model_profiles parents, so an unscoped
+    # check would report those absent parents rather than this key.
+    assert violations == [], "the migrated database declares an artifact key it already violates"
+
+
+_SETUP_FK_REVISION = "e4b7d1c5a960"
+_SETUP_FK_PRIOR = "b41e7c0a92d5"
+
+
+def test_the_setup_verification_index_guard_accepts_an_exact_replay(tmp_path: Path) -> None:
+    """A replay must finish rather than dying on "already exists".
+
+    The rebuild that adds the constraint reflects and recreates this table's
+    indexes, so on a replay the index is already present by the time the guard
+    runs. Accepting an exact match is what lets a partially applied revision
+    complete on the next start instead of stopping the application for good.
+    """
+
+    _settings, config, database = _migrated_to(tmp_path, _SETUP_FK_PRIOR)
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute(
+            "CREATE INDEX ix_setup_verifications_input_artifact_id "
+            "ON setup_verifications (input_artifact_id)"
+        )
+        connection.commit()
+
+    command.upgrade(config, _SETUP_FK_REVISION)
+
+    with closing(sqlite3.connect(database)) as connection:
+        version = connection.execute("SELECT version_num FROM alembic_version").fetchone()
+    assert version == (_SETUP_FK_REVISION,), (
+        "the replay did not advance the revision, so the next start replays again"
+    )
+
+
+def test_the_setup_verification_index_guard_refuses_a_same_name_index_of_another_shape(
+    tmp_path: Path,
+) -> None:
+    """Advancing over an index this revision did not create is the failure mode.
+
+    A same-name index on another column would leave the foreign-key lookup
+    unindexed while the revision advanced as though it had been made cheap.
+    The guard compares the exact definition rather than the name, and refusing
+    loudly is the point.
+    """
+
+    _settings, config, database = _migrated_to(tmp_path, _SETUP_FK_PRIOR)
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute(
+            "CREATE INDEX ix_setup_verifications_input_artifact_id ON setup_verifications (state)"
+        )
+        connection.commit()
+
+    with pytest.raises(Exception, match="already exists with a different definition"):
+        command.upgrade(config, _SETUP_FK_REVISION)
+
+    with closing(sqlite3.connect(database)) as connection:
+        version = connection.execute("SELECT version_num FROM alembic_version").fetchone()
+        columns = [
+            row[2]
+            for row in connection.execute(
+                "PRAGMA index_info('ix_setup_verifications_input_artifact_id')"
+            )
+        ]
+
+    assert version == (_SETUP_FK_PRIOR,), (
+        "the revision advanced without the index it claims to make"
+    )
+    assert columns == ["state"], (
+        "the guard adopted or replaced an index this revision did not create"
+    )
+
+
+def test_the_enforcement_migration_records_the_distribution_it_claims_to_log(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The counts must reach the log, not merely be computed.
+
+    Once the migration has run, the difference between a dangling identifier and
+    one that was never set is gone for good and cannot be recovered from the
+    result, so the recorded distribution is the only lasting account of what the
+    store held beforehand.
+
+    The application configures the root logger at INFO and installs an INFO
+    handler around the startup stage that runs migrations, which is how these
+    records reach api.log; this covers the migration's half of that.
+    """
+
+    _settings, config, database = _migrated_to(tmp_path, _SETUP_FK_PRIOR)
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute(_INSERT_ARTIFACT, ("art-live", "c" * 64, "kept.png", _STAMP, _STAMP))
+        connection.execute(
+            _INSERT_VERIFICATION,
+            ("verify-resolving", "key-r", "running", "art-live", _STAMP, _STAMP),
+        )
+        connection.execute(
+            _INSERT_VERIFICATION,
+            ("verify-dangling", "key-d", "running", "art-gone", _STAMP, _STAMP),
+        )
+        # Two states, because the record is per verification state: one state
+        # produces a single group, which a whole-table aggregate is
+        # indistinguishable from.
+        connection.execute(
+            _INSERT_VERIFICATION,
+            ("verify-done", "key-f", "failed", "art-live", _STAMP, _STAMP),
+        )
+        connection.commit()
+
+    with caplog.at_level(logging.INFO):
+        command.upgrade(config, _SETUP_FK_REVISION)
+
+    assert "setup verification input artifacts before enforcement" in caplog.text, (
+        "the distribution was computed and never recorded"
+    )
+    # Whole records, including `resolving`, which is the only derived value in
+    # the line: asserting a substring that appears in the input leaves the one
+    # computed field free to be wrong.
+    assert "state=running rows=2 named=2 dangling=1 resolving=1" in caplog.text
+    assert "state=failed rows=1 named=1 dangling=0 resolving=1" in caplog.text
+    assert "cleared 1 setup verification input artifact identifier" in caplog.text
+
+
+def test_the_enforcement_migration_downgrades_back_to_an_unconstrained_column(
+    tmp_path: Path,
+) -> None:
+    """The downgrade must remove exactly what the upgrade added, and keep the rows.
+
+    A downgrade that leaves the constraint behind is worse than one that fails:
+    the schema then disagrees with the revision the database claims, and the
+    next upgrade replays onto a table that already has the foreign key.
+    """
+
+    _settings, config, database = _migrated_to(tmp_path, _SETUP_FK_REVISION)
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute(_INSERT_ARTIFACT, ("art-keep", "d" * 64, "keep.png", _STAMP, _STAMP))
+        connection.execute(
+            _INSERT_VERIFICATION,
+            ("verify-keep", "key-keep", "running", "art-keep", _STAMP, _STAMP),
+        )
+        connection.commit()
+
+    command.downgrade(config, _SETUP_FK_PRIOR)
+
+    with closing(sqlite3.connect(database)) as connection:
+        targets = [
+            row[2] for row in connection.execute("PRAGMA foreign_key_list('setup_verifications')")
+        ]
+        indexes = [row[1] for row in connection.execute("PRAGMA index_list('setup_verifications')")]
+        column = next(
+            row
+            for row in connection.execute("PRAGMA table_info('setup_verifications')")
+            if row[1] == "input_artifact_id"
+        )
+        surviving = connection.execute(
+            "SELECT id, input_artifact_id FROM setup_verifications"
+        ).fetchall()
+
+    assert "artifacts" not in targets, "the downgrade left the foreign key in place"
+    assert "ix_setup_verifications_input_artifact_id" not in indexes
+    assert column[2] == "VARCHAR(40)", f"the column was not narrowed back, it is {column[2]}"
+    assert surviving == [("verify-keep", "art-keep")], "the downgrade lost or altered a row"
+
+    # The three constraints this table already had must outlive both rebuilds.
+    assert sorted(targets) == ["model_installs", "model_profiles", "workflow_revisions"], (
+        "a rebuild dropped a foreign key that had nothing to do with this revision"
+    )
+
+
+def test_the_enforcement_downgrade_preserves_a_differently_shaped_namesake(
+    tmp_path: Path,
+) -> None:
+    """The downgrade drops only the index this revision made.
+
+    An index carrying the same name but a different shape belongs to something
+    else, and this revision has no authority to remove it. The guard is
+    symmetric with the upgrade's, which refuses such an index rather than
+    adopting it.
+    """
+
+    _settings, config, database = _migrated_to(tmp_path, _SETUP_FK_REVISION)
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("DROP INDEX ix_setup_verifications_input_artifact_id")
+        connection.execute(
+            "CREATE INDEX ix_setup_verifications_input_artifact_id ON setup_verifications (state)"
+        )
+        connection.commit()
+
+    command.downgrade(config, _SETUP_FK_PRIOR)
+
+    with closing(sqlite3.connect(database)) as connection:
+        columns = [
+            row[2]
+            for row in connection.execute(
+                "PRAGMA index_info('ix_setup_verifications_input_artifact_id')"
+            )
+        ]
+        targets = [
+            row[2] for row in connection.execute("PRAGMA foreign_key_list('setup_verifications')")
+        ]
+
+    assert columns == ["state"], (
+        "the downgrade dropped a same-name index of a different shape, which this "
+        "revision did not create and has no authority to remove"
+    )
+    assert "artifacts" not in targets, "the downgrade left the foreign key in place"
