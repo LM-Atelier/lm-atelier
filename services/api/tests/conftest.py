@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import shutil
 import sqlite3
 from collections.abc import AsyncIterator
@@ -99,6 +100,11 @@ def app(settings: Settings) -> FastAPI:
 @pytest_asyncio.fixture
 async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
     async with app.router.lifespan_context(app):
+        # The retention sweep runs after startup rather than inside it, so a
+        # test that inspects artifacts would otherwise race it. Every test
+        # starts from the settled store, exactly as it did when the sweep was
+        # a startup stage.
+        await asyncio.wait_for(app.state.retention_sweep, timeout=30)
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://testserver") as test_client:
             session = await test_client.post("/api/session")
