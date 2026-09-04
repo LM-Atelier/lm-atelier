@@ -435,7 +435,28 @@ def test_release_bundle_rejects_mismatched_source_identity(tmp_path: Path) -> No
         ("state/chat.db", True),
         ("logs/service.log", True),
         ("release/application.exe", True),
+        # Weight formats beyond the common four. A format the rules do not name
+        # is publishable, and these are produced by ordinary training tooling.
+        ("checkpoints/model.ggml", True),
+        ("checkpoints/model.h5", True),
+        ("checkpoints/model.hdf5", True),
+        ("checkpoints/model.mlmodel", True),
+        ("checkpoints/embeddings.npy", True),
+        ("checkpoints/embeddings.npz", True),
+        ("checkpoints/graph.pb", True),
+        ("checkpoints/state.pickle", True),
+        ("checkpoints/state.pkl", True),
+        ("checkpoints/model.tflite", True),
+        # The case suffix rules cannot reach: the files that sit BESIDE weights
+        # are ordinary text and match no format rule, so the directory carries
+        # the guarantee instead.
+        ("private-assets/subject/captions.txt", True),
+        ("private-assets/manifest.json", True),
+        ("private-assets/notes.md", True),
         ("package-lock.json", False),
+        # Ordinary repository content that merely resembles the rules above.
+        ("docs/private-assets-policy.md", False),
+        ("services/api/local_lm/models.py", False),
     ],
 )
 def test_repository_hygiene_rejects_force_added_artifacts(
