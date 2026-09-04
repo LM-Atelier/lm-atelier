@@ -9,11 +9,12 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from local_lm.artifact_library import library_entry_id
 from local_lm.artifacts import ArtifactStore
 from local_lm.config import Settings
 from local_lm.db import Base
 from local_lm.domain import ArtifactKind
-from local_lm.models import Artifact
+from local_lm.models import Artifact, ArtifactLibraryEntry
 
 
 @pytest.fixture
@@ -274,3 +275,75 @@ def test_artifact_resolve_rejects_noncanonical_database_paths(
 
     with pytest.raises(ValueError, match="not canonical"):
         store.resolve(artifact)
+
+
+def test_temporary_preview_delete_declines_a_retained_preview(
+    artifact_session: tuple[ArtifactStore, Session],
+) -> None:
+    """A preview something still retains is declined, not raised.
+
+    The parts count is only a fast path. A library entry retains through the
+    reference walk instead, which is the set `_delete_artifact` refuses on, and
+    one caller of this method runs inside the FastAPI lifespan where a raise
+    would stop the application starting.
+    """
+
+    store, session = artifact_session
+    artifact = store.ingest_bytes(
+        session,
+        b"\x89PNG\r\n\x1a\nretained preview",
+        kind=ArtifactKind.IMAGE,
+        media_type="image/png",
+        metadata={"temporary_preview": True},
+    )
+    now = datetime.now(UTC)
+    session.add(
+        ArtifactLibraryEntry(
+            id=library_entry_id(artifact),
+            artifact_id=artifact.id,
+            display_name="kept",
+            favorite=False,
+            state="visible",
+            version=1,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    session.commit()
+    path = store.resolve(artifact)
+
+    assert store.delete_temporary_preview(session, artifact.id) is False
+    assert session.get(Artifact, artifact.id) is not None
+    assert path.exists()
+
+
+def test_temporary_preview_delete_still_raises_on_a_containment_failure(
+    artifact_session: tuple[ArtifactStore, Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Declining a retained preview must not widen into swallowing safety errors.
+
+    Deletion staging through a filesystem link is a containment violation, and
+    keeping a boot alive by ignoring one is the trade this store exists to
+    refuse.
+    """
+
+    store, session = artifact_session
+    artifact = store.ingest_bytes(
+        session,
+        b"\x89PNG\r\n\x1a\nunreferenced preview",
+        kind=ArtifactKind.IMAGE,
+        media_type="image/png",
+        metadata={"temporary_preview": True},
+    )
+    session.commit()
+    trash = store.root / ".delete-pending"
+    real_is_link = store._is_link
+
+    def link_at_trash(candidate: Path) -> bool:
+        return candidate == trash or real_is_link(candidate)
+
+    monkeypatch.setattr(store, "_is_link", link_at_trash)
+
+    with pytest.raises(ValueError, match="filesystem link"):
+        store.delete_temporary_preview(session, artifact.id)

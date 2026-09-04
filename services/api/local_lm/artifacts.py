@@ -660,8 +660,22 @@ class ArtifactStore:
         )
         if references:
             return False
+        # This returns bool, and `orchestrator.recover_interrupted` calls it from
+        # the `orchestrator-recovery` startup stage, which `_startup_stage` wraps
+        # in try/finally with no except. A ValueError here would therefore
+        # propagate out of lifespan and stop the application starting, so a
+        # preview something still retains is declined rather than raised.
+        #
+        # The parts counted above are a fast path, not the whole answer: the walk
+        # follows metadata links too, and `_delete_artifact` raises on exactly
+        # this set. Taking the fence first is what makes the snapshot safe to
+        # hand back, so the check costs one walk rather than two.
+        begin_artifact_write_fence(session)
+        retained = self.referenced_artifact_ids(session)
+        if artifact.id in retained:
+            return False
         try:
-            self._delete_artifact(session, artifact)
+            self._delete_artifact(session, artifact, retained=retained)
         except OSError as exc:
             if getattr(exc, "winerror", None) in {32, 33}:
                 return False
