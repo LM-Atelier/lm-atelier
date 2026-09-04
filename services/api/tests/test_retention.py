@@ -365,13 +365,15 @@ def test_a_metadata_cycle_is_skipped_rather_than_aborting_the_sweep(
 async def test_startup_completes_when_a_video_and_its_poster_have_both_aged_out(
     settings: Settings,
 ) -> None:
-    """The sweep runs inside lifespan, so aborting it stops the application.
+    """A video and the poster it names are both swept, and startup survives.
 
-    main.py calls cleanup_retention in the artifact-retention-cleanup startup
-    stage with dry_run=False, and _startup_stage wraps its body in try/finally
-    with no except clause. An IntegrityError from the sweep therefore
-    propagates out of lifespan and the app never finishes starting. This drives
-    the real create_app lifespan rather than the sweep directly.
+    The sweep runs after startup as a background task, so the application is
+    up regardless of what the sweep meets. Within one pass the poster is
+    skipped while the video still names it; the sweep then runs another pass,
+    which finds the poster unnamed and removes it too, so a chain drains in one
+    sweep rather than one link per start. Awaiting the task pins the sweep's
+    outcome rather than a moment in time, and drives the real create_app
+    lifespan rather than the sweep directly.
 
     Nothing here is dated to the test run: the pair is stamped in 2020, so it
     ages out under the shipped retention settings rather than settings the test
@@ -385,11 +387,11 @@ async def test_startup_completes_when_a_video_and_its_poster_have_both_aged_out(
 
     app = create_app(settings)
     async with app.router.lifespan_context(app):
-        pass
+        await app.state.retention_sweep
 
     with SessionLocal() as session:
-        assert session.get(Artifact, video_id) is None, "startup did not sweep the referrer"
-        assert session.get(Artifact, poster_id) is not None
+        assert session.get(Artifact, video_id) is None, "the sweep did not remove the referrer"
+        assert session.get(Artifact, poster_id) is None, "the second pass left the poster"
 
 
 def _chat(session: Session) -> Chat:

@@ -10,6 +10,7 @@ import shutil
 import stat
 import tempfile
 import uuid
+from collections.abc import Callable
 from collections.abc import Set as AbstractSet
 from contextlib import suppress
 from dataclasses import dataclass
@@ -164,6 +165,39 @@ class RetentionCleanupSummary:
     pending_count: int
     removed_count: int
     reclaimed_bytes: int
+    #: True when the pass stopped before examining every artifact - a deletion
+    #: bound was reached or the caller asked it to stop - so another pass is
+    #: needed before the sweep can be called complete.
+    truncated: bool = False
+
+
+class _DeletionBudget:
+    """What a pass may still remove, and whether it may go on at all.
+
+    The orphan-file walk is the part of a pass that has no rows to count, so a
+    caller's bound and stop request had no purchase on it: a store whose aged
+    backlog is files rather than rows got one unbounded batch. The budget is
+    consulted before every removal and records, in ``truncated``, that the walk
+    stopped short, so the caller knows another pass is owed.
+    """
+
+    def __init__(self, remaining: int | None, should_stop: Callable[[], bool] | None) -> None:
+        self.remaining = remaining
+        self.should_stop = should_stop
+        self.truncated = False
+
+    def allow(self) -> bool:
+        if self.should_stop is not None and self.should_stop():
+            self.truncated = True
+            return False
+        if self.remaining is not None and self.remaining <= 0:
+            self.truncated = True
+            return False
+        return True
+
+    def spend(self) -> None:
+        if self.remaining is not None:
+            self.remaining -= 1
 
 
 @dataclass(frozen=True)
@@ -694,7 +728,25 @@ class ArtifactStore:
         temporary_hours: int,
         dry_run: bool,
         now: datetime | None = None,
+        max_deletions: int | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> RetentionCleanupSummary:
+        """Sweep the store once, or once up to a deletion bound.
+
+        Every deletion here pays for the JSON reference trigger's scan of the
+        referring tables, so a sweep over thousands of aged previews takes
+        hours and, in one session, commits nothing until the end. A caller
+        that wants progress to survive a kill and the write fence held only
+        briefly passes ``max_deletions`` and commits after each call; the
+        summary's ``truncated`` says whether another call is needed. A pass
+        that stops early leaves the marking of ``unreferenced_at`` and the
+        orphan-file sweep to the pass that completes, since both describe the
+        whole store rather than the artifacts examined so far.
+
+        ``should_stop`` is consulted before each deletion; a truthful answer
+        ends the pass at that boundary rather than mid-deletion.
+        """
+
         current = now or datetime.now(UTC)
         if not dry_run:
             begin_artifact_write_fence(session)
@@ -704,6 +756,7 @@ class ArtifactStore:
         pending_count = 0
         removed_count = 0
         reclaimed_bytes = 0
+        truncated = False
         ordered = session.scalars(select(Artifact).order_by(Artifact.created_at)).all()
         # Who names whom, from rows already loaded above: no extra query, and
         # bounded by this sweep's own working set rather than by the store.
@@ -735,6 +788,12 @@ class ArtifactStore:
                 # rather than one per pass.
                 eligible = False
             if eligible:
+                if should_stop is not None and should_stop():
+                    truncated = True
+                    break
+                if max_deletions is not None and removed_count >= max_deletions:
+                    truncated = True
+                    break
                 removed_count += 1
                 reclaimed_bytes += artifact.size_bytes
                 if not dry_run:
@@ -756,17 +815,29 @@ class ArtifactStore:
             # sweep" is only true if this flush lends the snapshot too.
             with fenced_reference_snapshot(session, referenced):
                 session.flush()
-        orphan_count, orphan_bytes = self._cleanup_orphan_files(
-            session,
-            current=current,
-            temporary_hours=temporary_hours,
-            dry_run=dry_run,
-        )
+        orphan_count = 0
+        orphan_bytes = 0
+        if not truncated:
+            # The orphan walk spends what the row loop left of the bound and
+            # answers to the same stop request, so the final batch of a pass
+            # is bounded exactly like the ones before it.
+            remaining = None if max_deletions is None else max(max_deletions - removed_count, 0)
+            budget = _DeletionBudget(remaining, should_stop)
+            if budget.allow():
+                orphan_count, orphan_bytes = self._cleanup_orphan_files(
+                    session,
+                    current=current,
+                    temporary_hours=temporary_hours,
+                    dry_run=dry_run,
+                    budget=budget,
+                )
+            truncated = budget.truncated
         return RetentionCleanupSummary(
             marked_count=marked_count,
             pending_count=pending_count,
             removed_count=removed_count + orphan_count,
             reclaimed_bytes=reclaimed_bytes + orphan_bytes,
+            truncated=truncated,
         )
 
     def delete_library_artifact(
@@ -1030,6 +1101,7 @@ class ArtifactStore:
         current: datetime,
         temporary_hours: int,
         dry_run: bool,
+        budget: _DeletionBudget | None = None,
     ) -> tuple[int, int]:
         """Remove aged temporaries and unindexed files through held directories.
 
@@ -1057,9 +1129,12 @@ class ArtifactStore:
 
         indexed = {artifact.relative_path for artifact in session.scalars(select(Artifact)).all()}
         cutoff = current - timedelta(hours=temporary_hours)
+        allowance = budget or _DeletionBudget(None, None)
         try:
             with AnchoredDirectory(self.root) as anchor:
-                return self._sweep_orphans(anchor, indexed=indexed, cutoff=cutoff, dry_run=dry_run)
+                return self._sweep_orphans(
+                    anchor, indexed=indexed, cutoff=cutoff, dry_run=dry_run, budget=allowance
+                )
         except (AnchoredDirectoryError, OSError):
             return 0, 0
 
@@ -1070,6 +1145,7 @@ class ArtifactStore:
         indexed: set[str],
         cutoff: datetime,
         dry_run: bool,
+        budget: _DeletionBudget,
     ) -> tuple[int, int]:
         """One enumeration of the held root, read twice for its two jobs."""
 
@@ -1082,15 +1158,20 @@ class ArtifactStore:
             size = _aged_file_size(entry, cutoff)
             if size is None:
                 continue
+            if not budget.allow():
+                return removed_count, reclaimed_bytes
             if not dry_run and not _removed(anchor, entry.name, counted=size, cutoff=cutoff):
                 continue
+            budget.spend()
             removed_count += 1
             reclaimed_bytes += size
         for entry in entries:
             if entry.kind is not AnchoredEntryKind.DIRECTORY or not _SHARD.fullmatch(entry.name):
                 continue
+            if budget.truncated:
+                return removed_count, reclaimed_bytes
             count, reclaimed = self._sweep_first_shard(
-                anchor, entry.name, indexed=indexed, cutoff=cutoff, dry_run=dry_run
+                anchor, entry.name, indexed=indexed, cutoff=cutoff, dry_run=dry_run, budget=budget
             )
             removed_count += count
             reclaimed_bytes += reclaimed
@@ -1104,8 +1185,13 @@ class ArtifactStore:
         indexed: set[str],
         cutoff: datetime,
         dry_run: bool,
+        budget: _DeletionBudget,
     ) -> tuple[int, int]:
-        """Sweep one first-level shard, then drop it if this pass emptied it."""
+        """Sweep one first-level shard, then drop it if this pass emptied it.
+
+        A shard is dropped only when the walk through it ran to the end; a
+        walk cut short by the budget may have left entries it never reached.
+        """
 
         removed_count = 0
         reclaimed_bytes = 0
@@ -1116,6 +1202,8 @@ class ArtifactStore:
                         entry.name
                     ):
                         continue
+                    if budget.truncated:
+                        return removed_count, reclaimed_bytes
                     count, reclaimed = self._sweep_second_shard(
                         held,
                         first,
@@ -1123,12 +1211,13 @@ class ArtifactStore:
                         indexed=indexed,
                         cutoff=cutoff,
                         dry_run=dry_run,
+                        budget=budget,
                     )
                     removed_count += count
                     reclaimed_bytes += reclaimed
         except (AnchoredDirectoryError, OSError):
             return removed_count, reclaimed_bytes
-        if removed_count and not dry_run:
+        if removed_count and not dry_run and not budget.truncated:
             with suppress(AnchoredDirectoryError, OSError):
                 remove_directory_entry(anchor, first)
         return removed_count, reclaimed_bytes
@@ -1142,12 +1231,14 @@ class ArtifactStore:
         indexed: set[str],
         cutoff: datetime,
         dry_run: bool,
+        budget: _DeletionBudget,
     ) -> tuple[int, int]:
         """Sweep one leaf shard, then drop it if this pass emptied it.
 
         The shard is released before it is removed. A held directory can be
         neither renamed nor deleted, which is the property the rest of this
-        walk relies on and would otherwise trip over here.
+        walk relies on and would otherwise trip over here. A shard the budget
+        cut short is kept, since entries after the cut were never examined.
         """
 
         removed_count = 0
@@ -1160,13 +1251,16 @@ class ArtifactStore:
                     )
                     if size is None:
                         continue
+                    if not budget.allow():
+                        return removed_count, reclaimed_bytes
                     if not dry_run and not _removed(held, entry.name, counted=size, cutoff=cutoff):
                         continue
+                    budget.spend()
                     removed_count += 1
                     reclaimed_bytes += size
         except (AnchoredDirectoryError, OSError):
             return removed_count, reclaimed_bytes
-        if removed_count and not dry_run:
+        if removed_count and not dry_run and not budget.truncated:
             with suppress(AnchoredDirectoryError, OSError):
                 remove_directory_entry(parent, second)
         return removed_count, reclaimed_bytes
