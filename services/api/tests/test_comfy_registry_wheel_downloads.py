@@ -3,6 +3,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import subprocess
+import sys
+import textwrap
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -21,6 +25,8 @@ from local_lm.comfy_registry_wheel_downloads import (
     ComfyRegistryWheelDownloader,
     ComfyRegistryWheelDownloadError,
 )
+from local_lm.filesystem_links import AnchoredDirectory, AnchoredDirectoryError
+from local_lm.shared_asset_lock_v1 import hold
 
 _TAG = "py3-none-any"
 
@@ -85,9 +91,20 @@ async def _stage_with(
         await downloader.close()
 
 
+def _assert_stage_lock_is_unheld(parent: Path, destination: Path) -> None:
+    """The lock entry stays; the next holder must be able to take it."""
+
+    lock_name = f".{destination.name}.lock"
+    assert (parent / lock_name).is_file()
+    with AnchoredDirectory(parent) as anchor, hold(anchor, lock_name):
+        pass
+
+
 def _assert_clean(parent: Path, destination: Path) -> None:
     assert not destination.exists()
-    assert not (parent / f".{destination.name}.lock").exists()
+    lock = parent / f".{destination.name}.lock"
+    if lock.exists():
+        _assert_stage_lock_is_unheld(parent, destination)
     assert not list(parent.glob(f".registry-wheels-{destination.name}-*"))
 
 
@@ -131,7 +148,7 @@ async def test_wheel_and_hash_bound_metadata_are_staged_atomically(tmp_path: Pat
         (f"{filename}.metadata", 0, len(metadata)),
         (f"{filename}.metadata", len(metadata), len(metadata)),
     ]
-    assert not (tmp_path / ".staged.lock").exists()
+    _assert_stage_lock_is_unheld(tmp_path, destination)
     assert not list(tmp_path.glob(".registry-wheels-staged-*"))
 
 
@@ -287,12 +304,6 @@ async def test_destination_parent_existing_target_and_lock_are_enforced(
     with pytest.raises(ComfyRegistryWheelDownloadError) as parent_error:
         await _stage_with(httpx.MockTransport(handler), missing_parent)
     assert parent_error.value.code == "invalid_stage_destination"
-
-    locked = tmp_path / "locked"
-    (tmp_path / ".locked.lock").write_text("held", encoding="utf-8")
-    with pytest.raises(ComfyRegistryWheelDownloadError) as lock_error:
-        await _stage_with(httpx.MockTransport(handler), locked)
-    assert lock_error.value.code == "stage_locked"
 
 
 async def test_redirect_partial_and_encoded_responses_fail_without_staging(
@@ -462,3 +473,116 @@ async def test_failure_on_second_artifact_never_exposes_first_artifact(
         )
     assert raised.value.code == "download_size_mismatch"
     _assert_clean(tmp_path, destination)
+
+
+_STAGE_HOLDER = textwrap.dedent(
+    """
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, sys.argv[1])
+    from local_lm.filesystem_links import AnchoredDirectory
+    from local_lm.shared_asset_lock_v1 import hold
+
+    with AnchoredDirectory(Path(sys.argv[2])) as anchor:
+        with hold(anchor, sys.argv[3]):
+            print("HELD", flush=True)
+            import time
+
+            time.sleep(300)
+    """
+)
+
+
+def _start_stage_holder(tmp_path: Path, lock_name: str) -> subprocess.Popen[str]:
+    script = tmp_path / "stage-holder.py"
+    script.write_text(_STAGE_HOLDER, encoding="utf-8")
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            str(script),
+            str(Path(__file__).resolve().parents[1]),
+            str(tmp_path),
+            lock_name,
+        ],
+        stdout=subprocess.PIPE,
+        encoding="utf-8",
+    )
+    try:
+        assert child.stdout is not None
+        announced = child.stdout.readline().strip()
+        assert announced == "HELD", "the holder never took the lock"
+        return child
+    except BaseException:
+        child.kill()
+        child.wait(timeout=30)
+        raise
+
+
+async def test_a_live_holder_keeps_the_stage_locked(tmp_path: Path) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("a locked stage must not reach the network")
+
+    destination = tmp_path / "staged"
+    lock_name = f".{destination.name}.lock"
+    child = _start_stage_holder(tmp_path, lock_name)
+    try:
+        with pytest.raises(ComfyRegistryWheelDownloadError) as raised:
+            await _stage_with(httpx.MockTransport(handler), destination)
+        assert raised.value.code == "stage_locked"
+    finally:
+        child.kill()
+        child.wait(timeout=30)
+
+
+async def test_a_killed_holder_does_not_keep_the_stage_locked(tmp_path: Path) -> None:
+    wheel = b"wheel-bytes"
+    metadata = b"metadata"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        content = metadata if request.url.path.endswith(".metadata") else wheel
+        return httpx.Response(200, content=content)
+
+    destination = tmp_path / "staged"
+    lock_name = f".{destination.name}.lock"
+    child = _start_stage_holder(tmp_path, lock_name)
+    child.kill()
+    child.wait(timeout=30)
+
+    deadline = time.monotonic() + 30
+    last_error: ComfyRegistryWheelDownloadError | None = None
+    while time.monotonic() < deadline:
+        try:
+            await _stage_with(httpx.MockTransport(handler), destination)
+            break
+        except ComfyRegistryWheelDownloadError as exc:
+            last_error = exc
+            if exc.code != "stage_locked":
+                raise
+            time.sleep(0.1)
+    else:
+        pytest.fail(
+            "stage stayed locked after the holder died"
+            if last_error is None
+            else f"stage stayed locked after the holder died: {last_error.code}"
+        )
+    assert destination.is_dir()
+    _assert_stage_lock_is_unheld(tmp_path, destination)
+
+
+async def test_an_unanchorable_parent_fails_closed_as_stage_lock_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Anchor failure must refuse, not stage with no lock held."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("an unanchored parent must not reach the network")
+
+    class Boom:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            raise AnchoredDirectoryError("directory containment could not be established")
+
+    monkeypatch.setattr(download_module, "AnchoredDirectory", Boom)
+    with pytest.raises(ComfyRegistryWheelDownloadError) as raised:
+        await _stage_with(httpx.MockTransport(handler), tmp_path / "staged")
+    assert raised.value.code == "stage_lock_failed"

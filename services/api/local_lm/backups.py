@@ -18,6 +18,7 @@ from .config import Settings
 from .filesystem_links import is_link_or_reparse
 from .schemas import BackupInfo
 
+_VERIFICATION_RECEIPT_SCHEMA = "lm-atelier-backup-verification-v1"
 _BACKUP_NAME = re.compile(r"^local-lm-(?P<stamp>\d{8}T\d{6}Z)-[0-9a-f]{8}\.sqlite3$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MAX_MEDIA_MANIFEST_BYTES = 16 * 1024 * 1024
@@ -124,6 +125,11 @@ class BackupManager:
         if media_path.is_file():
             self._verify_media_archive(media_path, path)
         result = self._info(path)
+        # Record the pass here as well as in the same-day lookup, because this
+        # is where a freshly created backup is verified. Recording only in the
+        # lookup would mean the first start after a backup was made still had
+        # to walk it again to earn a receipt.
+        self._write_verification_receipt(result)
         result.verified = True
         return result
 
@@ -214,6 +220,8 @@ class BackupManager:
             if path not in keep:
                 self._delete_backup_pair(path)
                 removed += 1
+        retained = [created for path, created in parsed if path in keep]
+        self._prune_verification_receipts_locked(min(retained) if retained else None)
         return removed
 
     def _verified_metadata_backup_for_day_locked(
@@ -241,8 +249,14 @@ class BackupManager:
         candidates.sort(key=lambda item: (item[1], item[2]), reverse=True)
         for path, _created, _modified in candidates:
             try:
-                self._verify_path(path)
+                # `_info` is computed first because it already digests the whole
+                # file, and that digest is what a receipt is bound to. Ordering
+                # it before the structural check makes the receipt free: nothing
+                # is read that this method did not already read.
                 result = self._info(path)
+                if not self._verification_receipt_matches(result):
+                    self._verify_path(path)
+                    self._write_verification_receipt(result)
             except (OSError, ValueError):
                 logger.warning(
                     "Ignoring an invalid recovery backup for the current UTC day",
@@ -252,6 +266,111 @@ class BackupManager:
             result.verified = True
             return result
         return None
+
+    def _receipt_dir(self) -> Path:
+        return self.settings.state_dir / "backup-verifications"
+
+    def _receipt_path(self, digest: str) -> Path:
+        return self._receipt_dir() / f"{digest}.json"
+
+    def _verification_receipt_matches(self, info: BackupInfo) -> bool:
+        """True only when a receipt records THESE bytes passing verification.
+
+        Bound to the content digest, not to the file name and not to
+        `(st_dev, st_ino)`. A name can be re-pointed at different bytes between
+        two starts, and inode numbers are reused, so either would let a
+        replaced file inherit an earlier file's result - which is the one thing
+        a reused verification must never do. The digest cannot: different bytes
+        produce a different digest and therefore find no receipt.
+
+        Reading it costs nothing extra. `_info` already streams the whole file
+        to compute that digest, so the receipt removes `PRAGMA integrity_check`
+        and `PRAGMA foreign_key_check` - a page-level structural walk and a
+        scan across every foreign key - without adding a read.
+
+        Fails closed. A receipt that is missing, unreadable, malformed, or
+        disagrees about size is treated as no receipt at all, so the answer is
+        a re-verification rather than a wrong reuse.
+        """
+
+        try:
+            raw = self._receipt_path(info.sha256).read_text(encoding="utf-8")
+            record = json.loads(raw)
+        except (OSError, ValueError):
+            return False
+        if type(record) is not dict:
+            return False
+        return (
+            record.get("schema") == _VERIFICATION_RECEIPT_SCHEMA
+            and record.get("sha256") == info.sha256
+            and record.get("size_bytes") == info.size_bytes
+        )
+
+    def _write_verification_receipt(self, info: BackupInfo) -> None:
+        """Record a passing verification, and only after it has passed.
+
+        Written to a name derived from the digest, which makes the store
+        content-addressed and the record effectively immutable: a receipt for
+        different bytes is a different file rather than an overwrite of this
+        one. Published by rename so a crash mid-write cannot leave a partial
+        record that would later read as a valid one.
+
+        A failure to record is not a failure to verify. The backup was checked
+        and is sound; losing the receipt costs one repeated check on the next
+        start, which is the cost this exists to avoid rather than an error to
+        propagate.
+        """
+
+        record = {
+            "schema": _VERIFICATION_RECEIPT_SCHEMA,
+            "sha256": info.sha256,
+            "size_bytes": info.size_bytes,
+            "verified_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        }
+        try:
+            directory = self._receipt_dir()
+            directory.mkdir(parents=True, exist_ok=True)
+            handle, temporary_name = tempfile.mkstemp(
+                prefix="receipt-", suffix=".partial", dir=directory
+            )
+            temporary = Path(temporary_name)
+            try:
+                with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
+                    json.dump(record, stream, sort_keys=True)
+                os.replace(temporary, self._receipt_path(info.sha256))
+            except Exception:
+                temporary.unlink(missing_ok=True)
+                raise
+        except OSError:
+            logger.warning("Could not record a backup verification receipt", exc_info=True)
+
+    def _prune_verification_receipts_locked(self, oldest_kept: datetime | None) -> None:
+        """Drop receipts that predate every retained backup.
+
+        Keyed by digest, so a receipt outlives the file it describes and would
+        otherwise accumulate one entry for every backup ever verified.
+
+        Pruned by time rather than by digest on purpose. Matching receipts to
+        retained backups would mean digesting each retained backup, which is a
+        full read of every one - the cost this whole change exists to remove.
+        A receipt is written when its backup is verified, so a receipt older
+        than the oldest retained backup cannot belong to one, and dropping it
+        is safe. Erring towards keeping is free: a stale receipt is never
+        matched, because no file digests to it.
+        """
+
+        if oldest_kept is None:
+            return
+        directory = self._receipt_dir()
+        if not directory.is_dir():
+            return
+        cutoff = oldest_kept.timestamp()
+        for path in directory.glob("*.json"):
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+            except OSError:
+                continue
 
     def _cleanup_stale_partials(self) -> None:
         self._recover_backup_deletions()

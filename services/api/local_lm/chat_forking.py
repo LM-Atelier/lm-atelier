@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from .message_references import carry_message_references_if_absent
 from .models import Chat, Message, MessagePart
 from .workflow_compatibility import copy_chat_workflow_selections
 
@@ -73,6 +74,7 @@ def fork_chat_from_message(session: Session, message_id: str) -> ChatFork:
     copy_chat_workflow_selections(session, origin, fork)
 
     copied: list[str] = []
+    carried: list[tuple[str, str]] = []
     parent_id: str | None = None
     for message in lineage:
         clone = Message(
@@ -97,8 +99,26 @@ def fork_chat_from_message(session: Session, message_id: str) -> ChatFork:
                     metadata_json=dict(part.metadata_json or {}),
                 )
             )
+        carried.append((message.id, clone.id))
         parent_id = clone.id
         copied.append(clone.id)
+
+    # References are immutable history, just like the copied message. Use their
+    # sole writer so every identity/snapshot field travels verbatim and stays
+    # bound to the newly created message rather than the source.
+    #
+    # Carried in one batch with autoflush held off. A pending MessageReference
+    # that pins an asset makes the before_flush guard walk the WHOLE artifact
+    # reference graph, so every flush taken while a carry is pending pays that
+    # walk. Held off, the single flush below pays it once for the fork rather
+    # than once per copied message.
+    with session.no_autoflush:
+        for source_message_id, target_message_id in carried:
+            carry_message_references_if_absent(
+                session,
+                source_message_id=source_message_id,
+                target_message_id=target_message_id,
+            )
 
     fork.active_head_message_id = parent_id
     # Recorded in both directions so neither chat is a mystery later.

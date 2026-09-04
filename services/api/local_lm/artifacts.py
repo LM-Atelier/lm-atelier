@@ -7,8 +7,11 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import tempfile
 import uuid
+from collections.abc import Callable
+from collections.abc import Set as AbstractSet
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -18,7 +21,14 @@ from typing import IO, Final
 from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session
 
-from .artifact_library import begin_artifact_write_fence, referenced_artifact_ids
+from .artifact_library import (
+    artifacts_naming,
+    begin_artifact_write_fence,
+    fenced_reference_snapshot,
+    metadata_referrers,
+    referenced_artifact_ids,
+)
+from .artifact_library_schema import ARTIFACT_METADATA_REFERENCE_KEYS
 from .config import Settings
 from .domain import ArtifactKind, MessageRole, PartType
 from .filesystem_links import (
@@ -155,6 +165,39 @@ class RetentionCleanupSummary:
     pending_count: int
     removed_count: int
     reclaimed_bytes: int
+    #: True when the pass stopped before examining every artifact - a deletion
+    #: bound was reached or the caller asked it to stop - so another pass is
+    #: needed before the sweep can be called complete.
+    truncated: bool = False
+
+
+class _DeletionBudget:
+    """What a pass may still remove, and whether it may go on at all.
+
+    The orphan-file walk is the part of a pass that has no rows to count, so a
+    caller's bound and stop request had no purchase on it: a store whose aged
+    backlog is files rather than rows got one unbounded batch. The budget is
+    consulted before every removal and records, in ``truncated``, that the walk
+    stopped short, so the caller knows another pass is owed.
+    """
+
+    def __init__(self, remaining: int | None, should_stop: Callable[[], bool] | None) -> None:
+        self.remaining = remaining
+        self.should_stop = should_stop
+        self.truncated = False
+
+    def allow(self) -> bool:
+        if self.should_stop is not None and self.should_stop():
+            self.truncated = True
+            return False
+        if self.remaining is not None and self.remaining <= 0:
+            self.truncated = True
+            return False
+        return True
+
+    def spend(self) -> None:
+        if self.remaining is not None:
+            self.remaining -= 1
 
 
 @dataclass(frozen=True)
@@ -167,9 +210,34 @@ class StagedArtifactFile:
         self.path.unlink(missing_ok=True)
 
 
+def _path_follows_a_link(path: Path) -> bool:
+    """True when resolving this path would traverse a link or reparse point.
+
+    `.resolve()` also absolutizes and normalizes case, so a string comparison
+    of requested versus resolved is not this question. Walk the named path and
+    its parents with the existing inspection primitive instead.
+    """
+
+    cursor = path if path.is_absolute() else Path.cwd() / path
+    while True:
+        if is_link_or_reparse(
+            cursor,
+            missing="assume_regular",
+            unreadable="assume_link",
+        ):
+            return True
+        parent = cursor.parent
+        if parent == cursor:
+            return False
+        cursor = parent
+
+
 class ArtifactStore:
     def __init__(self, settings: Settings, *, root: Path | None = None) -> None:
-        self.root = (root or settings.artifact_dir).resolve()
+        requested = root or settings.artifact_dir
+        self.requested_root = requested
+        self.root_followed_a_link = _path_follows_a_link(requested)
+        self.root = requested.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self._verified_files: dict[Path, tuple[int, int]] = {}
 
@@ -221,6 +289,70 @@ class ArtifactStore:
                 raise ValueError("artifact file checksum does not match its record")
             self._verified_files[path] = fingerprint
         return path
+
+    def verified_bytes(self, artifact: Artifact, *, maximum_bytes: int) -> bytes:
+        """Read bounded artifact bytes from the descriptor that is verified.
+
+        A pathname check followed by a later pathname read does not bind both
+        operations to one file. This walk holds the store and both digest
+        shards, opens the digest entry through the held leaf, and derives the
+        size, digest, and returned bytes from that one descriptor. The ordinary
+        verified-path cache is intentionally irrelevant to an authorization
+        decision about exact bytes.
+        """
+
+        if maximum_bytes < 0:
+            raise ValueError("maximum artifact read size is invalid")
+        digest_value = artifact.sha256
+        if artifact.id != f"sha256:{digest_value}" or not _SHA256.fullmatch(digest_value):
+            raise ValueError("artifact identity is invalid")
+        expected_relative = PurePosixPath(
+            digest_value[:2],
+            digest_value[2:4],
+            digest_value,
+        ).as_posix()
+        if artifact.relative_path != expected_relative:
+            raise ValueError("artifact path is not canonical")
+
+        descriptor: int | None = None
+        try:
+            with (
+                AnchoredDirectory(self.root) as root,
+                open_child_directory(root, digest_value[:2]) as first,
+                open_child_directory(first, digest_value[2:4]) as second,
+            ):
+                descriptor = open_entry(second, digest_value)
+                if descriptor is None:
+                    raise FileNotFoundError("artifact file is missing")
+                measured = os.fstat(descriptor)
+                if not stat.S_ISREG(measured.st_mode):
+                    raise ValueError("artifact entry is not a regular file")
+                if measured.st_size != artifact.size_bytes:
+                    raise ValueError("artifact file size does not match its record")
+                if measured.st_size > maximum_bytes:
+                    raise ValueError("artifact is larger than this read allows")
+
+                content = bytearray()
+                content_digest = hashlib.sha256()
+                with os.fdopen(descriptor, "rb") as source:
+                    descriptor = None
+                    while chunk := source.read(1024 * 1024):
+                        content.extend(chunk)
+                        if len(content) > measured.st_size:
+                            raise ValueError("artifact file size does not match its record")
+                        content_digest.update(chunk)
+        except AnchoredDirectoryError as exc:
+            raise ValueError("artifact path could not be held for reading") from exc
+        finally:
+            if descriptor is not None:
+                with suppress(OSError):
+                    os.close(descriptor)
+
+        if len(content) != artifact.size_bytes:
+            raise ValueError("artifact file size does not match its record")
+        if content_digest.hexdigest() != digest_value:
+            raise ValueError("artifact file checksum does not match its record")
+        return bytes(content)
 
     def delivery_metadata(self, artifact: Artifact) -> tuple[Path, str, str]:
         path = self.verified_path(artifact)
@@ -282,7 +414,7 @@ class ArtifactStore:
         original_name: str | None,
         metadata: dict[str, object] | None,
     ) -> Artifact:
-        sha256, size = self._publish_under_its_digest(source)
+        sha256, size = self._publish_under_its_digest(source, session)
         destination_path = self._destination(sha256)
         # The verified-file cache is NOT primed here, and that is deliberate.
         # _remember_verified stats by pathname, so priming it immediately after
@@ -334,7 +466,7 @@ class ArtifactStore:
         session.flush()
         return artifact
 
-    def _publish_under_its_digest(self, source: IO[bytes]) -> tuple[str, int]:
+    def _publish_under_its_digest(self, source: IO[bytes], session: Session) -> tuple[str, int]:
         """Consume the stream into the store and publish it under its digest.
 
         Everything from the store root down is HELD. The two digest directories
@@ -377,6 +509,22 @@ class ArtifactStore:
                     sink.flush()
                     os.fsync(sink.fileno())
                 sha256 = digest.hexdigest()
+                # The writer reservation is taken HERE: after the bytes are
+                # staged and before they are published, and it is held through
+                # the caller's row work.
+                #
+                # The sweep takes the same reservation, so it cannot run between
+                # the moment these bytes appear under their digest and the moment
+                # a row exists to protect them. Without it the deduplication path
+                # can return having written nothing at all - no insert, no update,
+                # no fence - so a live request holds nothing the sweep can see,
+                # and the sweep deletes the row and the bytes underneath it.
+                #
+                # Taken here rather than at the top of the ingest, because the
+                # streaming above is the expensive part and holding SQLite's
+                # single writer slot for the length of an upload would block
+                # every other write for as long as the upload takes.
+                begin_artifact_write_fence(session)
                 first = open_child_directory(root_anchor, sha256[:2], create=True)
                 try:
                     second = open_child_directory(first, sha256[2:4], create=True)
@@ -546,8 +694,22 @@ class ArtifactStore:
         )
         if references:
             return False
+        # This returns bool, and `orchestrator.recover_interrupted` calls it from
+        # the `orchestrator-recovery` startup stage, which `_startup_stage` wraps
+        # in try/finally with no except. A ValueError here would therefore
+        # propagate out of lifespan and stop the application starting, so a
+        # preview something still retains is declined rather than raised.
+        #
+        # The parts counted above are a fast path, not the whole answer: the walk
+        # follows metadata links too, and `_delete_artifact` raises on exactly
+        # this set. Taking the fence first is what makes the snapshot safe to
+        # hand back, so the check costs one walk rather than two.
+        begin_artifact_write_fence(session)
+        retained = self.referenced_artifact_ids(session)
+        if artifact.id in retained:
+            return False
         try:
-            self._delete_artifact(session, artifact)
+            self._delete_artifact(session, artifact, retained=retained)
         except OSError as exc:
             if getattr(exc, "winerror", None) in {32, 33}:
                 return False
@@ -566,7 +728,25 @@ class ArtifactStore:
         temporary_hours: int,
         dry_run: bool,
         now: datetime | None = None,
+        max_deletions: int | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> RetentionCleanupSummary:
+        """Sweep the store once, or once up to a deletion bound.
+
+        Every deletion here pays for the JSON reference trigger's scan of the
+        referring tables, so a sweep over thousands of aged previews takes
+        hours and, in one session, commits nothing until the end. A caller
+        that wants progress to survive a kill and the write fence held only
+        briefly passes ``max_deletions`` and commits after each call; the
+        summary's ``truncated`` says whether another call is needed. A pass
+        that stops early leaves the marking of ``unreferenced_at`` and the
+        orphan-file sweep to the pass that completes, since both describe the
+        whole store rather than the artifacts examined so far.
+
+        ``should_stop`` is consulted before each deletion; a truthful answer
+        ends the pass at that boundary rather than mid-deletion.
+        """
+
         current = now or datetime.now(UTC)
         if not dry_run:
             begin_artifact_write_fence(session)
@@ -576,7 +756,13 @@ class ArtifactStore:
         pending_count = 0
         removed_count = 0
         reclaimed_bytes = 0
-        for artifact in session.scalars(select(Artifact).order_by(Artifact.created_at)).all():
+        truncated = False
+        ordered = session.scalars(select(Artifact).order_by(Artifact.created_at)).all()
+        # Who names whom, from rows already loaded above: no extra query, and
+        # bounded by this sweep's own working set rather than by the store.
+        referrers = metadata_referrers(ordered)
+        removed_ids: set[str] = set()
+        for artifact in ordered:
             metadata = dict(artifact.metadata_json)
             # A favorite pins against the automatic sweep exactly like a live
             # reference: never marked, never removed here. Explicit deletion
@@ -592,11 +778,27 @@ class ArtifactStore:
             unreferenced_at = self._metadata_datetime(metadata.get("unreferenced_at"))
             if not temporary and unreferenced_at:
                 eligible = current - unreferenced_at >= timedelta(days=retention_days)
+            if eligible and any(
+                naming not in removed_ids for naming in referrers.get(artifact.id, ())
+            ):
+                # The delete trigger refuses while a SURVIVING artifact names
+                # this one, so attempting it aborts the pass and everything
+                # after it. A referrer already removed in this pass no longer
+                # counts, which is what lets a video and its poster go together
+                # rather than one per pass.
+                eligible = False
             if eligible:
+                if should_stop is not None and should_stop():
+                    truncated = True
+                    break
+                if max_deletions is not None and removed_count >= max_deletions:
+                    truncated = True
+                    break
                 removed_count += 1
                 reclaimed_bytes += artifact.size_bytes
                 if not dry_run:
-                    self._delete_artifact(session, artifact)
+                    self._delete_artifact(session, artifact, retained=referenced)
+                removed_ids.add(artifact.id)
                 continue
             if not temporary:
                 pending_count += 1
@@ -606,18 +808,36 @@ class ArtifactStore:
                         metadata["unreferenced_at"] = current.isoformat()
                         artifact.metadata_json = metadata
         if not dry_run:
-            session.flush()
-        orphan_count, orphan_bytes = self._cleanup_orphan_files(
-            session,
-            current=current,
-            temporary_hours=temporary_hours,
-            dry_run=dry_run,
-        )
+            # Marking `unreferenced_at` makes an artifact dirty, and if its
+            # metadata names a poster then _pending_json_reference_ids is
+            # non-empty here, so the listener walks the graph again on this final
+            # flush. That is O(1) rather than the per-deletion walk, but "once per
+            # sweep" is only true if this flush lends the snapshot too.
+            with fenced_reference_snapshot(session, referenced):
+                session.flush()
+        orphan_count = 0
+        orphan_bytes = 0
+        if not truncated:
+            # The orphan walk spends what the row loop left of the bound and
+            # answers to the same stop request, so the final batch of a pass
+            # is bounded exactly like the ones before it.
+            remaining = None if max_deletions is None else max(max_deletions - removed_count, 0)
+            budget = _DeletionBudget(remaining, should_stop)
+            if budget.allow():
+                orphan_count, orphan_bytes = self._cleanup_orphan_files(
+                    session,
+                    current=current,
+                    temporary_hours=temporary_hours,
+                    dry_run=dry_run,
+                    budget=budget,
+                )
+            truncated = budget.truncated
         return RetentionCleanupSummary(
             marked_count=marked_count,
             pending_count=pending_count,
             removed_count=removed_count + orphan_count,
             reclaimed_bytes=reclaimed_bytes + orphan_bytes,
+            truncated=truncated,
         )
 
     def delete_library_artifact(
@@ -637,7 +857,7 @@ class ArtifactStore:
 
         linked_ids = {
             linked_id
-            for key in ("poster_artifact_id", "browser_proxy_artifact_id")
+            for key in ARTIFACT_METADATA_REFERENCE_KEYS
             if isinstance((linked_id := artifact.metadata_json.get(key)), str)
         }
         parts = session.scalars(
@@ -660,6 +880,13 @@ class ArtifactStore:
         for linked_id in linked_ids:
             linked = session.get(Artifact, linked_id)
             if not linked or linked.id in referenced:
+                continue
+            # The parent is already deleted above, so anything still naming this
+            # poster or proxy is a DIFFERENT artifact - ingest deduplicates on
+            # sha256, so two videos with identical extracted frames share one
+            # poster row. referenced_artifact_ids does not see that referrer when
+            # it is itself unreferenced, but the delete trigger does, and refuses.
+            if artifacts_naming(session, linked.id):
                 continue
             removed_count += 1
             reclaimed_bytes += linked.size_bytes
@@ -751,16 +978,42 @@ class ArtifactStore:
             removed += removed_count
         return removed
 
-    def _delete_artifact(self, session: Session, artifact: Artifact) -> None:
+    def _delete_artifact(
+        self,
+        session: Session,
+        artifact: Artifact,
+        *,
+        retained: AbstractSet[str] | None = None,
+    ) -> None:
+        """Remove one artifact, staging its bytes so a failed flush can restore them.
+
+        `retained` is an optimisation with a safety condition, not a shortcut. A
+        caller may pass the reference graph ONLY when it computed that graph
+        after taking this same write fence, in the same transaction: BEGIN
+        IMMEDIATE holds the writer reservation, so no other connection can create
+        a reference while it is held and the snapshot cannot go stale underneath
+        us. A caller that has not taken the fence, or that spans several
+        transactions, passes nothing and pays for its own check - that guard is
+        the safety property for explicit deletion and is deliberately kept.
+
+        Removing the wrapper call alone is NOT enough. The flush below fires a
+        listener that independently walks the same graph for every deleted
+        artifact, so the snapshot is lent to that listener too; otherwise the
+        per-deletion walk survives untouched behind a test that cannot see it,
+        because each module binds its own reference to that function.
+        """
+
         begin_artifact_write_fence(session)
-        if artifact.id in self.referenced_artifact_ids(session):
+        known = self.referenced_artifact_ids(session) if retained is None else retained
+        if artifact.id in known:
             raise ValueError("This artifact is still retained.")
         try:
             path = self.resolve(artifact)
         except ValueError:
             # Invalid metadata must never redirect deletion to another file.
             session.delete(artifact)
-            session.flush()
+            with fenced_reference_snapshot(session, retained):
+                session.flush()
             return
         staged: Path | None = None
         if path.exists():
@@ -775,7 +1028,10 @@ class ArtifactStore:
             self._verified_files.pop(path, None)
         try:
             session.delete(artifact)
-            session.flush()
+            # The listener on this flush walks the whole reference graph unless a
+            # caller that already holds the fence lends it the graph it computed.
+            with fenced_reference_snapshot(session, retained):
+                session.flush()
         except Exception:
             if staged is not None:
                 self._restore_staged_file(staged, path)
@@ -845,6 +1101,7 @@ class ArtifactStore:
         current: datetime,
         temporary_hours: int,
         dry_run: bool,
+        budget: _DeletionBudget | None = None,
     ) -> tuple[int, int]:
         """Remove aged temporaries and unindexed files through held directories.
 
@@ -872,9 +1129,12 @@ class ArtifactStore:
 
         indexed = {artifact.relative_path for artifact in session.scalars(select(Artifact)).all()}
         cutoff = current - timedelta(hours=temporary_hours)
+        allowance = budget or _DeletionBudget(None, None)
         try:
             with AnchoredDirectory(self.root) as anchor:
-                return self._sweep_orphans(anchor, indexed=indexed, cutoff=cutoff, dry_run=dry_run)
+                return self._sweep_orphans(
+                    anchor, indexed=indexed, cutoff=cutoff, dry_run=dry_run, budget=allowance
+                )
         except (AnchoredDirectoryError, OSError):
             return 0, 0
 
@@ -885,6 +1145,7 @@ class ArtifactStore:
         indexed: set[str],
         cutoff: datetime,
         dry_run: bool,
+        budget: _DeletionBudget,
     ) -> tuple[int, int]:
         """One enumeration of the held root, read twice for its two jobs."""
 
@@ -897,15 +1158,20 @@ class ArtifactStore:
             size = _aged_file_size(entry, cutoff)
             if size is None:
                 continue
+            if not budget.allow():
+                return removed_count, reclaimed_bytes
             if not dry_run and not _removed(anchor, entry.name, counted=size, cutoff=cutoff):
                 continue
+            budget.spend()
             removed_count += 1
             reclaimed_bytes += size
         for entry in entries:
             if entry.kind is not AnchoredEntryKind.DIRECTORY or not _SHARD.fullmatch(entry.name):
                 continue
+            if budget.truncated:
+                return removed_count, reclaimed_bytes
             count, reclaimed = self._sweep_first_shard(
-                anchor, entry.name, indexed=indexed, cutoff=cutoff, dry_run=dry_run
+                anchor, entry.name, indexed=indexed, cutoff=cutoff, dry_run=dry_run, budget=budget
             )
             removed_count += count
             reclaimed_bytes += reclaimed
@@ -919,8 +1185,13 @@ class ArtifactStore:
         indexed: set[str],
         cutoff: datetime,
         dry_run: bool,
+        budget: _DeletionBudget,
     ) -> tuple[int, int]:
-        """Sweep one first-level shard, then drop it if this pass emptied it."""
+        """Sweep one first-level shard, then drop it if this pass emptied it.
+
+        A shard is dropped only when the walk through it ran to the end; a
+        walk cut short by the budget may have left entries it never reached.
+        """
 
         removed_count = 0
         reclaimed_bytes = 0
@@ -931,6 +1202,8 @@ class ArtifactStore:
                         entry.name
                     ):
                         continue
+                    if budget.truncated:
+                        return removed_count, reclaimed_bytes
                     count, reclaimed = self._sweep_second_shard(
                         held,
                         first,
@@ -938,12 +1211,13 @@ class ArtifactStore:
                         indexed=indexed,
                         cutoff=cutoff,
                         dry_run=dry_run,
+                        budget=budget,
                     )
                     removed_count += count
                     reclaimed_bytes += reclaimed
         except (AnchoredDirectoryError, OSError):
             return removed_count, reclaimed_bytes
-        if removed_count and not dry_run:
+        if removed_count and not dry_run and not budget.truncated:
             with suppress(AnchoredDirectoryError, OSError):
                 remove_directory_entry(anchor, first)
         return removed_count, reclaimed_bytes
@@ -957,12 +1231,14 @@ class ArtifactStore:
         indexed: set[str],
         cutoff: datetime,
         dry_run: bool,
+        budget: _DeletionBudget,
     ) -> tuple[int, int]:
         """Sweep one leaf shard, then drop it if this pass emptied it.
 
         The shard is released before it is removed. A held directory can be
         neither renamed nor deleted, which is the property the rest of this
-        walk relies on and would otherwise trip over here.
+        walk relies on and would otherwise trip over here. A shard the budget
+        cut short is kept, since entries after the cut were never examined.
         """
 
         removed_count = 0
@@ -975,13 +1251,16 @@ class ArtifactStore:
                     )
                     if size is None:
                         continue
+                    if not budget.allow():
+                        return removed_count, reclaimed_bytes
                     if not dry_run and not _removed(held, entry.name, counted=size, cutoff=cutoff):
                         continue
+                    budget.spend()
                     removed_count += 1
                     reclaimed_bytes += size
         except (AnchoredDirectoryError, OSError):
             return removed_count, reclaimed_bytes
-        if removed_count and not dry_run:
+        if removed_count and not dry_run and not budget.truncated:
             with suppress(AnchoredDirectoryError, OSError):
                 remove_directory_entry(parent, second)
         return removed_count, reclaimed_bytes

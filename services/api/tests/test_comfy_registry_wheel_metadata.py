@@ -10,6 +10,7 @@ from packaging.markers import default_environment
 import local_lm.comfy_registry_wheel_metadata as metadata_module
 from local_lm.comfy_registry_dependencies import plan_comfy_registry_dependencies
 from local_lm.comfy_registry_wheel_artifacts import (
+    ComfyRegistryWheelArtifact,
     ComfyRegistryWheelArtifactManifest,
     resolve_comfy_registry_wheel_artifacts,
 )
@@ -118,7 +119,7 @@ def _assert_error(
 
 def _rehash_manifest(
     manifest: ComfyRegistryWheelArtifactManifest,
-    artifacts: tuple[metadata_module.ComfyRegistryWheelArtifact, ...],
+    artifacts: tuple[ComfyRegistryWheelArtifact, ...],
 ) -> ComfyRegistryWheelArtifactManifest:
     payload = {
         "version": 1,

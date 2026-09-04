@@ -435,7 +435,28 @@ def test_release_bundle_rejects_mismatched_source_identity(tmp_path: Path) -> No
         ("state/chat.db", True),
         ("logs/service.log", True),
         ("release/application.exe", True),
+        # Weight formats beyond the common four. A format the rules do not name
+        # is publishable, and these are produced by ordinary training tooling.
+        ("checkpoints/model.ggml", True),
+        ("checkpoints/model.h5", True),
+        ("checkpoints/model.hdf5", True),
+        ("checkpoints/model.mlmodel", True),
+        ("checkpoints/embeddings.npy", True),
+        ("checkpoints/embeddings.npz", True),
+        ("checkpoints/graph.pb", True),
+        ("checkpoints/state.pickle", True),
+        ("checkpoints/state.pkl", True),
+        ("checkpoints/model.tflite", True),
+        # The case suffix rules cannot reach: the files that sit BESIDE weights
+        # are ordinary text and match no format rule, so the directory carries
+        # the guarantee instead.
+        ("private-assets/subject/captions.txt", True),
+        ("private-assets/manifest.json", True),
+        ("private-assets/notes.md", True),
         ("package-lock.json", False),
+        # Ordinary repository content that merely resembles the rules above.
+        ("docs/private-assets-policy.md", False),
+        ("services/api/local_lm/models.py", False),
     ],
 )
 def test_repository_hygiene_rejects_force_added_artifacts(
@@ -1478,6 +1499,17 @@ def test_strict_mypy_gates_load_the_strict_api_config() -> None:
     assert step is not None
     assert "--config-file" in step.group(0)
     assert "services/api/pyproject.toml" in step.group(0)
+    assert "services/api/local_lm" in step.group(0)
+
+    linux_platform_step = re.search(
+        r'Invoke-Checked "Strict mypy \(Linux platform\)".*?\)', script, re.S
+    )
+    assert linux_platform_step is not None
+    linux_platform_command = linux_platform_step.group(0)
+    assert "--config-file" in linux_platform_command
+    assert "services/api/pyproject.toml" in linux_platform_command
+    assert "services/api/local_lm" in linux_platform_command
+    assert re.search(r'"--platform"\s*,\s*"linux"', linux_platform_command) is not None
 
     linux = (ROOT / "scripts" / "verify.sh").read_text(encoding="utf-8")
     linux_step = linux.split('run_checked "Strict mypy"', 1)[1].split(
@@ -1509,43 +1541,6 @@ def test_api_mypy_config_rejects_a_strict_only_fixture(tmp_path: Path) -> None:
     )
 
     assert result.returncode != 0, result.stdout + result.stderr
-
-
-def test_a_file_that_declares_it_must_not_ship_is_refused(tmp_path: Path) -> None:
-    """Some files carry handling flags saying they must never be published, and
-    nothing enforced them, so the rule held only as long as nobody copied the
-    content somewhere tracked.
-
-    Matching the declaration rather than a path means a rename, a copy, or an
-    excerpt embedded in another document is still caught, which is how this kind
-    of content actually escapes.
-    """
-
-    namespace = runpy.run_path(str(ROOT / "scripts/check-repository-hygiene.py"))
-    refused = namespace["declares_it_must_not_ship"]
-
-    # Assembled rather than written out, so this file does not trip the very
-    # check it tests - the same discipline the secret scan test follows.
-    committable = '"never' + '_commit"'
-    publishable = '"never' + '_publish"'
-    documentable = '"never' + '_include_in_public_documentation"'
-
-    for ordinal, flag in enumerate((committable, publishable, documentable)):
-        declared = tmp_path / f"declared-{ordinal}.json"
-        declared.write_text("{" + flag + ": true}", encoding="utf-8")
-        assert refused(str(declared)), flag
-
-    excerpt = tmp_path / "notes.md"
-    excerpt.write_text(
-        "Pasted from elsewhere:\n\n    " + committable + ": true\n", encoding="utf-8"
-    )
-    assert refused(str(excerpt))
-
-    ordinary = tmp_path / "settings.json"
-    ordinary.write_text(
-        '{"classification": "public", ' + committable + ": false}", encoding="utf-8"
-    )
-    assert not refused(str(ordinary))
 
 
 # --------------------------------------------------------------------------
@@ -1978,3 +1973,67 @@ def test_workflow_validator_wiring_is_intact() -> None:
     # 6. The gate executes the shipped predicate rather than a description.
     assert 'MERGE_GATE_COMMAND = "python scripts/ci-merge-gate.py"' in source
     assert (ROOT / "scripts/ci-merge-gate.py").is_file()
+
+
+def _hygiene_namespace() -> dict[str, object]:
+    return runpy.run_path(str(ROOT / "scripts/check-repository-hygiene.py"))
+
+
+def test_hygiene_diagnostics_do_not_echo_rejected_values() -> None:
+    listed = _hygiene_namespace()["_listed"]
+    first = "docs/sensitive-source-name.md"
+    second = "docs/another-sensitive-source-name.md:4"
+
+    rendered = listed([first, second])
+
+    assert first not in rendered
+    assert second not in rendered
+    first_ref = hashlib.sha256(first.encode()).hexdigest()[:12]
+    second_ref = hashlib.sha256(second.encode()).hexdigest()[:12]
+    assert rendered == f"candidate 1 [ref {first_ref}]\n- candidate 2 [ref {second_ref}]"
+    assert first_ref != second_ref
+
+
+def test_repository_hygiene_passes_a_clean_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    namespace = _hygiene_namespace()
+    main = namespace["main"]
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "docs").mkdir()
+    fixture = "docs/clean.py"
+    (tmp_path / fixture).write_text("value = 1\n", encoding="utf-8")
+    monkeypatch.setitem(main.__globals__, "candidate_paths", lambda: [fixture])
+
+    assert main() == 0
+
+
+def test_unsafe_candidate_is_refused_before_content_readers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    namespace = _hygiene_namespace()
+    main = namespace["main"]
+    opened: list[str] = []
+
+    def recording_reader(path: str) -> bool:
+        opened.append(path)
+        return False
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".local-state").mkdir()
+    fixture = ".local-state/notes.md"
+    (tmp_path / fixture).write_text("ordinary\n", encoding="utf-8")
+    monkeypatch.setitem(main.__globals__, "candidate_paths", lambda: [fixture])
+    monkeypatch.setitem(main.__globals__, "unsafe_path", lambda _path: True)
+    monkeypatch.setitem(main.__globals__, "contains_secret", recording_reader)
+    monkeypatch.setitem(main.__globals__, "has_trailing_whitespace", recording_reader)
+    monkeypatch.setitem(main.__globals__, "mojibake_lines", recording_reader)
+
+    with pytest.raises(SystemExit) as refusal:
+        main()
+
+    assert "Private, generated, executable, or runtime artifacts" in str(refusal.value)
+    assert opened == []

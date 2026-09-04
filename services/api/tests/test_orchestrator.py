@@ -22,8 +22,11 @@ from local_lm.models import (
     WorkStep,
 )
 from local_lm.orchestrator import ConversationOrchestrator, _queued_workflow_activation
+from local_lm.scheduler import JobClaim
 from local_lm.schemas import EngineCapabilities, WorkerStatus
 from local_lm.workflow_activations import WorkflowActivationLaunchScope
+
+_TEST_CLAIM = JobClaim(token="attempt-token-a", attempt=1)
 
 
 def test_contract_backed_queue_freezes_only_the_ready_active_activation() -> None:
@@ -495,7 +498,7 @@ async def test_cancelled_chat_release_restores_planner_readiness() -> None:
     )
 
     with pytest.raises(asyncio.CancelledError):
-        await orchestrator._prepare_device_handoff("text_to_image")
+        await orchestrator._prepare_device_handoff("text_to_image", claim=_TEST_CLAIM)
 
     assert orchestrator._chat_planner_ready.is_set()
 
@@ -529,9 +532,10 @@ async def test_media_worker_startup_forwards_truthful_phases() -> None:
     phases = AsyncMock()
     orchestrator._set_media_phase = phases  # type: ignore[method-assign]
 
-    await orchestrator._ensure_media_worker(job_id="job-1", run_id="run-1")
+    await orchestrator._ensure_media_worker(claim=_TEST_CLAIM, job_id="job-1", run_id="run-1")
 
     assert [call.args[2] for call in phases.await_args_list] == [
+        "Starting media worker",
         "Provisioning media runtime",
         "Validating media dependencies",
         "Starting media runtime",
@@ -574,7 +578,7 @@ async def test_ready_media_worker_still_receives_an_exact_activation_scope() -> 
         ),
     )
 
-    await orchestrator._ensure_media_worker(activation_scope=scope)
+    await orchestrator._ensure_media_worker(claim=_TEST_CLAIM, activation_scope=scope)
 
     start_media.assert_awaited_once_with(activation_scope=scope)
 
@@ -718,7 +722,7 @@ async def test_media_execution_awaits_inflight_handoff_restart() -> None:
     )
     orchestrator._schedule_media_restart()
     await restart_entered.wait()
-    ensure_task = asyncio.create_task(orchestrator._ensure_media_worker())
+    ensure_task = asyncio.create_task(orchestrator._ensure_media_worker(claim=_TEST_CLAIM))
     await asyncio.sleep(0)
 
     assert start_calls == 1
@@ -1081,12 +1085,14 @@ async def test_vision_bridge_restores_the_text_profile_after_completion_or_cance
     if cancelled:
         with pytest.raises(asyncio.CancelledError):
             await orchestrator._bridge_visual_context(
+                _TEST_CLAIM,
                 FakeSession(),  # type: ignore[arg-type]
                 run,  # type: ignore[arg-type]
                 [SimpleNamespace(id="sha256:image")],  # type: ignore[list-item]
             )
     else:
         observation, metadata = await orchestrator._bridge_visual_context(
+            _TEST_CLAIM,
             FakeSession(),  # type: ignore[arg-type]
             run,  # type: ignore[arg-type]
             [SimpleNamespace(id="sha256:image")],  # type: ignore[list-item]
@@ -1203,6 +1209,19 @@ async def test_chat_phase_advances_when_the_first_token_arrives() -> None:
         def commit(self):  # type: ignore[no-untyped-def]
             return None
 
+        def rollback(self):  # type: ignore[no-untyped-def]
+            return None
+
+        def execute(self, _statement):  # type: ignore[no-untyped-def]
+            # The ownership probe and the claim-bound writes are conditional
+            # UPDATEs; one owned row answers them.
+            return SimpleNamespace(rowcount=1)
+
+        def in_transaction(self) -> bool:
+            # The owned commit asserts ownership inside the transaction it
+            # commits; this fake is always mid-transaction.
+            return True
+
         def __enter__(self):  # type: ignore[no-untyped-def]
             return self
 
@@ -1225,10 +1244,13 @@ async def test_chat_phase_advances_when_the_first_token_arrives() -> None:
     )
     orchestrator._persist_streamed_text = Mock()  # type: ignore[method-assign]
     orchestrator._release_deferred_media_restart = Mock()  # type: ignore[method-assign]
+    orchestrator._claim_still_owns = Mock(return_value=True)  # type: ignore[method-assign]
     orchestrator._begin_step_prewarm = Mock()  # type: ignore[method-assign]
 
     with pytest.raises(RuntimeError):
-        await orchestrator._execute_chat("job-phase", "run-phase")
+        await orchestrator._execute_chat(
+            "job-phase", "run-phase", SimpleNamespace(token="claim-test", attempt=1)
+        )
 
     labels = [call.args[2] for call in phases.await_args_list]
     assert "Waiting for first token" in labels

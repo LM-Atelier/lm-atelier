@@ -1,8 +1,8 @@
-"""Neutral claims registry for the Shared Asset Library (item 58, Phase 0).
+"""Neutral claims registry for the Shared Asset Library.
 
 The registry records which opaque consumer holds a claim on which immutable
 package. Claims are the deletion authority: bytes may be collected only when
-no claim (and no active lease, a later slice) remains. Callers pass an
+no claim or active lease remains. Callers pass an
 explicit registry database path; this module never discovers the desktop
 library, never touches object bytes, and exposes one consumer's rows only to
 that consumer. Short WAL transactions; no transaction is held across any

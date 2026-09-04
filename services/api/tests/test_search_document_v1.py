@@ -206,3 +206,49 @@ def test_every_deny_flag_must_be_stated_by_the_caller() -> None:
             transcript_visible=True,
             content_removed=False,
         )
+
+
+def test_a_document_cannot_be_minted_without_the_evaluator_witness() -> None:
+    """The authority guard: only the evaluator may declare a document eligible.
+
+    SearchDocumentV1 carries eligible=True plus two authorization flags, and it
+    is built through object.__new__ precisely because __post_init__ always
+    raises - the dataclass cannot be constructed normally at all. So the
+    module-private sentinel is the only thing between "the evaluator decided
+    this message is indexable" and "a caller asserted it was".
+
+    It was unbound. Deleting the check left the COMPLETE API suite green,
+    because every legitimate path goes through build_search_document and passes
+    the right sentinel; only an attempted forgery separates the two states.
+    """
+    from local_lm import search_document_v1 as module
+
+    with pytest.raises(SearchDocumentError, match=INVALID_DOCUMENT):
+        module._document_from_evaluator(
+            witness=object(),
+            message_id="m" * 8,
+            chat_id="c" * 8,
+            role="user",
+            body="hello",
+            has_media=False,
+            selected_response_revision_id=None,
+            created_at_unix=None,
+        )
+
+    # The real evaluator still builds one, so the guard refuses forgery rather
+    # than refusing everything.
+    document = build_search_document(
+        message_id="m" * 8,
+        chat_id="c" * 8,
+        role="user",
+        body="hello",
+        has_media=False,
+        transcript_visible=True,
+        content_removed=False,
+        private_session=False,
+        helper_session=False,
+        secret_payload=False,
+    )
+    assert document is not None
+    assert document.eligible is True
+    assert document.fts_write_authorized is False

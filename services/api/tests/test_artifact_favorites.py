@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from local_lm.domain import ArtifactKind
 
 
 @pytest.fixture
-def artifact_session(tmp_path: Path) -> tuple[ArtifactStore, Session]:
+def artifact_session(tmp_path: Path) -> Iterator[tuple[ArtifactStore, Session]]:
     settings = Settings(data_dir=tmp_path / "data")
     settings.prepare()
     engine = create_engine(f"sqlite:///{tmp_path / 'artifacts.sqlite3'}")
@@ -131,7 +132,7 @@ async def test_the_flag_toggles_filters_and_library_membership_blocks_legacy_del
     assert cleared.json()["favorite"] is False
     assert (await client.get("/api/artifacts", params={"favorites": "true"})).json() == []
 
-    # Phase A has no Trash yet: legacy hard deletion cannot bypass membership.
+    # Without Trash support, legacy hard deletion cannot bypass membership.
     await client.patch("/api/artifacts/art_favorite_flow", json={"favorite": True})
     deleted = await client.delete("/api/artifacts/art_favorite_flow")
     assert deleted.status_code == 409

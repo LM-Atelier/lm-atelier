@@ -17,7 +17,7 @@ def test_context_compaction_is_deterministic_bounded_and_prompt_free() -> None:
         }
         for index in range(40)
     ]
-    source_ids = [f"message-{index}" for index in range(40)]
+    source_ids: list[str | None] = [f"message-{index}" for index in range(40)]
 
     first = compact_context_messages(messages, source_ids, max_characters=480)
     second = compact_context_messages(messages, source_ids, max_characters=480)

@@ -138,9 +138,9 @@ def _reaper_spy(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
     seen: list[dict[str, object]] = []
     real = ProcessSupervisor._reap_persisted_workers
 
-    def spy(self, *args: object, **kwargs: object) -> object:
+    def spy(self: ProcessSupervisor) -> None:
         seen.append(dict(self._worker_identities))
-        return real(self, *args, **kwargs)  # type: ignore[arg-type]
+        return real(self)
 
     monkeypatch.setattr(ProcessSupervisor, "_reap_persisted_workers", spy)
     return seen

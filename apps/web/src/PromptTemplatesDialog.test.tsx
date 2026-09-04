@@ -174,8 +174,12 @@ describe("PromptTemplatesDialog", () => {
       "Distinct choice mode cannot create that many prompts. Request fewer prompts, add more choices, or allow repeats.",
     ],
     [
+      "prompt-model-profile-unset",
+      "Choose a chat model for this chat before using model-guided template slots.",
+    ],
+    [
       "prompt-model-worker-unavailable",
-      "Start a ready chat model before using model-guided template slots.",
+      "The chat model could not be made ready. Check it in Settings, or use authored inputs and choices instead.",
     ],
     [
       "prompt-model-invocation-failed",

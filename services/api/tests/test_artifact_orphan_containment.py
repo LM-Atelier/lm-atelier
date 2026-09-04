@@ -278,7 +278,7 @@ def test_a_shard_this_pass_did_not_empty_keeps_its_directory(
 def test_a_deliberately_linked_root_is_resolved_once_and_still_swept(
     store_session: tuple[ArtifactStore, Session, Path],
 ) -> None:
-    """The owner allows a redirected store root, so the sweep must still run.
+    """A configured redirected store root is supported and must still be swept.
 
     `ArtifactStore.__init__` resolves the root once at construction, which is
     what makes holding it possible at all: by the time the anchor is taken

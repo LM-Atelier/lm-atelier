@@ -7,21 +7,25 @@ import hashlib
 import hmac
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Set as AbstractSet
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, NoReturn, cast
+from typing import Any, Final, NoReturn, cast
 
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
+from .artifact_library_schema import ARTIFACT_METADATA_REFERENCE_KEYS
 from .domain import ArtifactKind, utcnow
 from .models import (
     Artifact,
     ArtifactLibraryEntry,
     Chat,
+    ComfyRegistrySourceArtifactReview,
     Job,
     MessagePart,
     MessageReference,
@@ -555,10 +559,46 @@ def _pending_json_reference_ids(session: Session) -> set[str]:
             retain(_job_ids(value.result_json or {}))
         elif isinstance(value, Artifact):
             metadata = _mapping(value.metadata_json or {})
-            for key in ("poster_artifact_id", "browser_proxy_artifact_id"):
+            for key in ARTIFACT_METADATA_REFERENCE_KEYS:
                 if key in metadata:
                     retain(_optional_id(metadata[key]))
     return found
+
+
+#: Key under which a caller that already holds the write fence publishes the
+#: reference graph it computed under that fence, so this listener can reuse it.
+_FENCED_REFERENCE_SNAPSHOT: Final = "artifact_reference_ids_under_write_fence"
+
+
+@contextmanager
+def fenced_reference_snapshot(
+    session: Session, snapshot: AbstractSet[str] | None
+) -> Iterator[None]:
+    """Lend an already-fenced reference graph to the flush listener.
+
+    The listener below runs on EVERY flush that deletes an Artifact and, left to
+    itself, walks the whole reference graph again each time. A sweep deleting
+    thousands of artifacts therefore paid for that walk per deletion even after
+    its caller had computed the same graph once. Removing only the caller's own
+    recompute is not enough: it leaves the listener untouched, and the walk
+    survives behind a change that looks like it removed it.
+
+    Lending is only sound while the writer reservation is held in the same
+    transaction, because BEGIN IMMEDIATE is what stops another connection
+    creating a reference underneath the snapshot. The lend is therefore scoped to
+    one flush and removed in a finally: it cannot outlive the fence that makes it
+    true, and a caller with no snapshot passes None and the listener pays as
+    before.
+    """
+
+    if snapshot is None:
+        yield
+        return
+    session.info[_FENCED_REFERENCE_SNAPSHOT] = frozenset(snapshot)
+    try:
+        yield
+    finally:
+        session.info.pop(_FENCED_REFERENCE_SNAPSHOT, None)
 
 
 def guard_artifact_reference_flush(
@@ -573,7 +613,9 @@ def guard_artifact_reference_flush(
     if not referenced and not deleted:
         return
     begin_artifact_write_fence(session)
-    if deleted & referenced_artifact_ids(session):
+    lent = session.info.get(_FENCED_REFERENCE_SNAPSHOT)
+    known = lent if isinstance(lent, frozenset) else referenced_artifact_ids(session)
+    if deleted & known:
         raise ArtifactReferenceDataError(REFERENCE_CORRUPT)
     available = {
         value.id for value in session.new if isinstance(value, Artifact) and value.id not in deleted
@@ -607,6 +649,7 @@ def referenced_artifact_ids(
         SetupVerification,
         ArtifactLibraryEntry,
         MessageReference,
+        ComfyRegistrySourceArtifactReview,
         Run,
         WorkStep,
         Chat,
@@ -629,6 +672,7 @@ def referenced_artifact_ids(
         ReferenceAsset.artifact_id,
         SetupVerification.input_artifact_id,
         ArtifactLibraryEntry.artifact_id,
+        ComfyRegistrySourceArtifactReview.artifact_id,
     )
     for column in direct_columns:
         retain({value for value in session.scalars(select(column)) if value})
@@ -681,10 +725,90 @@ def referenced_artifact_ids(
         if artifact is None:
             continue
         metadata = _mapping(artifact.metadata_json)
-        for key in ("poster_artifact_id", "browser_proxy_artifact_id"):
+        for key in ARTIFACT_METADATA_REFERENCE_KEYS:
             if key in metadata:
                 linked = _optional_id(metadata[key])
                 for linked_id in linked - found:
                     retain({linked_id})
                     pending.append(linked_id)
     return found
+
+
+def metadata_referrers(artifacts: Iterable[Artifact]) -> dict[str, set[str]]:
+    """Map each named artifact id to the ids of the artifacts naming it.
+
+    This answers a different question from ``referenced_artifact_ids``, and the
+    difference is why deletion needs it. That walk follows artifact-metadata
+    links only out of artifacts that are already retained, so a poster whose
+    only referrer is itself garbage reads as unreferenced there. The delete
+    trigger refuses while ANY surviving artifact names it, retained or not.
+
+    Both are right about their own concern - one is reachability, the other is
+    referential integrity - but SQLite evaluates the trigger per statement
+    rather than per transaction, so it cannot see that the referrer is about to
+    be deleted too. Deletion has to respect the stricter answer.
+
+    It returns the REFERRERS rather than just the named ids, because a caller
+    deleting in one pass needs to know when a name stops applying: once every
+    artifact naming a poster has itself been deleted, that poster is free in the
+    same pass rather than the next one.
+
+    Deliberately takes loaded artifacts instead of a session. The sweep already
+    holds every row, so this costs no query, and - the reason that matters - a
+    set built here is bounded by the caller's own working set instead of by the
+    store. Scanning the whole table instead would be bounded by
+    MAX_REFERENCE_VALUES, which is a CORRUPTION bound: a large but entirely
+    valid store exceeds it and fails the startup sweep with "reference data is
+    invalid" - the failure this module exists to prevent.
+    """
+
+    referrers: dict[str, set[str]] = {}
+    for artifact in artifacts:
+        row = _mapping(artifact.metadata_json or {})
+        for key in ARTIFACT_METADATA_REFERENCE_KEYS:
+            if key in row:
+                for named in _optional_id(row[key]):
+                    referrers.setdefault(named, set()).add(artifact.id)
+    return referrers
+
+
+def artifacts_naming(session: Session, artifact_id: str) -> set[str]:
+    """Ids of stored artifacts whose metadata names this one.
+
+    The single-id form, for callers deleting one artifact rather than sweeping.
+    Bounded by how many artifacts name this one, which is a handful.
+    """
+
+    found: set[str] = set()
+    for other_id, value in session.execute(select(Artifact.id, Artifact.metadata_json)):
+        row = _mapping(value or {})
+        for key in ARTIFACT_METADATA_REFERENCE_KEYS:
+            if key in row and artifact_id in _optional_id(row[key]):
+                found.add(other_id)
+    return found
+
+
+def deletion_restricted_artifact_ids(session: Session) -> set[str]:
+    """Ids deletion must refuse.
+
+    SET NULL pointers are clearable only when no RESTRICT relationship also
+    names the same artifact. Cover/part pointers do not excuse deleting a
+    ReferenceAsset, library membership, or reviewed source-wheel row.
+    """
+
+    blocked = referenced_artifact_ids(session)
+    clearable: set[str] = set()
+    for column in (
+        MessagePart.artifact_id,
+        ResponseRevisionPart.artifact_id,
+        ReferenceSubject.cover_artifact_id,
+    ):
+        clearable.update(value for value in session.scalars(select(column)) if value)
+    restricted: set[str] = set()
+    for column in (
+        ReferenceAsset.artifact_id,
+        ArtifactLibraryEntry.artifact_id,
+        ComfyRegistrySourceArtifactReview.artifact_id,
+    ):
+        restricted.update(value for value in session.scalars(select(column)) if value)
+    return blocked - (clearable - restricted)

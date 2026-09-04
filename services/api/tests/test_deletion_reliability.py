@@ -1,6 +1,6 @@
 """Every delete reconciles, refuses honestly, and spares shared media.
 
-The owner reported Delete appearing to do nothing. These regressions pin the
+Delete appeared to do nothing. These regressions pin the
 five properties every user-facing delete path owes: distinguishable failure,
 immediate list reconciliation, shared-artifact survival, actionable refusals,
 and honesty about the already-deleted.

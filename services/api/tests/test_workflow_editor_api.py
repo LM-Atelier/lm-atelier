@@ -171,7 +171,8 @@ async def _create_workflow(
         },
     )
     assert response.status_code == 201
-    return response.json()
+    payload: dict[str, Any] = response.json()
+    return payload
 
 
 def _ready_editor(

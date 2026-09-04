@@ -59,3 +59,55 @@ def test_resetting_the_cache_forces_a_fresh_measurement(
     hardware.hardware_capability_class(settings)
 
     assert calls[0] == 2
+
+
+def test_every_device_kind_produced_here_is_in_the_declared_vocabulary() -> None:
+    """DeviceKind is declared in schemas.py but produced only in this module.
+
+    There is no stored column behind DeviceInfo.kind and therefore no database
+    constraint to derive the vocabulary from, so nothing else would notice a
+    fourth kind being introduced here. The API would keep advertising three and
+    serialising a fourth, which is a serialization failure on read rather than
+    an odd string passed through - the same trap the vocabulary gate exists for.
+
+    This reads the literals out of the producing source rather than restating
+    them, because a restated copy is exactly what the declaration removed.
+
+    The comparison is EQUALITY, not containment. An earlier version asserted
+    only that everything produced was declared, which let the public server and
+    browser protocols jointly advertise a device kind the sole producer never
+    emits - an invented member passed untouched. That is the same false-member
+    drift the contract test rejects one layer later with its declared-minus-served
+    assertion, so this refuses in both directions and names which side is wrong.
+    """
+    import ast
+    import inspect
+    from typing import get_args
+
+    from local_lm.schemas import DeviceKind
+
+    tree = ast.parse(inspect.getsource(hardware))
+    produced: set[str] = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+            continue
+        if node.func.id != "DeviceInfo":
+            continue
+        for keyword in node.keywords:
+            if keyword.arg == "kind":
+                assert isinstance(keyword.value, ast.Constant), (
+                    f"DeviceInfo at line {node.lineno} computes its kind, so this "
+                    "test can no longer prove the vocabulary from the source"
+                )
+                produced.add(keyword.value.value)
+
+    assert produced, "no DeviceInfo construction found; this test is measuring nothing"
+
+    declared = set(get_args(DeviceKind))
+    invented = sorted(declared - produced)
+    missing = sorted(produced - declared)
+    assert not missing and not invented, (
+        "DeviceKind and hardware.py disagree about the device vocabulary. "
+        f"Produced here but not declared: {missing or 'none'}. "
+        f"Declared but never produced: {invented or 'none'}."
+    )

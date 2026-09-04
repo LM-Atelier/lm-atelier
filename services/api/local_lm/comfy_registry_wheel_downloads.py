@@ -8,7 +8,8 @@ import logging
 import os
 import shutil
 import tempfile
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -24,7 +25,9 @@ from .comfy_registry_wheel_artifacts import (
     ComfyRegistryWheelArtifact,
     ComfyRegistryWheelArtifactManifest,
 )
+from .filesystem_links import AnchoredDirectory, AnchoredDirectoryError
 from .network import shared_tls_context
+from .shared_asset_lock_v1 import LOCK_UNAVAILABLE, SharedAssetLockError, hold
 
 logger = logging.getLogger(__name__)
 
@@ -87,8 +90,27 @@ class ComfyRegistryWheelDownloader:
         progress: WheelDownloadProgress | None = None,
     ) -> ComfyRegistryWheelStageReport:
         artifact_payload, artifacts = _validated_manifest(manifest)
-        parent, lock = _stage_target(destination)
-        lock_descriptor = _acquire_lock(lock)
+        parent, lock_name = _stage_target(destination)
+        with _hold_stage_lock(parent, lock_name):
+            return await self._stage_locked(
+                manifest,
+                artifact_payload,
+                artifacts,
+                destination,
+                parent,
+                progress=progress,
+            )
+
+    async def _stage_locked(
+        self,
+        manifest: ComfyRegistryWheelArtifactManifest,
+        artifact_payload: dict[str, object],
+        artifacts: tuple[ComfyRegistryWheelArtifact, ...],
+        destination: Path,
+        parent: Path,
+        *,
+        progress: WheelDownloadProgress | None,
+    ) -> ComfyRegistryWheelStageReport:
         staging: Path | None = None
         try:
             staging = Path(
@@ -132,7 +154,12 @@ class ComfyRegistryWheelDownloader:
                         metadata_size,
                     )
                 )
-            report, encoded = _stage_report(manifest, artifact_payload, tuple(staged), total_bytes)
+            report, encoded = _stage_report(
+                manifest,
+                artifact_payload,
+                tuple(staged),
+                total_bytes,
+            )
             _write_new_file(staging / "stage-manifest.json", encoded)
             if destination.exists() or destination.is_symlink():
                 raise ComfyRegistryWheelDownloadError(
@@ -145,8 +172,6 @@ class ComfyRegistryWheelDownloader:
         finally:
             if staging is not None:
                 shutil.rmtree(staging, ignore_errors=True)
-            os.close(lock_descriptor)
-            lock.unlink(missing_ok=True)
 
     async def _download(
         self,
@@ -342,7 +367,7 @@ def _validated_artifact(artifact: object) -> ComfyRegistryWheelArtifact:
     return artifact
 
 
-def _stage_target(destination: Path) -> tuple[Path, Path]:
+def _stage_target(destination: Path) -> tuple[Path, str]:
     if not isinstance(destination, Path) or not destination.name or len(destination.name) > 200:
         raise ComfyRegistryWheelDownloadError(
             "invalid_stage_destination", "Registry wheel staging destination is invalid"
@@ -360,16 +385,43 @@ def _stage_target(destination: Path) -> tuple[Path, Path]:
         raise ComfyRegistryWheelDownloadError(
             "invalid_stage_destination", "Registry wheel staging parent does not exist"
         )
-    return parent, parent / f".{destination.name}.lock"
+    return parent, f".{destination.name}.lock"
 
 
-def _acquire_lock(path: Path) -> int:
+@contextmanager
+def _hold_stage_lock(parent: Path, name: str) -> Iterator[None]:
+    """Hold a released-on-death lock for one staging destination, or refuse.
+
+    The previous create-only sentinel file outlived a crashed holder, so the
+    next stage stayed locked until a human deleted the file. An OS lock is
+    released when that process dies, including a hard kill.
+
+    Yield sits outside the lock-mapping handlers so a staging-body error is
+    not rewritten as a lock failure for this destination.
+    """
+
     try:
-        return os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError as exc:
+        anchor = AnchoredDirectory(parent)
+    except AnchoredDirectoryError as exc:
         raise ComfyRegistryWheelDownloadError(
-            "stage_locked", "Registry wheel staging destination is already in use"
+            "stage_lock_failed",
+            "Registry wheel staging lock could not be created",
         ) from exc
+    with ExitStack() as stack:
+        stack.push(anchor)
+        try:
+            stack.enter_context(hold(anchor, name))
+        except SharedAssetLockError as exc:
+            if str(exc) == LOCK_UNAVAILABLE:
+                raise ComfyRegistryWheelDownloadError(
+                    "stage_locked",
+                    "Registry wheel staging destination is already in use",
+                ) from exc
+            raise ComfyRegistryWheelDownloadError(
+                "stage_lock_failed",
+                "Registry wheel staging lock could not be created",
+            ) from exc
+        yield
 
 
 def _wheel_url(value: object, filename: str) -> str:

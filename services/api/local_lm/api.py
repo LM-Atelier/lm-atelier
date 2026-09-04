@@ -12,6 +12,7 @@ import re
 import shutil
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 from contextlib import suppress
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
@@ -277,6 +278,7 @@ from .reference_library import (
     set_details,
     set_favorite,
 )
+from .reference_review import ReviewOutcome, ReviewRefusal, ReviewRefused, review_asset
 from .references import ReferenceError, ReferenceNotFoundError
 from .routing import RouteConfirmationRequired
 from .runtime_config import persist_runtime_values
@@ -376,6 +378,8 @@ from .schemas import (
     ReferenceAssetAttach,
     ReferenceAssetAttached,
     ReferenceAssetOut,
+    ReferenceAssetReview,
+    ReferenceAssetReviewed,
     ReferenceCoverIn,
     ReferenceDeletionImpact,
     ReferenceRecipe,
@@ -720,11 +724,17 @@ async def system_info(request: Request) -> SystemInfo:
 
 @router.get("/about", response_model=ApplicationInfo)
 async def application_info(request: Request) -> ApplicationInfo:
-    settings: Settings = _services(request).settings
+    services = _services(request)
+    settings: Settings = services.settings
+    store = services.artifacts
     return ApplicationInfo(
         version=__version__,
         data_directory=str(settings.data_dir.resolve()),
         log_directory=str(settings.log_dir.resolve()),
+        artifact_directory=str(store.root),
+        artifact_directory_requested=(
+            str(store.requested_root) if store.root_followed_a_link else None
+        ),
         max_media_outputs_per_plan=settings.max_media_outputs_per_plan,
         web_access_enabled=settings.web_access_enabled,
     )
@@ -825,9 +835,71 @@ async def worker_status(request: Request, session: SessionDep) -> list[WorkerSta
             or 0
         )
         statuses[index] = status.model_copy(
-            update={"active_jobs": active_jobs, "queued_jobs": queued_jobs}
+            update={
+                "active_jobs": active_jobs,
+                "queued_jobs": queued_jobs,
+                "progress_age_seconds": _reported_progress_age(session, kinds),
+            }
         )
     return statuses
+
+
+def _reported_progress_age(session: Session, kinds: list[str]) -> float | None:
+    """Seconds since a running job for these kinds last reported forward motion.
+
+    None when nothing is running, and None when something is running that has
+    not reported at all yet - starting is not stalling, and a number invented for
+    that case would be indistinguishable from a real stall at the same value.
+
+    With several jobs running this reports the MOST RECENT report across them,
+    so the age is smallest. That is deliberate: the question is whether the
+    worker is making progress, and one job moving answers it. Taking the oldest
+    would report a worker as stalled whenever any single job happened to be
+    between reports, which on a deep queue is almost always.
+
+    IT READS `engine_reported_at`, NOT `updated_at`, and that distinction is the
+    whole correctness of this field. `updated_at` advances whenever anything
+    writes progress - and the scheduler writes it at CLAIM time, with
+    stage="starting", before the engine has produced anything. A reader using it
+    would report a numeric age for a job with zero engine reports, which is
+    exactly the None case this promises. `engine_reported_at` is stamped only by
+    a caller relaying an event from the engine.
+
+    `Job.heartbeat_at` is the obvious source and is the wrong one. The scheduler
+    advances it every few seconds for as long as the ASYNCIO TASK holding the
+    claim is alive - including through a stall, where that task waits forever;
+    `Job.updated_at` is written by that same heartbeat and is no better. Only the
+    `updated_at` inside `progress_json` moves when the engine actually reports
+    something, because `update_job_progress` is what writes it.
+    """
+
+    latest: datetime | None = None
+    for progress, attempt in session.execute(
+        select(Job.progress_json, Job.attempt).where(Job.kind.in_(kinds), Job.status == "running")
+    ):
+        if not isinstance(progress, dict):
+            continue
+        if progress.get("engine_report_attempt") != attempt:
+            # A stamp whose embedded attempt is not the row's current
+            # attempt was minted by a previous attempt; reading it as
+            # liveness would report a producer that is not there.
+            continue
+        reported = progress.get("engine_reported_at")
+        if not isinstance(reported, str):
+            continue
+        try:
+            stamp = datetime.fromisoformat(reported.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=UTC)
+        if latest is None or stamp > latest:
+            latest = stamp
+    if latest is None:
+        return None
+    # Clamped at zero: a stamp written a moment ahead of this clock is a clock
+    # detail, not a worker that reported progress in the future.
+    return max(0.0, (utcnow() - latest).total_seconds())
 
 
 @router.get("/workers/settings", response_model=WorkerSettings)
@@ -2408,6 +2480,124 @@ async def create_prompt_batch(
         )
 
 
+def _chat_worker_status(services: Services) -> WorkerStatus | None:
+    return next(
+        (status for status in services.processes.statuses() if status.name == "chat"),
+        None,
+    )
+
+
+def _chat_worker_can_fill_slots(worker: WorkerStatus | None) -> bool:
+    """Whether the chat worker can fill model-guided slots exactly as it stands."""
+
+    return (
+        worker is not None
+        and worker.managed
+        and worker.running
+        and worker.state == "ready"
+        and bool(worker.profile_id)
+    )
+
+
+def _chat_profile_for_model_slots(services: Services, session: Session, chat: Chat) -> str | None:
+    """The chat profile this chat would use, resolved the way the app resolves it.
+
+    Three sources in the order the rest of the application already prefers them:
+    the chat's own selection, then whatever the worker last carried, then the
+    last profile loaded anywhere. The worker restart endpoint uses the second
+    and third of these, and its comment gives the reason - a crashed worker
+    still knows what it was running.
+
+    ``active_chat_profile_id`` may hold ``AUTO_PROFILE_ID`` rather than a real
+    profile, which means "decide for me" and is not something that can be
+    loaded. Passing that sentinel through would look up a profile that does not
+    exist and report it as a missing install, so it is skipped rather than
+    resolved.
+    """
+
+    worker = _chat_worker_status(services)
+    setting = session.get(AppSetting, LAST_CHAT_PROFILE_KEY)
+    for candidate in (
+        chat.active_chat_profile_id,
+        worker.profile_id if worker else None,
+        setting.value_json if setting else None,
+    ):
+        if isinstance(candidate, str) and candidate and candidate != AUTO_PROFILE_ID:
+            return candidate
+    return None
+
+
+async def _prepare_chat_worker_for_model_slots(
+    services: Services, session: Session, chat: Chat, borrowed: list[str]
+) -> WorkerStatus | None:
+    """Load a chat model so model-guided slots can be filled, and say if media stopped.
+
+    WHY THIS EXISTS. Every other path in the application that needs a different
+    model loads it - the chat run path, the media run path, the ordered-plan
+    prewarm, the install probes, the image-edit verification. This one path used
+    to refuse instead, with a 409 that named no action. End-to-end use exposed
+    the consequence: filling one slot
+    meant opening Settings, unloading ComfyUI, pressing Load on a profile row,
+    coming back, running the batch, and remembering to restart ComfyUI
+    afterwards. Two controls in two sections of one page to satisfy a refusal.
+
+    The borrow-the-device shape is taken from the image-edit verification path
+    rather than invented: check the media worker is a managed running ComfyUI,
+    stop it, load the chat profile. The caller schedules the restart, because
+    only the caller knows when the model is finished with the device.
+
+    ``borrowed`` IS A CAUTION, not a style. The first version returned a flag
+    saying whether media had stopped, so the caller could only learn about the
+    borrow if this function RETURNED - and a load that raised propagated past
+    the caller's cleanup with ComfyUI stopped and nothing scheduled to bring it
+    back. The list is appended the instant the stop succeeds, so every later
+    failure, here or in the caller, is covered by one ``finally``.
+
+    IT ALSO TAKES THE SAME LOCKS AS EVERY OTHER WORKER CONTROL. Reaching
+    straight for ``_load_chat_profile`` skipped the idle check and the primary
+    lease, so a running image job did not stop this path and ComfyUI could be
+    stopped out from under it. The idle check runs BEFORE the lease for the
+    reason the worker endpoints give: a wedged job holds the lease indefinitely,
+    and a request that hangs there cannot even report the 409 that explains it.
+    Lock order is chat_guard then primary, which nothing takes the other way.
+    """
+
+    profile_id = _chat_profile_for_model_slots(services, session, chat)
+    if not profile_id:
+        # A DISTINCT CODE, because the remedy is distinct. Every other refusal
+        # under prompt-model-worker-unavailable means a model exists and cannot
+        # be used; this one means none has been chosen. The browser keys on the
+        # code and carries its own message, so sharing a code here made it tell
+        # the user to START a ready chat model - advice that stopped being true
+        # when this endpoint began starting one for them.
+        raise api_error(
+            409,
+            "prompt-model-profile-unset",
+            "Choose a chat model for this chat before using model-guided template slots.",
+        )
+
+    _ensure_worker_idle(session, "chat")
+    _ensure_worker_idle(session, "media")
+    async with services.scheduler.lease("primary"):
+        session.expire_all()
+        _ensure_worker_idle(session, "chat")
+        _ensure_worker_idle(session, "media")
+        media = next(
+            (status for status in services.processes.statuses() if status.name == "media"),
+            None,
+        )
+        if (
+            services.settings.media_engine == "comfyui"
+            and media is not None
+            and media.managed
+            and media.running
+        ):
+            await services.processes.stop("media")
+            borrowed.append("media")
+        await _load_chat_profile(services, session, profile_id)
+    return _chat_worker_status(services)
+
+
 async def _create_prompt_batch_locked(
     chat_id: str,
     payload: PromptExpansionCreate,
@@ -2487,76 +2677,88 @@ async def _create_prompt_batch_locked(
 
     snapshot = PromptExpansionModelSnapshot(version=1, kind="deterministic")
     if not plan.complete:
-        worker = next(
-            (status for status in services.processes.statuses() if status.name == "chat"),
-            None,
-        )
-        if (
-            worker is None
-            or not worker.managed
-            or not worker.running
-            or worker.state != "ready"
-            or not worker.profile_id
-        ):
-            raise api_error(
-                409,
-                "prompt-model-worker-unavailable",
-                "Start a ready chat model before using model-guided template slots.",
-            )
-        profile = session.get(ModelProfile, worker.profile_id)
-        if (
-            profile is None
-            or profile.role != ModelRole.CHAT.value
-            or not profile.model_install_id
-            or profile.engine != services.settings.chat_engine
-        ):
-            raise api_error(
-                409,
-                "prompt-model-worker-unavailable",
-                "Start a ready chat model before using model-guided template slots.",
-            )
-        install = session.get(ModelInstall, profile.model_install_id)
-        if (
-            install is None
-            or not install.active
-            or install.role != ModelRole.CHAT.value
-            or install.engine != profile.engine
-        ):
-            raise api_error(
-                409,
-                "prompt-model-worker-unavailable",
-                "Start a ready chat model before using model-guided template slots.",
-            )
+        worker = _chat_worker_status(services)
+        # Collected by the preparation itself the moment a stop succeeds, so the
+        # finally below covers a failure INSIDE the preparation as well as one
+        # after it. A returned flag could not: the caller never sees it when the
+        # call raises.
+        borrowed: list[str] = []
         try:
-            model_contract = prompt_model_slot_contract(
-                contract,
-                item_count=expansion_request.item_count,
+            if not _chat_worker_can_fill_slots(worker):
+                worker = await _prepare_chat_worker_for_model_slots(
+                    services, session, chat, borrowed
+                )
+            if worker is None or not worker.profile_id:
+                raise api_error(
+                    409,
+                    "prompt-model-worker-unavailable",
+                    "The chat model did not become ready, so the template slots "
+                    "could not be filled.",
+                )
+            profile = session.get(ModelProfile, worker.profile_id)
+            if (
+                profile is None
+                or profile.role != ModelRole.CHAT.value
+                or not profile.model_install_id
+                or profile.engine != services.settings.chat_engine
+            ):
+                raise api_error(
+                    409,
+                    "prompt-model-worker-unavailable",
+                    "Start a ready chat model before using model-guided template slots.",
+                )
+            install = session.get(ModelInstall, profile.model_install_id)
+            if (
+                install is None
+                or not install.active
+                or install.role != ModelRole.CHAT.value
+                or install.engine != profile.engine
+            ):
+                raise api_error(
+                    409,
+                    "prompt-model-worker-unavailable",
+                    "Start a ready chat model before using model-guided template slots.",
+                )
+            try:
+                model_contract = prompt_model_slot_contract(
+                    contract,
+                    item_count=expansion_request.item_count,
+                )
+                invocation_data = prompt_model_invocation_data(contract, plan)
+                result = await invoke_prompt_model_values(
+                    services.engines.chat,
+                    contract=model_contract,
+                    data=invocation_data,
+                )
+                plan = complete_prompt_expansion_with_model_values(
+                    contract,
+                    plan,
+                    result.values,
+                )
+            except (
+                PromptExpansionError,
+                PromptModelValuesError,
+                PromptModelInvocationError,
+            ) as exc:
+                raise api_error(
+                    503,
+                    "prompt-model-invocation-failed",
+                    "The chat model could not fill the template slots. Retry, or use authored "
+                    "inputs and choices instead.",
+                ) from exc
+            snapshot = PromptExpansionModelSnapshot(
+                version=1,
+                kind="model",
+                adapter_id=profile.engine,
+                model_id=install.id,
+                values_sha256=result.values_sha256,
             )
-            invocation_data = prompt_model_invocation_data(contract, plan)
-            result = await invoke_prompt_model_values(
-                services.engines.chat,
-                contract=model_contract,
-                data=invocation_data,
-            )
-            plan = complete_prompt_expansion_with_model_values(
-                contract,
-                plan,
-                result.values,
-            )
-        except (PromptExpansionError, PromptModelValuesError, PromptModelInvocationError) as exc:
-            raise api_error(
-                503,
-                "prompt-model-invocation-failed",
-                "The chat model could not fill the template slots. Retry, or use authored "
-                "inputs and choices instead.",
-            ) from exc
-        snapshot = PromptExpansionModelSnapshot(
-            version=1,
-            kind="model",
-            adapter_id=profile.engine,
-            model_id=install.id,
-            values_sha256=result.values_sha256,
-        )
+        finally:
+            # The device was borrowed, so give it back whether the model
+            # answered or not. A 503 that also left ComfyUI stopped would be
+            # the same manual cleanup this change exists to remove.
+            if borrowed:
+                services.orchestrator.schedule_media_restart()
 
     try:
         stored = create_or_replay_expansion(
@@ -5706,6 +5908,82 @@ async def attach_reference_asset(
             )
             for item in attached.similar
         ],
+    )
+
+
+_MAX_REFERENCE_REVIEW_BYTES = 64 * 1024 * 1024
+
+
+@router.post(
+    "/references/{subject_id}/assets/{asset_id}/review",
+    response_model=ReferenceAssetReviewed,
+)
+async def review_reference_asset(
+    subject_id: str,
+    asset_id: str,
+    payload: ReferenceAssetReview,
+    request: Request,
+    session: SessionDep,
+) -> ReferenceAssetReviewed:
+    """Settle one unchecked image against its exact retained bytes."""
+
+    subject = _subject_or_404(session, subject_id)
+    services = _services(request)
+    try:
+        outcome = ReviewOutcome(payload.outcome)
+    except ValueError as exc:
+        raise api_error(
+            422,
+            "reference-review-outcome-unsupported",
+            "Choose usable, weak, or rejected.",
+        ) from exc
+
+    def read_verified(artifact_id: str) -> bytes:
+        artifact = session.get(Artifact, artifact_id)
+        if artifact is None:
+            raise KeyError(artifact_id)
+        return services.artifacts.verified_bytes(
+            artifact,
+            maximum_bytes=_MAX_REFERENCE_REVIEW_BYTES,
+        )
+
+    result = review_asset(
+        session,
+        subject,
+        asset_id=asset_id,
+        outcome=outcome,
+        reasons=payload.reasons,
+        read_bytes=read_verified,
+    )
+    if isinstance(result, ReviewRefused):
+        if result.refusal is ReviewRefusal.ASSET_NOT_FOUND:
+            raise api_error(
+                404,
+                "reference-asset-not-attached",
+                "That image is not attached to this reference.",
+            )
+        if result.refusal is ReviewRefusal.ALREADY_SETTLED:
+            raise api_error(
+                409,
+                "reference-review-already-settled",
+                "This image has already been reviewed.",
+            )
+        detail = f"Review refused: {result.refusal.value.replace('_', ' ')}."
+        if result.measured is not None:
+            detail = f"{detail[:-1]} ({result.measured[0]}x{result.measured[1]})."
+        raise api_error(422, "reference-review-refused", detail)
+
+    if result.width is None or result.height is None:  # pragma: no cover - service invariant
+        raise api_error(500, "reference-review-incomplete", "The review was not recorded.")
+    session.commit()
+    asset = session.get(ReferenceAsset, result.reference_asset_id)
+    if asset is None:  # pragma: no cover - the successful settle just updated it
+        raise api_error(404, "reference-asset-not-attached", "That image is no longer attached.")
+    return ReferenceAssetReviewed(
+        asset=ReferenceAssetOut.model_validate(asset, from_attributes=True),
+        width=result.width,
+        height=result.height,
+        review_version=asset.review_version,
     )
 
 

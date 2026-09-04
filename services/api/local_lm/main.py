@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
+import threading
+import time
 from collections.abc import Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass
@@ -15,6 +18,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy.exc import OperationalError
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -26,7 +30,7 @@ from .api import (
     shutdown_registry_preparations,
 )
 from .api_errors import register_api_error_handler
-from .artifacts import ArtifactStore
+from .artifacts import ArtifactStore, RetentionCleanupSummary
 from .backups import BackupManager
 from .catalog import HuggingFaceCatalog
 from .catalog_sources import CatalogSources
@@ -61,6 +65,7 @@ AUTOMATIC_BACKUP_CHECK_INTERVAL_SECONDS = 60 * 60
 API_LOG_MAX_BYTES = 2 * 1024 * 1024
 API_LOG_BACKUP_COUNT = 3
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+STARTUP_STAGE_WARN_SECONDS = 30.0
 
 
 def _request_hostname(authority: str) -> str | None:
@@ -127,6 +132,65 @@ def _api_file_logging(settings: Settings) -> Iterator[None]:
     finally:
         root_logger.removeHandler(handler)
         handler.close()
+
+
+def _emit_startup_notice(message: str) -> None:
+    """Say it on both channels, because either one can be the missing one.
+
+    The api.log handler does not exist until the lifespan installs it, and the
+    stages that run before that are exactly the ones a silent hang hides. A
+    flushed stderr line survives both that gap and a wedged file handler.
+    """
+    logger.warning(message)
+    print(f"local_lm: {message}", file=sys.stderr, flush=True)
+
+
+@contextmanager
+def _startup_stage(name: str, *, warn_after: float = STARTUP_STAGE_WARN_SECONDS) -> Iterator[None]:
+    """Name a slow startup stage while it is still running, not after it ends.
+
+    Timing a stage and reporting the duration afterwards proves nothing about a
+    stage that never returns, which is the case worth diagnosing: a start that
+    hangs for seventy minutes reports no duration at all, because nothing
+    reaches the line that would log it. A watchdog thread reports from outside
+    the stage instead, so the last name emitted is the stage still running.
+
+    Bounded on purpose. A healthy start emits nothing, because a stage that
+    beats warn_after says nothing on entry or exit; only a stage that overruns
+    speaks, and then it repeats so the log shows the wait growing rather than
+    one line that could be mistaken for a completed step.
+
+    Emission is serialized with finalization because clearing the event is not
+    enough on its own. `finished.set()` stops another wait cycle, but a watchdog
+    that has already returned from `wait` is past that check and will still
+    write its line - after the stage has exited and recorded that it finished.
+    That inverts the one guarantee here, which is that the last stage named is
+    the stage still running. Holding the lock across the check and the write
+    means a watchdog either speaks while the stage is genuinely running or,
+    finding the stage finished ahead of it, does not speak at all.
+    """
+    finished = threading.Event()
+    speaking = threading.Lock()
+    started = time.perf_counter()
+
+    def watch() -> None:
+        while not finished.wait(warn_after):
+            with speaking:
+                if finished.is_set():
+                    return
+                waited = time.perf_counter() - started
+                _emit_startup_notice(f"startup stage {name} still running after {waited:.0f}s")
+
+    watcher = threading.Thread(target=watch, name=f"startup-stage-{name}", daemon=True)
+    watcher.start()
+    try:
+        yield
+    finally:
+        finished.set()
+        with speaking:
+            elapsed = time.perf_counter() - started
+            if elapsed >= warn_after:
+                _emit_startup_notice(f"startup stage {name} finished after {elapsed:.0f}s")
 
 
 async def _cancel_task(task: asyncio.Task[Any] | None) -> None:
@@ -299,34 +363,221 @@ async def maintain_automatic_recovery_backups(
         await asyncio.sleep(interval_seconds)
 
 
+RETENTION_BATCH_DELETIONS = 10
+RETENTION_BATCH_PAUSE_SECONDS = 1.0
+# A batch holds SQLite's writer reservation for its whole duration, and every
+# other writer in the process waits on the event-loop thread for at most
+# busy_timeout (5 s) before failing. The batch is therefore bounded by time
+# held, not by a count: at ~3 s per deletion a 2 s budget means one deletion
+# per batch on a heavy install and several on a light one.
+RETENTION_BATCH_SECONDS = 2.0
+# Contention with a user transaction is waited out, a bounded number of times
+# in a row; a whole store is drained in successive passes, since a poster is
+# freed only by the pass that removes the artifact naming it, up to a bound
+# that keeps a pathological store from sweeping forever.
+RETENTION_LOCK_RETRIES = 5
+RETENTION_MAX_PASSES = 20
+
+
+async def sweep_artifact_retention(
+    artifacts: ArtifactStore,
+    settings: Settings,
+    *,
+    batch_deletions: int | None = None,
+    pause_seconds: float | None = None,
+    batch_seconds: float | None = None,
+) -> None:
+    """Run the artifact retention sweep after the port is open, in committed batches.
+
+    The sweep used to be a startup stage before the lifespan yield, inside the
+    session that commits only at session-commit. Every deletion pays for the
+    JSON reference trigger's scan of the referring tables, so an install with
+    thousands of aged previews kept the port closed for hours, and killing the
+    process rolled every deletion back, so the next start began from zero.
+
+    Each batch here is its own session and its own commit: the port is open
+    before the first batch runs, the write fence is held only for a batch's
+    own deletions, committed progress survives a kill, and a stop request
+    ends the sweep at the next deletion boundary rather than mid-transaction.
+    A failure inside the sweep is logged and leaves the application running;
+    the sweep runs again at the next start.
+    """
+
+    # Resolved at call time, not at definition time, so the module constants
+    # are the single place to tune - and to patch under test.
+    if batch_deletions is None:
+        batch_deletions = RETENTION_BATCH_DELETIONS
+    if pause_seconds is None:
+        pause_seconds = RETENTION_BATCH_PAUSE_SECONDS
+    if batch_seconds is None:
+        batch_seconds = RETENTION_BATCH_SECONDS
+    if batch_deletions < 1:
+        raise ValueError("retention batch size must be positive")
+    if pause_seconds < 0:
+        raise ValueError("retention batch pause must not be negative")
+    if batch_seconds < 0:
+        raise ValueError("retention batch budget must not be negative")
+    stop = threading.Event()
+    # The session factory is rebound in place whenever the database is
+    # reconfigured; a sweep binds to the engine it started with, so a later
+    # rebinding cannot redirect a batch mid-sweep.
+    bind = SessionLocal.kw.get("bind")
+
+    def run_batch(*, deletions: int, deadline: float | None) -> RetentionCleanupSummary:
+        def should_stop() -> bool:
+            if stop.is_set():
+                return True
+            return deadline is not None and time.monotonic() >= deadline
+
+        with SessionLocal(bind=bind) as session:
+            try:
+                summary = artifacts.cleanup_retention(
+                    session,
+                    retention_days=settings.artifact_retention_days,
+                    temporary_hours=settings.temporary_retention_hours,
+                    dry_run=False,
+                    max_deletions=deletions,
+                    should_stop=should_stop,
+                )
+                session.commit()
+            except BaseException:
+                # Roll back here, not implicitly at close, so the rollback
+                # listeners that restore staged files run before anything else
+                # observes the store.
+                session.rollback()
+                raise
+            return summary
+
+    batches = 0
+    removed = 0
+    passes = 0
+    locked_out = 0
+    single = False
+    try:
+        while True:
+            deletions = batch_deletions
+            deadline: float | None = time.monotonic() + batch_seconds
+            if single:
+                # The fixed work of a pass alone exhausted the budget once, so
+                # the budget can no longer guarantee progress. One deletion per
+                # batch does, and it is the smallest hold there is.
+                deletions = 1
+                deadline = None
+            operation = asyncio.create_task(
+                asyncio.to_thread(run_batch, deletions=deletions, deadline=deadline),
+                name="artifact-retention-batch",
+            )
+            try:
+                summary = await asyncio.shield(operation)
+            except asyncio.CancelledError:
+                # A batch in flight cannot be cancelled inside SQLite. The stop
+                # flag ends it at its next deletion boundary and it commits what
+                # it has; wait for that rather than tearing the session down.
+                stop.set()
+                with suppress(Exception):
+                    await operation
+                raise
+            except OperationalError as exc:
+                # A user transaction held the writer for longer than
+                # busy_timeout. That is contention, not corruption: wait and
+                # try again, a bounded number of times in a row.
+                locked_out += 1
+                if locked_out > RETENTION_LOCK_RETRIES:
+                    logger.error(
+                        "Artifact retention sweep gave up after %s consecutive waits on "
+                        "the database writer; it runs again at the next start (%s)",
+                        locked_out - 1,
+                        exc,
+                    )
+                    return
+                logger.warning(
+                    "Artifact retention batch waited on the database writer; retrying (%s)",
+                    exc,
+                )
+                await asyncio.sleep(max(pause_seconds, 1.0))
+                continue
+            locked_out = 0
+            batches += 1
+            removed += summary.removed_count
+            if summary.truncated:
+                if summary.removed_count == 0 and not single:
+                    single = True
+                    logger.info(
+                        "Artifact retention batch %s made no progress within %.1fs; "
+                        "continuing one deletion per batch",
+                        batches,
+                        batch_seconds,
+                    )
+                else:
+                    logger.info(
+                        "Artifact retention batch %s removed %s artifact(s); more remain",
+                        batches,
+                        summary.removed_count,
+                    )
+                await asyncio.sleep(pause_seconds)
+                continue
+            passes += 1
+            if summary.removed_count == 0 or passes >= RETENTION_MAX_PASSES:
+                break
+            # A completed pass that removed something may have freed more: a
+            # poster goes only once the artifact naming it is gone. Sweep again
+            # until a whole pass finds nothing, rather than once per start.
+            await asyncio.sleep(pause_seconds)
+    except asyncio.CancelledError:
+        logger.info(
+            "Artifact retention sweep stopped after %s batch(es), %s removed; "
+            "it resumes at the next start",
+            batches,
+            removed,
+        )
+        raise
+    except Exception:
+        logger.exception(
+            "Artifact retention sweep failed after %s batch(es); it runs again at the next start",
+            batches,
+        )
+        return
+    logger.info(
+        "Artifact retention sweep complete: %s batch(es), %s artifact(s) removed",
+        batches,
+        removed,
+    )
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     _configure_console_logging()
-    active_settings = settings or get_settings()
-    active_settings.prepare()
-    instance_identity = load_or_create_instance_identity(active_settings.data_dir)
-    BackupManager(active_settings).apply_pending_restore()
-    configure_database(active_settings)
-    services = build_services(active_settings)
+    with _startup_stage("load-settings"):
+        active_settings = settings or get_settings()
+    with _startup_stage("settings-prepare"):
+        active_settings.prepare()
+    with _startup_stage("instance-identity"):
+        instance_identity = load_or_create_instance_identity(active_settings.data_dir)
+    with _startup_stage("pending-restore"):
+        BackupManager(active_settings).apply_pending_restore()
+    with _startup_stage("configure-database"):
+        configure_database(active_settings)
+    with _startup_stage("build-services"):
+        services = build_services(active_settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
         with _api_file_logging(active_settings):
-            upgrade_database(active_settings)
+            with _startup_stage("database-migrations"):
+                upgrade_database(active_settings)
             with SessionLocal() as session:
-                recover_model_delete_quarantines(
-                    session,
-                    active_settings.model_dir.resolve(),
-                )
-                seed_defaults(session, active_settings)
-                services.artifacts.cleanup_retention(
-                    session,
-                    retention_days=active_settings.artifact_retention_days,
-                    temporary_hours=active_settings.temporary_retention_hours,
-                    dry_run=False,
-                )
-                session.commit()
-            services.orchestrator.recover_interrupted()
-            services.downloads.recover_interrupted()
+                with _startup_stage("model-delete-quarantine-recovery"):
+                    recover_model_delete_quarantines(
+                        session,
+                        active_settings.model_dir.resolve(),
+                    )
+                with _startup_stage("seed-defaults"):
+                    seed_defaults(session, active_settings)
+                with _startup_stage("session-commit"):
+                    session.commit()
+            with _startup_stage("orchestrator-recovery"):
+                services.orchestrator.recover_interrupted()
+            with _startup_stage("download-recovery"):
+                services.downloads.recover_interrupted()
             logger.info(
                 "LM Atelier %s started on %s:%s",
                 __version__,
@@ -342,13 +593,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 maintain_automatic_recovery_backups(services.backups),
                 name="maintain-automatic-recovery-backups",
             )
+            # After recovery, never before the yield: recovery removes the
+            # preview parts of interrupted jobs, which is what makes those
+            # previews eligible, and the port must not wait on any of it.
+            retention_sweep = asyncio.create_task(
+                sweep_artifact_retention(services.artifacts, active_settings),
+                name="artifact-retention-sweep",
+            )
+            # Exposed so a caller that needs the sweep's result - a test, or a
+            # later readiness view - can await it instead of polling the store.
+            app.state.retention_sweep = retention_sweep
+            background = (worker_restore, backup_maintenance, retention_sweep)
             try:
                 yield
             finally:
-                for task in (worker_restore, backup_maintenance):
+                for task in background:
                     if not task.done():
                         task.cancel()
-                for task in (worker_restore, backup_maintenance):
+                for task in background:
                     with suppress(asyncio.CancelledError):
                         await task
                 await shutdown_registry_preparations()

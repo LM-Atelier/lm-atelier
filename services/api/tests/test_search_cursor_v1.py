@@ -198,3 +198,41 @@ def test_a_cursor_is_expired_at_the_instant_it_names() -> None:
             index_generation=1,
             query_digest=DIGEST,
         )
+
+
+def test_a_cursor_cannot_be_minted_without_the_binder_witness() -> None:
+    """The authority guard: only bind_search_cursor may mint a cursor.
+
+    SearchCursorV1 records index_generation, contains_query_text and
+    query_execution_authorized, and it is built through object.__new__ because
+    the dataclass refuses ordinary construction. So the module-private sentinel
+    is the whole boundary between "the binder issued this cursor" and "a caller
+    asserted it" - including its index generation, which is what makes a stale
+    cursor detectable.
+
+    It was unbound. Deleting the check left the COMPLETE API suite green,
+    because every legitimate path goes through bind_search_cursor and passes the
+    right sentinel; only an attempted forgery separates the two states.
+    """
+    from local_lm import search_cursor_v1 as module
+
+    with pytest.raises(SearchCursorError, match=INVALID_CURSOR):
+        module._cursor_from_evaluator(
+            witness=object(),
+            index_generation=1,
+            query_digest=DIGEST,
+            offset=0,
+            expires_at_unix=2,
+        )
+
+    # The real binder still works, so the guard refuses forgery rather than
+    # refusing everything.
+    cursor = bind_search_cursor(
+        index_generation=1,
+        query_digest=DIGEST,
+        offset=0,
+        expires_at_unix=2,
+        now_unix=1,
+    )
+    assert cursor.query_execution_authorized is False
+    assert cursor.contains_query_text is False

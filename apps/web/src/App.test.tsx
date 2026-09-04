@@ -6,6 +6,14 @@ import { api, connectEvents } from "./api";
 import type { BackupInfo, Chat, ChatDetail, EngineCapabilities, EngineRole, Job, SettingField, SetupReadinessReport, SetupRoleReadiness, TurnAccepted } from "./types";
 import { DEFAULT_CHAT_WORKFLOW_SELECTIONS, DEFAULT_PROJECT_WORKFLOW_SELECTIONS, familiesForWorkflows } from "./workflowSelectionFixtures";
 const clipboardWrite = vi.fn();
+
+function renderApp() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={client}><App /></QueryClientProvider>,
+  );
+}
+
 const imageSetting: SettingField = {
   key: "negative_prompt",
   label: "Negative prompt",
@@ -182,6 +190,8 @@ vi.mock("./api", () => ({
       version: "0.1.7",
       data_directory: "C:\\LM Atelier\\data",
       log_directory: "C:\\LM Atelier\\data\\logs",
+      artifact_directory: "C:\\LM Atelier\\data\\artifacts",
+      artifact_directory_requested: null,
     }),
     platforms: vi.fn().mockResolvedValue([]),
     createDiagnostics: vi.fn(),
@@ -2293,12 +2303,7 @@ describe("App", () => {
     vi.mocked(api.createBackup).mockImplementation(
       () => new Promise<BackupInfo>((resolve) => { finishBackup = resolve; }),
     );
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(
-      <QueryClientProvider client={client}>
-        <App />
-      </QueryClientProvider>,
-    );
+    renderApp();
 
     fireEvent.click(await screen.findByText("Settings"));
     const create = await screen.findByRole("button", { name: "Back up state" });
@@ -2357,12 +2362,7 @@ describe("App", () => {
       state: "installing",
       message: "Preparing download.",
     });
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(
-      <QueryClientProvider client={client}>
-        <App />
-      </QueryClientProvider>,
-    );
+    renderApp();
 
     fireEvent.click(await screen.findByText("Settings"));
     expect(await screen.findByText("v0.28.0 · Manual setup required")).toBeInTheDocument();
@@ -2380,6 +2380,8 @@ describe("App", () => {
       version: "0.1.7",
       data_directory: "C:\\Users\\someone\\LM Atelier\\data",
       log_directory: "C:\\Users\\someone\\LM Atelier\\data\\logs",
+      artifact_directory: "C:\\Users\\someone\\LM Atelier\\data\\artifacts",
+      artifact_directory_requested: null,
       max_media_outputs_per_plan: 8,
       web_access_enabled: false,
     });
@@ -2422,16 +2424,14 @@ describe("App", () => {
         messages: [],
       },
     });
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(
-      <QueryClientProvider client={client}>
-        <App />
-      </QueryClientProvider>,
-    );
+    renderApp();
 
     fireEvent.click(await screen.findByText("Settings"));
     expect(await screen.findByText("Version 0.1.7")).toBeInTheDocument();
     expect(screen.getByText("C:\\Users\\someone\\LM Atelier\\data")).toBeInTheDocument();
+    expect(screen.getByText("C:\\Users\\someone\\LM Atelier\\data\\artifacts")).toBeInTheDocument();
+    expect(screen.getByText("Artifact folder")).toBeInTheDocument();
+    expect(screen.queryByText("Artifact folder requested as")).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Issues" })).toHaveAttribute(
       "href",
       "https://github.com/ajccarlson/lm-atelier/issues",
@@ -4640,7 +4640,6 @@ describe("App", () => {
         <App />
       </QueryClientProvider>,
     );
-
     const composer = await screen.findByRole("textbox", { name: "Message" });
     fireEvent.change(composer, { target: { value: "A blue cup" } });
     fireEvent.click(screen.getByRole("button", { name: "Open prompt workshop" }));
@@ -5132,30 +5131,21 @@ describe("App", () => {
   it("shows an Auto submission while model routing is pending", async () => {
     const stamp = "2026-07-22T00:00:00Z";
     const project = {
-      id: "project-auto-routing",
-      name: "Auto routing project",
-      description: "",
-      instructions: "",
+      id: "project-auto-routing", name: "Auto routing project",
+      description: "", instructions: "",
       pinned: false, archived: false,
-      image_workflow_revision_id: null,
-      video_workflow_revision_id: null,
-      created_at: stamp,
-      updated_at: stamp,
+      image_workflow_revision_id: null, video_workflow_revision_id: null,
+      created_at: stamp, updated_at: stamp,
     };
     const chat = {
-      id: "chat-auto-routing",
-      project_id: project.id,
-      title: "Auto routing",
+      id: "chat-auto-routing", project_id: project.id, title: "Auto routing",
       archived: false,
       pinned: false, routing_mode: "auto" as const,
       confirm_uncertain_media: false,
-      active_chat_profile_id: null,
-      active_image_profile_id: null,
-      active_video_profile_id: null,
-      active_head_message_id: null,
+      active_chat_profile_id: null, active_image_profile_id: null,
+      active_video_profile_id: null, active_head_message_id: null,
       generation_settings_json: { chat: { max_tokens: 4096 } },
-      created_at: stamp,
-      updated_at: stamp,
+      created_at: stamp, updated_at: stamp,
     };
     localStorage.setItem("local-lm-chat", chat.id);
     vi.mocked(api.projects).mockResolvedValue([project]);
@@ -5179,15 +5169,25 @@ describe("App", () => {
     expect(api.projectWorkflowSelections).not.toHaveBeenCalled();
     fireEvent.change(composer, { target: { value: "Surprise me with a tiny story" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
-
     expect(await screen.findByText("Surprise me with a tiny story")).toBeVisible();
     expect(api.sendTurn).toHaveBeenCalledWith(
-      chat.id, "Surprise me with a tiny story", "auto", [], {}, expect.any(String), "turns", undefined, [],
+      chat.id, "Surprise me with a tiny story", "auto", [], {}, expect.any(String), "turns", undefined, [], undefined, undefined, expect.any(Function),
     );
     expect(screen.getByText("Choosing mode and model…")).toBeVisible();
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    const confirmTurn = vi.mocked(api.sendTurn).mock.calls[0][11];
+    if (!confirmTurn) throw new Error("App did not supply turn confirmation");
+    let answer!: Promise<boolean>;
+    act(() => { answer = confirmTurn({ kind: "ordered_plan", title: "Start ordered plan?", question: "Run two steps.", confirmLabel: "Start plan", details: { sequence: ["text", "image"], estimatedWorkingBytes: 2 * 1024 ** 3 } }); });
+    expect(screen.getByRole("dialog", { name: "Start ordered plan?" })).toBeVisible();
+    expect(screen.getByText("Sequence: text \u2192 image")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await expect(answer).resolves.toBe(false);
+    act(() => { answer = confirmTurn({ kind: "media_route", title: "Start video generation?", question: "Start it?", confirmLabel: "Start video", details: { operation: "video", estimatedIntermediateBytes: 3 * 1024 ** 3 } }); });
+    expect(screen.getByText("Intermediate space: up to 3.0 GB")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Start video" }));
+    await expect(answer).resolves.toBe(true);
   });
-
   it("keeps the composer available and orders multiple optimistic submissions", async () => {
     const stamp = "2026-07-26T00:00:00Z";
     const chat = {
@@ -5311,7 +5311,7 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "Stop current response" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "Stop current response and send" }));
     await waitFor(() => expect(api.stopAndSendTurn).toHaveBeenCalledWith(
-      chat.id, "Use this instead", "text", [], {}, expect.any(String), [],
+      chat.id, "Use this instead", "text", [], {}, expect.any(String), [], undefined, undefined, expect.any(Function),
     ));
   });
 
@@ -6111,7 +6111,7 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() => expect(api.sendTurn).toHaveBeenCalledWith(
-      chat.id, "Animate this image", "video", ["sha256:animate-source"], {}, expect.any(String), "turns", undefined, [],
+      chat.id, "Animate this image", "video", ["sha256:animate-source"], {}, expect.any(String), "turns", undefined, [], undefined, undefined, expect.any(Function),
     ));
   });
   it("offers image editing immediately after an image is attached", async () => {
@@ -6293,7 +6293,7 @@ describe("App", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Count to 1000" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(api.sendTurn).toHaveBeenCalledWith(
-      chat.id, "Count to 1000", "text", [], { max_tokens: 4096 }, expect.any(String), "turns", undefined, [],
+      chat.id, "Count to 1000", "text", [], { max_tokens: 4096 }, expect.any(String), "turns", undefined, [], undefined, undefined, expect.any(Function),
     ));
   });
 

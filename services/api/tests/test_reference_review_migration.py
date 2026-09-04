@@ -7,6 +7,7 @@ from threading import Event
 
 import pytest
 from alembic import command
+from alembic_head import EXPECTED_ALEMBIC_HEAD
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 
@@ -294,7 +295,7 @@ def test_a9_write_fence_blocks_a_concurrent_settled_writer(tmp_path: Path) -> No
             "SELECT count(*) FROM reference_assets WHERE id = 'refasset_race'"
         ).fetchone() == (0,)
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "c8e2f4a71d90",
+            EXPECTED_ALEMBIC_HEAD,
         )
 
 
@@ -537,7 +538,9 @@ def test_fresh_and_migrated_reference_tables_have_identical_pragmas(
     finally:
         engine.dispose()
 
-    def by_name(rows: list[tuple]) -> dict[str, tuple]:
+    def by_name(
+        rows: list[tuple[int, str, str, int, str | None, int]],
+    ) -> dict[str, tuple[str, int, str | None, int]]:
         # Column ORDER legitimately differs (batch add_column appends; fresh
         # metadata declares inline); type, nullability, default, and pk must
         # not. A server-default mismatch is the defect this pins.
@@ -738,7 +741,7 @@ def test_downgrade_refuses_a_non_pristine_asset_even_without_events(
     command.upgrade(pristine_config, "head")
     with sqlite3.connect(pristine_database) as connection:
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "c8e2f4a71d90",
+            EXPECTED_ALEMBIC_HEAD,
         )
         assert connection.execute(
             "SELECT validation_state, validation_reasons_json, width, height, review_version "

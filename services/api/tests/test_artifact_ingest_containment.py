@@ -13,6 +13,44 @@ from local_lm.config import Settings
 from local_lm.domain import ArtifactKind
 
 
+class _OpenTransactionDriver:
+    """A driver connection that reports an already-open transaction."""
+
+    in_transaction = True
+
+
+class _RawConnection:
+    driver_connection = _OpenTransactionDriver()
+
+
+class _SqliteDialect:
+    name = "sqlite"
+
+
+class _AlreadyInTransaction:
+    """The connection a caller holds when it is already inside a transaction.
+
+    `ingest_stream` takes the artifact writer reservation before publishing, and
+    `begin_artifact_write_fence` reads the dialect and then asks the driver
+    whether a transaction is already open. Reporting one models a real caller
+    mid-transaction and makes the fence a correctly-observed no-op here, which
+    keeps these tests about the thing they exist for: where the bytes land.
+
+    The reservation itself is proved in test_ingest_dedup_race.py against a real
+    database, where a sweep is driven at the exact interleaving point. Proving it
+    again here would need the database this stub exists to avoid.
+    """
+
+    dialect = _SqliteDialect()
+    connection = _RawConnection()
+
+    def exec_driver_sql(self, *_args: object, **_kwargs: object) -> None:
+        raise AssertionError(
+            "the fence issued SQL against a session that reported an open "
+            "transaction; it should have observed the transaction and returned"
+        )
+
+
 class _Session:
     """Enough Session for ingest_stream, with no database behind it.
 
@@ -23,6 +61,9 @@ class _Session:
 
     def __init__(self) -> None:
         self.added: list[object] = []
+
+    def connection(self) -> _AlreadyInTransaction:
+        return _AlreadyInTransaction()
 
     def scalar(self, *_args: object, **_kwargs: object) -> None:
         return None
@@ -212,4 +253,4 @@ def test_a_link_at_the_artifact_name_is_replaced_not_followed(tmp_path: Path) ->
 # That is a real finding and a separate one: it is about which directory the
 # store decides to be, not about how ingest publishes into it. Widening this
 # slice to cover it would change the meaning of every caller's root. Recorded
-# on tasks/artifact-ingest-writes-through-a-junction.md.
+# by the captured-path containment contract.

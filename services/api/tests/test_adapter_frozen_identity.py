@@ -40,7 +40,7 @@ def _binding(session: Session, install_id: str | None, identity: object, **chang
         "resource_identity_sha256": BOUND,
     }
     values.update(changes)
-    session.add(WorkflowDependencyBinding(**values))  # type: ignore[arg-type]
+    session.add(WorkflowDependencyBinding(**values))
     session.flush()
 
 

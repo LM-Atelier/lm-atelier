@@ -2,8 +2,8 @@ import { expect, test, type APIRequestContext, type Page } from "@playwright/tes
 
 /** The studio's honesty about what it cannot do, driven through the browser.
  *
- * The project had exactly one end-to-end test, and the studio is where three
- * separate defects reached the owner: a masked edit refused by the settings
+ * The project had exactly one end-to-end test, and the studio exposed three
+ * separate defects: a masked edit refused by the settings
  * hierarchy, a selection that only appeared after the stroke ended, and every
  * tool looking ready whether or not any installed workflow could honor it.
  *

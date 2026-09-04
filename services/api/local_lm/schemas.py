@@ -19,13 +19,15 @@ from .domain import (
     ArtifactKind,
     JobKind,
     JobStatus,
+    MaskMode,
     MessageStatus,
     Operation,
     PartType,
+    ResourceKind,
     RoutingMode,
     RunStatus,
 )
-from .references import MAX_REFERENCES_PER_TURN, MAX_ROLE, MentionSource
+from .references import MAX_REFERENCES_PER_TURN, MAX_ROLE, MentionSource, ValidationState
 from .worker_failures import WorkerFailureCode
 
 
@@ -37,6 +39,10 @@ class ApiModel(BaseModel):
 
 
 ContentRating = Literal["general", "mature", "unknown"]
+#: What a compute device is. Produced only by hardware.py, which builds every
+#: DeviceInfo and passes one of these three literals; there is no stored column
+#: behind it and so no constraint to derive. Bound to those producers by test.
+DeviceKind = Literal["accelerator", "cpu", "gpu"]
 
 GenerationSettingsByRole = dict[
     Literal["chat", "image", "video"],
@@ -1268,14 +1274,13 @@ class WorkflowOut(ApiModel):
 
 
 WorkflowSelectorCapability = Literal["chat", "vision", "image", "video"]
-WorkflowDependencyResourceKind = Literal[
-    "model_profile",
-    "model_install",
-    "model_asset",
-    "custom_node",
-    "registry_package",
-    "runtime",
-]
+#: ResourceKind itself, not a restatement of it. The models that consume this
+#: alias use ApiModel, whose config is not strict, so the enum validates the
+#: plain strings the wire carries. An earlier revision kept a hand-maintained
+#: Literal here and claimed the copy was unavoidable; a focused compatibility
+#: probe proved otherwise. Only the strict parser in workflow_dependencies still
+#: needs its own Literal. See test_closed_storage_vocabularies.
+WorkflowDependencyResourceKind = ResourceKind
 WorkflowVariantReadiness = Literal[
     "ready",
     "setup_required",
@@ -1344,7 +1349,7 @@ class WorkflowFamilyPreferenceUpdate(ApiModel):
 
 
 class WorkflowDependencyImpactOut(ApiModel):
-    resource_kind: str
+    resource_kind: ResourceKind
     resource_id: str
     resource_name: str
     binding_count: int
@@ -1535,7 +1540,7 @@ class EditTemplateOut(ApiModel):
     settings_json: dict[str, Any]
     workflow_revision_id: str | None
     model_profile_id: str | None
-    mask_mode: str
+    mask_mode: MaskMode
     trigger_words_json: list[str]
     content_rating: ContentRating
     builtin: bool
@@ -2216,7 +2221,25 @@ class ReferenceAssetOut(ApiModel):
     purpose: str
     view_label: str | None
     sort_order: int
-    validation_state: str
+    validation_state: ValidationState
+
+
+ReferenceReviewReason = Annotated[
+    StrictStr,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=200),
+]
+
+
+class ReferenceAssetReview(ApiModel):
+    outcome: StrictStr = Field(min_length=1, max_length=30)
+    reasons: list[ReferenceReviewReason] = Field(default_factory=list, max_length=16)
+
+
+class ReferenceAssetReviewed(ApiModel):
+    asset: ReferenceAssetOut
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+    review_version: int = Field(gt=1)
 
 
 class ReferenceSimilarAsset(ApiModel):
@@ -2324,7 +2347,7 @@ class ToolCapabilityProbe(ApiModel):
 class DeviceInfo(ApiModel):
     id: str
     name: str
-    kind: str
+    kind: DeviceKind
     total_memory_bytes: int | None = None
     available_memory_bytes: int | None = None
     backend: str | None = None
@@ -2378,6 +2401,10 @@ class ApplicationInfo(ApiModel):
     version: str
     data_directory: str
     log_directory: str
+    artifact_directory: str
+    # Present only when construction followed a filesystem link to reach
+    # artifact_directory. A relative path or a case change is not a link.
+    artifact_directory_requested: str | None = None
     max_media_outputs_per_plan: int = Field(ge=1, le=16)
     # The installation-wide gate. When this is false no chat can open its
     # own, and the UI says so rather than offering a switch that does
@@ -2400,6 +2427,26 @@ class WorkerStatus(ApiModel):
     peak_memory_bytes: int | None = None
     active_jobs: int = 0
     queued_jobs: int = 0
+    # How long ago the worker last reported forward motion on a job it is
+    # running. `state` cannot express this: a worker that has stopped
+    # progressing still reports `ready` with an active job, so a live stall
+    # is invisible without a measurement of the engine's own reports.
+    #
+    # None means NO MEASUREMENT, which covers two situations and deliberately
+    # does not distinguish them: nothing is running, or something is running that
+    # has not reported yet. A worker still loading, and a worker between jobs,
+    # are both "no answer" rather than an age. Reading None as "idle" is
+    # therefore wrong - only `active_jobs` says that. An age invented for the
+    # not-yet-reported case would be indistinguishable at any value from a
+    # real stall of the same length, making a worker that is merely starting
+    # up look wedged.
+    #
+    # Deliberately an AGE rather than a `stuck` flag. Where the line falls
+    # depends on the workflow - a video step legitimately reports nothing for far
+    # longer than an image step - so the number is reported and the threshold is
+    # left to whoever has that context, instead of being frozen into the wire
+    # format.
+    progress_age_seconds: float | None = Field(default=None, ge=0)
     failure_detail: str | None = None
     # What kind of failure this was, and what the user can do about it. Both are
     # derived from the same output `stderr_tail` carries; neither replaces it.

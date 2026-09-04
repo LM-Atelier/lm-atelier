@@ -26,8 +26,12 @@ from local_lm.search_privacy_v1 import (
     classify_search_privacy,
 )
 from local_lm.search_resource_bounds_v1 import (
+    INVALID_BOUNDS,
+    MAX_LIMIT,
     MAX_QUERY_CHARS,
+    MAX_SNIPPET,
     MAX_TERMS,
+    MAX_WINDOW,
     SearchResourceBoundsError,
     SearchResourceBoundsV1,
     declare_search_resource_bounds,
@@ -228,18 +232,25 @@ def test_no_caller_can_authorize_query_execution_or_an_index_write() -> None:
         bounds.__setattr__("query_execution_authorized", True)
 
 
-def test_neither_module_publishes_a_private_roadmap_coordinate() -> None:
-    """The hygiene ratchet on trunk refuses a diff that adds one.
+def test_a_configured_bound_above_its_ceiling_is_refused() -> None:
+    """The upper half of the configured-value guard.
 
-    Both docstrings carried one, so copying either module forward unchanged
-    would have failed the gate on a line nobody was reading.
+    _configured refuses a value that is not an int, is boolean, is below one, or
+    is ABOVE its maximum. The lower bound is covered; the ceiling was not, so
+    deleting `or value > maximum` left the whole API suite green and a caller
+    could declare a limit larger than the system will honour - a declaration
+    that is internally consistent and false about the system, which is the exact
+    failure this module exists to prevent.
     """
-    import re
+    for field, ceiling in (
+        ("limit", MAX_LIMIT),
+        ("window", MAX_WINDOW),
+        ("snippet_chars", MAX_SNIPPET),
+    ):
+        with pytest.raises(SearchResourceBoundsError, match=INVALID_BOUNDS):
+            declare_search_resource_bounds(**{field: ceiling + 1}, query_chars=10, term_count=2)
 
-    import local_lm.search_privacy_v1 as privacy
-    import local_lm.search_resource_bounds_v1 as bounds
-
-    coordinate = re.compile(r"\((?:roadmap )?item \d+\)")
-    for module in (privacy, bounds):
-        assert module.__doc__ is not None
-        assert coordinate.search(module.__doc__) is None
+        # The ceiling itself is permitted, so the guard bounds rather than
+        # forbids.
+        allowed = declare_search_resource_bounds(**{field: ceiling}, query_chars=10, term_count=2)
+        assert getattr(allowed, field) == ceiling

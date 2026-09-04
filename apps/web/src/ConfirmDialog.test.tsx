@@ -55,6 +55,23 @@ describe("ConfirmDialog", () => {
     expect(onCancel).toHaveBeenCalled();
     expect(onConfirm).not.toHaveBeenCalled();
   });
+
+  it("presents a reversible start as a neutral action", () => {
+    render(
+      <ConfirmDialog
+        title="Start ordered plan?"
+        question="This request will run three steps in sequence."
+        confirmLabel="Start plan"
+        tone="action"
+        onConfirm={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Confirm action")).toBeInTheDocument();
+    expect(screen.queryByText("Cannot be undone")).toBeNull();
+    expect(screen.getByRole("button", { name: "Start plan" })).toHaveClass("primary");
+  });
 });
 
 describe("PromptDialog", () => {

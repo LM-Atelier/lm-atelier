@@ -479,6 +479,10 @@ export function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
           <div className="about-paths">
             <div><Folder size={17} /><span><small>Data folder</small><code>{about.data.data_directory}</code></span><CopyTextButton text={about.data.data_directory} label="Copy data folder" buttonText="Copy data folder" className="secondary compact-button" /></div>
             <div><Folder size={17} /><span><small>Log folder</small><code>{about.data.log_directory}</code></span><CopyTextButton text={about.data.log_directory} label="Copy log folder" buttonText="Copy log folder" className="secondary compact-button" /></div>
+            <div><Folder size={17} /><span><small>Artifact folder</small><code>{about.data.artifact_directory}</code></span><CopyTextButton text={about.data.artifact_directory} label="Copy artifact folder" buttonText="Copy artifact folder" className="secondary compact-button" /></div>
+            {about.data.artifact_directory_requested && (
+              <div><Folder size={17} /><span><small>Artifact folder requested as</small><code>{about.data.artifact_directory_requested}</code></span></div>
+            )}
           </div>
           <div className="about-actions">
             {technicalDetails && <CopyTextButton text={technicalDetails} label="Copy technical details" buttonText="Copy technical details" className="secondary" />}

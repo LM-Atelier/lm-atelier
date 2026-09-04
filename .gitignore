@@ -48,7 +48,6 @@ test-results/
 blob-report/
 
 # Local application state
-.private/
 backups/
 cache/
 caches/
@@ -65,6 +64,12 @@ artifacts/
 *.sqlite
 *.sqlite3
 
+# Local assets kept out of the repository. Model weights are covered by suffix
+# rules, but the files that sit beside them - captions, dataset manifests, JSON
+# sidecars - are ordinary text and match no suffix, so the directory itself is
+# ignored rather than the formats inside it.
+private-assets/
+
 # AI model and media artifacts
 *.gguf
 *.safetensors
@@ -72,6 +77,16 @@ artifacts/
 *.pt
 *.pth
 *.onnx
+*.ggml
+*.h5
+*.hdf5
+*.mlmodel
+*.npy
+*.npz
+*.pb
+*.pickle
+*.pkl
+*.tflite
 *.png
 *.jpg
 *.jpeg

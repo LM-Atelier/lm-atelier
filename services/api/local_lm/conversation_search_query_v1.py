@@ -101,7 +101,7 @@ def term_coverage_score(body: object, query: object) -> int:
     text = _require_body(body)
     terms = query_terms(query)
     folded = text.casefold()
-    return sum(1 for term in terms if term in folded)
+    return len({term for term in terms if term in folded})
 
 
 def _require_id(value: object) -> str:

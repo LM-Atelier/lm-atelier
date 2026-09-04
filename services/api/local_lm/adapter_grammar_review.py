@@ -1,7 +1,7 @@
 """Turn a published grammar and a reviewer's approvals into a stored review.
 
 This is the only place that writes `AdapterPromptGrammar`. Everywhere else in
-the lane reads what was written here and recomputes whether it still applies;
+the subsystem reads what was written here and recomputes whether it still applies;
 nothing downstream may create or widen a review, which is what keeps a
 generation outcome from ever promoting itself into evidence.
 

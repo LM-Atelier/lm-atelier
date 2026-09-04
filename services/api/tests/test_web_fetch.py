@@ -142,4 +142,4 @@ async def test_the_first_address_is_validated_before_any_request_is_made() -> No
     with pytest.raises(WebRetrievalError):
         await fetch_source("http://example.com/insecure", request=request, resolve=_public)
 
-    assert request.seen == []  # type: ignore[attr-defined]
+    assert request.seen == []

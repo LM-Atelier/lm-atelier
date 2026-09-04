@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import shutil
 import sqlite3
 from collections.abc import AsyncIterator
@@ -33,9 +34,8 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 _EXPECTED_PACKAGE = (_REPOSITORY_ROOT / "services" / "api" / "local_lm").resolve()
 _IMPORTED_FROM = Path(local_lm.__file__).resolve().parent
 
-# EXACT identity, not containment. This repository keeps its worktrees BELOW
-# the main checkout - .private/worktrees/* and temp/worktrees/* - so a nested
-# worktree's package is relative to the main root and a containment test says
+# EXACT identity, not containment. Linked worktrees can live below the main
+# checkout, so a nested worktree's package is relative to the main root and a containment test says
 # yes to it. Measured: is_relative_to returns True for
 # <root>/temp/worktrees/x/services/api/local_lm against <root>, which is
 # precisely the wrong answer.
@@ -100,6 +100,11 @@ def app(settings: Settings) -> FastAPI:
 @pytest_asyncio.fixture
 async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
     async with app.router.lifespan_context(app):
+        # The retention sweep runs after startup rather than inside it, so a
+        # test that inspects artifacts would otherwise race it. Every test
+        # starts from the settled store, exactly as it did when the sweep was
+        # a startup stage.
+        await asyncio.wait_for(app.state.retention_sweep, timeout=30)
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://testserver") as test_client:
             session = await test_client.post("/api/session")

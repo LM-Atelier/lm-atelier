@@ -61,6 +61,14 @@ _JOB_SCALAR_KEYS = (
     "browser_proxy_artifact_id",
 )
 _JOB_LIST_KEYS = ("artifact_ids", "input_artifact_ids")
+
+#: Metadata keys by which one artifact retains another. Every site asking
+#: "which artifacts does this one name" must read the same keys: the write
+#: validation and delete-trigger SQL generated below, the reference walk and
+#: its pending-write counterpart, library deletion's linked set, and export
+#: bundling. Separate copies can drift apart while still comparing equal, so
+#: these sites share this object rather than repeating its literals.
+ARTIFACT_METADATA_REFERENCE_KEYS = ("poster_artifact_id", "browser_proxy_artifact_id")
 MAX_JSON_BYTES = 1_048_576
 MAX_JSON_NODES = 100_000
 MAX_JSON_DEPTH = 16
@@ -217,7 +225,7 @@ def _table_invalid(table: str, prefix: str) -> tuple[str, ...]:
     if table == "artifacts":
         return tuple(
             _optional_id_invalid(f"{prefix}.metadata_json", f"$.{key}")
-            for key in ("poster_artifact_id", "browser_proxy_artifact_id")
+            for key in ARTIFACT_METADATA_REFERENCE_KEYS
         )
     raise AssertionError(table)
 
@@ -273,7 +281,7 @@ def _reference_values(table: str, prefix: str) -> str:
         return " UNION ALL ".join(
             f"SELECT json_extract({prefix}.metadata_json, '$.{key}') AS artifact_id "
             f"WHERE json_type({prefix}.metadata_json, '$.{key}') = 'text'"
-            for key in ("poster_artifact_id", "browser_proxy_artifact_id")
+            for key in ARTIFACT_METADATA_REFERENCE_KEYS
         )
     raise AssertionError(table)
 

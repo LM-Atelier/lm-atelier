@@ -423,6 +423,7 @@ export interface WorkerStatus {
   peak_memory_bytes: number | null;
   active_jobs: number;
   queued_jobs: number;
+  progress_age_seconds?: number | null;
   failure_detail?: string | null;
   failure_code?:
     | "oom_vram"
@@ -939,21 +940,16 @@ export interface SystemInfo {
   disk_free_bytes: number;
   ffmpeg_available: boolean;
   support: PlatformAssessment;
-  devices: Array<{
-    id: string;
-    name: string;
-    kind: string;
-    total_memory_bytes: number | null;
-    available_memory_bytes: number | null;
-    backend: string | null;
-    details: Record<string, unknown>;
-  }>;
+  devices: DeviceInfo[];
 }
 
 export interface ApplicationInfo {
   version: string;
   data_directory: string;
   log_directory: string;
+  artifact_directory: string;
+  // Present only when construction followed a filesystem link.
+  artifact_directory_requested: string | null;
   max_media_outputs_per_plan: number;
   // The installation-wide gate. False means no chat can open its own, and
   // the UI says so rather than offering a switch that does nothing.
@@ -1097,7 +1093,7 @@ export interface EditTemplate {
    * before recipes: nobody recorded it, and today's binding is not it. */
   workflow_revision_id: string | null;
   model_profile_id: string | null;
-  mask_mode: string;
+  mask_mode: "none" | "selection" | "inverse";
   trigger_words_json: string[];
   content_rating: "general" | "mature" | "unknown";
   builtin: boolean;
@@ -1250,6 +1246,18 @@ export type ProjectWorkflowSelectionInput =
   | { mode: "family"; workflow_family_id: string }
   | { mode: "revision"; workflow_revision_id: string };
 
+export type DeviceKind = "accelerator" | "cpu" | "gpu";
+
+export interface DeviceInfo {
+  id: string;
+  name: string;
+  kind: DeviceKind;
+  total_memory_bytes: number | null;
+  available_memory_bytes: number | null;
+  backend: string | null;
+  details: Record<string, unknown>;
+}
+
 export type WorkflowDependencyResourceKind =
   | "model_profile"
   | "model_install"
@@ -1275,7 +1283,7 @@ export interface WorkflowFamilyPreferenceUpdate {
 
 /** One thing a family depends on, and whether anything else depends on it too. */
 export interface WorkflowDependencyImpact {
-  resource_kind: string;
+  resource_kind: WorkflowDependencyResourceKind;
   resource_id: string;
   resource_name: string;
   binding_count: number;
@@ -1377,7 +1385,7 @@ export interface ReferenceAsset {
   purpose: string;
   view_label: string | null;
   sort_order: number;
-  validation_state: string;
+  validation_state: "unchecked" | "usable" | "weak" | "rejected";
 }
 
 export type PromptTemplateSlotMode = "input" | "choice" | "model" | "fixed";

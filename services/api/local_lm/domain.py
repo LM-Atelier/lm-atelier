@@ -72,6 +72,28 @@ class MaskMode(StrEnum):
     INVERSE = "inverse"
 
 
+class ResourceKind(StrEnum):
+    """What kind of resource a workflow dependency slot asks for.
+
+    These six values already existed as a hand-written SQL string inside the
+    table that stores them, and a second copy of the same string inside the
+    migration that created it. Declaring them here lets the constraint be
+    DERIVED from the vocabulary instead of restated beside it, which is what
+    stops the two drifting when a seventh kind is added.
+
+    The order matters and is not cosmetic: it is the order the existing
+    constraint lists them in, so the generated SQL is character-for-character
+    what the table was created with and no schema changes.
+    """
+
+    MODEL_PROFILE = "model_profile"
+    MODEL_INSTALL = "model_install"
+    MODEL_ASSET = "model_asset"
+    CUSTOM_NODE = "custom_node"
+    REGISTRY_PACKAGE = "registry_package"
+    RUNTIME = "runtime"
+
+
 class Operation(StrEnum):
     TEXT = "text"
     TEXT_TO_IMAGE = "text_to_image"

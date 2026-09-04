@@ -1,3 +1,53 @@
+"""The SQLAlchemy models, and one policy that is not visible from any single one.
+
+STORED VOCABULARIES ARE ENFORCED BY THE APPLICATION. THE DATABASE IS NOT THE
+AUTHORITY ON THEM, AND MOST OF THEM CARRY NO CONSTRAINT AT ALL.
+
+A vocabulary column - a status, a kind, a state, a phase, a failure code - holds
+one of a closed set of strings, defined in Python and usually as a StrEnum. The
+writer is trusted to honour it.
+
+The practice here is MIXED, and saying so is the point of writing this down. A
+small set of columns carries a ``CheckConstraint`` naming them; the rest, the
+overwhelming majority, carry nothing. No column anywhere uses SQLAlchemy's
+``Enum`` type.
+
+NO COUNT OF VOCABULARY COLUMNS APPEARS HERE, and that is deliberate rather than
+vague. Identifying "a vocabulary column" by its name needs a heuristic, and the
+total moves with the heuristic - 44 columns under one suffix list, 45 under
+another, 53 under a third. Worse, every heuristic tried has MISSED real closed
+vocabularies: ``message_references.source``, ``runs.operation``,
+``prompt_template_import_winners.authority_rule`` and
+``workflow_dependency_slots.satisfaction`` are all closed sets of strings whose
+names match no reasonable suffix list. A count would be a fact about the regex
+rather than about the schema, and a wrong one.
+
+What is stated instead is a fact the schema can answer exactly: which columns a
+``CheckConstraint`` names at all. Those are enumerated in
+``test_stored_vocabulary_policy.py``, found by looking for each table's real
+column names inside its own constraints, so no classifier decides what counts.
+Most of them are format and range checks - digest lengths, positive counters,
+bounded text - and only a minority pin a column to a set of string literals:
+``kind = 'manual'``, ``reviewer_kind = 'local-human'``,
+``state IN ('draft', 'queued')``. A few of those guard a relationship between
+columns, which is a different job again from listing a vocabulary.
+
+THE POLICY: application-level enforcement is the intended direction. A new
+vocabulary column does not need a ``CheckConstraint``, and adding one to a
+column that lacks it is not a fix worth making on its own. Enforce the set where
+it is written.
+
+WHAT IT MEANS IF YOU ARE READING ONE. A stored vocabulary value is trusted, not
+guaranteed. Declaring an API response field as a closed enum turns any
+unexpected stored value into a serialization failure on read rather than an odd
+string passed through, so tighten the response type only where the write path is
+genuinely the sole writer.
+
+``test_stored_vocabulary_policy.py`` pins what is described above. It fails if the
+documentation is removed AND if the schema drifts away from what is described
+here, so this cannot quietly stop being true.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -42,6 +92,7 @@ from .domain import (
     ModelRole,
     Operation,
     PartType,
+    ResourceKind,
     RoutingMode,
     RunStatus,
     new_id,
@@ -83,6 +134,13 @@ def _lowercase_sha256_check(column: str) -> str:
     for character in "0123456789abcdef":
         remainder = f"replace({remainder}, '{character}', '')"
     return f"length({column}) = 64 AND lower({column}) = {column} AND {remainder} = ''"
+
+
+def _lowercase_git_commit_check(column: str) -> str:
+    remainder = column
+    for character in "0123456789abcdef":
+        remainder = f"replace({remainder}, '{character}', '')"
+    return f"length({column}) = 40 AND lower({column}) = {column} AND {remainder} = ''"
 
 
 def _install_sqlite_trigger(statement: str) -> Callable[..., None]:
@@ -266,7 +324,7 @@ class MessagePart(TimestampMixin, Base):
     type: Mapped[str] = mapped_column(String(32), default=PartType.TEXT.value)
     text: Mapped[str | None] = mapped_column(Text, nullable=True)
     artifact_id: Mapped[str | None] = mapped_column(
-        ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True, index=True
     )
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
@@ -489,7 +547,7 @@ class ResponseRevisionPart(TimestampMixin, Base):
     type: Mapped[str] = mapped_column(String(32), default=PartType.TEXT.value)
     text: Mapped[str | None] = mapped_column(Text, nullable=True)
     artifact_id: Mapped[str | None] = mapped_column(
-        ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True, index=True
     )
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
@@ -1239,7 +1297,9 @@ class SetupVerification(TimestampMixin, Base):
     chat_id: Mapped[str | None] = mapped_column(String(40), nullable=True, unique=True, index=True)
     run_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     job_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
-    input_artifact_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    input_artifact_id: Mapped[str | None] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     failure_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -1641,8 +1701,7 @@ class WorkflowDependencySlot(TimestampMixin, Base):
             name="ck_workflow_dependency_slot_name_nonempty",
         ),
         CheckConstraint(
-            "resource_kind IN ('model_profile', 'model_install', 'model_asset', "
-            "'custom_node', 'registry_package', 'runtime')",
+            _closed_vocabulary_check("resource_kind", ResourceKind),
             name="ck_workflow_dependency_slot_resource_kind",
         ),
         CheckConstraint(
@@ -2030,7 +2089,7 @@ class ReferenceSubject(TimestampMixin, Base):
     # Cleared rather than cascading: losing a cover image must not lose the
     # subject, because the images are replaceable and the identity is not.
     cover_artifact_id: Mapped[str | None] = mapped_column(
-        ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True, index=True
     )
     favorite: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     # Archive is the normal way to remove a subject. Permanent deletion has to
@@ -2134,6 +2193,78 @@ class ReferenceAssetReviewEvent(Base):
     height: Mapped[int] = mapped_column(Integer)
     decision_sha256: Mapped[str] = mapped_column(String(64), unique=True)
     reviewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ComfyRegistrySourceArtifactReview(TimestampMixin, Base):
+    """One local-human review of an exact-commit wheel artifact."""
+
+    __tablename__ = "comfy_registry_source_artifact_reviews"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_declaration_sha256",
+            name="uq_registry_source_review_declaration",
+        ),
+        UniqueConstraint("artifact_id", name="uq_registry_source_review_artifact"),
+        UniqueConstraint("review_sha256", name="uq_registry_source_review_digest"),
+        CheckConstraint(
+            _lowercase_sha256_check("source_declaration_sha256"),
+            name="ck_registry_source_review_declaration_sha256",
+        ),
+        CheckConstraint(
+            _lowercase_git_commit_check("source_commit"),
+            name="ck_registry_source_review_commit",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("artifact_sha256"),
+            name="ck_registry_source_review_artifact_sha256",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("review_sha256"),
+            name="ck_registry_source_review_sha256",
+        ),
+        CheckConstraint(
+            "artifact_size_bytes > 0",
+            name="ck_registry_source_review_artifact_size",
+        ),
+        CheckConstraint(
+            "reviewer_kind = 'local-human'",
+            name="ck_registry_source_review_reviewer",
+        ),
+        Index(
+            "ix_comfy_registry_source_artifact_reviews_source_declaration_sha256",
+            "source_declaration_sha256",
+        ),
+        Index(
+            "ix_comfy_registry_source_artifact_reviews_artifact_id",
+            "artifact_id",
+        ),
+        Index(
+            "ix_comfy_registry_source_artifact_reviews_artifact_sha256",
+            "artifact_sha256",
+        ),
+        Index(
+            "ix_comfy_registry_source_artifact_reviews_review_sha256",
+            "review_sha256",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(80), primary_key=True, default=lambda: new_id("srcreview")
+    )
+    source_declaration: Mapped[str] = mapped_column(Text)
+    source_declaration_sha256: Mapped[str] = mapped_column(String(64))
+    repository: Mapped[str] = mapped_column(String(300))
+    source_commit: Mapped[str] = mapped_column(String(40))
+    artifact_id: Mapped[str] = mapped_column(ForeignKey("artifacts.id", ondelete="RESTRICT"))
+    artifact_sha256: Mapped[str] = mapped_column(String(64))
+    artifact_size_bytes: Mapped[int] = mapped_column(Integer)
+    wheel_filename: Mapped[str] = mapped_column(String(500))
+    wheel_distribution: Mapped[str] = mapped_column(String(200))
+    wheel_version: Mapped[str] = mapped_column(String(200))
+    evidence_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    reviewer_kind: Mapped[str] = mapped_column(String(32))
+    review_sha256: Mapped[str] = mapped_column(String(64))
+    reviewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class MessageReference(TimestampMixin, Base):

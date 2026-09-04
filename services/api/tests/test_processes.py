@@ -45,6 +45,7 @@ from local_lm.processes import (
     WORKER_STDERR_TAIL_BYTES,
     ProcessSupervisor,
     WorkerRecord,
+    _ProcessIdentity,
     _RotatingWorkerLog,
     _with_comfy_registry_overlays,
 )
@@ -2700,3 +2701,664 @@ def test_a_worker_environment_still_inherits_nothing_it_should_not() -> None:
 
     assert "AWS_SECRET_ACCESS_KEY" not in environment
     assert "HF_TOKEN" not in environment
+
+
+async def test_stopping_a_worker_with_no_live_record_still_stops_its_process(
+    settings,
+) -> None:  # type: ignore[no-untyped-def]
+    """Losing the handle must not make the worker unstoppable.
+
+    Measured on a live install: /api/workers reported the media worker stopped
+    with pid=None while the ComfyUI process the app had launched was still alive,
+    still its child, and still holding 127.0.0.1:8289. `_stop_unlocked` returned
+    immediately because `self._workers` had no record, so the stop was a no-op,
+    and the port preflight in `_replace` then refused every start and restart
+    with "already in use". Nothing in the product recovered it; the process had
+    to be killed from outside.
+
+    The identities are persisted so a worker can be recognised after the handle
+    is lost. This drives the exact state that occurred - a persisted identity
+    with no in-memory record - and requires that stopping actually stops it.
+    """
+
+    settings.prepare()
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        creationflags=creationflags,
+    )
+    try:
+        supervisor = ProcessSupervisor(settings)
+        # A persisted identity and NO live record: the state the install was in.
+        supervisor._worker_identities["media"] = [
+            _ProcessIdentity(pid=child.pid, create_time=psutil.Process(child.pid).create_time())
+        ]
+        assert "media" not in supervisor._workers
+
+        await supervisor._stop_unlocked("media")
+
+        child.wait(timeout=10)
+        assert child.poll() is not None, (
+            "the worker process survived a stop, so the port it holds stays held "
+            "and every later start refuses"
+        )
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+
+
+async def test_stopping_a_worker_with_no_record_does_not_kill_a_reused_pid(
+    settings,
+) -> None:  # type: ignore[no-untyped-def]
+    """The recovery must not become a licence to kill by pid alone.
+
+    The control for the test above. A persisted identity whose creation time no
+    longer matches is a pid the operating system has since handed to something
+    else, and stopping the worker must leave it alone. Without this, recovering a
+    wedged worker could terminate an unrelated process that merely inherited its
+    number.
+    """
+
+    settings.prepare()
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    stranger = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        creationflags=creationflags,
+    )
+    try:
+        supervisor = ProcessSupervisor(settings)
+        # Same pid, wrong creation time: a reused number, not our worker.
+        supervisor._worker_identities["media"] = [
+            _ProcessIdentity(
+                pid=stranger.pid,
+                create_time=psutil.Process(stranger.pid).create_time() - 3600.0,
+            )
+        ]
+
+        await supervisor._stop_unlocked("media")
+
+        assert stranger.poll() is None, (
+            "a process that merely reused the worker's pid was killed; identity "
+            "is pid AND creation time, and only the pair may authorise a kill"
+        )
+    finally:
+        stranger.kill()
+        stranger.wait(timeout=5)
+
+
+async def test_a_port_held_by_our_own_child_is_reclaimed_without_any_identity(
+    settings,
+) -> None:  # type: ignore[no-untyped-def]
+    """The incident had no usable identity, and this is the path that recovers it.
+
+    The persisted identities are not sufficient on their own, and believing they
+    were is what made an earlier version of this fix narrower than it claimed.
+    They can be absent entirely, and they can be emptied while a process still
+    holds the port, because the snapshot only covers the tree as it stood when it
+    was taken. A descendant that appeared afterwards is invisible to them.
+
+    So this drives the state that leaves the application wedged with NOTHING
+    recorded: a live child of this process listening on the port, no worker
+    record, and no identity at all. Recovery has to come from ownership we can
+    still prove - it is our descendant, and it is on the port we are about to
+    bind.
+    """
+
+    settings.prepare()
+    port = _free_port()
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import socket,time;"
+            "s=socket.socket();"
+            "s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1);"
+            f"s.bind(('127.0.0.1',{port}));s.listen(8);time.sleep(120)",
+        ],
+        creationflags=creationflags,
+    )
+    try:
+        supervisor = ProcessSupervisor(settings)
+        assert "media" not in supervisor._workers
+        assert not supervisor._worker_identities.get("media"), (
+            "this test is about the case with NO identity; if one exists it is "
+            "measuring the other path"
+        )
+
+        async def bound() -> bool:
+            while True:
+                if supervisor._own_descendants_blocking("media", "127.0.0.1", port):
+                    return True
+                await asyncio.sleep(0.05)
+
+        assert await asyncio.wait_for(bound(), timeout=30) is True
+
+        await supervisor._reclaim_port_from_our_own_children(
+            "media", f"http://127.0.0.1:{port}/health"
+        )
+
+        holder.wait(timeout=15)
+        assert holder.poll() is not None, "our own child kept the port after a reclaim"
+        assert supervisor._port_is_free("127.0.0.1", port), (
+            "the port was not bindable after reclaiming it, so a start would still refuse"
+        )
+    finally:
+        if holder.poll() is None:
+            holder.kill()
+            holder.wait(timeout=5)
+
+
+async def test_a_port_held_by_a_process_we_did_not_parent_is_left_alone(
+    settings,
+) -> None:  # type: ignore[no-untyped-def]
+    """Reclaiming must never become killing by port number.
+
+    The control for the test above. A listener this application did not parent is
+    not ours, whatever it is holding. Both tests are required together: descendant
+    AND on the port. Without this one, a recovery would be free to terminate an
+    unrelated service that happened to occupy the address.
+
+    The stranger here is deliberately NOT a descendant of the test process: it is
+    detached, so `children(recursive=True)` from our pid cannot reach it.
+    """
+
+    settings.prepare()
+    port = _free_port()
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", port))
+    listener.listen(8)
+    try:
+        supervisor = ProcessSupervisor(settings)
+        # Held by THIS process, which is not one of our descendants.
+        assert supervisor._own_descendants_blocking("media", "127.0.0.1", port) == []
+
+        await supervisor._reclaim_port_from_our_own_children(
+            "media", f"http://127.0.0.1:{port}/health"
+        )
+
+        # Still bound, and this process is still alive to prove nothing was killed.
+        assert not supervisor._port_is_free("127.0.0.1", port), (
+            "the reclaim freed a port it could not prove it owned"
+        )
+    finally:
+        listener.close()
+
+
+def _free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+async def test_replace_reclaims_the_port_before_it_judges_the_port(
+    settings,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """The reclaim must be wired in, and wired in BEFORE the preflight.
+
+    The other reclaim tests call it directly, so they would all still pass with
+    its call site deleted - a recovery nothing reaches is decorative. This binds
+    the wiring and the order together: stopping first, then reclaiming, then
+    judging whether the port is free. Reclaiming after the preflight would be
+    useless, because the preflight is what refuses.
+    """
+
+    settings.prepare()
+    supervisor = ProcessSupervisor(settings)
+    order: list[str] = []
+
+    async def record_stop(name: str) -> None:
+        order.append("stop")
+
+    async def record_reclaim(name: str, url: str) -> None:
+        order.append("reclaim")
+
+    async def record_preflight(name: str, url: str) -> None:
+        order.append("preflight")
+        # Stop _replace here: everything after this launches a real process, and
+        # the ordering is the whole assertion.
+        raise OSError("preflight reached")
+
+    monkeypatch.setattr(supervisor, "_stop_unlocked", record_stop)
+    monkeypatch.setattr(supervisor, "_reclaim_port_from_our_own_children", record_reclaim)
+    monkeypatch.setattr(supervisor, "_ensure_port_available", record_preflight)
+
+    with pytest.raises(OSError, match="preflight reached"):
+        await supervisor._replace(
+            "media",
+            [sys.executable, "-c", "pass"],
+            "http://127.0.0.1:65530/health",
+        )
+
+    assert order == ["stop", "reclaim", "preflight"], (
+        f"expected the port to be reclaimed between stopping and judging it, got {order}"
+    )
+
+
+def _listener_child(address: str, port: int) -> subprocess.Popen[bytes]:
+    """A child of this process that holds one listening socket and then waits."""
+
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    return subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import socket,time;"
+            "s=socket.socket();"
+            "s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1);"
+            f"s.bind(('{address}',{port}));s.listen(8);time.sleep(120)",
+        ],
+        creationflags=creationflags,
+    )
+
+
+def _tree_pids(root_pid: int) -> list[int]:
+    """That pid and every pid beneath it."""
+
+    try:
+        process = psutil.Process(root_pid)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return []
+    pids = [root_pid]
+    with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+        pids.extend(child.pid for child in process.children(recursive=True))
+    return pids
+
+
+async def _await_listener(root_pid: int, address: str, port: int) -> int:
+    """Wait until something in this child's tree is listening, and say which pid.
+
+    The pid `Popen` returns is not necessarily the pid that binds. A virtual
+    environment's interpreter is a trampoline that re-execs the real one, so the
+    listener is commonly a CHILD of the process we spawned. An assertion written
+    against the spawned pid therefore compares the launcher against the listener
+    and fails for a reason that has nothing to do with the code under test -
+    which is exactly what it did before this helper existed. Everything here is
+    asserted about the spawned TREE.
+    """
+
+    while True:
+        for pid in _tree_pids(root_pid):
+            with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
+                if ProcessSupervisor._listening_match(psutil.Process(pid), address, port) == (
+                    "exact"
+                ):
+                    return pid
+        await asyncio.sleep(0.05)
+
+
+async def test_a_descendant_on_another_address_at_the_same_port_survives(
+    settings,
+) -> None:  # type: ignore[no-untyped-def]
+    """The port number is not the endpoint, and terminating on it is destruction.
+
+    A child of ours listening on 127.0.0.2 at the same number is not what stands
+    between the worker and 127.0.0.1. Killing it frees nothing - the real
+    blocker keeps the address - and it destroys a process that was doing its
+    job. An earlier version of this fix did exactly that, because it compared
+    `laddr.port` and discarded the host it had already parsed.
+
+    The target endpoint is held here by the TEST process, which is deliberate on
+    two counts. The reclaim returns immediately on a free endpoint, so something
+    must hold it or the selection under test is never reached. And the test
+    process is not a descendant of itself, so it stands in for the foreign
+    blocker: the correct outcome is that the reclaim proves it owns nothing,
+    terminates nothing, and leaves the address exactly as busy as it found it.
+    """
+
+    settings.prepare()
+    port = _free_port()
+    stranger = _listener_child("127.0.0.2", port)
+    blocker = socket.socket()
+    blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        blocker.bind(("127.0.0.1", port))
+        blocker.listen(8)
+        supervisor = ProcessSupervisor(settings)
+        listener = await asyncio.wait_for(
+            _await_listener(stranger.pid, "127.0.0.2", port), timeout=30
+        )
+        assert supervisor._own_descendants_blocking("media", "127.0.0.1", port) == [], (
+            "a descendant on another address was selected as a blocker of this one"
+        )
+
+        await supervisor._reclaim_port_from_our_own_children(
+            "media", f"http://127.0.0.1:{port}/health"
+        )
+
+        assert stranger.poll() is None, (
+            "the reclaim terminated a descendant that was not blocking the "
+            "endpoint it was asked to free"
+        )
+        assert psutil.pid_exists(listener), (
+            "the reclaim terminated the listener beneath that descendant, which "
+            "is the same harm reached one level down"
+        )
+    finally:
+        blocker.close()
+        if stranger.poll() is None:
+            stranger.kill()
+            stranger.wait(timeout=5)
+
+
+async def test_a_wildcard_descendant_is_recognised_as_holding_the_address(
+    settings,
+) -> None:  # type: ignore[no-untyped-def]
+    """The other half of the same distinction, and it must not be lost with it.
+
+    A listener on the unspecified address covers every address of its family.
+    Narrowing the match to exact address equality would leave this one
+    unrecognised, and on the platforms where a wildcard really does exclude a
+    specific bind that means the workspace still refuses to start - the failure
+    this row exists to fix.
+
+    This asserts RECOGNITION, not a completed reclaim, and the distinction is
+    measured rather than stylistic. On Windows a specific address may be bound
+    alongside a wildcard at the same port, so `_port_is_free('127.0.0.1', port)`
+    answers True with this child running and the reclaim correctly returns
+    having done nothing. On POSIX the same probe answers False. An end-to-end
+    assertion here would therefore be asserting the platform. What must hold
+    everywhere is that this child is identified as holding the address, which is
+    what the selection is for.
+    """
+
+    settings.prepare()
+    port = _free_port()
+    holder = _listener_child("0.0.0.0", port)
+    try:
+        supervisor = ProcessSupervisor(settings)
+        listener = await asyncio.wait_for(_await_listener(holder.pid, "0.0.0.0", port), timeout=30)
+
+        selected = supervisor._own_descendants_blocking("media", "127.0.0.1", port)
+        chosen = [process.pid for process in selected]
+
+        assert chosen == [listener], (
+            "a wildcard listener of ours was not recognised as holding the address"
+        )
+    finally:
+        if holder.poll() is None:
+            holder.kill()
+            holder.wait(timeout=5)
+
+
+async def test_an_exact_holder_is_preferred_and_a_wildcard_bystander_is_spared(
+    settings,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """Both tiers present, and only the exact one may be terminated.
+
+    This is the case the two socket tests cannot reach, and the reason is the
+    platform rather than the design: an exact holder and a wildcard holder can
+    coexist at one port on Windows and cannot on POSIX, so a test built from
+    real listeners could only run where that arrangement is possible - and the
+    rule it checks has to hold on both. The descendants are therefore supplied
+    directly.
+
+    Why preference rather than taking both. Where a wildcard does not exclude a
+    specific bind, the exact holder is the only thing that can be holding the
+    address, so terminating the wildcard alongside it kills a working child of
+    ours for no gain. Where a wildcard does exclude one, the two cannot both be
+    there, so nothing is given up by preferring exact. Taking both is wrong on
+    one platform and pointless on the other.
+    """
+
+    settings.prepare()
+    supervisor = ProcessSupervisor(settings)
+    exact = SimpleNamespace(pid=4001)
+    bystander = SimpleNamespace(pid=4002)
+    kinds = {4001: "exact", 4002: "wildcard"}
+
+    monkeypatch.setattr(supervisor, "_own_descendants", lambda: [bystander, exact])
+    monkeypatch.setattr(
+        supervisor,
+        "_listening_match",
+        lambda process, host, port: kinds.get(process.pid),
+    )
+
+    chosen = supervisor._own_descendants_blocking("media", "127.0.0.1", 65532)
+
+    assert [process.pid for process in chosen] == [exact.pid], (
+        "the wildcard bystander was selected alongside the exact holder, which "
+        "on a platform where a wildcard does not block is a working child of "
+        "ours terminated for nothing"
+    )
+
+
+async def test_localhost_names_the_loopback_addresses_and_nothing_else(
+    settings,
+) -> None:  # type: ignore[no-untyped-def]
+    """A named host has to be resolved deliberately, in both directions.
+
+    `localhost` is a SUPPORTED value here - `validate_worker_url` accepts it
+    beside literal loopback addresses - so refusing to resolve it would leave
+    this recovery silently inoperative for anyone whose URLs are written that
+    way. Nothing would fail; the worker would simply never be reclaimed. A
+    mutation found that, not a reader.
+
+    Resolving it must not become resolving anything. The three assertions are
+    the three cases and they have to hold together: localhost reaches the
+    loopback address, localhost does NOT reach the rest of 127.0.0.0/8, and a
+    name this code cannot prove reaches nothing at all. Widening the first
+    without the second would put the different-address bystander back in range
+    of termination through the back door.
+    """
+
+    settings.prepare()
+    port = _free_port()
+    loopback = _listener_child("127.0.0.1", port)
+    elsewhere = _listener_child("127.0.0.2", port)
+    try:
+        loopback_pid = await asyncio.wait_for(
+            _await_listener(loopback.pid, "127.0.0.1", port), timeout=30
+        )
+        elsewhere_pid = await asyncio.wait_for(
+            _await_listener(elsewhere.pid, "127.0.0.2", port), timeout=30
+        )
+        supervisor = ProcessSupervisor(settings)
+
+        assert (
+            supervisor._listening_match(psutil.Process(loopback_pid), "localhost", port) == "exact"
+        ), "localhost did not reach the loopback listener, so the reclaim would never fire"
+        assert (
+            supervisor._listening_match(psutil.Process(elsewhere_pid), "localhost", port) is None
+        ), "localhost reached 127.0.0.2, which is loopback but is not localhost"
+        assert (
+            supervisor._listening_match(psutil.Process(loopback_pid), "example.invalid", port)
+            is None
+        ), "a name this code cannot prove was treated as naming an address"
+    finally:
+        for child in (loopback, elsewhere):
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=5)
+
+
+async def test_the_reclaim_retries_a_briefly_unbindable_address(
+    settings,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """A terminated listener can leave the address unbindable for a moment.
+
+    Judging that moment as a refusal would fail the start for a condition that
+    resolves on its own, so the bind is retried. The retry existed before this
+    test and nothing drove it: every other case here frees the address on the
+    first probe, so the loop could have been deleted with the suite still green.
+
+    The probe is scripted rather than raced. Busy on the first question, which
+    is what admits the selection; then two transient failures; then bindable.
+    Four probes means the loop kept asking past a failure and stopped at the
+    first success, which is both halves of the guarantee. A version that judged
+    one attempt would ask twice and give up with the address still counted busy.
+    """
+
+    settings.prepare()
+    supervisor = ProcessSupervisor(settings)
+    answers = iter((False, False, False, True))
+    probes = 0
+
+    def scripted_probe(host: str, port: int) -> bool:
+        nonlocal probes
+        probes += 1
+        return next(answers, True)
+
+    def one_holder(name: str, host: str, port: int) -> list[psutil.Process]:
+        return [psutil.Process(os.getpid())]
+
+    terminated: list[int] = []
+
+    def record_termination(processes, timeout) -> None:  # type: ignore[no-untyped-def]
+        terminated.append(len(processes))
+
+    monkeypatch.setattr(supervisor, "_port_is_free", scripted_probe)
+    monkeypatch.setattr(supervisor, "_own_descendants_blocking", one_holder)
+    monkeypatch.setattr(supervisor, "_terminate_processes", record_termination)
+    monkeypatch.setattr(supervisor, "_refresh_worker_identities_after_stop", lambda name: None)
+
+    await supervisor._reclaim_port_from_our_own_children("media", "http://127.0.0.1:65531/health")
+
+    assert terminated == [1], f"expected the one selected holder to be terminated, got {terminated}"
+    assert probes == 4, (
+        f"expected the bind to be retried past two transient failures, it probed {probes} time(s)"
+    )
+
+
+async def test_a_sibling_worker_on_the_same_endpoint_is_never_terminated(
+    settings,
+) -> None:  # type: ignore[no-untyped-def]
+    """Endpoint ownership proves a process is in the way, not that it is ours to take.
+
+    Nothing requires two workers to be configured on DIFFERENT endpoints:
+    `validate_worker_url` checks each URL is loopback and stops there. So
+    `llama_url` and `comfy_url` may name the same host and port, and then the
+    other worker is a descendant of ours holding exactly the address this one
+    wants - indistinguishable, by endpoint alone, from the lost worker being
+    reclaimed. Selecting it tears down a live sibling, and `_terminate_processes`
+    takes its whole subtree, so a running service is stopped where the ordinary
+    preflight would merely have refused.
+
+    THE HOLDER IS FOUND RATHER THAN ASSUMED. On Windows this interpreter is a
+    trampoline: `subprocess.Popen` returns the pid of a launcher that holds no
+    socket, and the real listener is its child. Registering the returned pid as
+    the sibling's identity would therefore name a process that owns nothing, and
+    the test would pass while proving the opposite of what it claims.
+    """
+
+    settings.prepare()
+    port = _free_port()
+    sibling = _listener_child("127.0.0.1", port)
+    try:
+        supervisor = ProcessSupervisor(settings)
+
+        def holders() -> list[psutil.Process]:
+            return [
+                process
+                for process in supervisor._own_descendants()
+                if supervisor._listening_match(process, "127.0.0.1", port) == "exact"
+            ]
+
+        async def bound() -> list[psutil.Process]:
+            while True:
+                found = holders()
+                if found:
+                    return found
+                await asyncio.sleep(0.05)
+
+        actual = await asyncio.wait_for(bound(), timeout=30)
+        assert actual, "the sibling never took the endpoint, so nothing was measured"
+        # Without the exclusion this is exactly what would be terminated.
+        assert supervisor._own_descendants_blocking("media", "127.0.0.1", port) == actual
+
+        # Now it is chat's, and we are replacing media.
+        supervisor._worker_identities["chat"] = [
+            _ProcessIdentity(pid=process.pid, create_time=process.create_time())
+            for process in actual
+        ]
+
+        assert supervisor._own_descendants_blocking("media", "127.0.0.1", port) == [], (
+            "a live sibling worker holding the same configured endpoint was "
+            "selected for termination"
+        )
+
+        await supervisor._reclaim_port_from_our_own_children(
+            "media", f"http://127.0.0.1:{port}/health"
+        )
+        assert all(process.is_running() for process in actual), (
+            "the reclaim terminated another worker's process"
+        )
+    finally:
+        if sibling.poll() is None:
+            sibling.kill()
+            sibling.wait(timeout=5)
+
+
+def test_an_ipv6_wildcard_is_not_evidence_for_an_ipv4_target(
+    settings,
+) -> None:  # type: ignore[no-untyped-def]
+    """Cross-family wildcard evidence is unprovable here, so it must not authorise.
+
+    A socket bound to `::` accepts IPv4 connections wherever the platform leaves
+    IPV6_V6ONLY off - and psutil cannot report that flag, so whether a given `::`
+    listener holds an IPv4 endpoint is exactly what this cannot observe. An
+    earlier version accepted it anyway, reasoning that the endpoint had already
+    been measured busy. That reasoning is wrong: the thing making it busy can be
+    a FOREIGN IPv4 holder while an IPv6-only child of ours sits innocently at the
+    same number, and it would then be killed for a bind it could never block.
+
+    Driven through _listening_match with a stand-in rather than a real dual-stack
+    listener, because what is asserted is the rule, and arranging a genuine
+    IPv6-only holder would make the test assert the platform instead.
+    """
+
+    settings.prepare()
+    supervisor = ProcessSupervisor(settings)
+    listener = SimpleNamespace(
+        status=psutil.CONN_LISTEN,
+        laddr=SimpleNamespace(ip="::", port=51234),
+    )
+    process = SimpleNamespace(net_connections=lambda kind="tcp": [listener])
+
+    assert supervisor._listening_match(process, "127.0.0.1", 51234) is None, (
+        "an IPv6 wildcard was accepted as evidence for an IPv4 target, which "
+        "this cannot prove and must not act on"
+    )
+    assert supervisor._listening_match(process, "::1", 51234) == "wildcard", (
+        "the same-family wildcard is real evidence and must still count"
+    )
+
+
+def test_localhost_selects_only_the_family_the_probe_uses(
+    settings,
+) -> None:  # type: ignore[no-untyped-def]
+    """The evidence and the decision have to be about one endpoint.
+
+    `_port_is_free` and `_ensure_port_available` both pick the address family
+    from whether the host text contains a colon, so `localhost` is probed as IPv4
+    only. Selecting against both families while probing one would let an IPv4
+    busy result authorise terminating an exact ::1 descendant that had nothing to
+    do with it.
+    """
+
+    settings.prepare()
+    supervisor = ProcessSupervisor(settings)
+    on_v6 = SimpleNamespace(
+        net_connections=lambda kind="tcp": [
+            SimpleNamespace(status=psutil.CONN_LISTEN, laddr=SimpleNamespace(ip="::1", port=51235))
+        ]
+    )
+    on_v4 = SimpleNamespace(
+        net_connections=lambda kind="tcp": [
+            SimpleNamespace(
+                status=psutil.CONN_LISTEN, laddr=SimpleNamespace(ip="127.0.0.1", port=51235)
+            )
+        ]
+    )
+
+    assert supervisor._listening_match(on_v6, "localhost", 51235) is None, (
+        "an IPv6 loopback descendant was selected on an IPv4 probe of localhost"
+    )
+    assert supervisor._listening_match(on_v4, "localhost", 51235) == "exact", (
+        "localhost stopped matching the family it is actually probed as"
+    )

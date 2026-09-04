@@ -342,12 +342,24 @@ class _Collector:
         self._measure_string(event_type)
         self._measure_string(event.text)
         self._measure_data(event.data)
-        if event.text or ("tool_calls" in event.data and event_type != "tool_delta"):
+        if "tool_calls" in event.data and event_type != "tool_delta":
             raise _InvalidOutput
         if event_type == "complete":
             self._terminal = True
             return
-        if event_type == "usage":
+        if event_type in {"usage", "delta"}:
+            # Narration is ignored rather than refused. A reasoning model emits
+            # its chain of thought as a `delta` carrying text, and refusing ANY
+            # text rejected such a model before it ever reached its tool call -
+            # so the failure looked the same whether one value was asked for or
+            # eight, and the item count was never the variable.
+            #
+            # This removes a refusal, not a bound. The text is measured above
+            # before it is judged, so an unbounded stream still fails the same
+            # aggregate cap. Silence is still failure: arguments() requires a
+            # terminal event, a call, the exact tool name and non-empty
+            # arguments, so a model that only narrates gets the same refusal it
+            # gets today.
             return
         if event_type != "tool_delta":
             raise _InvalidOutput

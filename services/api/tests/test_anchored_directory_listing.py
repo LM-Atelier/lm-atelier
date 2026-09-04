@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import subprocess
+from collections.abc import Callable, Iterator
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -149,6 +151,147 @@ def test_a_zero_or_negative_bound_refuses(tmp_path: Path) -> None:
             list_entries(anchor, limit=0)
         with pytest.raises(AnchoredDirectoryError):
             list_entries(anchor, limit=-1)
+
+
+def test_a_stop_abandons_before_another_record_is_requested(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stopping after one validated record must not request the next one."""
+
+    root = tmp_path / "store"
+    root.mkdir()
+    requested: list[str] = []
+    closed = False
+    stopping = False
+
+    def records(
+        _anchor: AnchoredDirectory,
+        _limit: int,
+        _should_stop: Callable[[], bool] | None,
+    ) -> Iterator[AnchoredEntry]:
+        nonlocal closed
+        try:
+            for name in ("first.bin", "second.bin"):
+                requested.append(name)
+                yield AnchoredEntry(name, AnchoredEntryKind.FILE)
+        finally:
+            closed = True
+
+    original_require = filesystem_links._require_entry_name
+
+    def validate_then_stop(name: str) -> None:
+        nonlocal stopping
+        original_require(name)
+        if name == "first.bin":
+            stopping = True
+
+    monkeypatch.setattr(filesystem_links, "_iter_anchored_entries", records)
+    monkeypatch.setattr(filesystem_links, "_require_entry_name", validate_then_stop)
+
+    with (
+        AnchoredDirectory(root) as anchor,
+        pytest.raises(filesystem_links.AnchoredListingStopped),
+    ):
+        list_entries(anchor, should_stop=lambda: stopping)
+
+    assert requested == ["first.bin"]
+    assert closed
+
+
+def test_a_stop_during_posix_metadata_acquisition_abandons_the_listing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stop observed after the anchored open skips the remaining metadata."""
+
+    if os.name == "nt":
+        pytest.skip("POSIX reacquires metadata separately from its dirent")
+
+    root = tmp_path / "store"
+    root.mkdir()
+    (root / "entry.bin").write_bytes(b"payload")
+    stopping = False
+    fstat_calls = 0
+    original_fstat = os.fstat
+
+    def fstat_then_stop(descriptor: int) -> os.stat_result:
+        nonlocal fstat_calls, stopping
+        measured = original_fstat(descriptor)
+        fstat_calls += 1
+        stopping = True
+        return measured
+
+    with AnchoredDirectory(root) as anchor:
+        monkeypatch.setattr(os, "fstat", fstat_then_stop)
+        with pytest.raises(filesystem_links.AnchoredListingStopped):
+            list_entries(anchor, should_stop=lambda: stopping)
+
+    assert fstat_calls == 1
+
+
+def test_windows_records_observe_a_stop_between_records(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parsed Windows record does not force the following record to parse."""
+
+    def record(name: str, *, next_offset: int = 0) -> bytearray:
+        encoded = name.encode("utf-16-le")
+        raw = bytearray(_FILE_DIRECTORY_INFORMATION_HEADER + len(encoded))
+        raw[0:4] = next_offset.to_bytes(4, "little")
+        raw[60:64] = len(encoded).to_bytes(4, "little")
+        raw[_FILE_DIRECTORY_INFORMATION_HEADER:] = encoded
+        return raw
+
+    first = record("first.bin")
+    first[0:4] = len(first).to_bytes(4, "little")
+    raw = bytes(first + record("second.bin"))
+    stopping = False
+    metadata_calls = 0
+    original_metadata = filesystem_links._windows_metadata
+
+    def track_metadata(
+        kind: AnchoredEntryKind, end_of_file: int, written: int
+    ) -> tuple[int | None, datetime | None]:
+        nonlocal metadata_calls
+        metadata_calls += 1
+        return original_metadata(kind, end_of_file, written)
+
+    monkeypatch.setattr(filesystem_links, "_windows_metadata", track_metadata)
+    records = filesystem_links._iter_directory_records(raw, 8, 0, lambda: stopping)
+
+    assert next(records).name == "first.bin"
+    stopping = True
+    with pytest.raises(filesystem_links.AnchoredListingStopped):
+        next(records)
+    records.close()
+
+    assert metadata_calls == 1
+
+
+def test_a_late_duplicate_refuses_without_returning_the_earlier_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Incremental validation keeps the collected listing's all-or-none result."""
+
+    root = tmp_path / "store"
+    root.mkdir()
+
+    def records(
+        _anchor: AnchoredDirectory,
+        _limit: int,
+        _should_stop: Callable[[], bool] | None,
+    ) -> Iterator[AnchoredEntry]:
+        yield AnchoredEntry("same.bin", AnchoredEntryKind.FILE)
+        yield AnchoredEntry("same.bin", AnchoredEntryKind.DIRECTORY)
+
+    monkeypatch.setattr(filesystem_links, "_iter_anchored_entries", records)
+
+    with (
+        AnchoredDirectory(root) as anchor,
+        pytest.raises(AnchoredDirectoryError) as caught,
+    ):
+        list_entries(anchor)
+
+    assert not isinstance(caught.value, filesystem_links.AnchoredListingStopped)
 
 
 def test_a_closed_anchor_refuses_rather_than_answering(tmp_path: Path) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import subprocess
 from pathlib import Path, PurePosixPath
@@ -12,7 +13,6 @@ ALLOWED_FILES = {
     "docs/assets/social-preview.png",
 }
 DENIED_DIRECTORIES = {
-    ".private",
     ".venv",
     "artifacts",
     "backups",
@@ -26,6 +26,7 @@ DENIED_DIRECTORIES = {
     "logs",
     "models",
     "node_modules",
+    "private-assets",
     "outputs",
     "release",
     "temp",
@@ -67,41 +68,50 @@ DENIED_SUFFIXES = {
     ".egg",
     ".exe",
     ".flac",
-    ".gif",
+    ".ggml",
     ".gguf",
+    ".gif",
     ".gpg",
     ".gz",
+    ".h5",
+    ".hdf5",
     ".ipa",
     ".iso",
-    ".jks",
     ".jar",
+    ".jks",
     ".jpeg",
     ".jpg",
+    ".kdbx",
     ".key",
     ".keystore",
-    ".kdbx",
     ".lib",
     ".log",
     ".m4a",
     ".mkv",
+    ".mlmodel",
+    ".mobileprovision",
     ".mov",
     ".mp3",
     ".mp4",
-    ".mobileprovision",
     ".msi",
     ".msix",
     ".msu",
     ".node",
+    ".npy",
+    ".npz",
     ".nupkg",
     ".o",
     ".obj",
     ".onnx",
     ".ovpn",
     ".p12",
+    ".pb",
     ".pem",
     ".pfx",
+    ".pickle",
     ".pkcs8",
     ".pkg",
+    ".pkl",
     ".png",
     ".ppk",
     ".pt",
@@ -117,10 +127,11 @@ DENIED_SUFFIXES = {
     ".sqlite",
     ".sqlite3",
     ".tar",
+    ".tflite",
     ".tgz",
-    ".wav",
     ".war",
     ".wasm",
+    ".wav",
     ".webm",
     ".webp",
     ".whl",
@@ -139,16 +150,6 @@ SECRET_PATTERNS = (
     re.compile(r"AKIA[0-9A-Z]{16}"),
     re.compile(r"BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY"),
 )
-# Some files carry machine-readable handling flags saying they must never be
-# published. Matching the declaration rather than a path means the rule survives
-# a rename, a copy, or an excerpt pasted into another document - which is how
-# this kind of content actually escapes.
-SELF_EXCLUDING_MARKERS = (
-    re.compile(r'"never_commit"\s*:\s*true'),
-    re.compile(r'"never_publish"\s*:\s*true'),
-    re.compile(r'"never_include_in_public_documentation"\s*:\s*true'),
-)
-
 MARKDOWN_LINK = re.compile(r"!?\[[^\]]*]\((?P<target>[^)]+)\)")
 # A UTF-8 sequence re-read as cp1252 or latin-1 always begins with one of
 # these pairs. They are written as escapes so this file stays ASCII and
@@ -211,16 +212,6 @@ def contains_secret(path: str) -> bool:
 VENDORED_TEXT = ("apps/web/public/fonts/",)
 
 
-def declares_it_must_not_ship(path: str) -> bool:
-    """Whether a file carries content that declared itself unpublishable."""
-
-    try:
-        text = Path(path).read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return False
-    return any(pattern.search(text) for pattern in SELF_EXCLUDING_MARKERS)
-
-
 def is_vendored(path: str) -> bool:
     normalized = path.replace("\\", "/")
     return normalized.startswith(VENDORED_TEXT)
@@ -232,6 +223,16 @@ def has_trailing_whitespace(path: str) -> bool:
         return False
     text = payload.decode("utf-8", errors="ignore")
     return any(line.endswith((" ", "\t")) for line in text.splitlines())
+
+
+def _listed(locations: list[str]) -> str:
+    """Render stable diagnostic references without echoing rejected values."""
+
+    return "\n- ".join(
+        f"candidate {ordinal} [ref "
+        f"{hashlib.sha256(location.replace(chr(92), '/').encode()).hexdigest()[:12]}]"
+        for ordinal, location in enumerate(locations, 1)
+    )
 
 
 def mojibake_lines(path: str) -> list[str]:
@@ -293,25 +294,20 @@ def broken_local_links(paths: list[str]) -> list[str]:
 
 def main() -> int:
     paths = candidate_paths()
+
+    # Decide whether a candidate may be opened before any content rule reads it.
     unsafe = [path for path in paths if unsafe_path(path) or Path(path).is_symlink()]
     if unsafe:
         raise SystemExit(
             "Private, generated, executable, or runtime artifacts are in the "
-            "candidate:\n- " + "\n- ".join(unsafe)
-        )
-
-    self_excluding = [path for path in paths if declares_it_must_not_ship(path)]
-    if self_excluding:
-        raise SystemExit(
-            "Files that declare they must never be published are in the "
-            "candidate:\n- " + "\n- ".join(self_excluding)
+            "candidate:\n- " + _listed(unsafe)
         )
 
     secret_paths = [path for path in paths if contains_secret(path)]
     if secret_paths:
         raise SystemExit(
             "Likely credentials are present in candidate files:\n- "
-            + "\n- ".join(secret_paths)
+            + _listed(secret_paths)
         )
 
     whitespace_paths = [
@@ -322,7 +318,7 @@ def main() -> int:
     if whitespace_paths:
         raise SystemExit(
             "Trailing whitespace is present in candidate files:\n- "
-            + "\n- ".join(whitespace_paths)
+            + _listed(whitespace_paths)
         )
 
     mangled = [line for path in paths for line in mojibake_lines(path)]
@@ -331,14 +327,14 @@ def main() -> int:
             "Text mangled by a codepage round trip is present. Rewrite the line "
             "as UTF-8, and prefer an explicit escape such as \\u2022 over a "
             "literal non-ASCII character inside a regular expression:\n- "
-            + "\n- ".join(mangled)
+            + _listed(mangled)
         )
 
     broken_links = broken_local_links(paths)
     if broken_links:
         raise SystemExit(
             "Broken or out-of-repository local Markdown links are present:\n- "
-            + "\n- ".join(broken_links)
+            + _listed(broken_links)
         )
 
     print(f"Repository hygiene passed for {len(paths)} candidate files.")

@@ -986,7 +986,7 @@ def test_a_refusal_over_a_pending_plan_echoes_no_guidance() -> None:
 
 
 def test_a_model_slot_carries_guidance_as_a_string_never_none() -> None:
-    """Phase 1 guarantees guidance is present, and the model-values codec on the
+    """The contract guarantees guidance is present, and the model-values codec on the
     other side of this seam types it `str`. Admitting None here would describe a
     state neither side can reach."""
 
@@ -1298,7 +1298,7 @@ def _slotless_contract():
 
 
 def test_a_slotless_template_produces_one_draft_with_a_valid_receipt() -> None:
-    """Phase 1 permits a fixed literal template and the editor displays it.
+    """The contract permits a fixed literal template and the editor displays it.
 
     The canonical receipt refused this shape outright, because it required each
     item to carry at least one piece of evidence. A template with no slots has

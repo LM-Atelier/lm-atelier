@@ -44,6 +44,7 @@ CHECKED_CONTRACTS = {
     "ChatDetail": "ChatDetail",
     "CredentialStatus": "CredentialStatus",
     "DraftClassification": "DraftClassification",
+    "DeviceInfo": "DeviceInfo",
     "EditTemplate": "EditTemplateOut",
     "EngineCapabilities": "EngineCapabilities",
     "ExchangeDeletion": "ExchangeDeletionOut",
@@ -60,6 +61,7 @@ CHECKED_CONTRACTS = {
     "PromptTemplatePage": "PromptTemplatePageOut",
     "PromptTemplateRevision": "PromptTemplateRevisionOut",
     "PromptTemplateWriteResult": "PromptTemplateWriteOut",
+    "ReferenceAsset": "ReferenceAssetOut",
     "RegistryInstall": "RegistryInstallOut",
     "ResponseRevision": "ResponseRevisionOut",
     "Run": "RunOut",
@@ -345,8 +347,6 @@ OPEN_VOCABULARY_BASELINE = frozenset(
         "BoundWorkflowAssetOut.kind",
         "CatalogPreflight.auxiliary_kind",
         "ChatItemRemovalReferenceOut.subject_kind",
-        "DeviceInfo.kind",
-        "EditTemplateOut.mask_mode",
         "InstallPlanOut.failure_code",
         "InstallPlanOut.status",
         "JobOut.phase",
@@ -354,7 +354,6 @@ OPEN_VOCABULARY_BASELINE = frozenset(
         "ModelAssetOut.kind",
         "ModelCapabilityEvidenceOut.failure_code",
         "ModelUpdateOut.kind",
-        "ReferenceAssetOut.validation_state",
         "ReferenceSubjectCreate.kind",
         "ReferenceSubjectOut.kind",
         "ResponseRevisionOut.status",
@@ -363,21 +362,39 @@ OPEN_VOCABULARY_BASELINE = frozenset(
         "StudioToolCapability.kind",
         "WorkPlanOut.status",
         "WorkStepOut.status",
-        "WorkflowDependencyImpactOut.resource_kind",
         "WorkflowInstallOfferOut.invalidation_code",
         "WorkflowMissingNodeOut.node_type",
         "WorkflowPackageIssueOut.code",
     }
 )
 
-# Names ending in a vocabulary word that are NOT vocabularies. Kept explicit so
-# the classifier does not have to guess, and so a reader can see what was
-# deliberately excluded rather than wonder.
+# Names ending in a vocabulary word that are NOT vocabularies. Each reason is
+# paired with the check that enforces it, and the classifier consumes these
+# rather than repeating the conditions inline. The prose used to sit here
+# unreferenced while the same three rules were hardcoded further down, so a
+# reader who trusted this list - which its own comment invited - was reading
+# something with no authority over the behaviour, and a fourth exclusion added
+# in code would have left the list silently wrong.
+EXCLUDED_COMPONENTS = frozenset({"ValidationError", "HTTPValidationError"})
+
+
+def _is_identifier(name: str) -> bool:
+    return name == "id" or name.endswith("_id")
+
+
+def _is_media_type(name: str) -> bool:
+    return "mime" in name or "media_type" in name or "content_type" in name
+
+
 VOCABULARY_NAME_EXCLUSIONS = (
-    "identifiers - anything ending in _id, and a bare id",
-    "media and mime types - a content type is not a closed vocabulary",
-    "FastAPI validation models, which the application does not define",
+    ("identifiers - anything ending in _id, and a bare id", _is_identifier),
+    (
+        "media and mime types - a content type is not a closed vocabulary",
+        _is_media_type,
+    ),
 )
+
+VOCABULARY_COMPONENT_EXCLUSION = "FastAPI validation models, which the application does not define"
 
 
 def _resolve_reference(
@@ -464,15 +481,13 @@ def _open_vocabulary_fields(schemas: dict[str, dict]) -> set[str]:
 
     found: set[str] = set()
     for component, spec in schemas.items():
-        if component in {"ValidationError", "HTTPValidationError"}:
+        if component in EXCLUDED_COMPONENTS:
             continue
         for field, field_spec in (spec.get("properties") or {}).items():
             if field.split("_")[-1] not in VOCABULARY_TOKENS:
                 continue
             lowered = field.lower()
-            if lowered == "id" or lowered.endswith("_id"):
-                continue
-            if "mime" in lowered or "media_type" in lowered or "content_type" in lowered:
+            if any(excluded(lowered) for _, excluded in VOCABULARY_NAME_EXCLUSIONS):
                 continue
             if _is_closed_vocabulary(field_spec, schemas):
                 continue
@@ -480,6 +495,53 @@ def _open_vocabulary_fields(schemas: dict[str, dict]) -> set[str]:
                 continue
             found.add(f"{component}.{field}")
     return found
+
+
+def test_every_named_exclusion_is_one_the_classifier_actually_honours() -> None:
+    """Each reason must be paired with a check the classifier consumes.
+
+    The reasons used to sit in an unreferenced tuple while the same rules were
+    hardcoded inside the classifier. Nothing kept the two agreed: a fourth
+    exclusion added in code would have left the list silently wrong, and
+    editing the list would have changed nothing. This asserts the pairing
+    rather than the prose - an entry whose predicate the classifier ignores
+    fails here.
+    """
+    assert VOCABULARY_NAME_EXCLUSIONS, "no named exclusions declared"
+    for reason, excluded in VOCABULARY_NAME_EXCLUSIONS:
+        assert isinstance(reason, str) and reason.strip(), reason
+        assert callable(excluded), reason
+
+    # A field name that every exclusion should let through, so the loop below
+    # is measuring the exclusion rather than a name nothing would report.
+    assert not any(excluded("status") for _, excluded in VOCABULARY_NAME_EXCLUSIONS)
+
+    schemas = {"Thing": {"properties": {"status": {"type": "string"}}}}
+    assert _open_vocabulary_fields(schemas) == {"Thing.status"}
+
+    for reason, excluded in VOCABULARY_NAME_EXCLUSIONS:
+        name = next(
+            (
+                n
+                for n in ("chat_id", "content_type", "media_type", "mime_type", "id")
+                if excluded(n)
+            ),
+            None,
+        )
+        assert name is not None, f"no sample name matches: {reason}"
+        schemas = {"Thing": {"properties": {name: {"type": "string"}}}}
+        assert _open_vocabulary_fields(schemas) == set(), (
+            f"classifier ignores the exclusion: {reason}"
+        )
+
+
+def test_the_excluded_components_are_honoured() -> None:
+    """The component exclusion is paired with its reason the same way."""
+    assert VOCABULARY_COMPONENT_EXCLUSION.strip()
+    assert EXCLUDED_COMPONENTS
+    for component in EXCLUDED_COMPONENTS:
+        schemas = {component: {"properties": {"status": {"type": "string"}}}}
+        assert _open_vocabulary_fields(schemas) == set(), component
 
 
 def test_no_new_api_field_is_a_vocabulary_typed_as_an_open_string(

@@ -13,6 +13,7 @@ import dataclasses
 import pytest
 
 from local_lm.conversation_search_query_v1 import (
+    INVALID_QUERY,
     MAX_BODY_CHARS,
     MAX_ID_CHARS,
     MAX_QUERY_CHARS,
@@ -79,6 +80,33 @@ def test_scoring_counts_distinct_terms_and_folds_case() -> None:
     assert term_coverage_score("Alpha and BETA", "alpha beta") == 2
     assert term_coverage_score("Alpha only", "alpha beta") == 1
     assert term_coverage_score("nothing here", "alpha beta") == 0
+
+
+def test_a_repeated_query_term_counts_once() -> None:
+    """Distinct coverage is the contract; position counting inflated rank.
+
+    query_terms casefolds each part but keeps duplicate positions, so
+    "alpha alpha" and "ALPHA alpha" both scored 2 against a body that
+    contains alpha once.
+    """
+    assert term_coverage_score("alpha", "alpha") == 1
+    assert term_coverage_score("alpha", "alpha alpha") == 1
+    assert term_coverage_score("alpha", "alpha alpha alpha") == 1
+    assert term_coverage_score("alpha", "ALPHA alpha") == 1
+    assert term_coverage_score("alpha beta", "alpha alpha beta") == 2
+
+
+def test_a_padded_query_does_not_outrank_a_different_term() -> None:
+    """A repeated term must not rank above a document covering another term."""
+    ranked = rank_candidate_bodies(
+        [
+            ("narrow", "alpha"),
+            ("other", "beta gamma"),
+        ],
+        "alpha alpha beta",
+    )
+    scores = {row[0]: row[2] for row in ranked}
+    assert scores == {"narrow": 1, "other": 1}
 
 
 def test_fixed_location_facts_cannot_be_set_by_a_caller() -> None:
@@ -179,3 +207,25 @@ def test_ranking_is_deterministic_and_drops_rows_that_match_nothing() -> None:
     )
     assert [row[0] for row in ranked] == ["m1", "m2", "m3"]
     assert [row[2] for row in ranked] == [2, 2, 1]
+
+
+def test_a_long_query_that_collapses_to_a_short_one_is_still_refused() -> None:
+    """The RAW length cap, which the normalized cap below it cannot stand in for.
+
+    Both checks refuse the same oversized queries, so deleting the first one
+    changes no observable behaviour for almost every input - which is why it
+    was unbound. The distinguishing case is a query that is over the limit
+    BEFORE whitespace is collapsed and under it afterwards: the raw cap refuses
+    it, and without the raw cap it is accepted.
+
+    What the raw cap actually buys is bounded work. Without it, " ".join(
+    raw.split()) runs across the whole input before anything refuses, so an
+    arbitrarily large string is fully tokenised on the way to being rejected.
+    Measured at 1 MB the peak allocation is about 11 MB rather than 584 bytes.
+    """
+    collapses = "a" + (" " * (MAX_QUERY_CHARS * 2)) + "b"
+    assert len(collapses) > MAX_QUERY_CHARS
+    assert len(" ".join(collapses.split())) <= MAX_QUERY_CHARS
+
+    with pytest.raises(ConversationSearchError, match=INVALID_QUERY):
+        normalize_search_query(collapses)
