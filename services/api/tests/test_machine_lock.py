@@ -3054,3 +3054,152 @@ Write-Output "EXACT:$($env:GIT_DIR -ceq "{value}")"
     out = result.stdout + result.stderr
     assert "COMMON_RETURNED:True" in result.stdout, out
     assert "EXACT:True" in result.stdout, "the value came back changed: " + out
+
+
+@pytest.mark.parametrize("host", _powershell_hosts())
+def test_pytest_scratch_is_held_outside_the_repository(
+    anchor: Path, tmp_path: Path, host: str
+) -> None:
+    target = tmp_path / "available-scratch"
+    target.mkdir()
+    fallback = tmp_path / "fallback-scratch"
+    fallback.mkdir()
+    script = f"""
+$ErrorActionPreference = "Stop"
+. "{ROOT / "scripts" / "machine-lease.ps1"}"
+. "{ROOT / "scripts" / "held-pytest-scratch.ps1"}"
+$env:RUNNER_TEMP = "{target}"
+$env:TEMP = "{fallback}"
+$env:TMP = "{fallback}"
+$Lease = Enter-MachineLease -RepositoryRoot "{anchor}" -Purpose "scratch-test"
+if (-not $Lease) {{ exit 2 }}
+try {{
+    $Scratch = New-HeldPytestScratch -RepositoryRoot "{anchor}" -Lease $Lease
+    New-Item -ItemType Directory -Path $Scratch -ErrorAction Stop | Out-Null
+    Set-Content -LiteralPath (Join-Path $Scratch "write.txt") -Value "ok"
+    Write-Output "SCRATCH:$Scratch"
+    Write-Output "INSIDE:$(Test-PytestScratchContainedBy -Path $Scratch -Root "{anchor}")"
+    Write-Output "RUNNER:$(Test-PytestScratchContainedBy -Path $Scratch -Root "{target}")"
+    Write-Output "EXISTS:$(Test-Path -LiteralPath $Scratch)"
+    Write-Output "USABLE:$(Test-Path -LiteralPath (Join-Path $Scratch "write.txt"))"
+}} finally {{
+    if (-not (Exit-MachineLease $Lease)) {{ exit 3 }}
+}}
+"""
+    result = subprocess.run(
+        [host, "-NoProfile", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    assert "INSIDE:False" in result.stdout, out
+    assert "RUNNER:True" in result.stdout, out
+    assert "EXISTS:True" in result.stdout, out
+    assert "USABLE:True" in result.stdout, out
+
+
+@pytest.mark.parametrize("host", _powershell_hosts())
+def test_pytest_scratch_refuses_a_root_that_reaches_the_repository(
+    anchor: Path, tmp_path: Path, host: str
+) -> None:
+    target = anchor / "scratch-target"
+    target.mkdir()
+    link = tmp_path / "scratch-link"
+    _junction(link, target)
+    script = f"""
+$ErrorActionPreference = "Stop"
+. "{ROOT / "scripts" / "machine-lease.ps1"}"
+. "{ROOT / "scripts" / "held-pytest-scratch.ps1"}"
+$env:RUNNER_TEMP = ""
+$env:TEMP = "{link}"
+$env:TMP = "{link}"
+$Lease = Enter-MachineLease -RepositoryRoot "{anchor}" -Purpose "scratch-refusal"
+if (-not $Lease) {{ exit 2 }}
+try {{
+    try {{
+        New-HeldPytestScratch -RepositoryRoot "{anchor}" -Lease $Lease | Out-Null
+        Write-Output "ACCEPTED"
+    }} catch {{
+        Write-Output "REFUSED:$($_.Exception.Message)"
+    }}
+}} finally {{
+    if (-not (Exit-MachineLease $Lease)) {{ exit 3 }}
+}}
+"""
+    result = subprocess.run(
+        [host, "-NoProfile", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    assert "REFUSED:The pytest scratch root resolves inside the repository." in out
+    assert "ACCEPTED" not in out
+
+
+@pytest.mark.parametrize("host", _powershell_hosts())
+def test_pytest_scratch_holds_every_link_to_its_external_root(
+    anchor: Path, tmp_path: Path, host: str
+) -> None:
+    target = tmp_path / "external-scratch"
+    target.mkdir()
+    link = tmp_path / "external-link"
+    _junction(link, target)
+    script = f"""
+$ErrorActionPreference = "Stop"
+. "{ROOT / "scripts" / "machine-lease.ps1"}"
+. "{ROOT / "scripts" / "held-pytest-scratch.ps1"}"
+$env:RUNNER_TEMP = ""
+$env:TEMP = "{link}"
+$env:TMP = "{link}"
+$Lease = Enter-MachineLease -RepositoryRoot "{anchor}" -Purpose "scratch-link"
+if (-not $Lease) {{ exit 2 }}
+try {{
+    $Scratch = New-HeldPytestScratch -RepositoryRoot "{anchor}" -Lease $Lease
+    try {{
+        Remove-Item -LiteralPath "{link}" -Force -ErrorAction Stop
+        Write-Output "MOVED-WHILE-HELD"
+    }} catch {{
+        Write-Output "PINNED"
+    }}
+    try {{
+        Rename-Item -LiteralPath "{target}" -NewName "external-moved" -ErrorAction Stop
+        Write-Output "ROOT-MOVED-WHILE-HELD"
+    }} catch {{
+        Write-Output "ROOT-PINNED"
+    }}
+}} finally {{
+    if (-not (Exit-MachineLease $Lease)) {{ exit 3 }}
+}}
+Write-Output "RELEASED"
+"""
+    result = subprocess.run(
+        [host, "-NoProfile", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    assert "PINNED" in result.stdout, out
+    assert "MOVED-WHILE-HELD" not in result.stdout, out
+    assert "ROOT-PINNED" in result.stdout, out
+    assert "ROOT-MOVED-WHILE-HELD" not in result.stdout, out
+    assert "RELEASED" in result.stdout, out
+    os.rmdir(link)
+    assert not link.exists()
+
+
+def test_gate_uses_the_held_external_pytest_scratch() -> None:
+    source = (ROOT / "scripts" / "verify.ps1").read_text(encoding="utf-8")
+    helper_at = source.index("held-pytest-scratch.ps1")
+    select_at = source.index("New-HeldPytestScratch")
+    api_at = source.index('Invoke-Checked "API tests"')
+    assert helper_at < select_at < api_at
+    assert 'Join-Path $RepositoryRoot "temp"' not in source

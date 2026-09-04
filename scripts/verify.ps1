@@ -57,6 +57,7 @@ try {
     # holder dies - there is nothing to renew and nothing to recover.
     Write-Host "==> Machine-exclusive lease"
     . (Join-Path $RepositoryRoot "scripts\machine-lease.ps1")
+    . (Join-Path $RepositoryRoot "scripts\held-pytest-scratch.ps1")
     $MachineLease = Enter-MachineLease -RepositoryRoot $RepositoryRoot -Purpose "verify.ps1"
     if (-not $MachineLease) {
         # The refusal above says WHY (a live holder, an unreadable record, a
@@ -115,9 +116,8 @@ try {
         "-q", "-lll", "-r", "services/api/local_lm"
     )
     Invoke-Checked "Version metadata" $Python @("scripts/sync-version.py")
-    $VerificationTemp = Join-Path $RepositoryRoot "temp"
-    New-Item -ItemType Directory -Force -Path $VerificationTemp | Out-Null
-    $PytestTemp = Join-Path $VerificationTemp "verify-pytest-$PID"
+    $PytestTemp = New-HeldPytestScratch `
+        -RepositoryRoot $RepositoryRoot -Lease $MachineLease
     Invoke-Checked "API tests" $Pytest @(
         "services/api/tests",
         "-q",
