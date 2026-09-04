@@ -538,7 +538,9 @@ def test_fresh_and_migrated_reference_tables_have_identical_pragmas(
     finally:
         engine.dispose()
 
-    def by_name(rows: list[tuple]) -> dict[str, tuple]:
+    def by_name(
+        rows: list[tuple[int, str, str, int, str | None, int]],
+    ) -> dict[str, tuple[str, int, str | None, int]]:
         # Column ORDER legitimately differs (batch add_column appends; fresh
         # metadata declares inline); type, nullability, default, and pk must
         # not. A server-default mismatch is the defect this pins.
