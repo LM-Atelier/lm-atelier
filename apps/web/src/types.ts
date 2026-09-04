@@ -96,6 +96,7 @@ export interface ArtifactCleanupResult {
   retention_pending_count: number;
   removed_count: number;
   reclaimed_bytes: number;
+  truncated?: boolean;
 }
 
 export interface ArtifactDeleteResult {

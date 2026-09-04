@@ -218,6 +218,9 @@ class ArtifactCleanupResult(ApiModel):
     retention_pending_count: int
     removed_count: int
     reclaimed_bytes: int
+    # A real run is one bounded batch; True means eligible artifacts remain
+    # and another call continues from where this one stopped.
+    truncated: bool = False
 
 
 class ArtifactDeleteResult(ApiModel):
