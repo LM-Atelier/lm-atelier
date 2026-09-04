@@ -21,10 +21,13 @@ from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session
 
 from .artifact_library import (
+    artifacts_naming,
     begin_artifact_write_fence,
     fenced_reference_snapshot,
+    metadata_referrers,
     referenced_artifact_ids,
 )
+from .artifact_library_schema import ARTIFACT_METADATA_REFERENCE_KEYS
 from .config import Settings
 from .domain import ArtifactKind, MessageRole, PartType
 from .filesystem_links import (
@@ -687,7 +690,12 @@ class ArtifactStore:
         pending_count = 0
         removed_count = 0
         reclaimed_bytes = 0
-        for artifact in session.scalars(select(Artifact).order_by(Artifact.created_at)).all():
+        ordered = session.scalars(select(Artifact).order_by(Artifact.created_at)).all()
+        # Who names whom, from rows already loaded above: no extra query, and
+        # bounded by this sweep's own working set rather than by the store.
+        referrers = metadata_referrers(ordered)
+        removed_ids: set[str] = set()
+        for artifact in ordered:
             metadata = dict(artifact.metadata_json)
             # A favorite pins against the automatic sweep exactly like a live
             # reference: never marked, never removed here. Explicit deletion
@@ -703,11 +711,21 @@ class ArtifactStore:
             unreferenced_at = self._metadata_datetime(metadata.get("unreferenced_at"))
             if not temporary and unreferenced_at:
                 eligible = current - unreferenced_at >= timedelta(days=retention_days)
+            if eligible and any(
+                naming not in removed_ids for naming in referrers.get(artifact.id, ())
+            ):
+                # The delete trigger refuses while a SURVIVING artifact names
+                # this one, so attempting it aborts the pass and everything
+                # after it. A referrer already removed in this pass no longer
+                # counts, which is what lets a video and its poster go together
+                # rather than one per pass.
+                eligible = False
             if eligible:
                 removed_count += 1
                 reclaimed_bytes += artifact.size_bytes
                 if not dry_run:
                     self._delete_artifact(session, artifact, retained=referenced)
+                removed_ids.add(artifact.id)
                 continue
             if not temporary:
                 pending_count += 1
@@ -754,7 +772,7 @@ class ArtifactStore:
 
         linked_ids = {
             linked_id
-            for key in ("poster_artifact_id", "browser_proxy_artifact_id")
+            for key in ARTIFACT_METADATA_REFERENCE_KEYS
             if isinstance((linked_id := artifact.metadata_json.get(key)), str)
         }
         parts = session.scalars(
@@ -777,6 +795,13 @@ class ArtifactStore:
         for linked_id in linked_ids:
             linked = session.get(Artifact, linked_id)
             if not linked or linked.id in referenced:
+                continue
+            # The parent is already deleted above, so anything still naming this
+            # poster or proxy is a DIFFERENT artifact - ingest deduplicates on
+            # sha256, so two videos with identical extracted frames share one
+            # poster row. referenced_artifact_ids does not see that referrer when
+            # it is itself unreferenced, but the delete trigger does, and refuses.
+            if artifacts_naming(session, linked.id):
                 continue
             removed_count += 1
             reclaimed_bytes += linked.size_bytes

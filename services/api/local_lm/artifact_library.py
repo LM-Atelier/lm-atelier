@@ -7,7 +7,7 @@ import hashlib
 import hmac
 import json
 import re
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from collections.abc import Set as AbstractSet
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -19,6 +19,7 @@ from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
+from .artifact_library_schema import ARTIFACT_METADATA_REFERENCE_KEYS
 from .domain import ArtifactKind, utcnow
 from .models import (
     Artifact,
@@ -558,7 +559,7 @@ def _pending_json_reference_ids(session: Session) -> set[str]:
             retain(_job_ids(value.result_json or {}))
         elif isinstance(value, Artifact):
             metadata = _mapping(value.metadata_json or {})
-            for key in ("poster_artifact_id", "browser_proxy_artifact_id"):
+            for key in ARTIFACT_METADATA_REFERENCE_KEYS:
                 if key in metadata:
                     retain(_optional_id(metadata[key]))
     return found
@@ -724,12 +725,66 @@ def referenced_artifact_ids(
         if artifact is None:
             continue
         metadata = _mapping(artifact.metadata_json)
-        for key in ("poster_artifact_id", "browser_proxy_artifact_id"):
+        for key in ARTIFACT_METADATA_REFERENCE_KEYS:
             if key in metadata:
                 linked = _optional_id(metadata[key])
                 for linked_id in linked - found:
                     retain({linked_id})
                     pending.append(linked_id)
+    return found
+
+
+def metadata_referrers(artifacts: Iterable[Artifact]) -> dict[str, set[str]]:
+    """Map each named artifact id to the ids of the artifacts naming it.
+
+    This answers a different question from ``referenced_artifact_ids``, and the
+    difference is why deletion needs it. That walk follows artifact-metadata
+    links only out of artifacts that are already retained, so a poster whose
+    only referrer is itself garbage reads as unreferenced there. The delete
+    trigger refuses while ANY surviving artifact names it, retained or not.
+
+    Both are right about their own concern - one is reachability, the other is
+    referential integrity - but SQLite evaluates the trigger per statement
+    rather than per transaction, so it cannot see that the referrer is about to
+    be deleted too. Deletion has to respect the stricter answer.
+
+    It returns the REFERRERS rather than just the named ids, because a caller
+    deleting in one pass needs to know when a name stops applying: once every
+    artifact naming a poster has itself been deleted, that poster is free in the
+    same pass rather than the next one.
+
+    Deliberately takes loaded artifacts instead of a session. The sweep already
+    holds every row, so this costs no query, and - the reason that matters - a
+    set built here is bounded by the caller's own working set instead of by the
+    store. Scanning the whole table instead would be bounded by
+    MAX_REFERENCE_VALUES, which is a CORRUPTION bound: a large but entirely
+    valid store exceeds it and fails the startup sweep with "reference data is
+    invalid" - the failure this module exists to prevent.
+    """
+
+    referrers: dict[str, set[str]] = {}
+    for artifact in artifacts:
+        row = _mapping(artifact.metadata_json or {})
+        for key in ARTIFACT_METADATA_REFERENCE_KEYS:
+            if key in row:
+                for named in _optional_id(row[key]):
+                    referrers.setdefault(named, set()).add(artifact.id)
+    return referrers
+
+
+def artifacts_naming(session: Session, artifact_id: str) -> set[str]:
+    """Ids of stored artifacts whose metadata names this one.
+
+    The single-id form, for callers deleting one artifact rather than sweeping.
+    Bounded by how many artifacts name this one, which is a handful.
+    """
+
+    found: set[str] = set()
+    for other_id, value in session.execute(select(Artifact.id, Artifact.metadata_json)):
+        row = _mapping(value or {})
+        for key in ARTIFACT_METADATA_REFERENCE_KEYS:
+            if key in row and artifact_id in _optional_id(row[key]):
+                found.add(other_id)
     return found
 
 

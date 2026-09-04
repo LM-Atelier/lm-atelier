@@ -15,6 +15,7 @@ from sqlalchemy import event, select
 from sqlalchemy.orm import Session, selectinload
 
 from .artifact_library import ensure_library_entry
+from .artifact_library_schema import ARTIFACT_METADATA_REFERENCE_KEYS
 from .artifacts import ArtifactStore
 from .auxiliary_assets import AUXILIARY_ASSET_KINDS
 from .config import Settings
@@ -154,7 +155,7 @@ class ProjectExporter:
         linked_artifact_ids = {
             linked_id
             for artifact in referenced.values()
-            for key in ("poster_artifact_id", "browser_proxy_artifact_id")
+            for key in ARTIFACT_METADATA_REFERENCE_KEYS
             if isinstance((linked_id := artifact.metadata_json.get(key)), str)
         }
         if linked_artifact_ids:
