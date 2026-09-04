@@ -10,6 +10,7 @@ import math
 import os
 import re
 import shutil
+import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -45,6 +46,11 @@ from .artifact_library import (
     ensure_library_entry,
     list_library_entries,
     set_library_favorite,
+)
+from .artifacts import (
+    RETENTION_BATCH_DELETIONS,
+    RETENTION_BATCH_SECONDS,
+    RetentionCleanupSummary,
 )
 from .auxiliary_assets import AUXILIARY_ASSET_KINDS, validate_lora_workflow_contract
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
@@ -4302,23 +4308,63 @@ async def artifact_storage(
 async def cleanup_artifacts(
     payload: ArtifactCleanupRequest,
     request: Request,
-    session: ConversationSessionDep,
 ) -> ArtifactCleanupResult:
+    """Run one budgeted retention batch, off the event loop.
+
+    A real run is bounded the way the background sweep's batches are, since it
+    holds the same writer reservation: by time held, with a count as the
+    ceiling, and always at least one deletion, so a call makes progress even
+    when the fixed work of a pass alone exhausts the budget. When the bound cut
+    the run short the result says so and the next call continues. A dry run
+    deletes nothing and reports the whole eligible set.
+    """
+
     services = _services(request)
-    cleanup = services.artifacts.cleanup_retention(
-        session,
-        retention_days=services.settings.artifact_retention_days,
-        temporary_hours=services.settings.temporary_retention_hours,
-        dry_run=payload.dry_run,
-    )
-    if not payload.dry_run:
-        session.commit()
+    settings = services.settings
+
+    def run() -> RetentionCleanupSummary:
+        deadline: float | None = None
+        max_deletions: int | None = None
+        if not payload.dry_run:
+            deadline = time.monotonic() + RETENTION_BATCH_SECONDS
+            max_deletions = RETENTION_BATCH_DELETIONS
+        consulted = 0
+
+        def should_stop() -> bool:
+            nonlocal consulted
+            consulted += 1
+            if deadline is None or consulted == 1:
+                return False
+            return time.monotonic() >= deadline
+
+        with SessionLocal() as session:
+            try:
+                summary = services.artifacts.cleanup_retention(
+                    session,
+                    retention_days=settings.artifact_retention_days,
+                    temporary_hours=settings.temporary_retention_hours,
+                    dry_run=payload.dry_run,
+                    max_deletions=max_deletions,
+                    should_stop=should_stop,
+                )
+                if not payload.dry_run:
+                    session.commit()
+            except BaseException:
+                # Roll back here, not implicitly at close, so the rollback
+                # listeners that restore staged files run before anything else
+                # observes the store.
+                session.rollback()
+                raise
+            return summary
+
+    cleanup = await asyncio.to_thread(run)
     return ArtifactCleanupResult(
         dry_run=payload.dry_run,
         marked_count=cleanup.marked_count,
         retention_pending_count=cleanup.pending_count,
         removed_count=cleanup.removed_count,
         reclaimed_bytes=cleanup.reclaimed_bytes,
+        truncated=cleanup.truncated,
     )
 
 

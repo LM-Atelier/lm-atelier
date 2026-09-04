@@ -159,6 +159,17 @@ def _removed(anchor: AnchoredDirectory, name: str, *, counted: int, cutoff: date
     return True
 
 
+# A retention batch holds SQLite's writer reservation for its whole duration,
+# and every other writer in the process waits on the event-loop thread for at
+# most busy_timeout (5 s) before failing. A batch is therefore bounded by time
+# held, with the count as a ceiling: at ~3 s per deletion a 2 s budget means
+# one deletion per batch on a heavy install and several on a light one. The
+# background sweep and the manual cleanup endpoint share the bound, since they
+# hold the same reservation.
+RETENTION_BATCH_DELETIONS = 10
+RETENTION_BATCH_SECONDS = 2.0
+
+
 @dataclass(frozen=True)
 class RetentionCleanupSummary:
     marked_count: int

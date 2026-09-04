@@ -30,7 +30,12 @@ from .api import (
     shutdown_registry_preparations,
 )
 from .api_errors import register_api_error_handler
-from .artifacts import ArtifactStore, RetentionCleanupSummary
+from .artifacts import (
+    RETENTION_BATCH_DELETIONS,
+    RETENTION_BATCH_SECONDS,
+    ArtifactStore,
+    RetentionCleanupSummary,
+)
 from .backups import BackupManager
 from .catalog import HuggingFaceCatalog
 from .catalog_sources import CatalogSources
@@ -363,14 +368,7 @@ async def maintain_automatic_recovery_backups(
         await asyncio.sleep(interval_seconds)
 
 
-RETENTION_BATCH_DELETIONS = 10
 RETENTION_BATCH_PAUSE_SECONDS = 1.0
-# A batch holds SQLite's writer reservation for its whole duration, and every
-# other writer in the process waits on the event-loop thread for at most
-# busy_timeout (5 s) before failing. The batch is therefore bounded by time
-# held, not by a count: at ~3 s per deletion a 2 s budget means one deletion
-# per batch on a heavy install and several on a light one.
-RETENTION_BATCH_SECONDS = 2.0
 # Contention with a user transaction is waited out, a bounded number of times
 # in a row; a whole store is drained in successive passes, since a poster is
 # freed only by the pass that removes the artifact naming it, up to a bound
