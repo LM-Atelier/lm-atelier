@@ -7,10 +7,19 @@ from typing import Any
 
 import pytest
 from httpx2 import AsyncClient
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
+import local_lm.chat_forking as chat_forking_module
+from local_lm.chat_forking import fork_chat_from_message
 from local_lm.db import SessionLocal
-from local_lm.models import Chat, Message
+from local_lm.message_references import (
+    ResolvedReference,
+    message_references,
+    record_message_references,
+)
+from local_lm.models import Artifact, Chat, Message, MessageReference
+from local_lm.references import MentionSource
 
 
 async def wait_for_run(client: AsyncClient, run_id: str) -> dict[str, Any]:
@@ -68,6 +77,17 @@ async def test_forking_copies_the_history_up_to_the_chosen_message(
     assert len(original["messages"]) == 4
     assert original["origin_json"] == {}
 
+    with SessionLocal() as session:
+        fork_message_ids = select(Message.id).where(Message.chat_id == fork["id"])
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(MessageReference)
+                .where(MessageReference.message_id.in_(fork_message_ids))
+            )
+            == 0
+        )
+
 
 async def test_the_fork_is_independently_editable(client: AsyncClient) -> None:
     source = (await client.post("/api/chats", json={"title": "Shared start"})).json()
@@ -102,3 +122,262 @@ async def test_a_long_title_stays_within_its_bound(client: AsyncClient, title: s
         chat = session.get(Chat, forked.json()["id"])
         assert chat is not None
         assert len(chat.title) <= 240
+
+
+async def test_fork_carries_exact_reference_snapshots_in_order(client: AsyncClient) -> None:
+    source = (await client.post("/api/chats", json={"title": "Referenced history"})).json()
+    first_snapshot = (
+        ResolvedReference(
+            reference_subject_id="refsubject_deleted",
+            mention_slug="original-name",
+            subject_name="Original Name",
+            subject_kind="person",
+            reference_asset_ids=("refasset_second", "refasset_first"),
+            artifact_ids=("artifact_second", "artifact_first"),
+            role="subject",
+            strength=0.65,
+            source=MentionSource.INHERITED_CONTEXT,
+        ),
+        ResolvedReference(
+            reference_subject_id="refsubject_place",
+            mention_slug="old-studio",
+            subject_name="Old Studio",
+            subject_kind="place",
+            role="style",
+            strength=0.25,
+            source=MentionSource.MENTION,
+        ),
+    )
+    second_snapshot = (
+        ResolvedReference(
+            reference_subject_id="refsubject_object",
+            mention_slug="blue-vase",
+            subject_name="Blue Vase",
+            subject_kind="object",
+            source=MentionSource.MENTION,
+        ),
+    )
+    with SessionLocal() as session:
+        session.add_all(
+            [
+                Artifact(
+                    id="artifact_first",
+                    sha256="1" * 64,
+                    kind="image",
+                    media_type="image/png",
+                    size_bytes=1,
+                    relative_path="fork/first.png",
+                ),
+                Artifact(
+                    id="artifact_second",
+                    sha256="2" * 64,
+                    kind="image",
+                    media_type="image/png",
+                    size_bytes=1,
+                    relative_path="fork/second.png",
+                ),
+            ]
+        )
+        root = Message(chat_id=source["id"], role="user", status="complete")
+        session.add(root)
+        session.flush()
+        leaf = Message(
+            chat_id=source["id"],
+            parent_id=root.id,
+            role="assistant",
+            status="complete",
+        )
+        session.add(leaf)
+        session.flush()
+        record_message_references(session, root.id, first_snapshot)
+        record_message_references(session, leaf.id, second_snapshot)
+        session.commit()
+        root_id, leaf_id = root.id, leaf.id
+        source_reference_ids = tuple(
+            session.scalars(
+                select(MessageReference.id)
+                .where(MessageReference.message_id.in_((root_id, leaf_id)))
+                .order_by(MessageReference.message_id, MessageReference.position)
+            ).all()
+        )
+
+    response = await client.post(f"/api/messages/{leaf_id}/fork")
+    assert response.status_code == 201
+    fork_id = response.json()["id"]
+
+    with SessionLocal() as session:
+        copied_root = session.scalar(
+            select(Message).where(Message.chat_id == fork_id, Message.parent_id.is_(None))
+        )
+        assert copied_root is not None
+        copied_leaf = session.scalar(
+            select(Message).where(
+                Message.chat_id == fork_id,
+                Message.parent_id == copied_root.id,
+            )
+        )
+        assert copied_leaf is not None
+
+        assert message_references(session, copied_root.id) == first_snapshot
+        assert message_references(session, copied_leaf.id) == second_snapshot
+        assert message_references(session, root_id) == first_snapshot
+        assert message_references(session, leaf_id) == second_snapshot
+
+        source_rows = session.scalars(
+            select(MessageReference)
+            .where(MessageReference.message_id.in_((root_id, leaf_id)))
+            .order_by(MessageReference.message_id, MessageReference.position)
+        ).all()
+        assert tuple(row.id for row in source_rows) == source_reference_ids
+        copied_rows = session.scalars(
+            select(MessageReference)
+            .where(MessageReference.message_id.in_((copied_root.id, copied_leaf.id)))
+            .order_by(MessageReference.message_id, MessageReference.position)
+        ).all()
+        assert len(copied_rows) == 3
+        assert not {row.id for row in copied_rows} & set(source_reference_ids)
+        copied_message_ids = {copied_root.id, copied_leaf.id}
+        assert {row.message_id for row in copied_rows} <= copied_message_ids
+        copied_messages = [session.get(Message, row.message_id) for row in copied_rows]
+        assert all(message is not None for message in copied_messages)
+        assert all(message.chat_id == fork_id for message in copied_messages if message is not None)
+
+
+async def test_reference_copy_failure_rolls_back_the_whole_fork(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = (
+        ResolvedReference(
+            reference_subject_id="refsubject_private",
+            mention_slug="private-subject",
+            subject_name="Private Subject",
+            subject_kind="person",
+        ),
+    )
+    source_chat = (await client.post("/api/chats", json={"title": "Rollback source"})).json()
+    with SessionLocal() as session:
+        root = Message(chat_id=source_chat["id"], role="user", status="complete")
+        session.add(root)
+        session.flush()
+        leaf = Message(
+            chat_id=source_chat["id"],
+            parent_id=root.id,
+            role="assistant",
+            status="complete",
+        )
+        session.add(leaf)
+        session.flush()
+        record_message_references(session, root.id, snapshot)
+        record_message_references(session, leaf.id, snapshot)
+        session.commit()
+        source_chat_id = source_chat["id"]
+        source_message_ids = (root.id, leaf.id)
+        source_reference_ids = tuple(
+            session.scalars(select(MessageReference.id).order_by(MessageReference.message_id)).all()
+        )
+
+    real_carry = chat_forking_module.carry_message_references_if_absent  # type: ignore[attr-defined]
+    calls = 0
+
+    def fail_after_second_copy(
+        session: Session,
+        *,
+        source_message_id: str,
+        target_message_id: str,
+    ) -> None:
+        nonlocal calls
+        calls += 1
+        real_carry(
+            session,
+            source_message_id=source_message_id,
+            target_message_id=target_message_id,
+        )
+        if calls == 2:
+            raise RuntimeError("injected fork failure")
+
+    monkeypatch.setattr(
+        chat_forking_module,
+        "carry_message_references_if_absent",
+        fail_after_second_copy,
+    )
+    with SessionLocal() as session:
+        with pytest.raises(RuntimeError, match="^injected fork failure$"):
+            fork_chat_from_message(session, source_message_ids[1])
+        session.rollback()
+
+    with SessionLocal() as session:
+        assert session.scalars(select(Chat.id)).all() == [source_chat_id]
+        assert set(session.scalars(select(Message.id)).all()) == set(source_message_ids)
+        rows = session.scalars(select(MessageReference).order_by(MessageReference.message_id)).all()
+        assert tuple(row.id for row in rows) == source_reference_ids
+        assert {row.message_id for row in rows} == set(source_message_ids)
+
+
+async def test_forking_walks_the_artifact_reference_graph_once_not_once_per_message(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Carrying references must not buy a whole-graph walk per copied message.
+
+    A pending MessageReference that pins an asset makes the before_flush guard
+    walk the entire artifact reference graph, so carrying references costs one
+    full walk for every flush taken while a carry is pending. A fork must pay
+    that walk once, however many messages the lineage holds.
+    """
+
+    from local_lm import artifact_library
+
+    pinned = ResolvedReference(
+        reference_subject_id="refsubject_counted",
+        mention_slug="counted-subject",
+        subject_name="Counted Subject",
+        subject_kind="person",
+        artifact_ids=("artifact_counted",),
+    )
+    chat = (await client.post("/api/chats", json={"title": "Walk count"})).json()
+    with SessionLocal() as session:
+        session.add(
+            Artifact(
+                id="artifact_counted",
+                sha256="counted",
+                kind="image",
+                media_type="image/png",
+                size_bytes=1,
+                relative_path="counted.png",
+            )
+        )
+        parent_id: str | None = None
+        for _ in range(6):
+            message = Message(
+                chat_id=chat["id"],
+                parent_id=parent_id,
+                role="assistant",
+                status="complete",
+            )
+            session.add(message)
+            session.flush()
+            record_message_references(session, message.id, (pinned,))
+            parent_id = message.id
+        session.commit()
+        leaf_id = parent_id
+
+    calls = 0
+    real = artifact_library.referenced_artifact_ids
+
+    def counted(*args: Any, **kwargs: Any) -> set[str]:
+        nonlocal calls
+        calls += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(artifact_library, "referenced_artifact_ids", counted)
+
+    with SessionLocal() as session:
+        assert leaf_id is not None
+        fork_chat_from_message(session, leaf_id)
+        session.commit()
+
+    assert calls == 1, (
+        f"forking a six-message lineage walked the reference graph {calls} times; "
+        f"a fork pays exactly one walk however long the lineage is"
+    )
