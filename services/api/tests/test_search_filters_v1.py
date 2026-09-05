@@ -5,6 +5,7 @@ import pytest
 from local_lm.search_filters_v1 import (
     INVALID_FILTER,
     MAX_ID_CHARS,
+    MAX_TIME_CHARS,
     SearchFilterError,
     SearchFiltersV1,
     validate_search_filters,
@@ -53,6 +54,17 @@ def test_refuses_empty_non_string_and_oversize_ids() -> None:
         validate_search_filters({"chat_id": 1})
     with pytest.raises(SearchFilterError, match=INVALID_FILTER):
         validate_search_filters({"chat_id": "x" * (MAX_ID_CHARS + 1)})
+
+
+def test_refuses_empty_non_string_and_oversize_times() -> None:
+    with pytest.raises(SearchFilterError, match=INVALID_FILTER):
+        validate_search_filters({"since": ""})
+    with pytest.raises(SearchFilterError, match=INVALID_FILTER):
+        validate_search_filters({"until": ""})
+    with pytest.raises(SearchFilterError, match=INVALID_FILTER):
+        validate_search_filters({"since": 1})
+    with pytest.raises(SearchFilterError, match=INVALID_FILTER):
+        validate_search_filters({"since": "2" * (MAX_TIME_CHARS + 1)})
 
 
 def test_refuses_hostile_keys_and_constructor_authority() -> None:
