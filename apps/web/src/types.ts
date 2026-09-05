@@ -721,6 +721,13 @@ export interface CatalogFileVariant {
   precision: string | null;
 }
 
+export interface CatalogPreflightCheck {
+  id: string;
+  label: string;
+  status: "pass" | "warn" | "block";
+  detail: string;
+}
+
 export interface CatalogPreflight {
   remote_id: string;
   source_remote_id: string | null;
@@ -756,12 +763,7 @@ export interface CatalogPreflight {
     failure_code: string | null;
     failure_reason: string | null;
   } | null;
-  checks: Array<{
-    id: string;
-    label: string;
-    status: "pass" | "warn" | "block";
-    detail: string;
-  }>;
+  checks: CatalogPreflightCheck[];
 }
 
 /** One missing workflow file bound to an exact plan artifact. */
