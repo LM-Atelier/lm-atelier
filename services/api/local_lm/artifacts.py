@@ -184,6 +184,8 @@ class RetentionCleanupSummary:
     #: bound was reached or the caller asked it to stop - so another pass is
     #: needed before the sweep can be called complete.
     truncated: bool = False
+    #: Rows inspected in this pass, including retained rows and the stopping boundary.
+    examined_count: int = 0
 
 
 class _DeletionBudget:
@@ -747,6 +749,7 @@ class ArtifactStore:
         now: datetime | None = None,
         max_deletions: int | None = None,
         should_stop: Callable[[], bool] | None = None,
+        report_phase: Callable[[str], None] | None = None,
     ) -> RetentionCleanupSummary:
         """Remove expired unretained artifacts within the caller's stop/budget.
 
@@ -758,23 +761,33 @@ class ArtifactStore:
         Callers may commit each bounded pass to preserve completed work.
         """
 
+        phase: Callable[[str], None] = report_phase or (lambda _name: None)
         current = now or datetime.now(UTC)
         if not dry_run:
+            phase("acquire-writer")
             begin_artifact_write_fence(session)
+            phase("writer-acquired")
+            phase("recover-staged-deletions")
             self._recover_staged_deletions(session)
+        phase("reference-snapshot")
         referenced = self.referenced_artifact_ids(session, for_deletion=not dry_run)
+        examined_count = 0
         marked_count = 0
         pending_count = 0
         removed_count = 0
         reclaimed_bytes = 0
         truncated = False
+        phase("load-artifact-rows")
         ordered = session.scalars(select(Artifact).order_by(Artifact.created_at)).all()
         # Who names whom, from rows already loaded above: no extra query, and
         # bounded by this sweep's own working set rather than by the store.
+        phase("metadata-references")
         referrers = metadata_referrers(ordered)
         removed_ids: set[str] = set()
         metadata_updates: list[tuple[Artifact, dict[str, Any]]] = []
+        phase("examine-artifacts")
         for artifact in ordered:
+            examined_count += 1
             metadata = dict(artifact.metadata_json)
             # A favorite pins against the automatic sweep exactly like a live
             # reference: never marked, never removed here. Explicit deletion
@@ -807,8 +820,10 @@ class ArtifactStore:
                     truncated = True
                     break
                 if not dry_run:
+                    phase("delete-artifact")
                     proof = mint_artifact_deletion_proof(session, {artifact.id}, referenced)
                     self._delete_artifact(session, artifact, proof=proof)
+                    phase("examine-artifacts")
                 removed_count += 1
                 reclaimed_bytes += artifact.size_bytes
                 removed_ids.add(artifact.id)
@@ -821,6 +836,7 @@ class ArtifactStore:
                         metadata["unreferenced_at"] = current.isoformat()
                         metadata_updates.append((artifact, metadata))
         if not dry_run:
+            phase("flush-metadata")
             for artifact, metadata in metadata_updates:
                 artifact.metadata_json = metadata
             # Marking `unreferenced_at` makes an artifact dirty, and if its
@@ -839,6 +855,7 @@ class ArtifactStore:
             remaining = None if max_deletions is None else max(max_deletions - removed_count, 0)
             budget = _DeletionBudget(remaining, should_stop)
             if budget.allow():
+                phase("cleanup-orphan-files")
                 orphan_count, orphan_bytes = self._cleanup_orphan_files(
                     session,
                     current=current,
@@ -848,6 +865,7 @@ class ArtifactStore:
                 )
             truncated = budget.truncated
         return RetentionCleanupSummary(
+            examined_count=examined_count,
             marked_count=marked_count,
             pending_count=pending_count,
             removed_count=removed_count + orphan_count,
