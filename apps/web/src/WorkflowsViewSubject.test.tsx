@@ -12,6 +12,7 @@ vi.mock("./api", () => ({
     validateWorkflow: vi.fn(),
     cloneWorkflow: vi.fn(),
     updateWorkflow: vi.fn(),
+    createWorkflow: vi.fn(),
     createWorkflowRevision: vi.fn(),
     createWorkflowEditorDraft: vi.fn(),
     consumeWorkflowEditor: vi.fn(),
@@ -96,6 +97,33 @@ function renderView() {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+});
+
+describe("workflow creation requests", () => {
+  it.each([
+    { action: "New workflow", submit: "Save workflow", newRevision: false },
+    { action: "New revision", submit: "Create revision", newRevision: true },
+  ])("omits browser trust when saving $action", async ({ action, submit, newRevision }) => {
+    vi.mocked(api.workflows).mockResolvedValue([workflow("wf-a", "Alpha")] as never);
+    vi.mocked(api.createWorkflow).mockResolvedValue(workflow("wf-new", "Created") as never);
+    vi.mocked(api.createWorkflowRevision).mockResolvedValue(revision("revision-new") as never);
+
+    renderView();
+    fireEvent.click(await screen.findByText("Alpha"));
+    expect(screen.getByText("Trusted", { selector: ".badge" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: action }));
+
+    expect.soft(screen.queryByRole("checkbox", { name: /trust this workflow/i })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: submit }));
+
+    const save = newRevision ? api.createWorkflowRevision : api.createWorkflow;
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    const payload = newRevision
+      ? vi.mocked(api.createWorkflowRevision).mock.calls[0]?.[1]
+      : vi.mocked(api.createWorkflow).mock.calls[0]?.[0];
+    expect(payload).toEqual(expect.objectContaining({ api_graph: {}, ui_graph: {} }));
+    expect(payload).not.toHaveProperty("trusted");
+  });
 });
 
 describe("a verdict belongs to the workflow it was asked about", () => {
