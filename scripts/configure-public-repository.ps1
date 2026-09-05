@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [switch]$Apply,
-    [string]$Repository = "ajccarlson/lm-atelier"
+    [switch]$MergeQueueOnly,
+    [string]$Repository = "LM-Atelier/lm-atelier"
 )
 
 $ErrorActionPreference = "Stop"
@@ -9,7 +10,8 @@ Set-StrictMode -Version Latest
 
 $RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $ApiVersion = "2026-03-10"
-$ExpectedOwnerId = 32660587
+$ExpectedOwnerId = 325157610
+$ExpectedRepositoryId = 1308948872
 $AllowedActionPatterns = @(
     "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d",
     "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
@@ -193,7 +195,57 @@ function Set-Ruleset {
     }
 }
 
-if ($Repository -ne "ajccarlson/lm-atelier") {
+function Assert-QueueVerificationDeployed {
+    # Check deployed runtime bytes before either configuration mode changes settings.
+    $Develop = Invoke-GitHubApi -Method GET -Endpoint "repos/$Repository/branches/develop" |
+        ConvertFrom-Json
+    foreach ($Path in @(
+        ".github/workflows/ci.yml",
+        "scripts/ci-plan.py",
+        "scripts/ci-merge-gate.py"
+    )) {
+        $Deployed = Invoke-GitHubApi -Method GET -Endpoint (
+            "repos/$Repository/contents/${Path}?ref=$($Develop.commit.sha)"
+        ) | ConvertFrom-Json
+        $ExpectedBytes = [System.IO.File]::ReadAllBytes((Join-Path $RepositoryRoot $Path))
+        if (
+            $Deployed.encoding -ne "base64" -or
+            [Convert]::ToBase64String([Convert]::FromBase64String($Deployed.content)) -cne
+                [Convert]::ToBase64String($ExpectedBytes)
+        ) {
+            throw "Queue verification is not deployed on develop: $Path"
+        }
+    }
+}
+
+function Enable-DevelopMergeQueue {
+    Invoke-GitHubApi -Method PATCH -Endpoint "repos/$Repository" -Body @{
+        squash_merge_commit_title = "PR_TITLE"
+        squash_merge_commit_message = "BLANK"
+    } | Out-Null
+    Set-Ruleset -Definition $QueueRules
+
+    $Configured = Invoke-GitHubApi -Method GET -Endpoint "repos/$Repository" |
+        ConvertFrom-Json
+    Assert-JsonSubset -Label "Queue commit settings" -Actual $Configured -Expected @{
+        allow_squash_merge = $true
+        squash_merge_commit_title = "PR_TITLE"
+        squash_merge_commit_message = "BLANK"
+    }
+    $Rulesets = Invoke-GitHubApi -Method GET -Endpoint "repos/$Repository/rulesets" |
+        ConvertFrom-Json
+    $QueueSummary = @($Rulesets | Where-Object name -eq $QueueRules.name)
+    if ($QueueSummary.Count -ne 1) {
+        throw "The develop merge queue ruleset could not be verified."
+    }
+    $ActualQueue = Invoke-GitHubApi -Method GET -Endpoint (
+        "repos/$Repository/rulesets/$($QueueSummary[0].id)"
+    ) | ConvertFrom-Json
+    Assert-JsonSubset -Label "Develop merge queue" -Actual $ActualQueue -Expected $QueueRules
+    Write-Host "Develop merge queue applied and verified for $Repository."
+}
+
+if ($Repository -ne "LM-Atelier/lm-atelier") {
     throw "Refusing to configure an unexpected repository: $Repository"
 }
 
@@ -207,15 +259,21 @@ $TagCreationRules = Read-JsonFile (
     Join-Path $RepositoryRoot ".github\rulesets\release-tag-creation.json"
 )
 
+$QueueRules = Read-JsonFile (
+    Join-Path $RepositoryRoot ".github\rulesets\public-develop-queue.json"
+)
+
 if (-not $Apply) {
     Write-Host "Dry run only. No GitHub settings were changed."
-    Write-Host "After the approved visibility change, run:"
+    Write-Host "After queue verification is deployed on develop, run:"
     Write-Host "  .\scripts\configure-public-repository.ps1 -Apply"
     Write-Host "Prepared controls:"
     Write-Host "  - squash work merges, merge-commit promotions, and branch cleanup"
     Write-Host "  - read-only, SHA-pinned selected Actions"
     Write-Host "  - 30-day Actions log and artifact retention"
     Write-Host "  - protected main/develop branches and v* tags"
+    Write-Host "  - checked squash queue for develop with empty commit bodies"
+    Write-Host "Use -Apply -MergeQueueOnly to change only queue and squash settings."
     Write-Host "  - dependency, secret, push, CodeQL, and private-reporting security"
     exit 0
 }
@@ -233,8 +291,23 @@ $RepositoryState = Invoke-GitHubApi -Method GET -Endpoint "repos/$Repository" |
 if ($RepositoryState.visibility -ne "public") {
     throw "The repository must be public before applying public-repository controls."
 }
-if ($RepositoryState.owner.id -ne $ExpectedOwnerId) {
+if (
+    $RepositoryState.owner.id -ne $ExpectedOwnerId -or
+    $RepositoryState.owner.type -ne "Organization" -or
+    $RepositoryState.id -ne $ExpectedRepositoryId -or
+    $RepositoryState.full_name -cne $Repository
+) {
     throw "The repository owner identity does not match the reviewed configuration."
+}
+
+Assert-QueueVerificationDeployed
+
+if ($MergeQueueOnly) {
+    if (-not $RepositoryState.allow_squash_merge) {
+        throw "Squash merging must be enabled before configuring the queue."
+    }
+    Enable-DevelopMergeQueue
+    exit 0
 }
 
 Invoke-GitHubApi -Method PATCH -Endpoint "repos/$Repository" -Body @{
@@ -259,7 +332,7 @@ Invoke-GitHubApi -Method PATCH -Endpoint "repos/$Repository" -Body @{
         secret_scanning = @{ status = "enabled" }
         secret_scanning_push_protection = @{ status = "enabled" }
     }
-    squash_merge_commit_message = "PR_BODY"
+    squash_merge_commit_message = "BLANK"
     squash_merge_commit_title = "PR_TITLE"
 } | Out-Null
 
@@ -461,5 +534,7 @@ Assert-JsonSubset `
     -Label "Release-tag creation ruleset" `
     -Actual $ActualTagCreationRules `
     -Expected $TagCreationRules
+
+Enable-DevelopMergeQueue
 
 Write-Host "Public repository controls were applied and verified for $Repository."

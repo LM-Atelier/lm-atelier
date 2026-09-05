@@ -966,6 +966,121 @@ def test_ci_plan_requires_exact_protected_develop_promotion(monkeypatch) -> None
         validate(base_ref="main", head_ref="develop", base_sha=base, head_sha=head)
 
 
+@pytest.mark.parametrize(
+    ("paths", "mode", "audit", "windows"),
+    [
+        (["docs/ARCHITECTURE.md"], "documentation", "false", "false"),
+        (["apps/web/src/App.tsx"], "full", "false", "false"),
+        (["services/api/local_lm/api.py"], "full", "false", "true"),
+        (["services/api/uv.lock", "docs/ARCHITECTURE.md"], "full", "true", "true"),
+    ],
+    ids=["documentation", "web", "api", "combined-dependency"],
+)
+def test_ci_plan_verifies_generated_merge_group_changes(
+    tmp_path: Path, monkeypatch, paths: list[str], mode: str, audit: str, windows: str
+) -> None:
+    """Plan the combined queue diff, whose event has no pull-request fields."""
+    namespace = runpy.run_path(str(ROOT / "scripts/ci-plan.py"))
+    main = namespace["main"]
+    base, head = "a" * 40, "b" * 40
+    output = tmp_path / "outputs"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "ci-plan.py",
+            "--event",
+            "merge_group",
+            "--base-ref",
+            "refs/heads/develop",
+            "--head-ref",
+            "refs/heads/gh-readonly-queue/develop/pr-1-" + head,
+            "--base-sha",
+            base,
+            "--head-sha",
+            head,
+            "--github-output",
+            str(output),
+        ],
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def event_git(*arguments: str) -> str:
+        calls.append(arguments)
+        queries = {
+            ("rev-parse", "--verify", f"{base}^{{commit}}"): base,
+            ("rev-parse", "--verify", f"{head}^{{commit}}"): head,
+            ("rev-parse", "HEAD"): head,
+            ("merge-base", base, head): base,
+            ("diff", "--name-only", "--diff-filter=ACDMRTUXB", base, head): "\n".join(paths),
+        }
+        return queries[arguments]
+
+    monkeypatch.setitem(main.__globals__, "git", event_git)
+    main()
+    assert output.read_text() == f"mode={mode}\ndependency_audit={audit}\nwindows={windows}\n"
+    assert ("rev-parse", "HEAD") in calls
+    assert ("merge-base", base, head) in calls
+
+
+@pytest.mark.parametrize(
+    "defect", ["main-target", "pr-head-ref", "checkout", "unrelated-base", "missing-sha"]
+)
+def test_ci_plan_refuses_unbound_merge_groups(monkeypatch, defect: str) -> None:
+    namespace = runpy.run_path(str(ROOT / "scripts/ci-plan.py"))
+    validate = namespace["validate_merge_group"]
+    base, head = "a" * 40, "b" * 40
+    inputs = {
+        "base_ref": "refs/heads/develop",
+        "head_ref": "refs/heads/gh-readonly-queue/develop/pr-1-" + head,
+        "base_sha": base,
+        "head_sha": head,
+    }
+    if defect == "main-target":
+        inputs["base_ref"] = "refs/heads/main"
+    elif defect == "pr-head-ref":
+        inputs["head_ref"] = "refs/pull/1/head"
+    elif defect == "missing-sha":
+        inputs["head_sha"] = ""
+
+    def event_git(*arguments: str) -> str:
+        if arguments == ("rev-parse", "HEAD"):
+            return "c" * 40 if defect == "checkout" else head
+        if arguments == ("merge-base", base, head):
+            return "c" * 40 if defect == "unrelated-base" else base
+        return arguments[-1].split("^")[0]
+
+    monkeypatch.setitem(validate.__globals__, "git", event_git)
+    with pytest.raises(ValueError):
+        validate(**inputs)
+
+
+@pytest.mark.parametrize("pr_fields", [{}, {"DRAFT": "", "BASE_CHANGED": "false"}])
+def test_merge_gate_accepts_verified_merge_group_without_pull_request_fields(pr_fields) -> None:
+    namespace = runpy.run_path(str(ROOT / "scripts/ci-merge-gate.py"))
+    environment = {
+        "EVENT_NAME": "merge_group",
+        "REPOSITORY_PRIVATE": "false",
+        "ACTION": "checks_requested",
+        "BASE_REF": "refs/heads/develop",
+        "BASE_SHA": "a" * 40,
+        "HEAD_REF": "refs/heads/gh-readonly-queue/develop/pr-1-" + "b" * 40,
+        "HEAD_SHA": "b" * 40,
+        "RUN_SHA": "b" * 40,
+        "PLAN": "success",
+        "UBUNTU": "success",
+        "WINDOWS": "skipped",
+        "WINDOWS_REQUIRED": "false",
+        **pr_fields,
+    }
+    log: list[str] = []
+    assert namespace["decide"](environment, log) == 0, log
+    for result in ("skipped", "cancelled", "failure"):
+        for job in ("PLAN", "UBUNTU", "WINDOWS"):
+            refused = {**environment, job: result, "WINDOWS_REQUIRED": "true"}
+            assert namespace["decide"](refused, []) == 1, (job, result)
+
+
 def test_ci_workflow_retains_required_check_for_every_pr_scope() -> None:
     workflow = (ROOT / ".github/workflows/ci.yml").read_text()
     plan = workflow.split("  verification-plan:", 1)[1].split("  compatibility:", 1)[0]
@@ -1085,7 +1200,9 @@ def test_each_production_shape_reaches_the_branch_that_names_it(
     namespace = runpy.run_path(str(ROOT / "scripts/ci-merge-gate.py"))
     log: list[str] = []
 
-    status = namespace["decide"]({"HEAD_SHA": "0" * 40, **environment}, log)
+    status = namespace["decide"](
+        {"EVENT_NAME": "pull_request", "HEAD_SHA": "0" * 40, **environment}, log
+    )
 
     assert status == 1, label
     assert any(expected_reason in line for line in log), log
@@ -1839,6 +1956,105 @@ def _content_mutations() -> list[tuple[str, str, str]]:
     ]
 
 
+def _queue_binding_mutations() -> list[tuple[str, object]]:
+    def job(name, key, apply):
+        return name, lambda content, workflow: apply(workflow["jobs"][key])
+
+    def checkout_ref(ref):
+        def apply(candidate):
+            for step in candidate["steps"]:
+                if str(step.get("uses", "")).startswith("actions/checkout@"):
+                    step["with"]["ref"] = ref
+
+        return apply
+
+    mutations = [
+        (
+            "missing merge group trigger",
+            lambda content, workflow: _triggers(workflow).pop("merge_group", None),
+        ),
+        (
+            "unexpected merge group action",
+            lambda content, workflow: _triggers(workflow).update(
+                {"merge_group": {"types": ["checks_requested", "destroyed"]}}
+            ),
+        ),
+        job(
+            "planner PR-only base SHA",
+            "verification-plan",
+            lambda j: j["steps"][1]["env"].update(
+                {"BASE_SHA": "${{ github.event.pull_request.base.sha }}"}
+            ),
+        ),
+        job(
+            "planner PR-only head SHA",
+            "verification-plan",
+            lambda j: j["steps"][1]["env"].update(
+                {"HEAD_SHA": "${{ github.event.pull_request.head.sha }}"}
+            ),
+        ),
+        job(
+            "planner PR-only base ref",
+            "verification-plan",
+            lambda j: j["steps"][1]["env"].update({"BASE_REF": "${{ github.base_ref }}"}),
+        ),
+        job(
+            "planner loses Windows output",
+            "verification-plan",
+            lambda j: j["outputs"].update({"windows": "false"}),
+        ),
+        job(
+            "Ubuntu accepts skipped planner",
+            "compatibility",
+            lambda j: j["steps"][0].update({"run": "exit 0"}),
+        ),
+        job(
+            "documentation checks PR head",
+            "compatibility",
+            lambda j: next(
+                step
+                for step in j["steps"]
+                if step.get("name") == "Validate documentation-only change"
+            )["env"].update({"HEAD_SHA": "${{ github.event.pull_request.head.sha }}"}),
+        ),
+    ]
+    for key in ("verification-plan", "compatibility", "windows-compatibility"):
+        mutations.extend(
+            [
+                job(
+                    f"{key} checks PR head",
+                    key,
+                    checkout_ref("${{ github.event.pull_request.head.sha }}"),
+                ),
+                job(
+                    f"{key} skipped for merge group",
+                    key,
+                    lambda j: j.update({"if": "github.event_name == 'pull_request'"}),
+                ),
+                job(
+                    f"{key} tolerates failures",
+                    key,
+                    lambda j: j.update({"continue-on-error": True}),
+                ),
+            ]
+        )
+    return mutations
+
+
+def test_workflow_policy_rejects_merge_group_binding_drift() -> None:
+    namespace = _workflow_namespace()
+    validate = namespace["validate_workflow_document"]
+    path, content, shipped = _shipped_ci()
+    assert validate(path, content, shipped) == []
+    accepted = []
+    for label, mutate in _queue_binding_mutations():
+        workflow = yaml.safe_load(content)
+        mutate(content, workflow)
+        if not validate(path, content, workflow):
+            accepted.append(label)
+    assert not accepted, accepted
+
+
 def _all_workflow_mutations() -> list[tuple[str, object]]:
     return _job_mutations() + _trigger_mutations() + _policy_mutations()
 
@@ -1950,6 +2166,7 @@ def test_workflow_validator_wiring_is_intact() -> None:
             "validate_untrusted_triggers",
             "validate_pull_request_triggers",
             "validate_merge_gate",
+            "validate_verification_bindings",
         )
     )
     # 4. The coordinator wires in every rule.
@@ -1964,6 +2181,7 @@ def test_workflow_validator_wiring_is_intact() -> None:
         "validate_untrusted_triggers",
         "validate_pull_request_triggers",
         "validate_merge_gate",
+        "validate_verification_bindings",
     ):
         assert f"errors.extend({rule}(" in coordinator, rule
     # 5. The merge gate wrapper reaches both of its halves.

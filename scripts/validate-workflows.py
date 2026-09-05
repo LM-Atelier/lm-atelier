@@ -242,6 +242,7 @@ def validate_untrusted_triggers(path: Path, content: str) -> list[str]:
 # A fully valid, fully green environment. The malformed-authority cases below
 # start here and break exactly one field, so each one isolates its own input.
 GREEN_MERGE_GATE = {
+    "EVENT_NAME": "pull_request",
     "DRAFT": "false",
     "ACTION": "synchronize",
     "HEAD_SHA": "0" * 40,
@@ -251,7 +252,57 @@ GREEN_MERGE_GATE = {
     "WINDOWS_REQUIRED": "true",
 }
 
+GREEN_MERGE_GROUP = {
+    "EVENT_NAME": "merge_group",
+    "REPOSITORY_PRIVATE": "false",
+    "ACTION": "checks_requested",
+    "BASE_REF": "refs/heads/develop",
+    "BASE_SHA": "1" * 40,
+    "HEAD_REF": "refs/heads/gh-readonly-queue/develop/pr-1-" + "0" * 40,
+    "HEAD_SHA": "0" * 40,
+    "RUN_SHA": "0" * 40,
+    "DRAFT": None,
+    "BASE_CHANGED": None,
+    "PLAN": "success",
+    "UBUNTU": "success",
+    "WINDOWS": "success",
+    "WINDOWS_REQUIRED": "true",
+}
+
 MERGE_GATE_MATRIX = (
+    ("verified merge group without PR-only fields", GREEN_MERGE_GROUP, 0),
+    (
+        "merge group with unrequired Windows",
+        {**GREEN_MERGE_GROUP, "WINDOWS": "skipped", "WINDOWS_REQUIRED": "false"},
+        0,
+    ),
+    *(
+        (f"merge group refuses {name}={value!r}", {**GREEN_MERGE_GROUP, name: value}, 1)
+        for name, value in (
+            ("EVENT_NAME", None),
+            ("EVENT_NAME", "push"),
+            ("ACTION", "destroyed"),
+            ("REPOSITORY_PRIVATE", None),
+            ("REPOSITORY_PRIVATE", "true"),
+            ("BASE_REF", "refs/heads/main"),
+            ("BASE_REF", None),
+            ("BASE_SHA", None),
+            ("BASE_SHA", "0" * 40),
+            ("HEAD_REF", "refs/heads/develop"),
+            ("HEAD_SHA", "0" * 39),
+            ("RUN_SHA", "2" * 40),
+            ("PLAN", "skipped"),
+            ("PLAN", "failure"),
+            ("PLAN", "cancelled"),
+            ("UBUNTU", "skipped"),
+            ("UBUNTU", "failure"),
+            ("UBUNTU", "cancelled"),
+            ("WINDOWS", "skipped"),
+            ("WINDOWS", "failure"),
+            ("WINDOWS", "cancelled"),
+            ("WINDOWS_REQUIRED", None),
+        )
+    ),
     (
         # Production's shape, not a synthetic green one: the plan is skipped,
         # Ubuntu runs on always() and refuses, and WINDOWS_REQUIRED is absent
@@ -520,7 +571,29 @@ MERGE_GATE_MATRIX = (
 
 MERGE_GATE_SCRIPT = Path("scripts/ci-merge-gate.py")
 MERGE_GATE_COMMAND = "python scripts/ci-merge-gate.py"
-MERGE_GATE_CONDITION = "always() && github.event_name == 'pull_request'"
+MERGE_GATE_CONDITION = (
+    "always() && (github.event_name == 'pull_request' || "
+    "github.event_name == 'merge_group')"
+)
+
+
+def event_expression(field: str, fallback: str) -> str:
+    """Select a merge-group field or the existing PR/dispatch binding."""
+
+    return (
+        "${{ github.event_name == 'merge_group' && github.event.merge_group."
+        + field
+        + " || "
+        + fallback
+        + " }}"
+    )
+
+
+EVENT_HEAD_SHA = event_expression("head_sha", "github.event.pull_request.head.sha")
+EVENT_BASE_SHA = event_expression("base_sha", "github.event.pull_request.base.sha")
+EVENT_BASE_REF = event_expression("base_ref", "github.base_ref")
+EVENT_HEAD_REF = event_expression("head_ref", "github.head_ref")
+VERIFICATION_REF = event_expression("head_sha", "github.sha")
 
 # The whole job, declared rather than sampled. Six rounds of review on this file
 # established that any check phrased as "the fields I thought of are correct"
@@ -540,9 +613,15 @@ MERGE_GATE_JOB = {
 # goes missing becomes an unreadable input rather than a permissive default,
 # and one that reads the wrong expression answers about a different thing.
 MERGE_GATE_ENV = {
+    "EVENT_NAME": "${{ github.event_name }}",
+    "REPOSITORY_PRIVATE": "${{ github.event.repository.private }}",
+    "BASE_REF": EVENT_BASE_REF,
+    "BASE_SHA": EVENT_BASE_SHA,
+    "HEAD_REF": EVENT_HEAD_REF,
+    "RUN_SHA": "${{ github.sha }}",
     "DRAFT": "${{ github.event.pull_request.draft }}",
     "ACTION": "${{ github.event.action }}",
-    "HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
+    "HEAD_SHA": EVENT_HEAD_SHA,
     "PLAN": "${{ needs.verification-plan.result }}",
     "UBUNTU": "${{ needs.compatibility.result }}",
     "WINDOWS": "${{ needs.windows-compatibility.result }}",
@@ -568,9 +647,8 @@ MERGE_GATE_SETUP = (
         "action": "actions/checkout",
         "ref": "3d3c42e5aac5ba805825da76410c181273ba90b1",
         "required_with": {
-            # The exact head, not the merge ref: the decision is about this
-            # commit, so the script judging it must come from this commit.
-            "ref": "${{ github.event.pull_request.head.sha }}",
+            # The PR head or generated merge-group head being judged.
+            "ref": EVENT_HEAD_SHA,
             # This job reads a verdict. It never needs to write, and a token
             # left on disk is reachable by anything the head runs later.
             "persist-credentials": False,
@@ -845,7 +923,9 @@ PULL_REQUEST_ACTIONS = [
     "converted_to_draft",
     "edited",
 ]
-EXPECTED_TRIGGER_KEYS = frozenset({"pull_request", "schedule", "workflow_dispatch"})
+EXPECTED_TRIGGER_KEYS = frozenset(
+    {"pull_request", "merge_group", "schedule", "workflow_dispatch"}
+)
 PROTECTED_BRANCHES = ["develop", "main"]
 EXPECTED_SCHEDULE = [{"cron": "23 9 * * 2"}]
 # Whitespace-normalised, because the expression is written across lines in YAML.
@@ -891,6 +971,8 @@ def validate_pull_request_triggers(path: Path, workflow: dict[str, Any]) -> list
             f"{path}: triggers must be exactly {sorted(EXPECTED_TRIGGER_KEYS)}; "
             f"missing={missing} unexpected={extra}"
         )
+    if not exactly_equal({"types": ["checks_requested"]}, triggers.get("merge_group")):
+        problems.append(f"{path}: merge_group must request exactly checks_requested")
     # workflow_dispatch takes no inputs. A dispatch contract is a way to vary a
     # run's behaviour from outside the file.
     if triggers.get("workflow_dispatch") is not None:
@@ -980,6 +1062,7 @@ def validate_merge_gate(path: Path, workflow: dict[str, Any]) -> list[str]:
     for label, environment, expected in MERGE_GATE_MATRIX:
         full = {
             **os.environ,
+            "EVENT_NAME": "pull_request",
             "ACTION": "synchronize",
             "HEAD_SHA": "0" * 40,
             "BASE_CHANGED": "false",
@@ -1016,6 +1099,140 @@ def validate_merge_gate(path: Path, workflow: dict[str, Any]) -> list[str]:
     return problems
 
 
+MERGE_GROUP_CONDITION = (
+    "( github.event_name == 'merge_group' && "
+    "github.event.action == 'checks_requested' && "
+    "github.event.repository.private == false && "
+    "github.event.merge_group.base_ref == 'refs/heads/develop' )"
+)
+VERIFICATION_PLAN_CONDITION = (
+    "github.event_name == 'workflow_dispatch' || " + MERGE_GROUP_CONDITION + " || "
+    "( github.event_name == 'pull_request' && "
+    "github.event.repository.private == false && "
+    "github.event.pull_request.draft == false && "
+    "( github.event.action != 'edited' || "
+    "github.event.changes.base.ref.from != '' || "
+    "github.event.changes.base.sha.from != '' ) )"
+)
+COMPATIBILITY_CONDITION = (
+    "always() && ( github.event_name == 'workflow_dispatch' || "
+    + MERGE_GROUP_CONDITION
+    + " || ( github.event_name == 'pull_request' && "
+    "github.event.repository.private == false && "
+    "github.event.pull_request.draft == false ) )"
+)
+PLAN_ENV = {
+    "BASE_REF": EVENT_BASE_REF,
+    "BASE_SHA": EVENT_BASE_SHA,
+    "EVENT_NAME": "${{ github.event_name }}",
+    "HEAD_REF": EVENT_HEAD_REF,
+    "HEAD_SHA": EVENT_HEAD_SHA,
+}
+PLAN_COMMAND = (
+    "python3 scripts/ci-plan.py \\\n"
+    '  --event "$EVENT_NAME" \\\n'
+    '  --base-ref "$BASE_REF" \\\n'
+    '  --head-ref "$HEAD_REF" \\\n'
+    '  --base-sha "$BASE_SHA" \\\n'
+    '  --head-sha "$HEAD_SHA" \\\n'
+    '  --github-output "$GITHUB_OUTPUT"'
+)
+
+
+def validate_verification_bindings(path: Path, workflow: dict[str, Any]) -> list[str]:
+    """Keep queue planning and verification bound to one integration commit."""
+
+    if path.name != "ci.yml":
+        return []
+    problems: list[str] = []
+    jobs = workflow.get("jobs") or {}
+    expected_checkout = {
+        "uses": f"{MERGE_GATE_SETUP[0]['action']}@{MERGE_GATE_SETUP[0]['ref']}",
+        "with": {
+            "ref": VERIFICATION_REF,
+            "fetch-depth": 0,
+            "persist-credentials": False,
+        },
+    }
+    for name, condition, needs in (
+        ("verification-plan", VERIFICATION_PLAN_CONDITION, None),
+        ("compatibility", COMPATIBILITY_CONDITION, "verification-plan"),
+        (
+            "windows-compatibility",
+            "needs.verification-plan.outputs.windows == 'true'",
+            "verification-plan",
+        ),
+    ):
+        job = jobs.get(name)
+        if not isinstance(job, dict):
+            problems.append(f"{path}: missing {name} verification job")
+            continue
+        if " ".join(str(job.get("if", "")).split()) != condition:
+            problems.append(f"{path}: {name} must keep its event condition")
+        if not exactly_equal(needs, job.get("needs")):
+            problems.append(f"{path}: {name} must depend on its verification plan")
+        steps = job.get("steps")
+        if not isinstance(steps, list) or not all(
+            isinstance(step, dict) for step in steps
+        ):
+            problems.append(f"{path}: {name} steps must be a list of mappings")
+            continue
+        checkouts = [
+            step
+            for step in steps
+            if str(step.get("uses", "")).startswith("actions/checkout@")
+        ]
+        if not exactly_equal([expected_checkout], checkouts):
+            problems.append(
+                f"{path}: {name} must check out the integration SHA exactly once"
+            )
+        if "continue-on-error" in job or any(
+            "continue-on-error" in step for step in steps
+        ):
+            problems.append(f"{path}: {name} must report verification failures")
+        if name == "verification-plan":
+            expected_outputs = {
+                output: "${{ steps.plan.outputs." + output + " }}"
+                for output in ("mode", "dependency_audit", "windows")
+            }
+            expected_plan = {"id": "plan", "env": PLAN_ENV, "run": PLAN_COMMAND}
+            normalized = [
+                {**step, "run": step["run"].strip()} if "run" in step else step
+                for step in steps
+            ]
+            if not exactly_equal([expected_checkout, expected_plan], normalized):
+                problems.append(
+                    f"{path}: verification-plan must run the bound planner exactly"
+                )
+            if not exactly_equal(expected_outputs, job.get("outputs")):
+                problems.append(
+                    f"{path}: verification-plan must publish all planner outputs"
+                )
+        elif name == "compatibility":
+            required_plan = {
+                "name": "Require a valid verification plan",
+                "if": "needs.verification-plan.result != 'success'",
+                "run": "exit 1",
+            }
+            if not steps or not exactly_equal(required_plan, steps[0]):
+                problems.append(
+                    f"{path}: compatibility must refuse an unsuccessful plan"
+                )
+            docs = [
+                step
+                for step in steps
+                if step.get("name") == "Validate documentation-only change"
+            ]
+            if len(docs) != 1 or not exactly_equal(
+                {"BASE_SHA": EVENT_BASE_SHA, "HEAD_SHA": EVENT_HEAD_SHA},
+                docs[0].get("env"),
+            ):
+                problems.append(
+                    f"{path}: documentation verification must use the event SHAs"
+                )
+    return problems
+
+
 def validate_workflow_document(
     path: Path, content: str, workflow: dict[str, Any]
 ) -> list[str]:
@@ -1035,6 +1252,7 @@ def validate_workflow_document(
     errors.extend(validate_untrusted_triggers(path, content))
     errors.extend(validate_pull_request_triggers(path, workflow))
     errors.extend(validate_merge_gate(path, workflow))
+    errors.extend(validate_verification_bindings(path, workflow))
     return errors
 
 

@@ -129,6 +129,24 @@ def validate_develop_promotion(
         )
 
 
+def validate_merge_group(
+    *, base_ref: str, head_ref: str, base_sha: str, head_sha: str
+) -> tuple[str, str]:
+    """Bind a develop queue plan to the checked-out integration commit."""
+
+    if base_ref != "refs/heads/develop":
+        raise ValueError("merge groups must target refs/heads/develop")
+    if not head_ref.startswith("refs/heads/gh-readonly-queue/develop/"):
+        raise ValueError("merge group head must use the develop queue ref")
+    base = require_sha("base SHA", base_sha)
+    head = require_sha("head SHA", head_sha)
+    if git("rev-parse", "HEAD") != head:
+        raise ValueError("checkout does not match the merge group head")
+    if base == head or git("merge-base", base, head) != base:
+        raise ValueError("merge group head must integrate its event base")
+    return base, head
+
+
 def write_outputs(
     path: Path,
     *,
@@ -159,6 +177,16 @@ def main() -> None:
     arguments = parse_arguments()
     if arguments.event == "workflow_dispatch":
         mode, dependency_audit, windows = "full", True, True
+    elif arguments.event == "merge_group":
+        base, head = validate_merge_group(
+            base_ref=arguments.base_ref,
+            head_ref=arguments.head_ref,
+            base_sha=arguments.base_sha,
+            head_sha=arguments.head_sha,
+        )
+        paths = changed_paths(base, head)
+        mode, dependency_audit = classify_develop_changes(paths)
+        windows = mode == "full" and requires_windows_verification(paths)
     elif arguments.event == "pull_request" and arguments.base_ref == "main":
         validate_develop_promotion(
             base_ref=arguments.base_ref,
