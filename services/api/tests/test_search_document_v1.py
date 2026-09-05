@@ -8,6 +8,7 @@ import pytest
 from local_lm.search_document_v1 import (
     INVALID_DOCUMENT,
     MAX_BODY,
+    MAX_ID,
     SearchDocumentError,
     SearchDocumentV1,
     build_search_document,
@@ -155,6 +156,27 @@ def test_invalid_and_hostile() -> None:
             secret_payload=False,
         )
     assert "private attacker detail" not in str(caught.value)
+
+
+def test_refuses_empty_non_string_and_oversize_ids() -> None:
+    common = {
+        "role": "user",
+        "body": "x",
+        "has_media": False,
+        "transcript_visible": True,
+        "content_removed": False,
+        "private_session": False,
+        "helper_session": False,
+        "secret_payload": False,
+    }
+    with pytest.raises(SearchDocumentError, match=INVALID_DOCUMENT):
+        build_search_document(message_id="", chat_id="c1", **common)
+    with pytest.raises(SearchDocumentError, match=INVALID_DOCUMENT):
+        build_search_document(message_id="m1", chat_id="", **common)
+    with pytest.raises(SearchDocumentError, match=INVALID_DOCUMENT):
+        build_search_document(message_id=1, chat_id="c1", **common)
+    with pytest.raises(SearchDocumentError, match=INVALID_DOCUMENT):
+        build_search_document(message_id="x" * (MAX_ID + 1), chat_id="c1", **common)
 
 
 def test_public_constructor_cannot_mint_eligible_document() -> None:
