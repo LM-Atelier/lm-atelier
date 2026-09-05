@@ -18,6 +18,7 @@ import threading
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -543,3 +544,40 @@ async def test_orphan_batches_commit_one_at_a_time_through_the_lifespan(
         await asyncio.wait_for(app.state.retention_sweep, timeout=30)
     assert not any(path.exists() for path in orphans)
     assert left_before == [5, 3, 1, 0], left_before
+
+
+async def test_a_slow_snapshot_keeps_the_default_batch_and_deletion_budget(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = ArtifactStore(settings)
+    with SessionLocal() as session:
+        for index in range(25):
+            _aged_temporary(store, session, index)
+        session.commit()
+    clock = 0.0
+    snapshots = 0
+    real_references = ArtifactStore.referenced_artifact_ids
+    real_cleanup = ArtifactStore.cleanup_retention
+    removed: list[int] = []
+
+    def slow_references(session: Session, *, for_deletion: bool = False) -> Any:
+        nonlocal clock, snapshots
+        clock += 10.0
+        snapshots += 1
+        return real_references(session, for_deletion=for_deletion)
+
+    def counted_cleanup(self: ArtifactStore, session: Session, **kwargs: Any) -> Any:
+        result = real_cleanup(self, session, **kwargs)
+        removed.append(result.removed_count)
+        return result
+
+    monkeypatch.setattr(main_module, "time", SimpleNamespace(monotonic=lambda: clock))
+    monkeypatch.setattr(ArtifactStore, "referenced_artifact_ids", staticmethod(slow_references))
+    monkeypatch.setattr(ArtifactStore, "cleanup_retention", counted_cleanup)
+    caplog.set_level(logging.INFO)
+
+    await main_module.sweep_artifact_retention(store, settings, pause_seconds=0)
+
+    assert removed == [25, 0]
+    assert snapshots == 2
+    assert "continuing one deletion per batch" not in caplog.text

@@ -19,6 +19,13 @@ from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
+from .artifact_deletion_authority import (
+    active_artifact_deletion_proof,
+    artifact_deletion_proof_references,
+    complete_reference_snapshot,
+    validate_artifact_deletion_proof,
+    validate_complete_reference_snapshot,
+)
 from .artifact_library_schema import ARTIFACT_METADATA_REFERENCE_KEYS
 from .domain import ArtifactKind, utcnow
 from .models import (
@@ -574,27 +581,17 @@ _FENCED_REFERENCE_SNAPSHOT: Final = "artifact_reference_ids_under_write_fence"
 def fenced_reference_snapshot(
     session: Session, snapshot: AbstractSet[str] | None
 ) -> Iterator[None]:
-    """Lend an already-fenced reference graph to the flush listener.
+    """Reuse this connection's unchanged fenced reference snapshot for one flush.
 
-    The listener below runs on EVERY flush that deletes an Artifact and, left to
-    itself, walks the whole reference graph again each time. A sweep deleting
-    thousands of artifacts therefore paid for that walk per deletion even after
-    its caller had computed the same graph once. Removing only the caller's own
-    recompute is not enough: it leaves the listener untouched, and the walk
-    survives behind a change that looks like it removed it.
-
-    Lending is only sound while the writer reservation is held in the same
-    transaction, because BEGIN IMMEDIATE is what stops another connection
-    creating a reference underneath the snapshot. The lend is therefore scoped to
-    one flush and removed in a finally: it cannot outlive the fence that makes it
-    true, and a caller with no snapshot passes None and the listener pays as
-    before.
+    A plain set or expired snapshot cannot supply deletion authority. Pending
+    JSON references are still checked against rows surviving the flush.
     """
 
     if snapshot is None:
         yield
         return
-    session.info[_FENCED_REFERENCE_SNAPSHOT] = frozenset(snapshot)
+    validate_complete_reference_snapshot(session, snapshot)
+    session.info[_FENCED_REFERENCE_SNAPSHOT] = snapshot
     try:
         yield
     finally:
@@ -613,8 +610,17 @@ def guard_artifact_reference_flush(
     if not referenced and not deleted:
         return
     begin_artifact_write_fence(session)
-    lent = session.info.get(_FENCED_REFERENCE_SNAPSHOT)
-    known = lent if isinstance(lent, frozenset) else referenced_artifact_ids(session)
+    proof = active_artifact_deletion_proof(session)
+    if proof is not None:
+        validate_artifact_deletion_proof(session, proof, frozenset(deleted))
+        known = artifact_deletion_proof_references(proof)
+    else:
+        lent = session.info.get(_FENCED_REFERENCE_SNAPSHOT)
+        if lent is not None:
+            validate_complete_reference_snapshot(session, lent)
+            known = cast(AbstractSet[str], lent)
+        else:
+            known = referenced_artifact_ids(session)
     if deleted & known:
         raise ArtifactReferenceDataError(REFERENCE_CORRUPT)
     available = {
@@ -632,14 +638,19 @@ def referenced_artifact_ids(
     session: Session,
     *,
     exclude_message_payload_for: str | None = None,
-) -> set[str]:
+    for_deletion: bool = False,
+) -> AbstractSet[str]:
     """Return the complete strong-reference graph or fail closed on corrupt JSON.
 
     ``exclude_message_payload_for`` models one selective-removal preview. It
     excludes only that message's owned parts, revision parts, and historical
     references while leaving every independently retained edge in the graph.
+    Only for_deletion validates all stored JSON and binds deletion authority
+    to the current writer reservation. Ordinary publication needs reachability.
     """
 
+    if for_deletion and exclude_message_payload_for is not None:
+        raise ValueError("a selective reference preview cannot authorize deletion")
     found: set[str] = set()
     counted_tables = (
         MessagePart,
@@ -731,7 +742,16 @@ def referenced_artifact_ids(
                 for linked_id in linked - found:
                     retain({linked_id})
                     pending.append(linked_id)
-    return found
+    if not for_deletion:
+        return frozenset(found)
+    referrers: dict[str, set[str]] = {}
+    for other_id, metadata_value in session.execute(select(Artifact.id, Artifact.metadata_json)):
+        metadata = _mapping(metadata_value)
+        for key in ARTIFACT_METADATA_REFERENCE_KEYS:
+            if key in metadata:
+                for named in _optional_id(metadata[key]):
+                    referrers.setdefault(named, set()).add(other_id)
+    return complete_reference_snapshot(session, found, referrers=referrers)
 
 
 def metadata_referrers(artifacts: Iterable[Artifact]) -> dict[str, set[str]]:
@@ -796,7 +816,7 @@ def deletion_restricted_artifact_ids(session: Session) -> set[str]:
     ReferenceAsset, library membership, or reviewed source-wheel row.
     """
 
-    blocked = referenced_artifact_ids(session)
+    blocked = set(referenced_artifact_ids(session))
     clearable: set[str] = set()
     for column in (
         MessagePart.artifact_id,

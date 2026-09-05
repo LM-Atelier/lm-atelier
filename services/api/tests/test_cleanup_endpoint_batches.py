@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import threading
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -146,3 +147,23 @@ async def test_a_batch_that_raises_rolls_back_and_keeps_every_row(
         assert _count(session) == 3
     monkeypatch.setattr(ArtifactStore, "_delete_artifact", real_delete)
     assert await _cleanup(client, dry_run=False) == (3, False)
+
+
+async def test_a_slow_snapshot_does_not_reduce_the_manual_batch_to_one(
+    client: AsyncClient, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed(settings, 25)
+    clock = 0.0
+    real_references = ArtifactStore.referenced_artifact_ids
+
+    def slow_references(session: Session, *, for_deletion: bool = False) -> Any:
+        nonlocal clock
+        clock += 10.0
+        return real_references(session, for_deletion=for_deletion)
+
+    monkeypatch.setattr(api_module, "time", SimpleNamespace(monotonic=lambda: clock))
+    monkeypatch.setattr(ArtifactStore, "referenced_artifact_ids", staticmethod(slow_references))
+
+    assert await _cleanup(client, dry_run=False) == (25, False)
+    with SessionLocal() as session:
+        assert _count(session) == 0

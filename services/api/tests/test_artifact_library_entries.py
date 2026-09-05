@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Iterator
+from collections.abc import Set as AbstractSet
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -453,8 +454,8 @@ def test_delete_write_fence_prevents_a_concurrent_reference_commit(
     release_delete = Event()
     original = store.referenced_artifact_ids
 
-    def paused_references(session: Session) -> set[str]:
-        found = original(session)
+    def paused_references(session: Session, *, for_deletion: bool = False) -> AbstractSet[str]:
+        found = original(session, for_deletion=for_deletion)
         scanned.set()
         assert release_delete.wait(5)
         return found
@@ -543,8 +544,8 @@ def test_delete_write_fence_rejects_late_json_reference_writers(
     release_delete = Event()
     original = store.referenced_artifact_ids
 
-    def paused_references(session: Session) -> set[str]:
-        found = original(session)
+    def paused_references(session: Session, *, for_deletion: bool = False) -> AbstractSet[str]:
+        found = original(session, for_deletion=for_deletion)
         scanned.set()
         assert release_delete.wait(5)
         return found

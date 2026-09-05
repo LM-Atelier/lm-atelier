@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -336,7 +337,7 @@ def _message_revision_id(
     *,
     references: list[MessageReference],
     target_artifacts: set[str],
-    surviving_artifacts: set[str],
+    surviving_artifacts: AbstractSet[str],
     source_run_ids: set[str],
 ) -> str:
     """Hash structural authority only; never hash short message content."""

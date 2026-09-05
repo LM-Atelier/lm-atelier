@@ -385,20 +385,14 @@ async def sweep_artifact_retention(
     pause_seconds: float | None = None,
     batch_seconds: float | None = None,
 ) -> None:
-    """Run the artifact retention sweep after the port is open, in committed batches.
+    """Run retention after the port opens, committing one bounded batch at a time.
 
-    The sweep used to be a startup stage before the lifespan yield, inside the
-    session that commits only at session-commit. Every deletion pays for the
-    JSON reference trigger's scan of the referring tables, so an install with
-    thousands of aged previews kept the port closed for hours, and killing the
-    process rolled every deletion back, so the next start began from zero.
-
-    Each batch here is its own session and its own commit: the port is open
-    before the first batch runs, the write fence is held only for a batch's
-    own deletions, committed progress survives a kill, and a stop request
-    ends the sweep at the next deletion boundary rather than mid-transaction.
-    A failure inside the sweep is logged and leaves the application running;
-    the sweep runs again at the next start.
+    Each batch holds its writer reservation through one complete reference
+    snapshot and a deletion phase bounded by time and count. Snapshot cost is
+    fixed work before the deletion clock starts. A stop request still ends the
+    batch at the next deletion boundary, and completed deletions are committed
+    before the next batch. Failures are logged while the application keeps
+    running; the next start resumes the sweep.
     """
 
     # Resolved at call time, not at definition time, so the module constants
@@ -421,11 +415,20 @@ async def sweep_artifact_retention(
     # rebinding cannot redirect a batch mid-sweep.
     bind = SessionLocal.kw.get("bind")
 
-    def run_batch(*, deletions: int, deadline: float | None) -> RetentionCleanupSummary:
+    def run_batch(*, deletions: int, seconds: float | None) -> RetentionCleanupSummary:
+        deadline: float | None = None
+
         def should_stop() -> bool:
+            nonlocal deadline
             if stop.is_set():
                 return True
-            return deadline is not None and time.monotonic() >= deadline
+            if seconds is None:
+                return False
+            if deadline is None:
+                # The complete graph and validity scan are fixed work. Charge
+                # the budget from the first deletion boundary after that mint.
+                deadline = time.monotonic() + seconds
+            return time.monotonic() >= deadline
 
         with SessionLocal(bind=bind) as session:
             try:
@@ -454,15 +457,14 @@ async def sweep_artifact_retention(
     try:
         while True:
             deletions = batch_deletions
-            deadline: float | None = time.monotonic() + batch_seconds
+            seconds: float | None = batch_seconds
             if single:
-                # The fixed work of a pass alone exhausted the budget once, so
-                # the budget can no longer guarantee progress. One deletion per
-                # batch does, and it is the smallest hold there is.
+                # A zero or exhausted deletion budget cannot make progress.
+                # Fall back to one deletion while still honoring shutdown.
                 deletions = 1
-                deadline = None
+                seconds = None
             operation = asyncio.create_task(
-                asyncio.to_thread(run_batch, deletions=deletions, deadline=deadline),
+                asyncio.to_thread(run_batch, deletions=deletions, seconds=seconds),
                 name="artifact-retention-batch",
             )
             try:

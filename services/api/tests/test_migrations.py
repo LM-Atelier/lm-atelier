@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event
@@ -271,6 +272,20 @@ def test_chat_item_removal_receipt_migration_preserves_replay_authority(
         )
 
 
+@contextmanager
+def _application_sqlite(database: Path) -> Iterator[sqlite3.Connection]:
+    """Use the application's default-closed SQLite functions, without its ORM guard."""
+    engine = create_engine(f"sqlite:///{database}")
+    try:
+        with engine.connect() as connection:
+            driver = connection.connection.driver_connection
+            assert isinstance(driver, sqlite3.Connection)
+            with driver:
+                yield driver
+    finally:
+        engine.dispose()
+
+
 def test_artifact_library_entry_migration_backfills_once_and_seals_membership(
     tmp_path: Path,
 ) -> None:
@@ -300,7 +315,7 @@ def test_artifact_library_entry_migration_backfills_once_and_seals_membership(
         )
     command.upgrade(config, "head")
 
-    with sqlite3.connect(database) as connection:
+    with _application_sqlite(database) as connection:
         connection.execute("PRAGMA foreign_keys=ON")
         entries = connection.execute(
             """
@@ -2141,7 +2156,7 @@ def _setup_verification_migrated_to(tmp_path: Path, name: str, revision: str) ->
 def test_deleting_an_artifact_nulls_the_setup_verification_that_named_it(
     tmp_path: Path,
 ) -> None:
-    """The database clears the reference, with no application code involved.
+    """The database clears the reference, with no ORM deletion guard involved.
 
     A delete that reaches the database directly must leave the column null
     rather than a dangling identifier, and must leave the verification row
@@ -2154,7 +2169,7 @@ def test_deleting_an_artifact_nulls_the_setup_verification_that_named_it(
     """
 
     database = _setup_verification_migrated_to(tmp_path, "fk-nulls", "head")
-    with closing(sqlite3.connect(database)) as connection:
+    with _application_sqlite(database) as connection:
         connection.execute(_INSERT_ARTIFACT, ("art-1", "a" * 64, "one.png", _STAMP, _STAMP))
         connection.execute(
             _INSERT_VERIFICATION, ("verify-1", "key-1", "running", "art-1", _STAMP, _STAMP)
@@ -2438,3 +2453,32 @@ def test_the_enforcement_downgrade_preserves_a_differently_shaped_namesake(
         "revision did not create and has no authority to remove"
     )
     assert "artifacts" not in targets, "the downgrade left the foreign key in place"
+
+
+def test_artifact_deletion_authority_migration_round_trips(tmp_path: Path) -> None:
+    settings = Settings(data_dir=tmp_path / "deletion-authority")
+    settings.prepare()
+    config = alembic_config(settings)
+    database = settings.state_dir / "local-lm.sqlite3"
+    trigger_query = "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name"
+    command.upgrade(config, "e4b7d1c5a960")
+    with sqlite3.connect(database) as connection:
+        before = dict(connection.execute(trigger_query).fetchall())
+    original = before["artifact_json_reference_delete_guard"]
+    assert "artifact_deletion_authorized" not in original
+
+    command.upgrade(config, "f5c2a8d91e40")
+    with sqlite3.connect(database) as connection:
+        after = dict(connection.execute(trigger_query).fetchall())
+    assert set(after) == set(before)
+    assert "artifact_deletion_authorized" in after["artifact_json_reference_delete_guard"]
+    assert {k: v for k, v in after.items() if k != "artifact_json_reference_delete_guard"} == {
+        k: v for k, v in before.items() if k != "artifact_json_reference_delete_guard"
+    }
+
+    command.downgrade(config, "e4b7d1c5a960")
+    with sqlite3.connect(database) as connection:
+        assert dict(connection.execute(trigger_query).fetchall()) == before
+    command.upgrade(config, "f5c2a8d91e40")
+    with sqlite3.connect(database) as connection:
+        assert dict(connection.execute(trigger_query).fetchall()) == after

@@ -69,6 +69,7 @@ _JOB_LIST_KEYS = ("artifact_ids", "input_artifact_ids")
 #: bundling. Separate copies can drift apart while still comparing equal, so
 #: these sites share this object rather than repeating its literals.
 ARTIFACT_METADATA_REFERENCE_KEYS = ("poster_artifact_id", "browser_proxy_artifact_id")
+ARTIFACT_DELETION_AUTHORIZED_SQL = "artifact_deletion_authorized"
 MAX_JSON_BYTES = 1_048_576
 MAX_JSON_NODES = 100_000
 MAX_JSON_DEPTH = 16
@@ -350,6 +351,9 @@ def _stored_json_invalid() -> str:
     return " OR\n    ".join(checks)
 
 
+STORED_JSON_INVALID_SQL = f"SELECT CASE WHEN {_stored_json_invalid()} THEN 1 ELSE 0 END"
+
+
 def _stored_reference_missing() -> str:
     checks = []
     for table in _TABLE_COLUMNS:
@@ -386,7 +390,7 @@ def _contains_deleted(table: str) -> str:
     )"""
 
 
-ARTIFACT_JSON_DELETE_TRIGGER = f"""
+ARTIFACT_JSON_DELETE_TRIGGER_UNPROVEN = f"""
 CREATE TRIGGER artifact_json_reference_delete_guard
 BEFORE DELETE ON artifacts
 BEGIN
@@ -396,6 +400,20 @@ BEGIN
   SELECT CASE WHEN
     {" OR ".join(_contains_deleted(table) for table in _TABLE_COLUMNS)}
     THEN RAISE(ABORT, 'artifact is retained by JSON reference') END;
+END
+"""
+
+ARTIFACT_JSON_DELETE_TRIGGER = f"""
+CREATE TRIGGER artifact_json_reference_delete_guard
+BEFORE DELETE ON artifacts
+BEGIN
+  SELECT CASE
+    WHEN {ARTIFACT_DELETION_AUTHORIZED_SQL}(OLD.id) = 1 THEN 0
+    WHEN {_stored_json_invalid()}
+      THEN RAISE(ABORT, 'artifact JSON reference is invalid')
+    WHEN {" OR ".join(_contains_deleted(table) for table in _TABLE_COLUMNS)}
+      THEN RAISE(ABORT, 'artifact is retained by JSON reference')
+    ELSE 0 END;
 END
 """
 
@@ -413,6 +431,9 @@ CREATE_TRIGGER_SQL = (
     *JSON_WRITE_TRIGGER_SQL,
     ARTIFACT_JSON_DELETE_TRIGGER,
 )
+
+# Earlier schema revisions retain their original deletion trigger.
+LEGACY_CREATE_TRIGGER_SQL = (*CREATE_TRIGGER_SQL[:-1], ARTIFACT_JSON_DELETE_TRIGGER_UNPROVEN)
 
 DROP_TRIGGER_SQL = (
     "DROP TRIGGER IF EXISTS artifact_json_reference_delete_guard",

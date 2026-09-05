@@ -4311,12 +4311,11 @@ async def cleanup_artifacts(
 ) -> ArtifactCleanupResult:
     """Run one budgeted retention batch, off the event loop.
 
-    A real run is bounded the way the background sweep's batches are, since it
-    holds the same writer reservation: by time held, with a count as the
-    ceiling, and always at least one deletion, so a call makes progress even
-    when the fixed work of a pass alone exhausts the budget. When the bound cut
-    the run short the result says so and the next call continues. A dry run
-    deletes nothing and reports the whole eligible set.
+    A real run takes one required reference snapshot, then bounds the deletion
+    phase by elapsed time and count under the same writer reservation. It allows
+    at least one deletion even with a zero deletion budget. A truncated result
+    lets the next call continue. A dry run deletes nothing and reports the whole
+    eligible set.
     """
 
     services = _services(request)
@@ -4326,14 +4325,16 @@ async def cleanup_artifacts(
         deadline: float | None = None
         max_deletions: int | None = None
         if not payload.dry_run:
-            deadline = time.monotonic() + RETENTION_BATCH_SECONDS
             max_deletions = RETENTION_BATCH_DELETIONS
-        consulted = 0
 
         def should_stop() -> bool:
-            nonlocal consulted
-            consulted += 1
-            if deadline is None or consulted == 1:
+            nonlocal deadline
+            if payload.dry_run:
+                return False
+            if deadline is None:
+                # Start after the required snapshot and allow the first deletion
+                # even when the caller configures a zero deletion budget.
+                deadline = time.monotonic() + RETENTION_BATCH_SECONDS
                 return False
             return time.monotonic() >= deadline
 
