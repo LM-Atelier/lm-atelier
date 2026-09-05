@@ -6,6 +6,7 @@ from local_lm.search_cursor_v1 import (
     INVALID_CURSOR,
     MAX_DIGEST_CHARS,
     MAX_GENERATION,
+    MAX_INT_DIGITS,
     MAX_OFFSET,
     MAX_TOKEN_CHARS,
     SearchCursorError,
@@ -13,6 +14,7 @@ from local_lm.search_cursor_v1 import (
     bind_search_cursor,
     decode_search_cursor,
     encode_search_cursor,
+    require_int_text,
 )
 
 DIGEST = "a" * MAX_DIGEST_CHARS
@@ -149,6 +151,17 @@ def test_refuses_unbounded_digest_token_and_stale_facts() -> None:
             index_generation=7,
             query_digest=DIGEST,
         )
+
+
+def test_require_int_text_refuses_empty_non_string_and_non_digits() -> None:
+    with pytest.raises(SearchCursorError, match=INVALID_CURSOR):
+        require_int_text("", maximum=MAX_OFFSET)
+    with pytest.raises(SearchCursorError, match=INVALID_CURSOR):
+        require_int_text(1, maximum=MAX_OFFSET)
+    with pytest.raises(SearchCursorError, match=INVALID_CURSOR):
+        require_int_text("1a", maximum=MAX_OFFSET)
+    with pytest.raises(SearchCursorError, match=INVALID_CURSOR):
+        require_int_text("1" * (MAX_INT_DIGITS + 1), maximum=MAX_OFFSET)
 
 
 def test_public_constructor_cannot_mint_query_text() -> None:
