@@ -4,6 +4,7 @@ import pytest
 
 from local_lm.search_filters_v1 import (
     INVALID_FILTER,
+    MAX_ID_CHARS,
     SearchFilterError,
     SearchFiltersV1,
     validate_search_filters,
@@ -41,6 +42,17 @@ def test_empty_and_chat_only() -> None:
     assert second.chat_id == "chat-9"
     with pytest.raises(SearchFilterError, match=INVALID_FILTER):
         validate_search_filters({"chat_id": "bad id"})
+
+
+def test_refuses_empty_non_string_and_oversize_ids() -> None:
+    with pytest.raises(SearchFilterError, match=INVALID_FILTER):
+        validate_search_filters({"chat_id": ""})
+    with pytest.raises(SearchFilterError, match=INVALID_FILTER):
+        validate_search_filters({"project_id": ""})
+    with pytest.raises(SearchFilterError, match=INVALID_FILTER):
+        validate_search_filters({"chat_id": 1})
+    with pytest.raises(SearchFilterError, match=INVALID_FILTER):
+        validate_search_filters({"chat_id": "x" * (MAX_ID_CHARS + 1)})
 
 
 def test_refuses_hostile_keys_and_constructor_authority() -> None:
