@@ -164,6 +164,25 @@ def test_require_int_text_refuses_empty_non_string_and_non_digits() -> None:
         require_int_text("1" * (MAX_INT_DIGITS + 1), maximum=MAX_OFFSET)
 
 
+def test_decode_refuses_wrong_prefix_and_wrong_part_count() -> None:
+    with pytest.raises(SearchCursorError, match=INVALID_CURSOR):
+        decode_search_cursor(
+            f"v0.1.0.10.{DIGEST}",
+            now_unix=1,
+            index_generation=1,
+            query_digest=DIGEST,
+        )
+    with pytest.raises(SearchCursorError, match=INVALID_CURSOR):
+        decode_search_cursor(
+            f"v1.1.0.{DIGEST}",
+            now_unix=1,
+            index_generation=1,
+            query_digest=DIGEST,
+        )
+    with pytest.raises(SearchCursorError, match=INVALID_CURSOR):
+        encode_search_cursor(object())
+
+
 def test_public_constructor_cannot_mint_query_text() -> None:
     with pytest.raises(SearchCursorError, match=INVALID_CURSOR):
         SearchCursorV1()
