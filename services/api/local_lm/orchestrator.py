@@ -6005,6 +6005,12 @@ class ConversationOrchestrator:
                 ):
                     await self.processes.stop("media")
                     media_stopped_for_verification = True
+                    # Stopping media is an await, and a successor can claim the
+                    # row inside it. Loading chat afterwards on a row this
+                    # execution no longer owns replaces the global worker that
+                    # successor is already using, and the check below runs too
+                    # late to prevent it: it reports the loss after both moves.
+                    self._require_ownership(job_id, claim, "after stopping media")
                 await self.processes.load_chat(profile, install)
             self._require_ownership(job_id, claim, "after its workers")
             capabilities = await self.engines.chat_capabilities()
@@ -6184,12 +6190,15 @@ class ConversationOrchestrator:
                     else:
                         session.rollback()
         finally:
-            preempted = job_id in self._preempted_image_edit_verifications
             # Recovery of the workers this execution moved belongs to the
             # attempt that still owns the row: an expired or reclaimed
             # attempt leaves chat and media to its successor.
-            recovers = not preempted and self._attempt_current(job_id, claim)
-            if restore_profile and restore_install and recovers:
+            #
+            # Read again immediately before each effect rather than once for
+            # all of them. The restore is itself an await, so a single reading
+            # taken before it decides the restart afterwards on what was true
+            # beforehand - the same staleness this teardown exists to avoid.
+            if restore_profile and restore_install and self._verification_recovers(job_id, claim):
                 try:
                     await self.processes.load_chat(restore_profile, restore_install)
                 except Exception:
@@ -6197,10 +6206,11 @@ class ConversationOrchestrator:
                         "Could not restore the previous chat profile after image edit verification",
                         exc_info=True,
                     )
-            if media_stopped_for_verification and recovers:
-                self._schedule_media_restart()
-            elif recovers:
-                self._release_deferred_media_restart()
+            if self._verification_recovers(job_id, claim):
+                if media_stopped_for_verification:
+                    self._schedule_media_restart()
+                else:
+                    self._release_deferred_media_restart()
         await self.scheduler.publish_job(job_id)
 
     async def _fail(self, job_id: str, run_id: str, error: str, *, claim: JobClaim | None) -> None:
@@ -6353,6 +6363,19 @@ class ConversationOrchestrator:
             except Exception:
                 logger.warning("The bound retry could not be announced again", exc_info=True)
         return bound
+
+    def _verification_recovers(self, job_id: str, claim: JobClaim) -> bool:
+        """Whether this execution may still move the global workers back.
+
+        One predicate for every teardown effect of an image edit verification,
+        so each of them asks the same question at the moment it acts rather
+        than inheriting an answer read before an await. A preempted or
+        reclaimed verification moves nothing: the workers are its successor's.
+        """
+
+        return job_id not in self._preempted_image_edit_verifications and self._attempt_current(
+            job_id, claim
+        )
 
     def _attempt_current(self, job_id: str, claim: JobClaim) -> bool:
         """Whether the row still belongs to this claim's attempt: owned by
