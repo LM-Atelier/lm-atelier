@@ -1258,3 +1258,148 @@ async def test_chat_phase_advances_when_the_first_token_arrives() -> None:
     assert labels.index("Writing the response") > labels.index("Waiting for first token")
     # Announced once, not per token: each phase change commits.
     assert labels.count("Writing the response") == 1
+
+
+def _queued_media_orchestrator(
+    peeks: list[object],
+    next_run: object,
+) -> tuple[ConversationOrchestrator, SimpleNamespace]:
+    """A handoff whose scheduler is about to hand back another job.
+
+    `peeks` is consumed one entry per handoff, so a test can express a run of
+    consecutive jobs without reaching back into the scheduler between them.
+    """
+
+    media = WorkerStatus(name="media", state="ready", managed=True, running=True, pid=22)
+
+    class FakeSession:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_args):  # type: ignore[no-untyped-def]
+            return None
+
+        def get(self, model, identity):  # type: ignore[no-untyped-def]
+            if model is Run and identity == "run-next":
+                return next_run
+            return None
+
+    processes = SimpleNamespace(
+        statuses=Mock(return_value=[media]),
+        stop=AsyncMock(),
+        start_media=AsyncMock(),
+    )
+    orchestrator = ConversationOrchestrator(
+        engines=SimpleNamespace(settings=SimpleNamespace(media_engine="comfyui")),
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=SimpleNamespace(peek_next_eligible_job=Mock(side_effect=list(peeks))),
+        processes=processes,
+        session_factory=FakeSession,
+    )
+    return orchestrator, processes
+
+
+async def test_a_queued_image_keeps_the_media_worker_and_leaves_chat_down() -> None:
+    """The recycle is skipped when the worker is about to be needed again.
+
+    A queue of images otherwise pays a full cold start of BOTH workers per
+    image: this handoff stops the media worker that the next job needs, and
+    reloads a chat model that the next job's own handoff immediately unloads.
+    """
+
+    orchestrator, processes = _queued_media_orchestrator(
+        [("job-next", "run-next")],
+        SimpleNamespace(operation="text_to_image", profile_id=None),
+    )
+    resume = AsyncMock()
+    orchestrator._resume_chat_worker = resume  # type: ignore[method-assign]
+
+    await orchestrator._complete_media_handoff("profile-chat")
+
+    processes.stop.assert_not_awaited()
+    resume.assert_not_awaited()
+    assert orchestrator._media_restart_task is None
+    assert orchestrator._media_restart_after_chat_activity is False
+
+
+async def test_skipping_the_resume_releases_the_chat_readiness_latch() -> None:
+    """The latch marks a handoff in flight, and this handoff is over.
+
+    Leaving it held would outlast the media run: `_ensure_chat_worker` loads the
+    model for a later text job without touching the latch, so the planner would
+    report itself unavailable against a chat worker that is ready.
+    """
+
+    orchestrator, _ = _queued_media_orchestrator(
+        [("job-next", "run-next")],
+        SimpleNamespace(operation="image_to_video", profile_id=None),
+    )
+    orchestrator._resume_chat_worker = AsyncMock()  # type: ignore[method-assign]
+    orchestrator._chat_planner_ready.clear()
+
+    await orchestrator._complete_media_handoff("profile-chat")
+
+    assert orchestrator._chat_planner_ready.is_set()
+
+
+async def test_a_later_image_in_the_run_still_reaches_the_terminal_handoff() -> None:
+    """Only the first image of a run is handed a profile to restore.
+
+    `_prepare_device_handoff` returns None as soon as chat is down, so every
+    image after the first - the last one included - passes nothing to the
+    handoff. If the run did not remember what it displaced, the final image
+    would skip the handoff entirely and chat would stay unloaded until some
+    later text execution happened to load it.
+    """
+
+    orchestrator, processes = _queued_media_orchestrator(
+        [("job-next", "run-next"), None],
+        SimpleNamespace(operation="text_to_image", profile_id=None),
+    )
+    resume = AsyncMock()
+    orchestrator._resume_chat_worker = resume  # type: ignore[method-assign]
+
+    first = orchestrator._pending_chat_restore("profile-chat")
+    assert first == "profile-chat"
+    await orchestrator._complete_media_handoff(first)
+    processes.stop.assert_not_awaited()
+
+    # What the dispatch computes for every later image in the run.
+    last = orchestrator._pending_chat_restore(None)
+    assert last == "profile-chat"
+    await orchestrator._complete_media_handoff(last)
+    if orchestrator._media_restart_task:
+        await orchestrator._media_restart_task
+
+    processes.stop.assert_awaited_once_with("media")
+    resume.assert_awaited_once_with("profile-chat")
+    assert orchestrator._pending_chat_restore(None) is None
+
+
+async def test_a_run_that_displaced_nothing_owes_nothing() -> None:
+    """The remembered profile is an obligation, so it must not be invented."""
+
+    orchestrator, processes = _queued_media_orchestrator(
+        [None],
+        SimpleNamespace(operation="text_to_image", profile_id=None),
+    )
+
+    assert orchestrator._pending_chat_restore(None) is None
+    processes.stop.assert_not_awaited()
+
+
+async def test_a_queued_text_job_still_recycles_before_its_model_loads() -> None:
+    """Only another media job keeps the worker; text is why the recycle exists."""
+
+    orchestrator, processes = _queued_media_orchestrator(
+        [("job-next", "run-next")],
+        SimpleNamespace(operation="text", profile_id="profile-next"),
+    )
+    resume = AsyncMock()
+    orchestrator._resume_chat_worker = resume  # type: ignore[method-assign]
+
+    await orchestrator._complete_media_handoff("profile-previous")
+
+    processes.stop.assert_awaited_once_with("media")
+    resume.assert_awaited_once_with("profile-next")

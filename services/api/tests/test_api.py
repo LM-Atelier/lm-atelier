@@ -11090,3 +11090,147 @@ async def test_a_claim_lost_after_the_completion_stamp_persists_no_asset(
         )
         row = session.get(Job, job_id)
         assert row is not None and row.status == "running" and row.attempt == claim.attempt + 1
+
+
+async def test_a_queue_of_images_restores_the_chat_model_once_at_the_end(
+    client: AsyncClient, app: FastAPI, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    """The run's last image must still reach the handoff that puts chat back.
+
+    Only the FIRST image of a run displaces chat, because every later one finds
+    it already stopped and `_prepare_device_handoff` answers None. The dispatch
+    therefore has to remember what the run displaced, or the final image skips
+    the handoff entirely and the chat model stays unloaded for the rest of the
+    session. This drives the real dispatch rather than calling the handoff by
+    hand: the first job is held inside generation until the second is queued, so
+    the sequence is the one production produces.
+    """
+
+    services = app.state.services
+    orchestrator = services.orchestrator
+    chat_running = {"value": True}
+
+    def statuses() -> list[WorkerStatus]:
+        running = chat_running["value"]
+        return [
+            WorkerStatus(
+                name="chat",
+                state="ready" if running else "stopped",
+                managed=True,
+                running=running,
+                pid=11 if running else None,
+                profile_id="profile-chat" if running else None,
+            ),
+            WorkerStatus(name="media", state="ready", managed=True, running=True, pid=22),
+        ]
+
+    stopped: list[str] = []
+    restored: list[str] = []
+    handoffs: list[str] = []
+
+    async def stop(name: str) -> None:
+        stopped.append(name)
+        if name == "chat":
+            chat_running["value"] = False
+
+    async def resume(profile_id: str) -> None:
+        restored.append(profile_id)
+        chat_running["value"] = True
+
+    async def start_media(**_kwargs: object) -> None:
+        return None
+
+    real_handoff = orchestrator._complete_media_handoff
+
+    async def watched_handoff(profile_id: str) -> None:
+        handoffs.append(profile_id)
+        await real_handoff(profile_id)
+
+    monkeypatch.setattr(services.processes, "statuses", statuses)
+    monkeypatch.setattr(services.processes, "stop", stop)
+    monkeypatch.setattr(services.processes, "start_media", start_media)
+    monkeypatch.setattr(orchestrator, "_resume_chat_worker", resume)
+    monkeypatch.setattr(orchestrator, "_complete_media_handoff", watched_handoff)
+
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    generated = 0
+    real_generate = MockMediaAdapter.generate
+
+    async def staged_generate(
+        self: MockMediaAdapter, request: MediaRequest
+    ) -> AsyncIterator[MediaEvent]:
+        nonlocal generated
+        generated += 1
+        if generated == 1:
+            first_started.set()
+            await release_first.wait()
+        async for event in real_generate(self, request):
+            yield event
+
+    monkeypatch.setattr(MockMediaAdapter, "generate", staged_generate)
+
+    chat = (await client.post("/api/chats", json={"title": "Queued images"})).json()
+    first = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "A grey mug on a table", "mode": "image"},
+    )
+    assert first.status_code == 202
+    await asyncio.wait_for(first_started.wait(), timeout=5)
+    second = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "A blue mug on a table", "mode": "image"},
+    )
+    assert second.status_code == 202
+    release_first.set()
+
+    deadline = asyncio.get_running_loop().time() + 10
+    while asyncio.get_running_loop().time() < deadline:
+        messages = (await client.get(f"/api/chats/{chat['id']}")).json()["messages"]
+        done = [
+            message
+            for message in messages
+            if message["role"] == "assistant" and message["status"] == "complete"
+        ]
+        if len(done) == 2:
+            break
+        await asyncio.sleep(0.03)
+    else:  # pragma: no cover - the queue did not drain
+        raise AssertionError("both queued images did not complete")
+
+    # The second entry is the whole point: it exists only because the dispatch
+    # asked what the run still owed rather than what this job displaced.
+    assert handoffs == ["profile-chat", "profile-chat"], handoffs
+    assert restored == ["profile-chat"], restored
+    # One chat stop for the whole run rather than one per image, which is the
+    # thrash this removes. The media worker is not recycled here at all: that
+    # branch is ComfyUI-only and this suite runs the mock media engine, so the
+    # unit tests pin the media half and this pins the chat half end to end.
+    assert stopped == ["chat"], stopped
+
+
+async def test_a_text_turn_clears_what_a_media_run_still_owed(
+    client: AsyncClient, app: FastAPI
+) -> None:
+    """A text execution settles the debt itself, so the dispatch must drop it.
+
+    `_ensure_chat_worker` loads whatever profile a text execution needs before
+    it runs, so once one has happened the run owes nothing. Leaving the record
+    set would make a later media job restore a profile nobody displaced. The
+    state is reachable in production when a run's remaining images never
+    dispatch, which is the cancelled-image case; it is set here directly
+    because engineering that race would be flaky rather than more truthful.
+    """
+
+    orchestrator = app.state.services.orchestrator
+    orchestrator._displaced_chat_profile_id = "profile-chat"
+
+    chat = (await client.post("/api/chats", json={"title": "Text after images"})).json()
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Explain local inference", "mode": "text"},
+    )
+    assert turn.status_code == 202
+    await wait_for_assistant(client, chat["id"], "text")
+
+    assert orchestrator._displaced_chat_profile_id is None

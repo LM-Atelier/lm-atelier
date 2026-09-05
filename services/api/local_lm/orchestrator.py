@@ -478,6 +478,14 @@ class ConversationOrchestrator:
         self._chat_guards: dict[str, asyncio.Lock] = {}
         self._chat_planner_ready = asyncio.Event()
         self._chat_planner_ready.set()
+        #: The chat profile a media run displaced and still owes back.
+        #:
+        #: Only the FIRST image of a run displaces chat; every later one finds
+        #: it already down and is told nothing. Without this the run has no
+        #: way to name what to restore when it ends, and the restore never
+        #: happens. Losing it is survivable in one direction only: chat is
+        #: not restored, and the next text execution loads what it needs.
+        self._displaced_chat_profile_id: str | None = None
         self._admission_open = True
 
     def recover_interrupted(self) -> None:
@@ -3197,8 +3205,13 @@ class ConversationOrchestrator:
                     if operation == Operation.TEXT.value:
                         self._release_deferred_media_restart()
                         await self._settle_step_prewarm(job_id)
-                    if resume_chat_profile:
-                        await self._complete_media_handoff(resume_chat_profile)
+                        # `_ensure_chat_worker` loaded whatever this execution
+                        # needed, so nothing is owed back any more.
+                        self._displaced_chat_profile_id = None
+                    else:
+                        pending = self._pending_chat_restore(resume_chat_profile)
+                        if pending:
+                            await self._complete_media_handoff(pending)
                 if queued_verification_job_id:
                     self.start(queued_verification_job_id, None)
         except asyncio.CancelledError:
@@ -4461,33 +4474,80 @@ class ConversationOrchestrator:
         finally:
             self._chat_planner_ready.set()
 
-    def _handoff_chat_target(self, fallback_profile_id: str) -> tuple[str, bool]:
-        """Prefer the profile required by the next dispatchable text job."""
+    def _pending_chat_restore(self, resume_chat_profile: str | None) -> str | None:
+        """Which chat profile this media execution's handoff owes back, if any.
+
+        One implementation, shared by the dispatch and its tests. Only the first
+        image of a run is handed a profile by `_prepare_device_handoff`, because
+        every later one finds chat already down; reading the remembered profile
+        here is what keeps the run's final image on the terminal path instead of
+        skipping the handoff entirely and leaving chat unloaded.
+        """
+
+        return resume_chat_profile or self._displaced_chat_profile_id
+
+    def _handoff_chat_target(self, fallback_profile_id: str) -> tuple[str, bool, bool]:
+        """Prefer the profile required by the next dispatchable text job.
+
+        Also reports whether the next dispatchable job is itself media, which is
+        a different question from "not text": an empty queue is not text either,
+        and the two want opposite handling. One peek answers both so the queue
+        cannot change between them.
+        """
 
         try:
             candidate = self.scheduler.peek_next_eligible_job("primary")
         except Exception:
             logger.exception("Could not inspect the next job during media handoff")
-            return fallback_profile_id, False
+            return fallback_profile_id, False, False
         if not isinstance(candidate, tuple) or len(candidate) != 2:
-            return fallback_profile_id, False
+            return fallback_profile_id, False, False
         with self.session_factory() as session:
             if candidate[1] is None:
                 job = session.get(Job, candidate[0])
                 if job and job.kind == JobKind.EDIT_VERIFY.value:
                     profile_id = job.payload_json.get("vision_profile_id")
                     if isinstance(profile_id, str):
-                        return profile_id, True
-                return fallback_profile_id, False
+                        return profile_id, True, False
+                return fallback_profile_id, False, False
             run = session.get(Run, candidate[1])
             if run and run.operation == Operation.TEXT.value and isinstance(run.profile_id, str):
-                return run.profile_id, True
-        return fallback_profile_id, False
+                return run.profile_id, True, False
+            # `_dispatch` sends every non-text operation to `_execute_media`, so
+            # the same dichotomy decides this: a queued run that is not text is
+            # another job for the worker this handoff is about to destroy.
+            queued_media_next = run is not None and run.operation != Operation.TEXT.value
+        return fallback_profile_id, False, queued_media_next
 
     async def _complete_media_handoff(self, chat_profile_id: str) -> None:
         """Release retained Comfy state before restoring a managed chat model."""
 
-        selected_chat_profile_id, queued_text_next = self._handoff_chat_target(chat_profile_id)
+        selected_chat_profile_id, queued_text_next, queued_media_next = self._handoff_chat_target(
+            chat_profile_id
+        )
+        if queued_media_next:
+            # Another image is already queued behind this one. Recycling here
+            # destroys the worker that is about to be needed and reloads a chat
+            # model that the next job would immediately unload again: a queue of
+            # images pays a full cold start of both workers per image, which is
+            # most of its wall clock.
+            #
+            # Nothing is owed by leaving chat down. `_ensure_chat_worker` loads
+            # the profile a text execution needs before it runs, so the resume
+            # here is a warm-up for the desktop's Ready chat service rather than
+            # a requirement of any job. The next media job then finds no running
+            # chat worker, `_prepare_device_handoff` returns None, this method is
+            # not reached, and the whole run keeps one worker. When the queue
+            # holds no further media work the ordinary path below runs unchanged.
+            #
+            # The readiness latch is released even though chat stays down: it
+            # marks a handoff in flight, and this handoff is over. Availability
+            # is then decided by the worker's real state, which is what
+            # `_chat_planner_available` already checks.
+            self._chat_planner_ready.set()
+            self._displaced_chat_profile_id = chat_profile_id
+            return
+        self._displaced_chat_profile_id = None
         recycle_managed_media = False
         recycled_activation_scope = False
         try:
