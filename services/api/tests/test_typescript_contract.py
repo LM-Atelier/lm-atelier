@@ -41,6 +41,7 @@ CHECKED_CONTRACTS = {
     "CatalogModel": "CatalogModel",
     "CatalogPage": "CatalogPage",
     "CatalogPreflight": "CatalogPreflight",
+    "CatalogPreflightCheck": "CatalogPreflightCheck",
     "ChatDetail": "ChatDetail",
     "CredentialStatus": "CredentialStatus",
     "DraftClassification": "DraftClassification",
@@ -51,6 +52,7 @@ CHECKED_CONTRACTS = {
     "Job": "JobOut",
     "Message": "MessageOut",
     "MessagePart": "MessagePartOut",
+    "MessageReference": "MessageReferenceOut",
     "ModelStorageInfo": "ModelStorageInfo",
     "ModelUpdate": "ModelUpdateOut",
     "PlatformMatrixEntry": "PlatformMatrixEntry",
@@ -67,7 +69,9 @@ CHECKED_CONTRACTS = {
     "Run": "RunOut",
     "RuntimeStatus": "RuntimeStatus",
     "SettingField": "SettingField",
+    "SetupReadinessCheck": "SetupReadinessCheck",
     "SetupReadinessReport": "SetupReadinessReport",
+    "SetupRoleReadiness": "SetupRoleReadiness",
     "StorageCleanupResult": "StorageCleanupResult",
     "SystemInfo": "SystemInfo",
     "ToolCapabilityProbe": "ToolCapabilityProbe",
@@ -84,6 +88,7 @@ CHECKED_CONTRACTS = {
     "WorkflowFamilyRemovalImpact": "WorkflowFamilyRemovalImpactOut",
     "WorkflowFamilyPreference": "WorkflowFamilyPreferenceOut",
     "WorkflowFamilyVariant": "WorkflowFamilyVariantOut",
+    "WorkflowMissingNode": "WorkflowMissingNodeOut",
     "WorkflowPackageAnalysis": "WorkflowPackageAnalysisOut",
     "WorkflowPackageIssue": "WorkflowPackageIssueOut",
     "WorkflowPackageRequirement": "WorkflowPackageRequirementOut",
@@ -150,6 +155,22 @@ def _typescript_fields(source: str, interface: str) -> set[str]:
     return fields
 
 
+def _array_item_components(spec: dict, *, array_item: bool = False) -> set[str]:
+    """Referenced array elements, including nullable and nested arrays."""
+    references: set[str] = set()
+    reference = spec.get("$ref")
+    if array_item and isinstance(reference, str):
+        prefix = "#/components/schemas/"
+        assert reference.startswith(prefix), f"Array item has a nonlocal ref: {reference}"
+        references.add(reference[len(prefix) :])
+    if spec.get("type") == "array":
+        references |= _array_item_components(spec.get("items") or {}, array_item=True)
+    for keyword in ("anyOf", "oneOf", "allOf"):
+        for option in spec.get(keyword, []):
+            references |= _array_item_components(option, array_item=array_item)
+    return references
+
+
 @pytest.fixture(scope="module")
 def schemas() -> dict[str, dict]:
     return _openapi_schemas()
@@ -182,6 +203,27 @@ def test_browser_type_mirrors_the_api_model(
         f"{interface} in types.ts declares {sorted(invented)}, which {component} "
         "does not return. Remove it, or map the interface to the right model."
     )
+
+    for field, spec in schema.get("properties", {}).items():
+        for target in sorted(_array_item_components(spec)):
+            target_schema = schemas.get(target)
+            assert target_schema is not None, f"{component}.{field} names unknown {target}"
+            if target_schema.get("type") != "object" and "properties" not in target_schema:
+                continue
+            declared = _typescript_field_type(types_source, interface, field)
+            element = re.fullmatch(
+                r"(?:(\w+)\[\]|Array<(\w+)>)(?:\s*\|\s*null)?",
+                (declared or "").strip(),
+            )
+            assert element is not None, (
+                f"{interface}.{field} reaches {target}; use a named array element "
+                "interface and register its pair in CHECKED_CONTRACTS."
+            )
+            child = element.group(1) or element.group(2)
+            assert CHECKED_CONTRACTS.get(child) == target, (
+                f"{interface}.{field} reaches {target}; register "
+                f"{child}/{target} in CHECKED_CONTRACTS."
+            )
 
 
 def test_every_checked_component_still_exists(schemas: dict[str, dict]) -> None:
@@ -376,6 +418,105 @@ OPEN_VOCABULARY_BASELINE = frozenset(
 # something with no authority over the behaviour, and a fourth exclusion added
 # in code would have left the list silently wrong.
 EXCLUDED_COMPONENTS = frozenset({"ValidationError", "HTTPValidationError"})
+
+
+def test_array_contract_registration_exposes_nested_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = (
+        "export interface NestedReport {\n"
+        "  roles: NestedRole[];\n"
+        "}\n"
+        "export interface NestedRole {\n"
+        "  checks: Array<NestedCheck> | null;\n"
+        "}\n"
+        "export interface NestedCheck {\n"
+        '  status: "pending" | "ready";\n'
+        "}\n"
+    )
+    nested_schemas = {
+        "NestedReportOut": {
+            "properties": {
+                "roles": {
+                    "type": "array",
+                    "items": {"$ref": "#/components/schemas/NestedRoleOut"},
+                }
+            }
+        },
+        "NestedRoleOut": {
+            "properties": {
+                "checks": {
+                    "anyOf": [
+                        {
+                            "type": "array",
+                            "items": {"$ref": "#/components/schemas/NestedCheckOut"},
+                        },
+                        {"type": "null"},
+                    ]
+                }
+            }
+        },
+        "NestedCheckOut": {
+            "properties": {"status": {"type": "string", "enum": ["pending", "ready"]}}
+        },
+    }
+    with pytest.raises(AssertionError, match="NestedRole/NestedRoleOut"):
+        test_browser_type_mirrors_the_api_model(
+            "NestedReport", "NestedReportOut", nested_schemas, source
+        )
+    monkeypatch.setitem(CHECKED_CONTRACTS, "NestedRole", "NestedRoleOut")
+    test_browser_type_mirrors_the_api_model(
+        "NestedReport", "NestedReportOut", nested_schemas, source
+    )
+    with pytest.raises(AssertionError, match="NestedCheck/NestedCheckOut"):
+        test_browser_type_mirrors_the_api_model(
+            "NestedRole", "NestedRoleOut", nested_schemas, source
+        )
+    monkeypatch.setitem(CHECKED_CONTRACTS, "NestedCheck", "NestedCheckOut")
+    for interface in ("NestedRole", "NestedCheck"):
+        test_browser_type_mirrors_the_api_model(
+            interface, interface + "Out", nested_schemas, source
+        )
+        test_browser_can_represent_every_value_the_server_returns(
+            interface, interface + "Out", nested_schemas, source
+        )
+    changed = source.replace('"pending" | "ready"', '"ready"')
+    with pytest.raises(AssertionError, match="cannot represent.*pending"):
+        test_browser_can_represent_every_value_the_server_returns(
+            "NestedCheck", "NestedCheckOut", nested_schemas, changed
+        )
+
+
+@pytest.mark.parametrize(
+    ("expression", "registered_component", "message"),
+    [
+        ("Array<{ status: string }>", "ArrayChildOut", "named array element"),
+        ("ArrayChild[]", "DifferentChildOut", "ArrayChild/ArrayChildOut"),
+    ],
+)
+def test_array_contract_requires_the_exact_named_pair(
+    expression: str,
+    registered_component: str,
+    message: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = "export interface ArrayParent {\n  children: " + expression + ";\n}\n"
+    nested_schemas = {
+        "ArrayParentOut": {
+            "properties": {
+                "children": {
+                    "type": "array",
+                    "items": {"$ref": "#/components/schemas/ArrayChildOut"},
+                }
+            }
+        },
+        "ArrayChildOut": {"type": "object", "properties": {"status": {"type": "string"}}},
+    }
+    monkeypatch.setitem(CHECKED_CONTRACTS, "ArrayChild", registered_component)
+    with pytest.raises(AssertionError, match=message):
+        test_browser_type_mirrors_the_api_model(
+            "ArrayParent", "ArrayParentOut", nested_schemas, source
+        )
 
 
 def _is_identifier(name: str) -> bool:
