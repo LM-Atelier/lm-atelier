@@ -9,6 +9,8 @@ on:
     # applies, and a stale success from the old base is not evidence about the
     # new one.
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]
+  merge_group:
+    types: [checks_requested]
   schedule:
     - cron: '23 9 * * 2'
   workflow_dispatch:
@@ -34,6 +36,12 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (
+        github.event_name == 'merge_group' &&
+        github.event.action == 'checks_requested' &&
+        github.event.repository.private == false &&
+        github.event.merge_group.base_ref == 'refs/heads/develop'
+      ) ||
+      (
         github.event_name == 'pull_request' &&
         github.event.repository.private == false &&
         github.event.pull_request.draft == false &&
@@ -52,15 +60,16 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - id: plan
         env:
-          BASE_REF: ${{ github.base_ref }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_ref || github.base_ref }}
+          BASE_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
           EVENT_NAME: ${{ github.event_name }}
-          HEAD_REF: ${{ github.head_ref }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_ref || github.head_ref }}
+          HEAD_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}
         run: |
           python3 scripts/ci-plan.py \
             --event "$EVENT_NAME" \
@@ -78,6 +87,12 @@ jobs:
       (
         github.event_name == 'workflow_dispatch' ||
         (
+          github.event_name == 'merge_group' &&
+          github.event.action == 'checks_requested' &&
+          github.event.repository.private == false &&
+          github.event.merge_group.base_ref == 'refs/heads/develop'
+        ) ||
+        (
           github.event_name == 'pull_request' &&
           github.event.repository.private == false &&
           github.event.pull_request.draft == false
@@ -94,6 +109,7 @@ jobs:
         run: exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Scan reachable source history for secrets
@@ -163,8 +179,8 @@ jobs:
       - name: Validate documentation-only change
         if: needs.verification-plan.outputs.mode == 'documentation'
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}
         run: |
           python3 scripts/check-repository-hygiene.py
           git diff --check $BASE_SHA...$HEAD_SHA --
@@ -184,7 +200,7 @@ jobs:
   # changes the ruleset - that is a separate, deliberate step.
   merge-gate:
     name: Merge gate
-    if: always() && github.event_name == 'pull_request'
+    if: always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
     needs: [verification-plan, compatibility, windows-compatibility]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -195,7 +211,7 @@ jobs:
       # this job reads a decision, it never writes.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}
           persist-credentials: false
       # A pinned interpreter rather than whatever `python` happens to mean on
       # the runner, so the gate's verdict does not depend on ambient tooling.
@@ -204,9 +220,15 @@ jobs:
           python-version: "3.12"
       - name: Require real verification for this exact head
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+          BASE_REF: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_ref || github.base_ref }}
+          BASE_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
+          HEAD_REF: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_ref || github.head_ref }}
+          RUN_SHA: ${{ github.sha }}
           DRAFT: ${{ github.event.pull_request.draft }}
           ACTION: ${{ github.event.action }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}
           PLAN: ${{ needs.verification-plan.result }}
           UBUNTU: ${{ needs.compatibility.result }}
           WINDOWS: ${{ needs.windows-compatibility.result }}
@@ -230,6 +252,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0

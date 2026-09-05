@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Decide whether a pull request head has really been verified.
+"""Decide whether a pull request or merge group has really been verified.
 
 This is the merge gate's whole decision, in one place. The workflow runs it and
 the workflow validator runs it, so the rule that ships and the rule under test
@@ -59,6 +59,7 @@ def decide(environment: Mapping[str, str], log: list[str]) -> int:
     windows = environment.get("WINDOWS", "")
     windows_required = environment.get("WINDOWS_REQUIRED", "")
     base_changed = environment.get("BASE_CHANGED", "")
+    event = environment.get("EVENT_NAME", "")
 
     log.append(f"action={action} draft={draft} head={head}")
     log.append(
@@ -77,6 +78,26 @@ def decide(environment: Mapping[str, str], log: list[str]) -> int:
     # input" and the branch naming the real reason was UNREACHABLE in
     # production, while the matrix reached it by supplying a shape production
     # never sends. Fail-closed both times, and wrong about why both times.
+    if event == "merge_group":
+        base = environment.get("BASE_SHA", "")
+        if (
+            action != "checks_requested"
+            or environment.get("REPOSITORY_PRIVATE") != "false"
+            or environment.get("BASE_REF") != "refs/heads/develop"
+            or not environment.get("HEAD_REF", "").startswith(
+                "refs/heads/gh-readonly-queue/develop/"
+            )
+            or not HEAD_SHA.fullmatch(base)
+            or base == head
+            or environment.get("RUN_SHA") != head
+        ):
+            log.append("Refusing: unusable develop merge group identity.")
+            return 1
+    elif event != "pull_request":
+        log.append("Refusing: unsupported verification event.")
+        return 1
+
+    # Merge groups have no PR draft or edited-base fields.
     preconditions = [
         f"{name}={value!r}"
         for name, value, domain in (
@@ -84,7 +105,7 @@ def decide(environment: Mapping[str, str], log: list[str]) -> int:
             ("ACTION", action, ACTIONS),
             ("BASE_CHANGED", base_changed, BOOLEANS),
         )
-        if value not in domain
+        if event == "pull_request" and value not in domain
     ]
     if preconditions:
         log.append(f"Unusable authority input: {', '.join(sorted(preconditions))}.")
@@ -95,7 +116,7 @@ def decide(environment: Mapping[str, str], log: list[str]) -> int:
     # required context on its head: if the later ready_for_review run is ever
     # lost - the exact failure this job exists for - that commit would still
     # show a green merge gate and could be merged untested.
-    if draft == "true":
+    if event == "pull_request" and draft == "true":
         log.append(
             "Draft pull request: full verification is deferred until ready_for_review."
         )
@@ -109,7 +130,7 @@ def decide(environment: Mapping[str, str], log: list[str]) -> int:
     # reverify. Editing a title or a body verifies NOTHING, and the jobs above
     # are skipped for it, so authorizing on that would let a text edit stand in
     # for a run.
-    if action == "edited" and base_changed != "true":
+    if event == "pull_request" and action == "edited" and base_changed != "true":
         log.append("Edited event that did not change the base branch.")
         log.append("Refusing: a title or body edit is not evidence about this head.")
         return 1
