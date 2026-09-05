@@ -209,6 +209,10 @@ def test_browser_type_mirrors_the_api_model(
             target_schema = schemas.get(target)
             assert target_schema is not None, f"{component}.{field} names unknown {target}"
             if target_schema.get("type") != "object" and "properties" not in target_schema:
+                assert "allOf" not in target_schema, (
+                    f"{component}.{field} reaches {target}; "
+                    "array item components using only allOf are unsupported."
+                )
                 continue
             declared = _typescript_field_type(types_source, interface, field)
             element = re.fullmatch(
@@ -516,6 +520,36 @@ def test_array_contract_requires_the_exact_named_pair(
     with pytest.raises(AssertionError, match=message):
         test_browser_type_mirrors_the_api_model(
             "ArrayParent", "ArrayParentOut", nested_schemas, source
+        )
+
+
+def test_array_contract_rejects_composition_only_targets() -> None:
+    source = (
+        "export interface ArrayParent {\n"
+        "  children: ArrayChild[];\n"
+        "}\n"
+        "export interface ArrayChild {\n"
+        '  status: "ready";\n'
+        "}\n"
+    )
+    composed_schemas = {
+        "ArrayParentOut": {
+            "properties": {
+                "children": {
+                    "type": "array",
+                    "items": {"$ref": "#/components/schemas/WrappedChildOut"},
+                }
+            }
+        },
+        "WrappedChildOut": {"allOf": [{"$ref": "#/components/schemas/ArrayChildOut"}]},
+        "ArrayChildOut": {
+            "type": "object",
+            "properties": {"status": {"type": "string", "enum": ["pending", "ready"]}},
+        },
+    }
+    with pytest.raises(AssertionError, match="WrappedChildOut.*allOf"):
+        test_browser_type_mirrors_the_api_model(
+            "ArrayParent", "ArrayParentOut", composed_schemas, source
         )
 
 
