@@ -16,6 +16,7 @@ import logging
 import os
 import threading
 import time
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,10 +24,11 @@ from typing import Any
 
 import pytest
 from httpx2 import ASGITransport, AsyncClient
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+from local_lm import artifacts as artifacts_module
 from local_lm import main as main_module
 from local_lm.artifacts import ArtifactStore
 from local_lm.config import Settings
@@ -581,3 +583,200 @@ async def test_a_slow_snapshot_keeps_the_default_batch_and_deletion_budget(
     assert removed == [25, 0]
     assert snapshots == 2
     assert "continuing one deletion per batch" not in caplog.text
+
+
+async def test_retention_progress_counts_rows_and_excludes_writer_wait(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = ArtifactStore(settings)
+    with SessionLocal() as session:
+        _aged_temporary(store, session, 0)
+        favorite = _aged_temporary(store, session, 1)
+        favorite.favorite = True
+        session.commit()
+    clock = 0.0
+    real_fence = artifacts_module.begin_artifact_write_fence
+    real_references = ArtifactStore.referenced_artifact_ids
+    real_commit = Session.commit
+
+    def waiting_fence(session: Session) -> None:
+        nonlocal clock
+        driver = session.connection().connection.driver_connection
+        if not driver.in_transaction:
+            clock += 7.0
+        real_fence(session)
+
+    def measured_references(session: Session, *, for_deletion: bool = False) -> Any:
+        nonlocal clock
+        clock += 3.0
+        return real_references(session, for_deletion=for_deletion)
+
+    def measured_commit(session: Session) -> None:
+        nonlocal clock
+        clock += 2.0
+        real_commit(session)
+
+    monkeypatch.setattr(main_module, "time", SimpleNamespace(monotonic=lambda: clock))
+    monkeypatch.setattr(artifacts_module, "begin_artifact_write_fence", waiting_fence)
+    monkeypatch.setattr(ArtifactStore, "referenced_artifact_ids", staticmethod(measured_references))
+    monkeypatch.setattr(Session, "commit", measured_commit)
+    caplog.set_level(logging.INFO)
+
+    await main_module.sweep_artifact_retention(store, settings, pause_seconds=0)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert "Artifact retention sweep started" in messages
+    committed = [message for message in messages if "retention batch committed:" in message]
+    assert len(committed) == 2
+    assert "2 row(s) examined, 1 item(s) removed" in committed[0]
+    assert "1 row(s) examined, 0 item(s) removed" in committed[1]
+    assert all("elapsed 12.000s; writer reservation 5.000s" in message for message in committed)
+    assert "3 row examination(s); elapsed 24.000s" in messages[-1]
+    with SessionLocal() as session:
+        assert _count(session) == 1
+
+
+@pytest.mark.parametrize("phase", ["reference-snapshot", "delete-artifact"])
+async def test_retention_progress_reports_a_statement_while_sqlite_is_still_inside_it(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    phase: str,
+) -> None:
+    store = ArtifactStore(settings)
+    with SessionLocal() as session:
+        _aged_temporary(store, session, 0)
+        session.commit()
+    monkeypatch.setattr(main_module, "RETENTION_PROGRESS_WARN_SECONDS", 0.02, raising=False)
+    in_sql = threading.Event()
+    reported = threading.Event()
+    attempted = threading.Event()
+    stalled_notices: list[logging.LogRecord] = []
+
+    class Notice(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            if in_sql.is_set() and f"phase {phase} " in record.getMessage():
+                stalled_notices.append(record)
+                reported.set()
+
+    def pause_inside_sqlite() -> int:
+        in_sql.set()
+        try:
+            reported.wait(timeout=3)
+        finally:
+            in_sql.clear()
+        return 1
+
+    def pause_statement(session: Session) -> None:
+        if attempted.is_set():
+            return
+        attempted.set()
+        driver = session.connection().connection.driver_connection
+        driver.create_function("retention_progress_pause", 0, pause_inside_sqlite)
+        session.execute(text("SELECT retention_progress_pause()"))
+
+    real_references = ArtifactStore.referenced_artifact_ids
+    real_delete = ArtifactStore._delete_artifact
+
+    def paused_references(session: Session, *, for_deletion: bool = False) -> Any:
+        pause_statement(session)
+        return real_references(session, for_deletion=for_deletion)
+
+    def paused_delete(self: ArtifactStore, session: Session, *args: Any, **kwargs: Any) -> Any:
+        pause_statement(session)
+        return real_delete(self, session, *args, **kwargs)
+
+    if phase == "reference-snapshot":
+        monkeypatch.setattr(
+            ArtifactStore, "referenced_artifact_ids", staticmethod(paused_references)
+        )
+    else:
+        monkeypatch.setattr(ArtifactStore, "_delete_artifact", paused_delete)
+    caplog.set_level(logging.INFO)
+    observer = Notice()
+    main_module.logger.addHandler(observer)
+    try:
+        await main_module.sweep_artifact_retention(store, settings, pause_seconds=0)
+    finally:
+        main_module.logger.removeHandler(observer)
+
+    assert attempted.is_set(), "the constructed SQLite statement was never executed"
+    assert reported.is_set(), "the stalled statement completed without a live phase notice"
+    messages = [record.getMessage() for record in caplog.records]
+    notices = [
+        index
+        for index, record in enumerate(caplog.records)
+        if any(record is stalled for stalled in stalled_notices)
+    ]
+    committed = [index for index, message in enumerate(messages) if "batch committed:" in message]
+    assert notices and committed
+    assert max(notices) < min(committed), "a live phase notice appeared after the batch committed"
+    assert not any(thread.name == "artifact-retention-progress" for thread in threading.enumerate())
+
+
+async def test_retention_progress_never_reports_a_failed_commit_as_removed(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = ArtifactStore(settings)
+    with SessionLocal() as session:
+        _aged_temporary(store, session, 0)
+        session.commit()
+
+    def failed_commit(session: Session) -> None:
+        raise RuntimeError("constructed commit failure")
+
+    monkeypatch.setattr(Session, "commit", failed_commit)
+    caplog.set_level(logging.INFO)
+    await main_module.sweep_artifact_retention(store, settings, pause_seconds=0)
+
+    assert "retention batch committed:" not in caplog.text
+    assert "retention sweep complete:" not in caplog.text
+    assert "retention sweep failed after 0 batch(es)" in caplog.text
+    with SessionLocal() as session:
+        assert _count(session) == 1
+    assert not any(thread.name == "artifact-retention-progress" for thread in threading.enumerate())
+
+
+async def test_retention_progress_includes_the_batch_committed_during_cancellation(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = ArtifactStore(settings)
+    with SessionLocal() as session:
+        for index in range(2):
+            _aged_temporary(store, session, index)
+        session.commit()
+    deleted = threading.Event()
+    release = threading.Event()
+    real_delete = ArtifactStore._delete_artifact
+
+    def paused_delete(self: ArtifactStore, session: Session, *args: Any, **kwargs: Any) -> Any:
+        result = real_delete(self, session, *args, **kwargs)
+        deleted.set()
+        assert release.wait(timeout=5), "the constructed deletion was not released"
+        return result
+
+    monkeypatch.setattr(ArtifactStore, "_delete_artifact", paused_delete)
+    caplog.set_level(logging.INFO)
+    operation = asyncio.create_task(
+        main_module.sweep_artifact_retention(store, settings, pause_seconds=0)
+    )
+    try:
+        assert await asyncio.to_thread(deleted.wait, 5), "the first deletion never ran"
+        operation.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await operation
+    finally:
+        release.set()
+        if not operation.done():
+            operation.cancel()
+        with suppress(asyncio.CancelledError):
+            await operation
+
+    with SessionLocal() as session:
+        assert _count(session) == 1
+    assert "retention batch committed:" in caplog.text
+    assert "1 item(s) removed" in caplog.text
+    assert "sweep stopped after 1 batch(es), 1 removed" in caplog.text
+    assert "sweep complete:" not in caplog.text
