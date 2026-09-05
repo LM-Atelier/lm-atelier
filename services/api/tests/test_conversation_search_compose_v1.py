@@ -275,3 +275,9 @@ def test_the_ceiling_refusal_stays_invisible_to_a_caller() -> None:
     # the cause is what let that through.
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
+
+
+def test_compose_refuses_a_non_string_body() -> None:
+    numbered = _row("m1", "hello")
+    numbered["body"] = 1
+    _refuse([numbered])

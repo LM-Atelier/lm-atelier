@@ -274,3 +274,23 @@ def test_a_document_cannot_be_minted_without_the_evaluator_witness() -> None:
     assert document is not None
     assert document.eligible is True
     assert document.fts_write_authorized is False
+
+
+def test_refuses_a_non_string_body_and_a_malformed_revision_id() -> None:
+    common = {
+        "message_id": "m1",
+        "chat_id": "c1",
+        "role": "user",
+        "has_media": False,
+        "transcript_visible": True,
+        "content_removed": False,
+        "private_session": False,
+        "helper_session": False,
+        "secret_payload": False,
+    }
+    with pytest.raises(SearchDocumentError, match=INVALID_DOCUMENT):
+        build_search_document(body=1, **common)
+    with pytest.raises(SearchDocumentError, match=INVALID_DOCUMENT):
+        build_search_document(body="x", selected_response_revision_id="", **common)
+    with pytest.raises(SearchDocumentError, match=INVALID_DOCUMENT):
+        build_search_document(body="x", selected_response_revision_id=1, **common)
