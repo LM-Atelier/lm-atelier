@@ -236,6 +236,16 @@ async function request<T>(
   return (await response.json()) as T;
 }
 
+type WorkflowRevisionInput = Pick<
+  WorkflowBundle,
+  "engine_version" | "api_graph" | "ui_graph" | "input_schema" | "dependencies"
+> & { trusted?: never };
+
+type WorkflowCreateInput = WorkflowRevisionInput & Pick<
+  WorkflowBundle,
+  "name" | "description" | "operation" | "engine"
+>;
+
 export const api = {
   initialize: ensureSession,
   setupReadiness: () => request<SetupReadinessReport>("/api/setup/readiness"),
@@ -989,11 +999,11 @@ export const api = {
       `/api/projects/${encodeURIComponent(projectId)}/workflow-selections/${capability}`,
       { method: "PUT", body: JSON.stringify(selection) },
     ),
-  createWorkflow: (payload: Record<string, unknown>) =>
+  createWorkflow: (payload: WorkflowCreateInput) =>
     request<Workflow>("/api/workflows", { method: "POST", body: JSON.stringify(payload) }),
   updateWorkflow: (id: string, payload: Record<string, unknown>) =>
     request<Workflow>(`/api/workflows/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
-  createWorkflowRevision: (id: string, payload: Record<string, unknown>) =>
+  createWorkflowRevision: (id: string, payload: WorkflowRevisionInput) =>
     request<WorkflowRevision>(`/api/workflows/${id}/revisions`, { method: "POST", body: JSON.stringify(payload) }),
   restoreWorkflowRevision: (id: string, revisionId: string) =>
     request<WorkflowRevision>(`/api/workflows/${id}/revisions/${revisionId}/restore`, { method: "POST" }),
