@@ -2175,6 +2175,39 @@ def test_exact_comparator_refuses_every_equal_but_differently_typed_value() -> N
     assert exactly_equal([1, "a", True], [1, "a", True])
 
 
+@pytest.mark.parametrize("surface", ["verification", "merge-gate"])
+def test_invalid_workflow_does_not_execute_the_merge_decision(monkeypatch, surface: str) -> None:
+    namespace = _workflow_namespace()
+    path, content, workflow = _shipped_ci()
+    if surface == "verification":
+        workflow["jobs"]["windows-compatibility"]["continue-on-error"] = True
+    else:
+        workflow["jobs"]["merge-gate"]["continue-on-error"] = True
+
+    def unexpected_execution(*args, **kwargs):
+        raise AssertionError("An invalid workflow executed the merge decision")
+
+    monkeypatch.setattr(namespace["subprocess"], "run", unexpected_execution)
+    assert namespace["validate_workflow_document"](path, content, workflow)
+
+
+def test_valid_workflow_still_executes_every_merge_decision_case(monkeypatch) -> None:
+    namespace = _workflow_namespace()
+    path, content, workflow = _shipped_ci()
+    original_run = namespace["subprocess"].run
+    executed = []
+
+    def record_execution(command, **kwargs):
+        executed.append(command)
+        return original_run(command, **kwargs)
+
+    monkeypatch.setattr(namespace["subprocess"], "run", record_execution)
+    assert namespace["validate_workflow_document"](path, content, workflow) == []
+    assert len(executed) == len(namespace["MERGE_GATE_MATRIX"])
+    expected_command = [sys.executable, str(Path("scripts") / "ci-merge-gate.py")]
+    assert all(command == expected_command for command in executed)
+
+
 def test_workflow_validator_wiring_is_intact() -> None:
     """The coordinator must actually call each rule, and main must call it.
 

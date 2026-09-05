@@ -1061,6 +1061,8 @@ def validate_merge_gate(path: Path, workflow: dict[str, Any]) -> list[str]:
         ]
     if not MERGE_GATE_SCRIPT.is_file():
         return problems + [f"{path}: {MERGE_GATE_SCRIPT} is missing"]
+    if problems:
+        return problems
 
     for label, environment, expected in MERGE_GATE_MATRIX:
         full = {
@@ -1254,8 +1256,10 @@ def validate_workflow_document(
     errors.extend(validate_environment_contexts(path, workflow))
     errors.extend(validate_untrusted_triggers(path, content))
     errors.extend(validate_pull_request_triggers(path, workflow))
-    errors.extend(validate_merge_gate(path, workflow))
     errors.extend(validate_verification_bindings(path, workflow))
+    if errors:
+        return errors
+    errors.extend(validate_merge_gate(path, workflow))
     return errors
 
 
