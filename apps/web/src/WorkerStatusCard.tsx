@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "./api";
 import { StatusDot } from "./StatusDot";
-import { formatBytes } from "./format";
+import { formatBytes, formatStageElapsed } from "./format";
 import type { WorkerStatus } from "./types";
 import { workerFailureSummary } from "./workerFailures";
 
@@ -66,6 +66,13 @@ export function WorkerStatusCard({
       <div className="worker-metrics">
         <span><strong>{worker.active_jobs}</strong> active</span>
         <span><strong>{worker.queued_jobs}</strong> queued</span>
+        {worker.active_jobs > 0 && (
+          <span>
+            {worker.progress_age_seconds == null
+              ? "Awaiting first progress report"
+              : `Last progress report: ${formatStageElapsed(worker.progress_age_seconds * 1_000)} ago`}
+          </span>
+        )}
         <span><strong>{formatBytes(worker.current_memory_bytes)}</strong> current RAM</span>
         <span><strong>{formatBytes(worker.peak_memory_bytes)}</strong> measured peak</span>
         {worker.estimated_memory_bytes != null && (
