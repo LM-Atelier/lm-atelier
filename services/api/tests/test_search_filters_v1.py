@@ -4,6 +4,7 @@ import pytest
 
 from local_lm.search_filters_v1 import (
     INVALID_FILTER,
+    MAX_FILTER_KEYS,
     MAX_ID_CHARS,
     SearchFilterError,
     SearchFiltersV1,
@@ -76,3 +77,12 @@ def test_refuses_hostile_keys_and_constructor_authority() -> None:
             until=None,
             query_execution_authorized=True,
         )
+
+
+def test_refuses_a_non_dict_and_an_oversized_filter_map() -> None:
+    with pytest.raises(SearchFilterError, match=INVALID_FILTER):
+        validate_search_filters([])
+    with pytest.raises(SearchFilterError, match=INVALID_FILTER):
+        validate_search_filters("chat-1")
+    with pytest.raises(SearchFilterError, match=INVALID_FILTER):
+        validate_search_filters({f"k{i}": i for i in range(MAX_FILTER_KEYS + 1)})
