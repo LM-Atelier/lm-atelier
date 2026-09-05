@@ -250,10 +250,15 @@ async def test_selected_prompt_batch_queues_one_atomic_exact_media_plan(
                 ).all()
             )
             assert len(runs) == len(steps) == 2
-            assert {run.standalone_prompt for run in runs} == {
-                item["reviewed_prompt"] for item in selected
-            }
+            prompt_by_step_id = {step.id: step.prompt for step in steps}
+            routing_prompts = []
             for run in runs:
+                assert run.work_step_id is not None
+                expected_prompt = prompt_by_step_id[run.work_step_id]
+                assert run.standalone_prompt == expected_prompt
+                recorded_prompt = run.provenance_json["routing"]["standalone_prompt"]
+                assert recorded_prompt == expected_prompt
+                routing_prompts.append(recorded_prompt)
                 witness = run.provenance_json["prompt_source"]
                 serialized = json.dumps(witness)
                 assert witness["batch_id"] == batch["id"]
@@ -261,6 +266,8 @@ async def test_selected_prompt_batch_queues_one_atomic_exact_media_plan(
                 assert "private first subject" not in serialized
                 assert "private skipped subject" not in serialized
                 assert "private third subject" not in serialized
+            assert routing_prompts[0] != routing_prompts[1]
+            assert set(routing_prompts) == {item["reviewed_prompt"] for item in selected}
 
         replay = await client.post(
             f"/api/prompt-batches/{batch['id']}/queue",

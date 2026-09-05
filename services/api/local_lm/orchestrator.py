@@ -1957,7 +1957,10 @@ class ConversationOrchestrator:
                 per_output_prompt,
             )
             provenance: dict[str, Any] = {
-                "routing": plan.model_dump(mode="json"),
+                "routing": {
+                    **plan.model_dump(mode="json"),
+                    "standalone_prompt": per_output_prompt,
+                },
                 **(
                     {
                         "prompt_source": (
