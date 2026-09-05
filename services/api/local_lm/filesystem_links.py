@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import dataclasses
 import enum
+import errno
 import os
 import stat
 import sys
@@ -113,6 +115,8 @@ _DIRECTORY_QUERY_BUFFER: Final = 64 * 1024
 #: this primitive walks what it returns, so an unbounded answer is an
 #: unbounded amount of someone else's work.
 _MAX_LISTED_ENTRIES: Final = 8192
+#: linkat flag: oldpath is ignored and olddirfd is the file itself.
+_AT_EMPTY_PATH: Final = 0x1000
 #: POSIX d_type values. Only the four that map to a distinct kind are named;
 #: everything else is OTHER, and DT_UNKNOWN stays UNKNOWN rather than being
 #: resolved by a second lookup.
@@ -382,6 +386,190 @@ def _require_regular(descriptor: int) -> int:
             os.close(descriptor)
         _refuse()
     return descriptor
+
+
+def take_regular_file(anchor: AnchoredDirectory, name: str) -> int | None:
+    """Open an existing regular file through the held directory, with move rights.
+
+    None means the name is gone. A link, a directory, or anything else refuses.
+    The caller owns the descriptor and must close it.
+
+    Distinct from open_entry because a later publish must move THIS object.
+    Windows rename needs DELETE on the handle; open_entry's read intent cannot
+    rename.
+    """
+
+    _require_entry_name(name)
+    if anchor.descriptor is not None:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        try:
+            descriptor = os.open(name, flags, dir_fd=anchor.descriptor)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            _refuse()
+        return _require_regular(descriptor)
+    handle = anchor.handle
+    if handle is None:
+        _refuse()
+    opened, status = _nt_try_open_relative(handle, name, intent="rename_source")
+    if status in (_STATUS_OBJECT_NAME_NOT_FOUND, _STATUS_OBJECT_PATH_NOT_FOUND):
+        return None
+    if status != _STATUS_SUCCESS or not opened:
+        _refuse()
+    if _nt_is_reparse(opened):
+        _close_windows_handle(opened)
+        _refuse()
+    try:
+        descriptor = _descriptor_from_handle(opened)
+    except OSError:
+        _close_windows_handle(opened)
+        _refuse()
+    return _require_regular(descriptor)
+
+
+def publish_opened_file(
+    source: AnchoredDirectory,
+    name: str,
+    opened: int,
+    *,
+    into: AnchoredDirectory,
+    destination: str | None = None,
+) -> None:
+    """Move the already-open regular file into `into`.
+
+    The object published is the one `opened` refers to, not a later lookup of
+    `name`. `name` is used only to drop the source directory entry after a
+    POSIX hard-link of that same inode. Destination must not already exist.
+    """
+
+    dest_name = name if destination is None else destination
+    _require_entry_name(name)
+    _require_entry_name(dest_name)
+    if source.descriptor is not None:
+        if into.descriptor is None:
+            _refuse()
+        _publish_opened_posix(source.descriptor, name, opened, into.descriptor, dest_name)
+        return
+    dest_handle = into.handle
+    if dest_handle is None:
+        _refuse()
+    native = _handle_from_descriptor(opened)
+    moved = _nt_set_name(
+        native,
+        dest_handle,
+        dest_name,
+        _FILE_RENAME_INFORMATION_CLASS,
+        replace=False,
+    )
+    if not moved:
+        raise AnchoredEntryExists(CONTAINMENT_REFUSED) from None
+
+
+def _publish_opened_posix(
+    source_dirfd: int,
+    source_name: str,
+    opened: int,
+    dest_dirfd: int,
+    dest_name: str,
+) -> None:
+    before = os.fstat(opened)
+    if not stat.S_ISREG(before.st_mode):
+        _refuse()
+    if _link_opened_posix(opened, dest_dirfd, dest_name):
+        dest = os.open(
+            dest_name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=dest_dirfd,
+        )
+        try:
+            after = os.fstat(dest)
+        finally:
+            os.close(dest)
+        if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+            with contextlib.suppress(OSError):
+                os.unlink(dest_name, dir_fd=dest_dirfd)
+            _refuse()
+    else:
+        _copy_opened_posix(opened, dest_dirfd, dest_name)
+    try:
+        os.unlink(source_name, dir_fd=source_dirfd)
+    except OSError:
+        _refuse()
+
+
+def _link_opened_posix(opened: int, dest_dirfd: int, dest_name: str) -> bool:
+    """Hard-link the opened inode into dest. False means copy instead.
+
+    Only one linkat failure says anything about containment: EEXIST means the
+    destination name is already taken, and taking it anyway is the thing this
+    module exists to refuse. Every other failure says that this host, this
+    filesystem or this pair of mounts will not hard-link, which is a fact about
+    the machine rather than about the file, and copying is the correct answer.
+
+    An allow-list of "expected" errnos gets that backwards. It has to predict
+    every way a kernel can decline to link, and the ones it misses turn an
+    ordinary install into a refusal: EXDEV when staging and the model directory
+    sit on different mounts, ENOENT or EACCES where AT_EMPTY_PATH needs a
+    capability the process does not hold, EMLINK on a full link count. None of
+    those are unsafe, and none of them are rare.
+
+    Falling back does not weaken the boundary. `_copy_opened_posix` reads from
+    this same held descriptor rather than looking the name up again, creates the
+    destination with O_EXCL | O_NOFOLLOW so it can neither replace an entry nor
+    write through a link, and refuses on any error of its own. What it gives up
+    is a shared inode, which nothing here relies on.
+    """
+
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+    except OSError:
+        return False
+    linkat = getattr(libc, "linkat", None)
+    if linkat is None:
+        return False
+    encoded = os.fsencode(dest_name)
+    result = linkat(
+        ctypes.c_int(opened),
+        b"",
+        ctypes.c_int(dest_dirfd),
+        encoded,
+        ctypes.c_int(_AT_EMPTY_PATH),
+    )
+    if result == 0:
+        return True
+    if ctypes.get_errno() == errno.EEXIST:
+        raise AnchoredEntryExists(CONTAINMENT_REFUSED) from None
+    return False
+
+
+def _copy_opened_posix(opened: int, dest_dirfd: int, dest_name: str) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        dest = os.open(dest_name, flags, 0o600, dir_fd=dest_dirfd)
+    except FileExistsError:
+        raise AnchoredEntryExists(CONTAINMENT_REFUSED) from None
+    except OSError:
+        _refuse()
+    try:
+        os.lseek(opened, 0, os.SEEK_SET)
+        while True:
+            chunk = os.read(opened, 1024 * 1024)
+            if not chunk:
+                break
+            view = memoryview(chunk)
+            while view:
+                written = os.write(dest, view)
+                if written <= 0:
+                    raise OSError("incomplete write")
+                view = view[written:]
+        os.fsync(dest)
+    except OSError:
+        os.close(dest)
+        with contextlib.suppress(OSError):
+            os.unlink(dest_name, dir_fd=dest_dirfd)
+        _refuse()
+    os.close(dest)
 
 
 def read_entry(anchor: AnchoredDirectory, name: str) -> bytes | None:
@@ -1708,6 +1896,18 @@ def _descriptor_from_handle(handle: int) -> int:
 
     windows: Any = msvcrt
     return int(windows.open_osfhandle(handle, getattr(os, "O_BINARY", 0)))
+
+
+def _handle_from_descriptor(descriptor: int) -> int:
+    """Recover the native handle the C runtime already owns.
+
+    The descriptor still owns the handle. Do not CloseHandle the result.
+    """
+
+    import msvcrt
+
+    windows: Any = msvcrt
+    return int(windows.get_osfhandle(descriptor))
 
 
 def _close_windows_handle(handle: int) -> None:
