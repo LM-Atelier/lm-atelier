@@ -12,6 +12,7 @@ from local_lm.conversation_search_compose_v1 import (
     MAX_COMPOSE_WORK,
     SearchComposeError,
     SearchComposeResultV1,
+    _bound_id,
     _owned_compose_row,
     _RowTooWide,
     compose_conversation_search,
@@ -72,6 +73,29 @@ def test_compose_requires_chat_id() -> None:
     del row["chat_id"]
     _refuse([row])
     _refuse([_row("m1", "hello", chat_id="bad id")])
+
+
+def test_bound_id_refuses_empty_and_non_string_values() -> None:
+    with pytest.raises(SearchComposeError, match=INVALID_COMPOSE) as empty:
+        _bound_id("")
+    assert str(empty.value) == INVALID_COMPOSE
+    with pytest.raises(SearchComposeError, match=INVALID_COMPOSE) as numbered:
+        _bound_id(1)
+    assert str(numbered.value) == INVALID_COMPOSE
+
+
+def test_compose_refuses_empty_ids() -> None:
+    _refuse([_row("m1", "hello", chat_id="")])
+    _refuse([_row("", "hello")])
+
+
+def test_compose_refuses_non_string_ids() -> None:
+    numbered_chat = _row("m1", "hello")
+    numbered_chat["chat_id"] = 1
+    _refuse([numbered_chat])
+    numbered_message = _row("m1", "hello")
+    numbered_message["message_id"] = 1
+    _refuse([numbered_message])
 
 
 def test_compose_refuses_duplicate_message_ids_across_chats() -> None:
