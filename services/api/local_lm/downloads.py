@@ -40,7 +40,19 @@ from .comfy_templates import (
 from .config import Settings
 from .domain import CompatibilityLevel, JobKind, JobStatus, new_id, utcnow
 from .events import EventBroker
-from .filesystem_links import is_link_or_reparse
+from .filesystem_links import (
+    UNSAFE_ENTRY_KINDS,
+    AnchoredDirectory,
+    AnchoredDirectoryError,
+    AnchoredEntryKind,
+    is_link_or_reparse,
+    list_entries,
+    open_child_directory,
+    publish_opened_file,
+    remove_directory_entry,
+    remove_entry,
+    take_regular_file,
+)
 from .gguf import (
     GGUFSelectionError,
     automatic_gguf_selection,
@@ -1446,9 +1458,7 @@ class DownloadManager:
                     provisional_files = list(filenames)
                 async with self.scheduler.lease("disk"):
                     self._activate_staging(staging, destination)
-                    installed_size = sum(
-                        path.stat().st_size for path in destination.rglob("*") if path.is_file()
-                    )
+                    installed_size = self._contained_tree_size(destination)
                 template_defaults = (
                     self._template_defaults(compiled_template) if compiled_template else {}
                 )
@@ -3330,20 +3340,101 @@ class DownloadManager:
     @staticmethod
     def _activate_staging(staging: Path, destination: Path) -> None:
         """Atomically add complete files while preserving other selections from a revision."""
-        if not destination.exists():
-            os.replace(staging, destination)
-            return
-        for source in sorted(staging.rglob("*")):
-            if not source.is_file():
+        try:
+            with (
+                AnchoredDirectory(staging.parent) as staged_parent,
+                AnchoredDirectory(destination.parent) as dest_parent,
+            ):
+                with open_child_directory(staged_parent, staging.name) as staged:
+                    DownloadManager._refuse_unsafe_tree(staged)
+                    with open_child_directory(dest_parent, destination.name, create=True) as dest:
+                        DownloadManager._merge_contained_tree(staged, dest)
+                        DownloadManager._remove_contained_tree(staged)
+                remove_directory_entry(staged_parent, staging.name)
+        except AnchoredDirectoryError as exc:
+            raise ValueError("model staging cannot use filesystem links") from exc
+
+    @staticmethod
+    def _refuse_unsafe_tree(anchor: AnchoredDirectory) -> None:
+        for entry in list_entries(anchor):
+            if entry.kind in UNSAFE_ENTRY_KINDS:
+                raise ValueError("model staging cannot use filesystem links")
+            if entry.kind is AnchoredEntryKind.DIRECTORY:
+                with open_child_directory(anchor, entry.name) as child:
+                    DownloadManager._refuse_unsafe_tree(child)
+
+    @staticmethod
+    def _merge_contained_tree(staged: AnchoredDirectory, dest: AnchoredDirectory) -> None:
+        entries = tuple(list_entries(staged))
+        if any(entry.kind in UNSAFE_ENTRY_KINDS for entry in entries):
+            raise ValueError("model staging cannot use filesystem links")
+        for entry in entries:
+            if entry.kind is AnchoredEntryKind.DIRECTORY:
+                with (
+                    open_child_directory(dest, entry.name, create=True) as dest_child,
+                    open_child_directory(staged, entry.name) as staged_child,
+                ):
+                    DownloadManager._merge_contained_tree(staged_child, dest_child)
                 continue
-            relative = source.relative_to(staging)
-            target = destination / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if target.exists():
-                source.unlink()
-            else:
-                os.replace(source, target)
-        shutil.rmtree(staging, ignore_errors=True)
+            if entry.kind is not AnchoredEntryKind.FILE:
+                continue
+            opened = take_regular_file(staged, entry.name)
+            if opened is None:
+                raise ValueError("model staging cannot use filesystem links")
+            published = False
+            try:
+                existing = {item.name: item.kind for item in list_entries(dest)}.get(entry.name)
+                if existing is AnchoredEntryKind.FILE:
+                    pass
+                elif existing is not None:
+                    raise ValueError("model staging cannot use filesystem links")
+                else:
+                    publish_opened_file(
+                        staged,
+                        entry.name,
+                        opened,
+                        into=dest,
+                        destination=entry.name,
+                    )
+                    published = True
+            finally:
+                os.close(opened)
+            if not published:
+                remove_entry(staged, entry.name)
+
+    @staticmethod
+    def _remove_contained_tree(anchor: AnchoredDirectory) -> None:
+        entries = tuple(list_entries(anchor))
+        if any(entry.kind in UNSAFE_ENTRY_KINDS for entry in entries):
+            raise ValueError("model staging cannot use filesystem links")
+        for entry in entries:
+            if entry.kind is AnchoredEntryKind.DIRECTORY:
+                with open_child_directory(anchor, entry.name) as child:
+                    DownloadManager._remove_contained_tree(child)
+                remove_directory_entry(anchor, entry.name)
+                continue
+            remove_entry(anchor, entry.name)
+
+    @staticmethod
+    def _contained_tree_size(root: Path) -> int:
+        try:
+            with AnchoredDirectory(root) as held:
+                return DownloadManager._sum_contained_files(held)
+        except AnchoredDirectoryError as exc:
+            raise ValueError("model staging cannot use filesystem links") from exc
+
+    @staticmethod
+    def _sum_contained_files(anchor: AnchoredDirectory) -> int:
+        total = 0
+        for entry in list_entries(anchor):
+            if entry.kind in UNSAFE_ENTRY_KINDS:
+                raise ValueError("model staging cannot use filesystem links")
+            if entry.kind is AnchoredEntryKind.FILE and entry.size_bytes is not None:
+                total += entry.size_bytes
+            elif entry.kind is AnchoredEntryKind.DIRECTORY:
+                with open_child_directory(anchor, entry.name) as child:
+                    total += DownloadManager._sum_contained_files(child)
+        return total
 
     @staticmethod
     def _retain_verified_staging(
