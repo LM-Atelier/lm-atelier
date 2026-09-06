@@ -64,6 +64,18 @@ export function useLiveEvents(
     // per-message map remembers which attempt last wrote a message's
     // live text, so a newer attempt's first delta starts it over.
     const latestAttemptByJob = new Map<string, number>();
+    // Seeded from the cache, because this map is rebuilt on every connect and
+    // only `job.progress` used to fill it. Between a reconnect and the first
+    // progress event it was empty, so an earlier attempt's delta had nothing
+    // to be measured against and was accepted - overwriting live text the
+    // newer attempt had already produced. The job list carries each job's
+    // attempt and is already here, so the answer does not have to be waited
+    // for.
+    for (const job of client.getQueryData<Job[]>(["jobs"]) ?? []) {
+      if (job.id && typeof job.attempt === "number") {
+        latestAttemptByJob.set(job.id, job.attempt);
+      }
+    }
     const latestAttempt = new Map<string, number>();
     let mediaRefresh: number | undefined;
     let authoritativeRefresh: number | undefined;
