@@ -91,6 +91,12 @@ def _preview_payload(frame: bytes) -> bytes | None:
     return payload if _is_preview_image(payload) else None
 
 
+#: How long the abandonment interrupt may take. `close_iterator` gives the whole
+#: close five seconds, and the output cleanup runs after this, so the interrupt
+#: must not be able to spend the entire allowance on its own.
+ABANDONED_INTERRUPT_SECONDS = 2.0
+
+
 class ComfyUIAdapter:
     def __init__(
         self,
@@ -382,6 +388,7 @@ class ComfyUIAdapter:
         self._cancel_events[request.run_id] = cancel_event
         prompt_id: str | None = None
         outputs_collected = False
+        abandoned = False
         try:
             yield MediaEvent(
                 type="progress",
@@ -567,6 +574,13 @@ class ComfyUIAdapter:
                 assets=assets,
                 engine_sourced=True,
             )
+        except GeneratorExit:
+            # The consumer closed this producer rather than finishing it: a
+            # superseded execution, dropping a stream whose result nobody will
+            # read. Recorded here and acted on in the teardown, because that is
+            # where it is known whether a prompt was ever submitted.
+            abandoned = True
+            raise
         except asyncio.CancelledError:
             raise
         except WebSocketException:
@@ -586,6 +600,22 @@ class ComfyUIAdapter:
             self._cancel_events.pop(request.run_id, None)
             self._cancelled.discard(request.run_id)
             if prompt_id and not outputs_collected:
+                if abandoned and not cancel_event.is_set():
+                    # A prompt was submitted and the consumer walked away.
+                    # Popping the entries above ends this adapter's interest in
+                    # it and nothing else: the backend goes on sampling a result
+                    # nobody will read, holding the device against the run that
+                    # replaced this one. Only an explicit interrupt stops it.
+                    #
+                    # A set cancel event means `cancel` already issued the
+                    # interrupt, so there is nothing to repeat.
+                    #
+                    # Deliberately not extended to the error exits below. A
+                    # malformed or oversized event is a different case with its
+                    # own settled handling, and widening this to cover it would
+                    # change six existing controls on a question this row does
+                    # not ask.
+                    await self._interrupt_prompt(timeout=ABANDONED_INTERRUPT_SECONDS)
                 await self._cleanup_prompt_outputs(prompt_id)
 
     async def _next_message(
@@ -898,9 +928,21 @@ class ComfyUIAdapter:
         if run_id in self._jobs:
             await self._interrupt_prompt()
 
-    async def _interrupt_prompt(self) -> None:
+    async def _interrupt_prompt(self, *, timeout: float = 10) -> None:
+        """Stop whatever the backend is executing.
+
+        The endpoint takes no prompt id: it interrupts the running prompt,
+        whichever that is. Every caller here holds the media worker for the run
+        it is interrupting, which is what makes that safe, and it is the same
+        assumption `cancel` already makes.
+
+        `timeout` exists because one caller is a `finally` driven by a bounded
+        close. A budget larger than that close would spend the whole allowance
+        here and leave the output cleanup after it unrun.
+        """
+
         try:
-            response = await self._client.post("/interrupt", timeout=10)
+            response = await self._client.post("/interrupt", timeout=timeout)
             response.raise_for_status()
         except httpx.HTTPError:
             # Local cancellation remains authoritative even when the worker has

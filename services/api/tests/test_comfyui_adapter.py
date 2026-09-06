@@ -14,6 +14,7 @@ from websockets.exceptions import WebSocketException
 
 from local_lm.adapters.base import GeneratedAsset, MediaEvent, MediaRequest
 from local_lm.adapters.comfyui import ComfyUIAdapter, _preview_payload
+from local_lm.adapters.contracts import close_iterator
 
 
 def media_request(
@@ -560,6 +561,152 @@ async def test_cancel_wakes_a_blocked_comfyui_websocket(
     assert interrupted
     assert request.run_id not in adapter._jobs
     assert request.run_id not in adapter._cancel_events
+
+
+async def test_abandoning_a_submitted_prompt_interrupts_the_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A consumer that walks away must not leave the backend sampling.
+
+    The prompt is submitted before iteration completes, so a superseded
+    execution closing its producer leaves work running that nobody will read.
+    Popping the local records ends this adapter's interest in that prompt and
+    nothing else: the backend goes on holding the device against the run that
+    replaced this one.
+
+    Cleaning the outputs afterwards was already here and is not the same thing.
+    It removes what the run WROTE; only the interrupt stops it writing.
+    """
+
+    prompt_id = "prompt-abandoned"
+    receiving = asyncio.Event()
+    interrupts = 0
+    cleaned = False
+
+    class Socket:
+        async def __aenter__(self) -> Socket:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        def __aiter__(self) -> Socket:
+            return self
+
+        async def __anext__(self) -> str:
+            receiving.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    def connect(*_args: Any, **_kwargs: Any) -> Socket:
+        return Socket()
+
+    async def comfy(request: httpx.Request) -> httpx.Response:
+        nonlocal interrupts, cleaned
+        if request.url.path == "/prompt":
+            return httpx.Response(200, json={"prompt_id": prompt_id, "node_errors": {}})
+        if request.url.path == "/interrupt":
+            interrupts += 1
+            return httpx.Response(200, json={})
+        if request.url.path == f"/history/{prompt_id}":
+            cleaned = True
+            return httpx.Response(200, json={})
+        raise AssertionError(f"unexpected ComfyUI request: {request.method} {request.url}")
+
+    monkeypatch.setattr("local_lm.adapters.comfyui.websockets.connect", connect)
+    adapter = ComfyUIAdapter("http://comfy.test", inactivity_seconds=60)
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(comfy),
+    )
+    request = media_request(operation="text_to_image")
+    producer = adapter.generate(request)
+    try:
+        seen = []
+        while True:
+            event = await asyncio.wait_for(anext(producer), timeout=1)
+            seen.append(event.type)
+            if event.type == "queued":
+                break
+
+        # The abandonment itself, through the same bounded close the
+        # orchestrator uses when a write refuses.
+        await close_iterator(producer)
+    finally:
+        await adapter.close()
+
+    assert seen[-1] == "queued", "the prompt was never submitted, so nothing was abandoned"
+    assert interrupts == 1, "the backend was left executing a prompt nobody would read"
+    assert cleaned, "the output cleanup lost its turn inside the bounded close"
+    assert request.run_id not in adapter._jobs
+    assert request.run_id not in adapter._cancel_events
+
+
+async def test_a_cancelled_run_is_interrupted_once_and_not_again_on_the_way_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The half that must not change.
+
+    `cancel` issues the interrupt itself, and every post-submission exit that
+    yields `cancelled` runs with the cancel event set. That event is what tells
+    the teardown there is nothing left to repeat. This passes before the
+    abandonment interrupt exists and must keep passing after it.
+    """
+
+    prompt_id = "prompt-cancelled-once"
+    receiving = asyncio.Event()
+    interrupts = 0
+
+    class Socket:
+        async def __aenter__(self) -> Socket:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        def __aiter__(self) -> Socket:
+            return self
+
+        async def __anext__(self) -> str:
+            receiving.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    def connect(*_args: Any, **_kwargs: Any) -> Socket:
+        return Socket()
+
+    async def comfy(request: httpx.Request) -> httpx.Response:
+        nonlocal interrupts
+        if request.url.path == "/prompt":
+            return httpx.Response(200, json={"prompt_id": prompt_id, "node_errors": {}})
+        if request.url.path == "/interrupt":
+            interrupts += 1
+            return httpx.Response(200, json={})
+        if request.url.path == f"/history/{prompt_id}":
+            return httpx.Response(200, json={})
+        raise AssertionError(f"unexpected ComfyUI request: {request.method} {request.url}")
+
+    monkeypatch.setattr("local_lm.adapters.comfyui.websockets.connect", connect)
+    adapter = ComfyUIAdapter("http://comfy.test", inactivity_seconds=60)
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(comfy),
+    )
+    request = media_request(operation="text_to_image")
+    collecting = asyncio.create_task(_collect_media_events(adapter, request))
+    try:
+        await asyncio.wait_for(receiving.wait(), timeout=0.5)
+        await adapter.cancel(request.run_id)
+        events = await asyncio.wait_for(collecting, timeout=0.5)
+    finally:
+        if not collecting.done():
+            collecting.cancel()
+        await adapter.close()
+
+    assert events[-1].type == "cancelled"
+    assert interrupts == 1
 
 
 async def _collect_media_events(
