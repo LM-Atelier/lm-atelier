@@ -84,6 +84,25 @@ def test_bound_id_refuses_empty_and_non_string_values() -> None:
     assert str(numbered.value) == INVALID_COMPOSE
 
 
+def test_bound_id_refuses_whitespace_and_oversize_values() -> None:
+    """Public compose still wraps the query id check, so these must be direct.
+
+    `compose_conversation_search(..., chat_id="bad id")` and an oversize chat
+    id stay INVALID_COMPOSE even if `_bound_id`'s whitespace or length `if` is
+    deleted, because rank_identity_bodies refuses the same strings. Calling
+    `_bound_id` is the probe that fails when those two checks go.
+    """
+    with pytest.raises(SearchComposeError, match=INVALID_COMPOSE) as spaced:
+        _bound_id("bad id")
+    assert str(spaced.value) == INVALID_COMPOSE
+    with pytest.raises(SearchComposeError, match=INVALID_COMPOSE) as padded:
+        _bound_id(" m1")
+    assert str(padded.value) == INVALID_COMPOSE
+    with pytest.raises(SearchComposeError, match=INVALID_COMPOSE) as oversize:
+        _bound_id("x" * (MAX_ID_CHARS + 1))
+    assert str(oversize.value) == INVALID_COMPOSE
+
+
 def test_compose_refuses_empty_ids() -> None:
     _refuse([_row("m1", "hello", chat_id="")])
     _refuse([_row("", "hello")])
@@ -281,3 +300,15 @@ def test_compose_refuses_a_non_string_body() -> None:
     numbered = _row("m1", "hello")
     numbered["body"] = 1
     _refuse([numbered])
+
+
+def test_compose_refuses_an_oversize_body_on_an_ineligible_row() -> None:
+    """The per-row body ceiling is not just the ranking helper's body cap.
+
+    `test_compose_refuses_over_body_cap` uses an eligible row, so deleting the
+    compose length check still fails: query MAX_BODY_CHARS is also 8192. A
+    tombstone never ranks, so only compose's own ceiling refuses a body that
+    large. Mutating that check lets this row compose as ineligible instead of
+    raising INVALID_COMPOSE.
+    """
+    _refuse([_row("m1", "x" * (MAX_COMPOSE_BODY_CHARS + 1), content_removed=True)])
