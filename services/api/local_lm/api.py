@@ -195,6 +195,7 @@ from .models import (
     WorkflowPreference,
     WorkflowProfileCompatibility,
     WorkflowRevision,
+    WorkflowRevisionReview,
     WorkPlan,
     WorkStep,
 )
@@ -460,6 +461,7 @@ from .schemas import (
     WorkflowResourceConsumersOut,
     WorkflowRevisionCreate,
     WorkflowRevisionOut,
+    WorkflowRevisionReviewRequest,
     WorkflowSelectionOut,
     WorkflowSelectionResponseMode,
     WorkflowSelectorCapability,
@@ -560,6 +562,25 @@ from .workflow_package_preparation import (
     PreparationContext,
     WorkflowPackagePreparationError,
     prepare_workflow_package,
+)
+from .workflow_review_runtime import review_runtime_object_info, verify_reviewed_packages
+from .workflow_revision_reviews import (
+    ReviewSnapshot as WorkflowReviewSnapshot,
+)
+from .workflow_revision_reviews import (
+    WorkflowReviewError,
+)
+from .workflow_revision_reviews import (
+    build_review_snapshot as build_workflow_review_snapshot,
+)
+from .workflow_revision_reviews import (
+    inherit_review as inherit_workflow_review,
+)
+from .workflow_revision_reviews import (
+    record_review as record_workflow_review,
+)
+from .workflow_revision_reviews import (
+    review_is_current as workflow_review_is_current,
 )
 from .workflow_source_candidates import collect_source_candidates
 from .workflow_trust import (
@@ -11108,7 +11129,7 @@ async def clone_workflow(
     workflow_id: str, payload: WorkflowClone, session: SessionDep
 ) -> WorkflowDefinition:
     definition, revision = _workflow_and_revision(session, workflow_id)
-    return await _persist_workflow(
+    cloned = await _persist_workflow(
         WorkflowCreate(
             name=payload.name or f"{definition.name} copy",
             operation=Operation(definition.operation),
@@ -11121,8 +11142,16 @@ async def clone_workflow(
             dependencies=revision.dependencies_json,
         ),
         session,
-        trusted=revision.trusted,
+        trusted=False,
     )
+
+    target = session.get(WorkflowRevision, cloned.current_revision_id)
+    if target is None:
+        raise api_error(409, "workflow-review-unavailable", "The cloned revision is unavailable.")
+    inherit_workflow_review(session, definition, revision, cloned, target)
+    session.commit()
+    session.refresh(cloned)
+    return cloned
 
 
 @router.post(
@@ -11200,7 +11229,7 @@ async def restore_workflow_revision(
     source = session.get(WorkflowRevision, revision_id)
     if not source or source.workflow_id != workflow_id:
         raise api_error(404, "workflow-revision-not-found", "workflow revision not found")
-    return await _persist_workflow_revision(
+    restored = await _persist_workflow_revision(
         workflow_id,
         WorkflowRevisionCreate(
             engine_version=source.engine_version,
@@ -11210,8 +11239,16 @@ async def restore_workflow_revision(
             dependencies=source.dependencies_json,
         ),
         session,
-        trusted=source.trusted,
+        trusted=False,
     )
+
+    definition = session.get(WorkflowDefinition, workflow_id)
+    if definition is None:
+        raise api_error(404, "workflow-not-found", "workflow not found")
+    inherit_workflow_review(session, definition, source, definition, restored)
+    session.commit()
+    session.refresh(restored)
+    return restored
 
 
 @router.post("/workflows/{workflow_id}/validate")
@@ -11226,10 +11263,12 @@ async def validate_workflow(
         raise api_error(404, "workflow-revision-not-found", "workflow revision not found")
     errors = await _services(request).engines.media.validate_workflow(revision.api_graph_json)
     warnings: list[str] = []
-    if revision.engine == "comfyui" and not revision.trusted:
+    if revision.engine == "comfyui" and not workflow_review_is_current(
+        session, definition, revision
+    ):
         errors.append(
-            "workflow revision is not trusted; review it and create a trusted revision "
-            "before execution"
+            "The selected workflow needs review. Open Workflows, choose this revision, "
+            "and use Review exact revision."
         )
     # Asking the engine what a role offers is I/O and can fail for reasons that
     # have nothing to do with this schema. It stays outside the block below so
@@ -11332,3 +11371,119 @@ def _workflow_bundle(definition: WorkflowDefinition, revision: WorkflowRevision)
         trusted=revision.trusted,
         source_revision=revision.version,
     )
+
+
+async def _workflow_review_object_info(services: Services) -> dict[str, Any] | None:
+    return await review_runtime_object_info(services.processes, services.engines.media)
+
+
+def _reviewed_revision(
+    session: Session, workflow_id: str, revision_id: str
+) -> tuple[WorkflowDefinition, WorkflowRevision]:
+    definition = session.get(WorkflowDefinition, workflow_id)
+    revision = session.get(WorkflowRevision, revision_id)
+    if definition is None or revision is None or revision.workflow_id != definition.id:
+        raise api_error(404, "workflow-revision-not-found", "workflow revision not found")
+    return definition, revision
+
+
+def _workflow_review_out(
+    session: Session,
+    definition: WorkflowDefinition,
+    revision: WorkflowRevision,
+    snapshot: WorkflowReviewSnapshot,
+) -> dict[str, Any]:
+    review = session.get(WorkflowRevisionReview, revision.id)
+    current = workflow_review_is_current(session, definition, revision)
+    if review is not None:
+        current = current and review.subject_sha256 == snapshot.subject_sha256
+    return {
+        "revision_id": revision.id,
+        "subject_sha256": snapshot.subject_sha256,
+        "trusted": current,
+        "can_approve": not snapshot.reasons,
+        "reasons": list(snapshot.reasons),
+        "state": review.state if review is not None else "unreviewed",
+        "reviewed_at": review.reviewed_at if review is not None else None,
+        "node_types": sorted({node["class_type"] for node in revision.api_graph_json.values()}),
+        "packages": list(
+            {
+                binding["pin"]["id"]: binding["pin"]
+                for binding in snapshot.node_bindings.values()
+                if isinstance(binding.get("pin"), dict)
+            }.values()
+        ),
+        "api_graph": revision.api_graph_json,
+        "input_schema": revision.input_schema_json,
+        "dependencies": revision.dependencies_json,
+    }
+
+
+@router.get("/workflows/{workflow_id}/revisions/{revision_id}/review")
+async def preview_workflow_revision_review(
+    workflow_id: str, revision_id: str, request: Request, session: SessionDep
+) -> dict[str, Any]:
+    definition, revision = _reviewed_revision(session, workflow_id, revision_id)
+    info = await _workflow_review_object_info(_services(request))
+    session.expire_all()
+    try:
+        snapshot = build_workflow_review_snapshot(session, definition, revision, object_info=info)
+    except WorkflowReviewError as exc:
+        raise api_error(422, "workflow-review-invalid", str(exc)) from exc
+    return _workflow_review_out(session, definition, revision, snapshot)
+
+
+@router.post("/workflows/{workflow_id}/revisions/{revision_id}/review")
+async def decide_workflow_revision_review(
+    workflow_id: str,
+    revision_id: str,
+    payload: WorkflowRevisionReviewRequest,
+    request: Request,
+    session: SessionDep,
+) -> dict[str, Any]:
+    services = _services(request)
+    async with services.scheduler.lease("primary"):
+        definition, revision = _reviewed_revision(session, workflow_id, revision_id)
+        info = await _workflow_review_object_info(services)
+        session.expire_all()
+        try:
+            snapshot = build_workflow_review_snapshot(
+                session, definition, revision, object_info=info
+            )
+            if snapshot.subject_sha256 != payload.subject_sha256:
+                raise api_error(
+                    409, "workflow-review-changed", "The workflow review changed. Review it again."
+                )
+            approved = payload.action == "approve"
+            if approved:
+                if snapshot.reasons:
+                    raise WorkflowReviewError("workflow_review_node_unavailable")
+                await verify_reviewed_packages(
+                    services.settings, session, snapshot, custom_nodes=services.custom_nodes
+                )
+                refreshed_info = await _workflow_review_object_info(services)
+                if refreshed_info is None:
+                    raise WorkflowReviewError("workflow_review_runtime_unavailable")
+                info = refreshed_info
+            # No writer spans worker I/O or code verification. Take the writer
+            # before the final durable-state read and compare the full subject.
+            session.connection().exec_driver_sql(
+                "UPDATE workflow_revision_reviews SET state=state WHERE 0"
+            )
+            session.expire_all()
+            definition, revision = _reviewed_revision(session, workflow_id, revision_id)
+            fresh = build_workflow_review_snapshot(session, definition, revision, object_info=info)
+            if fresh.subject_sha256 != payload.subject_sha256:
+                raise api_error(
+                    409, "workflow-review-changed", "The workflow review changed. Review it again."
+                )
+            record_workflow_review(session, revision, fresh, approved=approved)
+            session.commit()
+        except (WorkflowReviewError, ValueError, OSError, RuntimeError, TimeoutError) as exc:
+            session.rollback()
+            raise api_error(
+                409,
+                "workflow-review-unavailable",
+                "The exact workflow or its node code could not be verified.",
+            ) from exc
+        return _workflow_review_out(session, definition, revision, fresh)

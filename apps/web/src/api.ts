@@ -72,6 +72,7 @@ import type {
   WorkflowAssetReview,
   WorkflowPackageAnalysis,
   WorkflowRevision,
+  WorkflowRevisionReview,
   WorkflowEditorDraft,
   WorkflowEditorReturn,
   WorkflowEditorSession,
@@ -1007,6 +1008,10 @@ export const api = {
     request<WorkflowRevision>(`/api/workflows/${id}/revisions`, { method: "POST", body: JSON.stringify(payload) }),
   restoreWorkflowRevision: (id: string, revisionId: string) =>
     request<WorkflowRevision>(`/api/workflows/${id}/revisions/${revisionId}/restore`, { method: "POST" }),
+  previewWorkflowRevisionReview: (id: string, revisionId: string) =>
+    request<WorkflowRevisionReview>(`/api/workflows/${encodeURIComponent(id)}/revisions/${encodeURIComponent(revisionId)}/review`),
+  decideWorkflowRevisionReview: (id: string, revisionId: string, payload: { action: "approve" | "revoke"; subject_sha256: string }) =>
+    request<WorkflowRevisionReview>(`/api/workflows/${encodeURIComponent(id)}/revisions/${encodeURIComponent(revisionId)}/review`, { method: "POST", body: JSON.stringify(payload) }),
   cloneWorkflow: (id: string, name?: string) =>
     request<Workflow>(`/api/workflows/${id}/clone`, { method: "POST", body: JSON.stringify({ name }) }),
   exportWorkflow: (id: string) => request<WorkflowBundle>(`/api/workflows/${id}/export`),
