@@ -825,6 +825,21 @@ export interface ReferenceRecipe {
   notes: string[];
 }
 
+export interface WorkflowRevisionReview {
+  revision_id: string;
+  subject_sha256: string;
+  trusted: boolean;
+  can_approve: boolean;
+  reasons: string[];
+  state: string;
+  reviewed_at: string | null;
+  node_types: string[];
+  packages: Array<Record<string, unknown>>;
+  api_graph: Record<string, unknown>;
+  input_schema: Record<string, unknown>;
+  dependencies: Record<string, unknown>;
+}
+
 export interface WorkflowRevision {
   id: string;
   workflow_id: string;

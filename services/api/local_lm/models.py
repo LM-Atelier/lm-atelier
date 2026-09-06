@@ -1664,6 +1664,21 @@ class WorkflowRevision(TimestampMixin, Base):
     )
 
 
+class WorkflowRevisionReview(TimestampMixin, Base):
+    """A local decision over an exact revision and separately reviewed node code."""
+
+    __tablename__ = "workflow_revision_reviews"
+
+    workflow_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("workflow_revisions.id", ondelete="CASCADE"), primary_key=True
+    )
+    revision_sha256: Mapped[str] = mapped_column(String(64))
+    subject_sha256: Mapped[str] = mapped_column(String(64))
+    node_bindings_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    state: Mapped[str] = mapped_column(String(16))
+    reviewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class CustomNodeInstall(TimestampMixin, Base):
     __tablename__ = "custom_node_installs"
 

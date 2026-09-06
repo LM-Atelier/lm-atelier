@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 from contextlib import suppress
 from pathlib import Path
 from urllib.parse import urlparse
@@ -13,7 +14,9 @@ from urllib.parse import urlparse
 from sqlalchemy.orm import Session
 
 from .config import Settings
+from .custom_node_source import verify_pinned_source
 from .domain import new_id
+from .filesystem_links import AnchoredDirectory, AnchoredDirectoryError, open_child_directory
 from .models import CustomNodeInstall
 from .subprocess_env import git_subprocess_environment
 
@@ -148,11 +151,81 @@ class CustomNodeManager:
         install.trusted = False
 
     async def verify(self, install: CustomNodeInstall) -> None:
-        destination = self._destination(install.installed_path, require_exists=True)
-        revision = await self._run("git", "-C", str(destination), "rev-parse", "HEAD")
-        tree_hash = await self._run("git", "-C", str(destination), "rev-parse", "HEAD^{tree}")
-        if revision.lower() != install.revision.lower() or tree_hash != install.tree_hash:
-            raise ValueError("custom node files no longer match the recorded pinned revision")
+        name = install.installed_path
+        if Path(name).name != name or not name.startswith("lm-atelier-node_"):
+            raise ValueError("invalid managed custom node path")
+        try:
+            with (
+                AnchoredDirectory(self.settings.custom_node_dir.absolute()) as library,
+                open_child_directory(library, name) as package,
+                open_child_directory(package, ".git") as metadata,
+            ):
+                # Windows holds ancestry against rename. On Linux pass the held
+                # descriptors to Git instead of reopening mutable pathnames.
+                descriptors = tuple(
+                    descriptor
+                    for descriptor in (package.descriptor, metadata.descriptor)
+                    if descriptor is not None
+                )
+                repository = (
+                    f"/proc/self/fd/{package.descriptor}"
+                    if package.descriptor is not None
+                    else str(package.path)
+                )
+                git_directory = (
+                    f"/proc/self/fd/{metadata.descriptor}"
+                    if metadata.descriptor is not None
+                    else str(metadata.path)
+                )
+                command = (
+                    "git",
+                    "--no-replace-objects",
+                    "-C",
+                    repository,
+                    "--git-dir",
+                    git_directory,
+                )
+                identities = await self._run(
+                    *command, "rev-parse", "HEAD", "HEAD^{tree}", pass_fds=descriptors
+                )
+                if identities.splitlines() != [install.revision.lower(), install.tree_hash]:
+                    raise ValueError(
+                        "custom node files no longer match the recorded pinned revision"
+                    )
+                manifest = await self._run(
+                    *command,
+                    "ls-tree",
+                    "-r",
+                    "-z",
+                    "--full-tree",
+                    install.revision,
+                    pass_fds=descriptors,
+                )
+                stopped = threading.Event()
+                verification = asyncio.create_task(
+                    asyncio.to_thread(
+                        verify_pinned_source, package, manifest, install.tree_hash, stopped.is_set
+                    )
+                )
+                try:
+                    await asyncio.shield(verification)
+                except asyncio.CancelledError:
+                    # The thread owns no authority to outlive these directory
+                    # handles. Stop and join it before releasing the anchors.
+                    stopped.set()
+                    while not verification.done():
+                        try:
+                            await asyncio.shield(verification)
+                        except asyncio.CancelledError:
+                            continue
+                        except (ValueError, RuntimeError):
+                            break
+                    if not verification.cancelled():
+                        with suppress(ValueError, RuntimeError):
+                            verification.result()
+                    raise
+        except AnchoredDirectoryError:
+            raise ValueError("Custom node source directory could not be verified.") from None
 
     def python_requirements_path(self, install: CustomNodeInstall) -> Path | None:
         """The requirements file this package ships, if it ships one.
@@ -222,12 +295,13 @@ class CustomNodeManager:
         return value.strip().lower()
 
     @staticmethod
-    async def _run(*command: str, timeout: float = 180) -> str:
+    async def _run(*command: str, timeout: float = 180, pass_fds: tuple[int, ...] = ()) -> str:
         process = await asyncio.create_subprocess_exec(
             *command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=git_subprocess_environment(),
+            pass_fds=pass_fds,
         )
         try:
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)

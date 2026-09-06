@@ -4544,7 +4544,7 @@ async def test_workflow_validation_requires_trust_and_active_model_dependencies(
 
     assert validation.status_code == 200
     assert validation.json()["valid"] is False
-    assert any("not trusted" in error for error in validation.json()["errors"])
+    assert any("Review exact revision" in error for error in validation.json()["errors"])
     assert any("missing model dependency" in error for error in validation.json()["errors"])
 
 
