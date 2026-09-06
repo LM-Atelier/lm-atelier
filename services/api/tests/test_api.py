@@ -10929,6 +10929,122 @@ async def test_setup_finalization_refuses_a_requeue_that_lands_after_its_check(
         assert survivor.claim_owner == "a-later-attempt"
 
 
+async def test_a_cancel_teardown_does_not_finalize_the_retry_that_replaced_it(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`cancel` holds no claim, so the claim guard above never applied to it.
+
+    The window is wide and every step of it ships. `cancel` marks the job
+    cancelled and commits; the retry endpoint accepts a cancelled job, puts it
+    back to queued under the SAME id and starts it; the scheduler's claim writes
+    attempt + 1. Meanwhile the cancel has not finished - between its commit and
+    its finalizer it awaits the engine cancellation, which for media is an HTTP
+    interrupt, then gathers the cancelled task and publishes twice. Its teardown
+    then deleted the retry's records.
+
+    The interleave is placed where the check has already passed, for the same
+    reason as the sibling above: the read holds no writer lock, so this is the
+    moment the in-memory answer can go stale.
+    """
+
+    orch = app.state.services.orchestrator
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: None)
+    _chat_id, job_id, claim = await _claimed_text_job(client, monkeypatch)
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        run_id = job.run_id
+        cancelled_attempt = job.attempt
+        job.status = "cancelled"
+        session.commit()
+
+    published: list[str] = []
+
+    async def recording_publish(name: str, *args: object, **kwargs: object) -> None:
+        published.append(name)
+
+    monkeypatch.setattr(orch.events, "publish", recording_publish)
+    finalized = Mock(return_value=True)
+    monkeypatch.setitem(
+        orch._finalize_setup_verification_run.__globals__, "finalize_setup_verification", finalized
+    )
+
+    def retry_then_answer(_session: object, _chat_id: str) -> object:
+        # What the retry endpoint does, from a separate session that commits:
+        # a cancelled job goes back to queued under the same id, and the
+        # scheduler's claim then advances the attempt.
+        with SessionLocal() as other:
+            revived = other.get(Job, job_id)
+            assert revived is not None
+            revived.status = "running"
+            revived.attempt = cancelled_attempt + 1
+            revived.claim_owner = "the-retry"
+            other.commit()
+        return SimpleNamespace(role="setup", state="running")
+
+    monkeypatch.setitem(
+        orch._finalize_setup_verification_run.__globals__,
+        "setup_verification_for_chat",
+        retry_then_answer,
+    )
+
+    assert run_id is not None
+    await orch._finalize_setup_verification_run(job_id, run_id, cancelled_attempt=cancelled_attempt)
+
+    finalized.assert_not_called()
+    assert published == []
+    with SessionLocal() as session:
+        survivor = session.get(Job, job_id)
+        assert survivor is not None, "the retry's job was deleted by the cancel it replaced"
+        assert survivor.attempt == cancelled_attempt + 1
+        assert survivor.claim_owner == "the-retry"
+        assert survivor.status == "running"
+
+
+async def test_a_cancel_teardown_still_finalizes_the_run_it_cancelled(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The half that must not change.
+
+    Binding the teardown to the attempt it observed must not stop an ordinary
+    cancel from tidying up after itself. Nothing revives the job here, so the
+    finalizer runs exactly as before.
+    """
+
+    orch = app.state.services.orchestrator
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: None)
+    _chat_id, job_id, _claim = await _claimed_text_job(client, monkeypatch)
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        run_id = job.run_id
+        cancelled_attempt = job.attempt
+        job.status = "cancelled"
+        session.commit()
+
+    published: list[str] = []
+
+    async def recording_publish(name: str, *args: object, **kwargs: object) -> None:
+        published.append(name)
+
+    monkeypatch.setattr(orch.events, "publish", recording_publish)
+    finalized = Mock(return_value=True)
+    monkeypatch.setitem(
+        orch._finalize_setup_verification_run.__globals__, "finalize_setup_verification", finalized
+    )
+    monkeypatch.setitem(
+        orch._finalize_setup_verification_run.__globals__,
+        "setup_verification_for_chat",
+        lambda _session, _chat_id: SimpleNamespace(role="setup", state="running"),
+    )
+
+    assert run_id is not None
+    await orch._finalize_setup_verification_run(job_id, run_id, cancelled_attempt=cancelled_attempt)
+
+    finalized.assert_called_once()
+    assert published == ["setup.verification.completed"]
+
+
 async def test_a_publication_failure_after_the_retry_commit_converges(
     client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:

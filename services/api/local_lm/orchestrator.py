@@ -3062,6 +3062,7 @@ class ConversationOrchestrator:
         run_id: str | None = None
         operation: str | None = None
         verification_job = False
+        cancelled_attempt: int | None = None
         with self.session_factory() as session:
             job = session.get(Job, job_id)
             if not job or job.status in {
@@ -3081,6 +3082,10 @@ class ConversationOrchestrator:
                 task.cancel()
                 cancelled_task = task
             self._mark_cancelled(session, job)
+            # The attempt this cancel is acting on, read inside the transaction
+            # that marks it. Everything below is a teardown of THAT run, and a
+            # retry can put this same job back to work before the teardown ends.
+            cancelled_attempt = job.attempt
             session.commit()
         if run_id or verification_job:
             try:
@@ -3102,7 +3107,9 @@ class ConversationOrchestrator:
         if run_id:
             await self.events.publish("run.cancelled", run_id, {"job_id": job_id})
         if run_id:
-            await self._finalize_setup_verification_run(job_id, run_id)
+            await self._finalize_setup_verification_run(
+                job_id, run_id, cancelled_attempt=cancelled_attempt
+            )
         return True
 
     async def close(self) -> None:
@@ -3330,7 +3337,12 @@ class ConversationOrchestrator:
             await self._finalize_setup_verification_run(job_id, run_id, claim)
 
     async def _finalize_setup_verification_run(
-        self, job_id: str, run_id: str, claim: JobClaim | None = None
+        self,
+        job_id: str,
+        run_id: str,
+        claim: JobClaim | None = None,
+        *,
+        cancelled_attempt: int | None = None,
     ) -> None:
         finalized = False
         state: str | None = None
@@ -3357,6 +3369,22 @@ class ConversationOrchestrator:
                 # outcome is that attempt's to finalize, and this execution
                 # deletes nothing on its behalf.
                 return
+            if cancelled_attempt is not None and (
+                job.attempt != cancelled_attempt
+                or job.status
+                not in {
+                    JobStatus.COMPLETE.value,
+                    JobStatus.FAILED.value,
+                    JobStatus.CANCELLED.value,
+                }
+            ):
+                # The same rule for a caller that holds no claim. `cancel` acts
+                # on a job rather than from inside an execution, so there is no
+                # token to compare - but a retry revives this job under the SAME
+                # id: the retry endpoint accepts a cancelled job and puts it back
+                # to queued, and the scheduler's claim then advances the attempt.
+                # Either half of that says these records belong to the later run.
+                return
             verification = setup_verification_for_chat(session, chat_id)
             if verification:
                 # The check above read the row; this asserts it at the database
@@ -3365,6 +3393,10 @@ class ConversationOrchestrator:
                 # row that already belongs to the successor. A rowcount of one
                 # takes SQLite's writer and holds the fact until this commit.
                 if claim is not None and not self._claim_still_finalizes(session, job_id, claim):
+                    return
+                if cancelled_attempt is not None and not self._attempt_still_finalizes(
+                    session, job_id, cancelled_attempt
+                ):
                     return
                 role = verification.role
                 finalized = finalize_setup_verification(
@@ -6527,6 +6559,42 @@ class ConversationOrchestrator:
                     ),
                 )
                 .values(attempt=claim.attempt)
+            ),
+        )
+        return result.rowcount == 1
+
+    def _attempt_still_finalizes(self, session: Session, job_id: str, attempt: int) -> bool:
+        """The claimless half of `_claim_still_finalizes`, for the cancel path.
+
+        `cancel` acts on a job rather than from inside an execution, so it holds
+        no token to compare. What it does hold is the attempt it read while
+        marking the job cancelled, and the fact that a cancelled job is
+        terminal. A retry breaks both, in that order: the retry endpoint accepts
+        a cancelled job and sets its status back to queued, and the scheduler's
+        claim then writes attempt + 1. Requiring both closes the window on
+        either side of that claim.
+
+        A conditional no-op UPDATE for the same reason as its sibling: a
+        rowcount of one takes SQLite's writer and holds the fact until the
+        commit that performs the deletions.
+        """
+
+        result = cast(
+            "CursorResult[Any]",
+            session.execute(
+                update(Job)
+                .where(
+                    Job.id == job_id,
+                    Job.attempt == attempt,
+                    Job.status.in_(
+                        [
+                            JobStatus.COMPLETE.value,
+                            JobStatus.FAILED.value,
+                            JobStatus.CANCELLED.value,
+                        ]
+                    ),
+                )
+                .values(attempt=attempt)
             ),
         )
         return result.rowcount == 1

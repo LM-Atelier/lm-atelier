@@ -289,7 +289,9 @@ async def test_managed_chat_worker_is_aligned_to_the_run_profile() -> None:
 
 
 async def test_engine_cancel_runs_after_the_database_session_closes() -> None:
-    job = SimpleNamespace(id="job-cancel", status="running", run_id="run-cancel")
+    # `attempt` is part of a Job and the cancel now reads it, so the stand-in
+    # carries it too rather than the production code learning to do without.
+    job = SimpleNamespace(id="job-cancel", status="running", run_id="run-cancel", attempt=0)
     run = SimpleNamespace(id="run-cancel", operation="text")
     session_closed = False
 
