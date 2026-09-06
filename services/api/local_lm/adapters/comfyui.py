@@ -91,6 +91,14 @@ def _preview_payload(frame: bytes) -> bytes | None:
     return payload if _is_preview_image(payload) else None
 
 
+#: Total deadline for asking the backend to drop an abandoned prompt - not a
+#: per-request timeout, which httpx measures per phase and a trickling response
+#: can satisfy indefinitely. `close_iterator` gives the whole close five
+#: seconds and the output cleanup runs after this, so the ask must not be able
+#: to spend the entire allowance on its own.
+ABANDONED_INTERRUPT_SECONDS = 2.0
+
+
 class ComfyUIAdapter:
     def __init__(
         self,
@@ -382,6 +390,7 @@ class ComfyUIAdapter:
         self._cancel_events[request.run_id] = cancel_event
         prompt_id: str | None = None
         outputs_collected = False
+        abandoned = False
         try:
             yield MediaEvent(
                 type="progress",
@@ -567,6 +576,13 @@ class ComfyUIAdapter:
                 assets=assets,
                 engine_sourced=True,
             )
+        except GeneratorExit:
+            # The consumer closed this producer rather than finishing it: a
+            # superseded execution, dropping a stream whose result nobody will
+            # read. Recorded here and acted on in the teardown, because that is
+            # where it is known whether a prompt was ever submitted.
+            abandoned = True
+            raise
         except asyncio.CancelledError:
             raise
         except WebSocketException:
@@ -586,6 +602,22 @@ class ComfyUIAdapter:
             self._cancel_events.pop(request.run_id, None)
             self._cancelled.discard(request.run_id)
             if prompt_id and not outputs_collected:
+                if abandoned and not cancel_event.is_set():
+                    # A prompt was submitted and the consumer walked away.
+                    # Popping the entries above ends this adapter's interest in
+                    # it and nothing else: the backend goes on with a result
+                    # nobody will read, holding the device against the run that
+                    # replaced this one.
+                    #
+                    # A set cancel event means `cancel` already issued the
+                    # interrupt, so there is nothing to repeat.
+                    #
+                    # Deliberately not extended to the error exits below. A
+                    # malformed or oversized event is a different case with its
+                    # own settled handling, and widening this to cover it would
+                    # change six existing controls on a question this row does
+                    # not ask.
+                    await self._abandon_prompt(prompt_id)
                 await self._cleanup_prompt_outputs(prompt_id)
 
     async def _next_message(
@@ -906,6 +938,37 @@ class ComfyUIAdapter:
             # Local cancellation remains authoritative even when the worker has
             # already exited or its interrupt endpoint is unavailable.
             return
+
+    async def _abandon_prompt(self, prompt_id: str) -> None:
+        """Ask the backend to drop one prompt this adapter stopped listening to.
+
+        Scoped to the submitted identity, because the backend scopes it too.
+        ComfyUI v0.28.0's post_interrupt reads prompt_id from the body, walks
+        the currently running items, and interrupts only when one of them
+        matches; with no prompt_id it interrupts whatever is running. An
+        abandoned run sending the empty-body form could therefore stop the
+        prompt that had already replaced it.
+
+        A run that never began sampling is still PENDING rather than running,
+        and an interrupt does nothing for it, so its queue entry is deleted as
+        well. Deleting is safe for a running prompt too: post_queue only
+        removes pending entries.
+
+        One TOTAL deadline covers both requests. httpx timeouts are per-phase,
+        so a response trickling a byte at a time satisfies every one of them
+        and can still consume the whole five seconds `close_iterator` allows
+        for the close - taking the output cleanup after this with it. The
+        deadline is what keeps that cleanup's turn.
+
+        Failures are suppressed for the same reason the rest of this teardown
+        suppresses them: the caller is already unwinding, and a best-effort
+        request must not become the reason it stopped.
+        """
+
+        with suppress(Exception):
+            async with asyncio.timeout(ABANDONED_INTERRUPT_SECONDS):
+                await self._client.post("/interrupt", json={"prompt_id": prompt_id})
+                await self._client.post("/queue", json={"delete": [prompt_id]})
 
     async def close(self) -> None:
         for event in self._cancel_events.values():
