@@ -8499,6 +8499,12 @@ async def list_workflows(session: SessionDep) -> list[WorkflowDefinition]:
 
 @router.post("/workflows", response_model=WorkflowOut, status_code=201)
 async def create_workflow(payload: WorkflowCreate, session: SessionDep) -> WorkflowDefinition:
+    return await _persist_workflow(payload, session, trusted=False)
+
+
+async def _persist_workflow(
+    payload: WorkflowCreate, session: Session, *, trusted: bool
+) -> WorkflowDefinition:
     try:
         validate_lora_workflow_contract(
             payload.api_graph,
@@ -8525,7 +8531,7 @@ async def create_workflow(payload: WorkflowCreate, session: SessionDep) -> Workf
         api_graph_json=payload.api_graph,
         input_schema_json=payload.input_schema,
         dependencies_json=payload.dependencies,
-        trusted=payload.trusted,
+        trusted=trusted,
         # Every revision carries its artifact identity, not only compiled ones -
         # otherwise a hand-authored or imported workflow cannot take part in
         # capability evidence or in pin migration across recompiles.
@@ -10943,7 +10949,6 @@ async def import_workflow_package(
                 ui_graph=payload.ui_graph,
                 api_graph=compiled_api_graph,
                 input_schema=input_schema,
-                trusted=False,
             ),
             session,
         )
@@ -10957,7 +10962,6 @@ async def import_workflow_package(
             ui_graph=payload.ui_graph,
             api_graph=compiled_api_graph,
             input_schema=input_schema,
-            trusted=False,
         ),
         session,
     )
@@ -11094,7 +11098,6 @@ async def import_workflow(payload: WorkflowBundle, session: SessionDep) -> Workf
             api_graph=payload.api_graph,
             input_schema=payload.input_schema,
             dependencies=payload.dependencies,
-            trusted=False,
         ),
         session,
     )
@@ -11105,7 +11108,7 @@ async def clone_workflow(
     workflow_id: str, payload: WorkflowClone, session: SessionDep
 ) -> WorkflowDefinition:
     definition, revision = _workflow_and_revision(session, workflow_id)
-    return await create_workflow(
+    return await _persist_workflow(
         WorkflowCreate(
             name=payload.name or f"{definition.name} copy",
             operation=Operation(definition.operation),
@@ -11116,9 +11119,9 @@ async def clone_workflow(
             api_graph=revision.api_graph_json,
             input_schema=revision.input_schema_json,
             dependencies=revision.dependencies_json,
-            trusted=revision.trusted,
         ),
         session,
+        trusted=revision.trusted,
     )
 
 
@@ -11129,6 +11132,12 @@ async def clone_workflow(
 )
 async def create_workflow_revision(
     workflow_id: str, payload: WorkflowRevisionCreate, session: SessionDep
+) -> WorkflowRevision:
+    return await _persist_workflow_revision(workflow_id, payload, session, trusted=False)
+
+
+async def _persist_workflow_revision(
+    workflow_id: str, payload: WorkflowRevisionCreate, session: Session, *, trusted: bool
 ) -> WorkflowRevision:
     definition = session.get(WorkflowDefinition, workflow_id)
     if not definition:
@@ -11162,7 +11171,7 @@ async def create_workflow_revision(
         api_graph_json=payload.api_graph,
         input_schema_json=payload.input_schema,
         dependencies_json=payload.dependencies,
-        trusted=payload.trusted,
+        trusted=trusted,
         artifact_sha256=workflow_artifact_contract(
             operation=definition.operation,
             engine=engine,
@@ -11191,7 +11200,7 @@ async def restore_workflow_revision(
     source = session.get(WorkflowRevision, revision_id)
     if not source or source.workflow_id != workflow_id:
         raise api_error(404, "workflow-revision-not-found", "workflow revision not found")
-    return await create_workflow_revision(
+    return await _persist_workflow_revision(
         workflow_id,
         WorkflowRevisionCreate(
             engine_version=source.engine_version,
@@ -11199,9 +11208,9 @@ async def restore_workflow_revision(
             api_graph=source.api_graph_json,
             input_schema=source.input_schema_json,
             dependencies=source.dependencies_json,
-            trusted=source.trusted,
         ),
         session,
+        trusted=source.trusted,
     )
 
 

@@ -1201,7 +1201,6 @@ class WorkflowCreate(ApiModel):
     api_graph: dict[str, Any]
     input_schema: dict[str, Any] = Field(default_factory=dict)
     dependencies: dict[str, Any] = Field(default_factory=dict)
-    trusted: bool = False
 
 
 class WorkflowRevisionCreate(ApiModel):
@@ -1210,7 +1209,6 @@ class WorkflowRevisionCreate(ApiModel):
     api_graph: dict[str, Any]
     input_schema: dict[str, Any] = Field(default_factory=dict)
     dependencies: dict[str, Any] = Field(default_factory=dict)
-    trusted: bool = False
 
 
 class WorkflowUpdate(ApiModel):

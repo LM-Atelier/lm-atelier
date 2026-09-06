@@ -7,6 +7,7 @@ import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
 from sqlalchemy import func, select
+from workflow_fixtures import seed_workflow_trust
 
 from local_lm.db import SessionLocal
 from local_lm.domain import utcnow
@@ -178,9 +179,9 @@ async def test_fixed_import_rebinds_the_exact_authorized_local_workflow(
             "operation": "text_to_image",
             "engine": "mock",
             "api_graph": {},
-            "trusted": True,
         },
     )
+    seed_workflow_trust(workflow.json()["current_revision_id"])
     assert workflow.status_code == 201, workflow.text
     local_ref = workflow.json()["current_revision_id"]
     payload, _preview = await _portable_request(
@@ -450,9 +451,9 @@ async def test_missing_extra_and_duplicate_requirement_rows_fail_before_authorit
             "operation": "text_to_image",
             "engine": "mock",
             "api_graph": {},
-            "trusted": True,
         },
     )
+    seed_workflow_trust(workflow.json()["current_revision_id"])
     assert workflow.status_code == 201
     payload, _ = await _portable_request(
         client,
@@ -505,9 +506,9 @@ async def test_lora_that_becomes_unavailable_after_preview_cannot_commit(
             "operation": "text_to_image",
             "engine": "mock",
             "api_graph": {},
-            "trusted": True,
         },
     )
+    seed_workflow_trust(workflow.json()["current_revision_id"])
     assert workflow.status_code == 201
     digest = "9" * 64
     with SessionLocal() as session:
@@ -574,9 +575,9 @@ async def test_many_to_one_rebind_refuses_duplicate_options_but_keeps_distinct_p
                 "operation": "text_to_image",
                 "engine": "mock",
                 "api_graph": {},
-                "trusted": True,
             },
         )
+        seed_workflow_trust(response.json()["current_revision_id"])
         assert response.status_code == 201
         workflow_ids.append(response.json()["current_revision_id"])
 
