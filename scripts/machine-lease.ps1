@@ -60,6 +60,18 @@ function Test-MachineLeaseHandleInvalid {
     return ($Handle -eq [IntPtr]::Zero -or $Handle -eq [IntPtr]::new(-1))
 }
 
+function Read-MachineLeaseEnvironment {
+    # The one place this file reads the process environment back, so that the
+    # restoration check has a seam a control can stand in front of.
+    #
+    # Without it that branch cannot be reached at all: the real setter
+    # round-trips a value exactly, so no test can arrange for the read to
+    # differ from what was just written, and the comparison below would be
+    # asserted only by reading it.
+    param([Parameter(Mandatory = $true)][string] $Name)
+    return [Environment]::GetEnvironmentVariable($Name)
+}
+
 function Get-MachineLeaseCommonDir {
     param([Parameter(Mandatory)][string]$RepositoryRoot)
 
@@ -78,6 +90,13 @@ function Get-MachineLeaseCommonDir {
     # variable that is merely set empty still redirects. Absence is
     # therefore tested rather than requested.
     #
+    # The restoration comparison is ORDINAL: PowerShell's -ne is
+    # case-insensitive, so a value coming back with changed case was accepted
+    # as restored. Every scrubbed name is path-valued and a path differing
+    # only in case names the same object on Windows, so no caller was pointed
+    # at the wrong repository by this - but the guard did not hold the
+    # property it is here for, which is that the environment is what it was.
+    #
     # Both halves fail closed, and the resolution is only returned when
     # both held. A removal that did not take effect would leave a variable
     # naming another repository, and git would resolve THAT repository and
@@ -88,7 +107,7 @@ function Get-MachineLeaseCommonDir {
     $Saved = @{}
     $Cleared = $true
     foreach ($Name in $Scrubbed) {
-        $Saved[$Name] = [Environment]::GetEnvironmentVariable($Name)
+        $Saved[$Name] = Read-MachineLeaseEnvironment -Name $Name
         Remove-Item -LiteralPath "Env:$Name" -ErrorAction SilentlyContinue
         if (Test-Path -LiteralPath "Env:$Name") {
             Write-Host "ERROR: $Name could not be removed from the environment; refusing to resolve the repository with git redirection in force."
@@ -113,7 +132,7 @@ function Get-MachineLeaseCommonDir {
                 }
             } else {
                 [Environment]::SetEnvironmentVariable($Name, $Saved[$Name])
-                if ([Environment]::GetEnvironmentVariable($Name) -ne $Saved[$Name]) {
+                if ((Read-MachineLeaseEnvironment -Name $Name) -cne $Saved[$Name]) {
                     Write-Host "ERROR: $Name could not be restored to the value it had; refusing the resolution rather than leaving this process redirected."
                     $Restored = $false
                 }
