@@ -1470,6 +1470,128 @@ async def test_media_first_use_provisions_missing_runtime(
     assert captured["health_url"] == settings.comfy_url + "/system_stats"
 
 
+@pytest.mark.parametrize(
+    ("refused_phase", "effects_before_it"),
+    [
+        ("Provisioning media runtime", []),
+        ("Validating media dependencies", ["provisioned"]),
+        ("Starting media runtime", ["provisioned", "inspected nodes", "staged model paths"]),
+    ],
+)
+async def test_a_refused_media_phase_stops_before_the_next_process_effect(
+    settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    refused_phase: str,
+    effects_before_it: list[str],
+) -> None:  # type: ignore[no-untyped-def]
+    """A refusing callback stops the start at the phase it refused.
+
+    The sibling above shows the ordinary run: three phases, each followed by
+    the effect it announces. This is the same start with the announcement
+    refused, and the sentinel is the effect list: it must end where the
+    refusal was raised, whichever phase that is.
+
+    The distinction is the point. A callback that raises because it is broken
+    is still swallowed and the start still completes, because a worker must
+    not be lost to a failing progress report. A callback that raises
+    `WorkerStartRefused` is saying the row has moved on, and every effect
+    after it - provisioning the runtime, reading the trusted node set, staging
+    the model paths, launching the process - would be done on another
+    attempt's behalf.
+    """
+
+    runtime = tmp_path / "ComfyUI"
+    executable = tmp_path / "python.exe"
+    effects: list[str] = []
+
+    async def provision(engine: str) -> None:
+        assert engine == "comfyui"
+        effects.append("provisioned")
+        runtime.mkdir()
+        (runtime / "main.py").write_bytes(b"")
+        executable.write_bytes(b"runtime")
+        settings.comfy_directory = runtime
+        settings.comfy_executable = executable
+
+    runtimes = SimpleNamespace(ensure=AsyncMock(side_effect=provision))
+    supervisor = ProcessSupervisor(settings, runtimes)
+    model_paths = tmp_path / "extra-model-paths.yaml"
+    model_paths.write_text("{}", encoding="utf-8")
+    phases: list[str] = []
+
+    async def refuse_at(phase: str) -> None:
+        phases.append(phase)
+        if phase == refused_phase:
+            raise processes_module.WorkerStartRefused(phase)
+
+    async def trusted_nodes() -> list[str]:
+        effects.append("inspected nodes")
+        return []
+
+    def write_model_paths(*_args: object) -> Path:
+        effects.append("staged model paths")
+        return model_paths
+
+    async def replace(*_args: object, **_kwargs: object) -> None:
+        effects.append("launched")
+
+    monkeypatch.setattr(supervisor, "_trusted_comfy_node_folders", trusted_nodes)
+    monkeypatch.setattr(supervisor, "_write_comfy_model_paths", write_model_paths)
+    monkeypatch.setattr(supervisor, "_replace", replace)
+
+    with pytest.raises(processes_module.WorkerStartRefused, match=refused_phase):
+        await supervisor.start_media(phase_callback=refuse_at)
+
+    assert phases[-1] == refused_phase, "the start announced a phase past the refusal"
+    assert effects == effects_before_it
+
+
+async def test_a_broken_media_phase_report_does_not_stop_the_start(
+    settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """The other half of the distinction, held in place.
+
+    A callback that raises anything else is a reporting bug, and a reporting
+    bug must not cost the caller a worker. Every phase is still attempted and
+    the launch still happens.
+    """
+
+    runtime = tmp_path / "ComfyUI"
+    runtime.mkdir()
+    (runtime / "main.py").write_bytes(b"")
+    executable = tmp_path / "python.exe"
+    executable.write_bytes(b"runtime")
+    settings.comfy_directory = runtime
+    settings.comfy_executable = executable
+    supervisor = ProcessSupervisor(settings)
+    model_paths = tmp_path / "extra-model-paths.yaml"
+    model_paths.write_text("{}", encoding="utf-8")
+    launched: list[str] = []
+    phases: list[str] = []
+
+    async def broken_report(phase: str) -> None:
+        phases.append(phase)
+        raise RuntimeError("the progress channel is down")
+
+    async def trusted_nodes() -> list[str]:
+        return []
+
+    async def replace(*_args: object, **_kwargs: object) -> None:
+        launched.append("media")
+
+    monkeypatch.setattr(supervisor, "_trusted_comfy_node_folders", trusted_nodes)
+    monkeypatch.setattr(supervisor, "_write_comfy_model_paths", lambda *_args: model_paths)
+    monkeypatch.setattr(supervisor, "_replace", replace)
+
+    await supervisor.start_media(phase_callback=broken_report)
+
+    assert phases == ["Validating media dependencies", "Starting media runtime"]
+    assert launched == ["media"]
+
+
 async def test_vllm_chat_launches_complete_modelopt_snapshot(
     settings,
     tmp_path: Path,

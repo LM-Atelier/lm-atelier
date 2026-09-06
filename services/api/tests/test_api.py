@@ -10707,10 +10707,14 @@ async def test_a_refused_start_phase_enters_no_worker_and_no_engine(
 async def test_a_refused_phase_during_the_start_ends_the_execution_before_inference(
     client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A phase the row refuses while the worker is starting is carried out
-    of the start - the supervisor swallows what its callback raises - and
-    the execution ends before any inference; the started worker stays for
-    the attempt that owns the row now."""
+    """A phase the row refuses while the worker is starting stops the start
+    and ends the execution before any inference; the worker that was already
+    started stays for the attempt that owns the row now.
+
+    The supervisor here is a stand-in, so this covers the orchestrator's half
+    of the refusal only. That the real supervisor stops rather than swallowing
+    is held by the sentinel controls in test_processes.py.
+    """
 
     from local_lm.orchestrator import ClaimLost
 
