@@ -149,8 +149,6 @@ def encode_search_cursor(cursor: SearchCursorV1) -> str:
         f"{TOKEN_PREFIX}.{cursor.index_generation}.{cursor.offset}."
         f"{cursor.expires_at_unix}.{cursor.query_digest}"
     )
-    if len(token) > MAX_TOKEN_CHARS:
-        _invalid()
     return token
 
 
