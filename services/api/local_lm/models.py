@@ -1153,6 +1153,28 @@ class InstallPlan(TimestampMixin, Base):
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class SharedPackageBinding(TimestampMixin, Base):
+    """One profile's recoverable reference to an immutable shared package."""
+
+    __tablename__ = "shared_package_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "library_id",
+            "consumer_id",
+            "package_digest",
+            name="uq_shared_package_binding_identity",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("shared"))
+    library_id: Mapped[str] = mapped_column(String(36))
+    consumer_id: Mapped[str] = mapped_column(String(64))
+    package_digest: Mapped[str] = mapped_column(String(64))
+    member_digests_json: Mapped[dict[str, str]] = mapped_column(JSON)
+    claim_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    state: Mapped[str] = mapped_column(String(24), default="preparing")
+
+
 class ModelInstall(TimestampMixin, Base):
     __tablename__ = "model_installs"
 
@@ -1164,6 +1186,11 @@ class ModelInstall(TimestampMixin, Base):
     role: Mapped[str] = mapped_column(String(16), default=ModelRole.CHAT.value)
     engine: Mapped[str] = mapped_column(String(32))
     local_path: Mapped[str] = mapped_column(Text)
+    shared_package_binding_id: Mapped[str | None] = mapped_column(
+        ForeignKey("shared_package_bindings.id"),
+        nullable=True,
+        index=True,
+    )
     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
     compatibility: Mapped[str] = mapped_column(
         String(24), default=CompatibilityLevel.ADVANCED.value
@@ -1189,6 +1216,11 @@ class ModelAssetInstall(TimestampMixin, Base):
     kind: Mapped[str] = mapped_column(String(40), index=True)
     family: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
     local_path: Mapped[str] = mapped_column(Text)
+    shared_package_binding_id: Mapped[str | None] = mapped_column(
+        ForeignKey("shared_package_bindings.id"),
+        nullable=True,
+        index=True,
+    )
     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
     manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
