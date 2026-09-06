@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import logging
 import sys
 import threading
@@ -51,6 +52,7 @@ from .engines import EngineRegistry
 from .events import EventBroker
 from .exports import ProjectExporter
 from .instance_identity import INSTANCE_ID_HEADER, load_or_create_instance_identity
+from .instance_lock import DataDirectoryLock
 from .orchestrator import ConversationOrchestrator
 from .processes import ProcessSupervisor
 from .runtime_provisioning import RuntimeProvisioner
@@ -804,11 +806,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     return app
 
 
-app = create_app()
+def _create_default_app() -> tuple[FastAPI, DataDirectoryLock]:
+    settings = get_settings()
+    ownership = DataDirectoryLock(settings.data_dir)
+    try:
+        application = create_app(settings)
+    except BaseException:
+        ownership.close()
+        raise
+    atexit.register(ownership.close)
+    return application, ownership
+
+
+app, _default_instance_lock = _create_default_app()
 
 
 def run() -> None:
     settings = get_settings()
+    if settings.dev:
+        # The reload supervisor does not serve this app. Its spawned child
+        # imports the module and takes its own lock before touching the data.
+        _default_instance_lock.close()
     uvicorn.run(
         "local_lm.main:app" if settings.dev else app,
         host=settings.host,
