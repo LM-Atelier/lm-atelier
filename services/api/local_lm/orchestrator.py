@@ -130,7 +130,7 @@ from .outpaint_workflows import (
     normalize_margins,
     workflow_declares_outpaint,
 )
-from .processes import ProcessSupervisor
+from .processes import ProcessSupervisor, WorkerStartRefused
 from .profile_service import AUTO_PROFILE_ID
 from .progress import apply_engine_progress, completed_progress, update_job_progress
 from .prompt_expansion_use import (
@@ -4746,27 +4746,32 @@ class ConversationOrchestrator:
             if job_id and run_id:
                 # The start is a process effect: it is earned only by a
                 # phase write the row still accepts, and a phase the row
-                # refuses during the start ends this execution before any
-                # inference - the supervisor swallows what its callback
-                # raises, so the refusal is carried out of the start here.
+                # refuses during the start ends this execution at that
+                # phase, before the effect it announced.
                 await self._require_phase(
                     job_id, run_id, "Starting media worker", claim, media=True
                 )
-                refused: list[str] = []
 
                 async def report_phase(phase: str) -> None:
                     if not await self._set_media_phase(job_id, run_id, phase, claim):
-                        refused.append(phase)
+                        # Raised rather than recorded: the supervisor re-raises
+                        # this one, so the start stops at the phase that was
+                        # refused instead of running every remaining effect and
+                        # reporting the refusal once they are all done.
+                        raise WorkerStartRefused(phase)
 
-                if activation_scope is not None:
-                    await self.processes.start_media(
-                        phase_callback=report_phase,
-                        activation_scope=activation_scope,
-                    )
-                else:
-                    await self.processes.start_media(phase_callback=report_phase)
-                if refused:
-                    raise ClaimLost(f"job {job_id} is no longer this execution's at {refused[0]!r}")
+                try:
+                    if activation_scope is not None:
+                        await self.processes.start_media(
+                            phase_callback=report_phase,
+                            activation_scope=activation_scope,
+                        )
+                    else:
+                        await self.processes.start_media(phase_callback=report_phase)
+                except WorkerStartRefused as refusal:
+                    raise ClaimLost(
+                        f"job {job_id} is no longer this execution's at {str(refusal)!r}"
+                    ) from refusal
             else:
                 if activation_scope is not None:
                     await self.processes.start_media(activation_scope=activation_scope)

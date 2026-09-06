@@ -59,6 +59,17 @@ if TYPE_CHECKING:
 STATE_REFUSED = "LM Atelier's state folder may not be a filesystem link"
 
 
+class WorkerStartRefused(RuntimeError):
+    """A phase callback refused the start; the caller no longer owns the work.
+
+    Distinct from every other callback failure on purpose. `start_media` treats
+    a raising callback as a reporting bug and continues, because a worker start
+    must not be lost to a broken progress report. A refusal is the opposite: the
+    row has moved to another attempt, and every effect after it - provisioning,
+    validation, verification, the launch - is done on that attempt's behalf.
+    """
+
+
 class ProcessStateError(RuntimeError):
     """State beneath the data folder could not be reached or published safely."""
 
@@ -624,7 +635,10 @@ class ProcessSupervisor:
                 return
             try:
                 await phase_callback(phase)
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, WorkerStartRefused):
+                # A refusal is authority, not a reporting failure: it stops the
+                # start here, before the next process effect, rather than being
+                # reported after every effect has already happened.
                 raise
             except Exception:
                 logger.warning("Could not publish media startup phase", exc_info=True)
