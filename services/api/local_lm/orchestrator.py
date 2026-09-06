@@ -4588,6 +4588,7 @@ class ConversationOrchestrator:
         self._displaced_chat_profile_id = None
         recycle_managed_media = False
         recycled_activation_scope = False
+        recycle_wanted = False
         try:
             media_worker = next(item for item in self.processes.statuses() if item.name == "media")
             if self.engines.settings.media_engine == "comfyui" and media_worker.managed:
@@ -4597,12 +4598,34 @@ class ConversationOrchestrator:
                 # stalled before sampling. A managed worker recycle releases
                 # both VRAM and host allocations while preserving the automatic
                 # Ready media service expected by the desktop application.
+                recycle_wanted = True
                 launch_scope = getattr(self.processes, "launch_scope_sha256", None)
                 recycled_activation_scope = bool(launch_scope and launch_scope("media") is not None)
-                await self.processes.stop("media")
-                recycle_managed_media = True
         except Exception:
-            logger.exception("Could not recycle the media worker after device handoff")
+            logger.exception("Could not prepare the media worker recycle after device handoff")
+            recycle_wanted = False
+            recycled_activation_scope = False
+
+        if recycle_wanted:
+            try:
+                await self.processes.stop("media")
+            except Exception:
+                # The stop is what makes the room. It failed, so the worker may
+                # still hold the allocations a chat model would now be loaded
+                # beside, which is the contention this recycle exists to
+                # prevent. "Nothing to recycle" and "the recycle failed" both
+                # left `recycle_managed_media` false and were answered the same
+                # way; only the first of them wants chat back.
+                #
+                # The profile goes back on the books so a later handoff still
+                # owes the restore, and the readiness latch is released for the
+                # reason recorded above: this handoff is over, and availability
+                # is then decided by the worker's real state.
+                logger.exception("Could not recycle the media worker after device handoff")
+                self._chat_planner_ready.set()
+                self._displaced_chat_profile_id = chat_profile_id
+                return
+            recycle_managed_media = True
 
         if not recycle_managed_media:
             await self._resume_chat_worker(selected_chat_profile_id)
