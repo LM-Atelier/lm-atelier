@@ -614,6 +614,68 @@ async def test_worker_port_preflight_distinguishes_free_and_bound_ports(
             )
 
 
+async def test_port_refusal_names_the_process_holding_the_port(
+    settings,
+) -> None:  # type: ignore[no-untyped-def]
+    """A user who hits this must learn what to close.
+
+    The listener here is the test process itself, so the expected name and pid
+    are known exactly rather than matched loosely.
+    """
+
+    settings.prepare()
+    supervisor = ProcessSupervisor(settings)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        occupied_port = listener.getsockname()[1]
+        with pytest.raises(OSError) as refused:
+            await supervisor._ensure_port_available(
+                "media",
+                f"http://127.0.0.1:{occupied_port}/health",
+            )
+
+    message = str(refused.value)
+    assert "already in use by " in message, message
+    assert f"pid {os.getpid()}" in message, message
+    assert psutil.Process(os.getpid()).name() in message, message
+
+
+async def test_port_refusal_keeps_its_original_wording_when_the_holder_is_unknown(
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """Enumerating sockets is privileged on some systems.
+
+    Degradation guard rather than a regression: this passes on the parent too,
+    because the parent only ever produces the unnamed message. It is here so a
+    later change cannot turn an unidentifiable occupant into a wrong name or a
+    lost error.
+    """
+
+    settings.prepare()
+    supervisor = ProcessSupervisor(settings)
+
+    def refuse_enumeration(*_args: object, **_kwargs: object) -> list[object]:
+        raise psutil.AccessDenied(pid=None, name="net_connections")
+
+    monkeypatch.setattr(processes_module.psutil, "net_connections", refuse_enumeration)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        occupied_port = listener.getsockname()[1]
+        with pytest.raises(OSError) as refused:
+            await supervisor._ensure_port_available(
+                "media",
+                f"http://127.0.0.1:{occupied_port}/health",
+            )
+
+    assert (
+        str(refused.value)
+        == f"media worker cannot start because 127.0.0.1:{occupied_port} is already in use"
+    )
+
+
 async def test_cancelled_worker_start_terminates_and_forgets_starting_process(
     settings,
     monkeypatch: pytest.MonkeyPatch,
