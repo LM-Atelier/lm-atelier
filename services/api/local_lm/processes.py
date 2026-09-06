@@ -1783,9 +1783,49 @@ class ProcessSupervisor:
                     probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 probe.bind(address)
         except OSError as exc:
-            raise OSError(
-                f"{name} worker cannot start because {host}:{port} is already in use"
-            ) from exc
+            occupant = self._port_listener_description(host, port)
+            detail = f"{name} worker cannot start because {host}:{port} is already in use"
+            raise OSError(f"{detail} by {occupant}" if occupant else detail) from exc
+
+    def _port_listener_description(self, host: str, port: int) -> str | None:
+        """Name the process listening on this endpoint, when the platform will say.
+
+        Only ever called after a bind has already failed, so the ordinary start
+        path pays nothing for it. Returns None rather than guessing: an
+        unidentifiable occupant leaves the original message exactly as it was,
+        because a wrong name in a diagnostic is worse than no name.
+
+        Reports the process name and pid only. A command line can carry a data
+        folder or a home directory, and this text reaches the user.
+        """
+
+        try:
+            wildcards = {"0.0.0.0", "::", ""}
+            for connection in psutil.net_connections(kind="tcp"):
+                if connection.status != psutil.CONN_LISTEN or connection.pid is None:
+                    continue
+                address = connection.laddr
+                listening_host = getattr(address, "ip", None)
+                listening_port = getattr(address, "port", None)
+                if listening_port is None and len(address) > 1:
+                    listening_host, listening_port = address[0], address[1]
+                if listening_port != port:
+                    continue
+                if listening_host not in wildcards and listening_host != host:
+                    # A listener on another interface does not block this bind,
+                    # and naming it would send the reader after the wrong process.
+                    continue
+                try:
+                    return self._sanitize_diagnostic(
+                        f"{psutil.Process(connection.pid).name()} (pid {connection.pid})"
+                    )
+                except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+                    return f"pid {connection.pid}"
+        except (psutil.AccessDenied, psutil.Error, OSError, RuntimeError):
+            # Enumerating sockets is a privileged operation on some systems.
+            # Failing to identify the occupant must not replace the real error.
+            return None
+        return None
 
     @staticmethod
     def _listener_owned_by_worker(pid: int, url: str) -> bool:
