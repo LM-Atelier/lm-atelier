@@ -277,6 +277,22 @@ def test_a_cursor_is_expired_at_the_instant_it_names() -> None:
         )
 
 
+def test_a_zero_expiry_is_already_too_late() -> None:
+    """now >= expires refuses unix 0; a separate floor of 1 cannot fire first.
+
+    now_unix cannot be negative, so expires_at_unix=0 is always now >= expires.
+    The extra minimum=1 on the expiry integer was the same public refusal.
+    """
+    with pytest.raises(SearchCursorError, match=INVALID_CURSOR):
+        bind_search_cursor(
+            index_generation=1,
+            query_digest=DIGEST,
+            offset=0,
+            expires_at_unix=0,
+            now_unix=0,
+        )
+
+
 def test_a_cursor_cannot_be_minted_without_the_binder_witness() -> None:
     """The authority guard: only bind_search_cursor may mint a cursor.
 
