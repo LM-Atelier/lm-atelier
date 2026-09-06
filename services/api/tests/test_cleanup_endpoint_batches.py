@@ -9,6 +9,7 @@ budgeted batch the sweep runs, in a worker thread, and says when more remains.
 
 from __future__ import annotations
 
+import os
 import threading
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -167,3 +168,31 @@ async def test_a_slow_snapshot_does_not_reduce_the_manual_batch_to_one(
     assert await _cleanup(client, dry_run=False) == (25, False)
     with SessionLocal() as session:
         assert _count(session) == 0
+
+
+@pytest.mark.parametrize("sharded", [False, True])
+async def test_zero_time_budget_makes_orphan_progress_and_confirms_completion(
+    client: AsyncClient,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    sharded: bool,
+) -> None:
+    store = ArtifactStore(settings)
+    target = store.root / "aa" / "00" if sharded else store.root
+    target.mkdir(parents=True, exist_ok=True)
+    old = (datetime.now(UTC) - timedelta(hours=49)).timestamp()
+    paths = []
+    for index in range(3):
+        name = f"aa00{index:060x}" if sharded else f"ingest-orphan-{index}.tmp"
+        path = target / name
+        path.write_bytes(b"aged orphan")
+        os.utime(path, (old, old))
+        paths.append(path)
+    monkeypatch.setattr(api_module, "RETENTION_BATCH_SECONDS", 0.0)
+
+    results = [await _cleanup(client, dry_run=False) for _ in range(4)]
+
+    assert [count for count, _ in results] == [1, 1, 1, 0]
+    assert results[0][1] is True
+    assert results[-1] == (0, False)
+    assert all(not path.exists() for path in paths)
