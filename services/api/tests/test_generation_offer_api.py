@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -12,12 +13,12 @@ from local_lm.db import SessionLocal
 from local_lm.models import Artifact, Run
 
 
-async def wait_for_assistant(client: AsyncClient, chat_id: str) -> dict:  # type: ignore[type-arg]
+async def wait_for_assistant(client: AsyncClient, chat_id: str) -> dict[str, Any]:
     deadline = asyncio.get_running_loop().time() + 5
     while asyncio.get_running_loop().time() < deadline:
         response = await client.get(f"/api/chats/{chat_id}")
         assert response.status_code == 200
-        assistants = [
+        assistants: list[dict[str, Any]] = [
             message for message in response.json()["messages"] if message["role"] == "assistant"
         ]
         if assistants and assistants[-1]["status"] in {"complete", "failed", "cancelled"}:
@@ -27,12 +28,12 @@ async def wait_for_assistant(client: AsyncClient, chat_id: str) -> dict:  # type
     raise AssertionError("assistant run did not complete")
 
 
-async def wait_for_run(client: AsyncClient, run_id: str) -> dict:  # type: ignore[type-arg]
+async def wait_for_run(client: AsyncClient, run_id: str) -> dict[str, Any]:
     deadline = asyncio.get_running_loop().time() + 5
     while asyncio.get_running_loop().time() < deadline:
         response = await client.get(f"/api/runs/{run_id}")
         assert response.status_code == 200
-        run = response.json()
+        run: dict[str, Any] = response.json()
         if run["status"] in {"complete", "failed", "cancelled"}:
             assert run["status"] == "complete", run
             return run
@@ -40,7 +41,9 @@ async def wait_for_run(client: AsyncClient, run_id: str) -> dict:  # type: ignor
     raise AssertionError("run did not complete")
 
 
-async def create_offer(client: AsyncClient, *, multiple: bool) -> tuple[dict, dict]:  # type: ignore[type-arg]
+async def create_offer(
+    client: AsyncClient, *, multiple: bool
+) -> tuple[dict[str, Any], dict[str, Any]]:
     chat = (
         await client.post(
             "/api/chats",
