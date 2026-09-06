@@ -128,7 +128,7 @@ def bind_search_cursor(
     generation = _require_int(index_generation, maximum=MAX_GENERATION)
     digest = _require_digest(query_digest)
     start = _require_int(offset, maximum=MAX_OFFSET)
-    expires = _require_int(expires_at_unix, maximum=MAX_EXPIRES, minimum=1)
+    expires = _require_int(expires_at_unix, maximum=MAX_EXPIRES)
     now = _require_int(now_unix, maximum=MAX_EXPIRES)
     if now >= expires:
         _invalid()
