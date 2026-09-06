@@ -864,6 +864,7 @@ h1, h2, h3 { margin: 0; }
 .worker-failure { display: grid; gap: 6px; margin-top: 10px; border: 1px solid #673337; border-radius: 10px; background: var(--danger-surface); color: var(--danger-ink-on-surface); padding: 9px 10px; font-size: 11px; }
 .worker-failure pre { max-height: 92px; overflow: auto; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-secondary); font: 10px/1.45 "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace; }
 .worker-failure small { color: var(--ink-muted); overflow-wrap: anywhere; }
+.worker-detail { margin: 0; color: var(--ink-secondary); font-size: 11px; line-height: 1.55; }
 .worker-remedy { margin: 0; color: var(--ink-secondary); font-size: 11px; line-height: 1.55; }
 .worker-failure details > summary { cursor: pointer; color: var(--ink-secondary); font-size: 10px; }
 .worker-failure details[open] > summary { margin-bottom: 6px; }

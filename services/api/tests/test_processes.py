@@ -1408,6 +1408,121 @@ async def test_chat_first_use_provisions_missing_runtime(
     assert captured["command"][0] == str(executable.resolve())
 
 
+def _pretend_orphan(
+    supervisor: ProcessSupervisor,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    name: str,
+    listening: bool,
+    process_name: str = "llama-server.exe",
+    pid: int = 4242,
+) -> None:
+    """Stand in for a worker we started earlier that outlived its record.
+
+    Both halves are stubbed on purpose. The real ones - a persisted identity
+    whose pid AND creation time still match, and a live listening socket owned
+    by that process tree - cannot be produced from a test without launching a
+    real worker, and each is already covered where it lives.
+    """
+
+    monkeypatch.setattr(
+        supervisor,
+        "_matching_worker_processes",
+        lambda asked: (
+            [SimpleNamespace(pid=pid, name=lambda: process_name)] if asked == name else []
+        ),
+    )
+    monkeypatch.setattr(
+        ProcessSupervisor, "_listener_owned_by_worker", staticmethod(lambda _pid, _url: listening)
+    )
+
+
+def test_a_worker_that_outlived_its_record_is_named(
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """ "Stopped" is true of this process and not of the machine.
+
+    A child this application started in an earlier session goes on serving, so
+    the card reads stopped while generation works - or stopped while a start
+    refuses - and neither is something a person can act on. Since the reclaim
+    landed the user is not blocked, so what is wrong is only what the report
+    SAYS, which is exactly why it is worth saying.
+    """
+
+    supervisor = ProcessSupervisor(settings)
+    _pretend_orphan(supervisor, monkeypatch, name="chat", listening=True)
+
+    chat = next(item for item in supervisor.statuses() if item.name == "chat")
+
+    # The contract the web application reads is unchanged: nothing is managed
+    # and no worker is running, because neither is true of this process.
+    assert chat.state == "stopped"
+    assert chat.managed is False
+    assert chat.running is False
+    # What changed is that it now says so.
+    assert chat.failure_code == "port_in_use"
+    assert chat.failure_detail is not None
+    assert "llama-server.exe (pid 4242)" in chat.failure_detail
+    assert chat.failure_remedy
+
+
+def test_an_orphan_that_is_not_listening_is_not_reported(
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """The state the user sees is stopped-but-working, and that needs a listener.
+
+    A matched process that holds nothing is not what the card is wrong about,
+    and reporting it would put a fault where the user has nothing to do.
+    """
+
+    supervisor = ProcessSupervisor(settings)
+    _pretend_orphan(supervisor, monkeypatch, name="chat", listening=False)
+
+    chat = next(item for item in supervisor.statuses() if item.name == "chat")
+
+    assert chat.failure_code is None
+    assert chat.failure_detail is None
+
+
+def test_an_ordinary_stopped_worker_reports_no_fault(settings) -> None:  # type: ignore[no-untyped-def]
+    """The half that must not change, and the one that caught the first design.
+
+    An earlier version probed the configured port itself, so a status read
+    depended on unrelated programs: on a machine running the real application
+    beside its own tests, both worker ports are held and every card reported a
+    fault. test_worker_management_reports_missing_local_binaries failed for
+    exactly that, and it was right to.
+    """
+
+    supervisor = ProcessSupervisor(settings)
+
+    for worker in supervisor.statuses():
+        assert worker.state == "stopped"
+        assert worker.failure_code is None
+        assert worker.failure_detail is None
+        assert worker.failure_remedy is None
+
+
+def test_the_report_and_the_start_read_one_endpoint(settings) -> None:  # type: ignore[no-untyped-def]
+    """Both sides derive the endpoint from the same place.
+
+    The start paths each built this string themselves, which is why nothing
+    that was not starting a worker could say where one would listen. Two
+    derivations of one fact drift; this is the check that there is only one.
+    """
+
+    settings.llama_url = "http://127.0.0.1:12399"
+    settings.comfy_url = "http://127.0.0.1:8199"
+    supervisor = ProcessSupervisor(settings)
+
+    assert supervisor.worker_health_url("chat") == "http://127.0.0.1:12399/health"
+    assert supervisor.worker_health_url("media") == "http://127.0.0.1:8199/system_stats"
+    with pytest.raises(ValueError, match="no worker is named"):
+        supervisor.worker_health_url("embeddings")
+
+
 async def test_media_first_use_provisions_missing_runtime(
     settings,
     tmp_path: Path,

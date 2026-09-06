@@ -10,7 +10,9 @@ import type { WorkerStatus } from "./types";
 const HEADLINES: Record<string, (name: string) => string> = {
   oom_vram: (name) => `The ${name} model needs more graphics memory than this computer has free.`,
   oom_host: (name) => `The ${name} model needs more system memory than this computer has free.`,
-  port_in_use: (name) => `The ${name} worker could not start because its port is already in use.`,
+  // Not only a failed start: the same code now also reports a port held
+  // while this application is running no worker of that name at all.
+  port_in_use: (name) => `The ${name} worker's port is already in use.`,
   model_incompatible: (name) => `The ${name} engine could not read the selected model.`,
   executable_missing: (name) => `The ${name} engine program could not be started.`,
   startup_timeout: (name) => `The ${name} worker took too long to start.`,
