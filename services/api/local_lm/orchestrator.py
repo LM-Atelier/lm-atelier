@@ -3229,7 +3229,19 @@ class ConversationOrchestrator:
                         self._displaced_chat_profile_id = None
                     else:
                         pending = self._pending_chat_restore(resume_chat_profile)
-                        if pending:
+                        # Completing the handoff stops media, resumes chat or
+                        # schedules a restart, and `_execute_media` raising
+                        # ClaimLost does not stop this block from running. An
+                        # attempt a successor has already replaced must move no
+                        # global worker on its behalf, which is the rule the
+                        # verification teardown follows with the same predicate.
+                        #
+                        # A None claim is not a lost one: there is no attempt to
+                        # be stale, and the surrounding code already reads None
+                        # as no ownership assertion rather than as a refusal.
+                        # Skipping owes nothing either way - `_ensure_chat_worker`
+                        # loads whatever the next text execution needs.
+                        if pending and (claim is None or self._attempt_current(job_id, claim)):
                             await self._complete_media_handoff(pending)
                 if queued_verification_job_id:
                     self.start(queued_verification_job_id, None)
