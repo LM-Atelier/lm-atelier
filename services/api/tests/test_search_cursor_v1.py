@@ -164,6 +164,50 @@ def test_require_int_text_refuses_empty_non_string_and_non_digits() -> None:
         require_int_text("1" * (MAX_INT_DIGITS + 1), maximum=MAX_OFFSET)
 
 
+def test_require_int_text_refuses_a_value_above_its_ceiling() -> None:
+    """The digit string can be legal and still name a place past the bound.
+
+    Empty, mixed, and over-long inputs are already pinned. A six-digit offset
+    of 100001 and a ten-digit generation of 2147483648 pass those checks and
+    only the value ceiling refuses them. Without this, dropping that comparison
+    leaves require_int_text returning the parsed integer, and decode still
+    looks green because bind_search_cursor's integer bound catches the same
+    numbers later.
+    """
+    assert require_int_text(str(MAX_OFFSET), maximum=MAX_OFFSET) == MAX_OFFSET
+    with pytest.raises(SearchCursorError, match=INVALID_CURSOR):
+        require_int_text(str(MAX_OFFSET + 1), maximum=MAX_OFFSET)
+    assert require_int_text(str(MAX_GENERATION), maximum=MAX_GENERATION) == MAX_GENERATION
+    with pytest.raises(SearchCursorError, match=INVALID_CURSOR):
+        require_int_text(str(MAX_GENERATION + 1), maximum=MAX_GENERATION)
+
+
+def test_bind_refuses_a_short_hex_digest() -> None:
+    """A query digest is exactly 64 lowercase hex characters, not at most 64.
+
+    Oversize and non-hex inputs are already pinned. A 63-character hex string
+    is inside the length ceiling that require_bounded_exact_str enforces, and
+    every character is in the digest alphabet, so only the exact-length check
+    refuses it. Mutating that check left a short digest accepted.
+    """
+    short = "a" * (MAX_DIGEST_CHARS - 1)
+    with pytest.raises(SearchCursorError, match=INVALID_CURSOR):
+        bind_search_cursor(
+            index_generation=1,
+            query_digest=short,
+            offset=0,
+            expires_at_unix=10,
+            now_unix=1,
+        )
+    with pytest.raises(SearchCursorError, match=INVALID_CURSOR):
+        decode_search_cursor(
+            f"v1.1.0.10.{short}",
+            now_unix=1,
+            index_generation=1,
+            query_digest=DIGEST,
+        )
+
+
 def test_decode_refuses_wrong_prefix_and_wrong_part_count() -> None:
     with pytest.raises(SearchCursorError, match=INVALID_CURSOR):
         decode_search_cursor(
