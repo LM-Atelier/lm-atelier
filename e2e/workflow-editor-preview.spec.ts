@@ -90,7 +90,6 @@ async function createWorkflow(request: APIRequestContext): Promise<Workflow> {
       api_graph: apiGraph(),
       input_schema: {},
       dependencies: {},
-      trusted: true,
     },
   });
   expect(response.status(), await response.text()).toBe(201);

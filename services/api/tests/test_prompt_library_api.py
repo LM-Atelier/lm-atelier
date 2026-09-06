@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from httpx2 import AsyncClient
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
+from workflow_fixtures import seed_workflow_trust
 
 from local_lm import api as api_module
 from local_lm import orchestrator as orchestrator_module
@@ -331,10 +332,10 @@ async def test_prompt_batch_queue_allocates_lora_pool_per_item_deterministically
                 "operation": "text_to_image",
                 "engine": "mock",
                 "api_graph": {},
-                "trusted": True,
             },
         )
     ).json()
+    seed_workflow_trust(workflow["current_revision_id"])
     digests = ("a" * 64, "b" * 64)
     asset_ids: dict[str, str] = {}
     with SessionLocal() as session:
@@ -478,9 +479,9 @@ async def test_prompt_batch_queue_freezes_distinct_workflow_contexts_per_item(
                     "type": "object",
                     "properties": {"steps": {"type": "integer", "default": steps}},
                 },
-                "trusted": True,
             },
         )
+        seed_workflow_trust(response.json()["current_revision_id"])
         assert response.status_code == 201
         workflow_ids.append(response.json()["current_revision_id"])
 
@@ -604,9 +605,9 @@ async def test_prompt_batch_workflow_pool_refuses_partly_compatible_shared_setti
                 "engine": "mock",
                 "api_graph": {"node": {"class_type": f"SettingsWorkflow{index}"}},
                 "input_schema": {"type": "object", "properties": properties},
-                "trusted": True,
             },
         )
+        seed_workflow_trust(response.json()["current_revision_id"])
         assert response.status_code == 201
         workflow_ids.append(response.json()["current_revision_id"])
 
@@ -722,9 +723,9 @@ async def test_prompt_batch_workflow_pool_applies_setting_every_option_accepts(
                     "type": "object",
                     "properties": {"render_style": {"type": "string", "default": "soft"}},
                 },
-                "trusted": True,
             },
         )
+        seed_workflow_trust(response.json()["current_revision_id"])
         assert response.status_code == 201
         workflow_ids.append(response.json()["current_revision_id"])
 
@@ -805,9 +806,9 @@ async def test_prompt_batch_workflow_pool_unselected_stale_option_refuses_before
                 "operation": "text_to_image",
                 "engine": "mock",
                 "api_graph": {"node": {"class_type": f"StaleWorkflow{index}"}},
-                "trusted": True,
             },
         )
+        seed_workflow_trust(response.json()["current_revision_id"])
         assert response.status_code == 201
         workflow_ids.append(response.json()["current_revision_id"])
     resource_policy: dict[str, object] = {
@@ -1964,9 +1965,9 @@ async def test_prompt_template_fixed_resources_require_ready_workflow_and_verifi
             "operation": "text_to_image",
             "engine": "mock",
             "api_graph": {},
-            "trusted": True,
         },
     )
+    seed_workflow_trust(workflow_response.json()["current_revision_id"])
     assert workflow_response.status_code == 201
     workflow_revision_id = workflow_response.json()["current_revision_id"]
     fixed = {
@@ -2147,7 +2148,6 @@ async def test_prompt_template_fixed_resources_require_ready_workflow_and_verifi
             "operation": "text_to_image",
             "engine": "mock",
             "api_graph": {},
-            "trusted": False,
         },
     )
     assert untrusted_workflow.status_code == 201
@@ -2183,9 +2183,9 @@ async def test_prompt_template_workflow_pool_requires_every_option_and_lora(
                 "operation": "text_to_image",
                 "engine": "mock",
                 "api_graph": {},
-                "trusted": True,
             },
         )
+        seed_workflow_trust(response.json()["current_revision_id"])
         assert response.status_code == 201
         workflow_ids.append(response.json()["current_revision_id"])
 

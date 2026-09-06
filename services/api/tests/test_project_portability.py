@@ -11,6 +11,7 @@ import pytest
 from httpx2 import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from workflow_fixtures import seed_workflow_trust
 
 from local_lm.artifacts import ArtifactStore
 from local_lm.config import Settings
@@ -324,10 +325,10 @@ async def test_project_round_trip_redacts_paths_and_remaps_portable_identifiers(
                 "operation": "text_to_image",
                 "engine": "mock",
                 "api_graph": {"loader": {"class_type": "PortableLoader"}},
-                "trusted": True,
             },
         )
     ).json()
+    seed_workflow_trust(workflow["current_revision_id"])
     source_revision = workflow["revisions"][0]
     project = (
         await client.post(

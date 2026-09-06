@@ -20,6 +20,7 @@ from PIL import Image
 from sqlalchemy import func, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
+from workflow_fixtures import seed_workflow_trust
 
 import local_lm.api as api_module
 from local_lm import __version__
@@ -1139,9 +1140,9 @@ async def test_project_v3_round_trip_remaps_portable_dependencies_in_a_fresh_dat
                 "properties": {"steps": {"type": "integer", "default": 12}},
             },
             "dependencies": {"models": ["portable-model"]},
-            "trusted": True,
         },
     )
+    seed_workflow_trust(workflow_response.json()["current_revision_id"])
     assert workflow_response.status_code == 201
     workflow = workflow_response.json()
     revision_one = workflow["revisions"][0]
@@ -1154,9 +1155,9 @@ async def test_project_v3_round_trip_remaps_portable_dependencies_in_a_fresh_dat
                 "properties": {"steps": {"type": "integer", "default": 16}},
             },
             "dependencies": {"models": ["portable-model-v2"]},
-            "trusted": True,
         },
     )
+    seed_workflow_trust(revision_two_response.json()["id"])
     assert revision_two_response.status_code == 201
     revision_two = revision_two_response.json()
 
@@ -4396,15 +4397,16 @@ async def test_workflow_revisions_and_validation(client: AsyncClient) -> None:
                 "type": "object",
                 "properties": {"steps": {"type": "integer", "default": 20}},
             },
-            "trusted": True,
         },
     )
+    seed_workflow_trust(created.json()["current_revision_id"])
     assert created.status_code == 201
     workflow = created.json()
     revision = await client.post(
         f"/api/workflows/{workflow['id']}/revisions",
-        json={"api_graph": {"node": {"class_type": "MockV2"}}, "trusted": True},
+        json={"api_graph": {"node": {"class_type": "MockV2"}}},
     )
+    seed_workflow_trust(revision.json()["id"])
     assert revision.status_code == 201
     assert revision.json()["version"] == 2
     validation = await client.post(f"/api/workflows/{workflow['id']}/validate")
@@ -4443,9 +4445,9 @@ async def test_workflow_revisions_and_validation(client: AsyncClient) -> None:
         json={
             "api_graph": {"node": {"class_type": "Mock"}},
             "dependencies": {"models": ["not-installed"]},
-            "trusted": True,
         },
     )
+    seed_workflow_trust(missing_dependency.json()["id"])
     assert missing_dependency.status_code == 201
     validation = await client.post(f"/api/workflows/{workflow['id']}/validate")
     assert validation.json()["valid"] is False
@@ -4481,10 +4483,10 @@ async def test_workflow_vram_requirement_uses_device_capacity(
                 "engine": "mock",
                 "api_graph": {"node": {"class_type": "Mock"}},
                 "dependencies": {"minimum_vram_bytes": 12 * 1024**3},
-                "trusted": True,
             },
         )
     ).json()
+    seed_workflow_trust(workflow["current_revision_id"])
 
     under_pressure = await client.post(f"/api/workflows/{workflow['id']}/validate")
     assert under_pressure.status_code == 200
@@ -4534,7 +4536,6 @@ async def test_workflow_validation_requires_trust_and_active_model_dependencies(
                 "engine": "comfyui",
                 "api_graph": {"1": {"class_type": "SaveImage", "inputs": {}}},
                 "dependencies": {"models": [{"id": "model_inactive_workflow_dependency"}]},
-                "trusted": False,
             },
         )
     ).json()
@@ -4558,10 +4559,10 @@ async def test_project_pins_an_immutable_media_workflow_revision(client: AsyncCl
                 # workflow that cannot run here, which is a different test.
                 "engine": "mock",
                 "api_graph": {"1": {"class_type": "SaveImage", "inputs": {}}},
-                "trusted": True,
             },
         )
     ).json()
+    seed_workflow_trust(workflow["current_revision_id"])
     revision_id = workflow["current_revision_id"]
     project_response = await client.post(
         "/api/projects",
@@ -4605,10 +4606,10 @@ async def test_a_project_pin_that_cannot_run_is_named_rather_than_replaced(
                 "operation": "text_to_image",
                 "engine": "comfyui",
                 "api_graph": {"1": {"class_type": "SaveImage", "inputs": {}}},
-                "trusted": True,
             },
         )
     ).json()
+    seed_workflow_trust(other_engine["current_revision_id"])
     usable = (
         await client.post(
             "/api/workflows",
@@ -4617,10 +4618,10 @@ async def test_a_project_pin_that_cannot_run_is_named_rather_than_replaced(
                 "operation": "text_to_image",
                 "engine": "mock",
                 "api_graph": {"1": {"class_type": "SaveImage", "inputs": {}}},
-                "trusted": True,
             },
         )
     ).json()
+    seed_workflow_trust(usable["current_revision_id"])
     assert usable["current_revision_id"]
 
     project = (
@@ -4666,7 +4667,6 @@ async def test_an_untrusted_project_pin_is_refused_at_selection(client: AsyncCli
                 "operation": "text_to_image",
                 "engine": "mock",
                 "api_graph": {"1": {"class_type": "SaveImage", "inputs": {}}},
-                "trusted": False,
             },
         )
     ).json()
@@ -4726,10 +4726,10 @@ async def test_a_pin_follows_only_an_artifact_identical_recompile(client: AsyncC
                 "operation": "text_to_image",
                 "engine": "mock",
                 "api_graph": graph,
-                "trusted": True,
             },
         )
     ).json()
+    seed_workflow_trust(workflow["current_revision_id"])
     pinned_revision_id = workflow["current_revision_id"]
     project = (
         await client.post(
@@ -4746,9 +4746,10 @@ async def test_a_pin_follows_only_an_artifact_identical_recompile(client: AsyncC
     identical = (
         await client.post(
             f"/api/workflows/{workflow['id']}/revisions",
-            json={"api_graph": graph, "trusted": True},
+            json={"api_graph": graph},
         )
     ).json()
+    seed_workflow_trust(identical["id"])
     assert identical["id"] != pinned_revision_id
 
     turn = await client.post(
@@ -4765,10 +4766,10 @@ async def test_a_pin_follows_only_an_artifact_identical_recompile(client: AsyncC
             f"/api/workflows/{workflow['id']}/revisions",
             json={
                 "api_graph": {"1": {"class_type": "SaveImage", "inputs": {"quality": 95}}},
-                "trusted": True,
             },
         )
     ).json()
+    seed_workflow_trust(changed["id"])
 
     second = await client.post(
         f"/api/chats/{chat['id']}/turns",
@@ -4816,10 +4817,10 @@ async def test_media_workflow_follows_the_selected_model_dependency(
                     "engine": "mock",
                     "api_graph": {"node": {"class_type": f"MockImage{index}"}},
                     "dependencies": {"model_install_ids": [install["id"]]},
-                    "trusted": True,
                 },
             )
         ).json()
+        seed_workflow_trust(workflow["current_revision_id"])
         revisions.append(workflow["current_revision_id"])
 
     chat = (await client.post("/api/chats", json={"title": "Dependency routing"})).json()
@@ -4892,10 +4893,10 @@ async def test_auto_media_selection_falls_back_to_operation_compatible_profile(
                 "engine": "mock",
                 "api_graph": {"node": {"class_type": "MockTextImage"}},
                 "dependencies": {"model_install_ids": [installs[0]["id"]]},
-                "trusted": True,
             },
         )
     ).json()
+    seed_workflow_trust(text_workflow["current_revision_id"])
     edit_workflow = await client.post(
         "/api/workflows",
         json={
@@ -4904,9 +4905,9 @@ async def test_auto_media_selection_falls_back_to_operation_compatible_profile(
             "engine": "mock",
             "api_graph": {"node": {"class_type": "MockEditImage"}},
             "dependencies": {"model_install_ids": [installs[1]["id"]]},
-            "trusted": True,
         },
     )
+    seed_workflow_trust(edit_workflow.json()["current_revision_id"])
     assert edit_workflow.status_code == 201
 
     chat = (await client.post("/api/chats", json={"title": "Auto fallback"})).json()
@@ -4989,10 +4990,10 @@ async def test_pinned_workflow_schema_drives_generation_settings(client: AsyncCl
                         },
                     },
                 },
-                "trusted": True,
             },
         )
     ).json()
+    seed_workflow_trust(workflow["current_revision_id"])
     project = (
         await client.post(
             "/api/projects",
@@ -5129,9 +5130,9 @@ async def test_workflow_seconds_resolve_before_video_dispatch(
                     "frame_offset": 1,
                 },
             },
-            "trusted": True,
         },
     )
+    seed_workflow_trust(workflow_response.json()["current_revision_id"])
     assert workflow_response.status_code == 201, workflow_response.json()
     workflow = workflow_response.json()
     project = (
@@ -5429,10 +5430,10 @@ async def test_pinned_workflow_revision_keeps_dynamic_capability_constraints(
                         }
                     }
                 },
-                "trusted": True,
             },
         )
     ).json()
+    seed_workflow_trust(workflow["current_revision_id"])
     pinned_revision = workflow["current_revision_id"]
     project = (
         await client.post(
@@ -5458,9 +5459,9 @@ async def test_pinned_workflow_revision_keeps_dynamic_capability_constraints(
                     }
                 }
             },
-            "trusted": True,
         },
     )
+    seed_workflow_trust(replacement.json()["id"])
     assert replacement.status_code == 201
     chat = (
         await client.post(
@@ -7786,9 +7787,9 @@ async def test_workflow_edit_calibration_is_validated_and_portable(
             "engine": "mock",
             "api_graph": {"node": {"class_type": "Mock"}},
             "input_schema": input_schema,
-            "trusted": True,
         },
     )
+    seed_workflow_trust(created.json()["current_revision_id"])
     assert created.status_code == 201, created.text
     workflow = created.json()
 
@@ -7821,7 +7822,6 @@ async def test_workflow_edit_calibration_is_validated_and_portable(
         json={
             "api_graph": {"node": {"class_type": "MockV2"}},
             "input_schema": invalid_schema,
-            "trusted": True,
         },
     )
     assert rejected_revision.status_code == 422
@@ -7905,10 +7905,10 @@ async def test_derive_trust_reports_an_already_trusted_workflow(client: AsyncCli
                 "operation": "text_to_image",
                 "engine": "mock",
                 "api_graph": {"1": {"class_type": "SaveImage", "inputs": {}}},
-                "trusted": True,
             },
         )
     ).json()
+    seed_workflow_trust(workflow["current_revision_id"])
 
     derived = await client.post(f"/api/workflows/{workflow['id']}/derive-trust")
 

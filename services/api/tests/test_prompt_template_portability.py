@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from httpx2 import AsyncClient
 from sqlalchemy import event, func, select
 from sqlalchemy.engine import Engine
+from workflow_fixtures import seed_workflow_trust
 
 from local_lm.db import SessionLocal
 from local_lm.domain import utcnow
@@ -288,9 +289,9 @@ async def test_candidate_resolver_refuses_a_ready_workflow_with_another_descript
             "operation": "text_to_image",
             "engine": "mock",
             "api_graph": {},
-            "trusted": True,
         },
     )
+    seed_workflow_trust(exported_workflow.json()["current_revision_id"])
     assert exported_workflow.status_code == 201, exported_workflow.text
     other_workflow = await client.post(
         "/api/workflows",
@@ -299,9 +300,9 @@ async def test_candidate_resolver_refuses_a_ready_workflow_with_another_descript
             "operation": "text_to_image",
             "engine": "mock",
             "api_graph": {"node": {"class_type": "SomethingElse"}},
-            "trusted": True,
         },
     )
+    seed_workflow_trust(other_workflow.json()["current_revision_id"])
     assert other_workflow.status_code == 201, other_workflow.text
     other_ref = other_workflow.json()["current_revision_id"]
     created = await _create_template(
@@ -356,9 +357,9 @@ async def test_preview_receipt_is_refused_for_a_different_bundle(
             "operation": "text_to_image",
             "engine": "mock",
             "api_graph": {},
-            "trusted": True,
         },
     )
+    seed_workflow_trust(workflow.json()["current_revision_id"])
     assert workflow.status_code == 201, workflow.text
     workflow_ref = workflow.json()["current_revision_id"]
     exports: list[str] = []
@@ -484,9 +485,9 @@ async def test_candidate_resolver_refuses_unknown_well_formed_binding_key(
             "operation": "text_to_image",
             "engine": "mock",
             "api_graph": {},
-            "trusted": True,
         },
     )
+    seed_workflow_trust(workflow.json()["current_revision_id"])
     assert workflow.status_code == 201, workflow.text
     workflow_ref = workflow.json()["current_revision_id"]
     created = await _create_template(
@@ -537,9 +538,9 @@ async def test_fixed_export_erases_source_identity_and_preview_suggests_local_ma
             "operation": "text_to_image",
             "engine": "mock",
             "api_graph": {},
-            "trusted": True,
         },
     )
+    seed_workflow_trust(workflow.json()["current_revision_id"])
     assert workflow.status_code == 201, workflow.text
     workflow_revision_id = workflow.json()["current_revision_id"]
     lora_digest = "a" * 64
@@ -798,9 +799,9 @@ async def test_candidate_resolver_authorizes_match_omitted_by_bounded_preview(
                 "operation": "text_to_image",
                 "engine": "mock",
                 "api_graph": {},
-                "trusted": True,
             },
         )
+        seed_workflow_trust(workflow.json()["current_revision_id"])
         assert workflow.status_code == 201, workflow.text
         workflow_ids.append(workflow.json()["current_revision_id"])
     created = await _create_template(
@@ -958,9 +959,9 @@ async def test_workflow_pool_keys_deduplicate_only_exact_source_revisions(
                 "operation": "text_to_image",
                 "engine": "mock",
                 "api_graph": {},
-                "trusted": True,
             },
         )
+        seed_workflow_trust(workflow.json()["current_revision_id"])
         assert workflow.status_code == 201, workflow.text
         workflow_ids.append(workflow.json()["current_revision_id"])
     lora_digest = "c" * 64
