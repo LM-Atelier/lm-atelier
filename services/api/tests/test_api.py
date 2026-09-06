@@ -10858,6 +10858,73 @@ async def test_setup_finalization_skips_a_requeued_attempt(
         assert session.get(Job, job_id) is not None, "the successor's job was finalized away"
 
 
+async def test_setup_finalization_refuses_a_requeue_that_lands_after_its_check(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The requeue arrives AFTER the finalizer has already checked the row.
+
+    The sibling test above establishes the successor before entering the helper,
+    so the in-memory check catches it and the deletion is never reached. That
+    leaves the actual window untested: the read holds no writer lock, so a
+    requeue can land between the check and the mutation, and an execution that
+    checked a row it did own can still delete a row it no longer owns.
+
+    The interleave is placed exactly there. `setup_verification_for_chat` is
+    called after the check and before `finalize_setup_verification`, so a
+    requeue performed inside it, from a separate session that commits, is what
+    production would produce at the worst moment.
+    """
+
+    orch = app.state.services.orchestrator
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: None)
+    _chat_id, job_id, claim = await _claimed_text_job(client, monkeypatch)
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        run_id = job.run_id
+        assert job.attempt == claim.attempt, "the fixture job is not this claim's attempt"
+
+    published: list[str] = []
+
+    async def recording_publish(name: str, *args: object, **kwargs: object) -> None:
+        published.append(name)
+
+    monkeypatch.setattr(orch.events, "publish", recording_publish)
+    finalized = Mock(return_value=True)
+    monkeypatch.setitem(
+        orch._finalize_setup_verification_run.__globals__, "finalize_setup_verification", finalized
+    )
+
+    def requeue_then_answer(_session: object, _chat_id: str) -> object:
+        # A successor reclaims the row while the finalizer holds only its read.
+        with SessionLocal() as other:
+            requeued = other.get(Job, job_id)
+            assert requeued is not None
+            requeued.attempt = claim.attempt + 1
+            requeued.claim_owner = "a-later-attempt"
+            other.commit()
+        return SimpleNamespace(role="setup", state="running")
+
+    monkeypatch.setitem(
+        orch._finalize_setup_verification_run.__globals__,
+        "setup_verification_for_chat",
+        requeue_then_answer,
+    )
+
+    assert run_id is not None
+    await orch._finalize_setup_verification_run(job_id, run_id, claim)
+
+    finalized.assert_not_called()
+    assert published == []
+    with SessionLocal() as session:
+        survivor = session.get(Job, job_id)
+        assert survivor is not None, "the successor's job was deleted by a replaced attempt"
+        # The successor's reclaim is intact: the replaced execution wrote nothing
+        # over it on its way out.
+        assert survivor.attempt == claim.attempt + 1
+        assert survivor.claim_owner == "a-later-attempt"
+
+
 async def test_a_publication_failure_after_the_retry_commit_converges(
     client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:

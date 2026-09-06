@@ -3359,6 +3359,13 @@ class ConversationOrchestrator:
                 return
             verification = setup_verification_for_chat(session, chat_id)
             if verification:
+                # The check above read the row; this asserts it at the database
+                # immediately before the write. Between the two, a requeue can
+                # land - the read holds no lock - and finalizing then deletes a
+                # row that already belongs to the successor. A rowcount of one
+                # takes SQLite's writer and holds the fact until this commit.
+                if claim is not None and not self._claim_still_finalizes(session, job_id, claim):
+                    return
                 role = verification.role
                 finalized = finalize_setup_verification(
                     session,
@@ -6453,6 +6460,45 @@ class ConversationOrchestrator:
                     Job.claim_owner == claim.token,
                 )
                 .values(claim_owner=claim.token)
+            ),
+        )
+        return result.rowcount == 1
+
+    def _claim_still_finalizes(self, session: Session, job_id: str, claim: JobClaim) -> bool:
+        """Assert the finalizer's own attempt AT the database, in this transaction.
+
+        Deliberately not `_claim_owns_row` and not `_claim_terminal_transition`.
+        Finalization runs at the END of a run, so the job may already be
+        COMPLETE, FAILED or CANCELLED under this same attempt, and both of those
+        helpers require RUNNING. Using either here would refuse every ordinary
+        completed run rather than only a requeued one.
+
+        The predicate is the one the in-memory check already applied: the same
+        attempt, and either this claim still owns the row or the row reached a
+        terminal status under that attempt. A conditional no-op UPDATE makes it a
+        write, so a rowcount of one means the fact is held until the commit that
+        deletes the rows.
+        """
+
+        result = cast(
+            "CursorResult[Any]",
+            session.execute(
+                update(Job)
+                .where(
+                    Job.id == job_id,
+                    Job.attempt == claim.attempt,
+                    or_(
+                        Job.claim_owner == claim.token,
+                        Job.status.in_(
+                            [
+                                JobStatus.COMPLETE.value,
+                                JobStatus.FAILED.value,
+                                JobStatus.CANCELLED.value,
+                            ]
+                        ),
+                    ),
+                )
+                .values(attempt=claim.attempt)
             ),
         )
         return result.rowcount == 1
