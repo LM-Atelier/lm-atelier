@@ -18,6 +18,7 @@ from local_lm.models import (
     ModelProfile,
     Run,
     WorkflowActivation,
+    WorkflowDefinition,
     WorkflowRevision,
     WorkStep,
 )
@@ -96,6 +97,7 @@ def test_successful_media_evidence_requires_an_exact_official_contract(monkeypat
     performance = {"version": 1, "signals": [{"kind": "model-cache"}]}
     revision = SimpleNamespace(
         id="revision-image",
+        workflow_id="workflow-image",
         trusted=True,
         engine="comfyui",
         artifact_sha256="d" * 64,
@@ -119,6 +121,9 @@ def test_successful_media_evidence_requires_an_exact_official_contract(monkeypat
                 (ModelProfile, profile.id): profile,
                 (ModelInstall, install.id): install,
                 (WorkflowRevision, revision.id): revision,
+                (WorkflowDefinition, revision.workflow_id): SimpleNamespace(
+                    id=revision.workflow_id
+                ),
             }.get((model, identity))
 
     recorder = Mock(return_value=SimpleNamespace(evidence_key="evidence-key"))

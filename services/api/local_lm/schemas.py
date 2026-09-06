@@ -1211,6 +1211,11 @@ class WorkflowRevisionCreate(ApiModel):
     dependencies: dict[str, Any] = Field(default_factory=dict)
 
 
+class WorkflowRevisionReviewRequest(ApiModel):
+    action: Literal["approve", "revoke"]
+    subject_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class WorkflowUpdate(ApiModel):
     name: str | None = Field(default=None, min_length=1, max_length=240)
     description: str | None = Field(default=None, max_length=10_000)
