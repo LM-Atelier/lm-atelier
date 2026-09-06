@@ -4560,6 +4560,21 @@ class ConversationOrchestrator:
     async def _complete_media_handoff(self, chat_profile_id: str) -> None:
         """Release retained Comfy state before restoring a managed chat model."""
 
+        # The obligation is recorded BEFORE anything that can fail, and this is
+        # the only place it can be recorded at all: the caller holds this
+        # profile in a local that dies with its frame, so once this method
+        # raises there is nothing left that knows a chat model was displaced.
+        #
+        # Everything below can raise. `_handoff_chat_target` guards its peek
+        # and then opens a session and reads two rows unguarded; the recycle
+        # inspects live workers; the stop is a process effect. Any of those
+        # ending this method used to leave the displaced model down with no
+        # owner and nothing to restore it.
+        #
+        # So the debt is the default and paying it is the deliberate act. Every
+        # path below either clears it because chat is being restored now, or
+        # leaves it standing for a later handoff.
+        self._displaced_chat_profile_id = chat_profile_id
         selected_chat_profile_id, queued_text_next, queued_media_next = self._handoff_chat_target(
             chat_profile_id
         )
@@ -4583,9 +4598,7 @@ class ConversationOrchestrator:
             # is then decided by the worker's real state, which is what
             # `_chat_planner_available` already checks.
             self._chat_planner_ready.set()
-            self._displaced_chat_profile_id = chat_profile_id
             return
-        self._displaced_chat_profile_id = None
         recycle_managed_media = False
         recycled_activation_scope = False
         recycle_wanted = False
@@ -4623,18 +4636,21 @@ class ConversationOrchestrator:
                 # is then decided by the worker's real state.
                 logger.exception("Could not recycle the media worker after device handoff")
                 self._chat_planner_ready.set()
-                self._displaced_chat_profile_id = chat_profile_id
                 return
             recycle_managed_media = True
 
         if not recycle_managed_media:
+            # Nothing was holding the device, so chat comes back now and the
+            # obligation is discharged.
             await self._resume_chat_worker(selected_chat_profile_id)
+            self._displaced_chat_profile_id = None
             return
 
         # Restore chat without competing with Python/Torch startup for disk and
         # CPU. Once chat is ready, warm the empty ComfyUI service in a tracked
         # background task so the queued text job can proceed immediately.
         await self._resume_chat_worker(selected_chat_profile_id)
+        self._displaced_chat_profile_id = None
         if recycled_activation_scope:
             # A broad empty-worker restart would expose dependencies outside the
             # activation that just ran. The next contract-backed media step will

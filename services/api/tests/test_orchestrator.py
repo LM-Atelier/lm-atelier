@@ -1376,6 +1376,63 @@ async def test_nothing_to_recycle_still_restores_the_chat_model() -> None:
     assert orchestrator._displaced_chat_profile_id is None
 
 
+async def test_a_failure_choosing_the_target_still_leaves_the_profile_owed() -> None:
+    """The obligation has to outlive the method that discovers it.
+
+    `_prepare_device_handoff` hands the displaced profile back as a return
+    value, so until this method writes it down the only record of it is a local
+    in the caller's frame. `_handoff_chat_target` guards its scheduler peek and
+    then opens a session and reads two rows unguarded, so a database failure
+    there ends this method - and used to end it before the books were touched,
+    leaving the chat model down with nothing that knows it is owed.
+
+    The failure is put in that exact window: after the peek, inside the read.
+    """
+
+    orchestrator, processes = _queued_media_orchestrator(
+        [("job-next", "run-next")],
+        SimpleNamespace(operation="text", profile_id=None),
+    )
+
+    def unreadable_session() -> object:
+        raise RuntimeError("the database would not answer during the handoff")
+
+    orchestrator.session_factory = unreadable_session  # type: ignore[method-assign]
+    resume = AsyncMock()
+    orchestrator._resume_chat_worker = resume  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="would not answer"):
+        await orchestrator._complete_media_handoff("profile-chat")
+
+    assert orchestrator._displaced_chat_profile_id == "profile-chat", (
+        "the displaced chat model was left with no owner"
+    )
+    processes.stop.assert_not_awaited()
+    resume.assert_not_awaited()
+
+
+async def test_a_handoff_that_restores_chat_owes_nothing_afterwards() -> None:
+    """The other half: an obligation recorded up front must still be paid off.
+
+    Making the debt the default is only safe if every path that restores chat
+    clears it. A handoff that leaves it standing would send a later one to
+    reload a model that is already up.
+    """
+
+    orchestrator, processes = _queued_media_orchestrator(
+        [None],
+        SimpleNamespace(operation="text", profile_id=None),
+    )
+    resume = AsyncMock()
+    orchestrator._resume_chat_worker = resume  # type: ignore[method-assign]
+
+    await orchestrator._complete_media_handoff("profile-chat")
+
+    processes.stop.assert_awaited_once_with("media")
+    resume.assert_awaited_once_with("profile-chat")
+    assert orchestrator._displaced_chat_profile_id is None
+
+
 async def test_a_later_image_in_the_run_still_reaches_the_terminal_handoff() -> None:
     """Only the first image of a run is handed a profile to restore.
 
