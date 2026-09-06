@@ -949,35 +949,6 @@ async def test_external_media_handoff_only_resumes_chat() -> None:
     resume.assert_awaited_once_with("profile-chat")
 
 
-async def test_media_recycle_failure_still_restores_chat() -> None:
-    media = WorkerStatus(
-        name="media",
-        state="ready",
-        managed=True,
-        running=True,
-        pid=22,
-    )
-    processes = SimpleNamespace(
-        statuses=Mock(return_value=[media]),
-        stop=AsyncMock(side_effect=RuntimeError("recycle failed")),
-        start_media=AsyncMock(),
-    )
-    orchestrator = ConversationOrchestrator(
-        engines=SimpleNamespace(settings=SimpleNamespace(media_engine="comfyui")),
-        artifacts=Mock(),
-        events=Mock(),
-        scheduler=Mock(),
-        processes=processes,
-    )
-    resume = AsyncMock()
-    orchestrator._resume_chat_worker = resume  # type: ignore[method-assign]
-
-    await orchestrator._complete_media_handoff("profile-chat")
-
-    processes.start_media.assert_not_awaited()
-    resume.assert_awaited_once_with("profile-chat")
-
-
 async def test_chat_planner_falls_back_during_media_handoff() -> None:
     ready = WorkerStatus(
         name="chat",
@@ -1341,6 +1312,68 @@ async def test_skipping_the_resume_releases_the_chat_readiness_latch() -> None:
     await orchestrator._complete_media_handoff("profile-chat")
 
     assert orchestrator._chat_planner_ready.is_set()
+
+
+async def test_a_recycle_whose_stop_fails_leaves_chat_down_and_the_profile_owed() -> None:
+    """The stop is what makes the room, so a failed stop must not be followed
+    by the load it was making room for.
+
+    A false `recycle_managed_media` meant two unrelated things - there was
+    nothing to recycle, and the recycle failed - and both were answered by
+    resuming chat. Only the first wants that. On the second the worker may
+    still hold the allocations the chat model would be loaded beside, which is
+    the contention the recycle exists to prevent.
+
+    The profile stays on the books so a later handoff still owes the restore,
+    and the readiness latch is released for the reason the queued-media skip
+    records: this handoff is over either way.
+    """
+
+    orchestrator, processes = _queued_media_orchestrator(
+        [None],
+        SimpleNamespace(operation="text", profile_id=None),
+    )
+    processes.stop = AsyncMock(side_effect=RuntimeError("the media worker would not stop"))
+    resume = AsyncMock()
+    orchestrator._resume_chat_worker = resume  # type: ignore[method-assign]
+    orchestrator._chat_planner_ready.clear()
+
+    await orchestrator._complete_media_handoff("profile-chat")
+
+    processes.stop.assert_awaited_once_with("media")
+    resume.assert_not_awaited()
+    processes.start_media.assert_not_awaited()
+    assert orchestrator._displaced_chat_profile_id == "profile-chat"
+    assert orchestrator._chat_planner_ready.is_set()
+    assert orchestrator._media_restart_task is None
+    assert orchestrator._media_restart_after_chat_activity is False
+
+
+async def test_nothing_to_recycle_still_restores_the_chat_model() -> None:
+    """The other half of the split, held in place.
+
+    Separating a failed recycle from an absent one must not make an absent one
+    behave like a failure. An unmanaged media worker holds nothing this handoff
+    needs to release, so chat comes back and nothing is owed.
+    """
+
+    orchestrator, processes = _queued_media_orchestrator(
+        [None],
+        SimpleNamespace(operation="text", profile_id=None),
+    )
+    processes.statuses = Mock(
+        return_value=[
+            WorkerStatus(name="media", state="ready", managed=False, running=True, pid=22)
+        ]
+    )
+    resume = AsyncMock()
+    orchestrator._resume_chat_worker = resume  # type: ignore[method-assign]
+
+    await orchestrator._complete_media_handoff("profile-chat")
+
+    processes.stop.assert_not_awaited()
+    resume.assert_awaited_once_with("profile-chat")
+    assert orchestrator._displaced_chat_profile_id is None
 
 
 async def test_a_later_image_in_the_run_still_reaches_the_terminal_handoff() -> None:
