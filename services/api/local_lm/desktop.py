@@ -21,6 +21,7 @@ from .instance_identity import (
     InstanceIdentityError,
     load_or_create_instance_identity,
 )
+from .instance_lock import DataDirectoryLockError
 from .runtime_config import (
     RUNTIME_ENV_KEYS,
     RuntimeConfigError,
@@ -264,6 +265,12 @@ def main() -> int:
         )
         return 2
 
+    try:
+        from .main import run
+    except DataDirectoryLockError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
     _set_console_title()
     if _browser_enabled():
         threading.Thread(
@@ -273,8 +280,6 @@ def main() -> int:
             name="open-lm-atelier",
             daemon=True,
         ).start()
-
-    from .main import run
 
     run()
     return 0

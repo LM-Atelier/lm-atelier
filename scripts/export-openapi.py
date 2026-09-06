@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -28,19 +29,26 @@ def main() -> int:
     arguments = parser.parse_args()
     repository = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(repository / "services" / "api"))
-    from local_lm.config import Settings
-    from local_lm.main import create_app
-
     with tempfile.TemporaryDirectory() as scratch:
-        settings = Settings(
-            data_dir=Path(scratch) / "data",
-            dev=True,
-            chat_engine="mock",
-            media_engine="mock",
+        # Importing the server establishes its default application's data
+        # ownership. Export must choose its own folder before that import.
+        os.environ.update(
+            LOCAL_LM_DATA_DIR=str(Path(scratch) / "data"),
+            LOCAL_LM_DEV="true",
+            LOCAL_LM_CHAT_ENGINE="mock",
+            LOCAL_LM_MEDIA_ENGINE="mock",
         )
-        settings.prepare()
-        document = create_app(settings).openapi()
-    serialized = json.dumps(document, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+        from local_lm import main as api
+
+        try:
+            document = api.app.openapi()
+        finally:
+            # This process owns only the temporary app; release its directory
+            # handles before TemporaryDirectory removes the folder on Windows.
+            api._default_instance_lock.close()
+    serialized = (
+        json.dumps(document, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    )
     if arguments.output:
         arguments.output.parent.mkdir(parents=True, exist_ok=True)
         arguments.output.write_text(serialized, encoding="utf-8")
