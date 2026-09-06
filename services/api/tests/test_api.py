@@ -11209,6 +11209,129 @@ async def test_a_queue_of_images_restores_the_chat_model_once_at_the_end(
     assert stopped == ["chat"], stopped
 
 
+async def test_a_media_run_that_loses_its_claim_moves_no_worker_on_the_way_out(
+    client: AsyncClient, app: FastAPI, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    """A replaced attempt must not complete the handoff on a successor's behalf.
+
+    The dispatch's outer finally runs even when the media execution raises
+    ClaimLost, and completing the handoff stops media, resumes chat or schedules
+    a restart. Entering through the real dispatch is the whole point: the existing
+    controls for this call the handoff by hand and so never exercise the wrapper
+    that actually runs it.
+
+    The claim is taken away mid-generation by bumping the job's attempt, which is
+    what a successor reclaiming the row does. Chat is displaced FIRST, so the run
+    genuinely owes a restore when the claim is lost - otherwise the assertion
+    would hold for the trivial reason that nothing was owed at all.
+    """
+
+    services = app.state.services
+    orchestrator = services.orchestrator
+    chat_running = {"value": True}
+
+    def statuses() -> list[WorkerStatus]:
+        running = chat_running["value"]
+        return [
+            WorkerStatus(
+                name="chat",
+                state="ready" if running else "stopped",
+                managed=True,
+                running=running,
+                pid=11 if running else None,
+                profile_id="profile-chat" if running else None,
+            ),
+            WorkerStatus(name="media", state="ready", managed=True, running=True, pid=22),
+        ]
+
+    stopped: list[str] = []
+    restored: list[str] = []
+    handoffs: list[str] = []
+    restarts: list[str] = []
+
+    async def stop(name: str) -> None:
+        stopped.append(name)
+        if name == "chat":
+            chat_running["value"] = False
+
+    async def resume(profile_id: str) -> None:
+        restored.append(profile_id)
+        chat_running["value"] = True
+
+    async def start_media(**_kwargs: object) -> None:
+        return None
+
+    real_handoff = orchestrator._complete_media_handoff
+
+    async def watched_handoff(profile_id: str) -> None:
+        handoffs.append(profile_id)
+        await real_handoff(profile_id)
+
+    monkeypatch.setattr(services.processes, "statuses", statuses)
+    monkeypatch.setattr(services.processes, "stop", stop)
+    monkeypatch.setattr(services.processes, "start_media", start_media)
+    monkeypatch.setattr(orchestrator, "_resume_chat_worker", resume)
+    monkeypatch.setattr(orchestrator, "_complete_media_handoff", watched_handoff)
+    monkeypatch.setattr(orchestrator, "_schedule_media_restart", lambda: restarts.append("media"))
+
+    # The finally asks what the run still owes immediately before deciding, so
+    # observing that call is an exact signal that the decision point was reached.
+    # Waiting on the job leaving RUNNING would hang: a reclaimed row is the
+    # successor's to settle, and this test has no successor.
+    decided = asyncio.Event()
+    real_pending = orchestrator._pending_chat_restore
+
+    def watched_pending(resume_chat_profile: str | None) -> str | None:
+        answer = real_pending(resume_chat_profile)
+        decided.set()
+        return answer
+
+    monkeypatch.setattr(orchestrator, "_pending_chat_restore", watched_pending)
+
+    reclaimed = asyncio.Event()
+    real_generate = MockMediaAdapter.generate
+
+    async def reclaiming_generate(
+        self: MockMediaAdapter, request: MediaRequest
+    ) -> AsyncIterator[MediaEvent]:
+        # A successor takes the row while this attempt is generating.
+        if not reclaimed.is_set():
+            with orchestrator.session_factory() as session:
+                running = session.scalars(
+                    select(Job).where(Job.status == JobStatus.RUNNING.value)
+                ).all()
+                for job in running:
+                    job.attempt = job.attempt + 1
+                    job.claim_owner = "a-later-attempt"
+                session.commit()
+            reclaimed.set()
+        async for event in real_generate(self, request):
+            yield event
+
+    monkeypatch.setattr(MockMediaAdapter, "generate", reclaiming_generate)
+
+    chat = (await client.post("/api/chats", json={"title": "Reclaimed run"})).json()
+    accepted = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "A grey mug on a table", "mode": "image"},
+    )
+    assert accepted.status_code == 202
+    await asyncio.wait_for(reclaimed.wait(), timeout=5)
+
+    await asyncio.wait_for(decided.wait(), timeout=10)
+    # Let the handoff run if the dispatch is going to run it, so an assertion of
+    # absence is not just winning a race with it.
+    await asyncio.sleep(0.2)
+
+    # Not vacuous: chat really was displaced, so this run owed a restore. The
+    # handoff is skipped because the attempt no longer owns the row, not because
+    # there was nothing to hand back.
+    assert stopped == ["chat"], stopped
+    assert handoffs == [], handoffs
+    assert restored == [], restored
+    assert restarts == [], restarts
+
+
 async def test_a_text_turn_clears_what_a_media_run_still_owed(
     client: AsyncClient, app: FastAPI
 ) -> None:
