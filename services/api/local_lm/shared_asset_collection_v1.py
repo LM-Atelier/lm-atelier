@@ -153,7 +153,7 @@ def collect_unreferenced_object(*, root: Path, database: Path, package_digest: s
 
     connection: sqlite3.Connection | None = None
     try:
-        with _registry(database, require_leases=True) as connection:
+        with _registry(database, require_membership=True) as connection:
             connection.execute("BEGIN IMMEDIATE")
             claimed = connection.execute(
                 "SELECT 1 FROM package_claims WHERE package_digest = ? LIMIT 1",
@@ -165,7 +165,32 @@ def collect_unreferenced_object(*, root: Path, database: Path, package_digest: s
             ).fetchone()
             if claimed is not None or leased is not None:
                 _invalid()
+            # A pre-index claim might name a package rather than a raw object.
+            # Never interpret missing membership as proof of no dependencies.
+            # Idempotent verified package publication fills its exact edges.
+            unknown = connection.execute(
+                "SELECT 1 FROM (SELECT package_digest FROM package_claims"
+                " UNION SELECT package_digest FROM package_leases) AS protected"
+                " WHERE NOT EXISTS (SELECT 1 FROM package_members AS members"
+                " WHERE members.package_digest = protected.package_digest) LIMIT 1"
+            ).fetchone()
+            if unknown is not None:
+                _invalid()
+            protected_member = connection.execute(
+                "WITH RECURSIVE parents(digest) AS ("
+                " SELECT package_digest FROM package_members WHERE member_digest = ?"
+                " UNION SELECT members.package_digest FROM package_members AS members"
+                " JOIN parents ON members.member_digest = parents.digest)"
+                " SELECT 1 FROM parents WHERE"
+                " EXISTS (SELECT 1 FROM package_claims WHERE package_digest = parents.digest)"
+                " OR EXISTS (SELECT 1 FROM package_leases WHERE package_digest = parents.digest)"
+                " LIMIT 1",
+                (digest,),
+            ).fetchone()
+            if protected_member is not None:
+                _invalid()
             _collect_anchored(root=store, digest=digest)
+            connection.execute("DELETE FROM package_members WHERE package_digest = ?", (digest,))
             connection.execute("COMMIT")
     except (
         OSError,

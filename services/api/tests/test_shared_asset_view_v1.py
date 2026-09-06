@@ -55,6 +55,7 @@ def test_two_views_resolve_one_object_and_close_keeps_every_object(tmp_path: Pat
     assert "unet" not in _record(root, first).read_text(encoding="ascii")
     entries = tuple(root.rglob("*"))
     assert {entry.relative_to(root) for entry in entries if entry.is_file()} == {
+        Path("index.sqlite3"),
         object_path(root=root, digest=package).relative_to(root),
         stored.relative_to(root),
         Path(".views", f"{first}.json"),
@@ -74,10 +75,11 @@ def test_two_views_resolve_one_object_and_close_keeps_every_object(tmp_path: Pat
 def test_view_never_discovers_or_writes_the_desktop_library(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    import sys
-
-    monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Tester\AppData\Local")
+    # Only the desktop location is synthetic; directory operations retain the
+    # real platform so the registry can verify its selected root normally.
+    monkeypatch.setattr(
+        "local_lm.shared_asset_root_v1.default_data_dir", lambda: tmp_path / "desktop-data"
+    )
     root, package, weights = _package(tmp_path)
 
     view_id = open_package_view(root=root, digest=package)

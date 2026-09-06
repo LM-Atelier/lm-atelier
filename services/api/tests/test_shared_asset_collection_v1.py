@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from local_lm.shared_asset_leases_v1 import (
     acquire_read_lease,
     release_read_lease,
 )
+from local_lm.shared_asset_package_v1 import publish_package
 from local_lm.shared_asset_registry_v1 import (
     finalize_claim,
     release_claim,
@@ -141,3 +143,99 @@ def test_replacement_before_the_anchored_rename_is_preserved(
 
     assert original.read_bytes() == b"immutable shared bytes"
     assert published.read_bytes() == b"replacement"
+
+
+def test_package_claim_protects_each_member(tmp_path: Path) -> None:
+    root, database, digest, published = _published(tmp_path)
+    package = publish_package(root=root, members={"unet": digest})
+    reserve_claim(database=database, consumer_id=_consumer("owner"), package_digest=package)
+
+    with pytest.raises(SharedAssetCollectionError, match=INVALID_COLLECTION):
+        collect_unreferenced_object(root=root, database=database, package_digest=digest)
+
+    assert published.read_bytes() == b"immutable shared bytes"
+
+
+def test_package_lease_protects_members_after_claim_release(tmp_path: Path) -> None:
+    root, database, digest, published = _published(tmp_path)
+    package = publish_package(root=root, members={"unet": digest})
+    consumer = _consumer("owner")
+    claim = reserve_claim(database=database, consumer_id=consumer, package_digest=package)
+    finalize_claim(database=database, consumer_id=consumer, claim_id=claim.claim_id)
+    lease = acquire_read_lease(
+        database=database, consumer_id=consumer, package_digest=package, now=1, ttl=10
+    )
+    release_claim(database=database, consumer_id=consumer, claim_id=claim.claim_id)
+    try:
+        with pytest.raises(SharedAssetCollectionError, match=INVALID_COLLECTION):
+            collect_unreferenced_object(root=root, database=database, package_digest=digest)
+        assert published.read_bytes() == b"immutable shared bytes"
+    finally:
+        release_read_lease(database=database, consumer_id=consumer, lease_id=lease.lease_id)
+        _release_all_for_testing()
+
+
+def test_member_collects_only_after_the_last_containing_package_releases(tmp_path: Path) -> None:
+    root, database, digest, published = _published(tmp_path)
+    first_package = publish_package(root=root, members={"unet": digest})
+    second_package = publish_package(root=root, members={"lora": digest})
+    first = reserve_claim(
+        database=database, consumer_id=_consumer("first"), package_digest=first_package
+    )
+    second = reserve_claim(
+        database=database, consumer_id=_consumer("second"), package_digest=second_package
+    )
+    release_claim(database=database, consumer_id=first.consumer_id, claim_id=first.claim_id)
+    with pytest.raises(SharedAssetCollectionError, match=INVALID_COLLECTION):
+        collect_unreferenced_object(root=root, database=database, package_digest=digest)
+    assert published.is_file()
+
+    release_claim(database=database, consumer_id=second.consumer_id, claim_id=second.claim_id)
+    collect_unreferenced_object(root=root, database=database, package_digest=digest)
+    assert not published.exists()
+
+
+def test_a_claim_on_an_outer_package_protects_nested_members(tmp_path: Path) -> None:
+    root, database, digest, published = _published(tmp_path)
+    inner = publish_package(root=root, members={"unet": digest})
+    outer = publish_package(root=root, members={"unet": inner})
+    reserve_claim(database=database, consumer_id=_consumer("owner"), package_digest=outer)
+
+    with pytest.raises(SharedAssetCollectionError, match=INVALID_COLLECTION):
+        collect_unreferenced_object(root=root, database=database, package_digest=digest)
+
+    assert published.is_file()
+
+
+def test_legacy_package_holds_block_until_membership_is_verified(tmp_path: Path) -> None:
+    root, database, digest, published = _published(tmp_path)
+    source = tmp_path / "legacy-package.json"
+    source.write_text(
+        json.dumps(
+            {
+                "members": {"unet": digest},
+                "schema": "lm-atelier-shared-asset-package-v1",
+                "version": 1,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        encoding="ascii",
+    )
+    package = publish_file(root=root, source=source)
+    reserve_claim(database=database, consumer_id=_consumer("owner"), package_digest=package)
+    with pytest.raises(SharedAssetCollectionError, match=INVALID_COLLECTION):
+        collect_unreferenced_object(root=root, database=database, package_digest=digest)
+    assert published.is_file()
+
+    source.write_bytes(b"unrelated unclaimed bytes")
+    unrelated = publish_file(root=root, source=source)
+    with pytest.raises(SharedAssetCollectionError, match=INVALID_COLLECTION):
+        collect_unreferenced_object(root=root, database=database, package_digest=unrelated)
+
+    assert publish_package(root=root, members={"unet": digest}) == package
+    collect_unreferenced_object(root=root, database=database, package_digest=unrelated)
+    assert not object_path(root=root, digest=unrelated).exists()
+    with pytest.raises(SharedAssetCollectionError, match=INVALID_COLLECTION):
+        collect_unreferenced_object(root=root, database=database, package_digest=digest)
+    assert published.is_file()
