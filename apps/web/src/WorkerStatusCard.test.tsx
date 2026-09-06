@@ -43,6 +43,47 @@ function renderCard(status: WorkerStatus) {
 
 afterEach(cleanup);
 
+describe("WorkerStatusCard reported faults", () => {
+  it("explains a stopped worker whose port something else is holding", () => {
+    // The backend reports this without claiming a worker is running, because
+    // none is: what it knows is that the port answers. Gating the explanation
+    // on the exited state kept it off the only card it belongs on.
+    renderCard(
+      worker({
+        name: "chat",
+        state: "stopped",
+        managed: false,
+        running: false,
+        pid: null,
+        active_jobs: 0,
+        failure_code: "port_in_use",
+        failure_detail:
+          "This application is not running a chat worker, but llama-server.exe (pid 4242) is listening on the port one would use.",
+        failure_remedy: "Restart LM Atelier, or end the leftover process, then try again.",
+      }),
+    );
+
+    expect(screen.getByRole("alert")).toHaveTextContent(/port is already in use/i);
+    expect(screen.getByText(/llama-server\.exe \(pid 4242\)/)).toBeInTheDocument();
+    expect(screen.getByText(/Restart LM Atelier/)).toBeInTheDocument();
+  });
+
+  it("says nothing about a stopped worker with no reported fault", () => {
+    renderCard(
+      worker({
+        name: "chat",
+        state: "stopped",
+        managed: false,
+        running: false,
+        pid: null,
+        active_jobs: 0,
+      }),
+    );
+
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+});
+
 describe("WorkerStatusCard progress reports", () => {
   it.each([
     { age: 0, duration: "0s" },

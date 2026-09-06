@@ -41,7 +41,11 @@ export function WorkerStatusCard({
   });
   const busy = worker.active_jobs + worker.queued_jobs > 0;
   const busyTitle = busy ? "Wait for jobs to finish, or use Cancel jobs and reset" : undefined;
-  const failed = worker.state === "exited";
+  // An exit is not the only thing worth showing. A worker this application
+  // manages nothing of can still have something serving on its port, which
+  // the backend now reports; gating on the exited state alone would keep
+  // that explanation off the card it belongs on.
+  const failed = worker.state === "exited" || Boolean(worker.failure_code);
   // Chat restarts with the model it ran last, so the record must know one;
   // media's stopped state is covered by the Start button instead.
   const restartable = worker.name === "chat" ? Boolean(worker.profile_id) : worker.running;
@@ -82,6 +86,14 @@ export function WorkerStatusCard({
       {failed && (
         <div className="worker-failure" role="alert">
           <strong>{workerFailureSummary(worker)}</strong>
+          {/* The headline is chosen by code and is deliberately general. The
+              detail is the specific sentence - which process holds the port,
+              which code the engine exited with - and dropping it in favour of
+              the general one is how the card came to say less than the backend
+              knew. Shown only when it adds something the headline did not. */}
+          {worker.failure_detail && worker.failure_detail !== workerFailureSummary(worker) && (
+            <p className="worker-detail">{worker.failure_detail}</p>
+          )}
           {worker.failure_remedy && <p className="worker-remedy">{worker.failure_remedy}</p>}
           {worker.stderr_tail && (
             <details>

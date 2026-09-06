@@ -48,7 +48,12 @@ from .network import shared_tls_context
 from .schemas import WorkerStatus
 from .security import trusted_browser_origins
 from .subprocess_env import python_subprocess_environment
-from .worker_failures import WorkerFailure, WorkerFailureCode, classify_worker_failure
+from .worker_failures import (
+    WorkerFailure,
+    WorkerFailureCode,
+    classify_worker_failure,
+    worker_failure,
+)
 
 if TYPE_CHECKING:
     from .comfy_registry_installs import ComfyRegistryLaunchContract
@@ -421,6 +426,14 @@ class ProcessSupervisor:
             stderr_tail = self._stderr_tail(record) if record and not running else None
             failure_detail = None
             failure = WorkerFailure(WorkerFailureCode.UNKNOWN, None)
+            if record is None:
+                orphan = self._orphaned_worker_description(name)
+                if orphan is not None:
+                    failure_detail = (
+                        f"A {name} worker this application started earlier is still "
+                        f"running and holding its port: {orphan}."
+                    )
+                    failure = worker_failure(WorkerFailureCode.PORT_IN_USE)
             if record and not running:
                 exit_code = (
                     record.process.returncode
@@ -541,7 +554,7 @@ class ProcessSupervisor:
             await self._replace(
                 "chat",
                 command,
-                self.settings.llama_url + "/health",
+                self.worker_health_url("chat"),
                 profile.id,
                 estimated_memory_bytes=estimate,
             )
@@ -614,7 +627,7 @@ class ProcessSupervisor:
             await self._replace(
                 "chat",
                 command,
-                self.settings.llama_url + "/health",
+                self.worker_health_url("chat"),
                 profile.id,
                 estimated_memory_bytes=estimate,
             )
@@ -772,7 +785,7 @@ class ProcessSupervisor:
             await self._replace(
                 "media",
                 command,
-                self.settings.comfy_url + "/system_stats",
+                self.worker_health_url("media"),
                 environment_overrides=environment_overrides,
                 ready_check=(
                     (lambda: self._verify_comfy_node_types(expected_node_types))
@@ -786,7 +799,7 @@ class ProcessSupervisor:
             await self._replace(
                 "media",
                 command,
-                self.settings.comfy_url + "/system_stats",
+                self.worker_health_url("media"),
                 environment_overrides=environment_overrides,
                 ready_check=lambda: self._verify_comfy_node_types(registry_contract.node_types),
                 editor_bridge_support=editor_bridge_support,
@@ -795,7 +808,7 @@ class ProcessSupervisor:
             await self._replace(
                 "media",
                 command,
-                self.settings.comfy_url + "/system_stats",
+                self.worker_health_url("media"),
                 editor_bridge_support=editor_bridge_support,
             )
         return self.statuses()[1]
@@ -1779,6 +1792,63 @@ class ProcessSupervisor:
         except OSError:
             return False
         return True
+
+    def worker_health_url(self, name: str) -> str:
+        """Where a worker of this name serves, whether or not one is running.
+
+        The start paths each built this string themselves, so nothing that was
+        not starting a worker could say where it would listen - which is why
+        `statuses` could only report "stopped" for a name it had no record of,
+        however loudly something else was answering there. One derivation, used
+        by both, is what keeps the report and the start talking about the same
+        endpoint.
+        """
+
+        if name == "chat":
+            return self.settings.llama_url + "/health"
+        if name == "media":
+            return self.settings.comfy_url + "/system_stats"
+        raise ValueError(f"no worker is named {name!r}")
+
+    def _orphaned_worker_description(self, name: str) -> str | None:
+        """A worker THIS application started that outlived the record of it.
+
+        `stopped` is true of this process and not of the machine: a child left
+        behind by an earlier session goes on serving, so the card reads stopped
+        while generation works - or stopped while a start refuses - and neither
+        of those reads as something a person can act on.
+
+        Deliberately NOT "whatever holds the port". A status read must not
+        depend on unrelated programs. Another application's use of 8188 is not
+        this application's business to report, and a check that did would put a
+        fault on a card because of something the user installed elsewhere - it
+        failed test_worker_management_reports_missing_local_binaries on a
+        machine where the real app was running beside its own tests, which is
+        the ordinary case for whoever is working on this.
+
+        So the match is our own persisted identity: pid plus creation time, the
+        same pairing `_terminate_persisted_worker` relies on, which is why a
+        reused pid cannot be mistaken for our process. And it is reported only
+        when that process is actually listening on the worker's endpoint,
+        because that is the state the user sees as stopped-but-working.
+        """
+
+        url = self.worker_health_url(name)
+        try:
+            candidates = self._matching_worker_processes(name)
+        except Exception:
+            # Reporting must not be able to fail: an unanswerable lookup leaves
+            # the status exactly as it was.
+            return None
+        for process in candidates:
+            pid = process.pid
+            if not self._listener_owned_by_worker(pid, url):
+                continue
+            try:
+                return self._sanitize_diagnostic(f"{process.name()} (pid {pid})")
+            except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+                return f"pid {pid}"
+        return None
 
     async def _ensure_port_available(self, name: str, url: str) -> None:
         parsed = urlparse(url)

@@ -65,7 +65,7 @@ describe("workerFailureSummary", () => {
   it.each([
     ["oom_vram", "needs more graphics memory than this computer has free"],
     ["oom_host", "needs more system memory than this computer has free"],
-    ["port_in_use", "could not start because its port is already in use"],
+    ["port_in_use", "port is already in use"],
     ["model_incompatible", "could not read the selected model"],
     ["executable_missing", "engine program could not be started"],
     ["startup_timeout", "took too long to start"],
