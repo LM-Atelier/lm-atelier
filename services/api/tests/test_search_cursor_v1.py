@@ -5,6 +5,7 @@ import pytest
 from local_lm.search_cursor_v1 import (
     INVALID_CURSOR,
     MAX_DIGEST_CHARS,
+    MAX_EXPIRES,
     MAX_GENERATION,
     MAX_INT_DIGITS,
     MAX_OFFSET,
@@ -312,3 +313,23 @@ def test_a_cursor_cannot_be_minted_without_the_binder_witness() -> None:
     )
     assert cursor.query_execution_authorized is False
     assert cursor.contains_query_text is False
+
+
+def test_a_max_field_cursor_encodes_inside_the_token_ceiling() -> None:
+    """Field ceilings keep the token spelling inside MAX_TOKEN_CHARS.
+
+    encode_search_cursor used to refuse a token longer than 128 characters, but
+    a legal cursor's longest spelling is v1 plus 10-digit generation, 6-digit
+    offset, 10-digit expiry, 64-character digest and four dots: 96 characters.
+    That length check could not fire. This pins the implication instead.
+    """
+    cursor = bind_search_cursor(
+        index_generation=MAX_GENERATION,
+        query_digest=DIGEST,
+        offset=MAX_OFFSET,
+        expires_at_unix=MAX_EXPIRES,
+        now_unix=MAX_EXPIRES - 1,
+    )
+    token = encode_search_cursor(cursor)
+    assert len(token) <= MAX_TOKEN_CHARS
+    assert len(token) == len(f"v1.{MAX_GENERATION}.{MAX_OFFSET}.{MAX_EXPIRES}.{DIGEST}")
