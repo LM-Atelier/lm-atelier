@@ -3203,3 +3203,89 @@ def test_gate_uses_the_held_external_pytest_scratch() -> None:
     api_at = source.index('Invoke-Checked "API tests"')
     assert helper_at < select_at < api_at
     assert 'Join-Path $RepositoryRoot "temp"' not in source
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the lease helper is PowerShell")
+def test_a_restored_value_that_differs_only_in_case_refuses_the_resolution(
+    anchor: Path,
+) -> None:
+    """The guard is about the environment being what it was, not about paths.
+
+    PowerShell's `-ne` is case-insensitive, so a value coming back with
+    changed case was accepted as restored and the resolution was handed to the
+    caller. Every scrubbed name is path-valued and a path differing only in
+    case names the same object on Windows, so no caller was pointed at the
+    wrong repository by it - but the guard did not hold the property it exists
+    for, and the packet claimed it did.
+
+    The branch is unreachable without the seam: the real setter round-trips a
+    value exactly, so nothing a test can do to the environment produces a
+    case-altered read. `Read-MachineLeaseEnvironment` is shadowed here to
+    return the value uppercased on the SECOND read of one variable - the save
+    reads it first, the restoration check reads it second - which is the one
+    thing the production path cannot produce on its own.
+    """
+
+    script = f"""
+$ErrorActionPreference = "Stop"
+. "{ROOT / "scripts" / "machine-lease.ps1"}"
+$env:GIT_DIR = "C:\\NotThisRepository\\.git"
+$global:LeaseReads = 0
+function Read-MachineLeaseEnvironment {{
+    param([Parameter(Mandatory = $true)][string] $Name)
+    $Value = [Environment]::GetEnvironmentVariable($Name)
+    if ($Name -eq "GIT_DIR" -and $Value) {{
+        $global:LeaseReads++
+        if ($global:LeaseReads -gt 1) {{ return $Value.ToUpperInvariant() }}
+    }}
+    return $Value
+}}
+try {{
+    $Common = Get-MachineLeaseCommonDir -RepositoryRoot "{anchor}"
+    if ($null -ne $Common) {{ Write-Output "RESOLVED-ANYWAY"; exit 2 }}
+    Write-Output "REFUSED"
+}} finally {{
+    Remove-Item -LiteralPath "Env:GIT_DIR" -ErrorAction SilentlyContinue
+}}
+"""
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "RESOLVED-ANYWAY" not in result.stdout, (
+        "a value that came back with changed case was accepted as restored"
+    )
+    assert "REFUSED" in result.stdout
+    assert "could not be restored to the value it had" in result.stdout, (
+        "the refusal did not name what went wrong"
+    )
+
+
+def test_the_python_lease_never_mutates_the_process_environment() -> None:
+    """The other half of the same question, and its answer is different.
+
+    The row asks whether `machine_lock.py` shares the inexact comparison. It
+    cannot: it never restores anything. It builds a scrubbed COPY of the
+    environment and hands that to the subprocess, so the process it runs in is
+    never redirected and there is nothing to compare on the way back.
+
+    Checked here rather than asserted in prose, so that a later change which
+    starts mutating the real environment has to notice this.
+    """
+
+    source = (ROOT / "scripts" / "machine_lock.py").read_text(encoding="utf-8")
+
+    assert "_scrubbed_git_env" in source
+    assert "environment = dict(os.environ)" in source, (
+        "the scrub no longer works on a copy of the environment"
+    )
+    for mutation in ("os.environ[", "os.environ.pop(", "os.putenv", "setdefault("):
+        assert mutation not in source, (
+            f"machine_lock.py now writes the process environment through {mutation!r}, "
+            "so it needs the exact restoration comparison the shell helper has"
+        )
