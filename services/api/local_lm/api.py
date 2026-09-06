@@ -4327,16 +4327,23 @@ async def cleanup_artifacts(
         if not payload.dry_run:
             max_deletions = RETENTION_BATCH_DELETIONS
 
-        def should_stop() -> bool:
+        def report_phase(name: str) -> None:
             nonlocal deadline
-            if payload.dry_run:
-                return False
-            if deadline is None:
-                # Start after the required snapshot and allow the first deletion
-                # even when the caller configures a zero deletion budget.
+            if (
+                not payload.dry_run
+                and deadline is None
+                and name
+                in {
+                    "delete-artifact",
+                    "orphan-file-removed",
+                }
+            ):
+                # Arm on deletion progress, not on a stop query: listing may
+                # poll many times before finding any work, or find none at all.
                 deadline = time.monotonic() + RETENTION_BATCH_SECONDS
-                return False
-            return time.monotonic() >= deadline
+
+        def should_stop() -> bool:
+            return deadline is not None and time.monotonic() >= deadline
 
         with SessionLocal() as session:
             try:
@@ -4347,6 +4354,7 @@ async def cleanup_artifacts(
                     dry_run=payload.dry_run,
                     max_deletions=max_deletions,
                     should_stop=should_stop,
+                    report_phase=report_phase,
                 )
                 if not payload.dry_run:
                     session.commit()

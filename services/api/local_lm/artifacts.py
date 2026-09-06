@@ -198,7 +198,14 @@ class _DeletionBudget:
     stopped short, so the caller knows another pass is owed.
     """
 
-    def __init__(self, remaining: int | None, should_stop: Callable[[], bool] | None) -> None:
+    def __init__(
+        self,
+        remaining: int | None,
+        should_stop: Callable[[], bool] | None,
+        *,
+        report_removed: Callable[[], None] | None = None,
+    ) -> None:
+        self.report_removed = report_removed
         self.remaining = remaining
         self.should_stop = should_stop
         self.truncated = False
@@ -215,6 +222,8 @@ class _DeletionBudget:
     def spend(self) -> None:
         if self.remaining is not None:
             self.remaining -= 1
+        if self.report_removed is not None:
+            self.report_removed()
 
 
 @dataclass(frozen=True)
@@ -853,7 +862,9 @@ class ArtifactStore:
             # answers to the same stop request, so the final batch of a pass
             # is bounded exactly like the ones before it.
             remaining = None if max_deletions is None else max(max_deletions - removed_count, 0)
-            budget = _DeletionBudget(remaining, should_stop)
+            budget = _DeletionBudget(
+                remaining, should_stop, report_removed=lambda: phase("orphan-file-removed")
+            )
             if budget.allow():
                 phase("cleanup-orphan-files")
                 orphan_count, orphan_bytes = self._cleanup_orphan_files(
@@ -1187,7 +1198,12 @@ class ArtifactStore:
 
         removed_count = 0
         reclaimed_bytes = 0
-        entries = list_entries(anchor, limit=_ROOT_LISTING_LIMIT)
+        # Poll while the native listing is collected, not only after it has
+        # materialized. A stop also marks the shared budget truncated, so
+        # callers retain completed counts and leave unfinished shards intact.
+        entries = list_entries(
+            anchor, limit=_ROOT_LISTING_LIMIT, should_stop=lambda: not budget.allow()
+        )
         for entry in entries:
             if not _is_temporary_name(entry.name):
                 continue
@@ -1233,7 +1249,7 @@ class ArtifactStore:
         reclaimed_bytes = 0
         try:
             with open_child_directory(anchor, first) as held:
-                for entry in list_entries(held):
+                for entry in list_entries(held, should_stop=lambda: not budget.allow()):
                     if entry.kind is not AnchoredEntryKind.DIRECTORY or not _SHARD.fullmatch(
                         entry.name
                     ):
@@ -1281,7 +1297,7 @@ class ArtifactStore:
         reclaimed_bytes = 0
         try:
             with open_child_directory(parent, second) as held:
-                for entry in list_entries(held):
+                for entry in list_entries(held, should_stop=lambda: not budget.allow()):
                     size = self._removable_size(
                         entry, first, second, indexed=indexed, cutoff=cutoff
                     )
