@@ -183,6 +183,30 @@ def test_require_int_text_refuses_a_value_above_its_ceiling() -> None:
         require_int_text(str(MAX_GENERATION + 1), maximum=MAX_GENERATION)
 
 
+def test_bind_refuses_a_negative_integer_field() -> None:
+    """Cursor integers are non-negative. A bool is already pinned as the wrong type.
+
+    Offset and now are still ints when they are -1, so only the lower bound
+    refuses them. Mutating that bound left those values accepted.
+    """
+    with pytest.raises(SearchCursorError, match=INVALID_CURSOR):
+        bind_search_cursor(
+            index_generation=1,
+            query_digest=DIGEST,
+            offset=-1,
+            expires_at_unix=10,
+            now_unix=1,
+        )
+    with pytest.raises(SearchCursorError, match=INVALID_CURSOR):
+        bind_search_cursor(
+            index_generation=1,
+            query_digest=DIGEST,
+            offset=0,
+            expires_at_unix=10,
+            now_unix=-1,
+        )
+
+
 def test_bind_refuses_a_short_hex_digest() -> None:
     """A query digest is exactly 64 lowercase hex characters, not at most 64.
 
