@@ -68,6 +68,22 @@ def test_refuses_empty_non_string_and_oversize_times() -> None:
         validate_search_filters({"since": "2" * (MAX_TIME_CHARS + 1)})
 
 
+def test_refuses_times_that_omit_the_date_dashes() -> None:
+    """A filter time is YYYY-MM-DD at the start, not merely ten characters.
+
+    Empty, non-string, and oversize times are already pinned. "August" is
+    shorter than ten characters, so it is refused by the length half of the
+    same check. A ten-character string with a dash in the month slot but not
+    the year slot, or the year slot but not the month slot, is inside that
+    length floor and is not empty, so only the matching dash check refuses
+    it. Mutating either dash check left that spelling accepted.
+    """
+    with pytest.raises(SearchFilterError, match=INVALID_FILTER):
+        validate_search_filters({"since": "2026x08-01"})
+    with pytest.raises(SearchFilterError, match=INVALID_FILTER):
+        validate_search_filters({"until": "2026-08x01"})
+
+
 def test_refuses_hostile_keys_and_constructor_authority() -> None:
     class HostileKey(str):
         def __eq__(self, other):
