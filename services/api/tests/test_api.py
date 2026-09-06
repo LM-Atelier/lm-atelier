@@ -11096,8 +11096,9 @@ async def test_a_publication_failure_after_the_retry_commit_converges(
         assert session.scalar(select(func.count()).select_from(Run)) == runs_before + 1
     assert started == [], "the failed announcement started the retry anyway"
 
-    converged = await orch._converge_on_bound_retry(payload)  # type: ignore[arg-type]
+    converged, converged_started = await orch._converge_on_bound_retry(payload)  # type: ignore[arg-type]
     assert converged is not None and converged.run.id == bound_run_id
+    assert converged_started, "the convergence reported no start it had made"
     assert started, "the bound retry was not started on convergence"
     with SessionLocal() as session:
         again = await orch._create_image_edit_verification_retry(
@@ -11108,6 +11109,54 @@ async def test_a_publication_failure_after_the_retry_commit_converges(
         )
         assert again.run.id == bound_run_id, "a second retry was created for the same source"
         assert session.scalar(select(func.count()).select_from(Run)) == runs_before + 1
+
+
+async def test_a_convergence_that_cannot_announce_reports_no_start(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding the bound retry and starting it are two different answers.
+
+    This recovery is best-effort at every step, so it can find a durable retry
+    and still fail to announce it - and `_announce_bound_retry` publishes
+    before it starts anything, so a refused publication means no job was
+    started. Returning only the retry made "we found it" indistinguishable
+    from "it is running", and the caller recorded the second.
+    """
+
+    orch = app.state.services.orchestrator
+    started: list[object] = []
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: started.append(args))
+    chat_id, source_run_id, _verification_id, claim = await _image_edit_source_under_verification(
+        client, monkeypatch
+    )
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: started.append(args))
+    started.clear()
+    payload, decision = _retry_inputs(chat_id, source_run_id)
+    real_publish = orch.events.publish
+
+    async def refuse_plan_announcements(name: str, *args: object, **kwargs: object) -> None:
+        if name == "work_plan.created":
+            raise RuntimeError("the event broker was unavailable")
+        await real_publish(name, *args, **kwargs)
+
+    monkeypatch.setattr(orch.events, "publish", refuse_plan_announcements)
+    with SessionLocal() as session:
+        with pytest.raises(RuntimeError):
+            await orch._create_image_edit_verification_retry(
+                session,
+                payload,  # type: ignore[arg-type]
+                decision,  # type: ignore[arg-type]
+                claim=claim,  # type: ignore[arg-type]
+                source_record={"status": "complete"},
+            )
+        session.rollback()
+    assert started == [], "the failed announcement started the retry anyway"
+
+    converged, converged_started = await orch._converge_on_bound_retry(payload)  # type: ignore[arg-type]
+
+    assert converged is not None, "the durable binding was lost"
+    assert converged_started is False, "the convergence reported a start it never made"
+    assert started == [], "nothing was started, and something says otherwise"
 
 
 async def test_retry_convergence_keeps_a_durable_binding_when_materialization_fails_once(
@@ -11174,7 +11223,7 @@ async def test_retry_convergence_keeps_a_durable_binding_when_materialization_fa
     # Patched for the rest of the control: only the first read fails, and an
     # undo here would also remove the start recorder above.
     monkeypatch.setattr(Session, "scalars", failing_first_materialization)
-    converged = await orch._converge_on_bound_retry(payload)  # type: ignore[arg-type]
+    converged, _converged_started = await orch._converge_on_bound_retry(payload)  # type: ignore[arg-type]
 
     assert reads["n"] == 1, "the second-stage read was never reached"
     assert converged is not None and converged.run.id == bound_run_id, (
@@ -11190,7 +11239,7 @@ async def test_retry_convergence_keeps_a_durable_binding_when_materialization_fa
 
     # The next pass, with the read healthy, still converges on the same retry.
     started.clear()
-    again = await orch._converge_on_bound_retry(payload)  # type: ignore[arg-type]
+    again, _again_started = await orch._converge_on_bound_retry(payload)  # type: ignore[arg-type]
     assert again is not None and again.run.id == bound_run_id
     assert started, "the bound retry was not started on the later pass"
 
