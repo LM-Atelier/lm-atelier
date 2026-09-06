@@ -1017,7 +1017,6 @@ class ConversationOrchestrator:
             )
             if pending_revision:
                 raise ResponseRevisionConflict("this response is already being regenerated")
-            self._ensure_response_revision(session, replacement_message)
         parent_message_id = request.parent_message_id
         if parent_message_id:
             parent = session.get(Message, parent_message_id)
@@ -1495,6 +1494,23 @@ class ConversationOrchestrator:
                     f"The saved {scope} setting {key} is not compatible with every "
                     "workflow selected for this prompt batch."
                 )
+        if replacement_message:
+            # The baseline revision is written HERE, not beside its conflict checks
+            # above, because its flush takes SQLite's single writer lock and every
+            # await in this function is above this line. Written at the old site it
+            # held that lock across the planner, the visual-prompt compile and the
+            # engine probe - about twenty-two seconds against a five-second
+            # busy_timeout - so a regenerate could make a running generation's own
+            # writes fail, and could kill the scheduler heartbeat that renews its
+            # claim.
+            #
+            # It cannot move any further down: _active_response_seed on the next
+            # line reads the pointer this assigns, so below the seed read the
+            # regeneration seed would silently change for exactly the messages this
+            # branch serves. It must not become its own commit either - the whole
+            # span is one transaction so that a routine RouteConfirmationRequired
+            # discards it instead of leaving an orphaned revision behind.
+            self._ensure_response_revision(session, replacement_message)
         current_seed = effective_settings.get("seed")
         regeneration_seed = (
             self._active_response_seed(session, replacement_message)
