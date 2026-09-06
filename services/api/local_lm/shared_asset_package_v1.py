@@ -15,6 +15,7 @@ import json
 import os
 import re
 import secrets
+import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Final, NoReturn
@@ -32,6 +33,7 @@ from .filesystem_links import (
     sync_directory,
 )
 from .shared_asset_contract_v1 import SharedAssetContractError, _require_absolute_root
+from .shared_asset_registry_v1 import REGISTRY_LEAF, SharedAssetRegistryError, _registry
 
 SCHEMA_ID: Final = "lm-atelier-shared-asset-package-v1"
 SCHEMA_VERSION: Final = 1
@@ -131,14 +133,24 @@ def _published_descriptor(store: AnchoredDirectory, digest: str) -> Iterator[int
             first.close()
 
 
-def _require_published(store: AnchoredDirectory, digest: str) -> None:
+def _member_identity(descriptor: int) -> tuple[int, int, int, int, int]:
+    info = os.fstat(descriptor)
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+def _require_published(store: AnchoredDirectory, digest: str) -> tuple[int, int, int, int, int]:
     with _published_descriptor(store, digest) as descriptor:
-        if _digest_descriptor(descriptor) != digest:
+        before = _member_identity(descriptor)
+        if _digest_descriptor(descriptor) != digest or _member_identity(descriptor) != before:
             _invalid()
+        return before
 
 
 def _canonical_members(
-    members: object, store: AnchoredDirectory, roles: frozenset[str]
+    members: object,
+    store: AnchoredDirectory,
+    roles: frozenset[str],
+    verified: dict[str, tuple[int, int, int, int, int]] | None = None,
 ) -> dict[str, str]:
     if type(members) is not dict or not members or len(members) > len(roles):
         _invalid()
@@ -146,7 +158,9 @@ def _canonical_members(
     for key, digest in members.items():
         role = _require_role(key, roles)
         chosen = _require_digest(digest)
-        _require_published(store, chosen)
+        identity = _require_published(store, chosen)
+        if verified is not None:
+            verified[chosen] = identity
         ordered[role] = chosen
     return dict(sorted(ordered.items()))
 
@@ -237,13 +251,38 @@ def _publish_package(*, root: Path, members: dict[str, str]) -> str:
     with AnchoredDirectory(chosen_root) as store:
         uses_workflow_role = type(members) is dict and "workflow" in members
         roles = PACKAGE_ROLES_V2 if uses_workflow_role else PACKAGE_ROLES
+        verified: dict[str, tuple[int, int, int, int, int]] = {}
         encoded = _canonical_package_payload(
-            members=_canonical_members(members, store, roles),
+            members=_canonical_members(members, store, roles, verified),
             schema=SCHEMA_ID_V2 if uses_workflow_role else SCHEMA_ID,
             version=SCHEMA_VERSION_V2 if uses_workflow_role else SCHEMA_VERSION,
         )
         digest = hashlib.sha256(encoded).hexdigest()
-        _publish_payload(store, encoded, digest)
+        # Hash outside the registry writer. Under the same gate collection uses,
+        # recheck each verified member's identity before publishing the small
+        # descriptor and its complete membership in one registry transaction.
+        with _registry(chosen_root / REGISTRY_LEAF, require_membership=True) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for member, identity in verified.items():
+                with _published_descriptor(store, member) as descriptor:
+                    if _member_identity(descriptor) != identity:
+                        _invalid()
+            previous = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT member_digest FROM package_members WHERE package_digest = ?",
+                    (digest,),
+                )
+            }
+            if previous and previous != set(verified):
+                _invalid()
+            _publish_payload(store, encoded, digest)
+            connection.executemany(
+                "INSERT OR IGNORE INTO package_members (package_digest, member_digest)"
+                " VALUES (?, ?)",
+                ((digest, member) for member in verified),
+            )
+            connection.commit()
         return digest
 
 
@@ -257,6 +296,8 @@ def publish_package(*, root: Path, members: dict[str, str]) -> str:
         OSError,
         SharedAssetContractError,
         SharedAssetPackageError,
+        SharedAssetRegistryError,
+        sqlite3.Error,
     ):
         pass
     _invalid()

@@ -3,12 +3,17 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 from pathlib import Path
 
 import pytest
 
 import local_lm.shared_asset_package_v1 as package
 from local_lm.filesystem_links import AnchoredDirectory, open_child_directory, open_entry
+from local_lm.shared_asset_collection_v1 import (
+    SharedAssetCollectionError,
+    collect_unreferenced_object,
+)
 from local_lm.shared_asset_package_v1 import (
     INVALID_PACKAGE,
     MAX_PACKAGE_BYTES,
@@ -22,6 +27,7 @@ from local_lm.shared_asset_package_v1 import (
     load_package,
     publish_package,
 )
+from local_lm.shared_asset_registry_v1 import release_claim, reserve_claim
 from local_lm.shared_asset_root_v1 import default_shared_asset_root
 from local_lm.shared_asset_store_v1 import object_path, publish_file
 
@@ -141,10 +147,11 @@ def test_package_json_failures_expose_only_the_fixed_error(
 def test_package_does_not_discover_or_write_the_desktop_library(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    import sys
-
-    monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Tester\AppData\Local")
+    # Only the desktop location is synthetic; directory operations retain the
+    # real platform so the registry can verify its selected root normally.
+    monkeypatch.setattr(
+        "local_lm.shared_asset_root_v1.default_data_dir", lambda: tmp_path / "desktop-data"
+    )
     root, weights = _published(tmp_path, "only.bin", b"keep-out")
 
     digest = publish_package(root=root, members={"vae": weights})
@@ -391,3 +398,108 @@ def test_package_v2_refuses_a_document_without_a_workflow_member(
 
     with pytest.raises(SharedAssetPackageError, match=INVALID_PACKAGE):
         load_package(root=root, digest=digest)
+
+
+def test_package_refuses_member_changed_after_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, digest = _published(tmp_path, "weights.bin", b"weights")
+    member = object_path(root=root, digest=digest)
+    real_members = package._canonical_members
+
+    def changed_member(
+        members: object,
+        store: AnchoredDirectory,
+        roles: frozenset[str],
+        verified: dict[str, tuple[int, int, int, int, int]] | None = None,
+    ) -> dict[str, str]:
+        result = (
+            real_members(members, store, roles)
+            if verified is None
+            else real_members(members, store, roles, verified)
+        )
+        member.write_bytes(b"different")
+        return result
+
+    monkeypatch.setattr(package, "_canonical_members", changed_member)
+    with pytest.raises(SharedAssetPackageError, match=INVALID_PACKAGE):
+        publish_package(root=root, members={"unet": digest})
+
+    with sqlite3.connect(root / "index.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM package_members").fetchone() == (0,)
+    assert member.read_bytes() == b"different"
+
+
+def test_a_manifest_published_before_an_interruption_keeps_collection_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, digest = _published(tmp_path, "weights.bin", b"weights")
+    real_publish = package._publish_payload
+    published_digests: list[str] = []
+
+    def interrupted(store: AnchoredDirectory, payload: bytes, package_digest: str) -> None:
+        real_publish(store, payload, package_digest)
+        published_digests.append(package_digest)
+        raise OSError("interrupted publication")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(package, "_publish_payload", interrupted)
+        with pytest.raises(SharedAssetPackageError, match=INVALID_PACKAGE):
+            publish_package(root=root, members={"unet": digest})
+    assert len(published_digests) == 1
+    package_digest = published_digests[0]
+    assert object_path(root=root, digest=package_digest).is_file()
+    database = root / "index.sqlite3"
+    reserve_claim(database=database, consumer_id="a" * 32, package_digest=package_digest)
+    with pytest.raises(SharedAssetCollectionError):
+        collect_unreferenced_object(root=root, database=database, package_digest=digest)
+
+    assert publish_package(root=root, members={"unet": digest}) == package_digest
+    with pytest.raises(SharedAssetCollectionError):
+        collect_unreferenced_object(root=root, database=database, package_digest=digest)
+    assert object_path(root=root, digest=digest).read_bytes() == b"weights"
+
+
+def test_package_publication_holds_the_collection_write_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, digest = _published(tmp_path, "weights.bin", b"weights")
+    database = root / "index.sqlite3"
+    claim = reserve_claim(database=database, consumer_id="a" * 32, package_digest=digest)
+    release_claim(database=database, consumer_id=claim.consumer_id, claim_id=claim.claim_id)
+    real_publish = package._publish_payload
+
+    def checked_publish(store: AnchoredDirectory, payload: bytes, package_digest: str) -> None:
+        with (
+            sqlite3.connect(database, timeout=0) as competing,
+            pytest.raises(sqlite3.OperationalError, match="locked"),
+        ):
+            competing.execute("BEGIN IMMEDIATE")
+        real_publish(store, payload, package_digest)
+
+    monkeypatch.setattr(package, "_publish_payload", checked_publish)
+    published = publish_package(root=root, members={"unet": digest})
+    assert object_path(root=root, digest=published).is_file()
+
+
+def test_package_hashes_members_before_taking_the_collection_write_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, digest = _published(tmp_path, "weights.bin", b"weights")
+    database = root / "index.sqlite3"
+    claim = reserve_claim(database=database, consumer_id="a" * 32, package_digest=digest)
+    release_claim(database=database, consumer_id=claim.consumer_id, claim_id=claim.claim_id)
+    real_digest = package._digest_descriptor
+    hashed: list[str] = []
+
+    def checked_digest(descriptor: int) -> str:
+        with sqlite3.connect(database, timeout=0) as competing:
+            competing.execute("BEGIN IMMEDIATE")
+            competing.rollback()
+        value = real_digest(descriptor)
+        hashed.append(value)
+        return value
+
+    monkeypatch.setattr(package, "_digest_descriptor", checked_digest)
+    publish_package(root=root, members={"unet": digest})
+    assert hashed == [digest]
