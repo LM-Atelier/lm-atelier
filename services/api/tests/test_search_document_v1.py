@@ -158,6 +158,29 @@ def test_invalid_and_hostile() -> None:
     assert "private attacker detail" not in str(caught.value)
 
 
+def test_refuses_a_negative_created_at_unix() -> None:
+    """A document timestamp is a non-negative unix instant, or omitted.
+
+    A non-integer timestamp is already pinned. Zero is a valid instant. A
+    negative integer is still an int, so only the lower bound refuses it.
+    Mutating that bound left created_at_unix=-1 accepted.
+    """
+    with pytest.raises(SearchDocumentError, match=INVALID_DOCUMENT):
+        build_search_document(
+            message_id="m",
+            chat_id="c",
+            role="user",
+            body="x",
+            has_media=False,
+            transcript_visible=True,
+            content_removed=False,
+            private_session=False,
+            helper_session=False,
+            secret_payload=False,
+            created_at_unix=-1,
+        )
+
+
 def test_refuses_empty_non_string_and_oversize_ids() -> None:
     common = {
         "role": "user",
