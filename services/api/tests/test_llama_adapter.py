@@ -715,3 +715,48 @@ async def test_llama_adapter_stops_a_silent_stream_after_inactivity() -> None:
 
     assert [event.type for event in events] == ["error"]
     assert events[0].data["error"] == "llama.cpp stopped reporting generation activity"
+
+
+async def test_llama_adapter_honors_required_single_tool_request() -> None:
+    observed = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        observed.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text='data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+        )
+
+    adapter = LlamaCppAdapter("http://llama.test")
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://llama.test", transport=httpx.MockTransport(handler)
+    )
+    try:
+        request = ChatRequest(
+            run_id="constructed-tool-request",
+            messages=[{"role": "user", "content": "Choose a color."}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "choose_color",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"color": {"type": "string"}},
+                        },
+                    },
+                }
+            ],
+            tool_choice="required",
+            parallel_tool_calls=False,
+        )
+        events = [event async for event in adapter.stream(request)]
+    finally:
+        await adapter.close()
+    assert len(observed) == 1
+    assert observed[0]["tool_choice"] == "required"
+    assert observed[0]["parallel_tool_calls"] is False
+    assert observed[0]["parse_tool_calls"] is True
+    assert any(event.type == "complete" for event in events)

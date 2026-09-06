@@ -4,7 +4,7 @@ import math
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from ..schemas import EngineCapabilities
 
@@ -17,6 +17,8 @@ class ChatRequest:
     tools: list[dict[str, Any]] = field(default_factory=list)
     persistence_scope: str = "durable"
     scope_id: str | None = None
+    tool_choice: Literal["auto", "required"] = "auto"
+    parallel_tool_calls: bool | None = None
 
 
 @dataclass
