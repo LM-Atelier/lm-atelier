@@ -240,7 +240,7 @@ export function GenerationSettingsPanel({
         )}
         {fields.map((field) => (
           <SettingControl
-            key={`${field.scope}:${field.key}:${JSON.stringify(values[field.key])}`}
+            key={`${field.scope}:${field.key}`}
             field={field}
             value={effectiveValue(field)}
             onChange={(value) => onValues({ ...values, [field.key]: value })}
