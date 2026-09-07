@@ -436,18 +436,29 @@ class ComfyUIAdapter:
                 payload = response.json()
                 if not isinstance(payload, dict):
                     raise RuntimeError("ComfyUI returned an invalid prompt response")
-                if payload.get("node_errors"):
-                    raise RuntimeError("ComfyUI rejected the selected workflow")
                 raw_prompt_id = payload.get("prompt_id")
                 if (
-                    not isinstance(raw_prompt_id, str)
-                    or not raw_prompt_id
-                    or len(raw_prompt_id) > 200
-                    or any(character < " " for character in raw_prompt_id)
+                    isinstance(raw_prompt_id, str)
+                    and raw_prompt_id
+                    and len(raw_prompt_id) <= 200
+                    and all(character >= " " for character in raw_prompt_id)
                 ):
+                    # Recorded BEFORE anything can refuse this response. The
+                    # post already raised for status, so a body at all means
+                    # ComfyUI accepted the prompt and queued it, whatever the
+                    # body goes on to say about the graph. This identifier is
+                    # the only handle that can stop it or clean up after it:
+                    # the teardown purges outputs only when it is set, and
+                    # `cancel` sends an interrupt only for a run that appears
+                    # in `_jobs`. Refusing the response before reading the id
+                    # left an accepted prompt running with neither, and the
+                    # caller was told the generation had failed.
+                    prompt_id = raw_prompt_id
+                    self._jobs[request.run_id] = prompt_id
+                if payload.get("node_errors"):
+                    raise RuntimeError("ComfyUI rejected the selected workflow")
+                if prompt_id is None:
                     raise RuntimeError("ComfyUI returned an invalid prompt identifier")
-                prompt_id = raw_prompt_id
-                self._jobs[request.run_id] = prompt_id
                 if cancel_event.is_set():
                     await self._interrupt_prompt()
                     yield MediaEvent(type="cancelled")

@@ -736,6 +736,83 @@ async def test_comfyui_http_error_body_and_url_are_redacted(
     assert "http://comfy.test" not in str(captured.value)
 
 
+async def test_a_refused_response_still_cleans_up_the_prompt_comfyui_queued(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 2xx means the prompt is queued, even when the body then refuses it.
+
+    ComfyUI answers a graph it has already accepted with both an identifier and
+    a node_errors map, so a refusal raised before the identifier is read leaves
+    a prompt running that nothing can name - not the teardown that purges its
+    outputs, and not `cancel`, which interrupts only a run it can find.
+    """
+    prompt_id = "prompt-queued-then-refused"
+    output_root = tmp_path / "output"
+    orphan = output_root / "LMAtelier" / "orphan.png"
+    orphan.parent.mkdir(parents=True)
+    orphan.write_bytes(b"an output nobody asked for")
+
+    class Socket:
+        async def __aenter__(self) -> Socket:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    def connect(*_args: Any, **_kwargs: Any) -> Socket:
+        return Socket()
+
+    async def comfy(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/prompt":
+            # The shape ComfyUI actually returns for a graph it queued but has
+            # complaints about: the identifier and the errors arrive together.
+            return httpx.Response(
+                200,
+                json={
+                    "prompt_id": prompt_id,
+                    "node_errors": {"7": {"errors": [{"type": "value_not_in_list"}]}},
+                },
+            )
+        if request.url.path == f"/history/{prompt_id}":
+            return httpx.Response(
+                200,
+                json={
+                    prompt_id: {
+                        "outputs": {
+                            "save": {
+                                "images": [
+                                    {
+                                        "filename": orphan.name,
+                                        "subfolder": "LMAtelier",
+                                        "type": "output",
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                },
+            )
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr("local_lm.adapters.comfyui.websockets.connect", connect)
+    adapter = ComfyUIAdapter("http://comfy.test", managed_output_root=output_root)
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(comfy),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="rejected the selected workflow"):
+            [event async for event in adapter.generate(media_request(operation="text_to_image"))]
+    finally:
+        await adapter.close()
+
+    assert not orphan.exists(), (
+        "the prompt ComfyUI had already queued was left with its outputs behind"
+    )
+
+
 async def test_native_save_video_is_classified_by_media_type_not_collection() -> None:
     prompt_id = "prompt-video"
 
