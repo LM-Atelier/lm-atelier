@@ -52,6 +52,7 @@ from .project_dependencies import (
 )
 from .project_portability import has_local_path, redact_local_paths
 from .prompt_helpers import STANDARD_CHAT_SCOPE
+from .saved_settings import normalize_saved_settings
 from .schemas import ChatDetail, ProjectOut, RunOut, SettingField, VisionSettings
 from .settings_registry import validate_settings
 
@@ -2246,7 +2247,7 @@ class ProjectExporter:
     ) -> None:
         raw_settings = owner.generation_settings_json
         settings = {
-            role: dict(values)
+            role: normalize_saved_settings(values, role)
             for role, values in (raw_settings.items() if isinstance(raw_settings, dict) else [])
             if role in {"chat", "image", "video"} and isinstance(values, dict)
         }
@@ -2257,7 +2258,10 @@ class ProjectExporter:
                 continue
             preset = session.get(GenerationPreset, preset_id)
             if preset and preset.role == role:
-                settings[role] = {**preset.settings_json, **settings.get(role, {})}
+                settings[role] = {
+                    **normalize_saved_settings(preset.settings_json, role),
+                    **settings.get(role, {}),
+                }
                 if dependencies.preset_roles.get(preset_id) == role:
                     portable_bindings[role] = preset_id
         # The direct settings snapshot preserves effective behavior even when
@@ -2273,7 +2277,7 @@ class ProjectExporter:
             dict[str, dict[str, Any]],
             redact_local_paths(
                 {
-                    role: dict(settings)
+                    role: normalize_saved_settings(settings, role)
                     for role, settings in value.items()
                     if role in {"chat", "image", "video"} and isinstance(settings, dict)
                 }

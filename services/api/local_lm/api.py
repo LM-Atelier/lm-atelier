@@ -289,6 +289,7 @@ from .reference_review import ReviewOutcome, ReviewRefusal, ReviewRefused, revie
 from .references import ReferenceError, ReferenceNotFoundError
 from .routing import RouteConfirmationRequired
 from .runtime_config import persist_runtime_values
+from .saved_settings import normalize_saved_settings
 from .schemas import (
     AdapterPromptGrammarOut,
     AdapterPromptGrammarReview,
@@ -7280,7 +7281,7 @@ async def update_profile(
     if "request_settings" in values:
         try:
             profile.request_settings_json = validate_settings(
-                values.pop("request_settings") or {},
+                normalize_saved_settings(values.pop("request_settings") or {}, profile.role),
                 [field for field in fields if field.scope != "load"],
             )
         except ValueError as exc:
@@ -7454,7 +7455,7 @@ async def update_preset(
         fields = await _engine_role_fields(request, preset.role)
         try:
             preset.settings_json = validate_settings(
-                values.pop("settings") or {},
+                normalize_saved_settings(values.pop("settings") or {}, preset.role),
                 [field for field in fields if field.scope != "load"],
             )
         except ValueError as exc:
@@ -7498,8 +7499,8 @@ async def delete_preset(preset_id: str, session: SessionDep) -> Response:
         )
         direct = scoped.get(preset.role)
         scoped[preset.role] = {
-            **preset.settings_json,
-            **(direct if isinstance(direct, dict) else {}),
+            **normalize_saved_settings(preset.settings_json, preset.role),
+            **normalize_saved_settings(direct if isinstance(direct, dict) else {}, preset.role),
         }
         owner.generation_preset_ids_json = bindings
         owner.generation_settings_json = scoped

@@ -12,6 +12,7 @@ from local_lm.settings_registry import (
     MAX_WORKFLOW_SCHEMA_PROPERTIES,
     VIDEO_SETTINGS,
     capability_settings_for_role,
+    compatible_stored_settings,
     defaults,
     normalize_capability_settings,
     resolve_generation_settings,
@@ -458,3 +459,37 @@ def test_workflow_schema_cannot_weaken_engine_fields_or_claim_runtime_keys() -> 
             IMAGE_SETTINGS,
             {"properties": {"prompt": {"type": "string", "default": "override"}}},
         )
+
+
+def test_video_role_offers_cfg_under_the_shared_runtime_name() -> None:
+    keys = [field.key for field in VIDEO_SETTINGS]
+    assert "cfg" in keys
+    assert "guidance" not in keys
+    # The rename must not have collapsed two declarations into one key.
+    assert len(keys) == len(set(keys))
+
+
+def test_stored_guidance_values_survive_the_rename_to_cfg() -> None:
+    assert compatible_stored_settings({"guidance": 5.5}, VIDEO_SETTINGS) == {"cfg": 5.5}
+
+
+def test_an_explicit_cfg_value_beats_the_retired_guidance_key() -> None:
+    # Both insertion orders: with cfg first, only the alias guard stops the
+    # legacy key from overwriting it on the later iteration.
+    assert compatible_stored_settings({"guidance": 5.5, "cfg": 9.0}, VIDEO_SETTINGS) == {"cfg": 9.0}
+    assert compatible_stored_settings({"cfg": 9.0, "guidance": 5.5}, VIDEO_SETTINGS) == {"cfg": 9.0}
+    # An explicit successor wins outright even when its value is invalid:
+    # the legacy key never speaks for a layer that already chose cfg.
+    assert compatible_stored_settings({"cfg": 999, "guidance": 5.5, "fps": 24}, VIDEO_SETTINGS) == {
+        "fps": 24
+    }
+
+
+def test_an_invalid_legacy_guidance_value_is_dropped_not_resurrected() -> None:
+    compatible = compatible_stored_settings({"guidance": 999, "fps": 24}, VIDEO_SETTINGS)
+    assert "cfg" not in compatible
+    assert compatible["fps"] == 24
+
+
+def test_the_guidance_alias_only_applies_where_cfg_exists() -> None:
+    assert compatible_stored_settings({"guidance": 5.5}, CHAT_SETTINGS) == {}

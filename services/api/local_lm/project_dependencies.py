@@ -20,6 +20,7 @@ from .models import (
 )
 from .profile_service import AUTO_PROFILE_ID
 from .project_portability import redact_local_paths
+from .saved_settings import SavedRoleSettings, normalize_saved_settings
 from .settings_registry import ROLE_SETTINGS
 from .workflow_edit_calibration import validate_workflow_edit_calibration
 from .workflow_ownership import ensure_workflow_family_ownership
@@ -45,14 +46,14 @@ class PortableProfile(_PortableModel):
     role: ModelRoleName
     engine: str = Field(min_length=1, max_length=32)
     load_settings: dict[str, Any] = Field(default_factory=dict, max_length=256)
-    request_settings: dict[str, Any] = Field(default_factory=dict, max_length=256)
+    request_settings: SavedRoleSettings = Field(default_factory=dict, max_length=256)
 
 
 class PortablePreset(_PortableModel):
     source_id: str = Field(min_length=1, max_length=80)
     name: str = Field(min_length=1, max_length=200)
     role: ModelRoleName
-    settings: dict[str, Any] = Field(default_factory=dict, max_length=256)
+    settings: SavedRoleSettings = Field(default_factory=dict, max_length=256)
 
 
 class PortableWorkflowRevision(_PortableModel):
@@ -481,7 +482,10 @@ def _matching_profile(session: Session, source: PortableProfile) -> ModelProfile
             profile
             for profile in candidates
             if _json_equal(profile.load_settings_json, source.load_settings)
-            and _json_equal(profile.request_settings_json, source.request_settings)
+            and _json_equal(
+                normalize_saved_settings(profile.request_settings_json, profile.role),
+                source.request_settings,
+            )
         ),
         None,
     )
@@ -495,7 +499,9 @@ def _matching_preset(session: Session, source: PortablePreset) -> GenerationPres
         (
             preset
             for preset in candidates
-            if _json_equal(preset.settings_json, source.settings)
+            if _json_equal(
+                normalize_saved_settings(preset.settings_json, preset.role), source.settings
+            )
             and (preset.name == source.name or _is_imported_name(preset.name, source.name))
         ),
         None,

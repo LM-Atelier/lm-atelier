@@ -28,6 +28,7 @@ from .domain import (
     RunStatus,
 )
 from .references import MAX_REFERENCES_PER_TURN, MAX_ROLE, MentionSource, ValidationState
+from .saved_settings import GenerationSettingsByRole, SavedRoleSettings
 from .worker_failures import WorkerFailureCode
 
 
@@ -44,10 +45,6 @@ ContentRating = Literal["general", "mature", "unknown"]
 #: behind it and so no constraint to derive. Bound to those producers by test.
 DeviceKind = Literal["accelerator", "cpu", "gpu"]
 
-GenerationSettingsByRole = dict[
-    Literal["chat", "image", "video"],
-    dict[str, Any],
-]
 GenerationPresetIdsByRole = dict[
     Literal["chat", "image", "video"],
     str | None,
@@ -1113,7 +1110,7 @@ class ModelProfileCreate(ApiModel):
     engine: str = Field(min_length=1, max_length=32)
     model_install_id: str | None = None
     load_settings: dict[str, Any] = Field(default_factory=dict)
-    request_settings: dict[str, Any] = Field(default_factory=dict)
+    request_settings: SavedRoleSettings = Field(default_factory=dict)
     is_default: bool = False
 
 
@@ -1138,7 +1135,7 @@ class ModelProfileBundle(ApiModel):
     engine: str = Field(min_length=1, max_length=32)
     model_install_id: str | None = None
     load_settings: dict[str, Any] = Field(default_factory=dict)
-    request_settings: dict[str, Any] = Field(default_factory=dict)
+    request_settings: SavedRoleSettings = Field(default_factory=dict)
 
 
 class ModelProfileOut(ApiModel):
@@ -1149,7 +1146,7 @@ class ModelProfileOut(ApiModel):
     role: str
     engine: str
     load_settings_json: dict[str, Any]
-    request_settings_json: dict[str, Any]
+    request_settings_json: SavedRoleSettings
     is_default: bool
     input_modalities: list[str] = Field(default_factory=lambda: ["text"])
     created_at: datetime
@@ -1159,7 +1156,7 @@ class ModelProfileOut(ApiModel):
 class PresetCreate(ApiModel):
     name: str = Field(min_length=1, max_length=200)
     role: Literal["chat", "image", "video"]
-    settings: dict[str, Any] = Field(default_factory=dict)
+    settings: SavedRoleSettings = Field(default_factory=dict)
     is_default: bool = False
 
 
@@ -1178,14 +1175,14 @@ class PresetBundle(ApiModel):
     version: Literal[1] = 1
     name: str = Field(min_length=1, max_length=200)
     role: Literal["chat", "image", "video"]
-    settings: dict[str, Any] = Field(default_factory=dict)
+    settings: SavedRoleSettings = Field(default_factory=dict)
 
 
 class PresetOut(ApiModel):
     id: str
     name: str
     role: str
-    settings_json: dict[str, Any]
+    settings_json: SavedRoleSettings
     is_default: bool
     created_at: datetime
     updated_at: datetime

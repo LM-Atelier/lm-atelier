@@ -1721,7 +1721,7 @@ async def test_engine_api_isolates_media_settings_by_role(client: AsyncClient) -
         "frames",
         "fps",
         "steps",
-        "guidance",
+        "cfg",
         "motion_strength",
         "codec",
     ]
