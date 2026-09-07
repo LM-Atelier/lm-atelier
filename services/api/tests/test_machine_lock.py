@@ -706,11 +706,11 @@ Invoke-LeasedStage -Label "sleeping stage" -FilePath "{sys.executable}" `
     stage_pid = -1
     try:
         deadline = time.monotonic() + 60
-        while not pid_file.exists() or not pid_file.read_text(encoding="utf-8").strip():
-            assert time.monotonic() < deadline, "the stage child never started"
+
+        def holder_alive() -> None:
             assert holder.poll() is None, "the holder died before its stage ran"
-            time.sleep(0.2)
-        stage_pid = int(pid_file.read_text(encoding="utf-8"))
+
+        stage_pid = int(_settled_text(pid_file, deadline=deadline, still_running=holder_alive))
 
         holder.kill()
         holder.wait(timeout=30)
@@ -2279,11 +2279,11 @@ Invoke-LeasedStage -Label "sleeping stage" -FilePath "{sys.executable}" `
     stage_pid = -1
     try:
         deadline = time.monotonic() + 60
-        while not pid_file.exists() or not pid_file.read_text(encoding="utf-8").strip():
-            assert time.monotonic() < deadline, "the stage child never started"
+
+        def holder_alive() -> None:
             assert holder.poll() is None, "the holder died before its stage ran"
-            time.sleep(0.2)
-        stage_pid = int(pid_file.read_text(encoding="utf-8"))
+
+        stage_pid = int(_settled_text(pid_file, deadline=deadline, still_running=holder_alive))
 
         holder.kill()
         holder.wait(timeout=30)
@@ -2309,6 +2309,38 @@ Invoke-LeasedStage -Label "sleeping stage" -FilePath "{sys.executable}" `
     assert Path(moved.path).parent == (other / ".git").resolve()
     _NAMESPACE["release"](moved)
     _repoint(pointer, original_pointer)
+
+
+def _settled_text(
+    path: Path,
+    *,
+    deadline: float,
+    still_running: Callable[[], None],
+) -> str:
+    """The file's content once it has been written AND closed.
+
+    Waiting on `path.exists()` waits for the wrong thing. A writer that creates
+    the file before it finishes writing holds it in between, and on Windows it
+    holds it without share-read - so a reader in that window gets
+    `PermissionError: [Errno 13]` on a path that plainly exists. That is a real
+    failure this suite hit in a merge-group run rather than a hypothetical: the
+    same commit had passed the identical job minutes earlier, and only the
+    timing differed.
+
+    So the condition is content, not presence. An unreadable or empty file is
+    the writer mid-write and is retried; `still_running` re-checks whatever
+    produced it, so a dead producer fails immediately instead of at the
+    deadline.
+    """
+
+    while True:
+        still_running()
+        assert time.monotonic() < deadline, f"{path.name} never became readable"
+        with suppress(OSError):
+            text = path.read_text(encoding="utf-8")
+            if text.strip():
+                return text
+        time.sleep(0.2)
 
 
 def _pointer_through_a_junction(
@@ -2447,11 +2479,11 @@ if (Exit-MachineLease $Lease) {{ Write-Output "RELEASED" }}
     )
     try:
         deadline = time.monotonic() + 60
-        while not entered.exists():
-            assert time.monotonic() < deadline, "the shell never entered the lease"
+
+        def shell_alive() -> None:
             assert process.poll() is None, process.communicate()[0]
-            time.sleep(0.2)
-        roles = entered.read_text(encoding="utf-8")
+
+        roles = _settled_text(entered, deadline=deadline, still_running=shell_alive)
         assert f"a link on the way to the checkout's private git directory={jump}" in roles, roles
         with pytest.raises(PermissionError):
             os.rmdir(jump)
@@ -3310,3 +3342,38 @@ def test_the_shell_pin_opener_hands_its_outcome_back_instead_of_exiting(
     assert "if (-not $Closed -or $script:MachineLeaseStranded) {" in source, (
         "the chain opener must close its own pins and then consult the flag"
     )
+
+
+def test_a_signal_file_is_read_once_it_is_written_not_once_it_appears() -> None:
+    """A file that exists but is still held must be waited for, not read.
+
+    This is the failure that removed a candidate from the merge queue. The
+    shell writes its signal with `Set-Content`, which creates the file and then
+    writes and closes it; a reader in between gets errno 13 on Windows. Polling
+    `exists()` returns as soon as the path appears, which is before the content
+    is there.
+
+    The fake reproduces exactly that window - two refusals, then an empty read,
+    then the content - without depending on the timing that made it rare.
+    """
+
+    attempts: list[str] = []
+
+    class HeldFile:
+        name = "held.txt"
+
+        def read_text(self, encoding: str = "utf-8") -> str:
+            attempts.append(encoding)
+            if len(attempts) <= 2:
+                raise PermissionError(13, "the writer still holds it")
+            if len(attempts) == 3:
+                return ""
+            return "settled content"
+
+    text = _settled_text(
+        HeldFile(),  # type: ignore[arg-type]
+        deadline=time.monotonic() + 30,
+        still_running=lambda: None,
+    )
+    assert text == "settled content"
+    assert len(attempts) == 4, attempts
