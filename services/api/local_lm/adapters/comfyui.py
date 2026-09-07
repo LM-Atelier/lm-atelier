@@ -6,8 +6,9 @@ import json
 import logging
 import math
 import re
+import sys
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import Any, TypeGuard
@@ -19,6 +20,16 @@ import websockets
 from websockets.exceptions import WebSocketException
 
 from ..domain import Operation
+from ..filesystem_links import (
+    AnchoredDirectory,
+    AnchoredDirectoryError,
+    AnchoredEntry,
+    AnchoredEntryKind,
+    list_entries,
+    open_child_directory,
+    remove_directory_entry,
+    remove_entry,
+)
 from ..network import shared_tls_context
 from ..schemas import EngineCapabilities
 from ..settings_registry import IMAGE_SETTINGS, VIDEO_SETTINGS
@@ -29,6 +40,12 @@ logger = logging.getLogger(__name__)
 _CANCELLED = object()
 _MAX_COMFY_JSON_BYTES = 32 * 1024 * 1024
 _MAX_COMFY_OUTPUTS = 64
+
+#: The one subfolder every conditioning upload is addressed to. The backend's
+#: temp directory also holds files this adapter did not write, so this is the
+#: only part of it that is ours to reclaim.
+_UPLOAD_SUBFOLDER = "lm-atelier"
+
 _ERROR_LABEL = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,79}\Z")
 _ERRNO = re.compile(r"\[Errno (?P<number>\d{1,5})\]")
 _NUMBERED_INPUT_IMAGE = re.compile(r"\$\{input_image_(?P<index>\d{1,2})\}\Z")
@@ -141,8 +158,13 @@ class ComfyUIAdapter:
         self.managed_output_root = (
             managed_output_root.expanduser().resolve() if managed_output_root else None
         )
+        # Cleanup must inspect the supplied ancestry, before resolve can hide a
+        # linked root. Other output operations retain their existing path contract.
+        self._managed_output_sweep_root = (
+            managed_output_root.expanduser().absolute() if managed_output_root else None
+        )
         self.managed_temp_root = (
-            managed_temp_root.expanduser().resolve() if managed_temp_root else None
+            managed_temp_root.expanduser().absolute() if managed_temp_root else None
         )
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
@@ -319,7 +341,7 @@ class ComfyUIAdapter:
         label: str,
     ) -> list[str]:
         uploaded: list[str] = []
-        upload_subfolder = "lm-atelier"
+        upload_subfolder = _UPLOAD_SUBFOLDER
         for index, path in enumerate(paths):
             content = await asyncio.to_thread(path.read_bytes)
             extension, media_type = self._image_format(content)
@@ -907,41 +929,89 @@ class ComfyUIAdapter:
                 type(exc).__name__,
             )
 
+    def _managed_upload_root(self) -> Path | None:
+        """Where this adapter's uploaded conditioning input and masks land.
+
+        `managed_temp_root` is the BACKEND's whole temp directory and holds
+        files this adapter did not write, so it is not ours to sweep. Every
+        upload is addressed to one subfolder of it, and that subfolder is.
+        """
+
+        root = self.managed_temp_root
+        return root / _UPLOAD_SUBFOLDER if root is not None else None
+
     async def _sweep_stale_outputs(self) -> None:
-        root = self.managed_output_root
+        # Uploaded conditioning input is reclaimed on the same terms as output.
+        # Each upload is a distinct file under a per-run name, and nothing else
+        # removed them: the per-run cleanup covers outputs, and this sweep
+        # walked the output root alone, so they accumulated for the life of the
+        # installation.
+        roots = [
+            root
+            for root in (self._managed_output_sweep_root, self._managed_upload_root())
+            if root is not None
+        ]
         now = time.time()
-        if root is None or now - self._last_output_sweep < min(
+        if not roots or now - self._last_output_sweep < min(
             3600,
             self.stale_output_seconds,
         ):
             return
         self._last_output_sweep = now
-        await asyncio.to_thread(
-            self._sweep_stale_outputs_sync,
-            root,
-            now - self.stale_output_seconds,
-        )
+        cutoff = now - self.stale_output_seconds
+        for root in roots:
+            await asyncio.to_thread(self._sweep_stale_outputs_sync, root, cutoff)
 
     @staticmethod
     def _sweep_stale_outputs_sync(root: Path, cutoff: float) -> None:
-        if not root.is_dir():
+        """Reclaim old entries through held directories, skipping unsafe trees."""
+
+        try:
+            with AnchoredDirectory(root) as anchor:
+                # Existing cleanup directories have no entry-count ceiling.
+                # A bounded-list refusal would permanently strand a large backlog;
+                # retain the complete per-directory walk and its memory cost.
+                pending: list[tuple[AnchoredDirectory, Iterator[AnchoredEntry], str | None]] = [
+                    (anchor, iter(list_entries(anchor, limit=sys.maxsize)), None)
+                ]
+                try:
+                    while pending:
+                        current, entries, name = pending[-1]
+                        entry = next(entries, None)
+                        if entry is None:
+                            pending.pop()
+                            if name is not None:
+                                current.close()
+                                with suppress(AnchoredDirectoryError):
+                                    remove_directory_entry(pending[-1][0], name)
+                            continue
+                        if entry.kind is AnchoredEntryKind.DIRECTORY:
+                            child = None
+                            try:
+                                child = open_child_directory(current, entry.name)
+                                children = iter(list_entries(child, limit=sys.maxsize))
+                            except (AnchoredDirectoryError, OSError):
+                                if child is not None:
+                                    child.close()
+                                continue
+                            pending.append((child, children, entry.name))
+                        elif (
+                            entry.kind is AnchoredEntryKind.FILE
+                            and entry.modified_at is not None
+                            and entry.modified_at.timestamp() <= cutoff
+                        ):
+                            with suppress(AnchoredDirectoryError):
+                                remove_entry(current, entry.name)
+                finally:
+                    # Retain every ancestor through descent and release children
+                    # before their parents, including when enumeration refuses.
+                    for held, _, name in reversed(pending):
+                        if name is not None:
+                            held.close()
+        except (AnchoredDirectoryError, OSError):
+            # Missing roots, linked ancestry and refused listings are skipped.
+            # The next age-based sweep may retry; no pathname fallback deletes.
             return
-        for path in root.rglob("*"):
-            try:
-                if not path.is_file() or path.stat().st_mtime > cutoff:
-                    continue
-                resolved = path.resolve()
-                resolved.relative_to(root)
-                path.unlink(missing_ok=True)
-            except (OSError, ValueError):
-                continue
-        for directory in sorted(
-            (path for path in root.rglob("*") if path.is_dir()),
-            key=lambda path: len(path.parts),
-            reverse=True,
-        ):
-            with suppress(OSError):
-                directory.rmdir()
 
     def _managed_output_path(self, item: dict[str, Any]) -> Path | None:
         root = self.managed_output_root
