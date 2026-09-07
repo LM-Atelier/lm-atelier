@@ -226,6 +226,10 @@ from .workflow_selection import (
 
 logger = logging.getLogger(__name__)
 
+#: The fields on a source run's verification record that name a retry which
+#: already exists in the database. They are the only way `_bound_retry` can
+#: find that turn again, so a later record must not drop them.
+DURABLE_RETRY_BINDING_FIELDS = ("retry_run_id", "retry_work_plan_id", "retry_revision_id")
 IDEMPOTENCY_CLAIM_WAIT_SECONDS = 120.0
 MAX_PENDING_WORK_PER_CHAT = 32
 MEDIA_SEED_SPACE = 2_147_483_648
@@ -5695,9 +5699,29 @@ class ConversationOrchestrator:
         run = session.get(Run, payload.source_run_id)
         if not run:
             return True
+        # The record REPLACES the source's rather than merging into it, so a
+        # later outcome that says nothing about a retry would drop the identity
+        # of one that already exists. Anything that reaches the unavailable
+        # write - a source read that failed transiently, a bound retry that
+        # could not be reconstructed - would then erase the binding, and
+        # `_bound_retry` would find nothing on every later pass: the retry is
+        # not merely unannounced, it is unreachable.
+        #
+        # So a record that does not speak about the binding leaves the one
+        # already there standing. A record that does speak - naming the retry
+        # it created, or naming None deliberately - is taken at its word.
+        # Only the source's durable ledger is carried forward this way; the
+        # job's own result stays a truthful account of what THAT execution
+        # did, which for an unavailable verification is no retry at all.
+        record = dict(result)
+        previous = run.provenance_json.get("image_edit_verification")
+        if isinstance(previous, dict):
+            for field in DURABLE_RETRY_BINDING_FIELDS:
+                if field in previous and field not in record:
+                    record[field] = previous[field]
         run.provenance_json = {
             **run.provenance_json,
-            "image_edit_verification": result,
+            "image_edit_verification": record,
         }
         revision = session.scalar(select(ResponseRevision).where(ResponseRevision.run_id == run.id))
         if revision:
