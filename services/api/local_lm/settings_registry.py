@@ -496,7 +496,7 @@ VIDEO_SETTINGS = [
         visibility="advanced",
     ),
     SettingField(
-        key="guidance",
+        key="cfg",
         label="Guidance",
         type="number",
         default=6,
@@ -1105,6 +1105,10 @@ def validate_settings(values: Mapping[str, Any], fields: Iterable[SettingField])
     return validated
 
 
+# Preserve retired keys in stored layers; an explicit current key takes precedence.
+_STORED_SETTING_ALIASES = {"guidance": "cfg"}
+
+
 def compatible_stored_settings(
     values: Mapping[str, Any] | None,
     fields: Iterable[SettingField],
@@ -1117,14 +1121,20 @@ def compatible_stored_settings(
     Explicit per-turn overrides remain strict.
     """
 
+    stored = dict(values or {})
     definitions = {field.key: field for field in fields}
     compatible: dict[str, Any] = {}
-    for key, value in (values or {}).items():
+    for key, value in stored.items():
         field = definitions.get(key)
+        target = key
         if not field:
-            continue
+            alias = _STORED_SETTING_ALIASES.get(key)
+            if alias is None or alias not in definitions or alias in stored:
+                continue
+            field = definitions[alias]
+            target = alias
         try:
-            compatible.update(validate_settings({key: value}, [field]))
+            compatible.update(validate_settings({target: value}, [field]))
         except ValueError:
             continue
     return compatible
