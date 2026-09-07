@@ -20,6 +20,7 @@ from .models import (
     WorkflowProfileCompatibility,
     WorkflowRevision,
 )
+from .workflow_revision_reviews import review_is_current
 
 WorkflowSelectorCapability = Literal["chat", "vision", "image", "video"]
 WorkflowSelectionMode = Literal["explicit", "default", "automatic"]
@@ -457,7 +458,7 @@ def _validate_revision(
         raise _error(capability, operation, "engine_mismatch", workflow_family_id)
     if operation != Operation.TEXT and engine != "mock" and not revision.api_graph_json:
         raise _error(capability, operation, "revision_not_executable", workflow_family_id)
-    if not revision.trusted:
+    if not review_is_current(session, definition, revision):
         raise _error(capability, operation, "revision_untrusted", workflow_family_id)
     if not required_capabilities.issubset(set(revision.capabilities_json)):
         raise _error(capability, operation, "capability_mismatch", workflow_family_id)

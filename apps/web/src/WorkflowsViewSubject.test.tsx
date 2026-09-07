@@ -10,6 +10,8 @@ vi.mock("./api", () => ({
     workflows: vi.fn(),
     workflowFamilies: vi.fn().mockResolvedValue([]),
     validateWorkflow: vi.fn(),
+    previewWorkflowRevisionReview: vi.fn(),
+    decideWorkflowRevisionReview: vi.fn(),
     cloneWorkflow: vi.fn(),
     updateWorkflow: vi.fn(),
     createWorkflow: vi.fn(),
@@ -409,5 +411,51 @@ describe("the controls a revision declares", () => {
     expect(screen.getByText("One of: euler, dpmpp")).toBeTruthy();
     expect(screen.queryByRole("spinbutton")).toBeNull();
     expect(screen.queryByRole("combobox", { name: /sampler/i })).toBeNull();
+  });
+});
+
+
+describe("reviewing the selected exact revision", () => {
+  it("opens the Advanced review lazily and trusts only after an explicit decision", async () => {
+    const current = revision("revision-current");
+    const selected = { ...revision("revision-selected"), version: 2, trusted: false };
+    vi.mocked(api.workflows).mockResolvedValue([{
+      ...workflow("wf-a", "Alpha"),
+      current_revision_id: current.id,
+      revisions: [current, selected],
+    }] as never);
+    const preview = {
+      revision_id: selected.id,
+      subject_sha256: "e".repeat(64),
+      trusted: false,
+      can_approve: true,
+      reasons: [],
+      state: "unreviewed",
+      reviewed_at: null,
+      node_types: ["ExampleNode"],
+      packages: [],
+      api_graph: { "1": { class_type: "ExampleNode", inputs: {} } },
+      input_schema: {},
+      dependencies: {},
+    };
+    vi.mocked(api.previewWorkflowRevisionReview).mockResolvedValue(preview);
+    vi.mocked(api.decideWorkflowRevisionReview).mockResolvedValue({ ...preview, trusted: true, state: "approved" });
+    renderView();
+    fireEvent.click(await screen.findByText("Alpha"));
+    fireEvent.change(screen.getByRole("combobox", { name: "Revision" }), { target: { value: selected.id } });
+    expect(api.previewWorkflowRevisionReview).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText("Advanced"));
+    expect(api.previewWorkflowRevisionReview).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Review exact revision" }));
+    const trust = screen.getByRole("button", { name: "Trust exact revision" });
+    await waitFor(() => expect(trust).toBeEnabled());
+    expect(api.previewWorkflowRevisionReview).toHaveBeenCalledExactlyOnceWith("wf-a", selected.id);
+    expect(api.decideWorkflowRevisionReview).not.toHaveBeenCalled();
+    fireEvent.click(trust);
+    await waitFor(() => expect(api.decideWorkflowRevisionReview).toHaveBeenCalledExactlyOnceWith(
+      "wf-a", selected.id, { action: "approve", subject_sha256: preview.subject_sha256 },
+    ));
+    fireEvent.change(screen.getByRole("combobox", { name: "Revision" }), { target: { value: current.id } });
+    expect(screen.queryByRole("button", { name: "Trust exact revision" })).toBeNull();
   });
 });

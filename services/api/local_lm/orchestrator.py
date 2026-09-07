@@ -217,6 +217,11 @@ from .workflow_compatibility import (
     resolve_project_workflow_selection,
 )
 from .workflow_node_dependencies import node_dependency_errors
+from .workflow_review_runtime import (
+    revalidate_workflow_review_runtime,
+    verify_workflow_review_runtime,
+)
+from .workflow_revision_reviews import revision_is_trusted
 from .workflow_selection import (
     ResolvedWorkflowFamily,
     WorkflowFamilySelectionError,
@@ -2320,7 +2325,9 @@ class ConversationOrchestrator:
                     f"No ready workflow can perform ordered step {index + 1} ({operation.value})."
                 )
             if workflow_revision:
-                if workflow_revision.engine == "comfyui" and not workflow_revision.trusted:
+                if workflow_revision.engine == "comfyui" and not revision_is_trusted(
+                    session, workflow_revision
+                ):
                     raise ValueError(f"Ordered step {index + 1} selected an untrusted workflow.")
                 dependency_errors = node_dependency_errors(
                     session,
@@ -5071,7 +5078,7 @@ class ConversationOrchestrator:
             or not install
             or not install.active
             or not revision
-            or not revision.trusted
+            or not revision_is_trusted(session, revision)
             or profile.engine != install.engine
             or revision.engine != install.engine
             or capabilities.engine != install.engine
@@ -5159,6 +5166,28 @@ class ConversationOrchestrator:
             run = session.get(Run, run_id)
             if not run:
                 return None
+            validated_revision_id = run.workflow_revision_id
+            selected_revision = (
+                session.get(WorkflowRevision, validated_revision_id)
+                if validated_revision_id
+                else None
+            )
+            verify_review = selected_revision is not None and selected_revision.engine == "comfyui"
+        verified_review = None
+        if verify_review and validated_revision_id:
+            verified_review = await verify_workflow_review_runtime(
+                self.engines.settings,
+                self.processes,
+                self.engines.media,
+                self.session_factory,
+                validated_revision_id,
+            )
+        with self.session_factory() as session:
+            run = session.get(Run, run_id)
+            if not run:
+                return None
+            if run.workflow_revision_id != validated_revision_id:
+                raise RuntimeError("The selected media workflow changed during verification.")
             input_paths: list[Path] = []
             for artifact_id in self.input_artifact_ids_for_run(session, run):
                 artifact = session.get(Artifact, artifact_id)
@@ -5168,11 +5197,17 @@ class ConversationOrchestrator:
             revision: WorkflowRevision | None = None
             if run.workflow_revision_id:
                 revision = session.get(WorkflowRevision, run.workflow_revision_id)
+                if revision is None and verified_review is not None:
+                    raise RuntimeError("The selected media workflow is no longer available.")
                 if revision:
-                    if revision.engine == "comfyui" and not revision.trusted:
+                    if revision.engine == "comfyui" and not revision_is_trusted(session, revision):
                         raise RuntimeError(
-                            "The selected ComfyUI workflow is not trusted. Review its nodes and "
-                            "create a trusted revision before execution."
+                            "The selected ComfyUI workflow needs review. Open Workflows, "
+                            "choose this revision, and use Review exact revision."
+                        )
+                    if verified_review is not None:
+                        revalidate_workflow_review_runtime(
+                            session, self.processes, revision, verified_review
                         )
                     dependency_errors = node_dependency_errors(session, revision.dependencies_json)
                     if dependency_errors:
@@ -8515,7 +8550,7 @@ class ConversationOrchestrator:
             return "operation_mismatch"
         if not self._workflow_matches_engine(revision):
             return "engine_mismatch"
-        if not revision.trusted:
+        if not revision_is_trusted(session, revision):
             return "untrusted"
         if not self._revision_accepts_install(session, revision, model_install_id):
             return "model_mismatch"
