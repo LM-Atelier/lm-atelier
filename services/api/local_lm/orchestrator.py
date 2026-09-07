@@ -4517,9 +4517,18 @@ class ConversationOrchestrator:
         profile_id = chat_worker.profile_id
         if profile_id:
             self._chat_planner_ready.clear()
-        if job_id and run_id:
-            await self._require_phase(job_id, run_id, "Releasing chat model", claim, media=True)
         try:
+            # Inside the guard, not above it. `_require_phase` exists to RAISE
+            # when the row is no longer this execution's, so it is the most
+            # likely thing here to fail - and it fails without needing a
+            # cancellation or any scheduling window at all. Left outside, a
+            # refused phase walked out of this method with the latch cleared and
+            # the chat worker never stopped, and nothing downstream sets it
+            # again: `_resume_chat_worker` is reached through the handoff the
+            # caller only runs once this method has RETURNED. The planner then
+            # reads unavailable for the life of the process.
+            if job_id and run_id:
+                await self._require_phase(job_id, run_id, "Releasing chat model", claim, media=True)
             await self.processes.stop("chat")
         except asyncio.CancelledError:
             self._chat_planner_ready.set()
