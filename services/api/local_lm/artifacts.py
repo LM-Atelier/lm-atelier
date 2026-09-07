@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 from .artifact_deletion_authority import (
     activate_artifact_deletion_proof,
     artifact_deletion_proof_references,
+    artifact_metadata_retains,
     mint_artifact_deletion_proof,
     record_artifact_deletion,
     restrict_artifact_deletion_proof,
@@ -734,6 +735,22 @@ class ArtifactStore:
         retained = self.referenced_artifact_ids(session, for_deletion=True)
         if artifact.id in retained:
             return False
+        # Being unreachable from the walk is not the same as being
+        # deletable. A video that is itself unreferenced still NAMES its
+        # browser proxy in metadata, and the walk never reaches that
+        # naming because it does not enter an unreferenced artifact - but
+        # both the deletion proof and the delete trigger refuse while any
+        # surviving row names this one. Attempting it raises, and on the
+        # startup path raising is the application failing to start.
+        if artifact_metadata_retains(session, retained, artifact.id):
+            return False
+        # Being unreachable from the walk is not the same as being
+        # deletable. A video that is itself unreferenced still NAMES its
+        # browser proxy in metadata, and the walk never reaches that
+        # naming because it does not enter an unreferenced artifact - but
+        # both the deletion proof and the delete trigger refuse while any
+        # surviving row names this one. Attempting it raises, and on the
+        # startup path raising is the application failing to start.
         try:
             self._delete_artifact(session, artifact, references=retained)
         except OSError as exc:

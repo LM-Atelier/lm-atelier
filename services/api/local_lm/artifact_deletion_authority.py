@@ -147,6 +147,30 @@ def validate_complete_reference_snapshot(
     return references
 
 
+def artifact_metadata_retains(
+    session: Session,
+    references: AbstractSet[str],
+    artifact_id: str,
+) -> bool:
+    """Whether a surviving artifact's metadata names this one.
+
+    `mint_artifact_deletion_proof` refuses exactly this and RAISES, and the
+    delete trigger refuses it again in the database. A caller that cannot raise
+    has to ask before it mints - and it has to ask the SAME authority. A second
+    opinion computed another way is free to disagree with the one that actually
+    refuses, and then the caller declines the wrong artifacts and still raises on
+    the right ones.
+
+    A reference-graph problem is deliberately NOT reported as retention.
+    `validate_complete_reference_snapshot` raises for an invalid or stale
+    snapshot, and answering "retained" for one would turn a safety error into a
+    silent skip.
+    """
+
+    snapshot = validate_complete_reference_snapshot(session, references)
+    return bool(snapshot._referrers.get(artifact_id, frozenset()) - snapshot._removed)
+
+
 def mint_artifact_deletion_proof(
     session: Session,
     candidate_ids: Iterable[str],
