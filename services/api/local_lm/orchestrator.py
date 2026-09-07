@@ -4573,6 +4573,28 @@ class ConversationOrchestrator:
         finally:
             self._chat_planner_ready.set()
 
+    def _discharge_displaced_chat_profile(self, restored_profile_id: str) -> None:
+        """Clear the debt only when the profile that came back is the one owed.
+
+        `_handoff_chat_target` does not always choose the displaced profile. Its
+        edit-verification branch returns the VISION profile named by the queued
+        verification job, so this handoff can load a model that has nothing to do
+        with what it displaced. Clearing on that discharged the obligation by
+        loading something else, and this field is the only record of what went
+        down - `_pending_chat_restore` reads nothing else - so the chat profile
+        became unrecoverable and the next automatic turn planned against the
+        vision model.
+
+        Deliberately about identity and not about success. A restore of the RIGHT
+        profile that fails still discharges: `_resume_chat_worker` swallows load
+        failures and returns early on a missing profile or install, and that
+        attempt-discharges-the-debt reading is the one this record was reviewed
+        under. Only restoring a different profile is the defect.
+        """
+
+        if restored_profile_id == self._displaced_chat_profile_id:
+            self._displaced_chat_profile_id = None
+
     def _pending_chat_restore(self, resume_chat_profile: str | None) -> str | None:
         """Which chat profile this media execution's handoff owes back, if any.
 
@@ -4583,7 +4605,20 @@ class ConversationOrchestrator:
         skipping the handoff entirely and leaving chat unloaded.
         """
 
-        return resume_chat_profile or self._displaced_chat_profile_id
+        # The OLDER owed identity wins when both are set and they differ. That
+        # only happens after a handoff restored something other than what it
+        # displaced - the edit-verification branch loads the vision profile -
+        # and from then on the running chat worker IS that other profile, so a
+        # later image reports it as the thing it displaced. Preferring the newer
+        # one there would hand this method's caller the vision profile, and the
+        # first statement of `_complete_media_handoff` would overwrite the
+        # retained original with it: the chat model would be forgotten one step
+        # later instead of immediately.
+        #
+        # A surviving debt means no text execution has run in between, because
+        # the text branch clears it, so the newer identity cannot be a profile
+        # the user chose - it is one this process loaded for itself.
+        return self._displaced_chat_profile_id or resume_chat_profile
 
     def _handoff_chat_target(self, fallback_profile_id: str) -> tuple[str, bool, bool]:
         """Prefer the profile required by the next dispatchable text job.
@@ -4710,16 +4745,17 @@ class ConversationOrchestrator:
 
         if not recycle_managed_media:
             # Nothing was holding the device, so chat comes back now and the
-            # obligation is discharged.
+            # obligation is discharged - but only if what came back is what went
+            # down. See `_discharge_displaced_chat_profile`.
             await self._resume_chat_worker(selected_chat_profile_id)
-            self._displaced_chat_profile_id = None
+            self._discharge_displaced_chat_profile(selected_chat_profile_id)
             return
 
         # Restore chat without competing with Python/Torch startup for disk and
         # CPU. Once chat is ready, warm the empty ComfyUI service in a tracked
         # background task so the queued text job can proceed immediately.
         await self._resume_chat_worker(selected_chat_profile_id)
-        self._displaced_chat_profile_id = None
+        self._discharge_displaced_chat_profile(selected_chat_profile_id)
         if recycled_activation_scope:
             # A broad empty-worker restart would expose dependencies outside the
             # activation that just ran. The next contract-backed media step will

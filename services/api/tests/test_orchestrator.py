@@ -10,6 +10,7 @@ import pytest
 from local_lm.adapters.base import ChatEvent, MediaEvent, estimate_chat_tokens
 from local_lm.comfy_registry_paths import registry_wheel_environment_root
 from local_lm.comfy_templates import COMFY_TEMPLATE_COMPILER_VERSION
+from local_lm.domain import JobKind
 from local_lm.models import (
     Job,
     Message,
@@ -1023,6 +1024,119 @@ async def test_a_failing_step_leaves_the_give_back_released_beside_the_prewarm()
     assert start_finished is True, "the media worker was never brought back"
 
 
+async def test_a_handoff_that_loads_another_profile_still_owes_the_displaced_one() -> None:
+    """Loading the vision model is not paying back the chat model.
+
+    When an edit verification is already queued, `_handoff_chat_target` returns
+    the VISION profile named by that job rather than the profile this handoff
+    displaced. Loading it restores nothing that was owed, and the displaced
+    record is the only place the chat profile is remembered - so clearing it
+    there left the chat worker running a vision model with nothing knowing a
+    swap was still due.
+    """
+    displaced = "profile-chat"
+    verification_vision = "profile-vision"
+    verification = SimpleNamespace(
+        kind=JobKind.EDIT_VERIFY.value,
+        payload_json={"vision_profile_id": verification_vision},
+    )
+
+    class FakeSession:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_args):  # type: ignore[no-untyped-def]
+            return None
+
+        def get(self, model, identity):  # type: ignore[no-untyped-def]
+            if model is Job and identity == "job-verify":
+                return verification
+            return None
+
+    # Unmanaged media, so nothing is holding the device and the handoff takes
+    # the direct restore path rather than the recycle.
+    media = WorkerStatus(name="media", state="ready", managed=False, running=True, pid=22)
+    processes = SimpleNamespace(
+        statuses=Mock(return_value=[media]),
+        stop=AsyncMock(),
+        start_media=AsyncMock(),
+    )
+    orchestrator = ConversationOrchestrator(
+        engines=SimpleNamespace(settings=SimpleNamespace(media_engine="comfyui")),
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=SimpleNamespace(peek_next_eligible_job=Mock(return_value=("job-verify", None))),
+        processes=processes,
+        session_factory=FakeSession,
+    )
+    resumed: list[str] = []
+
+    async def resume(profile_id: str) -> None:
+        resumed.append(profile_id)
+
+    orchestrator._resume_chat_worker = resume  # type: ignore[method-assign]
+
+    await orchestrator._complete_media_handoff(displaced)
+
+    assert resumed == [verification_vision], (
+        "the handoff did not take the queued verification's vision profile"
+    )
+    assert orchestrator._displaced_chat_profile_id == displaced, (
+        "loading a different profile discharged the debt for the displaced chat model"
+    )
+
+
+async def test_a_handoff_that_restores_the_displaced_profile_clears_the_debt() -> None:
+    """The ordinary case still settles, including when the restore itself fails.
+
+    The record is discharged on the ATTEMPT, not on success - `_resume_chat_worker`
+    swallows load failures by design - so this pins that the guard added for the
+    wrong-profile case did not quietly make discharge conditional on the load
+    working.
+    """
+    displaced = "profile-chat"
+
+    class FakeSession:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_args):  # type: ignore[no-untyped-def]
+            return None
+
+        def get(self, _model, _identity):  # type: ignore[no-untyped-def]
+            return None
+
+    media = WorkerStatus(name="media", state="ready", managed=False, running=True, pid=22)
+    processes = SimpleNamespace(
+        statuses=Mock(return_value=[media]),
+        stop=AsyncMock(),
+        start_media=AsyncMock(),
+    )
+    orchestrator = ConversationOrchestrator(
+        engines=SimpleNamespace(settings=SimpleNamespace(media_engine="comfyui")),
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=SimpleNamespace(peek_next_eligible_job=Mock(return_value=None)),
+        processes=processes,
+        session_factory=FakeSession,
+    )
+    resumed: list[str] = []
+
+    async def resume_that_fails_inside(profile_id: str) -> None:
+        # Exactly what the real one does with a missing profile: it gives up and
+        # returns, without raising.
+        resumed.append(profile_id)
+
+    orchestrator._resume_chat_worker = resume_that_fails_inside  # type: ignore[method-assign]
+
+    await orchestrator._complete_media_handoff(displaced)
+
+    assert resumed == [displaced]
+    assert orchestrator._displaced_chat_profile_id is None, (
+        "restoring the displaced profile no longer discharges the debt"
+    )
+
+
 async def test_external_media_handoff_only_resumes_chat() -> None:
     media = WorkerStatus(
         name="media",
@@ -1748,3 +1862,64 @@ async def test_shutdown_does_not_restore_chat_from_active_bridge() -> None:
     assert [call.args[0].id for call in processes.load_chat.await_args_list] == [
         "profile-vision"
     ], "shutdown restored chat from the vision bridge only to destroy it next"
+
+
+@pytest.mark.parametrize("managed_media", [False, True])
+async def test_later_media_preserves_the_chat_profile_owed_before_verification(managed_media):
+    displaced = "profile-chat"
+    vision = "profile-vision"
+    verification = SimpleNamespace(
+        kind=JobKind.EDIT_VERIFY.value, payload_json={"vision_profile_id": vision}
+    )
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def get(self, model, identity):
+            return verification if model is Job and identity == "job-verify" else None
+
+    media = WorkerStatus(name="media", state="ready", managed=managed_media, running=True, pid=22)
+    chat = WorkerStatus(
+        name="chat", state="ready", managed=True, running=True, pid=23, profile_id=vision
+    )
+    processes = SimpleNamespace(
+        settings=SimpleNamespace(auto_unload_chat_for_media=True),
+        statuses=Mock(return_value=[media, chat]),
+        stop=AsyncMock(),
+        start_media=AsyncMock(),
+    )
+    scheduler = SimpleNamespace(peek_next_eligible_job=Mock(return_value=("job-verify", None)))
+    orchestrator = ConversationOrchestrator(
+        engines=SimpleNamespace(settings=SimpleNamespace(media_engine="comfyui")),
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=scheduler,
+        processes=processes,
+        session_factory=FakeSession,
+    )
+    resumed = []
+
+    async def resume(profile_id):
+        resumed.append(profile_id)
+
+    orchestrator._resume_chat_worker = resume
+    orchestrator._schedule_media_restart = Mock()
+    await orchestrator._complete_media_handoff(displaced)
+    assert resumed == [vision]
+    # The verification used the preloaded vision profile. A following image now
+    # displaces that running profile; it must not erase the earlier chat restore.
+    next_displaced = await orchestrator._prepare_device_handoff("text_to_image", claim=_TEST_CLAIM)
+    assert next_displaced == vision
+    scheduler.peek_next_eligible_job.return_value = None
+    pending = orchestrator._pending_chat_restore(next_displaced)
+    assert pending is not None
+    await orchestrator._complete_media_handoff(pending)
+    assert resumed[-1] == displaced or orchestrator._displaced_chat_profile_id == displaced, (
+        "the next image forgot the original chat model after verification loaded another profile",
+        resumed,
+        orchestrator._displaced_chat_profile_id,
+    )
