@@ -921,6 +921,59 @@ async def test_unsuccessful_step_stops_the_inflight_prewarm(job_status: str) -> 
     assert orchestrator._media_restart_task is None
 
 
+async def test_a_failing_step_leaves_the_give_back_released_beside_the_prewarm() -> None:
+    """The prewarm owns only the restart it started, so a failed step stops only that.
+
+    The two calls here are the two statements the first delta runs, in order.
+    When a handoff owed the media worker back, the release schedules that
+    give-back and the prewarm then finds a restart already in flight. Owning it
+    would mean cancelling somebody else's obligation on the way out - and the
+    release has already cleared the flag that would re-arm it, so nothing would
+    bring the media worker back at all.
+    """
+    start_entered = asyncio.Event()
+    start_release = asyncio.Event()
+    start_finished = False
+
+    async def start_media() -> None:
+        nonlocal start_finished
+        start_entered.set()
+        await start_release.wait()
+        start_finished = True
+
+    next_step = SimpleNamespace(operation="text_to_image", status="queued")
+    job = SimpleNamespace(status="failed")
+    orchestrator, _processes, session_factory = _plan_prewarm_orchestrator(
+        next_step, start_media=start_media, job=job
+    )
+
+    # A completed media handoff owed the worker back and deferred it until chat
+    # went quiet, which is the state the first delta arrives in.
+    orchestrator._media_restart_after_chat_activity = True
+    with session_factory() as session:
+        orchestrator._arm_step_prewarm(session, _ordered_text_run())
+
+    orchestrator._release_deferred_media_restart()
+    give_back = orchestrator._media_restart_task
+    assert give_back is not None, "the deferred give-back was never released"
+    orchestrator._begin_step_prewarm()
+    await start_entered.wait()
+
+    assert orchestrator._step_prewarm_task is None, (
+        "the prewarm adopted the give-back it did not create"
+    )
+
+    await orchestrator._settle_step_prewarm("job-current")
+
+    assert not give_back.cancelled(), "a failing step cancelled the give-back"
+    assert orchestrator._media_restart_task is give_back
+    assert orchestrator._media_restart_after_chat_activity is False
+
+    start_release.set()
+    await give_back
+    assert start_finished is True, "the media worker was never brought back"
+
+
 async def test_external_media_handoff_only_resumes_chat() -> None:
     media = WorkerStatus(
         name="media",
