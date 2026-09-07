@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+import local_lm.adapters.contracts as contracts
 from local_lm.adapters.base import ChatEvent, ChatRequest
 from local_lm.adapters.comfyui import ComfyUIAdapter
 from local_lm.adapters.conformance import probe_chat_adapter, probe_media_adapter
@@ -487,3 +488,173 @@ async def test_guarded_capability_errors_do_not_echo_third_party_exceptions() ->
     with pytest.raises(AdapterContractError) as captured:
         await adapter.capabilities()
     assert secret not in str(captured.value)
+
+
+class _CloseThatIgnoresCancellation:
+    """A producer whose `aclose` swallows the cancellation aimed at it.
+
+    Not a straw man. Any `aclose` with a `try/finally` that awaits, or an
+    `except asyncio.CancelledError` that tidies up before re-raising, can
+    outlive the cancellation. The bound has to hold for those too.
+
+    It ignores the bound once and then finishes, rather than looping forever:
+    a control that leaves an immortal task hangs the suite at loop teardown
+    instead of testing anything. Mine did, before this.
+    """
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.swallowed_cancellation = False
+        self.finished = False
+
+    def __aiter__(self) -> _CloseThatIgnoresCancellation:
+        return self
+
+    async def __anext__(self) -> object:
+        raise StopAsyncIteration
+
+    async def aclose(self) -> None:
+        self.entered.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            self.swallowed_cancellation = True
+        self.finished = True
+
+
+class _CloseThatRaisesCancellation:
+    """A producer whose `aclose` raises `CancelledError` of its own accord."""
+
+    def __aiter__(self) -> _CloseThatRaisesCancellation:
+        return self
+
+    async def __anext__(self) -> object:
+        raise StopAsyncIteration
+
+    async def aclose(self) -> None:
+        raise asyncio.CancelledError
+
+
+async def test_a_close_that_ignores_cancellation_does_not_hold_the_caller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bound must not depend on the close agreeing to be bounded.
+
+    `asyncio.timeout` bounds by cancelling the task that awaits it. Awaited in
+    the caller's own task, a close that catches that cancellation and keeps
+    waiting defeats the bound entirely, and a stale producer holds the
+    dispatch for as long as it likes.
+    """
+
+    monkeypatch.setattr(contracts, "CLOSE_SECONDS", 0.05)
+    producer = _CloseThatIgnoresCancellation()
+
+    await asyncio.wait_for(contracts.close_iterator(producer), timeout=2)
+
+    assert producer.entered.is_set(), "the close was never attempted"
+    # The discriminating assertion: the caller is released while the close is
+    # still going. On the parent this line is never reached, because the
+    # caller is still inside a close that will not stop.
+    assert not producer.finished, "the caller waited for the close after all"
+
+    # Let the abandoned close settle, so the control leaves nothing running
+    # and its own premise is checked rather than assumed.
+    for _ in range(200):
+        if producer.finished:
+            break
+        await asyncio.sleep(0.01)
+    assert producer.swallowed_cancellation, "this control never exercised an uncooperative close"
+
+
+async def test_a_close_that_raises_cancellation_does_not_replace_the_refusal() -> None:
+    """A cancellation from the close must not displace the reason for the close.
+
+    `suppress(Exception)` never caught `CancelledError`, which is a
+    `BaseException`. A close raising it while a refusal was already in flight
+    replaced that refusal, and the caller saw a cancellation instead of the
+    lost claim it actually had - the one thing the surrounding design is
+    careful never to do.
+    """
+
+    class Refusal(RuntimeError):
+        pass
+
+    async def stop_consuming_and_close() -> None:
+        try:
+            raise Refusal("the row is no longer this execution's")
+        finally:
+            await contracts.close_iterator(_CloseThatRaisesCancellation())
+
+    with pytest.raises(Refusal):
+        await stop_consuming_and_close()
+
+
+async def test_an_ordinary_close_is_still_awaited_and_its_failure_still_dropped() -> None:
+    """The half that must not change.
+
+    A close that finishes is still waited for, so a producer that tidies up
+    quickly is not abandoned mid-way; and a close that simply fails is still
+    not the caller's problem.
+    """
+
+    closed: list[str] = []
+
+    class Ordinary:
+        def __aiter__(self) -> object:
+            return self
+
+        async def __anext__(self) -> object:
+            raise StopAsyncIteration
+
+        async def aclose(self) -> None:
+            closed.append("done")
+
+    class Failing(Ordinary):
+        async def aclose(self) -> None:
+            closed.append("tried")
+            raise RuntimeError("the close failed")
+
+    await contracts.close_iterator(Ordinary())
+    await contracts.close_iterator(Failing())
+
+    assert closed == ["done", "tried"]
+
+
+async def test_cancelling_the_caller_still_asks_the_close_to_stop() -> None:
+    """A cancelled caller must not leave the producer running.
+
+    `asyncio.wait` does not cancel what it waits on when the WAITER is
+    cancelled. Awaiting the close in the caller's own task did, so moving it
+    to its own task removed that behaviour, and a cancelled generation left a
+    producer running with an unretrieved task behind it. The bound and the
+    caller's cancellation are two different ways out and both have to abandon
+    the close.
+    """
+
+    entered = asyncio.Event()
+    asked_to_stop = asyncio.Event()
+
+    class SlowClose:
+        def __aiter__(self) -> object:
+            return self
+
+        async def __anext__(self) -> object:
+            raise StopAsyncIteration
+
+        async def aclose(self) -> None:
+            entered.set()
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                asked_to_stop.set()
+                raise
+
+    producer = SlowClose()
+    waiting = asyncio.ensure_future(contracts.close_iterator(producer))
+    await asyncio.wait_for(entered.wait(), timeout=2)
+
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+
+    await asyncio.wait_for(asked_to_stop.wait(), timeout=2)
