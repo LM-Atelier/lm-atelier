@@ -1422,3 +1422,259 @@ async def test_a_selection_without_a_resolved_file_refuses(tmp_path: Path) -> No
             await adapter._request_parameters(request)
     finally:
         await adapter.close()
+
+
+MINE = "prompt-reply-lost"
+OTHER = "prompt-someone-else"
+
+
+def _queue_entry(prompt_id: str, client_id: str) -> list[Any]:
+    """One /queue row as the backend shapes it.
+
+    ComfyUI returns `item[:5]` of each queue tuple, so a row is
+    `[number, prompt_id, prompt, extra_data, outputs_to_execute]`, and the
+    client id the submission sent is in `extra_data`.
+    """
+
+    return [0, prompt_id, {}, {"client_id": client_id}, []]
+
+
+def _lost_reply_backend(*, mine_is_running: bool, during_lookup: Any = None) -> Any:
+    """A backend that takes the prompt and loses the reply.
+
+    Modelled on the real endpoints rather than on what would be convenient:
+
+      post_queue   `delete_queue_item` reaches PENDING entries only, so a
+                   delete never removes a running prompt. A fixture that let it
+                   would pass with no interrupt ever sent.
+      post_interrupt  stops the RUNNING prompt, and only when the body names it
+                   or names nothing.
+
+    Another client's prompt is always present in the other position, so a stop
+    aimed at the wrong one shows up as its disappearance.
+    """
+
+    state: dict[str, Any] = {
+        "running": MINE if mine_is_running else OTHER,
+        "pending": [OTHER] if mine_is_running else [MINE],
+        "client_id": None,
+        "ops": [],
+    }
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        body = json.loads(request.content or b"{}") if request.content else {}
+        if path == "/prompt":
+            state["client_id"] = body.get("client_id")
+            raise httpx.ReadTimeout("no answer", request=request)
+        if path == "/queue" and request.method == "GET":
+            state["ops"].append("lookup")
+            if during_lookup is not None:
+                await during_lookup()
+            mine_id = state["client_id"]
+            assert mine_id is not None
+            rows = {"queue_running": [], "queue_pending": []}
+            if state["running"] is not None:
+                rows["queue_running"].append(
+                    _queue_entry(
+                        state["running"],
+                        mine_id if state["running"] == MINE else "another-client",
+                    )
+                )
+            for prompt_id in state["pending"]:
+                rows["queue_pending"].append(
+                    _queue_entry(prompt_id, mine_id if prompt_id == MINE else "another-client")
+                )
+            return httpx.Response(200, json=rows)
+        if path == "/queue":
+            state["ops"].append("delete")
+            for prompt_id in body.get("delete", []):
+                if prompt_id in state["pending"]:
+                    state["pending"].remove(prompt_id)
+            return httpx.Response(200, json={})
+        if path == "/interrupt":
+            state["ops"].append("interrupt")
+            target = body.get("prompt_id")
+            if target is None or target == state["running"]:
+                state["running"] = None
+            return httpx.Response(200, json={})
+        if path.startswith("/history/"):
+            state["ops"].append("history")
+            return httpx.Response(200, json={})
+        raise AssertionError(f"unexpected ComfyUI request: {request.method} {request.url}")
+
+    return handler, state
+
+
+async def _drive_lost_reply(monkeypatch: pytest.MonkeyPatch, handler: Any) -> Any:
+    adapter = _adapter_on(monkeypatch, handler)
+    producer = adapter.generate(media_request(operation="text_to_image"))
+    try:
+        with pytest.raises(RuntimeError, match="transport timed out"):
+            async for _event in producer:
+                pass
+    finally:
+        await adapter.close()
+    return adapter
+
+
+async def test_a_running_submission_whose_reply_is_lost_is_found_and_stopped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The request went out; only the answer did not come back.
+
+    The backend queued the prompt anyway. Without an identifier nothing can
+    reach that generation: the caller is told the run failed while it goes on
+    holding the device against everything behind it. The client id is minted
+    per submission and comes back on /queue, so the backend can name the prompt
+    this call created and no other.
+    """
+
+    handler, state = _lost_reply_backend(mine_is_running=True)
+    await _drive_lost_reply(monkeypatch, handler)
+
+    assert "lookup" in state["ops"], f"the backend was never asked: {state['ops']}"
+    assert state["running"] != MINE, (
+        f"the generation the engine had taken was left running: {state['ops']}"
+    )
+    assert state["pending"] == [OTHER], "another client's queued work was disturbed"
+
+
+async def test_a_pending_submission_whose_reply_is_lost_leaves_the_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A prompt that has not started yet is removed rather than interrupted.
+
+    An interrupt does nothing for a pending entry - it would simply run later -
+    so the delete is the half that matters here, and the interrupt that follows
+    must not reach the prompt the backend is actually running for someone else.
+    """
+
+    handler, state = _lost_reply_backend(mine_is_running=False)
+    await _drive_lost_reply(monkeypatch, handler)
+
+    assert MINE not in state["pending"], f"the prompt was left queued: {state['ops']}"
+    assert state["running"] == OTHER, (
+        f"another client's running prompt was interrupted: {state['ops']}"
+    )
+
+
+async def test_a_cancel_during_the_lookup_still_stops_a_running_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancelling before the identity is bound must not lose the prompt.
+
+    `cancel` interrupts on `run_id in self._jobs`, and during the reconciliation
+    request there is no entry there yet - so it sets the event and issues
+    nothing. The teardown used to read a set event as "already interrupted",
+    which is false on this path: the prompt would be bound a moment later and
+    then deliberately left alone, running, with the caller told it failed.
+    """
+
+    holder: dict[str, Any] = {}
+
+    async def cancel_mid_lookup() -> None:
+        await holder["adapter"].cancel("run_conditioning")
+
+    handler, state = _lost_reply_backend(mine_is_running=True, during_lookup=cancel_mid_lookup)
+    adapter = _adapter_on(monkeypatch, handler)
+    holder["adapter"] = adapter
+    producer = adapter.generate(media_request(operation="text_to_image"))
+    try:
+        with pytest.raises(RuntimeError, match="transport timed out"):
+            async for _event in producer:
+                pass
+    finally:
+        await adapter.close()
+
+    assert state["running"] != MINE, (
+        f"a cancel before the identity was bound left it running: {state['ops']}"
+    )
+    assert state["pending"] == [OTHER], "another client's queued work was disturbed"
+
+
+async def test_a_cancel_during_the_lookup_still_removes_a_pending_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same window, for a prompt that had not started.
+
+    Left in the queue it would simply run later, which is the original defect
+    arriving by a different route.
+    """
+
+    holder: dict[str, Any] = {}
+
+    async def cancel_mid_lookup() -> None:
+        await holder["adapter"].cancel("run_conditioning")
+
+    handler, state = _lost_reply_backend(mine_is_running=False, during_lookup=cancel_mid_lookup)
+    adapter = _adapter_on(monkeypatch, handler)
+    holder["adapter"] = adapter
+    producer = adapter.generate(media_request(operation="text_to_image"))
+    try:
+        with pytest.raises(RuntimeError, match="transport timed out"):
+            async for _event in producer:
+                pass
+    finally:
+        await adapter.close()
+
+    assert MINE not in state["pending"], (
+        f"a cancel before the identity was bound left it queued: {state['ops']}"
+    )
+    assert state["running"] == OTHER, (
+        f"another client's running prompt was interrupted: {state['ops']}"
+    )
+
+
+async def test_a_submission_the_engine_never_took_invents_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lost reply is not evidence the prompt was queued.
+
+    When the queue does not name this submission there is nothing to bind and
+    nothing to stop, and guessing would send a stop at whatever the backend
+    happens to be doing for somebody else.
+    """
+
+    operations: list[str] = []
+
+    async def comfy(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/prompt":
+            raise httpx.ReadTimeout("no answer", request=request)
+        if request.url.path == "/queue" and request.method == "GET":
+            operations.append("lookup")
+            return httpx.Response(
+                200,
+                json={
+                    "queue_running": [_queue_entry(OTHER, "another-client")],
+                    "queue_pending": [],
+                },
+            )
+        operations.append(f"{request.method} {request.url.path}")
+        return httpx.Response(200, json={})
+
+    await _drive_lost_reply(monkeypatch, comfy)
+
+    assert operations == ["lookup"], (
+        f"something was stopped on the strength of a lost reply: {operations}"
+    )
+
+
+async def test_a_backend_that_will_not_answer_the_queue_still_reports_the_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reconciliation is best-effort and must not replace the failure.
+
+    A backend that has stopped answering will not answer this question either.
+    The caller still has to be told the submission timed out, and by the same
+    error it would have seen before this existed.
+    """
+
+    async def comfy(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/prompt":
+            raise httpx.ReadTimeout("no answer", request=request)
+        if request.url.path == "/queue" and request.method == "GET":
+            raise httpx.ConnectError("backend is gone", request=request)
+        raise AssertionError(f"unexpected ComfyUI request: {request.method} {request.url}")
+
+    await _drive_lost_reply(monkeypatch, comfy)
