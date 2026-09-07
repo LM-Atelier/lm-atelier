@@ -202,6 +202,29 @@ def test_refuses_empty_non_string_and_oversize_ids() -> None:
         build_search_document(message_id="x" * (MAX_ID + 1), chat_id="c1", **common)
 
 
+def test_refuses_a_chat_id_with_whitespace() -> None:
+    """A document chat id cannot contain spaces. Message ids are pinned elsewhere.
+
+    message_id="bad id" is refused by visibility even if this module's
+    whitespace check is removed. chat_id is not passed to visibility, so
+    only _require_id refuses a spaced chat id. Mutating that check left
+    chat_id="bad id" accepted.
+    """
+    with pytest.raises(SearchDocumentError, match=INVALID_DOCUMENT):
+        build_search_document(
+            message_id="m",
+            chat_id="bad id",
+            role="user",
+            body="x",
+            has_media=False,
+            transcript_visible=True,
+            content_removed=False,
+            private_session=False,
+            helper_session=False,
+            secret_payload=False,
+        )
+
+
 def test_public_constructor_cannot_mint_eligible_document() -> None:
     with pytest.raises(SearchDocumentError, match=INVALID_DOCUMENT):
         SearchDocumentV1()
