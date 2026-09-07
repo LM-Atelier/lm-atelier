@@ -20,6 +20,8 @@ from .workflow_edit_calibration import (
 _RUNTIME_PARAMETERS = {
     "batch_size": "batch_size",
     "cfg": "cfg",
+    "codec": "codec",
+    "guidance": "cfg",
     "denoise": "denoise",
     "fps": "fps",
     "frames": "frames",
@@ -31,9 +33,11 @@ _RUNTIME_PARAMETERS = {
     "steps": "steps",
     "width": "width",
 }
+# Settings without a supported node binding remain hidden in compiled workflows.
+_SUPPRESSED_RUNTIME_NAMES = frozenset({"motion_strength"})
 _PRIMITIVE_WIDGET_TYPES = {"BOOLEAN", "COMBO", "FLOAT", "INT", "STRING"}
 _CONTROL_AFTER_GENERATE = {"decrement", "fixed", "increment", "randomize"}
-COMFY_TEMPLATE_COMPILER_VERSION = 17
+COMFY_TEMPLATE_COMPILER_VERSION = 18
 DEFAULT_IMAGE_EDIT_DENOISE = 0.9
 _ADAPTIVE_CHECKPOINT_PREFIX = "lma_image_checkpoint_v1_"
 _ADAPTIVE_CHECKPOINT_PLACEHOLDER = "__LM_ATELIER_CHECKPOINT__"
@@ -1745,7 +1749,9 @@ def _compile_ui_graph(
                 "title": str(node.get("title") or node_info.get("display_name") or class_type)
             },
         }
-    for runtime_name in sorted(set(_RUNTIME_PARAMETERS.values()) | {"negative_prompt"}):
+    for runtime_name in sorted(
+        set(_RUNTIME_PARAMETERS.values()) | _SUPPRESSED_RUNTIME_NAMES | {"negative_prompt"}
+    ):
         schema_properties.setdefault(runtime_name, {"readOnly": True})
     return api_graph, {"type": "object", "properties": schema_properties}
 

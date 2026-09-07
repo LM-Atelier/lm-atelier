@@ -2272,3 +2272,222 @@ def test_rgthree_group_controls_compile_away_without_touching_modes() -> None:
     # Node 3 stayed out because it carries mode 4 itself, not because a
     # control node is still in the graph telling anyone about it.
     assert "3" not in graph
+
+
+def _video_vocabulary_object_info() -> dict[str, Any]:
+    return {
+        "VideoSampler": {
+            "input": {
+                "required": {
+                    "guidance": ["FLOAT", {"default": 6.0}],
+                }
+            },
+            "input_order": {"required": ["guidance"]},
+        },
+        "SaveVideo": {
+            "input": {
+                "required": {
+                    "codec": ["COMBO", {"options": ["h264", "vp9", "av1"]}],
+                }
+            },
+            "input_order": {"required": ["codec"]},
+        },
+    }
+
+
+def test_video_graph_binds_codec_and_maps_guidance_onto_cfg() -> None:
+    ui_graph = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "VideoSampler",
+                "inputs": [
+                    {
+                        "name": "guidance",
+                        "type": "FLOAT",
+                        "widget": {"name": "guidance"},
+                    }
+                ],
+                "outputs": [],
+                "widgets_values": [6.0],
+            },
+            {
+                "id": 2,
+                "type": "SaveVideo",
+                "inputs": [
+                    {
+                        "name": "codec",
+                        "type": "COMBO",
+                        "widget": {"name": "codec"},
+                    }
+                ],
+                "outputs": [],
+                "widgets_values": ["h264"],
+            },
+        ],
+        "links": [],
+    }
+
+    graph, schema = _compile_ui_graph(
+        ui_graph,
+        _video_vocabulary_object_info(),
+        operation="text_to_video",
+    )
+
+    # A guidance widget is the cfg knob under another name: one runtime name
+    # serves both, so a stored or per-turn cfg value reaches this graph.
+    assert graph["1"]["inputs"]["guidance"] == "${cfg}"
+    assert schema["properties"]["cfg"] == {"type": "number", "default": 6.0}
+    assert graph["2"]["inputs"]["codec"] == "${codec}"
+    assert schema["properties"]["codec"] == {"type": "string", "default": "h264"}
+
+
+def test_unsupported_video_settings_are_suppressed_not_left_inert() -> None:
+    # A graph with none of the video-only inputs must still declare them
+    # readOnly so the settings overlay hides the controls instead of offering
+    # values no node reads. Distinct from the binding test above on purpose:
+    # losing the mapping and losing the suppression fail different tests.
+    ui_graph = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "VideoSampler",
+                "inputs": [
+                    {
+                        "name": "guidance",
+                        "type": "FLOAT",
+                        "widget": {"name": "guidance"},
+                    }
+                ],
+                "outputs": [],
+                "widgets_values": [6.0],
+            },
+        ],
+        "links": [],
+    }
+
+    _, schema = _compile_ui_graph(
+        ui_graph,
+        _video_vocabulary_object_info(),
+        operation="text_to_video",
+    )
+
+    assert schema["properties"]["codec"] == {"readOnly": True}
+    assert schema["properties"]["motion_strength"] == {"readOnly": True}
+
+
+def test_a_changed_guidance_value_reaches_the_cfg_widget_end_to_end() -> None:
+    from local_lm.adapters.comfyui import ComfyUIAdapter
+
+    ui_graph = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "VideoSampler",
+                "inputs": [
+                    {
+                        "name": "guidance",
+                        "type": "FLOAT",
+                        "widget": {"name": "guidance"},
+                    }
+                ],
+                "outputs": [],
+                "widgets_values": [6.0],
+            },
+            {
+                "id": 2,
+                "type": "SaveVideo",
+                "inputs": [
+                    {
+                        "name": "codec",
+                        "type": "COMBO",
+                        "widget": {"name": "codec"},
+                    }
+                ],
+                "outputs": [],
+                "widgets_values": ["h264"],
+            },
+        ],
+        "links": [],
+    }
+
+    graph, _ = _compile_ui_graph(
+        ui_graph,
+        _video_vocabulary_object_info(),
+        operation="text_to_video",
+    )
+    dispatched = ComfyUIAdapter._compile(graph, {"cfg": 9.5, "codec": "vp9"})
+
+    # Past the registry boundary: the substituted API graph is what ComfyUI
+    # executes, so these are the values the nodes actually receive.
+    assert dispatched["1"]["inputs"]["guidance"] == 9.5
+    assert dispatched["2"]["inputs"]["codec"] == "vp9"
+
+
+def test_cfg_widget_receives_resolved_video_guidance_and_codec() -> None:
+    from local_lm.adapters.comfyui import ComfyUIAdapter
+    from local_lm.settings_registry import (
+        VIDEO_SETTINGS,
+        resolve_generation_settings,
+        workflow_settings,
+    )
+
+    object_info = _video_vocabulary_object_info()
+    object_info["VideoSampler"]["input"]["required"] = {"cfg": ["FLOAT", {"default": 6.0}]}
+    object_info["VideoSampler"]["input_order"]["required"] = ["cfg"]
+    ui_graph = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "VideoSampler",
+                "inputs": [{"name": "cfg", "type": "FLOAT", "widget": {"name": "cfg"}}],
+                "outputs": [],
+                "widgets_values": [6.0],
+            },
+            {
+                "id": 2,
+                "type": "SaveVideo",
+                "inputs": [{"name": "codec", "type": "COMBO", "widget": {"name": "codec"}}],
+                "outputs": [],
+                "widgets_values": ["h264"],
+            },
+        ],
+        "links": [],
+    }
+    graph, schema = _compile_ui_graph(ui_graph, object_info, operation="text_to_video")
+    fields = workflow_settings(VIDEO_SETTINGS, schema)
+    guidance = [field for field in fields if field.label == "Guidance"]
+    assert [field.key for field in guidance] == ["cfg"]
+    resolved = resolve_generation_settings(
+        fields, profile_defaults=[{"guidance": 4.5}], turn_overrides={"cfg": 9.5, "codec": "vp9"}
+    )
+    dispatched = ComfyUIAdapter._compile(graph, resolved)
+    assert dispatched["1"]["inputs"]["cfg"] == 9.5
+    assert dispatched["2"]["inputs"]["codec"] == "vp9"
+
+
+def test_video_workflow_without_binding_hides_each_unsupported_control() -> None:
+    from local_lm.settings_registry import VIDEO_SETTINGS, workflow_settings
+
+    ui_graph = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "VideoSampler",
+                "inputs": [{"name": "steps", "type": "INT", "widget": {"name": "steps"}}],
+                "outputs": [],
+                "widgets_values": [30],
+            }
+        ],
+        "links": [],
+    }
+    object_info = {
+        "VideoSampler": {
+            "input": {"required": {"steps": ["INT", {"default": 30}]}},
+            "input_order": {"required": ["steps"]},
+        }
+    }
+    _, schema = _compile_ui_graph(ui_graph, object_info, operation="text_to_video")
+    keys = {field.key for field in workflow_settings(VIDEO_SETTINGS, schema)}
+    assert "steps" in keys
+    assert keys.isdisjoint({"cfg", "guidance", "codec", "motion_strength"})
