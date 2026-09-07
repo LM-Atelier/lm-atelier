@@ -2767,12 +2767,29 @@ async def _create_prompt_batch_locked(
                 PromptModelValuesError,
                 PromptModelInvocationError,
             ) as exc:
-                raise api_error(
-                    503,
-                    "prompt-model-invocation-failed",
-                    "The chat model could not fill the template slots. Retry, or use authored "
-                    "inputs and choices instead.",
-                ) from exc
+                if isinstance(exc, PromptModelValuesError) or (
+                    isinstance(exc, PromptModelInvocationError) and exc.reason == "values"
+                ):
+                    code = "prompt-model-values-invalid"
+                    message = (
+                        "The values for the model-guided slots do not match this request. "
+                        "Try fewer prompts or simpler slot guidance, or use authored inputs "
+                        "and choices."
+                    )
+                elif isinstance(exc, PromptExpansionError):
+                    code = "prompt-model-expansion-failed"
+                    message = (
+                        "The model values could not be combined with this template. "
+                        "Shorten the template or simplify its slots, or use authored inputs "
+                        "and choices."
+                    )
+                else:
+                    code = "prompt-model-invocation-failed"
+                    message = (
+                        "The chat model could not fill the template slots. Retry, or use authored "
+                        "inputs and choices instead."
+                    )
+                raise api_error(503, code, message) from exc
             snapshot = PromptExpansionModelSnapshot(
                 version=1,
                 kind="model",
