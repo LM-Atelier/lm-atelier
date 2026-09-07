@@ -1081,3 +1081,25 @@ async def test_verification_artifact_mismatch_leaves_chat_untouched() -> None:
     await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
     assert world["loads"] == []
     orchestrator.processes.stop.assert_not_awaited()
+
+
+async def test_shutdown_does_not_restore_chat_from_active_verification() -> None:
+    job, orchestrator, world = _verification_world(lose_at="never")
+    entered = asyncio.Event()
+
+    async def stream(_request):  # type: ignore[no-untyped-def]
+        entered.set()
+        await asyncio.Event().wait()
+        yield
+
+    orchestrator.engines.chat.stream = stream
+    task = asyncio.create_task(orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM))
+    orchestrator._tasks[job.id] = task
+    await entered.wait()
+    assert [profile.id for profile in world["loads"]] == ["profile-vision"]
+
+    await orchestrator.close()
+
+    assert [profile.id for profile in world["loads"]] == ["profile-vision"], (
+        "shutdown restored chat from verification only to destroy it next"
+    )

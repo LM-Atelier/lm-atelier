@@ -1326,6 +1326,66 @@ def _queued_media_orchestrator(
     return orchestrator, processes
 
 
+async def test_shutdown_starts_no_worker_from_a_cancelled_media_handoff() -> None:
+    """Closing must not run the handoff a cancelled media job owes on its way out.
+
+    `close` cancels each dispatch task and then waits for it. A cancel raises at
+    the task's suspension point but does not stop its `finally` from awaiting, so
+    the handoff runs to completion inside that wait - stopping media, loading a
+    chat model and waiting on its health check - and the supervisor destroys all
+    of it moments later.
+    """
+    orchestrator, processes = _queued_media_orchestrator([None], None)
+    running = asyncio.Event()
+    observed: dict[str, object] = {}
+
+    async def dispatch() -> None:
+        running.set()
+        try:
+            await asyncio.sleep(3600)
+        finally:
+            await orchestrator._complete_media_handoff("profile-chat")
+            observed["restart"] = orchestrator._media_restart_task
+
+    task = asyncio.create_task(dispatch())
+    orchestrator._tasks["job-media"] = task
+    await running.wait()
+
+    await orchestrator.close()
+
+    processes.stop.assert_not_awaited()
+    assert observed["restart"] is None, "shutdown scheduled a media restart on its way out"
+
+
+async def test_shutdown_releases_no_deferred_media_restart() -> None:
+    """The other route out: a text step releases its deferred give-back.
+
+    `close` does cancel the restart task, but only after it has been launched,
+    so the worker is started and then killed for nothing.
+    """
+    orchestrator, processes = _queued_media_orchestrator([None], None)
+    orchestrator._media_restart_after_chat_activity = True
+    running = asyncio.Event()
+    observed: dict[str, object] = {}
+
+    async def dispatch() -> None:
+        running.set()
+        try:
+            await asyncio.sleep(3600)
+        finally:
+            orchestrator._release_deferred_media_restart()
+            observed["restart"] = orchestrator._media_restart_task
+
+    task = asyncio.create_task(dispatch())
+    orchestrator._tasks["job-text"] = task
+    await running.wait()
+
+    await orchestrator.close()
+
+    assert observed["restart"] is None, "shutdown launched the deferred media restart"
+    processes.start_media.assert_not_awaited()
+
+
 async def test_a_queued_image_keeps_the_media_worker_and_leaves_chat_down() -> None:
     """The recycle is skipped when the worker is about to be needed again.
 
@@ -1548,3 +1608,94 @@ async def test_a_queued_text_job_still_recycles_before_its_model_loads() -> None
 
     processes.stop.assert_awaited_once_with("media")
     resume.assert_awaited_once_with("profile-next")
+
+
+async def test_shutdown_does_not_restore_chat_from_active_bridge() -> None:
+    run = SimpleNamespace(
+        id="run-vision",
+        chat_id="chat-vision",
+        user_message_id="message-vision",
+        profile_id="profile-text",
+        vision_profile_id="profile-vision",
+        standalone_prompt="What is visible?",
+    )
+    text_profile = SimpleNamespace(id="profile-text", model_install_id="install-text")
+    vision_profile = SimpleNamespace(id="profile-vision", model_install_id="install-vision")
+    text_install = SimpleNamespace(id="install-text")
+    vision_install = SimpleNamespace(id="install-vision")
+
+    class FakeSession:
+        def get(self, model, identity):  # type: ignore[no-untyped-def]
+            return {
+                (ModelProfile, "profile-text"): text_profile,
+                (ModelProfile, "profile-vision"): vision_profile,
+                (ModelInstall, "install-text"): text_install,
+                (ModelInstall, "install-vision"): vision_install,
+            }.get((model, identity))
+
+        def expunge(self, _value) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+        def scalar(self, _statement):  # type: ignore[no-untyped-def]
+            return "job-vision"
+
+        def in_transaction(self) -> bool:
+            return False
+
+    entered = asyncio.Event()
+
+    async def stream(_request):  # type: ignore[no-untyped-def]
+        entered.set()
+        await asyncio.Event().wait()
+        yield ChatEvent(type="complete", data={"finish_reason": "stop"})
+
+    processes = SimpleNamespace(
+        settings=SimpleNamespace(),
+        runtimes=None,
+        load_chat=AsyncMock(),
+        stop=AsyncMock(),
+    )
+    engines = SimpleNamespace(
+        settings=SimpleNamespace(vision_bridge_max_tokens=128),
+        chat_capabilities=AsyncMock(
+            return_value=SimpleNamespace(input_modalities=["text", "image"])
+        ),
+        chat=SimpleNamespace(stream=stream),
+    )
+    orchestrator = ConversationOrchestrator(
+        engines=engines,
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=Mock(),
+        processes=processes,
+    )
+    orchestrator._set_chat_phase = AsyncMock()  # type: ignore[method-assign]
+    orchestrator._attach_visual_context = AsyncMock(  # type: ignore[method-assign]
+        return_value=(
+            [{"role": "user", "content": [{"type": "text", "text": "Question"}]}],
+            {
+                "available": True,
+                "images_included": 1,
+                "artifact_ids": ["sha256:image"],
+                "visual_contents_inspected": True,
+            },
+        )
+    )
+
+    task = asyncio.create_task(
+        orchestrator._bridge_visual_context(
+            _TEST_CLAIM,
+            FakeSession(),  # type: ignore[arg-type]
+            run,  # type: ignore[arg-type]
+            [SimpleNamespace(id="sha256:image")],  # type: ignore[list-item]
+        )
+    )
+    orchestrator._tasks["job-vision"] = task
+    await entered.wait()
+    assert [call.args[0].id for call in processes.load_chat.await_args_list] == ["profile-vision"]
+
+    await orchestrator.close()
+
+    assert [call.args[0].id for call in processes.load_chat.await_args_list] == [
+        "profile-vision"
+    ], "shutdown restored chat from the vision bridge only to destroy it next"

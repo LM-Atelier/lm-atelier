@@ -491,6 +491,10 @@ class ConversationOrchestrator:
         #: not restored, and the next text execution loads what it needs.
         self._displaced_chat_profile_id: str | None = None
         self._admission_open = True
+        #: Whether `close` has begun. Separate from `_admission_open`, which
+        #: only stops new turns being created: a drain deliberately keeps
+        #: restoring workers, while a teardown must not start any.
+        self._closing = False
 
     def recover_interrupted(self) -> None:
         queued: list[tuple[str, str | None]] = []
@@ -3118,6 +3122,11 @@ class ConversationOrchestrator:
 
     async def close(self) -> None:
         self._admission_open = False
+        # Before the cancels, because the cancels are what run the teardowns
+        # this flag exists to stop. Cancelling a task raises at its suspension
+        # point but does not stop its `finally` from awaiting, so the dispatch
+        # teardown runs to completion inside the gather below.
+        self._closing = True
         tasks = tuple(self._tasks.values())
         for task in tasks:
             task.cancel()
@@ -4411,10 +4420,17 @@ class ConversationOrchestrator:
                 "Restoring chat model",
                 claim,
             )
-            if text_profile and text_install:
-                await self.processes.load_chat(text_profile, text_install)
-            else:
-                await self.processes.stop("chat")
+            # Shutdown reaches this `finally` the same way it reaches the
+            # dispatch teardown: the task is cancelled and then awaited, and a
+            # cancel does not stop a finally from running. Restoring the text
+            # model here would cold-load it while the supervisor is a moment
+            # from closing both workers. Nothing is owed back to a process that
+            # is going away.
+            if not self._closing:
+                if text_profile and text_install:
+                    await self.processes.load_chat(text_profile, text_install)
+                else:
+                    await self.processes.stop("chat")
 
     @staticmethod
     def _append_vision_observation(
@@ -4611,6 +4627,14 @@ class ConversationOrchestrator:
         # path below either clears it because chat is being restored now, or
         # leaves it standing for a later handoff.
         self._displaced_chat_profile_id = chat_profile_id
+        if self._closing:
+            # Shutdown cancelled this execution and is waiting for it. The
+            # obligation is still recorded above, because it costs nothing and
+            # keeps that invariant whole, but nothing is owed back to a process
+            # that is going away: everything below stops media, loads a chat
+            # model and waits on its health check, and the supervisor destroys
+            # all of it moments later. The debt above dies with the process.
+            return
         selected_chat_profile_id, queued_text_next, queued_media_next = self._handoff_chat_target(
             chat_profile_id
         )
@@ -4716,6 +4740,11 @@ class ConversationOrchestrator:
         a restart somebody else started is how one gets cancelled on its behalf.
         """
 
+        if self._closing:
+            # The other route into a worker start during teardown: the text
+            # branch releases a deferred give-back on its way out, and `close`
+            # cancels the task it creates only AFTER it has been launched.
+            return None
         if self._media_restart_task and not self._media_restart_task.done():
             return None
         task = asyncio.create_task(
@@ -6425,8 +6454,13 @@ class ConversationOrchestrator:
             # with the profile it is ALREADY running, for a verification that
             # moved nothing. Chat is then unavailable for a full model load with
             # nothing to show for it.
+            # `not self._closing` beside the others rather than folded into
+            # `_verification_recovers`: that predicate answers who owns the row,
+            # and shutting down is not an ownership question. Same reason the
+            # bridge teardown reads the flag directly.
             if (
-                chat_displaced_for_verification
+                not self._closing
+                and chat_displaced_for_verification
                 and restore_profile
                 and restore_install
                 and self._verification_recovers(job_id, claim)
