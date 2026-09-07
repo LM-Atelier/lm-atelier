@@ -41,9 +41,9 @@ command -v pwsh >/dev/null 2>&1 || {
 }
 
 run_checked "Ruff format" \
-  "$python_tools/ruff" format --check services/api
+  "$python_tools/ruff" format --check services/api scripts packaging
 run_checked "Ruff lint" \
-  "$python_tools/ruff" check services/api
+  "$python_tools/ruff" check services/api scripts packaging
 run_checked "Strict mypy" \
   "$python_tools/mypy" --config-file services/api/pyproject.toml services/api/local_lm
 run_checked "Bandit high-severity scan" \

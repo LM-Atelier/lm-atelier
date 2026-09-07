@@ -46,9 +46,7 @@ def main() -> int:
             # This process owns only the temporary app; release its directory
             # handles before TemporaryDirectory removes the folder on Windows.
             api._default_instance_lock.close()
-    serialized = (
-        json.dumps(document, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
-    )
+    serialized = json.dumps(document, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
     if arguments.output:
         arguments.output.parent.mkdir(parents=True, exist_ok=True)
         arguments.output.write_text(serialized, encoding="utf-8")

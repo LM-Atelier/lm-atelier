@@ -1,0 +1,27 @@
+# One width for the repository.
+#
+# Ruff resolves configuration per file from the nearest ancestor, so before this
+# existed only `services/api` had settings. Nothing under `scripts/` or
+# `packaging/` was being checked at all - the gate passed ruff only
+# `services/api` - and those paths had no configuration of their own, so naming
+# them in the gate without a root file would have checked them at ruff's
+# defaults: a narrower rule set, and a formatter width of 88 rather than the 100
+# the rest of the repository uses. The scripts that decide how much verification
+# every change receives were the ones outside the standard.
+#
+# These values are `services/api/pyproject.toml`'s, deliberately, so there is one
+# answer rather than two. That file keeps its own copy because it is a package in
+# its own right and is configured as one; if the two ever drift, they should be
+# reconciled rather than allowed to diverge quietly.
+line-length = 100
+target-version = "py312"
+
+[lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C901", "PLR0912", "PLR0915"]
+
+[lint.mccabe]
+max-complexity = 75
+
+[lint.pylint]
+max-branches = 76
+max-statements = 326

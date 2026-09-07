@@ -78,9 +78,7 @@ def validate_permissions(path: Path, workflow: dict[str, Any]) -> list[str]:
         if declaration == "read-all":
             continue
         if isinstance(declaration, str):
-            errors.append(
-                f"{path}: unsupported permissions declaration {declaration!r}"
-            )
+            errors.append(f"{path}: unsupported permissions declaration {declaration!r}")
             continue
         for scope, access in declaration.items():
             reviewed_write = (
@@ -91,9 +89,7 @@ def validate_permissions(path: Path, workflow: dict[str, Any]) -> list[str]:
             if reviewed_write:
                 continue
             if access not in {"read", "none"}:
-                errors.append(
-                    f"{path}: {scope} permission must not grant {access!r} access"
-                )
+                errors.append(f"{path}: {scope} permission must not grant {access!r} access")
     return errors
 
 
@@ -114,14 +110,10 @@ def validate_action_pins(path: Path, content: str) -> list[str]:
             continue
         action, separator, reference = target.rpartition("@")
         if not separator or not action or not FULL_COMMIT.fullmatch(reference):
-            errors.append(
-                f"{path}:{line_number}: external action must use a full commit SHA"
-            )
+            errors.append(f"{path}:{line_number}: external action must use a full commit SHA")
         version = match.group("version")
         if version is None or not VERSION_COMMENT.fullmatch(version):
-            errors.append(
-                f"{path}:{line_number}: pinned action needs an auditable version comment"
-            )
+            errors.append(f"{path}:{line_number}: pinned action needs an auditable version comment")
     return errors
 
 
@@ -146,9 +138,7 @@ def validate_action_allowlist(workflow_actions: set[str]) -> list[str]:
     block = ALLOWED_ACTIONS_BLOCK.search(content)
     if block is None:
         return [f"{PUBLIC_CONFIGURATION}: missing $AllowedActionPatterns declaration"]
-    configured = {
-        match.group("target") for match in QUOTED_ACTION.finditer(block.group("body"))
-    }
+    configured = {match.group("target") for match in QUOTED_ACTION.finditer(block.group("body"))}
     if configured == workflow_actions:
         return []
     missing = sorted(workflow_actions - configured)
@@ -181,15 +171,10 @@ def validate_checkout_credentials(path: Path, workflow: dict[str, Any]) -> list[
             if not isinstance(step, dict):
                 continue
             action = step.get("uses")
-            if not isinstance(action, str) or not action.startswith(
-                "actions/checkout@"
-            ):
+            if not isinstance(action, str) or not action.startswith("actions/checkout@"):
                 continue
             inputs = step.get("with")
-            if (
-                not isinstance(inputs, dict)
-                or inputs.get("persist-credentials") is not False
-            ):
+            if not isinstance(inputs, dict) or inputs.get("persist-credentials") is not False:
                 errors.append(
                     f"{path}: checkout in job {job_name} must disable persisted credentials"
                 )
@@ -213,22 +198,16 @@ def validate_environment_contexts(path: Path, workflow: dict[str, Any]) -> list[
             continue
         for name, value in declaration.items():
             if isinstance(value, str) and "${{ runner." in value:
-                errors.append(
-                    f"{path}: {location} env {name} cannot use the runner context"
-                )
+                errors.append(f"{path}: {location} env {name} cannot use the runner context")
     return errors
 
 
 def validate_untrusted_triggers(path: Path, content: str) -> list[str]:
     errors: list[str] = []
     if PULL_REQUEST_TARGET.search(content):
-        errors.append(
-            f"{path}: pull_request_target is prohibited for untrusted contribution CI"
-        )
+        errors.append(f"{path}: pull_request_target is prohibited for untrusted contribution CI")
     if path.name == "ci.yml" and "run-ci" in content:
-        errors.append(
-            f"{path}: normal pull-request CI must not require the run-ci label"
-        )
+        errors.append(f"{path}: normal pull-request CI must not require the run-ci label")
     return errors
 
 
@@ -572,8 +551,7 @@ MERGE_GATE_MATRIX = (
 MERGE_GATE_SCRIPT = Path("scripts/ci-merge-gate.py")
 MERGE_GATE_COMMAND = "python scripts/ci-merge-gate.py"
 MERGE_GATE_CONDITION = (
-    "always() && (github.event_name == 'pull_request' || "
-    "github.event_name == 'merge_group')"
+    "always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group')"
 )
 
 
@@ -723,7 +701,7 @@ def exactly_equal(expected: Any, actual: Any) -> bool:
     if isinstance(expected, list):
         if len(expected) != len(actual):
             return False
-        return all(exactly_equal(item, other) for item, other in zip(expected, actual))
+        return all(exactly_equal(item, other) for item, other in zip(expected, actual, strict=True))
     return bool(expected == actual)
 
 
@@ -748,9 +726,7 @@ def validate_merge_gate_schema(path: Path, job: dict[str, Any]) -> list[str]:
     for key, want in MERGE_GATE_JOB.items():
         got = job.get(key)
         if not exactly_equal(want, got):
-            problems.append(
-                f"{path}: merge-gate {key} must be exactly {want!r}, found {got!r}"
-            )
+            problems.append(f"{path}: merge-gate {key} must be exactly {want!r}, found {got!r}")
 
     steps = job.get("steps")
     if not isinstance(steps, list) or len(steps) != len(MERGE_GATE_STEPS):
@@ -761,7 +737,7 @@ def validate_merge_gate_schema(path: Path, job: dict[str, Any]) -> list[str]:
                 f"its audited setup then one decision - found {found!r}"
             )
         ]
-    for index, (step, want_step) in enumerate(zip(steps, MERGE_GATE_STEPS)):
+    for index, (step, want_step) in enumerate(zip(steps, MERGE_GATE_STEPS, strict=True)):
         if not isinstance(step, dict):
             problems.append(f"{path}: merge-gate step {index} is not a mapping")
             continue
@@ -777,8 +753,7 @@ def validate_merge_gate_schema(path: Path, job: dict[str, Any]) -> list[str]:
                 got = got.strip()
             if not exactly_equal(want, got):
                 problems.append(
-                    f"{path}: merge-gate step {index} {key} must be exactly {want!r}, "
-                    f"found {got!r}"
+                    f"{path}: merge-gate step {index} {key} must be exactly {want!r}, found {got!r}"
                 )
     return problems
 
@@ -825,9 +800,7 @@ def validate_merge_gate_steps(path: Path, job: dict[str, Any]) -> list[str]:
             f"found {str(job.get('if', '')).strip()!r}"
         )
     uses = [
-        (index, str(step.get("uses", "")))
-        for index, step in enumerate(steps)
-        if step.get("uses")
+        (index, str(step.get("uses", ""))) for index, step in enumerate(steps) if step.get("uses")
     ]
     if len(uses) != len(MERGE_GATE_SETUP):
         problems.append(
@@ -856,9 +829,7 @@ def validate_merge_gate_steps(path: Path, job: dict[str, Any]) -> list[str]:
 
     for position, expected in enumerate(MERGE_GATE_SETUP):
         matches = [
-            (index, value)
-            for index, value in uses
-            if value.startswith(f"{expected['action']}@")
+            (index, value) for index, value in uses if value.startswith(f"{expected['action']}@")
         ]
         if not matches:
             problems.append(
@@ -926,9 +897,7 @@ PULL_REQUEST_ACTIONS = [
     "converted_to_draft",
     "edited",
 ]
-EXPECTED_TRIGGER_KEYS = frozenset(
-    {"pull_request", "merge_group", "schedule", "workflow_dispatch"}
-)
+EXPECTED_TRIGGER_KEYS = frozenset({"pull_request", "merge_group", "schedule", "workflow_dispatch"})
 PROTECTED_BRANCHES = ["develop", "main"]
 EXPECTED_SCHEDULE = [{"cron": "23 9 * * 2"}]
 # Whitespace-normalised, because the expression is written across lines in YAML.
@@ -962,8 +931,7 @@ def validate_pull_request_triggers(path: Path, workflow: dict[str, Any]) -> list
     declared = list(pull_request.get("types") or [])
     if declared != PULL_REQUEST_ACTIONS:
         problems.append(
-            f"{path}: pull_request types must be exactly {PULL_REQUEST_ACTIONS}, found "
-            f"{declared}"
+            f"{path}: pull_request types must be exactly {PULL_REQUEST_ACTIONS}, found {declared}"
         )
     # No other trigger keys. A `push` trigger would run this workflow, and its
     # gate, on events with none of the pull request context the gate reads.
@@ -1177,23 +1145,15 @@ def validate_verification_bindings(path: Path, workflow: dict[str, Any]) -> list
         if not exactly_equal(needs, job.get("needs")):
             problems.append(f"{path}: {name} must depend on its verification plan")
         steps = job.get("steps")
-        if not isinstance(steps, list) or not all(
-            isinstance(step, dict) for step in steps
-        ):
+        if not isinstance(steps, list) or not all(isinstance(step, dict) for step in steps):
             problems.append(f"{path}: {name} steps must be a list of mappings")
             continue
         checkouts = [
-            step
-            for step in steps
-            if str(step.get("uses", "")).startswith("actions/checkout@")
+            step for step in steps if str(step.get("uses", "")).startswith("actions/checkout@")
         ]
         if not exactly_equal([expected_checkout], checkouts):
-            problems.append(
-                f"{path}: {name} must check out the integration SHA exactly once"
-            )
-        if "continue-on-error" in job or any(
-            "continue-on-error" in step for step in steps
-        ):
+            problems.append(f"{path}: {name} must check out the integration SHA exactly once")
+        if "continue-on-error" in job or any("continue-on-error" in step for step in steps):
             problems.append(f"{path}: {name} must report verification failures")
         if name == "verification-plan":
             expected_outputs = {
@@ -1202,17 +1162,12 @@ def validate_verification_bindings(path: Path, workflow: dict[str, Any]) -> list
             }
             expected_plan = {"id": "plan", "env": PLAN_ENV, "run": PLAN_COMMAND}
             normalized = [
-                {**step, "run": step["run"].strip()} if "run" in step else step
-                for step in steps
+                {**step, "run": step["run"].strip()} if "run" in step else step for step in steps
             ]
             if not exactly_equal([expected_checkout, expected_plan], normalized):
-                problems.append(
-                    f"{path}: verification-plan must run the bound planner exactly"
-                )
+                problems.append(f"{path}: verification-plan must run the bound planner exactly")
             if not exactly_equal(expected_outputs, job.get("outputs")):
-                problems.append(
-                    f"{path}: verification-plan must publish all planner outputs"
-                )
+                problems.append(f"{path}: verification-plan must publish all planner outputs")
         elif name == "compatibility":
             required_plan = {
                 "name": "Require a valid verification plan",
@@ -1220,27 +1175,19 @@ def validate_verification_bindings(path: Path, workflow: dict[str, Any]) -> list
                 "run": "exit 1",
             }
             if not steps or not exactly_equal(required_plan, steps[0]):
-                problems.append(
-                    f"{path}: compatibility must refuse an unsuccessful plan"
-                )
+                problems.append(f"{path}: compatibility must refuse an unsuccessful plan")
             docs = [
-                step
-                for step in steps
-                if step.get("name") == "Validate documentation-only change"
+                step for step in steps if step.get("name") == "Validate documentation-only change"
             ]
             if len(docs) != 1 or not exactly_equal(
                 {"BASE_SHA": EVENT_BASE_SHA, "HEAD_SHA": EVENT_HEAD_SHA},
                 docs[0].get("env"),
             ):
-                problems.append(
-                    f"{path}: documentation verification must use the event SHAs"
-                )
+                problems.append(f"{path}: documentation verification must use the event SHAs")
     return problems
 
 
-def validate_workflow_document(
-    path: Path, content: str, workflow: dict[str, Any]
-) -> list[str]:
+def validate_workflow_document(path: Path, content: str, workflow: dict[str, Any]) -> list[str]:
     """Every policy this repository applies to one workflow file.
 
     Extracted from `main` so that a regression can enter where production

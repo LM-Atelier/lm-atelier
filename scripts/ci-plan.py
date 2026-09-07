@@ -98,8 +98,7 @@ def requires_windows_verification(paths: Iterable[str]) -> bool:
 
     normalized = (normalized_path(path) for path in paths)
     return any(
-        path in WINDOWS_PATHS
-        or any(path.startswith(prefix) for prefix in WINDOWS_PATH_PREFIXES)
+        path in WINDOWS_PATHS or any(path.startswith(prefix) for prefix in WINDOWS_PATH_PREFIXES)
         for path in normalized
     )
 
@@ -163,9 +162,7 @@ def validate_develop_promotion(
     base_tree = git("rev-parse", f"{base}^{{tree}}")
     common_tree = git("rev-parse", f"{common}^{{tree}}")
     if base_tree != common_tree:
-        raise ValueError(
-            "main contains source changes not present in the develop lineage"
-        )
+        raise ValueError("main contains source changes not present in the develop lineage")
 
 
 def validate_merge_group(
@@ -248,10 +245,7 @@ def main() -> None:
         dependency_audit=dependency_audit,
         windows=windows,
     )
-    print(
-        f"Verification plan: {mode}; dependency audit: {dependency_audit}; "
-        f"Windows: {windows}"
-    )
+    print(f"Verification plan: {mode}; dependency audit: {dependency_audit}; Windows: {windows}")
 
 
 if __name__ == "__main__":
