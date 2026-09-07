@@ -258,6 +258,18 @@ describe("scale and rhythm", () => {
     expect(stepsOf("gap").length).toBeLessThanOrEqual(7);
   });
 
+  it("keeps the sidebar Setup row level with the one beneath it", () => {
+    const css = readFileSync(STYLESHEET, "utf8");
+    // Named explicitly because the failure is silent and only appears at one end
+    // of a range the reader can drag to. Below 210px the status "Action needed"
+    // no longer fits on one line beside the label, and the row's height is set
+    // by its 24px icon: two lines at 12px are exactly 24px, so the wrap costs
+    // nothing. Without this the Setup button grows to 46px while the Settings
+    // button directly beneath it stays 42px.
+    const rule = /\.setup-nav-state\s*\{[^}]*\}/.exec(css)?.[0] ?? "";
+    expect(rule).toMatch(/line-height:\s*12px/);
+  });
+
   it("leaves the density floor alone", () => {
     // Small labels remain legible without changing the larger type scale.
     expect(Math.min(...stepsOf("font-size"))).toBe(11);
