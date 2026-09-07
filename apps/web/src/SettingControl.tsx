@@ -61,6 +61,13 @@ export function SettingControl({
       <label className="setting-row">
         <span><strong>{field.label}</strong>{field.help && <small>{field.help}</small>}</span>
         <textarea
+          // This one control is uncontrolled - it holds the user's raw text so a
+          // half-typed object is not destroyed on every keystroke - so React will
+          // not update it from `value`. Keying it on the value remounts it when the
+          // value changes from somewhere else, which is what keeps it in step.
+          // The surrounding controls must NOT carry that key: they are controlled,
+          // they need no remount, and remounting them loses the caret.
+          key={JSON.stringify(value ?? field.default)}
           rows={3}
           disabled={fixed}
           defaultValue={JSON.stringify(value ?? field.default, null, 2)}
