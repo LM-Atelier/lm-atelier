@@ -230,6 +230,44 @@ def test_browser_type_mirrors_the_api_model(
             )
 
 
+def test_a_closed_vocabulary_inside_an_array_is_still_compared() -> None:
+    """Both sides of the comparison have to follow an array, or neither counts.
+
+    A field declared as a list of a referenced enum returned NO admissible
+    values, so the browser union behind it was never compared - the same shape
+    of hole as reading only the inline `enum` form, and just as quiet. The
+    browser side had the mirror of it: `Foo[]` did not match the alias pattern,
+    so it resolved to nothing.
+
+    Today one checked field is shaped this way, and its vocabulary happens to be
+    compared at two non-array fields as well, so nothing is actually unguarded.
+    That is luck rather than cover: the first closed vocabulary used ONLY in an
+    array position would have been checked by neither side.
+    """
+
+    schemas = {
+        "DeviceKind": {"enum": ["cpu", "cuda"], "type": "string"},
+        "Wrapper": {"type": "object", "properties": {}},
+    }
+
+    referenced = {"type": "array", "items": {"$ref": "#/components/schemas/DeviceKind"}}
+    assert _admissible_values(referenced, schemas) == ["cpu", "cuda"]
+
+    inline = {"type": "array", "items": {"enum": ["a", "b"], "type": "string"}}
+    assert _admissible_values(inline, schemas) == ["a", "b"]
+
+    # A non-array reference keeps working; this is an addition, not a swap.
+    assert _admissible_values({"$ref": "#/components/schemas/DeviceKind"}, schemas) == [
+        "cpu",
+        "cuda",
+    ]
+
+    source = 'export type DeviceKind = "cpu" | "cuda";' + chr(10)
+    assert _declared_literals(source, "DeviceKind[]") == {"cpu", "cuda"}
+    assert _declared_literals(source, "DeviceKind[] | null") == {"cpu", "cuda"}
+    assert _declared_literals(source, "DeviceKind") == {"cpu", "cuda"}
+
+
 def test_every_checked_component_still_exists(schemas: dict[str, dict]) -> None:
     """A renamed model must not silently drop out of the comparison."""
     unknown = sorted(set(CHECKED_CONTRACTS.values()) - set(schemas))
@@ -273,6 +311,12 @@ def _declared_literals(source: str, expression: str | None) -> set[str] | None:
 
     if expression is None:
         return None
+    # `Foo[]` and `Foo[] | null` declare the same vocabulary as `Foo`; the
+    # server side compares a list against its element values, so the element
+    # type is what has to be read here.
+    array = re.fullmatch(r"(.+?)\[\](\s*\|\s*null)?", expression.strip())
+    if array:
+        expression = array.group(1).strip()
     if '"' in expression:
         return set(re.findall(r'"([^"]+)"', expression))
     alias = re.fullmatch(r"(\w+)(\s*\|\s*null)?", expression.strip())
@@ -307,6 +351,16 @@ def _admissible_values(spec: dict, schemas: dict[str, dict]) -> list[str] | None
 
     One level of reference is followed, which is all the generator emits.
     """
+
+    # An array field admits its ITEM's values. Reading only the field saw
+    # nothing for every array of a closed vocabulary, in exactly the way the
+    # docstring above describes for references: it had never failed because it
+    # had never looked. Today one checked field is shaped that way and its
+    # vocabulary happens to be compared elsewhere too, so nothing is currently
+    # unguarded - the cost of leaving it is that the first vocabulary used ONLY
+    # in an array position would be silently unchecked.
+    if spec.get("type") == "array":
+        return _admissible_values(spec.get("items") or {}, schemas)
 
     seen = spec
     for _ in range(2):
