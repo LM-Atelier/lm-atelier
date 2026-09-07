@@ -21,7 +21,7 @@ from local_lm.models import (
     WorkflowRevision,
     WorkStep,
 )
-from local_lm.orchestrator import ConversationOrchestrator, _queued_workflow_activation
+from local_lm.orchestrator import ClaimLost, ConversationOrchestrator, _queued_workflow_activation
 from local_lm.scheduler import JobClaim
 from local_lm.schemas import EngineCapabilities, WorkerStatus
 from local_lm.workflow_activations import WorkflowActivationLaunchScope
@@ -1043,6 +1043,14 @@ async def test_vision_bridge_restores_the_text_profile_after_completion_or_cance
         processes=processes,
     )
     orchestrator._set_chat_phase = AsyncMock()  # type: ignore[method-assign]
+    # This case is about WHICH profiles the bridge loads and in what order, not
+    # about ownership; its world has no jobs table for the per-event fence or
+    # the teardown's ownership read to consult. A bridge that keeps its claim is
+    # what production has whenever nothing reclaims the row, so that is what the
+    # fakes answer. The reclaimed side is covered by
+    # test_vision_bridge_stops_and_moves_no_worker_once_reclaimed.
+    orchestrator._claim_still_owns = Mock(return_value=True)  # type: ignore[method-assign]
+    orchestrator._attempt_current = Mock(return_value=True)  # type: ignore[method-assign]
     orchestrator._attach_visual_context = AsyncMock(  # type: ignore[method-assign]
         return_value=(
             [{"role": "user", "content": [{"type": "text", "text": "Question"}]}],
@@ -1077,6 +1085,125 @@ async def test_vision_bridge_restores_the_text_profile_after_completion_or_cance
         "profile-vision",
         "profile-text",
     ]
+
+
+async def test_vision_bridge_stops_and_moves_no_worker_once_reclaimed() -> None:
+    """A reclaimed attempt stops reading and leaves the successor's worker alone.
+
+    Both halves matter and they fail separately. Without the per-event fence the
+    obsolete attempt reads the whole observation out of a model the successor is
+    using; without a teardown that respects the refused phase it then puts the
+    text model back over the top of whatever the successor loaded.
+    """
+    run = SimpleNamespace(
+        id="run-vision",
+        chat_id="chat-vision",
+        user_message_id="message-vision",
+        profile_id="profile-text",
+        vision_profile_id="profile-vision",
+        standalone_prompt="What is visible?",
+    )
+    text_profile = SimpleNamespace(id="profile-text", model_install_id="install-text")
+    vision_profile = SimpleNamespace(id="profile-vision", model_install_id="install-vision")
+    text_install = SimpleNamespace(id="install-text")
+    vision_install = SimpleNamespace(id="install-vision")
+
+    class FakeSession:
+        def get(self, model, identity):  # type: ignore[no-untyped-def]
+            return {
+                (ModelProfile, "profile-text"): text_profile,
+                (ModelProfile, "profile-vision"): vision_profile,
+                (ModelInstall, "install-text"): text_install,
+                (ModelInstall, "install-vision"): vision_install,
+            }.get((model, identity))
+
+        def expunge(self, _value) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+        def scalar(self, _statement):  # type: ignore[no-untyped-def]
+            return "job-vision"
+
+        def in_transaction(self) -> bool:
+            return False
+
+    owned = {"value": True}
+    consumed: list[str] = []
+    resumed_after_reclaim = {"value": False}
+
+    async def stream(_request):  # type: ignore[no-untyped-def]
+        yield ChatEvent(type="delta", text="A green ")
+        # The row is taken over between one event and the next, exactly as a
+        # reclaim reaches a stream that is already running.
+        owned["value"] = False
+        yield ChatEvent(type="delta", text="apple.")
+        # Only reached if the consumer came back for a third event, which a
+        # fenced consumer does not: it has already stopped reading.
+        resumed_after_reclaim["value"] = True
+        yield ChatEvent(type="complete", data={"finish_reason": "stop"})
+
+    processes = SimpleNamespace(
+        settings=SimpleNamespace(),
+        runtimes=None,
+        load_chat=AsyncMock(),
+        stop=AsyncMock(),
+    )
+    engines = SimpleNamespace(
+        settings=SimpleNamespace(vision_bridge_max_tokens=128),
+        chat_capabilities=AsyncMock(
+            return_value=SimpleNamespace(input_modalities=["text", "image"])
+        ),
+        chat=SimpleNamespace(stream=stream),
+    )
+    orchestrator = ConversationOrchestrator(
+        engines=engines,
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=Mock(),
+        processes=processes,
+    )
+
+    # The real predicates, answered from one flag: the fence probes ownership,
+    # the phase refuses to speak for a row that is not this execution's, and the
+    # teardown reads the attempt again before it moves anything.
+    orchestrator._claim_still_owns = lambda _job_id, _claim: owned["value"]  # type: ignore[method-assign]
+    orchestrator._attempt_current = lambda _job_id, _claim: owned["value"]  # type: ignore[method-assign]
+
+    async def phase(_job_id, _run_id, label, _claim):  # type: ignore[no-untyped-def]
+        consumed.append(label)
+        return owned["value"]
+
+    orchestrator._set_chat_phase = phase  # type: ignore[method-assign]
+    orchestrator._require_phase = AsyncMock()  # type: ignore[method-assign]
+    orchestrator._commit_owned = Mock()  # type: ignore[method-assign]
+    orchestrator._commit_before_await = Mock()  # type: ignore[method-assign]
+    orchestrator._attach_visual_context = AsyncMock(  # type: ignore[method-assign]
+        return_value=(
+            [{"role": "user", "content": [{"type": "text", "text": "Question"}]}],
+            {
+                "available": True,
+                "images_included": 1,
+                "artifact_ids": ["sha256:image"],
+                "visual_contents_inspected": True,
+            },
+        )
+    )
+
+    with pytest.raises(ClaimLost, match="mid-vision-bridge"):
+        await orchestrator._bridge_visual_context(
+            _TEST_CLAIM,
+            FakeSession(),  # type: ignore[arg-type]
+            run,  # type: ignore[arg-type]
+            [SimpleNamespace(id="sha256:image")],  # type: ignore[list-item]
+        )
+
+    assert resumed_after_reclaim["value"] is False, (
+        "the obsolete attempt kept reading the successor's model"
+    )
+    assert consumed == ["Restoring chat model"], "the teardown never asked to speak"
+    assert [call.args[0].id for call in processes.load_chat.await_args_list] == [
+        "profile-vision"
+    ], "the reclaimed attempt moved the chat worker the successor owns"
+    processes.stop.assert_not_awaited()
 
 
 def test_media_progress_preserves_the_latest_preview() -> None:
