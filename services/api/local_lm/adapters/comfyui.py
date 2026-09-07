@@ -391,6 +391,7 @@ class ComfyUIAdapter:
         prompt_id: str | None = None
         outputs_collected = False
         abandoned = False
+        refused_after_acceptance = False
         try:
             yield MediaEvent(
                 type="progress",
@@ -445,18 +446,30 @@ class ComfyUIAdapter:
                 payload = response.json()
                 if not isinstance(payload, dict):
                     raise RuntimeError("ComfyUI returned an invalid prompt response")
-                if payload.get("node_errors"):
-                    raise RuntimeError("ComfyUI rejected the selected workflow")
                 raw_prompt_id = payload.get("prompt_id")
                 if (
-                    not isinstance(raw_prompt_id, str)
-                    or not raw_prompt_id
-                    or len(raw_prompt_id) > 200
-                    or any(character < " " for character in raw_prompt_id)
+                    isinstance(raw_prompt_id, str)
+                    and raw_prompt_id
+                    and len(raw_prompt_id) <= 200
+                    and all(character >= " " for character in raw_prompt_id)
                 ):
+                    # Recorded BEFORE either refusal below. The post already
+                    # raised for status, so a body at all means the backend
+                    # accepted this prompt and queued it, whatever the body goes
+                    # on to say about the graph - and the repository's own
+                    # fixtures model a success response as carrying prompt_id
+                    # and node_errors together. This identifier is the only
+                    # handle that can stop it or clean up after it.
+                    prompt_id = raw_prompt_id
+                    self._jobs[request.run_id] = prompt_id
+                if payload.get("node_errors"):
+                    # Refusing a prompt the backend has ALREADY taken. The
+                    # caller is told the generation failed, so the teardown has
+                    # to stop it rather than only forget it.
+                    refused_after_acceptance = prompt_id is not None
+                    raise RuntimeError("ComfyUI rejected the selected workflow")
+                if prompt_id is None:
                     raise RuntimeError("ComfyUI returned an invalid prompt identifier")
-                prompt_id = raw_prompt_id
-                self._jobs[request.run_id] = prompt_id
                 if cancel_event.is_set():
                     await self._interrupt_prompt()
                     yield MediaEvent(type="cancelled")
@@ -602,7 +615,7 @@ class ComfyUIAdapter:
             self._cancel_events.pop(request.run_id, None)
             self._cancelled.discard(request.run_id)
             if prompt_id and not outputs_collected:
-                if abandoned and not cancel_event.is_set():
+                if (abandoned or refused_after_acceptance) and not cancel_event.is_set():
                     # A prompt was submitted and the consumer walked away.
                     # Popping the entries above ends this adapter's interest in
                     # it and nothing else: the backend goes on with a result
@@ -612,11 +625,17 @@ class ComfyUIAdapter:
                     # A set cancel event means `cancel` already issued the
                     # interrupt, so there is nothing to repeat.
                     #
-                    # Deliberately not extended to the error exits below. A
-                    # malformed or oversized event is a different case with its
-                    # own settled handling, and widening this to cover it would
-                    # change six existing controls on a question this row does
-                    # not ask.
+                    # Still deliberately not extended to the generic error
+                    # exits below. A malformed or oversized event is a different
+                    # case with its own settled handling, and widening this to
+                    # cover it would change six existing controls on a question
+                    # that row did not ask.
+                    #
+                    # `refused_after_acceptance` is not that widening. It marks
+                    # the one exit where THIS code refuses a response the backend
+                    # has already accepted and queued, which is the same
+                    # situation as an abandoned stream and not an error arriving
+                    # from a prompt already being consumed.
                     await self._abandon_prompt(prompt_id)
                 await self._cleanup_prompt_outputs(prompt_id)
 

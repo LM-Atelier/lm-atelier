@@ -602,6 +602,67 @@ async def _drive_to_queued(producer: Any) -> list[str]:
             return seen
 
 
+async def test_a_refused_prompt_the_engine_already_accepted_is_stopped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refusing the response does not un-accept the prompt.
+
+    The post raised for status, so the backend has taken this graph and queued
+    it; the reply carries the identifier AND the complaints together, which is
+    the shape the rest of this module's fixtures model. Refusing before reading
+    the identifier told the caller the generation had failed while the backend
+    ran it to completion, with nothing able to name it.
+
+    The history stays EMPTY here on purpose. That is what a still-running prompt
+    looks like, and it is the case a fixture with finished outputs cannot show:
+    the output cleanup reads history once and returns, so it neither stops the
+    run nor removes anything.
+    """
+
+    prompt_id = "prompt-refused-after-acceptance"
+    running: str | None = prompt_id
+    queued = [prompt_id]
+    operations: list[str] = []
+
+    async def comfy(request: httpx.Request) -> httpx.Response:
+        nonlocal running
+        body = json.loads(request.content or b"{}")
+        if request.url.path == "/prompt":
+            return httpx.Response(
+                200,
+                json={
+                    "prompt_id": prompt_id,
+                    "node_errors": {"7": {"errors": [{"type": "value_not_in_list"}]}},
+                },
+            )
+        if request.url.path == "/queue":
+            operations.append("delete")
+            for identifier in body.get("delete", []):
+                if identifier in queued:
+                    queued.remove(identifier)
+            return httpx.Response(200, json={})
+        if request.url.path == "/interrupt":
+            operations.append("interrupt")
+            target = body.get("prompt_id")
+            if target is None or target == running:
+                running = None
+            return httpx.Response(200, json={})
+        if request.url.path == f"/history/{prompt_id}":
+            # Still executing, so the backend has no outputs to report.
+            return httpx.Response(200, json={})
+        raise AssertionError(f"unexpected ComfyUI request: {request.method} {request.url}")
+
+    adapter = _adapter_on(monkeypatch, comfy)
+    try:
+        with pytest.raises(RuntimeError, match="rejected the selected workflow"):
+            [event async for event in adapter.generate(media_request(operation="text_to_image"))]
+    finally:
+        await adapter.close()
+
+    assert running is None, f"the generation the engine had accepted was left running: {operations}"
+    assert prompt_id not in queued, f"the accepted prompt was left queued: {operations}"
+
+
 async def test_abandoning_a_submitted_prompt_asks_the_backend_to_drop_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
