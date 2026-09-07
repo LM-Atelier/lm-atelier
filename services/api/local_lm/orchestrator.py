@@ -6013,6 +6013,9 @@ class ConversationOrchestrator:
 
     async def _execute_image_edit_verification(self, job_id: str, claim: JobClaim) -> None:
         media_stopped_for_verification = False
+        # `restore_profile` says who to put back IF this execution displaces
+        # chat; it does not say that it did. This does.
+        chat_displaced_for_verification = False
         previous_profile_id = next(
             (
                 status.profile_id
@@ -6176,6 +6179,15 @@ class ConversationOrchestrator:
                     # successor is already using, and the check below runs too
                     # late to prevent it: it reports the loss after both moves.
                     self._require_ownership(job_id, claim, "after stopping media")
+                # Set before the await and not after it. Replacing the
+                # chat worker STOPS the previous one before it starts the new
+                # one, so a port, spawn or health failure raises with chat
+                # already down and the load never returning. What the restore
+                # is owed by is having entered that replacement, not having
+                # finished it - reading a failed load as "this execution moved
+                # nothing" leaves ordinary chat stopped after a vision model
+                # fails to start, which the parent did not do.
+                chat_displaced_for_verification = True
                 await self.processes.load_chat(profile, install)
             self._require_ownership(job_id, claim, "after its workers")
             capabilities = await self.engines.chat_capabilities()
@@ -6404,7 +6416,21 @@ class ConversationOrchestrator:
             # all of them. The restore is itself an await, so a single reading
             # taken before it decides the restart afterwards on what was true
             # beforehand - the same staleness this teardown exists to avoid.
-            if restore_profile and restore_install and self._verification_recovers(job_id, claim):
+            # `chat_displaced_for_verification` and not `restore_profile`
+            # alone. The profile was chosen from a reading taken at entry, long
+            # before the replacement, and two early returns sit between the two
+            # - a refused vision input and an inspected-artifact mismatch. Both
+            # settle the row under this same attempt, so ownership still answers
+            # yes, and the teardown would stop the chat worker and cold-start it
+            # with the profile it is ALREADY running, for a verification that
+            # moved nothing. Chat is then unavailable for a full model load with
+            # nothing to show for it.
+            if (
+                chat_displaced_for_verification
+                and restore_profile
+                and restore_install
+                and self._verification_recovers(job_id, claim)
+            ):
                 try:
                     await self.processes.load_chat(restore_profile, restore_install)
                 except Exception:
