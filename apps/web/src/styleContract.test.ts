@@ -259,10 +259,8 @@ describe("scale and rhythm", () => {
   });
 
   it("leaves the density floor alone", () => {
-    // Whether this interface should be denser or airier is a design
-    // decision. This change is only about it having a scale at all, so the
-    // smallest step must not drift while nobody is looking.
-    expect(Math.min(...stepsOf("font-size"))).toBe(9);
+    // Small labels remain legible without changing the larger type scale.
+    expect(Math.min(...stepsOf("font-size"))).toBe(11);
   });
 });
 
