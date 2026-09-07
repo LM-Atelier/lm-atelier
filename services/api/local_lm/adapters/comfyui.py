@@ -10,7 +10,7 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, TypeGuard
 from urllib.parse import urlencode, urlparse, urlunparse
 from uuid import uuid4
 
@@ -48,6 +48,23 @@ def _numbered_input_image_indices(workflow: dict[str, Any]) -> list[int]:
             if match and (index := int(match.group("index"))) < 64:
                 indices.add(index)
     return sorted(indices)
+
+
+def _usable_prompt_id(value: object) -> TypeGuard[str]:
+    """A prompt identifier this adapter is willing to carry.
+
+    The same test on both paths that produce one - the submission's own reply
+    and the queue consulted when that reply is lost - because an identifier the
+    accept path would have refused is not one to start trusting because it
+    arrived by the other route.
+    """
+
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and len(value) <= 200
+        and all(character >= " " for character in value)
+    )
 
 
 def _execution_error_message(data: dict[str, Any]) -> str:
@@ -97,6 +114,7 @@ def _preview_payload(frame: bytes) -> bytes | None:
 #: seconds and the output cleanup runs after this, so the ask must not be able
 #: to spend the entire allowance on its own.
 ABANDONED_INTERRUPT_SECONDS = 2.0
+RECONCILE_SECONDS = 5.0
 
 
 class ComfyUIAdapter:
@@ -392,6 +410,7 @@ class ComfyUIAdapter:
         outputs_collected = False
         abandoned = False
         refused_after_acceptance = False
+        bound_after_timeout = False
         try:
             yield MediaEvent(
                 type="progress",
@@ -437,22 +456,32 @@ class ComfyUIAdapter:
                     "prompt": graph,
                     "client_id": client_id,
                 }
-                response = await self._client.post(
-                    "/prompt",
-                    json=prompt_payload,
-                    timeout=30,
-                )
+                try:
+                    response = await self._client.post(
+                        "/prompt",
+                        json=prompt_payload,
+                        timeout=30,
+                    )
+                except httpx.TimeoutException:
+                    # The request went out and no answer came back. Nothing
+                    # here knows whether the backend took it, and the one
+                    # thing that would say so is the identifier that never
+                    # arrived. Ask the backend what it is holding under this
+                    # submission's own client id before giving up, so a
+                    # generation it did take can still be stopped rather than
+                    # running on unreachable behind the caller's failure.
+                    bound = await self._prompt_id_for_client(client_id)
+                    if bound is not None:
+                        prompt_id = bound
+                        self._jobs[request.run_id] = prompt_id
+                        bound_after_timeout = True
+                    raise
                 response.raise_for_status()
                 payload = response.json()
                 if not isinstance(payload, dict):
                     raise RuntimeError("ComfyUI returned an invalid prompt response")
                 raw_prompt_id = payload.get("prompt_id")
-                if (
-                    isinstance(raw_prompt_id, str)
-                    and raw_prompt_id
-                    and len(raw_prompt_id) <= 200
-                    and all(character >= " " for character in raw_prompt_id)
-                ):
+                if _usable_prompt_id(raw_prompt_id):
                     # Recorded BEFORE either refusal below. The post already
                     # raised for status, so a body at all means the backend
                     # accepted this prompt and queued it, whatever the body goes
@@ -615,7 +644,9 @@ class ComfyUIAdapter:
             self._cancel_events.pop(request.run_id, None)
             self._cancelled.discard(request.run_id)
             if prompt_id and not outputs_collected:
-                if (abandoned or refused_after_acceptance) and not cancel_event.is_set():
+                if (
+                    abandoned or refused_after_acceptance or bound_after_timeout
+                ) and not cancel_event.is_set():
                     # A prompt was submitted and the consumer walked away.
                     # Popping the entries above ends this adapter's interest in
                     # it and nothing else: the backend goes on with a result
@@ -636,6 +667,12 @@ class ComfyUIAdapter:
                     # has already accepted and queued, which is the same
                     # situation as an abandoned stream and not an error arriving
                     # from a prompt already being consumed.
+                    #
+                    # `bound_after_timeout` is the same situation reached the
+                    # other way: the backend took the prompt and this code never
+                    # heard so. It is only ever set when the backend's own queue
+                    # named the prompt under this submission's client id, so it
+                    # cannot mark a generation that was never accepted.
                     await self._abandon_prompt(prompt_id)
                 await self._cleanup_prompt_outputs(prompt_id)
 
@@ -957,6 +994,54 @@ class ComfyUIAdapter:
             # Local cancellation remains authoritative even when the worker has
             # already exited or its interrupt endpoint is unavailable.
             return
+
+    async def _prompt_id_for_client(self, client_id: str) -> str | None:
+        """The queued prompt this submission's client id names, if there is one.
+
+        A submission whose reply never arrived may still have been taken. The
+        request went out; only the answer was lost, and the backend has no
+        reason to have refused it. Without an identifier nothing can stop that
+        generation: it holds the device against every generation after it while
+        the caller has already been told this one failed.
+
+        `client_id` is minted per generation, travels in the prompt's
+        `extra_data`, and is returned by `/queue`, so it names the prompt THIS
+        call created and no other. A queue entry is
+        `[number, prompt_id, prompt, extra_data, outputs_to_execute]`.
+
+        Best-effort inside a deadline, because this runs on a failure path: a
+        second failure here must not replace the first, and a backend that will
+        not answer must not hold the unwinding open.
+
+        Only the queue is consulted. A prompt that finished between the timeout
+        and this question is in history rather than the queue, and there is
+        nothing left to stop; reclaiming what it wrote is a different question
+        and is not answered here.
+        """
+
+        with suppress(Exception):
+            async with asyncio.timeout(RECONCILE_SECONDS):
+                response = await self._client.get("/queue")
+                response.raise_for_status()
+                payload = response.json()
+                if not isinstance(payload, dict):
+                    return None
+                for key in ("queue_running", "queue_pending"):
+                    entries = payload.get(key)
+                    if not isinstance(entries, list):
+                        continue
+                    for entry in entries:
+                        if not isinstance(entry, list) or len(entry) < 4:
+                            continue
+                        extra = entry[3]
+                        if not isinstance(extra, dict):
+                            continue
+                        if extra.get("client_id") != client_id:
+                            continue
+                        candidate = entry[1]
+                        if _usable_prompt_id(candidate):
+                            return candidate
+        return None
 
     async def _abandon_prompt(self, prompt_id: str) -> None:
         """Ask the backend to drop one prompt this adapter stopped listening to.

@@ -1422,3 +1422,147 @@ async def test_a_selection_without_a_resolved_file_refuses(tmp_path: Path) -> No
             await adapter._request_parameters(request)
     finally:
         await adapter.close()
+
+
+def _queue_entry(prompt_id: str, client_id: str) -> list[Any]:
+    """One /queue row as the backend shapes it.
+
+    ComfyUI returns `item[:5]` of each queue tuple, so a row is
+    `[number, prompt_id, prompt, extra_data, outputs_to_execute]` and the
+    client id the submission sent is in `extra_data`.
+    """
+
+    return [0, prompt_id, {}, {"client_id": client_id}, []]
+
+
+async def test_a_submission_whose_reply_is_lost_is_found_and_stopped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The request went out; only the answer did not come back.
+
+    The backend queued the prompt anyway. Without an identifier nothing can
+    reach that generation: the caller is told the run failed while it goes on
+    holding the device against everything queued behind it. The client id is
+    minted per submission and comes back on /queue, so the backend can name
+    the prompt this call created and no other.
+    """
+
+    mine = "prompt-reply-lost"
+    running: str | None = mine
+    seen_client_id: str | None = None
+    operations: list[str] = []
+
+    async def comfy(request: httpx.Request) -> httpx.Response:
+        nonlocal running, seen_client_id
+        if request.url.path == "/prompt":
+            seen_client_id = json.loads(request.content or b"{}").get("client_id")
+            raise httpx.ReadTimeout("no answer", request=request)
+        if request.url.path == "/queue" and request.method == "GET":
+            operations.append("queue-read")
+            assert seen_client_id is not None
+            return httpx.Response(
+                200,
+                json={
+                    # A prompt from some other client must not be mistaken for
+                    # this one, so the queue carries both.
+                    "queue_running": [_queue_entry(mine, seen_client_id)],
+                    "queue_pending": [_queue_entry("prompt-someone-else", "another-client")],
+                },
+            )
+        if request.url.path == "/queue":
+            operations.append("delete")
+            for prompt_id in json.loads(request.content or b"{}").get("delete", []):
+                if prompt_id == running:
+                    running = None
+            return httpx.Response(200, json={})
+        if request.url.path == "/interrupt":
+            operations.append("interrupt")
+            target = json.loads(request.content or b"{}").get("prompt_id")
+            if target is None or target == running:
+                running = None
+            return httpx.Response(200, json={})
+        if request.url.path == f"/history/{mine}":
+            return httpx.Response(200, json={})
+        raise AssertionError(f"unexpected ComfyUI request: {request.method} {request.url}")
+
+    adapter = _adapter_on(monkeypatch, comfy)
+    producer = adapter.generate(media_request(operation="text_to_image"))
+    try:
+        with pytest.raises(RuntimeError, match="transport timed out"):
+            async for _event in producer:
+                pass
+    finally:
+        await adapter.close()
+
+    assert "queue-read" in operations, f"the backend was never asked: {operations}"
+    assert running is not mine, (
+        f"the generation the engine had taken was left running: {operations}"
+    )
+
+
+async def test_a_submission_the_engine_never_took_invents_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lost reply is not evidence the prompt was queued.
+
+    When the queue does not name this submission, there is nothing to bind and
+    nothing to stop, and guessing would send an interrupt at whatever the
+    backend happens to be running for somebody else.
+    """
+
+    operations: list[str] = []
+
+    async def comfy(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/prompt":
+            raise httpx.ReadTimeout("no answer", request=request)
+        if request.url.path == "/queue" and request.method == "GET":
+            operations.append("queue-read")
+            return httpx.Response(
+                200,
+                json={
+                    "queue_running": [_queue_entry("prompt-someone-else", "another-client")],
+                    "queue_pending": [],
+                },
+            )
+        operations.append(f"{request.method} {request.url.path}")
+        return httpx.Response(200, json={})
+
+    adapter = _adapter_on(monkeypatch, comfy)
+    producer = adapter.generate(media_request(operation="text_to_image"))
+    try:
+        with pytest.raises(RuntimeError, match="transport timed out"):
+            async for _event in producer:
+                pass
+    finally:
+        await adapter.close()
+
+    assert operations == ["queue-read"], (
+        f"something was stopped on the strength of a lost reply: {operations}"
+    )
+
+
+async def test_a_backend_that_will_not_answer_the_queue_still_reports_the_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reconciliation is best-effort and must not replace the failure.
+
+    A backend that has stopped answering will not answer this question either.
+    The caller still has to be told the submission timed out, and by the same
+    error it would have seen before this existed.
+    """
+
+    async def comfy(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/prompt":
+            raise httpx.ReadTimeout("no answer", request=request)
+        if request.url.path == "/queue" and request.method == "GET":
+            raise httpx.ConnectError("backend is gone", request=request)
+        raise AssertionError(f"unexpected ComfyUI request: {request.method} {request.url}")
+
+    adapter = _adapter_on(monkeypatch, comfy)
+    producer = adapter.generate(media_request(operation="text_to_image"))
+    try:
+        with pytest.raises(RuntimeError, match="transport timed out"):
+            async for _event in producer:
+                pass
+    finally:
+        await adapter.close()
