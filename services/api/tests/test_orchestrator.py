@@ -1264,6 +1264,14 @@ async def test_vision_bridge_restores_the_text_profile_after_completion_or_cance
         processes=processes,
     )
     orchestrator._set_chat_phase = AsyncMock()  # type: ignore[method-assign]
+    # This case is about WHICH profiles the bridge loads and in what order, not
+    # about ownership; its world has no jobs table for the per-event fence or
+    # the teardown's ownership read to consult. A bridge that keeps its claim is
+    # what production has whenever nothing reclaims the row, so that is what the
+    # fakes answer. The reclaimed side is covered by
+    # test_vision_bridge_stops_and_moves_no_worker_once_reclaimed.
+    orchestrator._claim_still_owns = Mock(return_value=True)  # type: ignore[method-assign]
+    orchestrator._attempt_current = Mock(return_value=True)  # type: ignore[method-assign]
     orchestrator._attach_visual_context = AsyncMock(  # type: ignore[method-assign]
         return_value=(
             [{"role": "user", "content": [{"type": "text", "text": "Question"}]}],
@@ -1298,6 +1306,125 @@ async def test_vision_bridge_restores_the_text_profile_after_completion_or_cance
         "profile-vision",
         "profile-text",
     ]
+
+
+async def test_vision_bridge_stops_and_moves_no_worker_once_reclaimed() -> None:
+    """A reclaimed attempt stops reading and leaves the successor's worker alone.
+
+    Both halves matter and they fail separately. Without the per-event fence the
+    obsolete attempt reads the whole observation out of a model the successor is
+    using; without a teardown that respects the refused phase it then puts the
+    text model back over the top of whatever the successor loaded.
+    """
+    run = SimpleNamespace(
+        id="run-vision",
+        chat_id="chat-vision",
+        user_message_id="message-vision",
+        profile_id="profile-text",
+        vision_profile_id="profile-vision",
+        standalone_prompt="What is visible?",
+    )
+    text_profile = SimpleNamespace(id="profile-text", model_install_id="install-text")
+    vision_profile = SimpleNamespace(id="profile-vision", model_install_id="install-vision")
+    text_install = SimpleNamespace(id="install-text")
+    vision_install = SimpleNamespace(id="install-vision")
+
+    class FakeSession:
+        def get(self, model, identity):  # type: ignore[no-untyped-def]
+            return {
+                (ModelProfile, "profile-text"): text_profile,
+                (ModelProfile, "profile-vision"): vision_profile,
+                (ModelInstall, "install-text"): text_install,
+                (ModelInstall, "install-vision"): vision_install,
+            }.get((model, identity))
+
+        def expunge(self, _value) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+        def scalar(self, _statement):  # type: ignore[no-untyped-def]
+            return "job-vision"
+
+        def in_transaction(self) -> bool:
+            return False
+
+    owned = {"value": True}
+    consumed: list[str] = []
+    resumed_after_reclaim = {"value": False}
+
+    async def stream(_request):  # type: ignore[no-untyped-def]
+        yield ChatEvent(type="delta", text="A green ")
+        # The row is taken over between one event and the next, exactly as a
+        # reclaim reaches a stream that is already running.
+        owned["value"] = False
+        yield ChatEvent(type="delta", text="apple.")
+        # Only reached if the consumer came back for a third event, which a
+        # fenced consumer does not: it has already stopped reading.
+        resumed_after_reclaim["value"] = True
+        yield ChatEvent(type="complete", data={"finish_reason": "stop"})
+
+    processes = SimpleNamespace(
+        settings=SimpleNamespace(),
+        runtimes=None,
+        load_chat=AsyncMock(),
+        stop=AsyncMock(),
+    )
+    engines = SimpleNamespace(
+        settings=SimpleNamespace(vision_bridge_max_tokens=128),
+        chat_capabilities=AsyncMock(
+            return_value=SimpleNamespace(input_modalities=["text", "image"])
+        ),
+        chat=SimpleNamespace(stream=stream),
+    )
+    orchestrator = ConversationOrchestrator(
+        engines=engines,
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=Mock(),
+        processes=processes,
+    )
+
+    # The real predicates, answered from one flag: the fence probes ownership,
+    # the phase refuses to speak for a row that is not this execution's, and the
+    # teardown reads the attempt again before it moves anything.
+    orchestrator._claim_still_owns = lambda _job_id, _claim: owned["value"]  # type: ignore[method-assign]
+    orchestrator._attempt_current = lambda _job_id, _claim: owned["value"]  # type: ignore[method-assign]
+
+    async def phase(_job_id, _run_id, label, _claim):  # type: ignore[no-untyped-def]
+        consumed.append(label)
+        return owned["value"]
+
+    orchestrator._set_chat_phase = phase  # type: ignore[method-assign]
+    orchestrator._require_phase = AsyncMock()  # type: ignore[method-assign]
+    orchestrator._commit_owned = Mock()  # type: ignore[method-assign]
+    orchestrator._commit_before_await = Mock()  # type: ignore[method-assign]
+    orchestrator._attach_visual_context = AsyncMock(  # type: ignore[method-assign]
+        return_value=(
+            [{"role": "user", "content": [{"type": "text", "text": "Question"}]}],
+            {
+                "available": True,
+                "images_included": 1,
+                "artifact_ids": ["sha256:image"],
+                "visual_contents_inspected": True,
+            },
+        )
+    )
+
+    with pytest.raises(ClaimLost, match="mid-vision-bridge"):
+        await orchestrator._bridge_visual_context(
+            _TEST_CLAIM,
+            FakeSession(),  # type: ignore[arg-type]
+            run,  # type: ignore[arg-type]
+            [SimpleNamespace(id="sha256:image")],  # type: ignore[list-item]
+        )
+
+    assert resumed_after_reclaim["value"] is False, (
+        "the obsolete attempt kept reading the successor's model"
+    )
+    assert consumed == ["Restoring chat model"], "the teardown never asked to speak"
+    assert [call.args[0].id for call in processes.load_chat.await_args_list] == [
+        "profile-vision"
+    ], "the reclaimed attempt moved the chat worker the successor owns"
+    processes.stop.assert_not_awaited()
 
 
 def test_media_progress_preserves_the_latest_preview() -> None:
@@ -1838,6 +1965,12 @@ async def test_shutdown_does_not_restore_chat_from_active_bridge() -> None:
         processes=processes,
     )
     orchestrator._set_chat_phase = AsyncMock()  # type: ignore[method-assign]
+    # Ownership answers yes so that `_closing` is the ONLY thing that can stop
+    # the restore. Without this the teardown's ownership read reaches a database
+    # this world does not have, raises inside the `finally`, and `close` swallows
+    # it - the restore is then skipped for a reason that has nothing to do with
+    # shutting down, and the case passes with the shutdown guard removed.
+    orchestrator._attempt_current = Mock(return_value=True)  # type: ignore[method-assign]
     orchestrator._attach_visual_context = AsyncMock(  # type: ignore[method-assign]
         return_value=(
             [{"role": "user", "content": [{"type": "text", "text": "Question"}]}],
@@ -1867,6 +2000,122 @@ async def test_shutdown_does_not_restore_chat_from_active_bridge() -> None:
     assert [call.args[0].id for call in processes.load_chat.await_args_list] == [
         "profile-vision"
     ], "shutdown restored chat from the vision bridge only to destroy it next"
+
+
+@pytest.mark.parametrize(
+    ("announced", "still_ours", "why"),
+    [
+        (True, False, "a successor had already replaced this attempt"),
+        (False, True, "the phase write was refused, so the row was not ours"),
+    ],
+)
+async def test_a_replaced_bridge_leaves_the_chat_worker_where_it_is(
+    announced: bool, still_ours: bool, why: str
+) -> None:
+    """Finishing is not the same as still being the attempt that may act.
+
+    The teardown puts the text model back, and that moves the GLOBAL chat
+    worker. An attempt a successor has already replaced must not do that: the
+    successor is using the worker it would take. Both halves of the guard are
+    here because either alone leaves the other unasked - the phase refusal says
+    the row stopped being ours during the write, and the ownership read says so
+    again afterwards, because the phase write is an await and its answer
+    describes what was true before it.
+
+    Neither was pinned by anything until this case: removing `announced` or the
+    ownership read from the teardown left all fifty tests in this file passing.
+    """
+
+    run = SimpleNamespace(
+        id="run-vision",
+        chat_id="chat-vision",
+        user_message_id="message-vision",
+        profile_id="profile-text",
+        vision_profile_id="profile-vision",
+        standalone_prompt="What is visible?",
+    )
+    text_profile = SimpleNamespace(id="profile-text", model_install_id="install-text")
+    vision_profile = SimpleNamespace(id="profile-vision", model_install_id="install-vision")
+    text_install = SimpleNamespace(id="install-text")
+    vision_install = SimpleNamespace(id="install-vision")
+
+    class FakeSession:
+        def get(self, model, identity):  # type: ignore[no-untyped-def]
+            return {
+                (ModelProfile, "profile-text"): text_profile,
+                (ModelProfile, "profile-vision"): vision_profile,
+                (ModelInstall, "install-text"): text_install,
+                (ModelInstall, "install-vision"): vision_install,
+            }.get((model, identity))
+
+        def expunge(self, _value) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+        def scalar(self, _statement):  # type: ignore[no-untyped-def]
+            return "job-vision"
+
+        def in_transaction(self) -> bool:
+            return False
+
+    async def stream(_request):  # type: ignore[no-untyped-def]
+        yield ChatEvent(type="delta", text="a lamp")
+        yield ChatEvent(type="complete", data={"finish_reason": "stop"})
+
+    processes = SimpleNamespace(
+        settings=SimpleNamespace(),
+        runtimes=None,
+        load_chat=AsyncMock(),
+        stop=AsyncMock(),
+    )
+    engines = SimpleNamespace(
+        settings=SimpleNamespace(vision_bridge_max_tokens=128),
+        chat_capabilities=AsyncMock(
+            return_value=SimpleNamespace(input_modalities=["text", "image"])
+        ),
+        chat=SimpleNamespace(stream=stream),
+    )
+    orchestrator = ConversationOrchestrator(
+        engines=engines,
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=Mock(),
+        processes=processes,
+    )
+
+    # Only the teardown's own phase write is refused. The earlier ones are
+    # asserted rather than captured, so refusing those raises ClaimLost long
+    # before the teardown and would test a different guard entirely.
+    async def phase(_job_id, _run_id, label, _claim):  # type: ignore[no-untyped-def]
+        return announced if label == "Restoring chat model" else True
+
+    orchestrator._set_chat_phase = AsyncMock(side_effect=phase)  # type: ignore[method-assign]
+    orchestrator._attempt_current = Mock(return_value=still_ours)  # type: ignore[method-assign]
+    # The per-event fence is a different guard with its own case; stubbing it
+    # keeps this one about the teardown rather than about a database this world
+    # does not have.
+    orchestrator._require_ownership = Mock()  # type: ignore[method-assign]
+    orchestrator._attach_visual_context = AsyncMock(  # type: ignore[method-assign]
+        return_value=(
+            [{"role": "user", "content": [{"type": "text", "text": "Question"}]}],
+            {
+                "available": True,
+                "images_included": 1,
+                "artifact_ids": ["sha256:image"],
+                "visual_contents_inspected": True,
+            },
+        )
+    )
+
+    await orchestrator._bridge_visual_context(
+        _TEST_CLAIM,
+        FakeSession(),  # type: ignore[arg-type]
+        run,  # type: ignore[arg-type]
+        [SimpleNamespace(id="sha256:image")],  # type: ignore[list-item]
+    )
+
+    assert [call.args[0].id for call in processes.load_chat.await_args_list] == [
+        "profile-vision"
+    ], f"the teardown moved the chat worker although {why}"
 
 
 @pytest.mark.parametrize("managed_media", [False, True])
