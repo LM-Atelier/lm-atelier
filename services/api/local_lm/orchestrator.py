@@ -4381,6 +4381,11 @@ class ConversationOrchestrator:
                         scope_id=self.scope_id,
                     )
                 ):
+                    # Every event of the bridge is this execution's to consume
+                    # only while it owns the row, exactly as the assessment
+                    # stream is. Without this a reclaimed attempt reads the
+                    # whole observation out of a model the successor is using.
+                    self._require_ownership(job_id, claim, "mid-vision-bridge")
                     if event.type == "delta":
                         observation += event.text
                         if len(observation) > 16_000:
@@ -4401,16 +4406,34 @@ class ConversationOrchestrator:
             return observation, metadata
         finally:
             self._commit_before_await(session)
-            await self._set_chat_phase(
+            announced = await self._set_chat_phase(
                 job_id,
                 run.id,
                 "Restoring chat model",
                 claim,
             )
-            if text_profile and text_install:
-                await self.processes.load_chat(text_profile, text_install)
-            else:
-                await self.processes.stop("chat")
+            # A refused phase is not a cosmetic failure here. `_set_chat_phase`
+            # returns False when the row is no longer this execution's, and the
+            # next two lines move the GLOBAL chat worker - so ignoring the
+            # refusal is exactly how an attempt a successor has already replaced
+            # takes that worker out from under it.
+            #
+            # Ownership is read again after the phase rather than trusted from
+            # it, because the phase write is an await: by the time the worker
+            # moves, the phase's answer describes what was true beforehand. This
+            # is the same staleness the verification teardown reads around.
+            # `_attempt_current` rather than ownership alone, so a bridge whose
+            # row finished under this same attempt still puts the text model
+            # back instead of leaving the vision model loaded.
+            #
+            # Deliberately a guard and not an early return: a return inside
+            # `finally` discards whatever is propagating, which here includes
+            # the ClaimLost the per-event fence raises.
+            if announced and self._attempt_current(job_id, claim):
+                if text_profile and text_install:
+                    await self.processes.load_chat(text_profile, text_install)
+                else:
+                    await self.processes.stop("chat")
 
     @staticmethod
     def _append_vision_observation(
