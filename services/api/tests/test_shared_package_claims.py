@@ -10,7 +10,12 @@ from local_lm.config import Settings
 from local_lm.shared_asset_contract_v1 import initialize_store_identity
 from local_lm.shared_asset_lock_v1 import SharedAssetLockError
 from local_lm.shared_asset_package_v1 import publish_package
-from local_lm.shared_asset_registry_v1 import FINAL, claims_for_consumer, reserve_claim
+from local_lm.shared_asset_registry_v1 import (
+    FINAL,
+    claims_for_consumer,
+    finalize_claim,
+    reserve_claim,
+)
 from local_lm.shared_asset_store_v1 import object_path, publish_file
 from local_lm.shared_package_bindings import SharedPackageReference, prepare_binding
 
@@ -193,6 +198,44 @@ def test_release_recovers_reservation_before_local_claim_commit(settings: Settin
         claims_for_consumer(database=root / "index.sqlite3", consumer_id=reference.consumer_id)
         == []
     )
+
+
+def test_release_refuses_an_unexplained_finalized_claim(settings: Settings, tmp_path: Path):
+    """The negative of the reservation-recovery case above.
+
+    That one proves a PROVISIONAL reservation is adopted when the local row lost
+    its claim to a crash. The refusal beside it - only a provisional claim may be
+    adopted, never a finalized one - had nothing holding it: deleting it left the
+    whole module green, so the rule could have been removed by an unrelated edit
+    without anything noticing.
+
+    A finalized claim the local record cannot account for is not this operation's
+    to release. Adopting one leads straight to releasing it, which is the single
+    thing this module promises not to do to bytes another consumer may hold.
+    """
+
+    api = importlib.import_module("local_lm.shared_package_claims")
+    root, binding_id, reference = _prepared(tmp_path)
+    claim = reserve_claim(
+        database=root / "index.sqlite3",
+        consumer_id=reference.consumer_id,
+        package_digest=reference.package_digest,
+    )
+    finalize_claim(
+        database=root / "index.sqlite3",
+        consumer_id=reference.consumer_id,
+        claim_id=claim.claim_id,
+    )
+
+    with pytest.raises(api.SharedPackageBindingError):
+        api.release_binding_claim(sessions=db.SessionLocal, root=root, binding_id=binding_id)
+
+    assert _row(binding_id) is not None, "the binding must survive the refusal"
+    remaining = claims_for_consumer(
+        database=root / "index.sqlite3", consumer_id=reference.consumer_id
+    )
+    assert [item.claim_id for item in remaining] == [claim.claim_id]
+    assert remaining[0].state == FINAL, "the finalized claim must not have been released"
 
 
 def test_wrong_library_refuses_before_claim_mutation(settings: Settings, tmp_path: Path):
