@@ -6233,6 +6233,10 @@ class ConversationOrchestrator:
                 "automatic_retry_executed": False,
             }
             accepted_retry: TurnAccepted | None = None
+            # Whether the retry's start was reached. Bound here rather than
+            # in the recovery below, because the ordinary path never enters
+            # that branch and the record is written for both.
+            retry_started = False
             retry_unavailable = False
             if decision.retry and payload.automatic_strength:
                 retry_session = self.session_factory()
@@ -6244,6 +6248,19 @@ class ConversationOrchestrator:
                         claim=claim,
                         source_record=persisted,
                     )
+                    # Creation announces the plan and starts its queued
+                    # jobs before it returns, so reaching this line is the
+                    # start having happened. Anything short of that raises,
+                    # and the recovery below answers for it.
+                    #
+                    # One exception this deliberately does not change:
+                    # `_resume_bound_retry` returns early when the retry's run
+                    # or plan is gone and there is nothing left to announce.
+                    # That path recorded the retry as executed before this
+                    # change and still does. Narrowing it means the creation
+                    # helper reporting its own start, which reaches seven call
+                    # sites and is wider than this row.
+                    retry_started = True
                 except asyncio.CancelledError:
                     raise
                 except ClaimLost:
@@ -6261,7 +6278,7 @@ class ConversationOrchestrator:
                     # The turn may already be durable - a publication or a
                     # start that failed after the commit - in which case the
                     # source record names it and recovery converges on it.
-                    accepted_retry = await self._converge_on_bound_retry(payload)
+                    accepted_retry, retry_started = await self._converge_on_bound_retry(payload)
                     retry_unavailable = accepted_retry is None
                 finally:
                     retry_session.close()
@@ -6272,6 +6289,30 @@ class ConversationOrchestrator:
                         persisted["retry_execution_reason"] = "manual_strength_preserved"
                     elif retry_unavailable:
                         persisted["retry_execution_reason"] = "unavailable"
+                    elif accepted_retry and not retry_started:
+                        # Found and still bound, but its start was not reached.
+                        # Not "unavailable": that would overwrite the binding
+                        # the next convergence needs to find. Not "executed"
+                        # either, which is what this used to say.
+                        #
+                        # The identity fields go in even though nothing ran.
+                        # `_persist_image_edit_verification` REPLACES the
+                        # source's verification record rather than merging into
+                        # it, so leaving them out erases the binding committed
+                        # with the durable retry - and `_bound_retry` then finds
+                        # nothing on the next pass. Recording the reason without
+                        # the identity would have destroyed the very thing the
+                        # reason exists to preserve.
+                        persisted.update(
+                            {
+                                "retry_execution_reason": "bound_not_started",
+                                "retry_run_id": accepted_retry.run.id,
+                                "retry_work_plan_id": accepted_retry.run.work_plan_id,
+                                "retry_revision_id": accepted_retry.run.provenance_json.get(
+                                    "response_replacement", {}
+                                ).get("revision_id"),
+                            }
+                        )
                     elif accepted_retry:
                         persisted.update(
                             {
@@ -6447,16 +6488,24 @@ class ConversationOrchestrator:
 
     async def _converge_on_bound_retry(
         self, payload: ImageEditVerificationJobPayload
-    ) -> TurnAccepted | None:
+    ) -> tuple[TurnAccepted | None, bool]:
         """After a retry creation that raised, the retry the source already
         bound - a turn durable before its publication or start failed - is
-        announced and started again; None when nothing was bound."""
+        announced and started again.
+
+        Returns that retry, or None when nothing was bound, AND whether its
+        start was reached. The two are separate answers and the caller needs
+        both: this recovery is best-effort at every step, so it can find a
+        durable retry and still fail to start it. Returning only the retry
+        made "we found it" indistinguishable from "it is running", and the
+        caller recorded the second when only the first was true.
+        """
 
         with self.session_factory() as session:
             source = session.get(Run, payload.source_run_id)
             bound = self._bound_retry(session, source) if source is not None else None
             if bound is None:
-                return None
+                return None, False
             try:
                 announcement = self._bound_retry_announcement(session, bound)
             except Exception:
@@ -6467,16 +6516,23 @@ class ConversationOrchestrator:
                 # overwrites that binding, and no later recovery can find
                 # the durable retry again.
                 logger.warning("The bound retry could not be described again", exc_info=True)
-                return bound
+                return bound, False
+        if announcement is None:
+            # The retry's run or plan is gone, so there is nothing to announce
+            # and nothing was started. The binding still stands.
+            return bound, False
         # The announcement is awaited with the session closed: this recovery
         # holds no database state across it, so another writer makes progress
         # while the event is published.
-        if announcement is not None:
-            try:
-                await self._announce_bound_retry(*announcement)
-            except Exception:
-                logger.warning("The bound retry could not be announced again", exc_info=True)
-        return bound
+        try:
+            await self._announce_bound_retry(*announcement)
+        except Exception:
+            logger.warning("The bound retry could not be announced again", exc_info=True)
+            return bound, False
+        # `_announce_bound_retry` publishes and then starts every queued job,
+        # so returning without raising is the point at which the start was
+        # reached. An empty queue is that too: nothing was owed.
+        return bound, True
 
     def _verification_recovers(self, job_id: str, claim: JobClaim) -> bool:
         """Whether this execution may still move the global workers back.
