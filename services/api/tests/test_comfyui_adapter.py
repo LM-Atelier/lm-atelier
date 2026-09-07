@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -951,6 +952,47 @@ async def test_output_collection_enforces_total_byte_limit_and_removes_source(
     assert not source.exists()
 
 
+async def test_stale_sweep_reclaims_uploaded_conditioning_input(tmp_path: Path) -> None:
+    """Uploads are reclaimed on the same terms as outputs, and nothing else is.
+
+    Every conditioning image and studio mask is uploaded under a per-run name,
+    so each one is a distinct new file. The per-run cleanup covers outputs, and
+    the stale sweep walked the output root alone, so these accumulated for the
+    life of the installation. The backend's temp directory also holds files this
+    adapter did not write, which is why only the subfolder uploads are addressed
+    to is swept.
+    """
+    output_root = tmp_path / "output"
+    temp_root = tmp_path / "temp"
+    output_root.mkdir()
+    stale_upload = temp_root / "lm-atelier" / "lm-atelier-run-old-0.png"
+    fresh_upload = temp_root / "lm-atelier" / "lm-atelier-run-new-0.png"
+    stale_upload.parent.mkdir(parents=True)
+    stale_upload.write_bytes(b"an old conditioning image")
+    fresh_upload.write_bytes(b"a conditioning image still in use")
+    backend_owned = temp_root / "comfy-internal.png"
+    backend_owned.write_bytes(b"not ours to remove")
+
+    now = time.time()
+    for aged in (stale_upload, backend_owned):
+        os.utime(aged, (now - 7200, now - 7200))
+
+    adapter = ComfyUIAdapter(
+        "http://comfy.test",
+        managed_output_root=output_root,
+        managed_temp_root=temp_root,
+        stale_output_seconds=3600,
+    )
+    try:
+        await adapter._sweep_stale_outputs()
+    finally:
+        await adapter.close()
+
+    assert not stale_upload.exists(), "an aged conditioning upload was never reclaimed"
+    assert fresh_upload.exists(), "an upload still inside the retention window was removed"
+    assert backend_owned.exists(), "the sweep removed a temp file this adapter did not write"
+
+
 def test_stale_output_sweep_keeps_fresh_files(tmp_path: Path) -> None:
     root = tmp_path / "output"
     stale = root / "LMAtelier" / "stale.png"
@@ -1050,3 +1092,53 @@ async def test_a_selection_without_a_resolved_file_refuses(tmp_path: Path) -> No
             await adapter._request_parameters(request)
     finally:
         await adapter.close()
+
+
+@pytest.mark.parametrize("linked_at", ["upload_root", "child"])
+async def test_stale_upload_sweep_keeps_directories_outside_selected_root(
+    tmp_path: Path,
+    linked_at: str,
+) -> None:
+    temp_root = tmp_path / "temp"
+    temp_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    retained_empty = outside / "keep-empty" / "nested"
+    retained_empty.mkdir(parents=True)
+    retained_file = outside / "keep.txt"
+    retained_file.write_text("neutral fixture", encoding="utf-8")
+    aged = time.time() - 7200
+    os.utime(retained_file, (aged, aged))
+    upload_root = temp_root / "lm-atelier"
+    if linked_at == "child":
+        upload_root.mkdir()
+        link = upload_root / "linked"
+    else:
+        link = upload_root
+    assert link.absolute().is_relative_to(tmp_path.absolute())
+    assert outside.resolve().is_relative_to(tmp_path.resolve())
+    if os.name == "nt":
+        result = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(outside)],
+            capture_output=True,
+        )
+        assert result.returncode == 0, "temporary fixture directory link unavailable"
+    else:
+        link.symlink_to(outside, target_is_directory=True)
+
+    adapter = ComfyUIAdapter(
+        "http://comfy.test",
+        managed_temp_root=temp_root,
+        stale_output_seconds=3600,
+    )
+    try:
+        await adapter._sweep_stale_outputs()
+        assert retained_file.read_text(encoding="utf-8") == "neutral fixture"
+        assert retained_empty.is_dir(), "cleanup removed a directory outside the upload root"
+    finally:
+        await adapter.close()
+        if os.name == "nt":
+            if link.exists():
+                link.rmdir()
+        elif link.is_symlink():
+            link.unlink()
