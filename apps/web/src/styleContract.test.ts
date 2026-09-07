@@ -253,16 +253,29 @@ describe("scale and rhythm", () => {
     // Seventeen font sizes, twenty-one radii, and twenty-one gap values are
     // not a system; 7px and 9px gaps sit on no grid at all. Ceilings, so a
     // new arbitrary value has to justify itself as a new step.
-    expect(stepsOf("font-size").length).toBeLessThanOrEqual(8);
+    //
+    // Type came down from eight steps to six when the density floor was
+    // raised and 9px and 10px stopped being used. The ceiling follows it
+    // down: leaving it at eight would have handed back two steps of slack
+    // that nobody asked for, which is the opposite of what a ceiling is.
+    expect(stepsOf("font-size").length).toBeLessThanOrEqual(6);
     expect(stepsOf("border-radius").length).toBeLessThanOrEqual(6);
     expect(stepsOf("gap").length).toBeLessThanOrEqual(7);
   });
 
-  it("leaves the density floor alone", () => {
-    // Whether this interface should be denser or airier is a design
-    // decision. This change is only about it having a scale at all, so the
-    // smallest step must not drift while nobody is looking.
-    expect(Math.min(...stepsOf("font-size"))).toBe(9);
+  it("keeps the smallest text at the floor the owner set", () => {
+    // The floor WAS deferred, and this case existed to stop it drifting while
+    // the design decision went unmade. The decision has now been made: 11px,
+    // chosen over 12px because raising every small label would have changed how
+    // dense the whole application looks rather than only the text that sat
+    // below the scale.
+    //
+    // Worth recording, because it is the reason the decision was finally
+    // forced: this ratchet held its own promise and still missed the drift.
+    // It pins the smallest STEP, not how much of the app lives at the bottom
+    // of the scale, and that second number went from 62 declarations at 11px
+    // or below to 81 while this case passed every time.
+    expect(Math.min(...stepsOf("font-size"))).toBe(11);
   });
 });
 
