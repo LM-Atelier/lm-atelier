@@ -347,3 +347,52 @@ def test_temporary_preview_delete_still_raises_on_a_containment_failure(
 
     with pytest.raises(ValueError, match="filesystem link"):
         store.delete_temporary_preview(session, artifact.id)
+
+
+def test_a_preview_an_unreferenced_artifact_names_is_declined_not_raised(
+    artifact_session: tuple[ArtifactStore, Session],
+) -> None:
+    """A preview the delete trigger will refuse must be declined, not attempted.
+
+    `orchestrator.recover_interrupted` deletes every preview of every
+    interrupted job from the `orchestrator-recovery` startup stage, which
+    `_startup_stage` wraps in try/finally with no except. Anything raised there
+    propagates out of lifespan and the application does not start - and a crash
+    during a large queue is exactly when there are most previews to try.
+
+    The reference walk does not answer for this preview. Its referrer is a video
+    that is itself unreferenced, so the walk never reaches the metadata naming
+    it. The delete trigger does not care whether the referrer is retained: it
+    refuses while any SURVIVING row's JSON names the artifact.
+    """
+
+    store, session = artifact_session
+    preview = store.ingest_bytes(
+        session,
+        b"browser proxy preview",
+        kind=ArtifactKind.IMAGE,
+        media_type="image/png",
+        metadata={"temporary_preview": True},
+    )
+    video = store.ingest_bytes(
+        session,
+        b"unreferenced video",
+        kind=ArtifactKind.VIDEO,
+        media_type="video/mp4",
+    )
+    video.metadata_json = {
+        **video.metadata_json,
+        "browser_proxy_artifact_id": preview.id,
+    }
+    session.commit()
+    path = store.resolve(preview)
+
+    # The walk really does answer "not retained", so a decline cannot be coming
+    # from the retained check that already exists.
+    assert preview.id not in store.referenced_artifact_ids(session, for_deletion=True)
+
+    assert store.delete_temporary_preview(session, preview.id) is False
+    assert session.get(Artifact, preview.id) is not None
+    assert path.exists()
+    # The referrer is untouched: declining is not a licence to break the link.
+    assert session.get(Artifact, video.id) is not None
