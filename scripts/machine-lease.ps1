@@ -333,8 +333,13 @@ function Open-MachineLeasePin {
     # refuses on that path strands this process.
     if (-not [LeaseNative.Kernel]::SetHandleInformation($Handle, 0x1, 0x1)) {
         $MarkError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        # Hand the outcome back rather than exiting here. Exiting from inside
+        # the pin opener leaves the caller's earlier pins unattempted and
+        # unreported, so the single report the design promises would name this
+        # pin and nothing else. The flag rides out with the throw; the caller
+        # closes what it holds, then exits stranded knowing about both.
         if (-not (Close-MachineLeaseAcquired -Pins @([pscustomobject]@{ Path = $Path; Role = $Role; Handle = $Handle }) -During "a refused pinning")) {
-            exit 4
+            $script:MachineLeaseStranded = $true
         }
         throw "$Role could not be held for a child's lifetime: $Path (error $MarkError)"
     }
@@ -463,6 +468,9 @@ function Open-MachineLeaseHandle {
             # a change slipped in before the pins took hold is refused and
             # nothing can change after them.
             $Pins = @()
+            # A stale $true from an earlier Enter-MachineLease in the same
+            # dot-sourced session would exit a healthy acquisition.
+            $script:MachineLeaseStranded = $false
             try {
                 foreach ($Link in Get-MachineLeaseResolutionChain -Anchor $AnchorPlain) {
                     $Pins += Open-MachineLeasePin -Path $Link.Path -Role $Link.Role
@@ -470,7 +478,12 @@ function Open-MachineLeaseHandle {
                 $Pins += Open-MachineLeasePin -Path $Plain -Role "the common git directory"
             } catch {
                 Write-Host "ERROR: the resolution chain could not be pinned. $_"
-                if (-not (Close-MachineLeaseAcquired -Pins $Pins -During "a refused pinning")) {
+                $Closed = Close-MachineLeaseAcquired -Pins $Pins -During "a refused pinning"
+                # $script:MachineLeaseStranded is set when the pin opener's own
+                # close was refused. Both halves are reported above by
+                # Close-MachineLeaseAcquired before this decides, so one exit
+                # covers every refused close rather than one per helper.
+                if (-not $Closed -or $script:MachineLeaseStranded) {
                     exit 4
                 }
                 return $null

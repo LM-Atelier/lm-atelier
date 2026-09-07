@@ -3203,3 +3203,110 @@ def test_gate_uses_the_held_external_pytest_scratch() -> None:
     api_at = source.index('Invoke-Checked "API tests"')
     assert helper_at < select_at < api_at
     assert 'Join-Path $RepositoryRoot "temp"' not in source
+
+
+def _second_pin_mark_refused(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    """Refuse the SECOND chain pin's inherit mark and protect both pins.
+
+    The first pin is protected from close as it is opened, so the chain
+    opener's own cleanup is refused; the second is protected when its mark is
+    refused, so the pin opener's cleanup is refused as well. Protection is
+    HANDLE_FLAG_PROTECT_FROM_CLOSE, a different bit from the inherit flag the
+    opener sets under mask 0x1, so marking a protected handle inheritable
+    still works.
+    """
+
+    import ctypes
+
+    kernel32 = _NAMESPACE["_kernel32"]()
+    real_create = kernel32.CreateFileW
+    real_mark = kernel32.SetHandleInformation
+    order: list[int] = []
+    taken: dict[str, int] = {}
+
+    def create_noting_pins(name: str, *rest: object) -> object:
+        handle = real_create(name, *rest)
+        # Pins are the only read-share opens: _SHARE_READ is 1.
+        number = 0 if handle is None else int(handle)
+        if rest[1] == 1 and number and number != _NAMESPACE["_INVALID_HANDLE"]:
+            order.append(number)
+            if len(order) == 1:
+                taken["outer"] = number
+                assert real_mark(ctypes.c_void_p(number), 2, 2)
+            elif len(order) == 2:
+                taken["inner"] = number
+        return handle
+
+    def refusing_mark(handle: object, mask: int, flags: int) -> int:
+        number = int(getattr(handle, "value", handle))  # type: ignore[arg-type]
+        if number == taken.get("inner") and mask == 1:
+            assert real_mark(ctypes.c_void_p(number), 2, 2)
+            return 0
+        return int(real_mark(handle, mask, flags))
+
+    monkeypatch.setattr(kernel32, "CreateFileW", create_noting_pins)
+    monkeypatch.setattr(kernel32, "SetHandleInformation", refusing_mark)
+    return taken
+
+
+def test_a_nested_pin_refusal_joins_the_outer_report(
+    anchor: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One report names both refused closes, not one plus a hidden cause.
+
+    The pin opener lets go of the pin it has just taken and its close is
+    refused; the chain opener then lets go of the earlier pin and that close
+    is refused too. Before this, the pin opener's report reached the chain
+    opener as an exception and became `__cause__` of the outer one - so the
+    outer report named the earlier pin only, and the new pin survived
+    somewhere no command line prints. The design promises ONE report naming
+    every acquired object whose close was refused.
+    """
+
+    taken = _second_pin_mark_refused(monkeypatch)
+    with pytest.raises(_NAMESPACE["LeaseStranded"], match="every refused close") as caught:
+        _NAMESPACE["acquire"]("nested-pin-strands", repo=anchor)
+    monkeypatch.undo()
+    assert "inner" in taken and "outer" in taken, "the two pins were never opened"
+    numbers = [number for _kind, number, _error in caught.value.strands]
+    # The nested cleanup ran first, so it is reported first.
+    assert numbers == [taken["inner"], taken["outer"]], caught.value.strands
+    assert all(kind == "pin" for kind, _number, _error in caught.value.strands)
+    # The failure that aborted the acquisition is still the cause, not the
+    # nested report: a report is not a reason.
+    assert isinstance(caught.value.__cause__, LeaseRefused)
+    assert "for a child's lifetime" in str(caught.value.__cause__)
+    _unprotect_and_close(taken["inner"])
+    _unprotect_and_close(taken["outer"])
+    successor = _NAMESPACE["acquire"]("after-nested-pin-strands", repo=anchor)
+    _NAMESPACE["release"](successor)
+
+
+def test_the_shell_pin_opener_hands_its_outcome_back_instead_of_exiting(
+    anchor: Path,
+) -> None:
+    """The shell's inner helper must not exit before the outer closer runs.
+
+    PowerShell cannot be made to refuse a real `SetHandleInformation`: the
+    P/Invoke lives on a compiled type, so unlike the Python control above this
+    one reads the source rather than driving the kernel. It is here because
+    the behaviour it guards is invisible in any run that succeeds - an `exit`
+    inside `Open-MachineLeasePin` leaves the caller's earlier pins unattempted
+    and unreported, and nothing else in this file would notice it coming back.
+    """
+
+    source = (ROOT / "scripts" / "machine-lease.ps1").read_text(encoding="utf-8")
+    opener = source[source.index("function Open-MachineLeasePin") :]
+    opener = opener[: opener.index("function Close-MachineLeaseAcquired")]
+    assert "exit 4" not in opener, (
+        "the pin opener exits before its caller can close the earlier pins"
+    )
+    assert "$script:MachineLeaseStranded = $true" in opener, (
+        "the pin opener must hand its refused close back to the caller"
+    )
+    assert "$script:MachineLeaseStranded = $false" in source, (
+        "a stale flag from an earlier acquisition would exit a healthy one"
+    )
+    assert "if (-not $Closed -or $script:MachineLeaseStranded) {" in source, (
+        "the chain opener must close its own pins and then consult the flag"
+    )
