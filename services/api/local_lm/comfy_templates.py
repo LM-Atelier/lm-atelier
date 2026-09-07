@@ -12,6 +12,13 @@ from urllib.parse import unquote, urlparse
 
 from .comfy_workflow_packages import FRONTEND_SYSTEM_NODE_TYPES
 from .config import Settings
+from .schemas import SettingField
+from .settings_registry import (
+    IMAGE_SETTINGS,
+    VIDEO_SETTINGS,
+    validate_settings,
+    workflow_settings,
+)
 from .workflow_edit_calibration import (
     EDIT_CALIBRATION_SCHEMA_KEY,
     standard_edit_calibration,
@@ -20,6 +27,8 @@ from .workflow_edit_calibration import (
 _RUNTIME_PARAMETERS = {
     "batch_size": "batch_size",
     "cfg": "cfg",
+    "codec": "codec",
+    "guidance": "cfg",
     "denoise": "denoise",
     "fps": "fps",
     "frames": "frames",
@@ -31,9 +40,11 @@ _RUNTIME_PARAMETERS = {
     "steps": "steps",
     "width": "width",
 }
-_PRIMITIVE_WIDGET_TYPES = {"BOOLEAN", "COMBO", "FLOAT", "INT", "STRING"}
+# Settings without a supported node binding remain hidden in compiled workflows.
+_SUPPRESSED_RUNTIME_NAMES = frozenset({"motion_strength"})
+_PRIMITIVE_WIDGET_TYPES = {"BOOLEAN", "COMBO", "COMFY_DYNAMICCOMBO_V3", "FLOAT", "INT", "STRING"}
 _CONTROL_AFTER_GENERATE = {"decrement", "fixed", "increment", "randomize"}
-COMFY_TEMPLATE_COMPILER_VERSION = 17
+COMFY_TEMPLATE_COMPILER_VERSION = 20
 DEFAULT_IMAGE_EDIT_DENOISE = 0.9
 _ADAPTIVE_CHECKPOINT_PREFIX = "lma_image_checkpoint_v1_"
 _ADAPTIVE_CHECKPOINT_PLACEHOLDER = "__LM_ATELIER_CHECKPOINT__"
@@ -1677,6 +1688,14 @@ def _compile_ui_graph(
         source_nodes,
     )
     source_indices = {node_id: index for index, node_id in enumerate(source_nodes)}
+    default_candidates: dict[str, list[Any]] = {}
+    # A graph with a real cfg input keeps guidance as its independent saved
+    # literal. Only guidance-only graphs use the historical cfg alias.
+    has_cfg = any(
+        int(node.get("mode") or 0) not in {2, 4}
+        and _is_widget_spec(_node_widget_spec(object_info.get(str(node.get("type"))), "cfg"))
+        for node in flat_nodes.values()
+    )
     for node_id, node in flat_nodes.items():
         class_type = str(node.get("type") or "")
         if class_type == "SaveImageAdvanced" and isinstance(object_info.get("SaveImage"), dict):
@@ -1704,13 +1723,22 @@ def _compile_ui_graph(
         overridden_inputs: set[str] = set()
         for (target_id, input_name), runtime_name in parameter_overrides.items():
             if target_id == node_id and (target_id, input_name) not in linked_inputs:
+                if has_cfg and input_name == "guidance":
+                    continue
                 if runtime_name == "denoise" and native_image_conditioning:
                     schema_properties.setdefault("denoise", {"readOnly": True})
                 else:
-                    _bind_runtime_parameter(inputs, input_name, runtime_name, schema_properties)
+                    _bind_runtime_parameter(
+                        inputs,
+                        input_name,
+                        runtime_name,
+                        schema_properties,
+                        _node_widget_spec(node_info, input_name),
+                        default_candidates,
+                    )
                 overridden_inputs.add(input_name)
         for input_name in list(inputs):
-            if input_name in overridden_inputs:
+            if input_name in overridden_inputs or (has_cfg and input_name == "guidance"):
                 continue
             if (node_id, input_name) in linked_inputs:
                 runtime_name = _runtime_parameter(input_name, node)
@@ -1722,7 +1750,14 @@ def _compile_ui_graph(
                 if runtime_name == "denoise" and native_image_conditioning:
                     schema_properties.setdefault("denoise", {"readOnly": True})
                 else:
-                    _bind_runtime_parameter(inputs, input_name, runtime_name, schema_properties)
+                    _bind_runtime_parameter(
+                        inputs,
+                        input_name,
+                        runtime_name,
+                        schema_properties,
+                        _node_widget_spec(node_info, input_name),
+                        default_candidates,
+                    )
         source_index = source_indices.get(node_id)
         if source_index is not None and "image" in inputs:
             runtime_name = (
@@ -1745,8 +1780,20 @@ def _compile_ui_graph(
                 "title": str(node.get("title") or node_info.get("display_name") or class_type)
             },
         }
-    for runtime_name in sorted(set(_RUNTIME_PARAMETERS.values()) | {"negative_prompt"}):
+    for runtime_name in sorted(
+        set(_RUNTIME_PARAMETERS.values()) | _SUPPRESSED_RUNTIME_NAMES | {"negative_prompt"}
+    ):
         schema_properties.setdefault(runtime_name, {"readOnly": True})
+    # A node can advertise wider limits than the application allows. Compile
+    # their intersection, leaving the registry's authored-schema checks strict.
+    fields = VIDEO_SETTINGS if operation.endswith("_video") else IMAGE_SETTINGS
+    for field in fields:
+        prop = schema_properties.get(field.key, {})
+        if "minimum" in prop and field.minimum is not None:
+            prop["minimum"] = max(prop["minimum"], field.minimum)
+        if "maximum" in prop and field.maximum is not None:
+            prop["maximum"] = min(prop["maximum"], field.maximum)
+    _resolve_widget_defaults(fields, schema_properties, default_candidates)
     return api_graph, {"type": "object", "properties": schema_properties}
 
 
@@ -1826,15 +1873,7 @@ def _widget_values(
             spec = cast(list[Any], spec)
             if cursor < len(values):
                 selected = values[cursor]
-                choices = (
-                    spec[0]
-                    if isinstance(spec[0], list)
-                    else (
-                        spec[1].get("options")
-                        if len(spec) > 1 and isinstance(spec[1], dict) and spec[0] == "COMBO"
-                        else None
-                    )
-                )
+                choices = _widget_choices(spec)
                 if (
                     validate_model_choices
                     and isinstance(choices, list)
@@ -1868,19 +1907,51 @@ def _is_widget_spec(spec: Any) -> bool:
     return isinstance(spec[0], list) or spec[0] in _PRIMITIVE_WIDGET_TYPES
 
 
+def _node_widget_spec(node_info: Any, input_name: str) -> Any:
+    if not isinstance(node_info, dict):
+        return None
+    for section in ("required", "optional"):
+        definitions = (node_info.get("input") or {}).get(section) or {}
+        if input_name in definitions:
+            return definitions[input_name]
+    return None
+
+
+def _widget_choices(spec: Any, *, required: bool = False) -> list[Any] | None:
+    if not _is_widget_spec(spec):
+        return None
+    raw: Any
+    if isinstance(spec[0], list):
+        raw = spec[0]
+    elif spec[0] in {"COMBO", "COMFY_DYNAMICCOMBO_V3"}:
+        raw = spec[1].get("options") if len(spec) > 1 and isinstance(spec[1], dict) else None
+    else:
+        return None
+    if not isinstance(raw, list) or not raw:
+        if not required:
+            return None
+        raise ValueError("ComfyUI widget must advertise a non-empty option list")
+    choices = []
+    for option in raw:
+        value = option.get("key") if isinstance(option, dict) else option
+        if not isinstance(value, (str, int, float, bool)) or (
+            isinstance(value, float) and not math.isfinite(value)
+        ):
+            if not required:
+                return None
+            raise ValueError("ComfyUI widget advertises an unsupported option")
+        if value not in choices:
+            choices.append(value)
+    return choices
+
+
 def _widget_default(spec: Any) -> Any:
     if not isinstance(spec, list) or not spec:
         return None
-    if isinstance(spec[0], list):
-        return spec[0][0] if spec[0] else None
-    if len(spec) > 1 and isinstance(spec[1], dict):
-        options = spec[1]
-        if "default" in options:
-            return options["default"]
-        choices = options.get("options")
-        if spec[0] == "COMBO" and isinstance(choices, list) and choices:
-            return choices[0]
-    return None
+    if len(spec) > 1 and isinstance(spec[1], dict) and "default" in spec[1]:
+        return spec[1]["default"]
+    choices = _widget_choices(spec)
+    return choices[0] if choices else None
 
 
 def _runtime_parameter(input_name: str, node: dict[str, Any]) -> str | None:
@@ -1935,7 +2006,17 @@ def _bind_runtime_parameter(
     input_name: str,
     runtime_name: str,
     schema_properties: dict[str, Any],
+    input_spec: Any = None,
+    default_candidates: dict[str, list[Any]] | None = None,
 ) -> None:
+    # Pixel dimensions are integer widgets. Fractional area dimensions have
+    # different units despite sharing the same names and keep their literals.
+    if (
+        runtime_name in {"width", "height"}
+        and _is_widget_spec(input_spec)
+        and input_spec[0] == "FLOAT"
+    ):
+        return
     default = inputs.get(input_name)
     placeholder = f"${{{runtime_name}}}"
     inputs[input_name] = placeholder
@@ -1952,4 +2033,87 @@ def _bind_runtime_parameter(
         property_schema["default"] = -1
     elif runtime_name != "prompt" and default is not None and not isinstance(default, list):
         property_schema["default"] = default
+    if default_candidates is not None and "default" in property_schema:
+        default_candidates.setdefault(runtime_name, []).append(property_schema["default"])
+    choices = _widget_choices(input_spec, required=True)
+    if choices is not None:
+        property_schema["enum"] = choices
+    if _is_widget_spec(input_spec) and input_spec[0] in ("INT", "FLOAT"):
+        options = input_spec[1] if len(input_spec) > 1 and isinstance(input_spec[1], dict) else {}
+        for source, target in (("min", "minimum"), ("max", "maximum"), ("step", "multipleOf")):
+            value = options.get(source)
+            if value is None:
+                continue
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+                or (source == "step" and value <= 0)
+            ):
+                raise ValueError("ComfyUI widget advertises an invalid numeric constraint")
+            property_schema[target] = value
+        if runtime_name == "seed" and "minimum" in property_schema:
+            property_schema["minimum"] = min(property_schema["minimum"], -1)
+
+    previous = schema_properties.get(runtime_name, {})
+    for key, combine in (("minimum", max), ("maximum", min)):
+        if key in previous:
+            property_schema[key] = combine(previous[key], property_schema.get(key, previous[key]))
+    if "enum" in previous:
+        property_schema["enum"] = [
+            value
+            for value in previous["enum"]
+            if "enum" not in property_schema or value in property_schema["enum"]
+        ]
+        if not property_schema["enum"]:
+            raise ValueError("ComfyUI widgets have no common setting choice")
+        property_schema["enum"].sort(key=lambda value: json.dumps(value, sort_keys=True))
+    if "multipleOf" in previous:
+        current_step = property_schema.get("multipleOf", previous["multipleOf"])
+        larger = max(current_step, previous["multipleOf"])
+        smaller = min(current_step, previous["multipleOf"])
+        if not math.isclose(larger / smaller, round(larger / smaller)):
+            raise ValueError("ComfyUI widgets have incompatible setting steps")
+        property_schema["multipleOf"] = larger
     schema_properties[runtime_name] = property_schema
+
+
+def _resolve_widget_defaults(
+    fields: list[SettingField],
+    properties: dict[str, Any],
+    candidates: dict[str, list[Any]],
+) -> None:
+    """Choose a valid default after all node and product constraints are known."""
+    for base in fields:
+        if base.key not in candidates:
+            continue
+        prop = properties[base.key]
+        field = workflow_settings([base], {"properties": {base.key: prop}})[0]
+        # Prefer an authored value that survives the intersection. The stable
+        # scalar ordering also settles graphs with several valid saved values.
+        values = sorted(candidates[base.key], key=lambda value: (type(value).__name__, value))
+        values.extend(sorted(field.choices, key=lambda value: json.dumps(value, sort_keys=True)))
+        values.append(base.default)
+        if field.type in {"integer", "number"}:
+            value = base.default
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                if field.minimum is not None:
+                    value = max(value, field.minimum)
+                if field.maximum is not None:
+                    value = min(value, field.maximum)
+                if field.multiple_of is not None:
+                    value = math.floor(value / field.multiple_of) * field.multiple_of
+                    if field.minimum is not None and value < field.minimum:
+                        value = math.ceil(field.minimum / field.multiple_of) * field.multiple_of
+                if field.type == "integer" and float(value).is_integer():
+                    value = int(value)
+                values.append(value)
+        for value in values:
+            try:
+                validate_settings({base.key: value}, [field])
+            except ValueError:
+                continue
+            prop["default"] = value
+            break
+        else:
+            raise ValueError("ComfyUI widgets have no valid shared setting default")
