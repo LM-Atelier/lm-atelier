@@ -15,7 +15,7 @@ import sys
 import sysconfig
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -90,9 +90,7 @@ def run_git(*arguments: str, required: bool = True) -> str:
     )
     if result.returncode != 0:
         if required:
-            raise RuntimeError(
-                result.stderr.strip() or f"git {' '.join(arguments)} failed"
-            )
+            raise RuntimeError(result.stderr.strip() or f"git {' '.join(arguments)} failed")
         return ""
     return result.stdout.strip()
 
@@ -100,19 +98,14 @@ def run_git(*arguments: str, required: bool = True) -> str:
 def canonical_version() -> str:
     match = VERSION_PATTERN.search(VERSION_FILE.read_text(encoding="utf-8"))
     if match is None:
-        raise RuntimeError(
-            f"Could not read the application version from {VERSION_FILE}"
-        )
+        raise RuntimeError(f"Could not read the application version from {VERSION_FILE}")
     return match.group(1)
 
 
 def normalized_license(value: Any, classifiers: list[str] | None = None) -> str:
     if isinstance(value, list):
         values = [normalized_license(item) for item in value]
-        expression = (
-            " OR ".join(item for item in values if item and item != "UNKNOWN")
-            or "UNKNOWN"
-        )
+        expression = " OR ".join(item for item in values if item and item != "UNKNOWN") or "UNKNOWN"
         return expression if expression in REVIEWED_LICENSE_EXPRESSIONS else "UNKNOWN"
     if isinstance(value, dict):
         return normalized_license(value.get("type") or value.get("name"))
@@ -144,9 +137,7 @@ def safe_segment(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-") or "package"
 
 
-def copy_license_file(
-    source: Path, destination: Path, relative_hint: str
-) -> str | None:
+def copy_license_file(source: Path, destination: Path, relative_hint: str) -> str | None:
     if not source.is_file() or source.stat().st_size > 1_000_000:
         return None
     digest = hashlib.sha256(relative_hint.encode("utf-8")).hexdigest()[:10]
@@ -171,17 +162,13 @@ def python_components(licenses_root: Path) -> tuple[list[dict[str, Any]], list[s
         normalized_name = name.lower().replace("_", "-")
         license_override = PYTHON_LICENSE_OVERRIDES.get((normalized_name, version))
         license_name = license_override or normalized_license(
-            distribution.metadata.get("License-Expression")
-            or distribution.metadata.get("License"),
+            distribution.metadata.get("License-Expression") or distribution.metadata.get("License"),
             classifiers,
         )
         declared = declared_license(
-            distribution.metadata.get("License-Expression")
-            or distribution.metadata.get("License")
+            distribution.metadata.get("License-Expression") or distribution.metadata.get("License")
         )
-        package_dir = (
-            licenses_root / "python" / f"{safe_segment(name)}@{safe_segment(version)}"
-        )
+        package_dir = licenses_root / "python" / f"{safe_segment(name)}@{safe_segment(version)}"
         package_dir.mkdir(parents=True, exist_ok=True)
         copied: list[str] = []
         for entry in distribution.files or []:
@@ -196,8 +183,7 @@ def python_components(licenses_root: Path) -> tuple[list[dict[str, Any]], list[s
             package_dir.rmdir()
         if license_name == "UNKNOWN":
             review.append(
-                f"Python package {name} {version} has unreviewed license metadata: "
-                f"{declared}"
+                f"Python package {name} {version} has unreviewed license metadata: {declared}"
             )
         purl = f"pkg:pypi/{quote(normalized_name, safe='')}@{quote(version, safe='')}"
         components.append(
@@ -214,9 +200,7 @@ def python_components(licenses_root: Path) -> tuple[list[dict[str, Any]], list[s
                     {
                         "name": "lm-atelier:license-review",
                         "value": (
-                            "version-specific override"
-                            if license_override
-                            else "declared metadata"
+                            "version-specific override" if license_override else "declared metadata"
                         ),
                     },
                     {
@@ -252,18 +236,12 @@ def node_components(licenses_root: Path) -> tuple[list[dict[str, Any]], list[str
         if package_json.is_file():
             package_document = json.loads(package_json.read_text(encoding="utf-8"))
         name = node_package_name(lock_path, package_document)
-        version = str(
-            package_document.get("version") or metadata.get("version") or "unknown"
-        )
+        version = str(package_document.get("version") or metadata.get("version") or "unknown")
         license_name = normalized_license(
             package_document.get("license") or metadata.get("license")
         )
-        declared = declared_license(
-            package_document.get("license") or metadata.get("license")
-        )
-        package_dir = (
-            licenses_root / "npm" / f"{safe_segment(name)}@{safe_segment(version)}"
-        )
+        declared = declared_license(package_document.get("license") or metadata.get("license"))
+        package_dir = licenses_root / "npm" / f"{safe_segment(name)}@{safe_segment(version)}"
         package_dir.mkdir(parents=True, exist_ok=True)
         copied: list[str] = []
         if package_root.is_dir():
@@ -277,8 +255,7 @@ def node_components(licenses_root: Path) -> tuple[list[dict[str, Any]], list[str
             package_dir.rmdir()
         if license_name == "UNKNOWN":
             review.append(
-                f"npm package {name} {version} has unreviewed license metadata: "
-                f"{declared}"
+                f"npm package {name} {version} has unreviewed license metadata: {declared}"
             )
         encoded_name = quote(name, safe="/")
         purl = f"pkg:npm/{encoded_name}@{quote(version, safe='')}"
@@ -414,8 +391,8 @@ def generated_time() -> datetime:
             timestamp = int(source_epoch)
         except ValueError as error:
             raise RuntimeError("SOURCE_DATE_EPOCH must be an integer") from error
-        return datetime.fromtimestamp(timestamp, tz=timezone.utc)
-    return datetime.now(tz=timezone.utc)
+        return datetime.fromtimestamp(timestamp, tz=UTC)
+    return datetime.now(tz=UTC)
 
 
 def sha256_file(path: Path) -> str:
@@ -530,9 +507,7 @@ def build_notices(components: list[dict[str, Any]]) -> str:
         )
         license_name = component["licenses"][0]["expression"].replace("|", "\\|")
         name = component["name"].replace("|", "\\|")
-        lines.append(
-            f"| {ecosystem} | {name} | {component['version']} | {license_name} |"
-        )
+        lines.append(f"| {ecosystem} | {name} | {component['version']} | {license_name} |")
     lines.extend(
         [
             "",
@@ -595,9 +570,7 @@ def main() -> int:
     )
     args = parser.parse_args()
     if bool(args.installer_tool) != bool(args.installer_tool_version):
-        parser.error(
-            "--installer-tool and --installer-tool-version must be supplied together"
-        )
+        parser.error("--installer-tool and --installer-tool-version must be supplied together")
     if args.installer_tool_sha256 and not args.installer_tool:
         parser.error("--installer-tool-sha256 requires --installer-tool")
     if args.installer_tool_sha256 and not re.fullmatch(
@@ -618,9 +591,7 @@ def main() -> int:
     if args.require_release_tag:
         expected_tag = f"v{version}"
         if tag != expected_tag:
-            raise SystemExit(
-                f"Release metadata requires exact tag {expected_tag}; found {tag!r}"
-            )
+            raise SystemExit(f"Release metadata requires exact tag {expected_tag}; found {tag!r}")
         if dirty:
             raise SystemExit("Release metadata requires a clean tracked worktree")
 
@@ -650,9 +621,7 @@ def main() -> int:
         lock_inputs = locked_build_inputs()
         toolchain = toolchain_versions(
             args.installer_tool,
-            args.installer_tool_version.strip()
-            if args.installer_tool_version
-            else None,
+            args.installer_tool_version.strip() if args.installer_tool_version else None,
             args.installer_tool_sha256.lower() if args.installer_tool_sha256 else None,
         )
         root_ref = f"pkg:generic/lm-atelier@{quote(version, safe='')}"
@@ -712,9 +681,7 @@ def main() -> int:
                 "license_inventory": "THIRD_PARTY_NOTICES.md",
                 "sbom": "sbom.cdx.json",
                 "signature_status": (
-                    "unsigned-preview"
-                    if args.require_release_tag
-                    else "unsigned-development-build"
+                    "unsigned-preview" if args.require_release_tag else "unsigned-development-build"
                 ),
             }
         )

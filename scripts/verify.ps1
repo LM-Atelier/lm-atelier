@@ -99,8 +99,15 @@ try {
         )
     }
 
-    Invoke-Checked "Ruff format" $Ruff @("format", "--check", "services/api")
-    Invoke-Checked "Ruff lint" $Ruff @("check", "services/api")
+    # scripts/ and packaging/ are checked here too. They were not checked at
+    # all before: this stage passed ruff only services/api. Ruff resolves
+    # settings per file from the nearest ancestor and those paths had none, so
+    # naming them here without the repository-root ruff.toml would have checked
+    # them at ruff's defaults - a narrower rule set, and a formatter width of 88
+    # rather than the 100 the rest of the repository uses. The root file is what
+    # makes naming them here mean the same standard.
+    Invoke-Checked "Ruff format" $Ruff @("format", "--check", "services/api", "scripts", "packaging")
+    Invoke-Checked "Ruff lint" $Ruff @("check", "services/api", "scripts", "packaging")
     # Without the explicit config mypy does not discover the nested API
     # pyproject from the repository root, so this ran with default settings
     # while being labelled strict. The label is the promise; the flag is

@@ -117,12 +117,8 @@ def decide(environment: Mapping[str, str], log: list[str]) -> int:
     # lost - the exact failure this job exists for - that commit would still
     # show a green merge gate and could be merged untested.
     if event == "pull_request" and draft == "true":
-        log.append(
-            "Draft pull request: full verification is deferred until ready_for_review."
-        )
-        log.append(
-            "Failing closed so this head is never authorized while it is a draft."
-        )
+        log.append("Draft pull request: full verification is deferred until ready_for_review.")
+        log.append("Failing closed so this head is never authorized while it is a draft.")
         return 1
 
     # An `edited` event covers two very different things. Changing the base
@@ -156,15 +152,11 @@ def decide(environment: Mapping[str, str], log: list[str]) -> int:
         return 1
 
     if plan != SUCCESS:
-        log.append(
-            f"The verification plan did not succeed for {head} (result: {plan})."
-        )
+        log.append(f"The verification plan did not succeed for {head} (result: {plan}).")
         return 1
 
     if ubuntu != SUCCESS:
-        log.append(
-            f"Ubuntu compatibility did not succeed for {head} (result: {ubuntu})."
-        )
+        log.append(f"Ubuntu compatibility did not succeed for {head} (result: {ubuntu}).")
         log.append("A skipped or cancelled job is not a passing one.")
         return 1
 

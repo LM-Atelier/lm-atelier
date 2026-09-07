@@ -175,9 +175,7 @@ def candidate_paths() -> list[str]:
         capture_output=True,
     )
     decoded = (item.decode("utf-8") for item in result.stdout.split(b"\0") if item)
-    return sorted(
-        item for item in decoded if Path(item).is_file() or Path(item).is_symlink()
-    )
+    return sorted(item for item in decoded if Path(item).is_file() or Path(item).is_symlink())
 
 
 def unsafe_path(value: str) -> bool:
@@ -191,9 +189,7 @@ def unsafe_path(value: str) -> bool:
     name = path.name
     if name == ".env" or name.startswith(".env."):
         return True
-    if name in DENIED_BASENAMES or (
-        name.startswith("service-account") and name.endswith(".json")
-    ):
+    if name in DENIED_BASENAMES or (name.startswith("service-account") and name.endswith(".json")):
         return True
     return any(name.endswith(suffix) for suffix in DENIED_SUFFIXES)
 
@@ -277,11 +273,7 @@ def broken_local_links(paths: list[str]) -> list[str]:
                 target = target[1:-1]
             else:
                 target = target.split(maxsplit=1)[0]
-            if (
-                not target
-                or target.startswith(("#", "/", "mailto:"))
-                or "://" in target
-            ):
+            if not target or target.startswith(("#", "/", "mailto:")) or "://" in target:
                 continue
             relative = unquote(target.split("#", 1)[0].split("?", 1)[0])
             if not relative:
@@ -306,19 +298,15 @@ def main() -> int:
     secret_paths = [path for path in paths if contains_secret(path)]
     if secret_paths:
         raise SystemExit(
-            "Likely credentials are present in candidate files:\n- "
-            + _listed(secret_paths)
+            "Likely credentials are present in candidate files:\n- " + _listed(secret_paths)
         )
 
     whitespace_paths = [
-        path
-        for path in paths
-        if not is_vendored(path) and has_trailing_whitespace(path)
+        path for path in paths if not is_vendored(path) and has_trailing_whitespace(path)
     ]
     if whitespace_paths:
         raise SystemExit(
-            "Trailing whitespace is present in candidate files:\n- "
-            + _listed(whitespace_paths)
+            "Trailing whitespace is present in candidate files:\n- " + _listed(whitespace_paths)
         )
 
     mangled = [line for path in paths for line in mojibake_lines(path)]
@@ -326,8 +314,7 @@ def main() -> int:
         raise SystemExit(
             "Text mangled by a codepage round trip is present. Rewrite the line "
             "as UTF-8, and prefer an explicit escape such as \\u2022 over a "
-            "literal non-ASCII character inside a regular expression:\n- "
-            + _listed(mangled)
+            "literal non-ASCII character inside a regular expression:\n- " + _listed(mangled)
         )
 
     broken_links = broken_local_links(paths)

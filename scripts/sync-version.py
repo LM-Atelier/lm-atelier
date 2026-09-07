@@ -7,7 +7,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parents[1]
 VERSION_FILE = ROOT / "services" / "api" / "local_lm" / "__init__.py"
 VERSION_PATTERN = re.compile(r'^__version__ = "([^"]+)"$', re.MULTILINE)
@@ -61,7 +60,8 @@ def sync_json_versions(version: str, *, write: bool) -> list[str]:
             if current == version:
                 continue
             mismatches.append(
-                f"{path.relative_to(ROOT)}:{'.'.join(location)} is {current!r}, expected {version!r}"
+                f"{path.relative_to(ROOT)}:{'.'.join(location)} is {current!r}, "
+                f"expected {version!r}"
             )
             if write:
                 set_value_at(document, location, version)
@@ -82,9 +82,7 @@ def validate_dynamic_sources() -> list[str]:
     if 'path = "local_lm/__init__.py"' not in pyproject:
         problems.append("services/api/pyproject.toml must read the canonical version module")
 
-    installer = (ROOT / "packaging" / "windows" / "LMAtelier.iss").read_text(
-        encoding="utf-8"
-    )
+    installer = (ROOT / "packaging" / "windows" / "LMAtelier.iss").read_text(encoding="utf-8")
     if re.search(r'#define MyAppVersion "[^"]+"', installer):
         problems.append("packaging/windows/LMAtelier.iss must receive MyAppVersion at build time")
     return problems

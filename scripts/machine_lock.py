@@ -137,8 +137,7 @@ class LeaseStranded(RuntimeError):
             )
         super().__init__(
             f"the lease {kind} {number} could not be closed after {during} "
-            f"(error {error}); this process may still hold the machine until it exits"
-            + detail
+            f"(error {error}); this process may still hold the machine until it exits" + detail
         )
 
 
@@ -285,9 +284,7 @@ def _final_path(handle: int) -> str:
     """The held object's current name, from the handle, never from a lookup."""
 
     buffer = ctypes.create_unicode_buffer(32768)
-    length = _kernel32().GetFinalPathNameByHandleW(
-        ctypes.c_void_p(handle), buffer, len(buffer), 0
-    )
+    length = _kernel32().GetFinalPathNameByHandleW(ctypes.c_void_p(handle), buffer, len(buffer), 0)
     if length == 0 or length >= len(buffer):
         raise LeaseRefused(
             f"the held directory's name could not be read (error {ctypes.get_last_error()})"
@@ -439,9 +436,7 @@ def _attributes(path: Path) -> int:
     return int(attributes)
 
 
-def _reparse_links(
-    path: Path, role: str, *, itself: bool = False
-) -> list[tuple[Path, str]]:
+def _reparse_links(path: Path, role: str, *, itself: bool = False) -> list[tuple[Path, str]]:
     """Every reparse point among the components of a textual path, root
     first - and the path itself when ``itself`` is set and it is one. Git
     resolves the text at each invocation, so retargeting one of these
@@ -599,13 +594,8 @@ def _hold_common_dir(repo: Path | None) -> tuple[int, _Binding]:
         try:
             identity = _identity(directory)
             name = _final_path(directory)
-            if (
-                _final_path(anchor) != anchor_name
-                or _identity(anchor) != anchor_identity
-            ):
-                raise LeaseRefused(
-                    "the repository directory moved while it was being resolved"
-                )
+            if _final_path(anchor) != anchor_name or _identity(anchor) != anchor_identity:
+                raise LeaseRefused("the repository directory moved while it was being resolved")
             if _directory_identity(_common_dir(Path(_plain(anchor_name)))) != identity:
                 raise LeaseRefused(
                     "the repository's common git directory changed while it was being held"
@@ -627,9 +617,7 @@ def _hold_common_dir(repo: Path | None) -> tuple[int, _Binding]:
                     )
             except BaseException as refusal:
                 nested, primary = _merge_strand(refusal)
-                strand = _abandon(
-                    during="a refused acquisition", pins=pins, stranded=nested
-                )
+                strand = _abandon(during="a refused acquisition", pins=pins, stranded=nested)
                 if strand is not None:
                     raise strand from primary
                 raise
@@ -680,9 +668,7 @@ def _open_lease_handle(
         if opened is None or opened == _INVALID_HANDLE:
             error = ctypes.get_last_error()
             if error == _ERROR_SHARING_VIOLATION:
-                raise LeaseRefused(
-                    f"contended: {_holder_line(Path(plain, LEASE_BASENAME))}"
-                )
+                raise LeaseRefused(f"contended: {_holder_line(Path(plain, LEASE_BASENAME))}")
             raise LeaseRefused(f"the lease file could not be opened (error {error})")
         handle = int(opened)
         _assert_binding(binding)
@@ -870,9 +856,7 @@ def acquire(
         if strand is not None:
             raise strand from primary
         raise
-    return AcquiredLease(
-        descriptor=descriptor, path=path, purpose=purpose, binding=binding
-    )
+    return AcquiredLease(descriptor=descriptor, path=path, purpose=purpose, binding=binding)
 
 
 def release(lease: AcquiredLease) -> None:
@@ -923,9 +907,7 @@ def status(repo: Path | None = None) -> str:
     # probe is closed first and every pin after it, each exactly once. If
     # any of them will not close, this process is now a holder and "free"
     # would be the one wrong answer.
-    strand = _abandon(
-        during="a status probe", handles=(("probe", probe),), pins=probe_binding.pins
-    )
+    strand = _abandon(during="a status probe", handles=(("probe", probe),), pins=probe_binding.pins)
     if strand is not None:
         raise strand
     return f"free (stale record left behind: {_holder_line(path)})"

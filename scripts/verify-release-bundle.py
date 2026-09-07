@@ -47,9 +47,7 @@ def _flat_files(root: Path) -> set[str]:
     files: set[str] = set()
     for entry in root.iterdir():
         if _is_link_or_junction(entry) or not entry.is_file():
-            raise RuntimeError(
-                f"Release bundle contains a non-regular entry: {entry.name}"
-            )
+            raise RuntimeError(f"Release bundle contains a non-regular entry: {entry.name}")
         files.add(entry.name)
     return files
 
@@ -93,8 +91,7 @@ def _verify_checksums(root: Path, platform_name: str, expected: set[str]) -> Non
         missing = sorted(expected_payload - set(entries))
         unexpected = sorted(set(entries) - expected_payload)
         raise RuntimeError(
-            f"{checksum_name} inventory mismatch: "
-            f"missing={missing}, unexpected={unexpected}"
+            f"{checksum_name} inventory mismatch: missing={missing}, unexpected={unexpected}"
         )
     for name, expected_digest in entries.items():
         if _sha256(root / name) != expected_digest:
@@ -151,9 +148,7 @@ def _verify_metadata(
     ):
         raise RuntimeError(f"{platform_name} SBOM identity is inconsistent")
     property_map = {
-        item.get("name"): item.get("value")
-        for item in properties
-        if isinstance(item, dict)
+        item.get("name"): item.get("value") for item in properties if isinstance(item, dict)
     }
     if property_map.get("lm-atelier:source-commit") != source_sha:
         raise RuntimeError(f"{platform_name} SBOM source commit is inconsistent")
@@ -190,19 +185,16 @@ def verify_bundle(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Verify the exact inventory, checksums, and source identity of a release bundle."
+        description=(
+            "Verify the exact inventory, checksums, and source identity of a release bundle."
+        )
     )
     parser.add_argument("--bundle", type=Path, required=True)
-    parser.add_argument(
-        "--platform", choices=("windows", "linux", "all"), required=True
-    )
+    parser.add_argument("--platform", choices=("windows", "linux", "all"), required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--source-sha", required=True)
     args = parser.parse_args()
-    if (
-        re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?", args.version)
-        is None
-    ):
+    if re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?", args.version) is None:
         parser.error("--version must be an exact SemVer-style version")
     if (
         SHA256.fullmatch(args.source_sha) is None
