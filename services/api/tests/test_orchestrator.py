@@ -21,7 +21,7 @@ from local_lm.models import (
     WorkflowRevision,
     WorkStep,
 )
-from local_lm.orchestrator import ConversationOrchestrator, _queued_workflow_activation
+from local_lm.orchestrator import ClaimLost, ConversationOrchestrator, _queued_workflow_activation
 from local_lm.scheduler import JobClaim
 from local_lm.schemas import EngineCapabilities, WorkerStatus
 from local_lm.workflow_activations import WorkflowActivationLaunchScope
@@ -503,6 +503,55 @@ async def test_cancelled_chat_release_restores_planner_readiness() -> None:
         await orchestrator._prepare_device_handoff("text_to_image", claim=_TEST_CLAIM)
 
     assert orchestrator._chat_planner_ready.is_set()
+
+
+async def test_a_refused_chat_release_restores_planner_readiness() -> None:
+    """A refused phase must leave the planner usable, as a cancelled stop does.
+
+    The release clears the planner latch and then announces itself, and that
+    announcement is a claim-bound write that RAISES when the row belongs to a
+    later attempt. It needs no cancellation and no scheduling window. Left
+    unrestored the latch stays cleared for the life of the process, because the
+    only other place that sets it is the resume the caller runs after this
+    method returns - and this method never returned.
+    """
+    chat = WorkerStatus(
+        name="chat",
+        state="ready",
+        managed=True,
+        running=True,
+        pid=21,
+        profile_id="profile-chat",
+    )
+    stop = AsyncMock()
+    processes = SimpleNamespace(
+        settings=SimpleNamespace(auto_unload_chat_for_media=True),
+        statuses=Mock(return_value=[chat]),
+        stop=stop,
+    )
+    orchestrator = ConversationOrchestrator(
+        engines=SimpleNamespace(settings=SimpleNamespace()),
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=Mock(),
+        processes=processes,
+    )
+    # The phase writer answers False exactly as it does for a row a later
+    # attempt now owns, which is what `_require_phase` turns into a stop.
+    orchestrator._set_media_phase = AsyncMock(return_value=False)  # type: ignore[method-assign]
+
+    with pytest.raises(ClaimLost, match="Releasing chat model"):
+        await orchestrator._prepare_device_handoff(
+            "text_to_image",
+            claim=_TEST_CLAIM,
+            job_id="job-release",
+            run_id="run-release",
+        )
+
+    assert orchestrator._chat_planner_ready.is_set(), (
+        "a refused release left the chat planner unavailable for the rest of the process"
+    )
+    stop.assert_not_awaited()
 
 
 async def test_media_worker_startup_forwards_truthful_phases() -> None:
