@@ -81,6 +81,85 @@ function KeyedSurface({ field }: { field: SettingField }) {
   );
 }
 
+describe("SettingControl numeric editing", () => {
+  it("reports nothing while the box is empty, for either numeric type", () => {
+    for (const type of ["integer", "number"] as const) {
+      const onChange = vi.fn();
+      const field = { ...stepsField, type, key: type };
+      render(<SettingControl field={field} value={30} onChange={onChange} />);
+      const input = screen.getByRole("spinbutton") as HTMLInputElement;
+
+      fireEvent.change(input, { target: { value: "" } });
+
+      // An emptied integer box used to report NaN, which reaches the API as
+      // null and is refused. An emptied number box used to report 0, because
+      // `Number("")` is 0 - so it could not be emptied at all, it jumped to
+      // zero and every settings surface persists that immediately.
+      expect(onChange).not.toHaveBeenCalled();
+      expect(input.value).toBe("");
+      cleanup();
+    }
+  });
+
+  it("reports the number once the text is one, and keeps the box showing what was typed", () => {
+    const onChange = vi.fn();
+    render(<SettingControl field={stepsField} value={30} onChange={onChange} />);
+    const input = screen.getByRole("spinbutton") as HTMLInputElement;
+
+    fireEvent.change(input, { target: { value: "" } });
+    fireEvent.change(input, { target: { value: "4" } });
+    fireEvent.change(input, { target: { value: "45" } });
+
+    expect(onChange.mock.calls.map((call) => call[0])).toEqual([4, 45]);
+    expect(input.value).toBe("45");
+  });
+
+  it("reports nothing for any half-typed number, not only an emptied box", () => {
+    // A number input hands the handler its SANITIZED value, so every one of
+    // these arrives as "" rather than as the characters typed. That is why the
+    // empty case is the whole class: typing a minus sign, or a decimal point
+    // before its digits, used to store 0 in a number field and null in an
+    // integer one, on the way to a perfectly ordinary value.
+    for (const partial of ["-", "3.", "1e", "abc"]) {
+      const onChange = vi.fn();
+      render(<SettingControl field={{ ...stepsField, key: "cfg", type: "number" }} value={7} onChange={onChange} />);
+      const input = screen.getByRole("spinbutton") as HTMLInputElement;
+
+      fireEvent.change(input, { target: { value: partial } });
+
+      expect(onChange, partial).not.toHaveBeenCalled();
+      expect(input.value).toBe("");
+      cleanup();
+    }
+  });
+
+  it("reports a negative number once it is one", () => {
+    const onChange = vi.fn();
+    render(<SettingControl field={{ ...stepsField, key: "cfg", type: "number", minimum: -10 }} value={7} onChange={onChange} />);
+    const input = screen.getByRole("spinbutton") as HTMLInputElement;
+
+    fireEvent.change(input, { target: { value: "-" } });
+    fireEvent.change(input, { target: { value: "-2" } });
+
+    expect(onChange.mock.calls.map((call) => call[0])).toEqual([-2]);
+  });
+
+  it("shows the stored value again once the field is left", () => {
+    const onChange = vi.fn();
+    render(<SettingControl field={stepsField} value={30} onChange={onChange} />);
+    const input = screen.getByRole("spinbutton") as HTMLInputElement;
+
+    fireEvent.change(input, { target: { value: "" } });
+    expect(input.value).toBe("");
+
+    fireEvent.blur(input);
+
+    // Nothing was stored while it was empty, so leaving it restores what is.
+    expect(onChange).not.toHaveBeenCalled();
+    expect(input.value).toBe("30");
+  });
+});
+
 describe("SettingControl identity across an edit", () => {
   it("keeps the same input element, and its caret, while a number is typed", () => {
     render(<KeyedSurface field={stepsField} />);
