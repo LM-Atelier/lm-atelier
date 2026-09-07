@@ -4707,15 +4707,24 @@ class ConversationOrchestrator:
         """
         self._schedule_media_restart()
 
-    def _schedule_media_restart(self) -> None:
+    def _schedule_media_restart(self) -> asyncio.Task[None] | None:
+        """Start the media worker back up, unless a restart is already running.
+
+        Returns the task THIS call created, or None when one was already in
+        flight and nothing new was started. A caller that intends to own the
+        restart it asked for has no other way to tell the two apart, and owning
+        a restart somebody else started is how one gets cancelled on its behalf.
+        """
+
         if self._media_restart_task and not self._media_restart_task.done():
-            return
+            return None
         task = asyncio.create_task(
             self._restart_media_worker(),
             name="media-worker-handoff-restart",
         )
         self._media_restart_task = task
         task.add_done_callback(self._media_restart_finished)
+        return task
 
     def _release_deferred_media_restart(self) -> None:
         if not self._media_restart_after_chat_activity:
@@ -4780,8 +4789,26 @@ class ConversationOrchestrator:
 
         if self._step_prewarm_plan_id is None or self._step_prewarm_task is not None:
             return
-        self._schedule_media_restart()
-        self._step_prewarm_task = self._media_restart_task
+        started = self._schedule_media_restart()
+        if started is None:
+            # A restart was already running, so this prewarm started nothing.
+            # The one that normally got here first is the give-back released on
+            # this same chat activity, one statement earlier in the caller.
+            #
+            # Adopting it was the defect: settling an unsuccessful step cancels
+            # what the prewarm owns, and the release has already cleared the
+            # flag that would re-arm the give-back, so a failed text step left
+            # the media worker down with nothing owing it.
+            #
+            # Standing down for this plan rather than trying again on the next
+            # delta: the launch the prewarm wanted is already happening, and
+            # `start_media` replaces the worker rather than returning early, so
+            # a second one would tear down the worker this restart is bringing
+            # up. There is nothing left to settle either, which is why the plan
+            # is released here.
+            self._step_prewarm_plan_id = None
+            return
+        self._step_prewarm_task = started
 
     async def _settle_step_prewarm(self, job_id: str) -> None:
         """Finish or abort a plan prewarm once its triggering step stops."""
