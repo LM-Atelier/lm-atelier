@@ -928,6 +928,103 @@ def test_ci_plan_is_fail_closed_and_audits_dependency_changes() -> None:
     assert not requires_windows(["docs/ARCHITECTURE.md"])
 
 
+def _tracked_documents(root: Path) -> set[str]:
+    """Every tracked document under `root`, one entry per file.
+
+    `git ls-files` writes one display line per path and quotes anything
+    unusual, so its output cannot be split on whitespace: a perfectly ordinary
+    `docs/Two words.md` becomes two paths, neither of which is a document, and
+    a check built on that reports a correctly classified file as unclassified.
+    `-z` writes each name's bytes followed by a NUL and quotes nothing, so the
+    record boundary is a byte that cannot occur inside a filename.
+
+    The bytes are decoded rather than read through `text=True` so that a name
+    outside UTF-8 round-trips instead of failing the run.
+    """
+
+    records = subprocess.run(
+        ["git", "ls-files", "-z", "*.md"],
+        check=True,
+        capture_output=True,
+        cwd=root,
+    ).stdout
+    return {path for path in records.decode("utf-8", "surrogateescape").split("\0") if path}
+
+
+def test_the_document_inventory_keeps_a_filename_with_spaces_whole(
+    tmp_path: Path,
+) -> None:
+    """A classified document whose name contains a space stays one document.
+
+    Splitting `git ls-files` output on whitespace turns `docs/Two words.md`
+    into `docs/Two` and `words.md`. Neither is tracked, so the totality check
+    reports two unclassified documents and fails the whole gate on a file that
+    was classified correctly. Nothing in this repository is named that way
+    today, which is exactly why the guard has to be a test rather than a habit.
+    """
+
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "Two words.md").write_text("spaced", encoding="utf-8")
+    (tmp_path / "README.md").write_text("plain", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], check=True, cwd=tmp_path)
+
+    assert _tracked_documents(tmp_path) == {"docs/Two words.md", "README.md"}
+
+
+def test_an_unclassified_document_is_not_lightweight() -> None:
+    """A document nobody has classified takes the full plan, not the empty one.
+
+    The documentation plan runs repository hygiene and a whitespace check and no
+    suite at all, so classifying a document wrongly does not weaken the run - it
+    removes it. Suffix alone cannot tell inert prose from a page a test reads,
+    which is why the answer is membership and why the unknown case goes up.
+    """
+
+    namespace = runpy.run_path(str(ROOT / "scripts/ci-plan.py"))
+    classify = namespace["classify_develop_changes"]
+    lightweight = namespace["is_lightweight_documentation"]
+
+    assert classify(["docs/UNCLASSIFIED-DOCUMENT.md"]) == ("full", False)
+    assert not lightweight("docs/UNCLASSIFIED-DOCUMENT.md")
+    # One unclassified document among inert ones still lifts the whole change.
+    assert classify(["docs/ARCHITECTURE.md", "docs/UNCLASSIFIED-DOCUMENT.md"]) == (
+        "full",
+        False,
+    )
+    # A document a test reads stays out of the lightweight set.
+    for contract in namespace["CONTRACT_DOCUMENTS"]:
+        assert not lightweight(contract), contract
+
+
+def test_every_tracked_document_is_classified() -> None:
+    """Adding a document forces the decision instead of defaulting to inert.
+
+    Without this the fail-closed default above is only as good as whoever
+    remembers it: a new document simply takes the full plan forever and nobody
+    learns that it was never classified. This makes the omission itself the
+    failure, at the moment the document is added.
+    """
+
+    namespace = runpy.run_path(str(ROOT / "scripts/ci-plan.py"))
+    normalize = namespace["normalized_path"]
+    contract = set(namespace["CONTRACT_DOCUMENTS"])
+    inert = set(namespace["INERT_DOCUMENTS"])
+
+    assert not contract & inert, contract & inert
+
+    tracked = {normalize(path) for path in _tracked_documents(ROOT)}
+    assert tracked, "no tracked documents were found"
+
+    assert tracked - (contract | inert) == set(), (
+        "these tracked documents are classified in neither set; add each to "
+        "CONTRACT_DOCUMENTS if any test reads it, otherwise to INERT_DOCUMENTS"
+    )
+    assert (contract | inert) - tracked == set(), (
+        "these entries name documents that are no longer tracked"
+    )
+
+
 def test_ci_plan_rejects_malformed_event_shas() -> None:
     namespace = runpy.run_path(str(ROOT / "scripts/ci-plan.py"))
     require_sha = namespace["require_sha"]
@@ -981,7 +1078,12 @@ def test_ci_plan_requires_exact_protected_develop_promotion(monkeypatch) -> None
         (["scripts/held-pytest-scratch.ps1"], "full", "false", "true"),
         (["scripts/verify.sh"], "full", "false", "true"),
         (["scripts/new-helper.py"], "full", "false", "true"),
-        (["scripts/README.md"], "documentation", "false", "false"),
+        # scripts/README.md is not a tracked document. It stands for one nobody
+        # has classified, so it lifts to the full plan rather than skipping the
+        # suite - and because it sits under a Windows-sensitive prefix, that
+        # plan wants Windows too. A real document under scripts/ would be
+        # classified in ci-plan.py and would not reach here.
+        (["scripts/README.md"], "full", "false", "true"),
         (["services/api/local_lm/api.py"], "full", "false", "true"),
         (["services/api/uv.lock", "docs/ARCHITECTURE.md"], "full", "true", "true"),
     ],
@@ -993,7 +1095,7 @@ def test_ci_plan_requires_exact_protected_develop_promotion(monkeypatch) -> None
         "pytest-scratch",
         "shell-script",
         "new-script",
-        "script-documentation",
+        "unclassified-document-under-a-windows-prefix",
         "api",
         "combined-dependency",
     ],
