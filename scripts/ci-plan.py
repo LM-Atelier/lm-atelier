@@ -9,10 +9,44 @@ from collections.abc import Iterable
 from pathlib import Path
 
 SHA = re.compile(r"[0-9a-f]{40}")
+# A documentation-only change runs repository hygiene and a whitespace check and
+# nothing else - not the test suite, not the browser suites. So the question this
+# answers is not "is this file prose" but "can this file be changed without any
+# test running". A path cannot answer that on its own: identical paths hold inert
+# prose or content a test reads, and the difference is invisible from the name.
+#
+# Both sets are therefore explicit, and a document in neither is NOT lightweight.
+# The cost of that default is one full run on a document nobody has classified;
+# the cost of the opposite default is a change landing with no suite at all
+# because someone added a document, or a test that reads one, and did not think
+# about this file. `test_every_tracked_document_is_classified` refuses a document
+# that is in neither set, so the decision cannot be skipped by omission.
+
+# Documents a test reads, so a change to one can fail the suite.
 CONTRACT_DOCUMENTS = {
     ".github/release_template.md",
     "docs/troubleshooting.md",
     "readme.md",
+}
+
+# Documents established to carry no executable contract: nothing reads them, and
+# they are not consumed by any tool. Adding a document here is the claim that
+# both remain true.
+INERT_DOCUMENTS = {
+    ".github/pull_request_template.md",
+    "code_of_conduct.md",
+    "contributing.md",
+    "docs/adapters.md",
+    "docs/architecture.md",
+    "docs/artifact-library-entry-contract.md",
+    "docs/decisions/0001-automatic-image-edit-strength.md",
+    "docs/editing-studio.md",
+    "docs/getting-started.md",
+    "docs/merge-queue.md",
+    "docs/privacy.md",
+    "docs/workflow-packages.md",
+    "security.md",
+    "support.md",
 }
 DEPENDENCY_FILES = {
     "apps/web/package.json",
@@ -43,10 +77,14 @@ def normalized_path(value: str) -> str:
 
 
 def is_lightweight_documentation(path: str) -> bool:
-    """Return whether a path is documentation with no executable contract."""
+    """Return whether a path is a document established to have no contract.
 
-    normalized = normalized_path(path)
-    return normalized.endswith(".md") and normalized not in CONTRACT_DOCUMENTS
+    Membership, not the suffix. An unrecognized document is not lightweight, so
+    a document added without being classified takes the full plan rather than
+    silently skipping every test.
+    """
+
+    return normalized_path(path) in INERT_DOCUMENTS
 
 
 def requires_dependency_audit(paths: Iterable[str]) -> bool:
