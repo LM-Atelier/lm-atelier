@@ -1025,6 +1025,62 @@ def test_every_tracked_document_is_classified() -> None:
     )
 
 
+# The two audits the scheduled job runs, and the manifests each one reads:
+# `npm audit` reads package.json and its lockfile, and audit-dependencies.py
+# runs pip-audit over the Python project and its lockfile. A file with one of
+# these names is a dependency input by definition, wherever it sits.
+DEPENDENCY_MANIFEST_NAMES = frozenset(
+    {"package.json", "package-lock.json", "pyproject.toml", "uv.lock"}
+)
+
+
+def _tracked_dependency_manifests(root: Path) -> set[str]:
+    """Every tracked file under `root` whose name is a dependency manifest.
+
+    The whole index is listed and filtered on the final path segment rather
+    than matched with a glob, because `*package.json` also matches a file
+    named `old-package.json`, which is not one.
+    """
+
+    records = subprocess.run(
+        ["git", "ls-files", "-z"],
+        check=True,
+        capture_output=True,
+        cwd=root,
+    ).stdout
+    decoded = records.decode("utf-8", "surrogateescape")
+    paths = (path for path in decoded.split("\0") if path)
+    return {path for path in paths if path.rsplit("/", 1)[-1] in DEPENDENCY_MANIFEST_NAMES}
+
+
+def test_every_tracked_dependency_manifest_asks_for_the_audit() -> None:
+    """A manifest added later must not land with the audit quietly skipped.
+
+    `DEPENDENCY_FILES` is a closed list of five paths, and a change is audited
+    only if it touches one of them. Add a second web workspace, or a second
+    Python project, and its manifest is not in the list: the dependency change
+    lands with the audit reported as skipped rather than failed, which reads
+    exactly like a change that had no dependencies in it. The failure has to be
+    the omission itself, at the moment the manifest is added, because by the
+    time it matters the evidence is a green run that checked nothing.
+    """
+
+    namespace = runpy.run_path(str(ROOT / "scripts/ci-plan.py"))
+    normalize = namespace["normalized_path"]
+    audited = {normalize(path) for path in namespace["DEPENDENCY_FILES"]}
+
+    tracked = {normalize(path) for path in _tracked_dependency_manifests(ROOT)}
+    assert tracked, "no tracked dependency manifests were found"
+
+    assert tracked - audited == set(), (
+        "these tracked dependency manifests are not in DEPENDENCY_FILES, so "
+        "changing one skips the audit instead of running it"
+    )
+    assert audited - tracked == set(), (
+        "these entries name dependency manifests that are no longer tracked"
+    )
+
+
 def test_ci_plan_rejects_malformed_event_shas() -> None:
     namespace = runpy.run_path(str(ROOT / "scripts/ci-plan.py"))
     require_sha = namespace["require_sha"]
