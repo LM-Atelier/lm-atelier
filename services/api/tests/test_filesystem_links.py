@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import stat
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -31,6 +33,66 @@ def test_regular_file_and_symbolic_link_are_distinguished(
         missing="raise",
         unreadable="raise",
     )
+
+
+def _make_junction(link: Path, target: Path) -> bool:
+    """Point `link` at `target` as a real junction, or report host refusal."""
+
+    completed = subprocess.run(  # noqa: S603 - fixed argv, test-local paths
+        ["cmd", "/c", "mklink", "/J", str(link), str(target)],  # noqa: S607
+        capture_output=True,
+        check=False,
+    )
+    return completed.returncode == 0
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junctions exist only on Windows")
+def test_a_symlink_only_check_does_not_see_a_real_junction(tmp_path: Path) -> None:
+    """The weaker form of this check cannot come back without failing here.
+
+    The other junction case in this module builds a synthetic one by patching
+    `lstat` to report the reparse attribute. That shows the function reads the
+    attribute; it cannot show that a real junction carries it, because the fake
+    supplies the very fact under test. This makes the real thing and asks both
+    questions of it.
+
+    `Path.is_symlink()` answers False for a junction, because a junction is a
+    reparse point and not a symbolic link. A containment check written that way
+    passes a junction straight through, which is the regression this pins.
+
+    Being exact about what this adds over the synthetic case above, since that
+    one does fail if the reparse test is removed from `is_link_or_reparse`:
+    what it cannot fail on is the premise itself. It asserts the attribute
+    because it supplied the attribute. If a real junction ever stopped
+    reporting what the fake reports, every synthetic case here would still pass
+    while the production check quietly stopped seeing junctions. This one reads
+    the attribute off the filesystem, so the premise is measured rather than
+    assumed.
+
+    On Linux the distinction does not exist - `os.symlink` makes a symbolic
+    link and `is_symlink()` sees it - so there is nothing to guard there and
+    the case is skipped rather than weakened into something that passes
+    everywhere.
+    """
+
+    target = tmp_path / "target"
+    target.mkdir()
+    link = tmp_path / "junction"
+    if not _make_junction(link, target):
+        pytest.skip("this host refuses to create a junction")
+
+    assert link.is_dir(), "the junction should resolve to the target directory"
+    assert not link.is_symlink(), "a junction is a reparse point, not a symlink"
+
+    # The premise every synthetic case in this module assumes, taken from the
+    # filesystem instead of supplied by a fake: a real junction sets the
+    # reparse attribute, and its mode is a directory rather than a link.
+    metadata = link.lstat()
+    reparse = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    assert int(getattr(metadata, "st_file_attributes", 0)) & reparse
+    assert not stat.S_ISLNK(metadata.st_mode)
+
+    assert is_link_or_reparse(link, missing="raise", unreadable="raise")
 
 
 def test_windows_reparse_attribute_is_recognized(
