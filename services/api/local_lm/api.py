@@ -4566,9 +4566,14 @@ async def catalog_search(
                 }
             )
         registry = ComfyTemplateRegistry(services.settings)
+        available_ids = (
+            {template.remote_id.casefold() for template in registry.available(role)}
+            if page.items
+            else set()
+        )
         items = []
         for item in page.items:
-            ready = bool(registry.matches(item.remote_id, role))
+            ready = item.remote_id.casefold() in available_ids
             adaptive_candidate = role == "image" and "safetensors" in {
                 item_format.casefold() for item_format in item.formats
             }
