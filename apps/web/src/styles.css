@@ -377,7 +377,9 @@ body.resizing-sidebar { user-select: none; cursor: col-resize; }
 .sidebar-chat-row:hover > .inline-add,
 .sidebar-chat-row:has(:focus-visible) > .inline-add { opacity: 1; }
 .sidebar-footer { margin-top: auto; border-top: 1px solid var(--border); padding-top: 9px; }
-.setup-nav-state { margin-left: auto; color: var(--muted); font-size: 11px; }
+/* Two lines of 12px are exactly the 24px the row's icon already imposes, so
+   the status wrapping at the narrow end of the sidebar costs no height. */
+.setup-nav-state { margin-left: auto; color: var(--muted); font-size: 11px; line-height: 12px; }
 .setup-nav-state.ready { color: var(--success); }
 .setup-nav-state.action_required { color: var(--atelier-soft); }
 .connection { display: flex; align-items: center; gap: 6px; color: var(--ink-muted); font-size: 11px; padding: 9px 10px 2px; }
