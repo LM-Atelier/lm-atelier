@@ -40,6 +40,7 @@ import { CopyTextButton } from "./CopyTextButton";
 import { InstallConfirmDialog } from "./InstallConfirmDialog";
 import { api } from "./api";
 import { formatBytes } from "./format";
+import { editReviewSummary } from "./editReview";
 import { videoLengthSummary } from "./videoLength";
 import { GlobalNotices } from "./GlobalNotices";
 import {
@@ -384,6 +385,7 @@ export function MessageBubble({
               </span>
             )}
             {appliedTriggerWords.length > 0 && <span>Added trigger words: {appliedTriggerWords.join(", ")}</span>}
+            {editReviewSummary(provenance) && <span>{editReviewSummary(provenance)}</span>}
             {videoLengthSummary(provenance) && <span>{videoLengthSummary(provenance)}</span>}
             {contextLimit > 0 && (
               <span>
