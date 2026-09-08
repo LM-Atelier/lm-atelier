@@ -31,6 +31,7 @@ from .filesystem_links import (
     discard_entry,
     link_entry,
     list_entries,
+    open_entry,
     sync_directory,
 )
 
@@ -442,7 +443,7 @@ def _registry(
         anchor = AnchoredDirectory(parent)
     except AnchoredDirectoryError:
         _invalid()
-    with anchor:
+    with anchor, contextlib.ExitStack() as held:
         # What the registry name IS, from the directory's own enumeration
         # record rather than from a second lookup by path.
         #
@@ -454,7 +455,7 @@ def _registry(
         # then follows the link by path into somebody else's database. The
         # listing is the only place the LINK kind survives.
         try:
-            listed = {entry.name: entry for entry in list_entries(anchor)}
+            listed = {entry.name: entry for entry in list_entries(anchor, include_metadata=False)}
         except AnchoredDirectoryError:
             _invalid()
         present = listed.get(leaf)
@@ -464,6 +465,31 @@ def _registry(
             # A link, a directory, or a kind the filesystem would not name.
             # Refusing beats adopting whatever it points at.
             _invalid()
+        # An extra POSIX close can clear SQLite locks held by another connection.
+        # Namespace pinning uses Windows share modes only.
+        if os.name == "nt":
+            # Keep the file as well as its directory until SQLite closes. On Windows,
+            # the anchored descriptor denies deletion and rename without preventing
+            # SQLite from opening the same regular file for ordinary reads and writes.
+            try:
+                descriptor = open_entry(anchor, leaf)
+                if descriptor is None:
+                    _invalid()
+                held.callback(os.close, descriptor)
+                # Acquisition can land after the initial listing. Check the held
+                # name again: a Windows reparse file can look regular to fstat.
+                present = next(
+                    (
+                        entry
+                        for entry in list_entries(anchor, include_metadata=False)
+                        if entry.name == leaf
+                    ),
+                    None,
+                )
+            except AnchoredDirectoryError:
+                _invalid()
+            if present is None or present.kind is not AnchoredEntryKind.FILE:
+                _invalid()
         path = parent / leaf
         _validate_registry(path)
         try:

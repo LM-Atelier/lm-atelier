@@ -4,12 +4,15 @@ import hashlib
 import os
 import sqlite3
 import subprocess
+import sys
 import threading
 import uuid
 from pathlib import Path
 
 import pytest
 
+import local_lm.shared_asset_registry_v1 as registry
+from local_lm.filesystem_links import AnchoredDirectory, AnchoredEntry, list_entries
 from local_lm.shared_asset_registry_v1 import (
     INVALID_REGISTRY,
     SharedAssetRegistryError,
@@ -865,3 +868,148 @@ def test_not_null_alone_does_not_stop_an_ordinary_writer_being_enough(
                 )
         finally:
             connection.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows held-file namespace contract")
+@pytest.mark.parametrize(
+    "after_validation", [False, True], ids=["before-validation", "after-validation"]
+)
+def test_the_validated_registry_cannot_be_replaced_before_the_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, after_validation: bool
+) -> None:
+    library = tmp_path / "library"
+    library.mkdir()
+    database = library / "index.sqlite3"
+    foreign = library / "replacement.sqlite3"
+    original = library / "original.sqlite3"
+    consumer = _consumer("profile-a")
+    owner = _consumer("profile-b")
+    existing = reserve_claim(
+        database=database, consumer_id=consumer, package_digest=_digest("existing")
+    )
+    reserve_claim(database=foreign, consumer_id=owner, package_digest=_digest("foreign"))
+    foreign_bytes = foreign.read_bytes()
+    validate = registry._validate_registry
+    blocked = False
+
+    def validate_while_replacing(path: Path) -> int:
+        nonlocal blocked
+        version = validate(path) if after_validation else None
+        try:
+            database.rename(original)
+        except PermissionError:
+            blocked = True
+        else:
+            foreign.rename(database)
+        return version if version is not None else validate(path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(registry, "_validate_registry", validate_while_replacing)
+        created = reserve_claim(
+            database=database, consumer_id=consumer, package_digest=_digest("new")
+        )
+
+    assert blocked, "the database name changed after acquisition and before the write"
+    assert foreign.read_bytes() == foreign_bytes
+    assert {
+        claim.claim_id for claim in claims_for_consumer(database=database, consumer_id=consumer)
+    } == {
+        existing.claim_id,
+        created.claim_id,
+    }
+    assert not package_is_claimed(database=foreign, package_digest=_digest("new"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows held-file namespace contract")
+def test_a_registry_link_introduced_during_acquisition_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    library = tmp_path / "library"
+    library.mkdir()
+    database = library / "index.sqlite3"
+    foreign = library / "replacement.sqlite3"
+    original = library / "original.sqlite3"
+    reserve_claim(
+        database=database, consumer_id=_consumer("profile-a"), package_digest=_digest("existing")
+    )
+    reserve_claim(
+        database=foreign, consumer_id=_consumer("profile-b"), package_digest=_digest("foreign")
+    )
+    foreign_bytes = foreign.read_bytes()
+    # Prove the local test capability before starting the operation under test.
+    probe = library / "link-probe"
+    try:
+        probe.symlink_to(foreign)
+    except OSError:
+        pytest.skip("this host does not allow file symlinks")
+    probe.unlink()
+    enumerate_entries = list_entries
+    replaced = False
+
+    def enumerate_while_replacing(
+        anchor: AnchoredDirectory, *, include_metadata: bool = True
+    ) -> tuple[AnchoredEntry, ...]:
+        nonlocal replaced
+        entries = (
+            enumerate_entries(anchor)
+            if include_metadata
+            else enumerate_entries(anchor, include_metadata=False)
+        )
+        if not replaced:
+            replaced = True
+            database.rename(original)
+            database.symlink_to(foreign)
+        return entries
+
+    with monkeypatch.context() as patch:
+        patch.setattr(registry, "list_entries", enumerate_while_replacing)
+        with pytest.raises(SharedAssetRegistryError, match=INVALID_REGISTRY):
+            reserve_claim(
+                database=database, consumer_id=_consumer("profile-a"), package_digest=_digest("new")
+            )
+
+    assert replaced
+    assert foreign.read_bytes() == foreign_bytes
+    database.unlink()  # The refused acquisition must release its own file handle.
+    assert original.is_file()
+    assert not package_is_claimed(database=foreign, package_digest=_digest("new"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX SQLite advisory-lock contract")
+def test_a_registry_reader_preserves_another_connections_writer_lock(tmp_path: Path) -> None:
+    database = tmp_path / "index.sqlite3"
+    consumer = _consumer("profile-a")
+    reserve_claim(database=database, consumer_id=consumer, package_digest=_digest("existing"))
+    writer = sqlite3.connect(database)
+    try:
+        # The supported fallback when an existing connection prevents switching
+        # into WAL must preserve the same exclusion as the normal journal mode.
+        assert writer.execute("PRAGMA journal_mode=DELETE").fetchone() == ("delete",)
+        writer.execute("BEGIN IMMEDIATE")
+        assert claims_for_consumer(database=database, consumer_id=consumer)
+        probe = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sqlite3,sys\n"
+                "connection=sqlite3.connect(sys.argv[1],timeout=0)\n"
+                "try:\n"
+                " connection.execute('BEGIN IMMEDIATE')\n"
+                "except sqlite3.OperationalError as error:\n"
+                " print(error.sqlite_errorcode)\n"
+                "else:\n"
+                " connection.rollback()\n"
+                " print('writer acquired')\n"
+                "finally:\n"
+                " connection.close()\n",
+                str(database),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+        assert probe.stdout.strip() == str(sqlite3.SQLITE_BUSY)
+    finally:
+        writer.rollback()
+        writer.close()
