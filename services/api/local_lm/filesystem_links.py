@@ -139,6 +139,7 @@ _FILETIME_EPOCH: Final = datetime(1601, 1, 1, tzinfo=UTC)
 #: is on, rather than for whatever a pathname resolves to at the moment it is
 #: read.
 _FILE_FS_SIZE_INFORMATION_CLASS: Final = 3
+_FILE_FS_DEVICE_INFORMATION_CLASS: Final = 4
 _MAX_ENTRY_NAME: Final = 260
 _NT_NAMESPACE: Final = "\\??\\"
 
@@ -264,6 +265,14 @@ class DirectoryIdentity:
     platform: Literal["posix", "windows"]
     volume_id: int
     file_id: int
+
+
+@dataclasses.dataclass(frozen=True)
+class DirectoryDeviceInformation:
+    """Raw Windows volume device fields, preserving unknown values and flag bits."""
+
+    device_type: int
+    characteristics: int
 
 
 def directory_identity(anchor: AnchoredDirectory) -> DirectoryIdentity:
@@ -1644,6 +1653,12 @@ def _windows_api() -> Any:
             ("BytesPerSector", ctypes.c_ulong),
         )
 
+    class FileFsDeviceInformation(ctypes.Structure):
+        _fields_ = (
+            ("DeviceType", ctypes.c_ulong),
+            ("Characteristics", ctypes.c_ulong),
+        )
+
     class FileIdInformation(ctypes.Structure):
         _fields_ = (
             ("VolumeSerialNumber", ctypes.c_ulonglong),
@@ -1672,6 +1687,7 @@ def _windows_api() -> Any:
         IoStatusBlock=IoStatusBlock,
         FileBasicInformation=FileBasicInformation,
         FileFsSizeInformation=FileFsSizeInformation,
+        FileFsDeviceInformation=FileFsDeviceInformation,
         FileIdInformation=FileIdInformation,
         FileNameInformation=FileNameInformation,
     )
@@ -1881,6 +1897,38 @@ def _nt_mark_deleted(handle: int) -> None:
     )
     if status & 0xFFFFFFFF != _STATUS_SUCCESS:
         _refuse()
+
+
+def directory_device_information(anchor: AnchoredDirectory) -> DirectoryDeviceInformation:
+    """Read device fields from the held Windows directory, without a path lookup.
+
+    These are the filesystem driver's reported fields, not an eligibility verdict.
+    Unsupported fields can be zero, and removable media is distinct from a
+    removable device. POSIX and closed anchors refuse rather than guess.
+    """
+
+    handle = anchor.handle
+    if handle is None:
+        _refuse()
+    api = _windows_api()
+    information = api.FileFsDeviceInformation()
+    status_block = api.IoStatusBlock()
+    size = api.ctypes.sizeof(information)
+    # FileFsDeviceInformation describes the volume associated with this handle.
+    # https://learn.microsoft.com/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntqueryvolumeinformationfile
+    status = api.ntdll.NtQueryVolumeInformationFile(
+        api.ctypes.c_void_p(handle),
+        api.ctypes.byref(status_block),
+        api.ctypes.byref(information),
+        api.ctypes.c_ulong(size),
+        api.ctypes.c_ulong(_FILE_FS_DEVICE_INFORMATION_CLASS),
+    )
+    if status & 0xFFFFFFFF != _STATUS_SUCCESS or status_block.Information != size:
+        _refuse()
+    return DirectoryDeviceInformation(
+        device_type=int(information.DeviceType),
+        characteristics=int(information.Characteristics),
+    )
 
 
 def available_bytes(anchor: AnchoredDirectory) -> int:
