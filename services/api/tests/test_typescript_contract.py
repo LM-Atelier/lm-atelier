@@ -489,7 +489,6 @@ VOCABULARY_TOKENS = frozenset(
 OPEN_VOCABULARY_BASELINE = frozenset(
     {
         "BoundWorkflowAssetOut.kind",
-        "JobOut.phase",
         "ReferenceSubjectCreate.kind",
         "WorkflowInstallOfferOut.invalidation_code",
     }
@@ -652,8 +651,9 @@ VOCABULARY_NAME_EXCLUSIONS = (
 
 VOCABULARY_COMPONENT_EXCLUSION = "FastAPI validation models, which the application does not define"
 
-# These exact fields name third-party values the application cannot enumerate.
+# These exact fields carry open text or third-party values that cannot be enumerated.
 OPEN_VOCABULARY_FIELDS = {
+    "JobOut.phase": "Progress labels include external filenames, hostnames and component counts",
     "WorkflowMissingNodeOut.node_type": "ComfyUI class names from user-supplied workflow graphs",
 }
 
