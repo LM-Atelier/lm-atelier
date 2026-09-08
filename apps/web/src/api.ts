@@ -16,6 +16,8 @@ import type {
   BackupInfo,
   ReferenceAsset,
   ReferenceAssetAttached,
+  ReferenceAssetReview,
+  ReferenceAssetReviewed,
   ReferenceDeletionImpact,
   ReferenceSubject,
   ReferenceSubjectPage,
@@ -767,6 +769,11 @@ export const api = {
     ),
   referenceAssets: (id: string) =>
     request<ReferenceAsset[]>(`/api/references/${encodeURIComponent(id)}/assets`),
+  reviewReferenceAsset: (id: string, assetId: string, body: ReferenceAssetReview) =>
+    request<ReferenceAssetReviewed>(
+      `/api/references/${encodeURIComponent(id)}/assets/${encodeURIComponent(assetId)}/review`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
   attachReferenceAsset: (id: string, body: { artifact_id: string; purpose?: string }) =>
     request<ReferenceAssetAttached>(`/api/references/${encodeURIComponent(id)}/assets`, {
       method: "POST",

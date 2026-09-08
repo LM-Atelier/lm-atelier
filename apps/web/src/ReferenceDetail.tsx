@@ -5,8 +5,9 @@ import { api } from "./api";
 import { EmptyState } from "./EmptyState";
 import { ErrorCallout } from "./ErrorCallout";
 import { LibraryImagePicker } from "./LibraryImagePicker";
+import { ReferenceAssetReviewDialog } from "./ReferenceAssetReviewDialog";
 import { artifactSource } from "./messageMedia";
-import type { ArtifactLibraryItem, ReferenceSimilarAsset, ReferenceSubject } from "./types";
+import type { ArtifactLibraryItem, ReferenceAsset, ReferenceSimilarAsset, ReferenceSubject } from "./types";
 
 /** What one image is for. Closed, because a preparation recipe decides what to
  *  do with an image from its purpose - one nobody implements contributes
@@ -33,6 +34,7 @@ export function ReferenceDetail({
   const client = useQueryClient();
   const [purpose, setPurpose] = useState<string>("identity");
   const [picking, setPicking] = useState(false);
+  const [reviewing, setReviewing] = useState<ReferenceAsset | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Held after an attach rather than shown transiently: the whole point is that
   // the person who just added the image gets to decide what to do about it.
@@ -279,6 +281,15 @@ export function ReferenceDetail({
               <span className="badge">{asset.validation_state}</span>
             </div>
             <div className="row-actions">
+              {asset.validation_state === "unchecked" ? (
+                <button
+                  className="secondary"
+                  aria-label={`Review image ${asset.sort_order + 1}`}
+                  onClick={() => setReviewing(asset)}
+                >
+                  Review image
+                </button>
+              ) : null}
               {/* Pressing the current cover clears it, so there is a way back
                   to no cover at all without removing the picture. */}
               <button
@@ -309,6 +320,15 @@ export function ReferenceDetail({
           </li>
         ))}
       </ul>
+
+      {reviewing?.reference_subject_id === subject.id ? (
+        <ReferenceAssetReviewDialog
+          key={reviewing.id}
+          asset={reviewing}
+          subjectName={subject.name}
+          onClose={() => setReviewing(null)}
+        />
+      ) : null}
 
       {picking ? (
         <LibraryImagePicker

@@ -1552,6 +1552,18 @@ export interface ReferenceAsset {
   validation_state: "unchecked" | "usable" | "weak" | "rejected";
 }
 
+export interface ReferenceAssetReview {
+  outcome: "usable" | "weak" | "rejected";
+  reasons: string[];
+}
+
+export interface ReferenceAssetReviewed {
+  asset: ReferenceAsset;
+  width: number;
+  height: number;
+  review_version: number;
+}
+
 export type PromptTemplateSlotMode = "input" | "choice" | "model" | "fixed";
 export type PromptTemplateVariationScope = "item" | "batch";
 
