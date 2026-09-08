@@ -6,15 +6,17 @@ import type { WorkflowFamily } from "./types";
 
 /** Ask before archiving a family, with what it actually costs.
  *
- * The server refuses outright while work is genuinely in flight; this shows
- * that refusal rather than offering a button that cannot succeed.
+ * The server requires selections and defaults to move before archiving.
+ * Accepted work and immutable revisions survive the change.
  */
 export function WorkflowFamilyArchive({
   family,
   onClose,
+  onArchived,
 }: {
   family: WorkflowFamily;
   onClose: () => void;
+  onArchived?: () => void;
 }) {
   const client = useQueryClient();
   const impact = useQuery({
@@ -25,6 +27,7 @@ export function WorkflowFamilyArchive({
     mutationFn: () => api.updateWorkflowFamily(family.id, { archived: true }),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: ["workflow-families"] });
+      onArchived?.();
       onClose();
     },
   });
@@ -32,9 +35,11 @@ export function WorkflowFamilyArchive({
   if (impact.isLoading) {
     return (
       <ConfirmDialog
+        tone="action"
         title={`Archive ${family.name}?`}
         question="Working out what this would affect…"
         confirmLabel="Archive"
+        confirmDisabled
         onConfirm={onClose}
         onCancel={onClose}
       />
@@ -47,6 +52,7 @@ export function WorkflowFamilyArchive({
     // reversible, but a decision taken on invented evidence is not a decision.
     return (
       <ConfirmDialog
+        tone="action"
         title={`Archive ${family.name}?`}
         question="What this would affect could not be read, so it is not being offered yet."
         detail={
@@ -66,8 +72,9 @@ export function WorkflowFamilyArchive({
   if (found?.archive_blocked) {
     return (
       <ConfirmDialog
+        tone="action"
         title={`${family.name} is still in use`}
-        question="It cannot be archived while work is running against it. Let the queue drain, or stop the runs, and try again."
+        question="This family is selected by a chat or project, or is set as a default. Choose another workflow in those places before archiving it."
         confirmLabel="Close"
         onConfirm={onClose}
         onCancel={onClose}
@@ -80,6 +87,7 @@ export function WorkflowFamilyArchive({
 
   return (
     <ConfirmDialog
+        tone="action"
       title={`Archive ${family.name}?`}
       question="Archiving hides it from the selectors. It does not delete anything."
       detail={
