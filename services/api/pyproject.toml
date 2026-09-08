@@ -46,9 +46,9 @@ package = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ajccarlson/lm-atelier"
-Issues = "https://github.com/ajccarlson/lm-atelier/issues"
-Repository = "https://github.com/ajccarlson/lm-atelier.git"
+Homepage = "https://github.com/LM-Atelier/lm-atelier"
+Issues = "https://github.com/LM-Atelier/lm-atelier/issues"
+Repository = "https://github.com/LM-Atelier/lm-atelier.git"
 
 [project.scripts]
 lm-atelier = "local_lm.desktop:main"

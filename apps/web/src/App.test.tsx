@@ -2434,26 +2434,26 @@ describe("App", () => {
     expect(screen.queryByText("Artifact folder requested as")).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Issues" })).toHaveAttribute(
       "href",
-      "https://github.com/ajccarlson/lm-atelier/issues",
+      "https://github.com/LM-Atelier/lm-atelier/issues",
     );
     // Documentation is pinned to the running release, so a reader is not shown
     // instructions for software they are not running.
     expect(screen.getByRole("link", { name: "Security" })).toHaveAttribute(
       "href",
-      "https://github.com/ajccarlson/lm-atelier/blob/v0.1.7/SECURITY.md",
+      "https://github.com/LM-Atelier/lm-atelier/blob/v0.1.7/SECURITY.md",
     );
     expect(screen.getByRole("link", { name: "Support" })).toHaveAttribute(
       "href",
-      "https://github.com/ajccarlson/lm-atelier/blob/v0.1.7/SUPPORT.md",
+      "https://github.com/LM-Atelier/lm-atelier/blob/v0.1.7/SUPPORT.md",
     );
     expect(screen.getByRole("link", { name: "Privacy" })).toHaveAttribute(
       "href",
-      "https://github.com/ajccarlson/lm-atelier/blob/v0.1.7/docs/PRIVACY.md",
+      "https://github.com/LM-Atelier/lm-atelier/blob/v0.1.7/docs/PRIVACY.md",
     );
     // The one document a stuck user needs was previously unreachable from here.
     expect(screen.getByRole("link", { name: "Troubleshooting" })).toHaveAttribute(
       "href",
-      "https://github.com/ajccarlson/lm-atelier/blob/v0.1.7/docs/TROUBLESHOOTING.md",
+      "https://github.com/LM-Atelier/lm-atelier/blob/v0.1.7/docs/TROUBLESHOOTING.md",
     );
     expect(screen.getByRole("link", { name: "Getting started" })).toBeInTheDocument();
 

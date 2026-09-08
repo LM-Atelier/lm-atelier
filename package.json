@@ -10,13 +10,13 @@
   ],
   "license": "Apache-2.0",
   "private": true,
-  "homepage": "https://github.com/ajccarlson/lm-atelier#readme",
+  "homepage": "https://github.com/LM-Atelier/lm-atelier#readme",
   "bugs": {
-    "url": "https://github.com/ajccarlson/lm-atelier/issues"
+    "url": "https://github.com/LM-Atelier/lm-atelier/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ajccarlson/lm-atelier.git"
+    "url": "git+https://github.com/LM-Atelier/lm-atelier.git"
   },
   "workspaces": [
     "apps/web"
