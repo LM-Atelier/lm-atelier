@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ReferenceDetail } from "./ReferenceDetail";
 import { api } from "./api";
-import type { ArtifactLibraryItem, ReferenceAsset, ReferenceSubject } from "./types";
+import type { ArtifactLibraryItem, ReferenceAsset, ReferenceAssetReviewed, ReferenceSubject } from "./types";
 
 vi.mock("./api", () => ({
   api: {
@@ -14,6 +14,7 @@ vi.mock("./api", () => ({
     setReferenceCover: vi.fn(),
     clearReferenceCover: vi.fn(),
     updateReference: vi.fn(),
+    reviewReferenceAsset: vi.fn(),
   },
 }));
 
@@ -85,6 +86,102 @@ async function pick(names: string[]) {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+});
+
+describe("reference image review", () => {
+  it("records a deliberate usable decision and shows the settled response", async () => {
+    mocked.reviewReferenceAsset.mockResolvedValue({
+      asset: asset({ validation_state: "usable" }), width: 512, height: 512, review_version: 2,
+    });
+    show([asset()]);
+    fireEvent.click(await screen.findByRole("button", { name: "Review image 1" }));
+    const save = screen.getByRole("button", { name: "Save review" });
+    expect(save.hasAttribute("disabled")).toBe(true);
+    expect(mocked.reviewReferenceAsset).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("Review outcome"), { target: { value: "usable" } });
+    fireEvent.click(save);
+    await waitFor(() => expect(mocked.reviewReferenceAsset).toHaveBeenCalledWith(
+      "ref-1", "asset-1", { outcome: "usable", reasons: [] },
+    ));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.getByText("usable")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Review image 1" })).toBeNull();
+  });
+
+  it.each(["weak", "rejected"] as const)("requires a reason for a %s decision", async (outcome) => {
+    mocked.reviewReferenceAsset.mockResolvedValue({
+      asset: asset({ validation_state: outcome }), width: 512, height: 512, review_version: 2,
+    });
+    show([asset()]);
+    fireEvent.click(await screen.findByRole("button", { name: "Review image 1" }));
+    fireEvent.change(screen.getByLabelText("Review outcome"), { target: { value: outcome } });
+    const save = screen.getByRole("button", { name: "Save review" });
+    expect(save.hasAttribute("disabled")).toBe(true);
+    fireEvent.change(screen.getByLabelText("Review reason"), { target: { value: "   " } });
+    expect(save.hasAttribute("disabled")).toBe(true);
+    fireEvent.change(screen.getByLabelText("Review reason"), { target: { value: "  Image is blurred  " } });
+    fireEvent.click(save);
+    await waitFor(() => expect(mocked.reviewReferenceAsset).toHaveBeenCalledWith(
+      "ref-1", "asset-1", { outcome, reasons: ["Image is blurred"] },
+    ));
+  });
+
+  it("keeps a refused review open for correction and retry", async () => {
+    mocked.reviewReferenceAsset.mockRejectedValueOnce(new Error("The image could not be verified."));
+    mocked.reviewReferenceAsset.mockResolvedValueOnce({
+      asset: asset({ validation_state: "weak" }), width: 512, height: 512, review_version: 2,
+    });
+    show([asset()]);
+    fireEvent.click(await screen.findByRole("button", { name: "Review image 1" }));
+    fireEvent.change(screen.getByLabelText("Review outcome"), { target: { value: "weak" } });
+    fireEvent.change(screen.getByLabelText("Review reason"), { target: { value: "Image is blurred" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save review" }));
+    expect(await screen.findByText("The image could not be verified.")).toBeTruthy();
+    expect(screen.getByText("unchecked")).toBeTruthy();
+    expect((screen.getByLabelText("Review reason") as HTMLTextAreaElement).value).toBe("Image is blurred");
+    fireEvent.click(screen.getByRole("button", { name: "Save review" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(mocked.reviewReferenceAsset).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("weak")).toBeTruthy();
+  });
+
+  it("does not offer another decision for settled images", async () => {
+    show([asset({ validation_state: "usable" }), asset({ id: "second", sort_order: 1, validation_state: "rejected" })]);
+    expect(await screen.findByText("usable")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Review image/ })).toBeNull();
+  });
+
+  it("cancels a review without sending it", async () => {
+    show([asset()]);
+    fireEvent.click(await screen.findByRole("button", { name: "Review image 1" }));
+    fireEvent.change(screen.getByLabelText("Review outcome"), { target: { value: "usable" } });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(mocked.reviewReferenceAsset).not.toHaveBeenCalled();
+  });
+
+  it("keeps a pending decision bound to the selected image and submits it once", async () => {
+    let finish!: (result: ReferenceAssetReviewed) => void;
+    mocked.reviewReferenceAsset.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const second = asset({ id: "second", artifact_id: "second-image", sort_order: 1 });
+    show([asset(), second]);
+    fireEvent.click(await screen.findByRole("button", { name: "Review image 2" }));
+    fireEvent.change(screen.getByLabelText("Review outcome"), { target: { value: "usable" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save review" }));
+    const pending = await screen.findByRole("button", { name: "Saving review…" });
+    expect(pending.hasAttribute("disabled")).toBe(true);
+    expect(screen.getByLabelText("Review outcome").hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Cancel" }).hasAttribute("disabled")).toBe(true);
+    fireEvent.click(pending);
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(mocked.reviewReferenceAsset).toHaveBeenCalledTimes(1);
+    expect(mocked.reviewReferenceAsset).toHaveBeenCalledWith("ref-1", "second", { outcome: "usable", reasons: [] });
+    finish({ asset: { ...second, validation_state: "usable" }, width: 512, height: 512, review_version: 2 });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.getByRole("button", { name: "Review image 1" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Review image 2" })).toBeNull();
+  });
 });
 
 describe("reference detail", () => {
