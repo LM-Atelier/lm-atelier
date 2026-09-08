@@ -4403,6 +4403,8 @@ async def list_artifacts(
     project_id: str | None = None,
     favorites: bool = False,
     query: str = Query(default="", max_length=200),
+    limit: Annotated[int | None, Query(ge=1, le=200)] = None,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[ArtifactLibraryItem]:
     statement = select(Artifact).where(
         Artifact.kind.in_([ArtifactKind.IMAGE.value, ArtifactKind.VIDEO.value])
@@ -4429,11 +4431,19 @@ async def list_artifacts(
         statement = statement.where(membership.where(Message.chat_id == chat_id).exists())
     if project_id:
         statement = statement.where(membership.where(Chat.project_id == project_id).exists())
-    artifacts = session.scalars(statement.order_by(Artifact.created_at.desc())).all()
+    if limit is not None or offset:
+        statement = statement.order_by(Artifact.created_at.desc(), Artifact.id.desc()).offset(
+            offset
+        )
+        if limit is not None:
+            statement = statement.limit(limit)
+    else:
+        statement = statement.order_by(Artifact.created_at.desc())
+    artifacts = session.scalars(statement).all()
     references: dict[str, list[tuple[str, str | None]]] = {}
     artifact_ids = [artifact.id for artifact in artifacts]
-    for offset in range(0, len(artifact_ids), 400):
-        batch = artifact_ids[offset : offset + 400]
+    for batch_offset in range(0, len(artifact_ids), 400):
+        batch = artifact_ids[batch_offset : batch_offset + 400]
         reference_rows = session.execute(
             select(MessagePart.artifact_id, Message.chat_id, Chat.project_id)
             .join(Message, Message.id == MessagePart.message_id)
