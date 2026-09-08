@@ -795,11 +795,18 @@ export const api = {
     request<ReferenceSubject>(`/api/references/${encodeURIComponent(id)}/cover`, {
       method: "DELETE",
     }),
-  artifacts: (kind = "", query = "", favorites = false) => {
+  artifacts: (
+    kind = "", query = "", favorites = false,
+    page?: { limit: number; offset: number }, signal?: AbortSignal,
+  ) => {
     const parameters = new URLSearchParams({ query });
     if (kind) parameters.set("kind", kind);
     if (favorites) parameters.set("favorites", "true");
-    return request<ArtifactLibraryItem[]>(`/api/artifacts?${parameters}`);
+    if (page) {
+      parameters.set("limit", String(page.limit));
+      parameters.set("offset", String(page.offset));
+    }
+    return request<ArtifactLibraryItem[]>(`/api/artifacts?${parameters}`, { signal });
   },
   artifactLibrary: async (
     filters: ArtifactLibraryFilters,
