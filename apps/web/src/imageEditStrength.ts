@@ -13,13 +13,27 @@ export function resolveImageEditStrengthMode(
   parameter: string,
   layers: Array<Record<string, unknown> | undefined>,
   numericManualLayers: boolean[],
+  bounds: { minimum: number; maximum: number },
 ): ImageEditStrengthMode {
   for (let index = layers.length - 1; index >= 0; index -= 1) {
     const layer = layers[index];
     if (!layer) continue;
     const declared = layer[IMAGE_EDIT_STRENGTH_MODE_KEY];
     if (declared === "auto" || declared === "manual") return declared;
-    if (numericManualLayers[index] && typeof layer[parameter] === "number") return "manual";
+    const stored = layer[parameter];
+    // A saved number counts as choosing the strength by hand only while this
+    // workflow can still accept it. The server applies the same bound and
+    // decides automatically when a stored value falls outside it, so without
+    // this the panel offers a manual control holding a number the run will not
+    // use.
+    if (
+      numericManualLayers[index]
+      && typeof stored === "number"
+      && stored >= bounds.minimum
+      && stored <= bounds.maximum
+    ) {
+      return "manual";
+    }
   }
   return "auto";
 }
