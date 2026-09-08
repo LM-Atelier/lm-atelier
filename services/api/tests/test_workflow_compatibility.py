@@ -31,6 +31,7 @@ from local_lm.workflow_compatibility import (
     compatibility_family_id,
     copy_chat_workflow_selections,
     mirror_legacy_chat_workflow_selections,
+    operation_selector_capability,
     reconcile_legacy_workflow_compatibility,
     resolve_chat_workflow_selection,
     resolve_project_workflow_selection,
@@ -604,3 +605,59 @@ def test_orchestrator_project_pin_read_prefers_workflow_selection(session: Sessi
         )
         is None
     )
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected"),
+    [
+        (Operation.TEXT, "chat"),
+        (Operation.TEXT_TO_IMAGE, "image"),
+        (Operation.IMAGE_TO_IMAGE, "image"),
+        (Operation.TEXT_TO_VIDEO, "video"),
+        (Operation.IMAGE_TO_VIDEO, "video"),
+    ],
+)
+def test_every_operation_selects_one_capability(operation: Operation, expected: str) -> None:
+    assert operation_selector_capability(operation) == expected
+
+
+def test_the_capability_matches_what_the_three_inline_derivations_computed() -> None:
+    """The three call sites this replaced each spelled the rule differently.
+
+    Two read "chat if TEXT, else video if 'video' in the value, else image"; the
+    third read "chat if TEXT, else image if 'image' and not 'video', else
+    video". They agreed on every operation, which is why nothing was misrouted -
+    but agreement by coincidence of string contents is not the same as one
+    decision, and a sixth operation would have fallen through three different
+    else branches.
+    """
+
+    def two_of_them(operation: Operation) -> str:
+        if operation == Operation.TEXT:
+            return "chat"
+        return "video" if "video" in operation.value else "image"
+
+    def the_third(operation: Operation) -> str:
+        if operation == Operation.TEXT:
+            return "chat"
+        if "image" in operation.value and "video" not in operation.value:
+            return "image"
+        return "video"
+
+    for operation in Operation:
+        assert (
+            two_of_them(operation)
+            == the_third(operation)
+            == operation_selector_capability(operation)
+        )
+
+
+def test_no_operation_asks_for_the_vision_capability() -> None:
+    """vision is a capability a chat model HAS, not one an operation requests.
+
+    Worth pinning because ChatSelectorCapability carries four members while only
+    three are reachable from an operation. A future mapping that returned
+    "vision" here would type-check silently.
+    """
+
+    assert "vision" not in {operation_selector_capability(op) for op in Operation}

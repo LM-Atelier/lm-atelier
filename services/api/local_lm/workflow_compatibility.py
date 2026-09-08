@@ -4,11 +4,12 @@ import hashlib
 import json
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, assert_never
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .domain import Operation
 from .models import (
     Chat,
     ChatWorkflowSelection,
@@ -25,6 +26,31 @@ AUTO_PROFILE_ID = "__auto__"
 
 ChatSelectorCapability = Literal["chat", "vision", "image", "video"]
 ProjectSelectorCapability = Literal["image", "video"]
+
+
+def operation_selector_capability(operation: Operation) -> ChatSelectorCapability:
+    """Choose the selector capability an operation needs, for every operation.
+
+    "vision" is a capability a chat model may HAVE, not one an operation asks
+    for, so no operation maps to it. Saying that with an exhaustive match rather
+    than a trailing else is the point: a new Operation becomes a type error here
+    instead of silently taking whichever branch happens to be last.
+
+    This is deliberately not operation_model_role. That answers a different
+    question with a narrower vocabulary - three model roles, no "vision" - and
+    the two happening to agree on today's five operations is not a reason to
+    conflate them.
+    """
+
+    match operation:
+        case Operation.TEXT:
+            return "chat"
+        case Operation.TEXT_TO_IMAGE | Operation.IMAGE_TO_IMAGE:
+            return "image"
+        case Operation.TEXT_TO_VIDEO | Operation.IMAGE_TO_VIDEO:
+            return "video"
+    assert_never(operation)
+
 
 _CHAT_PROFILE_FIELDS: dict[ChatSelectorCapability, str] = {
     "chat": "active_chat_profile_id",
