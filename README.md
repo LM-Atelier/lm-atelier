@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="https://github.com/ajccarlson/lm-atelier">
+  <a href="https://github.com/LM-Atelier/lm-atelier">
     <img src="docs/assets/lm-atelier-mark.svg" alt="LM Atelier" width="220">
   </a>
 </p>
@@ -40,7 +40,7 @@ local API run together on the user's computer.
 ## Install
 
 Download the latest installer and its `SHA256SUMS` file from
-[Releases](https://github.com/ajccarlson/lm-atelier/releases/latest).
+[Releases](https://github.com/LM-Atelier/lm-atelier/releases/latest).
 
 ### Windows
 

@@ -30,14 +30,14 @@ function trackedPaths(): Set<string> {
 describe("docsLink", () => {
   it("pins documentation to the running release", () => {
     expect(docsLink("0.1.8", "docs/TROUBLESHOOTING.md")).toBe(
-      "https://github.com/ajccarlson/lm-atelier/blob/v0.1.8/docs/TROUBLESHOOTING.md",
+      "https://github.com/LM-Atelier/lm-atelier/blob/v0.1.8/docs/TROUBLESHOOTING.md",
     );
   });
 
   it("falls back to the branch when the version is not a release", () => {
     // A broken link helps nobody, so an unrecognised version is not guessed at.
     expect(docsLink("0.1.8-dev", "SUPPORT.md")).toBe(
-      "https://github.com/ajccarlson/lm-atelier/blob/main/SUPPORT.md",
+      "https://github.com/LM-Atelier/lm-atelier/blob/main/SUPPORT.md",
     );
   });
 });
@@ -49,7 +49,7 @@ describe("supportLinks", () => {
 
   it("includes the issue tracker unpinned", () => {
     const issues = supportLinks("0.1.8").find(([label]) => label === "Issues");
-    expect(issues?.[1]).toBe("https://github.com/ajccarlson/lm-atelier/issues");
+    expect(issues?.[1]).toBe("https://github.com/LM-Atelier/lm-atelier/issues");
   });
 
   it("only offers documents this repository actually has", () => {

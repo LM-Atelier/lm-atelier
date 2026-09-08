@@ -3,7 +3,7 @@
 ## Report a vulnerability privately
 
 Use GitHub's
-[private vulnerability reporting](https://github.com/ajccarlson/lm-atelier/security/advisories/new).
+[private vulnerability reporting](https://github.com/LM-Atelier/lm-atelier/security/advisories/new).
 Do not open a public issue.
 
 Include the LM Atelier version, operating system, reproduction steps, and the
