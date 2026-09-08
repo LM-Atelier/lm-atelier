@@ -71,6 +71,7 @@ from .domain import (
     RoutingMode,
     RunStatus,
     elapsed_milliseconds,
+    operation_model_role,
     utcnow,
 )
 from .engines import EngineRegistry
@@ -9050,11 +9051,7 @@ class ConversationOrchestrator:
 
     @staticmethod
     def _role_for_operation(operation: Operation) -> str:
-        if operation == Operation.TEXT:
-            return "chat"
-        if "video" in operation.value:
-            return "video"
-        return "image"
+        return operation_model_role(operation)
 
     async def request_settings_for_operation(
         self,
