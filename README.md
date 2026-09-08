@@ -40,7 +40,7 @@ local API run together on the user's computer.
 ## Install
 
 Download the latest installer and its `SHA256SUMS` file from
-[Releases](https://github.com/LM-Atelier/lm-atelier/releases/latest).
+[Releases](https://github.com/LM-Atelier/lm-atelier/releases).
 
 ### Windows
 
