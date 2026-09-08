@@ -123,10 +123,13 @@ export function SettingControl({
           rows={3}
           disabled={fixed}
           defaultValue={JSON.stringify(value ?? field.default, null, 2)}
+          onChange={(event) => { event.currentTarget.dataset.edited = "true"; }}
           onBlur={(event) => {
+            if (event.currentTarget.dataset.edited !== "true") return;
             try {
               const parsed = JSON.parse(event.target.value) as unknown;
               event.target.setCustomValidity("");
+              delete event.currentTarget.dataset.edited;
               onChange(parsed);
             } catch {
               event.target.setCustomValidity("Enter valid JSON");

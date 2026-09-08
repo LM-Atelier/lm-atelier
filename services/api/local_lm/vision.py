@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from PIL import Image, UnidentifiedImageError
+from pydantic import BaseModel, ConfigDict, Field
 
 from .adapters.base import ChatAdapter, ChatRequest
 from .artifacts import ArtifactStore
@@ -112,10 +113,38 @@ class PreparedVisualContext:
         }
 
 
+class VisionSamplingPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    max_images: int = Field(ge=1, le=16)
+    max_video_frames: int = Field(ge=3, le=16)
+    max_frame_dimension: int = Field(ge=256, le=4096)
+
+
 class VisionContextService:
     def __init__(self, settings: Settings, artifacts: ArtifactStore) -> None:
         self.settings = settings
         self.artifacts = artifacts
+
+    def sampling_policy(self, vision_settings: dict[str, Any]) -> VisionSamplingPolicy:
+        return VisionSamplingPolicy(
+            max_images=min(
+                self.settings.vision_max_images,
+                self._bounded_int(
+                    vision_settings.get("max_images"), self.settings.vision_max_images, 1, 16
+                ),
+            ),
+            max_video_frames=min(
+                self.settings.vision_max_video_frames,
+                self._bounded_int(
+                    vision_settings.get("max_video_frames"),
+                    self.settings.vision_max_video_frames,
+                    3,
+                    16,
+                ),
+            ),
+            max_frame_dimension=self.settings.vision_max_frame_dimension,
+        )
 
     async def prepare(
         self,
@@ -123,21 +152,17 @@ class VisionContextService:
         *,
         strict_artifact_ids: set[str],
         vision_settings: dict[str, Any] | None = None,
+        sampling_policy: VisionSamplingPolicy | None = None,
     ) -> PreparedVisualContext:
-        values = vision_settings or {}
-        max_images = min(
-            self.settings.vision_max_images,
-            self._bounded_int(values.get("max_images"), self.settings.vision_max_images, 1, 16),
-        )
-        max_video_frames = min(
-            self.settings.vision_max_video_frames,
-            self._bounded_int(
-                values.get("max_video_frames"),
-                self.settings.vision_max_video_frames,
-                3,
-                16,
-            ),
-        )
+        policy = sampling_policy or self.sampling_policy(vision_settings or {})
+        if (
+            policy.max_images > self.settings.vision_max_images
+            or policy.max_video_frames > self.settings.vision_max_video_frames
+            or policy.max_frame_dimension > self.settings.vision_max_frame_dimension
+        ):
+            raise VisionInputError("Accepted visual sampling exceeds the current limits.")
+        max_images = policy.max_images
+        max_video_frames = policy.max_video_frames
         frames: list[VisualFrame] = []
         skipped: list[str] = []
         total_bytes = 0
@@ -151,6 +176,7 @@ class VisionContextService:
                     sampled = await self._sample_video(
                         artifact,
                         min(max_video_frames, remaining),
+                        max_frame_dimension=policy.max_frame_dimension,
                     )
                 else:
                     sampled = [self._validated_image(artifact)]
@@ -285,7 +311,9 @@ class VisionContextService:
             content=content,
         )
 
-    async def _sample_video(self, artifact: Artifact, count: int) -> list[VisualFrame]:
+    async def _sample_video(
+        self, artifact: Artifact, count: int, *, max_frame_dimension: int | None = None
+    ) -> list[VisualFrame]:
         if not artifact.media_type.casefold().startswith("video/"):
             raise VisionInputError("artifact is not a video")
         ffprobe = shutil.which("ffprobe")
@@ -303,7 +331,9 @@ class VisionContextService:
             raise VisionInputError("video dimensions are outside the configured limit")
         timestamps = self._uniform_timestamps(duration, count)
         return [
-            await self._extract_frame(Path(ffmpeg), path, artifact, timestamp)
+            await self._extract_frame(
+                Path(ffmpeg), path, artifact, timestamp, max_frame_dimension=max_frame_dimension
+            )
             for timestamp in timestamps
         ]
 
@@ -353,8 +383,14 @@ class VisionContextService:
         path: Path,
         artifact: Artifact,
         timestamp: float,
+        *,
+        max_frame_dimension: int | None = None,
     ) -> VisualFrame:
-        dimension = self.settings.vision_max_frame_dimension
+        dimension = (
+            max_frame_dimension
+            if max_frame_dimension is not None
+            else self.settings.vision_max_frame_dimension
+        )
         process = await asyncio.create_subprocess_exec(
             str(executable),
             "-hide_banner",

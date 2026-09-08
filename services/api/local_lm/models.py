@@ -459,6 +459,29 @@ class Run(TimestampMixin, Base):
     chat: Mapped[Chat] = relationship(back_populates="runs")
 
 
+class RunContextSnapshot(Base):
+    """The exact conversation inputs accepted for one queued run."""
+
+    __tablename__ = "run_context_snapshots"
+
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), primary_key=True)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class RunContextArtifact(Base):
+    """Keep accepted context media until its owning run is removed."""
+
+    __tablename__ = "run_context_artifacts"
+
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("run_context_snapshots.run_id", ondelete="CASCADE"), primary_key=True
+    )
+    artifact_id: Mapped[str] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="RESTRICT"), primary_key=True, index=True
+    )
+
+
 class ResponseFeedback(TimestampMixin, Base):
     """One local preference verdict on a response or one of its revisions.
 

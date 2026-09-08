@@ -1,3 +1,3 @@
 """Shared expected Alembic head for completion-only migration assertions."""
 
-EXPECTED_ALEMBIC_HEAD = "b9c6d1e47a20"
+EXPECTED_ALEMBIC_HEAD = "b8f31d0a6c42"

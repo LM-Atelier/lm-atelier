@@ -131,6 +131,7 @@ from .domain import (
 )
 from .downloads import DownloadManager
 from .edit_recipes import capture_recipe
+from .edited_branches import activate_edited_branch, list_edited_branches
 from .engines import (
     EngineNotConfiguredError,
     EngineRegistry,
@@ -212,6 +213,12 @@ from .preflight import (
     catalog_file_index,
     safe_civitai_file_variants,
     selected_catalog_file_metadata,
+)
+from .prior_turn_edits import (
+    EditRequestConflict,
+    classify_prior_turn_edit,
+    prior_turn_edit_source,
+    queue_prior_turn_edit,
 )
 from .profile_service import (
     AUTO_PROFILE_ID,
@@ -331,6 +338,9 @@ from .schemas import (
     DownloadRequest,
     DraftClassification,
     DraftClassificationRequest,
+    EditedBranchActivationOut,
+    EditedBranchActivationRequest,
+    EditedBranchPage,
     EditTemplateCreate,
     EditTemplateOut,
     EngineCapabilities,
@@ -357,6 +367,9 @@ from .schemas import (
     PresetCreate,
     PresetOut,
     PresetUpdate,
+    PriorTurnEditAccepted,
+    PriorTurnEditRequest,
+    PriorTurnEditSource,
     ProjectCreate,
     ProjectOut,
     ProjectUpdate,
@@ -3142,9 +3155,21 @@ async def _accept_turn(
     inherited_image_edit_strength: dict[str, Any] | None = None,
     inherited_prompt_source: object | None = None,
     reference_source_message_id: str | None = None,
+    edit_source_message_id: str | None = None,
+    chat_guard_held: bool = False,
+    before_commit: Callable[[Session, Run], None] | None = None,
 ) -> TurnAccepted:
     try:
-        return await orchestrator.create_turn(
+        if edit_source_message_id is not None and isinstance(payload, PriorTurnEditRequest):
+            return await queue_prior_turn_edit(
+                orchestrator, session, edit_source_message_id, payload
+            )
+        if not orchestrator._admission_open:
+            raise RuntimeError(
+                "This conversation service is shutting down and cannot accept new work."
+            )
+        create = orchestrator._create_turn if chat_guard_held else orchestrator.create_turn
+        return await create(
             session,
             chat_id,
             payload,
@@ -3154,7 +3179,10 @@ async def _accept_turn(
             inherited_image_edit_strength=inherited_image_edit_strength,
             inherited_prompt_source=inherited_prompt_source,
             reference_source_message_id=reference_source_message_id,
+            before_commit=before_commit,
         )
+    except EditRequestConflict as exc:
+        raise api_error(409, "edit-request-conflict", str(exc)) from exc
     except LookupError as exc:
         raise api_error(404, "turn-subject-not-found", str(exc)) from exc
     except RouteConfirmationRequired as exc:
@@ -3412,6 +3440,23 @@ async def regenerate_message(
     session: ConversationSessionDep,
 ) -> TurnAccepted:
     orchestrator: ConversationOrchestrator = _services(request).orchestrator
+    source = session.get(Message, message_id)
+    if source is None:
+        raise api_error(
+            409, "response-not-regenerable", "only a completed visible response can be regenerated"
+        )
+    async with orchestrator.chat_guard(source.chat_id):
+        session.expire_all()
+        return await _regenerate_message_locked(message_id, payload, request, session)
+
+
+async def _regenerate_message_locked(
+    message_id: str,
+    payload: RegenerateRequest,
+    request: Request,
+    session: Session,
+) -> TurnAccepted:
+    orchestrator: ConversationOrchestrator = _services(request).orchestrator
     source_assistant = session.get(Message, message_id)
     if (
         not source_assistant
@@ -3421,6 +3466,31 @@ async def regenerate_message(
         raise api_error(
             409, "response-not-regenerable", "only a completed visible response can be regenerated"
         )
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            {"message_id": message_id, "settings": payload.settings},
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+    def require_request_binding(provenance: dict[str, Any]) -> None:
+        if provenance.get("regeneration_request_sha256") != fingerprint:
+            raise api_error(
+                409,
+                "regeneration-request-conflict",
+                "This request ID already belongs to a different response or regeneration.",
+            )
+
+    if payload.idempotency_key is not None:
+        existing = orchestrator._idempotent_run(
+            session, source_assistant.chat_id, payload.idempotency_key
+        )
+        if existing is not None:
+            require_request_binding(existing.provenance_json)
+            _require_run_replay_sources(session, existing)
+            return orchestrator._accepted_for_run(session, existing)
     pending_revision = session.scalar(
         select(ResponseRevision.id).where(
             ResponseRevision.message_id == message_id,
@@ -3489,6 +3559,7 @@ async def regenerate_message(
         parent_message_id=user_message.parent_id,
         input_artifact_ids=orchestrator.input_artifact_ids_for_run(session, prior_run),
         settings={**prior_settings, **payload.settings},
+        idempotency_key=payload.idempotency_key,
     )
     prior_strength = _inherited_auto_image_edit_strength(prior_run)
     inherited_parameter = (
@@ -3502,7 +3573,15 @@ async def regenerate_message(
     inherited_prompt_source = run_prompt_source
     if inherited_prompt_source is None:
         inherited_prompt_source = _message_prompt_source(user_message)
-    return await _accept_turn(
+
+    def bind_request(_transaction: Session, run: Run) -> None:
+        if payload.idempotency_key is not None:
+            run.provenance_json = {
+                **run.provenance_json,
+                "regeneration_request_sha256": fingerprint,
+            }
+
+    accepted = await _accept_turn(
         orchestrator,
         session,
         prior_run.chat_id,
@@ -3513,7 +3592,13 @@ async def regenerate_message(
         inherited_image_edit_strength=inherited_image_edit_strength,
         inherited_prompt_source=inherited_prompt_source,
         reference_source_message_id=user_message.id,
+        chat_guard_held=True,
+        before_commit=bind_request,
     )
+
+    if payload.idempotency_key is not None:
+        require_request_binding(accepted.run.provenance_json)
+    return accepted
 
 
 @router.post(
@@ -3536,6 +3621,48 @@ async def select_response_revision(
         raise api_error(404, "response-revision-not-found", str(exc)) from exc
     except ValueError as exc:
         raise api_error(409, "response-revision-not-selectable", str(exc)) from exc
+
+
+@router.get("/messages/{message_id}/edit-source", response_model=PriorTurnEditSource)
+async def get_prior_turn_edit_source(
+    message_id: str,
+    request: Request,
+    session: ConversationSessionDep,
+    source_run_id: str | None = Query(default=None, min_length=1, max_length=40),
+) -> PriorTurnEditSource:
+    try:
+        return await prior_turn_edit_source(
+            _services(request).orchestrator, session, message_id, source_run_id
+        )
+    except EditRequestConflict as exc:
+        raise api_error(409, "edit-source-unavailable", str(exc)) from exc
+    except LookupError as exc:
+        raise api_error(404, "edit-source-not-found", str(exc)) from exc
+    except EngineNotConfiguredError as exc:
+        raise api_error(409, "engine-not-configured", str(exc)) from exc
+    except EngineSchemaUnavailableError as exc:
+        raise api_error(503, "engine-schema-unavailable", str(exc)) from exc
+    except ValueError as exc:
+        raise api_error(422, "edit-source-invalid", str(exc)) from exc
+
+
+@router.post("/messages/{message_id}/edits", response_model=PriorTurnEditAccepted, status_code=202)
+async def queue_edited_message(
+    message_id: str,
+    payload: PriorTurnEditRequest,
+    request: Request,
+    session: ConversationSessionDep,
+) -> TurnAccepted:
+    source = session.get(Message, message_id)
+    if source is None:
+        raise api_error(404, "user-message-not-found", "user message not found")
+    return await _accept_turn(
+        _services(request).orchestrator,
+        session,
+        source.chat_id,
+        payload,
+        edit_source_message_id=message_id,
+    )
 
 
 @router.post("/messages/{message_id}/branch", response_model=TurnAccepted, status_code=202)
@@ -3636,6 +3763,48 @@ async def get_run(run_id: str, session: ConversationSessionDep) -> Run:
     if not run:
         raise api_error(404, "run-not-found", "run not found")
     return run
+
+
+@router.get("/chats/{chat_id}/edited-branches", response_model=EditedBranchPage)
+async def get_edited_branches(
+    chat_id: str,
+    session: ConversationSessionDep,
+    limit: int = Query(default=50, ge=1, le=100),
+    cursor: str | None = None,
+) -> EditedBranchPage:
+    try:
+        return list_edited_branches(session, chat_id, limit=limit, cursor=cursor)
+    except LookupError as exc:
+        raise api_error(404, "edited-branch-not-found", str(exc)) from exc
+
+
+@router.post(
+    "/chats/{chat_id}/edited-branches/{plan_id}/activate",
+    response_model=EditedBranchActivationOut,
+)
+async def continue_edited_branch(
+    chat_id: str,
+    plan_id: str,
+    payload: EditedBranchActivationRequest,
+    request: Request,
+    session: ConversationSessionDep,
+) -> EditedBranchActivationOut:
+    services = _services(request)
+    # Release any dependency-opened snapshot before waiting for graph ownership.
+    session.rollback()
+    async with services.orchestrator.chat_guard(chat_id):
+        session.expire_all()
+        try:
+            head_id = activate_edited_branch(
+                session, chat_id, plan_id, payload.expected_active_head_message_id
+            )
+        except LookupError as exc:
+            raise api_error(404, "edited-branch-not-found", str(exc)) from exc
+        except EditRequestConflict as exc:
+            raise api_error(409, "edited-branch-unavailable", str(exc)) from exc
+        session.commit()
+    await services.events.publish("chat.updated", chat_id, {"active_head_message_id": head_id})
+    return EditedBranchActivationOut(chat_id=chat_id, active_head_message_id=head_id)
 
 
 @router.get("/work-plans", response_model=list[WorkPlanOut])
@@ -3854,6 +4023,26 @@ async def classify_chat_draft(
     chat = session.get(Chat, chat_id)
     if not chat:
         raise api_error(404, "chat-not-found", "chat not found")
+    if payload.edit_source is not None:
+        if payload.parent_message_id is not None:
+            raise api_error(422, "edit-source-invalid", "Choose either a source turn or a parent.")
+        try:
+            return DraftClassification(
+                references_prior_visual=classify_prior_turn_edit(
+                    _services(request).orchestrator,
+                    session,
+                    chat_id,
+                    payload.edit_source,
+                    text=payload.text,
+                    mode=payload.mode,
+                )
+            )
+        except EditRequestConflict as exc:
+            raise api_error(409, "edit-source-unavailable", str(exc)) from exc
+        except LookupError as exc:
+            raise api_error(404, "edit-source-not-found", str(exc)) from exc
+        except ValueError as exc:
+            raise api_error(422, "edit-source-invalid", str(exc)) from exc
     return DraftClassification(
         references_prior_visual=_services(request).orchestrator.classify_draft(
             session,

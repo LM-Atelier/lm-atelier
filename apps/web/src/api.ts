@@ -31,6 +31,7 @@ import type {
   ExchangeDeletion,
   ChatDetail,
   DraftClassification,
+  PriorTurnEditBinding,
   CustomNodeInstall,
   CredentialProvider,
   CredentialStatus,
@@ -66,6 +67,9 @@ import type {
   SystemInfo,
   ToolCapabilityProbe,
   TurnAccepted,
+  PriorTurnEditRequest,
+  PriorTurnEditAccepted,
+  PriorTurnEditSource,
   EditTemplate,
   Workflow,
   WorkflowBundle,
@@ -81,6 +85,8 @@ import type {
   WorkerResetResult,
   WorkerSettings,
   WorkerStatus,
+  EditedBranchPage,
+  EditedBranchActivation,
   WorkPlan,
   WorkStep,
   WorkflowDependencyResourceKind,
@@ -121,6 +127,46 @@ export type TurnConfirmationRequest = {
 export type TurnConfirmationHandler = (
   request: TurnConfirmationRequest,
 ) => Promise<boolean>;
+
+/** Decode only the server's supported confirmation responses. */
+export function turnConfirmationForError(error: unknown): { confirmation: TurnConfirmationRequest; mode: RoutingMode } | null {
+  if (!(error instanceof ApiError) || error.status !== 409) return null;
+  const detail = error.detail && typeof error.detail === "object" ? error.detail as Record<string, unknown> : null;
+  const plan = detail?.plan && typeof detail.plan === "object" ? detail.plan as Record<string, unknown> : null;
+  const estimate = detail?.estimate && typeof detail.estimate === "object" ? detail.estimate as Record<string, unknown> : null;
+  const orderedSteps = Array.isArray(plan?.steps) ? plan.steps.filter((step): step is Record<string, unknown> => (
+    Boolean(step) && typeof step === "object"
+  )) : [];
+  if (detail?.code === "ordered_plan_confirmation_required" && orderedSteps.length >= 2) {
+    return { mode: "auto", confirmation: {
+      kind: "ordered_plan", title: "Start ordered plan?",
+      question: `This request will run ${orderedSteps.length} steps in sequence.`, confirmLabel: "Start plan",
+      details: {
+        sequence: orderedSteps.map((step) => typeof step.mode === "string" ? step.mode : "work"),
+        ...(typeof estimate?.video_duration_seconds === "number" && estimate.video_duration_seconds > 0
+          ? { videoDurationSeconds: estimate.video_duration_seconds } : {}),
+        ...(typeof estimate?.estimated_bytes === "number" && estimate.estimated_bytes > 0
+          ? { estimatedWorkingBytes: estimate.estimated_bytes } : {}),
+      },
+    } };
+  }
+  const operation = typeof plan?.operation === "string" ? plan.operation : "";
+  if (detail?.code === "route_confirmation_required" && (operation.includes("image") || operation.includes("video"))) {
+    const selectedOperation = operation.includes("video") ? "video" : "image";
+    return { mode: selectedOperation, confirmation: {
+      kind: "media_route", title: `Start ${selectedOperation} generation?`,
+      question: `Auto mode suggests ${selectedOperation === "image" ? "an" : "a"} ${selectedOperation} generation.`,
+      confirmLabel: `Start ${selectedOperation}`,
+      details: {
+        operation: selectedOperation,
+        ...(typeof estimate?.duration_seconds === "number" ? { durationSeconds: estimate.duration_seconds } : {}),
+        ...(typeof estimate?.estimated_intermediate_bytes === "number"
+          ? { estimatedIntermediateBytes: estimate.estimated_intermediate_bytes } : {}),
+      },
+    } };
+  }
+  return null;
+}
 
 let csrfToken = "";
 let eventEpoch = "";
@@ -265,10 +311,10 @@ export const api = {
     return request<Chat[]>(`/api/chats?${parameters}`);
   },
   chat: (id: string) => request<ChatDetail>(`/api/chats/${id}`),
-  classifyDraft: (chatId: string, text: string, mode: RoutingMode) =>
+  classifyDraft: (chatId: string, text: string, mode: RoutingMode, editSource?: PriorTurnEditBinding) =>
     request<DraftClassification>(`/api/chats/${chatId}/classify-draft`, {
       method: "POST",
-      body: JSON.stringify({ text, mode }),
+      body: JSON.stringify({ text, mode, ...(editSource ? { edit_source: editSource } : {}) }),
     }),
   createChat: (projectId?: string | null) =>
     request<Chat>("/api/chats", {
@@ -423,76 +469,9 @@ export const api = {
     try {
       return await submit(mode);
     } catch (error) {
-      const detail = error instanceof ApiError && error.detail && typeof error.detail === "object" ? error.detail as Record<string, unknown> : null;
-      const plan = detail?.plan && typeof detail.plan === "object" ? detail.plan as Record<string, unknown> : null;
-      const operation = typeof plan?.operation === "string" ? plan.operation : "";
-      const estimate = detail?.estimate && typeof detail.estimate === "object" ? detail.estimate as Record<string, unknown> : null;
-      const orderedSteps = Array.isArray(plan?.steps)
-        ? plan.steps.filter((step): step is Record<string, unknown> => (
-          Boolean(step) && typeof step === "object"
-        ))
-        : [];
-      if (
-        error instanceof ApiError
-        && error.status === 409
-        && detail?.code === "ordered_plan_confirmation_required"
-        && orderedSteps.length >= 2
-      ) {
-        const orderedEstimate = detail.estimate && typeof detail.estimate === "object"
-          ? detail.estimate as Record<string, unknown>
-          : null;
-        if (!confirmTurn) throw error;
-        const confirmed = await confirmTurn({
-          kind: "ordered_plan",
-          title: "Start ordered plan?",
-          question: `This request will run ${orderedSteps.length} steps in sequence.`,
-          confirmLabel: "Start plan",
-          details: {
-            sequence: orderedSteps.map((step) => (
-              typeof step.mode === "string" ? step.mode : "work"
-            )),
-            ...(typeof orderedEstimate?.video_duration_seconds === "number"
-              && orderedEstimate.video_duration_seconds > 0
-              ? { videoDurationSeconds: orderedEstimate.video_duration_seconds }
-              : {}),
-            ...(typeof orderedEstimate?.estimated_bytes === "number"
-              && orderedEstimate.estimated_bytes > 0
-              ? { estimatedWorkingBytes: orderedEstimate.estimated_bytes }
-              : {}),
-          },
-        });
-        if (confirmed) {
-          return submit("auto", true);
-        }
-        throw error;
-      }
-      if (
-        error instanceof ApiError
-        && error.status === 409
-        && detail?.code === "route_confirmation_required"
-        && (operation.includes("image") || operation.includes("video"))
-      ) {
-        if (!confirmTurn) throw error;
-        const selectedOperation = operation.includes("video") ? "video" : "image";
-        const confirmed = await confirmTurn({
-          kind: "media_route",
-          title: `Start ${selectedOperation} generation?`,
-          question: `Auto mode suggests ${selectedOperation === "image" ? "an" : "a"} ${selectedOperation} generation.`,
-          confirmLabel: `Start ${selectedOperation}`,
-          details: {
-            operation: selectedOperation,
-            ...(typeof estimate?.duration_seconds === "number"
-              ? { durationSeconds: estimate.duration_seconds }
-              : {}),
-            ...(typeof estimate?.estimated_intermediate_bytes === "number"
-              ? { estimatedIntermediateBytes: estimate.estimated_intermediate_bytes }
-              : {}),
-          },
-        });
-        if (confirmed) return submit(selectedOperation, true);
-        throw error;
-      }
-      throw error;
+      const requested = turnConfirmationForError(error);
+      if (!requested || !confirmTurn || !await confirmTurn(requested.confirmation)) throw error;
+      return submit(requested.mode, true);
     }
   },
   stopAndSendTurn: (
@@ -520,10 +499,10 @@ export const api = {
     promptSource,
     confirmTurn,
   ),
-  regenerateMessage: (messageId: string, settings: Record<string, unknown>) =>
+  regenerateMessage: (messageId: string, settings: Record<string, unknown>, idempotencyKey?: string) =>
     request<TurnAccepted>(`/api/messages/${messageId}/regenerate`, {
       method: "POST",
-      body: JSON.stringify({ settings }),
+      body: JSON.stringify({ settings, idempotency_key: idempotencyKey }),
     }),
   forkThread: (messageId: string) =>
     request<Chat>(`/api/messages/${messageId}/fork`, { method: "POST" }),
@@ -547,6 +526,19 @@ export const api = {
     request<Message>(`/api/messages/${messageId}/revisions/${revisionId}/select`, {
       method: "POST",
     }),
+  getPriorTurnEditSource: (messageId: string, sourceRunId?: string) => {
+    const query = sourceRunId === undefined
+      ? ""
+      : `?${new URLSearchParams({ source_run_id: sourceRunId })}`;
+    return request<PriorTurnEditSource>(
+      `/api/messages/${encodeURIComponent(messageId)}/edit-source${query}`,
+    );
+  },
+  queueEditedMessage: (messageId: string, payload: PriorTurnEditRequest) =>
+    request<PriorTurnEditAccepted>(`/api/messages/${encodeURIComponent(messageId)}/edits`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   branchMessage: (
     messageId: string,
     text: string,
@@ -569,6 +561,18 @@ export const api = {
   workPlans: (chatId?: string) =>
     request<WorkPlan[]>(
       `/api/work-plans${chatId ? `?chat_id=${encodeURIComponent(chatId)}` : ""}`,
+    ),
+  editedBranches: (chatId: string, cursor: string | null = null, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ limit: "50" });
+    if (cursor !== null) query.set("cursor", cursor);
+    return request<EditedBranchPage>(
+      `/api/chats/${encodeURIComponent(chatId)}/edited-branches?${query}`, { signal },
+    );
+  },
+  activateEditedBranch: (chatId: string, planId: string, expectedHead: string | null) =>
+    request<EditedBranchActivation>(
+      `/api/chats/${encodeURIComponent(chatId)}/edited-branches/${encodeURIComponent(planId)}/activate`,
+      { method: "POST", body: JSON.stringify({ expected_active_head_message_id: expectedHead }) },
     ),
   workPlan: (id: string) => request<WorkPlan>(`/api/work-plans/${id}`),
   workStep: (id: string) => request<WorkStep>(`/api/work-steps/${id}`),

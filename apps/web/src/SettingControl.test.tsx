@@ -211,3 +211,25 @@ describe("SettingControl video length", () => {
     expect(onChange).toHaveBeenCalledWith(4.25);
   });
 });
+
+describe("SettingControl structured values", () => {
+  const field: SettingField = { ...durationField, key: "options", label: "Options", type: "object", default: {}, help: "" };
+  it("does not commit an untouched structured field on blur", () => {
+    const onChange = vi.fn();
+    render(<SettingControl field={field} value={{ quality: "high" }} onChange={onChange} />);
+    fireEvent.blur(screen.getByRole("textbox", { name: "Options" }));
+    expect(onChange).not.toHaveBeenCalled();
+  });
+  it("commits deliberate same-value JSON edits once and reflects external replacement", () => {
+    const onChange = vi.fn();
+    const view = render(<SettingControl field={field} value={{ quality: "high" }} onChange={onChange} />);
+    const input = screen.getByRole("textbox", { name: "Options" });
+    fireEvent.change(input, { target: { value: '{ "quality": "high" }' } });
+    fireEvent.blur(input);
+    fireEvent.blur(input);
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenCalledWith({ quality: "high" });
+    view.rerender(<SettingControl field={field} value={{ quality: "low" }} onChange={onChange} />);
+    expect(screen.getByRole("textbox", { name: "Options" })).toHaveValue(JSON.stringify({ quality: "low" }, null, 2));
+  });
+});

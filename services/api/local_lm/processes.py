@@ -511,9 +511,21 @@ class ProcessSupervisor:
             return None
         return support
 
-    async def load_chat(self, profile: ModelProfile, install: ModelInstall) -> WorkerStatus:
+    async def load_chat(
+        self,
+        profile: ModelProfile,
+        install: ModelInstall,
+        *,
+        launch_scope_sha256: str | None = None,
+        vision_max_images: int | None = None,
+    ) -> WorkerStatus:
         if profile.engine == "vllm":
-            return await self._load_vllm_chat(profile, install)
+            return await self._load_vllm_chat(
+                profile,
+                install,
+                launch_scope_sha256=launch_scope_sha256,
+                vision_max_images=vision_max_images,
+            )
         if profile.engine != "llama.cpp":
             raise ValueError("the selected profile is not a managed chat profile")
         if (
@@ -557,6 +569,7 @@ class ProcessSupervisor:
                 self.worker_health_url("chat"),
                 profile.id,
                 estimated_memory_bytes=estimate,
+                launch_scope_sha256=launch_scope_sha256,
             )
         except (Exception, asyncio.CancelledError):
             self.settings.chat_engine = previous_engine
@@ -567,7 +580,15 @@ class ProcessSupervisor:
         self,
         profile: ModelProfile,
         install: ModelInstall,
+        *,
+        launch_scope_sha256: str | None = None,
+        vision_max_images: int | None = None,
     ) -> WorkerStatus:
+        if (
+            vision_max_images is not None
+            and not 1 <= vision_max_images <= self.settings.vision_max_images
+        ):
+            raise RuntimeError("Accepted visual input limit is unavailable.")
         if (
             not self.settings.vllm_executable or not self.settings.vllm_executable.is_file()
         ) and self.runtimes:
@@ -608,7 +629,14 @@ class ProcessSupervisor:
             "--gpu-memory-utilization",
             "0.9",
             "--limit-mm-per-prompt",
-            json.dumps({"image": self.settings.vision_max_images, "video": 1}),
+            json.dumps(
+                {
+                    "image": vision_max_images
+                    if vision_max_images is not None
+                    else self.settings.vision_max_images,
+                    "video": 1,
+                }
+            ),
         ]
         raw_offload = profile.load_settings_json.get("cpu_offload_gb")
         if (
@@ -630,6 +658,7 @@ class ProcessSupervisor:
                 self.worker_health_url("chat"),
                 profile.id,
                 estimated_memory_bytes=estimate,
+                launch_scope_sha256=launch_scope_sha256,
             )
         except (Exception, asyncio.CancelledError):
             self.settings.chat_engine = previous_engine

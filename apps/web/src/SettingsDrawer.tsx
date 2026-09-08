@@ -1,6 +1,14 @@
+import type { ReactNode } from "react";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { GenerationSettingsPanel } from "./GenerationSettingsPanel";
 import type { EngineCapabilities, EngineRole, GenerationPreset, RoutingMode } from "./types";
+
+export interface EditedVersionSettings {
+  configurationControl?: ReactNode;
+  presetControl: ReactNode;
+  inheritedValues: Record<string, unknown>;
+  onRestore: () => void;
+}
 
 export function SettingsDrawer({
   open,
@@ -20,6 +28,7 @@ export function SettingsDrawer({
   profileValues,
   imageEdit,
   imageEditPrompt,
+  editSettings,
 }: {
   open: boolean;
   onClose: () => void;
@@ -31,7 +40,7 @@ export function SettingsDrawer({
   onRole: (role: EngineRole) => void;
   engines: EngineCapabilities[];
   values: Record<string, unknown>;
-  onValues: (values: Record<string, unknown>) => void;
+  onValues: (values: Record<string, unknown>, changedKeys?: string[]) => void;
   presets: GenerationPreset[];
   presetId: string | null;
   onPreset: (presetId: string | null) => void;
@@ -41,18 +50,20 @@ export function SettingsDrawer({
   profileValues?: Record<string, unknown>;
   imageEdit: boolean;
   imageEditPrompt: string;
+  editSettings?: EditedVersionSettings;
 }) {
   if (!open) return null;
   return (
     <AccessibleDialog
       title={`${role[0].toUpperCase() + role.slice(1)} settings`}
-      eyebrow="Chat defaults"
+      eyebrow={editSettings ? "This version only" : "Chat defaults"}
       closeLabel="Close settings"
       onClose={onClose}
       className={mode === "auto" ? "settings-drawer settings-drawer-with-roles" : "settings-drawer"}
       backdropClassName="settings-drawer-backdrop"
     >
-      {mode === "auto" && (
+      {editSettings?.configurationControl}
+      {mode === "auto" && !editSettings?.configurationControl && (
         <div className="segmented compact settings-role-tabs" role="group" aria-label="Settings role">
           {(["chat", "image", "video"] as EngineRole[]).map((option) => (
             <button
@@ -81,13 +92,14 @@ export function SettingsDrawer({
         presetId={presetId}
         onPreset={onPreset}
         workflowSchema={workflowSchema}
-        inheritedValues={inheritedValues}
+        inheritedValues={editSettings?.inheritedValues ?? inheritedValues}
         inheritedPresetId={inheritedPresetId}
         profileValues={profileValues}
         imageEdit={imageEdit}
         imageEditPrompt={imageEditPrompt}
-        resetLabel="Reset chat overrides"
-        onReset={() => onValues({})}
+        editSettings={editSettings}
+        resetLabel={editSettings ? "Restore original settings" : "Reset chat overrides"}
+        onReset={editSettings?.onRestore ?? (() => onValues({}))}
       />
     </AccessibleDialog>
   );

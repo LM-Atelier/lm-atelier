@@ -15,6 +15,7 @@ const AUTHORITATIVE_QUERY_ROOTS = new Set([
   "credential",
   "custom-nodes",
   "engines",
+  "edited-branches",
   "jobs",
   "models",
   "model-storage",
@@ -186,6 +187,10 @@ export function useLiveEvents(
         if (event.type.includes("progress") || event.type.startsWith("download.")) void client.invalidateQueries({ queryKey: ["jobs"] });
         if (event.type.startsWith("download.") || event.type.startsWith("worker.") || event.type.startsWith("runtime.") || event.type.startsWith("setup.verification")) void client.invalidateQueries({ queryKey: ["setup-readiness"] });
         if (event.type === "run.progress") void client.invalidateQueries({ queryKey: ["chat"] });
+        if (event.type === "chat.updated") {
+          void client.invalidateQueries({ queryKey: ["chat"] });
+          void client.invalidateQueries({ queryKey: ["chats"] });
+        }
         if (event.type === "message.updated") {
           void client.invalidateQueries({ queryKey: ["chat"] });
           void client.invalidateQueries({ queryKey: ["artifacts"] });

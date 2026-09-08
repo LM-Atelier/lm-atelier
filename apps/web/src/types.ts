@@ -1,3 +1,5 @@
+import type { ComposerPromptSource } from "./composerPromptSource";
+
 export type RoutingMode = "auto" | "text" | "image" | "video";
 export type JobKind =
   | "chat"
@@ -229,6 +231,124 @@ export interface TurnAccepted {
   assistant_message: Message;
 }
 
+export interface TurnReferenceInput {
+  reference_subject_id: string;
+  role?: string | null;
+  selected_asset_ids?: string[];
+  strength?: number | null;
+  source?: "mention" | "picker" | "inherited_context";
+}
+
+export type TurnWorkflowSelectionInput = {
+  selector_capability: "chat" | "image" | "video";
+} & (
+  | {
+      mode: "default" | "automatic";
+      workflow_family_id?: never;
+      workflow_revision_id?: never;
+    }
+  | {
+      mode: "family";
+      workflow_family_id: string;
+      workflow_revision_id?: never;
+    }
+  | {
+      mode: "revision";
+      workflow_revision_id: string;
+      workflow_family_id?: never;
+    }
+);
+
+export interface TurnRoleOverrides {
+  settings?: Record<string, unknown>;
+  preset_id?: string | null;
+  profile_id?: string | null;
+  vision_profile_id?: string | null;
+  workflow_revision_id?: string | null;
+  workflow_selection?: TurnWorkflowSelectionInput | null;
+}
+
+export interface PriorTurnEditRequest {
+  preset_id?: string | null;
+  text: string;
+  idempotency_key: string;
+  source_run_id?: string | null;
+  source_snapshot_sha256?: string | null;
+  profile_id?: string | null;
+  vision_profile_id?: string | null;
+  mode?: RoutingMode | null;
+  parent_message_id?: string | null;
+  /** Omit to inherit source inputs; an empty array explicitly removes them. */
+  input_artifact_ids?: string[];
+  /** Omit to inherit source bindings; an empty array explicitly removes them. */
+  references?: TurnReferenceInput[];
+  prompt_source?: ComposerPromptSource | null;
+  settings?: Record<string, unknown>;
+  ordered_settings?: Record<string, Record<string, unknown>>;
+  role_overrides?: Partial<Record<EngineRole, TurnRoleOverrides>>;
+  /** Explicit changes to exact source steps; applied after role-wide choices. */
+  step_overrides?: Record<string, TurnRoleOverrides>;
+  output_count?: number | null;
+  workflow_revision_id?: string | null;
+  workflow_selection?: TurnWorkflowSelectionInput | null;
+  confirm_media?: boolean;
+}
+
+export interface PriorTurnEditConfiguration {
+  image_edit_strength?: Record<string, unknown> | null;
+  operation: string;
+  profile_engine?: string | null;
+  settings: Record<string, unknown>;
+  resolved_settings: Record<string, unknown>;
+  settings_role: string;
+  output_count: number;
+  profile_id: string | null;
+  vision_profile_id: string | null;
+  preset_id: string | null;
+  preset: Record<string, unknown> | null;
+  model_selection: Record<string, unknown>;
+  workflow_selection: WorkflowSelection;
+  workflow_revision_id: string | null;
+  workflow_schema: Record<string, unknown> | null;
+  profile_settings?: Record<string, unknown>;
+}
+
+export interface PriorTurnEditStepSource extends PriorTurnEditConfiguration {
+  step_id: string;
+  ordinal: number;
+  source_run_id: string;
+  depends_on: string[];
+}
+
+export interface PriorTurnEditSource extends PriorTurnEditConfiguration {
+  source_user_message_id: string;
+  source_run_id: string;
+  /** Send with the edit to reject a source that changed while the editor was open. */
+  source_snapshot_sha256: string;
+  chat_id: string;
+  text: string;
+  mode: RoutingMode;
+  /** Null or absent means the historical routing mode was not recorded. */
+  original_mode?: RoutingMode | null;
+  plan_kind?: "single" | "ordered";
+  steps?: PriorTurnEditStepSource[];
+  input_artifact_ids: string[];
+  input_artifacts: Artifact[];
+  references: MessageReference[];
+  context_messages: Record<string, string>[];
+  context_visual_artifacts?: Artifact[];
+  prompt_source: Record<string, unknown> | null;
+}
+
+export interface PriorTurnEditAccepted extends TurnAccepted {
+  source_message_id: string;
+  source_run_id: string;
+  work_plan_id: string;
+  branch_head_message_id: string;
+  branch_activated: false;
+  accepted_context_sha256: string;
+}
+
 export interface Job {
   id: string;
   kind: JobKind;
@@ -322,6 +442,26 @@ export interface WorkPlan {
   steps: WorkStep[];
   created_at: string;
   updated_at: string;
+}
+
+export interface EditedBranch {
+  source_message_id: string;
+  source_run_id: string;
+  branch_head_message_id: string;
+  source_available: boolean;
+  can_continue: boolean;
+  plan: WorkPlan;
+  jobs: Job[];
+}
+
+export interface EditedBranchPage {
+  items: EditedBranch[];
+  next_cursor: string | null;
+}
+
+export interface EditedBranchActivation {
+  chat_id: string;
+  active_head_message_id: string;
 }
 
 export interface SettingField {
@@ -1021,6 +1161,12 @@ export interface AppEvent {
 }
 
 /** The router's answer for an unsent draft, so the composer need not guess. */
+export interface PriorTurnEditBinding {
+  source_message_id: string;
+  source_run_id: string;
+  source_snapshot_sha256: string;
+}
+
 export interface DraftClassification {
   references_prior_visual: boolean;
 }

@@ -21,6 +21,16 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, object_session, selectinload
 
+from .accepted_turn_context import (
+    AcceptedContext,
+    AcceptedWorkflow,
+    accepted_context,
+    accepted_profile_provenance,
+    resolve_accepted_profile,
+    resolve_accepted_workflow,
+    resolve_context_dependencies,
+    save_accepted_context,
+)
 from .adapters.base import ChatRequest, MediaEvent, MediaRequest
 from .adapters.contracts import close_iterator
 from .adapters.message_projection import project_chat_messages
@@ -161,6 +171,7 @@ from .schemas import (
     RunOut,
     TurnAccepted,
     TurnRequest,
+    TurnWorkflowSelectionIn,
     WorkerStatus,
 )
 from .settings_registry import (
@@ -182,6 +193,7 @@ from .studio_masks import (
     parse_mask_setting,
     split_mask_setting,
 )
+from .turn_inheritance import TurnInheritance, TurnSourceResolver, inherited_profile_configuration
 from .video_length import (
     VIDEO_DURATION_SETTING_KEY,
     resolve_video_length_settings,
@@ -211,6 +223,7 @@ from .workflow_activations import (
 from .workflow_compatibility import (
     ChatSelectorCapability,
     ProjectSelectorCapability,
+    ResolvedChatWorkflowSelection,
     WorkflowSelectionInvalid,
     mirror_legacy_project_workflow_selections,
     resolve_chat_workflow_selection,
@@ -226,6 +239,7 @@ from .workflow_selection import (
     ResolvedWorkflowFamily,
     WorkflowFamilySelectionError,
     WorkflowSelectionMode,
+    resolve_exact_workflow_revision,
     resolve_workflow_family,
 )
 
@@ -634,7 +648,10 @@ class ConversationOrchestrator:
         inherited_image_edit_strength: dict[str, Any] | None = None,
         inherited_prompt_source: object | None = None,
         reference_source_message_id: str | None = None,
+        freeze_context: bool = False,
+        activate_branch: bool = True,
         before_commit: Callable[[Session, Run], None] | None = None,
+        resolve_source: TurnSourceResolver | None = None,
     ) -> TurnAccepted:
         if not self._admission_open:
             raise RuntimeError(
@@ -651,7 +668,10 @@ class ConversationOrchestrator:
                 inherited_image_edit_strength=inherited_image_edit_strength,
                 inherited_prompt_source=inherited_prompt_source,
                 reference_source_message_id=reference_source_message_id,
+                freeze_context=freeze_context,
+                activate_branch=activate_branch,
                 before_commit=before_commit,
+                resolve_source=resolve_source,
             )
 
     async def create_prompt_batch_turn(
@@ -732,8 +752,12 @@ class ConversationOrchestrator:
         source_action: str = "send",
         inherited_image_edit_strength: dict[str, Any] | None = None,
         inherited_prompt_source: object | None = None,
+        inherited_workflow: AcceptedWorkflow | None = None,
         reference_source_message_id: str | None = None,
+        freeze_context: bool = False,
+        activate_branch: bool = True,
         before_commit: Callable[[Session, Run], None] | None = None,
+        resolve_source: TurnSourceResolver | None = None,
     ) -> TurnAccepted:
         # Never resolve an idempotency key until its URL-scoped chat has been
         # validated. Otherwise a key from one chat could disclose another
@@ -741,6 +765,12 @@ class ConversationOrchestrator:
         chat = session.get(Chat, chat_id)
         if not chat:
             raise LookupError("chat not found")
+        # An accepted retry consumes no additional queue capacity.
+        key = request.idempotency_key
+        if key is not None:
+            existing = self._idempotent_run(session, chat_id, key)
+            if existing is not None:
+                return self._accepted_for_run(session, existing)
         pending_count = session.scalar(
             select(func.count(Job.id))
             .join(Run, Job.run_id == Run.id)
@@ -761,7 +791,6 @@ class ConversationOrchestrator:
                 "Cancel one or wait for work to finish before sending another."
             )
 
-        key = request.idempotency_key
         if key is None:
             return await self._create_new_turn(
                 session,
@@ -772,8 +801,12 @@ class ConversationOrchestrator:
                 source_action=source_action,
                 inherited_image_edit_strength=inherited_image_edit_strength,
                 inherited_prompt_source=inherited_prompt_source,
+                inherited_workflow=inherited_workflow,
                 reference_source_message_id=reference_source_message_id,
+                freeze_context=freeze_context,
+                activate_branch=activate_branch,
                 before_commit=before_commit,
+                resolve_source=resolve_source,
             )
 
         owner_token, replay = await self._claim_or_replay_turn(
@@ -804,8 +837,12 @@ class ConversationOrchestrator:
                 source_action=source_action,
                 inherited_image_edit_strength=inherited_image_edit_strength,
                 inherited_prompt_source=inherited_prompt_source,
+                inherited_workflow=inherited_workflow,
                 reference_source_message_id=reference_source_message_id,
+                freeze_context=freeze_context,
+                activate_branch=activate_branch,
                 before_commit=before_commit,
+                resolve_source=resolve_source,
             )
         finally:
             self._release_turn_claim(session, chat_id, key, owner_token)
@@ -935,9 +972,13 @@ class ConversationOrchestrator:
         source_action: str = "send",
         inherited_image_edit_strength: dict[str, Any] | None = None,
         inherited_prompt_source: object | None = None,
+        inherited_workflow: AcceptedWorkflow | None = None,
         reference_source_message_id: str | None = None,
         prompt_batch_selection: PromptBatchQueueSelection | None = None,
+        freeze_context: bool = False,
+        activate_branch: bool = True,
         before_commit: Callable[[Session, Run], None] | None = None,
+        resolve_source: TurnSourceResolver | None = None,
     ) -> TurnAccepted:
         chat = session.get(Chat, chat_id)
         if not chat:
@@ -950,7 +991,10 @@ class ConversationOrchestrator:
             raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
         has_prompt_source = request.prompt_source is not None or inherited_prompt_source is not None
         if has_prompt_source and (
-            request.mode != RoutingMode.IMAGE
+            (
+                request.mode != RoutingMode.IMAGE
+                and not (request.mode == RoutingMode.AUTO and inherited_prompt_source is not None)
+            )
             or request.input_artifact_ids
             or request.references
             or request.output_count not in {None, 1}
@@ -988,9 +1032,24 @@ class ConversationOrchestrator:
             )
         )
         if resource_workflow_id is not None:
+            if (
+                request.workflow_revision_id is not None
+                or "workflow_selection" in request.model_fields_set
+            ):
+                _, _, selected_revision = self._execution_for_turn(
+                    session,
+                    chat,
+                    Operation.TEXT_TO_IMAGE,
+                    request.text,
+                    request,
+                )
+                resource_ids = requested_resource_workflows or {resource_workflow_id}
+                if selected_revision is None or resource_ids != {selected_revision.id}:
+                    raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
             request = request.model_copy(
                 update={
                     "workflow_revision_id": resource_workflow_id,
+                    "workflow_selection": None,
                 }
             )
         pending_count = session.scalar(
@@ -1134,7 +1193,10 @@ class ConversationOrchestrator:
                 pending_count=pending_count or 0,
                 source_action=source_action,
                 reference_source_message_id=reference_source_message_id,
+                freeze_context=freeze_context,
+                activate_branch=activate_branch,
                 before_commit=before_commit,
+                resolve_source=resolve_source,
             )
         prior_image, prior_image_prompt = self._latest_image_context(
             session,
@@ -1200,25 +1262,37 @@ class ConversationOrchestrator:
             else await self._compiled_visual_prompt(chat, plan, request.text)
         )
 
-        preferred_workflow_revision_id = (
-            self._setup_verification_workflow_id(session, chat) or request.workflow_revision_id
-        )
-        profile, model_selection, workflow_revision = self._profile_and_workflow_for_operation(
+        request = request.for_role(self._role_for_operation(plan.operation))
+        inherited_profile = None
+        inherited_vision = None
+        if resolve_source is not None:
+            request, inherited = await resolve_source(session, request, plan.operation, None)
+            inherited_profile = inherited.profile
+            inherited_vision = inherited.vision_profile
+            inherited_workflow = inherited.workflow
+            inherited_image_edit_strength = inherited.image_edit_strength
+
+        profile, model_selection, workflow_revision = self._execution_for_turn(
             session,
             chat,
             plan.operation,
             f"{request.text}\n{plan.standalone_prompt}",
-            # A recipe's recorded workflow wins over selection, and setup
-            # verification wins over both: it is the run that decides whether
-            # anything works at all.
-            preferred_revision_id=preferred_workflow_revision_id,
+            request,
         )
+        if inherited_profile is not None:
+            if profile is None or profile.id != inherited_profile.id:
+                raise ValueError("Accepted model configuration does not match its source.")
+            profile = inherited_profile_configuration(session, inherited_profile)
         profile_id = profile.id if profile else None
         vision_profile = (
-            self._vision_profile_for_chat(session, chat, profile)
+            self._vision_profile_for_turn(session, chat, profile, request)
             if plan.operation == Operation.TEXT
             else None
         )
+        if inherited_vision is not None:
+            if vision_profile is None or vision_profile.id != inherited_vision.id:
+                raise ValueError("Accepted vision configuration does not match its source.")
+            vision_profile = inherited_profile_configuration(session, inherited_vision)
         vision_profile_id = vision_profile.id if vision_profile else None
 
         if plan.operation != Operation.TEXT and not workflow_revision:
@@ -1234,11 +1308,12 @@ class ConversationOrchestrator:
                     profile,
                     model_selection,
                     workflow_revision,
-                ) = self._profile_and_workflow_for_operation(
+                ) = self._execution_for_turn(
                     session,
                     chat,
                     semantic_fallback,
                     f"{request.text}\n{plan.standalone_prompt}",
+                    request,
                 )
                 profile_id = profile.id if profile else None
             if not workflow_revision:
@@ -1246,8 +1321,21 @@ class ConversationOrchestrator:
                     "No ready workflow matches the active media engine. Install a supported "
                     "image or video model and LM Atelier will configure it automatically."
                 )
+        if inherited_workflow is not None:
+            if workflow_revision is None or workflow_revision.id != inherited_workflow.id:
+                raise ValueError("Accepted workflow configuration does not match its source.")
+            workflow_revision = resolve_accepted_workflow(session, inherited_workflow)
         if workflow_revision:
             model_selection = {**model_selection, "compatibility_only": True}
+        if (
+            prompt_source_resources is not None
+            and prompt_source_resources.workflow_revision_id is not None
+            and (
+                workflow_revision is None
+                or workflow_revision.id != prompt_source_resources.workflow_revision_id
+            )
+        ):
+            raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
         workflow_activation = _queued_workflow_activation(session, workflow_revision)
         role = self._role_for_operation(plan.operation)
         engine = (
@@ -1267,15 +1355,21 @@ class ConversationOrchestrator:
         mask, tunables = split_mask_setting(request.settings)
         request_settings = validate_settings(tunables, request_fields)
         project = session.get(Project, chat.project_id) if chat.project_id else None
-        default_preset = self._default_preset(session, plan.operation)
-        project_preset = self._bound_preset(session, project, role)
-        chat_preset = self._bound_preset(session, chat, role)
+        default_preset, project_preset, chat_preset, turn_preset = self._presets_for_turn(
+            session, project, chat, plan.operation, request
+        )
+        if turn_preset is not None:
+            request_settings = {
+                **compatible_stored_settings(turn_preset.settings_json, request_fields),
+                **request_settings,
+            }
         preset_layers = [
             (scope, preset, compatible_stored_settings(preset.settings_json, request_fields))
             for scope, preset in (
                 ("default", default_preset),
                 ("project", project_preset),
                 ("chat", chat_preset),
+                ("turn", turn_preset),
             )
             if preset
         ]
@@ -1754,7 +1848,7 @@ class ConversationOrchestrator:
         for assistant_message in assistant_messages:
             assistant_message.parent_id = previous_message_id
             previous_message_id = assistant_message.id
-        if replacement_message is None:
+        if replacement_message is None and activate_branch:
             chat.active_head_message_id = assistant_messages[-1].id
         assistant_message = assistant_messages[0]
 
@@ -1819,6 +1913,7 @@ class ConversationOrchestrator:
             failure_policy="stop_dependents",
             summary_json={
                 "operation": plan.operation.value,
+                "routing_mode": mode.value,
                 "step_count": output_count,
                 "output_count": output_count,
                 "source_action": source_action,
@@ -2186,6 +2281,9 @@ class ConversationOrchestrator:
             )
         if chat.title == "New chat":
             chat.title = request.text.strip().replace("\n", " ")[:72] or "New chat"
+        if freeze_context:
+            for accepted_run in runs:
+                self._freeze_turn_context(session, accepted_run)
         if before_commit is not None:
             # The caller's claim-bound assertion joins THIS transaction,
             # after every await above: the turn becomes durable only if
@@ -2226,9 +2324,58 @@ class ConversationOrchestrator:
         pending_count: int,
         source_action: str,
         reference_source_message_id: str | None,
+        freeze_context: bool = False,
+        activate_branch: bool = True,
         before_commit: Callable[[Session, Run], None] | None = None,
+        resolve_source: TurnSourceResolver | None = None,
     ) -> TurnAccepted:
         intent = OrderedPlanCompiler.validate(intent)
+        selected_roles = {"chat" if step.mode == "text" else step.mode for step in intent.steps}
+        workflow_choice = request.workflow_selection
+        if workflow_choice is not None:
+            if request.workflow_revision_id is not None:
+                raise ValueError("Choose one turn workflow selection or exact revision.")
+            if workflow_choice.selector_capability not in selected_roles:
+                raise ValueError(
+                    "The selected turn workflow cannot perform an operation in this plan."
+                )
+        if request.workflow_revision_id is not None:
+            selected_revision = session.get(WorkflowRevision, request.workflow_revision_id)
+            selected_definition = (
+                session.get(WorkflowDefinition, selected_revision.workflow_id)
+                if selected_revision
+                else None
+            )
+            if selected_definition is None:
+                raise ValueError("The selected turn workflow revision no longer exists.")
+            if (
+                self._role_for_operation(Operation(selected_definition.operation))
+                not in selected_roles
+            ):
+                raise ValueError(
+                    "The selected turn workflow cannot perform an operation in this plan."
+                )
+        selected_profile = (
+            session.get(ModelProfile, request.profile_id) if request.profile_id else None
+        )
+        if request.profile_id and selected_profile is None:
+            raise LookupError("The selected turn model no longer exists.")
+        if selected_profile and selected_profile.role not in {
+            "chat" if step.mode == "text" else step.mode for step in intent.steps
+        }:
+            raise ValueError("The selected turn model cannot perform an operation in this plan.")
+        selected_preset = (
+            session.get(GenerationPreset, request.preset_id) if request.preset_id else None
+        )
+        if request.preset_id and selected_preset is None:
+            raise LookupError("The selected turn preset no longer exists.")
+        if (
+            resolve_source is None
+            and selected_preset
+            and selected_preset.role
+            not in {"chat" if step.mode == "text" else step.mode for step in intent.steps}
+        ):
+            raise ValueError("The selected turn preset cannot apply to an operation in this plan.")
         if pending_count + len(intent.steps) > MAX_PENDING_WORK_PER_CHAT:
             raise ValueError(
                 f"This ordered request would exceed the limit of "
@@ -2291,16 +2438,37 @@ class ConversationOrchestrator:
                     else Operation.TEXT_TO_VIDEO
                 )
 
+            role = self._role_for_operation(operation)
+            step_request = request.for_role(role, ordered=True)
+            inherited = None
+            if resolve_source is not None:
+                step_request, inherited = await resolve_source(
+                    session, step_request, operation, index + 1
+                )
+
             (
                 profile,
                 model_selection,
                 workflow_revision,
-            ) = self._profile_and_workflow_for_operation(
+            ) = self._execution_for_turn(
                 session,
                 chat,
                 operation,
                 step_intent.prompt,
+                step_request,
+                ordered=True,
             )
+            if inherited is not None:
+                if inherited.profile is not None:
+                    if profile is None or profile.id != inherited.profile.id:
+                        raise ValueError("Accepted model configuration does not match its source.")
+                    profile = inherited_profile_configuration(session, inherited.profile)
+                if inherited.workflow is not None:
+                    if workflow_revision is None or workflow_revision.id != inherited.workflow.id:
+                        raise ValueError(
+                            "Accepted workflow configuration does not match its source."
+                        )
+                    workflow_revision = resolve_accepted_workflow(session, inherited.workflow)
             if workflow_revision:
                 model_selection = {**model_selection, "compatibility_only": True}
             if profile and profile.model_install_id:
@@ -2311,7 +2479,7 @@ class ConversationOrchestrator:
                     )
             profile_id = profile.id if profile else None
             vision_profile = (
-                self._vision_profile_for_chat(session, chat, profile)
+                self._vision_profile_for_turn(session, chat, profile, step_request)
                 if operation == Operation.TEXT
                 and (
                     any(binding.kind == "artifact" for binding in step_intent.inputs)
@@ -2319,6 +2487,11 @@ class ConversationOrchestrator:
                 )
                 else None
             )
+
+            if inherited is not None and inherited.vision_profile is not None:
+                if vision_profile is None or vision_profile.id != inherited.vision_profile.id:
+                    raise ValueError("Accepted vision configuration does not match its source.")
+                vision_profile = inherited_profile_configuration(session, inherited.vision_profile)
 
             if operation != Operation.TEXT and not workflow_revision:
                 raise ValueError(
@@ -2352,18 +2525,24 @@ class ConversationOrchestrator:
             )
             request_fields = [field for field in fields if field.scope != "load"]
             step_overrides = validate_settings(
-                request.ordered_settings.get(role, {}),
+                step_request.settings,
                 request_fields,
             )
-            default_preset = self._default_preset(session, operation)
-            project_preset = self._bound_preset(session, project, role)
-            chat_preset = self._bound_preset(session, chat, role)
+            default_preset, project_preset, chat_preset, turn_preset = self._presets_for_turn(
+                session, project, chat, operation, step_request, ordered=True
+            )
+            if turn_preset is not None:
+                step_overrides = {
+                    **compatible_stored_settings(turn_preset.settings_json, request_fields),
+                    **step_overrides,
+                }
             preset_layers = [
                 (scope, preset, compatible_stored_settings(preset.settings_json, request_fields))
                 for scope, preset in (
                     ("default", default_preset),
                     ("project", project_preset),
                     ("chat", chat_preset),
+                    ("turn", turn_preset),
                 )
                 if preset
             ]
@@ -2445,6 +2624,7 @@ class ConversationOrchestrator:
                     (EditSettingSource.CHAT, self._scoped_generation_settings(chat, role)),
                     (EditSettingSource.TURN, step_overrides),
                 ),
+                inherited_auto=inherited.image_edit_strength if inherited is not None else None,
                 workflow_schema=(
                     workflow_revision.input_schema_json if workflow_revision else None
                 ),
@@ -2568,7 +2748,8 @@ class ConversationOrchestrator:
         for assistant_message in assistant_messages:
             assistant_message.parent_id = previous_message_id
             previous_message_id = assistant_message.id
-        chat.active_head_message_id = assistant_messages[-1].id
+        if activate_branch:
+            chat.active_head_message_id = assistant_messages[-1].id
 
         transcript_sequence = (
             session.scalar(
@@ -2592,6 +2773,7 @@ class ConversationOrchestrator:
             failure_policy="preserve_completed_block_dependents",
             summary_json={
                 "operation": "ordered",
+                "routing_mode": (request.mode or RoutingMode(chat.routing_mode)).value,
                 "step_count": len(intent.steps),
                 "source_action": source_action,
                 "user_message_id": user_message.id,
@@ -2833,6 +3015,9 @@ class ConversationOrchestrator:
         }
         if chat.title == "New chat":
             chat.title = request.text.strip().replace("\n", " ")[:72] or "New chat"
+        if freeze_context:
+            for accepted_run in runs:
+                self._freeze_turn_context(session, accepted_run)
         if before_commit is not None:
             # The caller's claim-bound assertion joins THIS transaction,
             # after every await above: the turn becomes durable only if
@@ -3895,20 +4080,43 @@ class ConversationOrchestrator:
         return True
 
     async def _ensure_chat_worker(self, run_id: str) -> WorkerStatus | None:
-        if self.engines.settings.chat_engine not in {"llama.cpp", "vllm"}:
-            return None
+        launch_scope: str | None = None
+        profile: ModelProfile | None
+        install: ModelInstall | None
         with self.session_factory() as session:
             run = session.get(Run, run_id)
-            profile = session.get(ModelProfile, run.profile_id) if run and run.profile_id else None
-            install = (
-                session.get(ModelInstall, profile.model_install_id)
-                if profile and profile.model_install_id
-                else None
+            snapshot = accepted_context(session, run) if run is not None else None
+            if snapshot is not None:
+                engine = snapshot.profile.engine if snapshot.profile else snapshot.chat_engine
+                if engine not in {"llama.cpp", "vllm"}:
+                    if engine != self.engines.settings.chat_engine:
+                        raise RuntimeError("Accepted chat engine is unavailable.")
+                    return None
+                if snapshot.profile is None:
+                    raise RuntimeError("Accepted model configuration is unavailable.")
+                profile, install, launch_scope = resolve_accepted_profile(session, snapshot.profile)
+            else:
+                if self.engines.settings.chat_engine not in {"llama.cpp", "vllm"}:
+                    return None
+                profile = (
+                    session.get(ModelProfile, run.profile_id) if run and run.profile_id else None
+                )
+                install = (
+                    session.get(ModelInstall, profile.model_install_id)
+                    if profile and profile.model_install_id
+                    else None
+                )
+                if not profile or not install:
+                    raise RuntimeError("the selected chat profile does not have an installed model")
+                session.expunge(profile)
+                session.expunge(install)
+        if launch_scope is not None:
+            return await self.processes.load_chat(
+                profile,
+                install,
+                launch_scope_sha256=launch_scope,
+                vision_max_images=snapshot.vision_sampling.max_images if snapshot else None,
             )
-            if not profile or not install:
-                raise RuntimeError("the selected chat profile does not have an installed model")
-            session.expunge(profile)
-            session.expunge(install)
         status = next(item for item in self.processes.statuses() if item.name == "chat")
         if status.running and status.state == "ready" and status.profile_id == profile.id:
             return status
@@ -3973,6 +4181,17 @@ class ConversationOrchestrator:
     async def _prepare_chat_context(
         self, session: Session, run: Run, claim: JobClaim, *, job_id: str | None = None
     ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any], bool]:
+        snapshot = accepted_context(session, run)
+        profile_id = snapshot.profile_id if snapshot else run.profile_id
+        vision_profile_id = snapshot.vision_profile_id if snapshot else run.vision_profile_id
+        execution_settings = snapshot.settings if snapshot else run.settings_json
+        chat_engine = (
+            snapshot.profile.engine
+            if snapshot and snapshot.profile
+            else snapshot.chat_engine
+            if snapshot
+            else self.engines.settings.chat_engine
+        )
         messages, source_message_ids = self._context_messages_with_sources(session, run)
         # The executing job's own id: a run can carry more than one job row,
         # and the claim answers only for the one this execution holds.
@@ -3984,12 +4203,8 @@ class ConversationOrchestrator:
             session, run, lookback=self.engines.settings.vision_prior_visual_lookback
         )
         self._commit_owned(session, job_id, claim)
-        direct_profile_selected = run.vision_profile_id == run.profile_id and bool(run.profile_id)
-        if (
-            self.engines.settings.chat_engine == "mock"
-            and candidates
-            and "image" in capabilities.input_modalities
-        ):
+        direct_profile_selected = vision_profile_id == profile_id and bool(profile_id)
+        if chat_engine == "mock" and candidates and "image" in capabilities.input_modalities:
             direct_profile_selected = True
         vision_metadata: dict[str, Any] = {
             "available": "image" in capabilities.input_modalities,
@@ -4012,12 +4227,13 @@ class ConversationOrchestrator:
                 messages,
                 candidates=candidates,
             )
-            run.vision_profile_id = run.profile_id
+            if snapshot is None:
+                run.vision_profile_id = profile_id
             vision_metadata.update(
                 {
                     "mode": "direct",
-                    "profile_id": run.profile_id,
-                    "profile": self._vision_profile_provenance(session, run.profile_id),
+                    "profile_id": profile_id,
+                    "profile": self._vision_profile_provenance(session, profile_id, run=run),
                     "visual_contents_inspected": bool(vision_metadata.get("images_included")),
                 }
             )
@@ -4025,7 +4241,7 @@ class ConversationOrchestrator:
             raise RuntimeError(
                 "The verified vision profile did not expose image input after loading."
             )
-        elif candidates and run.vision_profile_id and run.vision_profile_id != run.profile_id:
+        elif candidates and vision_profile_id and vision_profile_id != profile_id:
             observation, bridge_metadata = await self._bridge_visual_context(
                 claim,
                 session,
@@ -4036,13 +4252,14 @@ class ConversationOrchestrator:
             vision_metadata = bridge_metadata
             vision_metadata["profile"] = self._vision_profile_provenance(
                 session,
-                run.vision_profile_id,
+                vision_profile_id,
+                run=run,
             )
             if observation:
                 messages = self._append_vision_observation(
                     messages,
                     observation,
-                    run.vision_profile_id,
+                    vision_profile_id,
                 )
         elif candidates:
             vision_metadata.update(
@@ -4055,11 +4272,13 @@ class ConversationOrchestrator:
             0,
             len(messages) - len(source_message_ids),
         )
-        profile = session.get(ModelProfile, run.profile_id) if run.profile_id else None
-        context_limit = int(
-            (profile.load_settings_json if profile else {}).get("context_length", 8192)
+        profile = session.get(ModelProfile, profile_id) if snapshot is None and profile_id else None
+        context_limit = (
+            snapshot.context_limit
+            if snapshot is not None
+            else int((profile.load_settings_json if profile else {}).get("context_length", 8192))
         )
-        requested_output = int(run.settings_json.get("max_tokens", 1024))
+        requested_output = int(execution_settings.get("max_tokens", 1024))
         safety_tokens = min(128, max(32, context_limit // 100))
         maximum_output = max(1, context_limit - safety_tokens - 64)
         output_limit = min(requested_output, maximum_output)
@@ -4086,7 +4305,7 @@ class ConversationOrchestrator:
                 "Increase Context length, reduce Maximum output, or shorten the message."
             )
 
-        request_settings = {**run.settings_json, "max_tokens": output_limit}
+        request_settings = {**execution_settings, "max_tokens": output_limit}
         metadata = {
             "policy": "compact-oldest-preserve-system-and-newest",
             "context_limit": context_limit,
@@ -4238,21 +4457,43 @@ class ConversationOrchestrator:
             if part.artifact_id and part.metadata_json.get("input_reference_source") == "explicit"
         }
         chat = session.get(Chat, run.chat_id)
-        vision_settings = dict(chat.vision_settings_json) if chat else {}
+        snapshot = accepted_context(session, run)
+        if snapshot is not None:
+            strict_ids = set(snapshot.strict_artifact_ids)
+        vision_settings = (
+            dict(snapshot.vision_settings)
+            if snapshot is not None
+            else dict(chat.vision_settings_json)
+            if chat
+            else {}
+        )
         self._commit_before_await(session)
         visual = await self.vision.prepare(
             candidates,
             strict_artifact_ids=strict_ids,
             vision_settings=vision_settings,
+            sampling_policy=snapshot.vision_sampling if snapshot else None,
         )
         if not visual.frames:
+            accepted_posters = dict(snapshot.visual_posters) if snapshot is not None else {}
+            if snapshot is not None and snapshot.dependencies:
+                dependencies = resolve_context_dependencies(session, run, snapshot)
+                accepted_posters.update(
+                    (artifact_id, poster_id)
+                    for artifact_id, poster_id in dependencies.visual_posters.items()
+                    if artifact_id not in snapshot.visual_artifact_ids
+                )
             posters = [
                 poster
                 for artifact in candidates
                 if artifact.id not in strict_ids
                 and artifact.media_type.casefold().startswith("video/")
                 and isinstance(
-                    poster_id := artifact.metadata_json.get("poster_artifact_id"),
+                    poster_id := (
+                        accepted_posters.get(artifact.id)
+                        if snapshot is not None
+                        else artifact.metadata_json.get("poster_artifact_id")
+                    ),
                     str,
                 )
                 and (poster := session.get(Artifact, poster_id)) is not None
@@ -4263,6 +4504,7 @@ class ConversationOrchestrator:
                     posters,
                     strict_artifact_ids=set(),
                     vision_settings=vision_settings,
+                    sampling_policy=snapshot.vision_sampling if snapshot else None,
                 )
                 visual = PreparedVisualContext(
                     frames=poster_visual.frames,
@@ -4303,34 +4545,54 @@ class ConversationOrchestrator:
     ) -> tuple[str, dict[str, Any]]:
         if job_id is None:
             job_id = self._job_id_for_run(session, run)
-        bridge_profile = session.get(ModelProfile, run.vision_profile_id)
-        bridge_install = (
-            session.get(ModelInstall, bridge_profile.model_install_id)
-            if bridge_profile and bridge_profile.model_install_id
-            else None
-        )
-        text_profile = session.get(ModelProfile, run.profile_id) if run.profile_id else None
-        text_install = (
-            session.get(ModelInstall, text_profile.model_install_id)
-            if text_profile and text_profile.model_install_id
-            else None
-        )
-        if not bridge_profile or not bridge_install:
-            return "", {
-                "available": False,
-                "mode": "none",
-                "visual_contents_inspected": False,
-                "images_included": 0,
-                "artifact_ids": [],
-                "images_skipped": len(candidates),
-                "reason": "The selected vision profile is unavailable.",
-            }
-        session.expunge(bridge_profile)
-        session.expunge(bridge_install)
-        if text_profile:
-            session.expunge(text_profile)
-        if text_install:
-            session.expunge(text_install)
+        snapshot = accepted_context(session, run)
+        bridge_scope: str | None = None
+        text_scope: str | None = None
+        bridge_profile: ModelProfile | None
+        bridge_install: ModelInstall | None
+        text_profile: ModelProfile | None
+        text_install: ModelInstall | None
+        if snapshot is not None:
+            if snapshot.vision_profile is None:
+                raise RuntimeError("Accepted vision profile is unavailable.")
+            bridge_profile, bridge_install, bridge_scope = resolve_accepted_profile(
+                session, snapshot.vision_profile
+            )
+            if snapshot.profile is not None and snapshot.profile.install is not None:
+                text_profile, text_install, text_scope = resolve_accepted_profile(
+                    session, snapshot.profile
+                )
+            else:
+                text_profile, text_install = None, None
+        else:
+            bridge_profile = session.get(ModelProfile, run.vision_profile_id)
+            bridge_install = (
+                session.get(ModelInstall, bridge_profile.model_install_id)
+                if bridge_profile and bridge_profile.model_install_id
+                else None
+            )
+            text_profile = session.get(ModelProfile, run.profile_id) if run.profile_id else None
+            text_install = (
+                session.get(ModelInstall, text_profile.model_install_id)
+                if text_profile and text_profile.model_install_id
+                else None
+            )
+            if not bridge_profile or not bridge_install:
+                return "", {
+                    "available": False,
+                    "mode": "none",
+                    "visual_contents_inspected": False,
+                    "images_included": 0,
+                    "artifact_ids": [],
+                    "images_skipped": len(candidates),
+                    "reason": "The selected vision profile is unavailable.",
+                }
+            session.expunge(bridge_profile)
+            session.expunge(bridge_install)
+            if text_profile:
+                session.expunge(text_profile)
+            if text_install:
+                session.expunge(text_install)
         observation = ""
         metadata: dict[str, Any] = {
             "available": True,
@@ -4348,10 +4610,19 @@ class ConversationOrchestrator:
                 "Loading vision model",
                 claim,
             )
-            await self.processes.load_chat(bridge_profile, bridge_install)
+            if bridge_scope is not None:
+                await self.processes.load_chat(
+                    bridge_profile,
+                    bridge_install,
+                    launch_scope_sha256=bridge_scope,
+                    vision_max_images=snapshot.vision_sampling.max_images if snapshot else None,
+                )
+            else:
+                await self.processes.load_chat(bridge_profile, bridge_install)
             capabilities = await self.engines.chat_capabilities()
             if "image" not in capabilities.input_modalities:
                 raise RuntimeError("the selected vision profile did not accept image input")
+            bridge_prompt = snapshot.standalone_prompt if snapshot else run.standalone_prompt
             bridge_messages: list[dict[str, Any]] = [
                 {
                     "role": MessageRole.USER.value,
@@ -4360,7 +4631,7 @@ class ConversationOrchestrator:
                         "Describe only relevant visible facts. If frames have timestamp labels, "
                         "identify observations by those sampled timestamps and do not claim to "
                         "have inspected unsampled portions.\n\n"
-                        f"User request: {run.standalone_prompt}"
+                        f"User request: {bridge_prompt}"
                     ),
                 }
             ]
@@ -4378,6 +4649,8 @@ class ConversationOrchestrator:
                     "visual_contents_inspected": bool(metadata.get("images_included")),
                 }
             )
+            if snapshot is not None:
+                metadata["profile"] = accepted_profile_provenance(snapshot.vision_profile)
             if not metadata["visual_contents_inspected"]:
                 return "", metadata
             self._commit_owned(session, job_id, claim)
@@ -4388,7 +4661,11 @@ class ConversationOrchestrator:
                 f"{'' if metadata['images_included'] == 1 else 's'}",
                 claim,
             )
-            max_tokens = self.engines.settings.vision_bridge_max_tokens
+            max_tokens = (
+                snapshot.vision_bridge_max_tokens
+                if snapshot is not None
+                else self.engines.settings.vision_bridge_max_tokens
+            )
             completion_seen = False
             completion_metadata: dict[str, Any] = {}
             async with asyncio.timeout(180):
@@ -4456,7 +4733,17 @@ class ConversationOrchestrator:
             # ClaimLost the per-event fence raises.
             if not self._closing and announced and self._attempt_current(job_id, claim):
                 if text_profile and text_install:
-                    await self.processes.load_chat(text_profile, text_install)
+                    if text_scope is not None:
+                        await self.processes.load_chat(
+                            text_profile,
+                            text_install,
+                            launch_scope_sha256=text_scope,
+                            vision_max_images=snapshot.vision_sampling.max_images
+                            if snapshot
+                            else None,
+                        )
+                    else:
+                        await self.processes.load_chat(text_profile, text_install)
                 else:
                     await self.processes.stop("chat")
 
@@ -4497,6 +4784,25 @@ class ConversationOrchestrator:
     ) -> list[Artifact]:
         """Return explicit current inputs, then the newest prior branch visual."""
 
+        snapshot = accepted_context(session, run)
+        if snapshot is not None:
+            visuals: list[Artifact] = []
+            dependency_ids = run.provenance_json.get("resolved_dependency_artifact_ids", [])
+            if not isinstance(dependency_ids, list) or any(
+                not isinstance(value, str) for value in dependency_ids
+            ):
+                raise ValueError("Accepted dependency media is unavailable.")
+            visual_ids = (
+                list(dict.fromkeys([*snapshot.input_artifact_ids, *dependency_ids]))
+                if dependency_ids
+                else snapshot.visual_artifact_ids
+            )
+            for artifact_id in visual_ids:
+                artifact = session.get(Artifact, artifact_id)
+                if artifact is None:
+                    raise ValueError("Accepted conversation context is unavailable.")
+                visuals.append(artifact)
+            return visuals
         current = session.get(Message, run.user_message_id)
         candidates = [
             artifact
@@ -5005,16 +5311,26 @@ class ConversationOrchestrator:
         self,
         session: Session,
         run: Run,
+        *,
+        accepted_inputs: AcceptedContext | None = None,
     ) -> WorkflowActivationLaunchScope | None:
         revision = (
-            session.get(WorkflowRevision, run.workflow_revision_id)
+            resolve_accepted_workflow(session, accepted_inputs.workflow)
+            if accepted_inputs is not None
+            else session.get(WorkflowRevision, run.workflow_revision_id)
             if run.workflow_revision_id
             else None
         )
         if revision is None or revision.dependency_contract_sha256 is None:
             return None
         workflow = run.provenance_json.get("workflow")
-        snapshot = workflow.get("activation") if isinstance(workflow, dict) else None
+        snapshot = (
+            accepted_inputs.workflow_activation
+            if accepted_inputs is not None
+            else workflow.get("activation")
+            if isinstance(workflow, dict)
+            else None
+        )
         required = (
             "id",
             "resolver_version",
@@ -5079,21 +5395,34 @@ class ConversationOrchestrator:
         *,
         output_count: int,
     ) -> str | None:
-        if (
-            output_count <= 0
-            or not capabilities
-            or not capabilities.healthy
-            or not run.profile_id
-            or not run.workflow_revision_id
-        ):
+        if output_count <= 0 or not capabilities or not capabilities.healthy:
             return None
-        profile = session.get(ModelProfile, run.profile_id)
-        install = (
-            session.get(ModelInstall, profile.model_install_id)
-            if profile and profile.model_install_id
-            else None
-        )
-        revision = session.get(WorkflowRevision, run.workflow_revision_id)
+        profile: ModelProfile | None
+        install: ModelInstall | None
+        snapshot = accepted_context(session, run)
+        if snapshot is not None:
+            if snapshot.profile is None or snapshot.workflow is None:
+                return None
+            try:
+                profile, install, _ = resolve_accepted_profile(session, snapshot.profile)
+                revision = resolve_accepted_workflow(session, snapshot.workflow)
+            except RuntimeError:
+                return None
+            current_install = session.get(ModelInstall, install.id)
+            if current_install is None or not current_install.active:
+                return None
+            operation = snapshot.operation
+        else:
+            if not run.profile_id or not run.workflow_revision_id:
+                return None
+            profile = session.get(ModelProfile, run.profile_id)
+            install = (
+                session.get(ModelInstall, profile.model_install_id)
+                if profile and profile.model_install_id
+                else None
+            )
+            revision = session.get(WorkflowRevision, run.workflow_revision_id)
+            operation = run.operation
         if (
             not profile
             or not install
@@ -5107,9 +5436,9 @@ class ConversationOrchestrator:
             return None
         expected_role = (
             "image"
-            if run.operation in {Operation.TEXT_TO_IMAGE.value, Operation.IMAGE_TO_IMAGE.value}
+            if operation in {Operation.TEXT_TO_IMAGE.value, Operation.IMAGE_TO_IMAGE.value}
             else "video"
-            if run.operation in {Operation.TEXT_TO_VIDEO.value, Operation.IMAGE_TO_VIDEO.value}
+            if operation in {Operation.TEXT_TO_VIDEO.value, Operation.IMAGE_TO_VIDEO.value}
             else None
         )
         if profile.role != expected_role or install.role != expected_role:
@@ -5152,7 +5481,7 @@ class ConversationOrchestrator:
             workflow_contract_version=revision.artifact_sha256,
             details={
                 "probe": "successful_media_output",
-                "operation": run.operation,
+                "operation": operation,
                 "workflow_revision_id": revision.id,
                 "workflow_template_id": dependencies.get("template_id"),
                 "workflow_performance": revision.input_schema_json.get(
@@ -5165,17 +5494,28 @@ class ConversationOrchestrator:
 
     async def _execute_media(self, job_id: str, run_id: str, claim: JobClaim) -> str | None:
         activation_scope: WorkflowActivationLaunchScope | None = None
-        if self.engines.settings.media_engine == "comfyui":
-            with self.session_factory() as session:
-                run = session.get(Run, run_id)
-                if not run:
-                    return None
+        with self.session_factory() as session:
+            run = session.get(Run, run_id)
+            if not run:
+                return None
+            accepted_inputs = accepted_context(session, run)
+            media_engine = (
+                accepted_inputs.media_engine
+                if accepted_inputs is not None
+                else self.engines.settings.media_engine
+            )
+            if media_engine != self.engines.settings.media_engine:
+                raise RuntimeError("Accepted media engine is no longer available.")
+            if media_engine == "comfyui":
                 try:
-                    activation_scope = self._media_activation_scope(session, run)
+                    activation_scope = self._media_activation_scope(
+                        session, run, accepted_inputs=accepted_inputs
+                    )
                 except Exception:
                     session.commit()
                     raise
                 session.commit()
+        if media_engine == "comfyui":
             await self._ensure_media_worker(
                 claim=claim,
                 job_id=job_id,
@@ -5187,7 +5527,12 @@ class ConversationOrchestrator:
             run = session.get(Run, run_id)
             if not run:
                 return None
-            validated_revision_id = run.workflow_revision_id
+            accepted_inputs = accepted_context(session, run)
+            validated_revision_id = (
+                accepted_inputs.workflow_revision_id
+                if accepted_inputs
+                else run.workflow_revision_id
+            )
             selected_revision = (
                 session.get(WorkflowRevision, validated_revision_id)
                 if validated_revision_id
@@ -5207,84 +5552,137 @@ class ConversationOrchestrator:
             run = session.get(Run, run_id)
             if not run:
                 return None
-            if run.workflow_revision_id != validated_revision_id:
+            accepted_inputs = accepted_context(session, run)
+            execution_settings = (
+                accepted_inputs.settings if accepted_inputs is not None else run.settings_json
+            )
+            execution_operation = (
+                accepted_inputs.operation if accepted_inputs is not None else run.operation
+            )
+            execution_prompt = (
+                accepted_inputs.media_prompt
+                if accepted_inputs is not None
+                else self._media_prompt(run)
+            )
+            semantic_prompt = (
+                accepted_inputs.standalone_prompt
+                if accepted_inputs is not None
+                else run.standalone_prompt
+            )
+            auxiliary_assets = (
+                accepted_inputs.auxiliary_assets
+                if accepted_inputs is not None
+                else run.provenance_json.get("auxiliary_assets") or {}
+            )
+            input_ids = self.input_artifact_ids_for_run(session, run)
+            if accepted_inputs is not None:
+                dependencies = resolve_context_dependencies(session, run, accepted_inputs)
+                input_ids = list(
+                    dict.fromkeys([*accepted_inputs.input_artifact_ids, *dependencies.artifact_ids])
+                )
+                if dependencies.text_inputs:
+                    context = "\n\n".join(item["text"] for item in dependencies.text_inputs)
+                    execution_prompt += f"\n\nUse this prior text as context:\n{context}"
+            current_revision_id = (
+                accepted_inputs.workflow_revision_id
+                if accepted_inputs
+                else run.workflow_revision_id
+            )
+            if current_revision_id != validated_revision_id:
                 raise RuntimeError("The selected media workflow changed during verification.")
             input_paths: list[Path] = []
-            for artifact_id in self.input_artifact_ids_for_run(session, run):
+            for artifact_id in input_ids:
                 artifact = session.get(Artifact, artifact_id)
+                if artifact is None and accepted_inputs is not None:
+                    raise RuntimeError("Accepted media input is unavailable.")
                 if artifact:
-                    input_paths.append(self.artifacts.resolve(artifact))
+                    input_paths.append(
+                        self.artifacts.verified_path(artifact)
+                        if accepted_inputs is not None
+                        else self.artifacts.resolve(artifact)
+                    )
             workflow: dict[str, Any] = {}
-            revision: WorkflowRevision | None = None
-            if run.workflow_revision_id:
-                revision = session.get(WorkflowRevision, run.workflow_revision_id)
-                if revision is None and verified_review is not None:
-                    raise RuntimeError("The selected media workflow is no longer available.")
-                if revision:
-                    if revision.engine == "comfyui" and not revision_is_trusted(session, revision):
+            revision = (
+                resolve_accepted_workflow(session, accepted_inputs.workflow)
+                if accepted_inputs is not None
+                else session.get(WorkflowRevision, run.workflow_revision_id)
+                if run.workflow_revision_id
+                else None
+            )
+            if revision is None and verified_review is not None:
+                raise RuntimeError("The selected media workflow is no longer available.")
+            if revision:
+                if revision.engine == "comfyui" and not revision_is_trusted(session, revision):
+                    raise RuntimeError(
+                        "The selected ComfyUI workflow needs review. Open Workflows, "
+                        "choose this revision, and use Review exact revision."
+                    )
+                if verified_review is not None:
+                    revalidate_workflow_review_runtime(
+                        session, self.processes, revision, verified_review
+                    )
+                dependency_errors = node_dependency_errors(session, revision.dependencies_json)
+                if dependency_errors:
+                    raise RuntimeError("; ".join(dependency_errors))
+                workflow = revision.api_graph_json
+                if execution_settings.get("loras"):
+                    resolved_loras = resolve_lora_stack(
+                        session,
+                        revision,
+                        execution_settings["loras"],
+                    )
+                    extension = workflow_lora_extension(revision)
+                    if not extension:
                         raise RuntimeError(
-                            "The selected ComfyUI workflow needs review. Open Workflows, "
-                            "choose this revision, and use Review exact revision."
+                            "The selected workflow no longer provides its LoRA extension."
                         )
-                    if verified_review is not None:
-                        revalidate_workflow_review_runtime(
-                            session, self.processes, revision, verified_review
+                    workflow = transform_lora_graph(
+                        workflow,
+                        extension,
+                        [
+                            {
+                                "comfy_name": item["comfy_name"],
+                                "model_strength": item["model_strength"],
+                                "clip_strength": item["clip_strength"],
+                            }
+                            for item in resolved_loras.provenance
+                            if item["enabled"]
+                        ],
+                    )
+                    if (
+                        accepted_inputs is not None
+                        and resolved_loras.provenance != auxiliary_assets.get("lora_stack")
+                    ):
+                        raise RuntimeError("Accepted LoRA assets are no longer available.")
+                    expected_graph = auxiliary_assets.get("effective_graph_sha256")
+                    if expected_graph != resolved_loras.graph_sha256:
+                        raise RuntimeError(
+                            "The effective LoRA graph changed after this run was queued."
                         )
-                    dependency_errors = node_dependency_errors(session, revision.dependencies_json)
-                    if dependency_errors:
-                        raise RuntimeError("; ".join(dependency_errors))
-                    workflow = revision.api_graph_json
-                    if run.settings_json.get("loras"):
-                        resolved_loras = resolve_lora_stack(
-                            session,
-                            revision,
-                            run.settings_json["loras"],
-                        )
-                        extension = workflow_lora_extension(revision)
-                        if not extension:
-                            raise RuntimeError(
-                                "The selected workflow no longer provides its LoRA extension."
-                            )
-                        workflow = transform_lora_graph(
-                            workflow,
-                            extension,
-                            [
-                                {
-                                    "comfy_name": item["comfy_name"],
-                                    "model_strength": item["model_strength"],
-                                    "clip_strength": item["clip_strength"],
-                                }
-                                for item in resolved_loras.provenance
-                                if item["enabled"]
-                            ],
-                        )
-                        expected_graph = (run.provenance_json.get("auxiliary_assets") or {}).get(
-                            "effective_graph_sha256"
-                        )
-                        if expected_graph != resolved_loras.graph_sha256:
-                            raise RuntimeError(
-                                "The effective LoRA graph changed after this run was queued."
-                            )
             # The mask travels as a resolved path beside the settings, never
             # as an input reference: it is instruction, not content, and must
             # not appear as an attachment or count toward edit lineage.
-            parameters: dict[str, Any] = dict(run.settings_json)
+            parameters: dict[str, Any] = copy.deepcopy(execution_settings)
             if revision and workflow_video_length(revision.input_schema_json):
                 parameters.pop(VIDEO_DURATION_SETTING_KEY, None)
-            mask_setting = run.settings_json.get(MASK_SETTING_KEY)
+            mask_setting = execution_settings.get(MASK_SETTING_KEY)
             if isinstance(mask_setting, dict):
                 mask_artifact = session.get(Artifact, str(mask_setting.get("artifact_id") or ""))
                 if not mask_artifact:
                     raise RuntimeError("The selection for this edit is no longer stored.")
                 parameters[MASK_SETTING_KEY] = {
                     **mask_setting,
-                    "path": str(self.artifacts.resolve(mask_artifact)),
+                    "path": str(
+                        self.artifacts.verified_path(mask_artifact)
+                        if accepted_inputs is not None
+                        else self.artifacts.resolve(mask_artifact)
+                    ),
                 }
             request = MediaRequest(
                 run_id=run.id,
-                operation=run.operation,
-                prompt=self._media_prompt(run),
-                negative_prompt=str(run.settings_json.get("negative_prompt", "")) or None,
+                operation=execution_operation,
+                prompt=execution_prompt,
+                negative_prompt=str(execution_settings.get("negative_prompt", "")) or None,
                 input_paths=input_paths,
                 workflow=workflow,
                 parameters=parameters,
@@ -5481,11 +5879,11 @@ class ConversationOrchestrator:
                     metadata={
                         **generated.metadata,
                         "run_id": run.id,
-                        "semantic_description": run.standalone_prompt,
+                        "semantic_description": semantic_prompt,
                         "semantic_description_source": "generation_prompt",
                         "semantic_description_confidence": "intent-only",
                         "visual_contents_inspected": False,
-                        "settings": run.settings_json,
+                        "settings": copy.deepcopy(execution_settings),
                     },
                 )
                 output_chat = session.get(Chat, run.chat_id)
@@ -5693,10 +6091,23 @@ class ConversationOrchestrator:
             ),
             None,
         )
-        vision_profile = self._vision_profile_for_chat(session, chat, None) if chat else None
+        snapshot = accepted_context(session, run)
+        vision_profile = (
+            session.get(ModelProfile, snapshot.verification_profile.id)
+            if snapshot is not None and snapshot.verification_profile is not None
+            else None
+            if snapshot is not None
+            else self._vision_profile_for_chat(session, chat, None)
+            if chat
+            else None
+        )
         eligibility = image_edit_verification_eligibility(
-            run.operation,
-            chat.vision_settings_json if chat else None,
+            snapshot.operation if snapshot is not None else run.operation,
+            snapshot.vision_settings
+            if snapshot is not None
+            else chat.vision_settings_json
+            if chat
+            else None,
             vision_profile_id=vision_profile.id if vision_profile else None,
             source_artifact_id=source_artifact_id,
             result_artifact_id=result_artifact_id,
@@ -5721,7 +6132,9 @@ class ConversationOrchestrator:
         assert result_artifact_id is not None
         edit = run.provenance_json.get("image_edit")
         edit_values = edit if isinstance(edit, dict) else {}
-        strength = edit_values.get("strength")
+        strength = (
+            snapshot.image_edit_strength if snapshot is not None else edit_values.get("strength")
+        )
         strength_values = strength if isinstance(strength, dict) else {}
         bounds = strength_values.get("applied_bounds")
         bound_values = bounds if isinstance(bounds, dict) else {}
@@ -6019,9 +6432,11 @@ class ConversationOrchestrator:
             bound = self._bound_retry(session, source_run)
             if bound is not None:
                 return await self._resume_bound_retry(session, bound)
+        snapshot = accepted_context(session, source_run) if source_run is not None else None
         if (
             not source_run
-            or source_run.operation != Operation.IMAGE_TO_IMAGE.value
+            or (snapshot.operation if snapshot else source_run.operation)
+            != Operation.IMAGE_TO_IMAGE.value
             or not decision.retry
             or not decision.parameter
             or decision.value_after is None
@@ -6035,7 +6450,15 @@ class ConversationOrchestrator:
         source_assistant = session.get(Message, source_run.assistant_message_id)
         if not source_user or not source_assistant:
             raise ValueError("image edit retry messages are unavailable")
-        text = "\n".join(part.text for part in source_user.parts if part.text).strip()
+        text = (
+            "\n".join(
+                entry.content
+                for entry in snapshot.messages
+                if entry.source_message_id == source_user.id
+            ).strip()
+            if snapshot is not None
+            else "\n".join(part.text for part in source_user.parts if part.text).strip()
+        )
         if not text:
             raise ValueError("image edit retry prompt is unavailable")
         workflow_revision = (
@@ -6048,16 +6471,32 @@ class ConversationOrchestrator:
         )
         source_run_id = source_run.id
         source_chat_id = source_run.chat_id
-        source_settings = copy.deepcopy(source_run.settings_json)
+        source_settings = copy.deepcopy(snapshot.settings if snapshot else source_run.settings_json)
         workflow_schema = (
-            copy.deepcopy(workflow_revision.input_schema_json) if workflow_revision else None
+            copy.deepcopy(snapshot.workflow.input_schema_json)
+            if snapshot and snapshot.workflow
+            else copy.deepcopy(workflow_revision.input_schema_json)
+            if workflow_revision
+            else None
         )
-        profile_engine = profile.engine if profile else None
+        profile_engine = (
+            snapshot.profile.engine
+            if snapshot and snapshot.profile
+            else profile.engine
+            if profile
+            else None
+        )
         parent_message_id = source_user.parent_id
         source_assistant_id = source_assistant.id
         input_artifact_ids = self.input_artifact_ids_for_run(session, source_run)
         image_edit = source_run.provenance_json.get("image_edit")
-        strength = image_edit.get("strength") if isinstance(image_edit, dict) else None
+        strength = (
+            snapshot.image_edit_strength
+            if snapshot is not None
+            else image_edit.get("strength")
+            if isinstance(image_edit, dict)
+            else None
+        )
         if not isinstance(strength, dict) or strength.get("mode") != "auto":
             raise ValueError("image edit retry requires automatic strength")
         inherited_strength = {
@@ -6078,6 +6517,24 @@ class ConversationOrchestrator:
         settings[decision.parameter] = decision.value_after
         verification_job_id = image_edit_verification_job_id(source_run_id)
 
+        async def resolve_retry_source(
+            turn_session: Session, request: TurnRequest, operation: Operation, ordinal: int | None
+        ) -> tuple[TurnRequest, TurnInheritance]:
+            if snapshot is None or operation != Operation.IMAGE_TO_IMAGE or ordinal is not None:
+                raise ValueError("Accepted image edit retry configuration is unavailable.")
+            return request.model_copy(
+                update={
+                    "profile_id": snapshot.profile_id,
+                    "workflow_revision_id": snapshot.workflow_revision_id,
+                    "workflow_selection": None,
+                    "preset_id": None,
+                }
+            ), TurnInheritance(
+                profile=snapshot.profile,
+                workflow=snapshot.workflow,
+                image_edit_strength=inherited_strength,
+            )
+
         def bound_to_claim(turn_session: Session, retry_run: Run) -> None:
             # Evaluated inside the turn creator immediately before the commit
             # that makes the retry durable, after every await that precedes
@@ -6094,6 +6551,7 @@ class ConversationOrchestrator:
                 "image_edit_verification_retry": {
                     "version": VERIFICATION_VERSION,
                     "source_run_id": source_run_id,
+                    "source_message_id": source_user.id,
                     "source_job_id": payload.source_job_id,
                     "source_verification_job_id": verification_job_id,
                     "attempt": decision.attempt,
@@ -6102,6 +6560,25 @@ class ConversationOrchestrator:
                     "strength_after": decision.value_after,
                 },
             }
+            if snapshot is not None:
+                auxiliary = retry_run.provenance_json.get("auxiliary_assets") or {}
+                if (auxiliary.get("lora_stack") or []) != (
+                    snapshot.auxiliary_assets.get("lora_stack") or []
+                ):
+                    raise ValueError("An accepted image edit LoRA is no longer available.")
+                retry_run.standalone_prompt = snapshot.standalone_prompt
+                retry_run.provenance_json = {
+                    **retry_run.provenance_json,
+                    "preset": copy.deepcopy(snapshot.preset),
+                    "preset_layers": copy.deepcopy(snapshot.preset_layers),
+                }
+                self._freeze_turn_context(
+                    turn_session,
+                    retry_run,
+                    inherited_context=snapshot,
+                    inherit_profile_configuration=True,
+                    inherit_workflow_configuration=True,
+                )
             # The source's verification record names its retry in the same
             # transaction: the turn and the record of what it retries are
             # durable together, and a later pass finds the retry by it.
@@ -6138,8 +6615,52 @@ class ConversationOrchestrator:
             inherited_image_edit_strength=inherited_strength,
             reference_source_message_id=source_user.id,
             before_commit=bound_to_claim,
+            resolve_source=resolve_retry_source if snapshot is not None else None,
         )
         return accepted
+
+    @staticmethod
+    def _image_edit_verification_profile(
+        session: Session, profile_id: str, snapshot: AcceptedContext | None
+    ) -> tuple[ModelProfile | None, ModelInstall | None, str | None]:
+        if snapshot is None:
+            profile = session.get(ModelProfile, profile_id)
+            install = (
+                session.get(ModelInstall, profile.model_install_id)
+                if profile and profile.model_install_id
+                else None
+            )
+            return profile, install, None
+        accepted = snapshot.verification_profile
+        current = (
+            session.get(ModelInstall, accepted.install.id)
+            if accepted is not None and accepted.install is not None
+            else None
+        )
+        if accepted is None or accepted.id != profile_id or current is None or not current.active:
+            return None, None, None
+        try:
+            return resolve_accepted_profile(session, accepted)
+        except RuntimeError:
+            return None, None, None
+
+    @staticmethod
+    def _image_edit_verification_restore_profile(
+        session: Session, previous_profile_id: str | None, verification_profile_id: str
+    ) -> tuple[ModelProfile | None, ModelInstall | None]:
+        if previous_profile_id is None or previous_profile_id == verification_profile_id:
+            return None, None
+        profile = session.get(ModelProfile, previous_profile_id)
+        install = (
+            session.get(ModelInstall, profile.model_install_id)
+            if profile and profile.model_install_id
+            else None
+        )
+        if profile:
+            session.expunge(profile)
+        if install:
+            session.expunge(install)
+        return profile, install
 
     async def _execute_image_edit_verification(self, job_id: str, claim: JobClaim) -> None:
         media_stopped_for_verification = False
@@ -6156,6 +6677,7 @@ class ConversationOrchestrator:
         )
         restore_profile: ModelProfile | None = None
         restore_install: ModelInstall | None = None
+        launch_scope: str | None = None
         try:
             with self.session_factory() as session:
                 job = session.get(Job, job_id)
@@ -6175,12 +6697,6 @@ class ConversationOrchestrator:
                 chat = session.get(Chat, payload.chat_id)
                 source = session.get(Artifact, payload.source_artifact_id)
                 result = session.get(Artifact, payload.result_artifact_id)
-                profile = session.get(ModelProfile, payload.vision_profile_id)
-                install = (
-                    session.get(ModelInstall, profile.model_install_id)
-                    if profile and profile.model_install_id
-                    else None
-                )
                 if not run or run.status != RunStatus.COMPLETE.value or not chat:
                     if self._finish_image_edit_verification(
                         session, job, VerificationReason.SOURCE_UNAVAILABLE, claim=claim
@@ -6189,7 +6705,11 @@ class ConversationOrchestrator:
                     else:
                         session.rollback()
                     return
-                if chat.vision_settings_json.get("verify_image_edits") is not True:
+                snapshot = accepted_context(session, run)
+                vision_settings = (
+                    snapshot.vision_settings if snapshot is not None else chat.vision_settings_json
+                )
+                if vision_settings.get("verify_image_edits") is not True:
                     if self._finish_image_edit_verification(
                         session, job, VerificationReason.DISABLED, claim=claim
                     ):
@@ -6205,6 +6725,9 @@ class ConversationOrchestrator:
                     else:
                         session.rollback()
                     return
+                profile, install, launch_scope = self._image_edit_verification_profile(
+                    session, payload.vision_profile_id, snapshot
+                )
                 if (
                     not profile
                     or not install
@@ -6218,25 +6741,15 @@ class ConversationOrchestrator:
                     else:
                         session.rollback()
                     return
-                if previous_profile_id and previous_profile_id != profile.id:
-                    restore_profile = session.get(ModelProfile, previous_profile_id)
-                    restore_install = (
-                        session.get(ModelInstall, restore_profile.model_install_id)
-                        if restore_profile and restore_profile.model_install_id
-                        else None
-                    )
-                    if restore_profile:
-                        session.expunge(restore_profile)
-                    if restore_install:
-                        session.expunge(restore_install)
-                vision_settings = (
-                    chat.vision_settings_json if isinstance(chat.vision_settings_json, dict) else {}
+                restore_profile, restore_install = self._image_edit_verification_restore_profile(
+                    session, previous_profile_id, profile.id
                 )
                 settings = {**vision_settings, "max_images": 2}
                 session.expunge(source)
                 session.expunge(result)
-                session.expunge(profile)
-                session.expunge(install)
+                if snapshot is None:
+                    session.expunge(profile)
+                    session.expunge(install)
                 if job.work_step_id:
                     step = session.get(WorkStep, job.work_step_id)
                     if step:
@@ -6258,6 +6771,11 @@ class ConversationOrchestrator:
                     [source, result],
                     strict_artifact_ids={source.id, result.id},
                     vision_settings=settings,
+                    sampling_policy=(
+                        snapshot.vision_sampling.model_copy(update={"max_images": 2})
+                        if snapshot is not None
+                        else None
+                    ),
                 )
             except VisionInputError:
                 with self.session_factory() as session:
@@ -6288,8 +6806,12 @@ class ConversationOrchestrator:
             chat_status = next(
                 status for status in self.processes.statuses() if status.name == "chat"
             )
-            if self.engines.settings.chat_engine in {"llama.cpp", "vllm"} and (
-                not chat_status.running
+            if (snapshot.chat_engine if snapshot else self.engines.settings.chat_engine) in {
+                "llama.cpp",
+                "vllm",
+            } and (
+                launch_scope is not None
+                or not chat_status.running
                 or chat_status.state != "ready"
                 or chat_status.profile_id != profile.id
             ):
@@ -6318,7 +6840,12 @@ class ConversationOrchestrator:
                 # nothing" leaves ordinary chat stopped after a vision model
                 # fails to start, which the parent did not do.
                 chat_displaced_for_verification = True
-                await self.processes.load_chat(profile, install)
+                if launch_scope is not None:
+                    await self.processes.load_chat(
+                        profile, install, launch_scope_sha256=launch_scope, vision_max_images=2
+                    )
+                else:
+                    await self.processes.load_chat(profile, install)
             self._require_ownership(job_id, claim, "after its workers")
             capabilities = await self.engines.chat_capabilities()
             if "image" not in capabilities.input_modalities:
@@ -6346,7 +6873,12 @@ class ConversationOrchestrator:
                     else:
                         session.rollback()
                     return
-                prompt = build_image_edit_verification_prompt(run.standalone_prompt)
+                current_context = accepted_context(session, run)
+                prompt = build_image_edit_verification_prompt(
+                    current_context.standalone_prompt
+                    if current_context is not None
+                    else run.standalone_prompt
+                )
                 if not self._claim_owns_row(session, job_id, claim):
                     session.rollback()
                     return
@@ -6372,7 +6904,9 @@ class ConversationOrchestrator:
                             "temperature": 0,
                             "max_tokens": min(
                                 256,
-                                self.engines.settings.vision_bridge_max_tokens,
+                                snapshot.vision_bridge_max_tokens
+                                if snapshot is not None
+                                else self.engines.settings.vision_bridge_max_tokens,
                             ),
                         },
                         persistence_scope=self.persistence_scope,
@@ -7561,21 +8095,166 @@ class ConversationOrchestrator:
         return messages
 
     @classmethod
+    def _chat_workflow_for_turn(
+        cls,
+        session: Session,
+        chat: Chat,
+        operation: Operation,
+        choice: TurnWorkflowSelectionIn | None,
+    ) -> ResolvedChatWorkflowSelection:
+        capability: ChatSelectorCapability = (
+            "chat"
+            if operation == Operation.TEXT
+            else "video"
+            if "video" in operation.value
+            else "image"
+        )
+        if choice is None:
+            return resolve_chat_workflow_selection(session, chat, capability)
+        if choice.selector_capability != capability:
+            raise ValueError("The selected turn workflow cannot perform this operation.")
+        if choice.mode == "family":
+            mapping = session.scalar(
+                select(WorkflowProfileCompatibility).where(
+                    WorkflowProfileCompatibility.workflow_family_id == choice.workflow_family_id
+                )
+            )
+            return ResolvedChatWorkflowSelection(
+                capability=capability,
+                mode="family",
+                profile_id=mapping.model_profile_id if mapping else None,
+                workflow_family_id=choice.workflow_family_id,
+            )
+        return ResolvedChatWorkflowSelection(
+            capability=capability,
+            mode="automatic" if choice.mode == "automatic" else "legacy",
+            profile_id=AUTO_PROFILE_ID if choice.mode == "automatic" else None,
+            workflow_family_id=None,
+        )
+
+    def _execution_for_turn(
+        self,
+        session: Session,
+        chat: Chat,
+        operation: Operation,
+        prompt: str,
+        request: TurnRequest,
+        *,
+        ordered: bool = False,
+    ) -> tuple[ModelProfile | None, dict[str, Any], WorkflowRevision | None]:
+        choice = request.workflow_selection
+        if choice is not None and choice.mode == "revision":
+            selected_revision = session.get(WorkflowRevision, choice.workflow_revision_id)
+            selected_definition = (
+                session.get(WorkflowDefinition, selected_revision.workflow_id)
+                if selected_revision
+                else None
+            )
+            if selected_definition is None:
+                raise ValueError("The selected turn workflow revision no longer exists.")
+            if (
+                self._role_for_operation(Operation(selected_definition.operation))
+                != choice.selector_capability
+            ):
+                raise ValueError("The selected turn workflow revision does not match its role.")
+        revision_id = request.workflow_revision_id
+        if choice is not None and revision_id is not None:
+            raise ValueError("Choose one turn workflow selection or exact revision.")
+        role = self._role_for_operation(operation)
+        if choice is not None and choice.selector_capability != role:
+            if not ordered:
+                raise ValueError("The selected turn workflow cannot perform this operation.")
+            choice = None
+        if choice is not None and choice.mode == "revision":
+            revision_id = choice.workflow_revision_id
+            choice = None
+        if revision_id is not None:
+            revision = session.get(WorkflowRevision, revision_id)
+            definition = session.get(WorkflowDefinition, revision.workflow_id) if revision else None
+            if revision is None or definition is None:
+                raise ValueError("The selected turn workflow revision no longer exists.")
+            revision_role = self._role_for_operation(Operation(definition.operation))
+            if ordered and revision_role != role:
+                override = request.role_overrides.get(role)
+                if override is not None and "workflow_revision_id" in override.model_fields_set:
+                    raise ValueError("The selected role workflow cannot perform this operation.")
+                revision_id = None
+            elif definition.operation != operation.value:
+                raise ValueError(
+                    "The selected turn workflow revision cannot perform this operation."
+                )
+        profile_id = request.profile_id
+        if ordered and profile_id is not None:
+            profile = session.get(ModelProfile, profile_id)
+            if profile is None:
+                raise LookupError("The selected turn model no longer exists.")
+            if profile.role != role:
+                override = request.role_overrides.get(role)
+                if override is not None and "profile_id" in override.model_fields_set:
+                    raise ValueError("The selected role model cannot perform this operation.")
+                profile_id = None
+        setup_id = self._setup_verification_workflow_id(session, chat)
+        if setup_id is not None:
+            revision_id, choice = setup_id, None
+        if revision_id is not None:
+            capability: ChatSelectorCapability = (
+                "chat"
+                if operation == Operation.TEXT
+                else "video"
+                if "video" in operation.value
+                else "image"
+            )
+            revision, activation, bound_profile = resolve_exact_workflow_revision(
+                session,
+                revision_id,
+                capability=capability,
+                operation=operation,
+                engine=self.engines.settings.chat_engine
+                if operation == Operation.TEXT
+                else self.engines.settings.media_engine,
+            )
+            if bound_profile is not None:
+                if profile_id is not None and bound_profile.id != profile_id:
+                    raise ValueError("The selected model does not match the turn workflow.")
+                profile_id = bound_profile.id
+            if operation == Operation.TEXT:
+                if bound_profile is None:
+                    raise ValueError("The selected text workflow has no ready model binding.")
+                return (
+                    bound_profile,
+                    {
+                        "mode": "explicit",
+                        "profile_id": bound_profile.id,
+                        "profile_name": bound_profile.name,
+                        "workflow_revision_id": revision.id,
+                        "workflow_activation_id": activation.id if activation else None,
+                    },
+                    revision,
+                )
+        result = self._profile_and_workflow_for_operation(
+            session,
+            chat,
+            operation,
+            prompt,
+            preferred_revision_id=revision_id,
+            preferred_profile_id=profile_id,
+            workflow_choice=choice,
+        )
+        if revision_id is not None and (result[2] is None or result[2].id != revision_id):
+            raise ValueError("The selected turn workflow revision is not ready for this operation.")
+        return result
+
+    @classmethod
     def _profile_for_operation(
         cls,
         session: Session,
         chat: Chat,
         operation: Operation,
         prompt: str,
+        *,
+        workflow_choice: TurnWorkflowSelectionIn | None = None,
     ) -> tuple[ModelProfile | None, dict[str, Any]]:
-        capability: ChatSelectorCapability
-        if operation == Operation.TEXT:
-            capability = "chat"
-        elif "image" in operation.value and "video" not in operation.value:
-            capability = "image"
-        else:
-            capability = "video"
-        workflow_selection = resolve_chat_workflow_selection(session, chat, capability)
+        workflow_selection = cls._chat_workflow_for_turn(session, chat, operation, workflow_choice)
         selected_id = workflow_selection.profile_id
         role = cls._role_for_operation(operation)
         profiles = list(
@@ -7637,17 +8316,85 @@ class ConversationOrchestrator:
         prompt: str,
         *,
         preferred_revision_id: str | None = None,
+        preferred_profile_id: str | None = None,
+        workflow_choice: TurnWorkflowSelectionIn | None = None,
     ) -> tuple[ModelProfile | None, dict[str, Any], WorkflowRevision | None]:
+        if preferred_profile_id is not None:
+            selected = session.get(ModelProfile, preferred_profile_id)
+            if selected is None:
+                raise LookupError("The selected turn model no longer exists.")
+            if selected.role != self._role_for_operation(operation):
+                raise ValueError("The selected turn model cannot perform this operation.")
+            if selected.model_install_id:
+                install = session.get(ModelInstall, selected.model_install_id)
+                if install is None or not install.active or install.engine != selected.engine:
+                    raise ValueError("The selected turn model is not ready.")
+        if workflow_choice is not None and preferred_profile_id is not None:
+            selected_workflow = self._workflow_family_for_operation(
+                session,
+                chat,
+                operation,
+                prompt,
+                preferred_revision_id=preferred_revision_id,
+                workflow_choice=workflow_choice,
+            )
+            if selected_workflow is not None:
+                selected_profile = selected_workflow[0]
+                if selected_profile is not None and selected_profile.id != preferred_profile_id:
+                    raise ValueError("The selected model does not match the turn workflow.")
+                if selected_profile is not None:
+                    return selected_workflow
+                selected = session.get(ModelProfile, preferred_profile_id)
+                if selected is None or selected.role != self._role_for_operation(operation):
+                    raise ValueError("The selected model does not match the turn workflow.")
+                revision = selected_workflow[2]
+                if revision is None or not self._revision_accepts_install(
+                    session, revision, selected.model_install_id
+                ):
+                    raise ValueError("The selected model does not match the turn workflow.")
+                return (
+                    selected,
+                    {
+                        **selected_workflow[1],
+                        "profile_id": selected.id,
+                        "profile_name": selected.name,
+                    },
+                    revision,
+                )
+        if preferred_profile_id is not None:
+            selected = session.get(ModelProfile, preferred_profile_id)
+            if selected is None:
+                raise LookupError("The selected turn model no longer exists.")
+            workflow = self._workflow_for_operation(
+                session,
+                operation,
+                project_id=chat.project_id,
+                model_install_id=selected.model_install_id,
+                preferred_revision_id=preferred_revision_id,
+            )
+            return (
+                selected,
+                {
+                    "mode": "explicit",
+                    "profile_id": selected.id,
+                    "profile_name": selected.name,
+                    "profile_use_case": selected.use_case,
+                },
+                workflow,
+            )
         workflow_first = self._workflow_family_for_operation(
             session,
             chat,
             operation,
             prompt,
             preferred_revision_id=preferred_revision_id,
+            workflow_choice=workflow_choice,
         )
         if workflow_first is not None:
             return workflow_first
-        profile, selection = self._profile_for_operation(session, chat, operation, prompt)
+        profile, selection = self._profile_for_operation(
+            session, chat, operation, prompt, workflow_choice=workflow_choice
+        )
         workflow = self._workflow_for_operation(
             session,
             operation,
@@ -7737,15 +8484,21 @@ class ConversationOrchestrator:
             raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
         request_settings = validate_settings(tunables, request_fields)
         project = session.get(Project, chat.project_id) if chat.project_id else None
-        default_preset = self._default_preset(session, Operation.TEXT_TO_IMAGE)
-        project_preset = self._bound_preset(session, project, role)
-        chat_preset = self._bound_preset(session, chat, role)
+        default_preset, project_preset, chat_preset, turn_preset = self._presets_for_turn(
+            session, project, chat, Operation.TEXT_TO_IMAGE, request
+        )
+        if turn_preset is not None:
+            request_settings = {
+                **compatible_stored_settings(turn_preset.settings_json, request_fields),
+                **request_settings,
+            }
         preset_layers = tuple(
             (scope, preset, compatible_stored_settings(preset.settings_json, request_fields))
             for scope, preset in (
                 ("default", default_preset),
                 ("project", project_preset),
                 ("chat", chat_preset),
+                ("turn", turn_preset),
             )
             if preset
         )
@@ -7762,6 +8515,10 @@ class ConversationOrchestrator:
                     chat_preset.settings_json if chat_preset is not None else {},
                 ),
                 ("chat", self._scoped_generation_settings(chat, role)),
+                (
+                    "turn preset",
+                    turn_preset.settings_json if turn_preset is not None else {},
+                ),
             )
             for key, value in layer.items()
             if key != "loras" and compatible_stored_settings({key: value}, request_fields)
@@ -7857,6 +8614,7 @@ class ConversationOrchestrator:
         prompt: str,
         *,
         preferred_revision_id: str | None,
+        workflow_choice: TurnWorkflowSelectionIn | None = None,
     ) -> tuple[ModelProfile | None, dict[str, Any], WorkflowRevision | None] | None:
         """Resolve new workflow choices before entering the legacy compatibility path."""
 
@@ -7872,7 +8630,7 @@ class ConversationOrchestrator:
 
         mode: WorkflowSelectionMode
         workflow_family_id: str | None
-        chat_selection = resolve_chat_workflow_selection(session, chat, capability)
+        chat_selection = self._chat_workflow_for_turn(session, chat, operation, workflow_choice)
         if chat_selection.mode == "family":
             mode = "explicit"
             workflow_family_id = chat_selection.workflow_family_id
@@ -8092,7 +8850,19 @@ class ConversationOrchestrator:
     def _vision_profile_provenance(
         session: Session,
         profile_id: str | None,
+        *,
+        run: Run | None = None,
     ) -> dict[str, Any] | None:
+        snapshot = accepted_context(session, run) if run is not None else None
+        if snapshot is not None:
+            profile_snapshot = (
+                snapshot.profile
+                if profile_id == snapshot.profile_id
+                else snapshot.vision_profile
+                if profile_id == snapshot.vision_profile_id
+                else None
+            )
+            return accepted_profile_provenance(profile_snapshot)
         profile = session.get(ModelProfile, profile_id) if profile_id else None
         install = (
             session.get(ModelInstall, profile.model_install_id)
@@ -8120,6 +8890,24 @@ class ConversationOrchestrator:
                 else None
             ),
         }
+
+    def _vision_profile_for_turn(
+        self,
+        session: Session,
+        chat: Chat,
+        text_profile: ModelProfile | None,
+        request: TurnRequest,
+    ) -> ModelProfile | None:
+        if "vision_profile_id" not in request.model_fields_set:
+            return self._vision_profile_for_chat(session, chat, text_profile)
+        if request.vision_profile_id is None:
+            return None
+        selected = session.get(ModelProfile, request.vision_profile_id)
+        if selected is None:
+            raise LookupError("The selected vision model no longer exists.")
+        if selected.role != "chat" or not self._profile_has_verified_vision(session, selected):
+            raise ValueError("The selected vision model has no verified image input support.")
+        return selected
 
     def _vision_profile_for_chat(
         self,
@@ -8197,6 +8985,53 @@ class ConversationOrchestrator:
             return {}
         settings = scoped.get(role)
         return dict(settings) if isinstance(settings, dict) else {}
+
+    @classmethod
+    def _presets_for_turn(
+        cls,
+        session: Session,
+        project: Project | None,
+        chat: Chat,
+        operation: Operation,
+        request: TurnRequest,
+        *,
+        ordered: bool = False,
+    ) -> tuple[
+        GenerationPreset | None,
+        GenerationPreset | None,
+        GenerationPreset | None,
+        GenerationPreset | None,
+    ]:
+        role = cls._role_for_operation(operation)
+        if "preset_id" in request.model_fields_set:
+            if request.preset_id is None:
+                return None, None, None, None
+            selected = session.get(GenerationPreset, request.preset_id)
+            if selected is None:
+                raise LookupError("The selected turn preset no longer exists.")
+            if selected.role == role:
+                # Keep the chosen values and label together across later awaits;
+                # this object is never attached to the session or saved as a default.
+                return (
+                    None,
+                    None,
+                    None,
+                    GenerationPreset(
+                        id=selected.id,
+                        name=selected.name,
+                        role=selected.role,
+                        settings_json=copy.deepcopy(selected.settings_json),
+                    ),
+                )
+            override = request.role_overrides.get(role)
+            if not ordered or (override is not None and "preset_id" in override.model_fields_set):
+                raise ValueError("The selected turn preset cannot apply to this operation.")
+        return (
+            cls._default_preset(session, operation),
+            cls._bound_preset(session, project, role),
+            cls._bound_preset(session, chat, role),
+            None,
+        )
 
     @staticmethod
     def _bound_preset(
@@ -8688,77 +9523,88 @@ class ConversationOrchestrator:
         step = session.get(WorkStep, run.work_step_id)
         if not step:
             raise RuntimeError("The planned work step is missing.")
-        text_inputs: list[dict[str, str]] = []
-        artifact_ids: list[str] = []
-        for binding in step.input_bindings_json:
-            binding_type = binding.get("type")
-            if binding_type not in {"step_output.text", "step_output.artifact"}:
-                continue
-            source_step_id = binding.get("source_step_id")
-            if not isinstance(source_step_id, str):
-                raise RuntimeError("A planned step input is missing its source.")
-            source_step = session.get(WorkStep, source_step_id)
-            if (
-                not source_step
-                or source_step.plan_id != run.work_plan_id
-                or source_step.status != JobStatus.COMPLETE.value
-                or not source_step.run_id
-            ):
-                raise RuntimeError("A required planned step did not complete successfully.")
-            source_run = session.get(Run, source_step.run_id)
-            source_message = (
-                session.get(Message, source_run.assistant_message_id) if source_run else None
-            )
-            if (
-                not source_run
-                or source_run.chat_id != run.chat_id
-                or not source_message
-                or source_message.chat_id != run.chat_id
-            ):
-                raise RuntimeError("A planned step output crossed its chat boundary.")
-            if binding_type == "step_output.text":
-                text = "\n".join(
-                    part.text
-                    for part in sorted(source_message.parts, key=lambda value: value.position)
-                    if part.type == PartType.TEXT.value and part.text
-                ).strip()
-                if not text:
-                    raise RuntimeError("A required text step produced no usable text.")
-                if len(text) > 50_000:
-                    raise RuntimeError("A required text step exceeded the dependency budget.")
-                text_inputs.append({"source_step_id": source_step_id, "text": text})
-                continue
-            binding_artifact_ids: list[str] = []
-            for part in sorted(source_message.parts, key=lambda value: value.position):
+        snapshot = accepted_context(session, run)
+        text_inputs: list[dict[str, str]]
+        artifact_ids: list[str]
+        if snapshot is not None:
+            dependencies = resolve_context_dependencies(session, run, snapshot)
+            text_inputs, artifact_ids = dependencies.text_inputs, dependencies.artifact_ids
+        else:
+            text_inputs = []
+            artifact_ids = []
+            for binding in step.input_bindings_json:
+                binding_type = binding.get("type")
+                if binding_type not in {"step_output.text", "step_output.artifact"}:
+                    continue
+                source_step_id = binding.get("source_step_id")
+                if not isinstance(source_step_id, str):
+                    raise RuntimeError("A planned step input is missing its source.")
+                source_step = session.get(WorkStep, source_step_id)
                 if (
-                    not part.artifact_id
-                    or part.metadata_json.get("preview")
-                    or part.metadata_json.get("input_reference")
+                    not source_step
+                    or source_step.plan_id != run.work_plan_id
+                    or source_step.status != JobStatus.COMPLETE.value
+                    or not source_step.run_id
                 ):
-                    continue
-                artifact = session.get(Artifact, part.artifact_id)
-                if not artifact:
-                    continue
-                if run.operation in {
-                    Operation.IMAGE_TO_IMAGE.value,
-                    Operation.IMAGE_TO_VIDEO.value,
-                } and not artifact.media_type.casefold().startswith("image/"):
-                    continue
+                    raise RuntimeError("A required planned step did not complete successfully.")
+                source_run = session.get(Run, source_step.run_id)
+                source_message = (
+                    session.get(Message, source_run.assistant_message_id) if source_run else None
+                )
                 if (
-                    run.operation == Operation.TEXT.value
-                    and not artifact.media_type.casefold().startswith(("image/", "video/"))
+                    not source_run
+                    or source_run.chat_id != run.chat_id
+                    or not source_message
+                    or source_message.chat_id != run.chat_id
                 ):
+                    raise RuntimeError("A planned step output crossed its chat boundary.")
+                if binding_type == "step_output.text":
+                    text = "\n".join(
+                        part.text
+                        for part in sorted(source_message.parts, key=lambda value: value.position)
+                        if part.type == PartType.TEXT.value and part.text
+                    ).strip()
+                    if not text:
+                        raise RuntimeError("A required text step produced no usable text.")
+                    if len(text) > 50_000:
+                        raise RuntimeError("A required text step exceeded the dependency budget.")
+                    text_inputs.append({"source_step_id": source_step_id, "text": text})
                     continue
-                binding_artifact_ids.append(artifact.id)
-            if not binding_artifact_ids:
-                raise RuntimeError("A required media step produced no compatible artifact.")
-            artifact_ids.extend(binding_artifact_ids)
+                binding_artifact_ids: list[str] = []
+                for part in sorted(source_message.parts, key=lambda value: value.position):
+                    if (
+                        not part.artifact_id
+                        or part.metadata_json.get("preview")
+                        or part.metadata_json.get("input_reference")
+                    ):
+                        continue
+                    artifact = session.get(Artifact, part.artifact_id)
+                    if not artifact:
+                        continue
+                    if run.operation in {
+                        Operation.IMAGE_TO_IMAGE.value,
+                        Operation.IMAGE_TO_VIDEO.value,
+                    } and not artifact.media_type.casefold().startswith("image/"):
+                        continue
+                    if (
+                        run.operation == Operation.TEXT.value
+                        and not artifact.media_type.casefold().startswith(("image/", "video/"))
+                    ):
+                        continue
+                    binding_artifact_ids.append(artifact.id)
+                if not binding_artifact_ids:
+                    raise RuntimeError("A required media step produced no compatible artifact.")
+                artifact_ids.extend(binding_artifact_ids)
 
         provenance = run.provenance_json if isinstance(run.provenance_json, dict) else {}
         compiled_step = provenance.get("compiled_step")
         compiled_prompt = compiled_step.get("prompt") if isinstance(compiled_step, dict) else None
         base_prompt: str = (
-            compiled_prompt if isinstance(compiled_prompt, str) else run.standalone_prompt
+            (snapshot.compiled_prompt or snapshot.standalone_prompt)
+            if snapshot is not None
+            else compiled_prompt
+            if isinstance(compiled_prompt, str)
+            else run.standalone_prompt
         )
         if run.operation != Operation.TEXT.value and text_inputs:
             context = "\n\n".join(
@@ -8804,6 +9650,114 @@ class ConversationOrchestrator:
             if (artifact := session.get(Artifact, artifact_id)) is not None
         ]
 
+    def _freeze_turn_context(
+        self,
+        session: Session,
+        run: Run,
+        *,
+        inherited_context: AcceptedContext | None = None,
+        inherited_configuration: AcceptedContext | None = None,
+        inherit_profile_configuration: bool = False,
+        inherit_vision_configuration: bool = False,
+        inherit_workflow_configuration: bool = False,
+    ) -> None:
+        messages, sources = self._context_messages_with_sources(
+            session, run, include_step_context=False
+        )
+        input_ids = self.input_artifact_ids_for_run(session, run)
+        if inherited_context is None:
+            visuals = self._visual_context_artifacts(
+                session, run, lookback=self.engines.settings.vision_prior_visual_lookback
+            )
+        else:
+            visual_ids = list(
+                dict.fromkeys(
+                    [
+                        *input_ids,
+                        *(
+                            artifact_id
+                            for artifact_id in inherited_context.visual_artifact_ids
+                            if artifact_id not in inherited_context.input_artifact_ids
+                        ),
+                    ]
+                )
+            )
+            visuals = []
+            for artifact_id in visual_ids:
+                artifact = session.get(Artifact, artifact_id)
+                if artifact is None:
+                    raise ValueError("Accepted conversation context is unavailable.")
+                visuals.append(artifact)
+        artifact_ids = set(input_ids)
+        mask = run.settings_json.get(MASK_SETTING_KEY)
+        if isinstance(mask, dict) and isinstance(mask.get("artifact_id"), str):
+            artifact_ids.add(mask["artifact_id"])
+        context_artifact_ids: set[str] = set()
+        if inherited_context is not None:
+            # Older snapshots did not distinguish context edges from current
+            # inputs. Retain their complete set instead of losing an edge.
+            context_artifact_ids.update(
+                inherited_context.context_artifact_ids
+                if inherited_context.context_artifact_ids is not None
+                else inherited_context.artifact_ids
+            )
+        else:
+            for source_id in sources:
+                if source_id == run.user_message_id:
+                    continue
+                message = session.get(Message, source_id) if source_id is not None else None
+                if message is not None:
+                    context_artifact_ids.update(
+                        artifact.id for artifact in self._message_input_artifacts(session, message)
+                    )
+            context_artifact_ids.update(
+                artifact.id for artifact in visuals if artifact.id not in input_ids
+            )
+        artifact_ids.update(context_artifact_ids)
+        current = session.get(Message, run.user_message_id)
+        strict_ids = [
+            part.artifact_id
+            for part in (current.parts if current else [])
+            if part.artifact_id and part.metadata_json.get("input_reference_source") == "explicit"
+        ]
+        chat = session.get(Chat, run.chat_id)
+        profile = session.get(ModelProfile, run.profile_id) if run.profile_id else None
+        save_accepted_context(
+            session,
+            run,
+            messages=messages,
+            sources=sources,
+            artifact_ids=artifact_ids,
+            input_artifact_ids=input_ids,
+            context_artifact_ids=context_artifact_ids,
+            inherited_context=inherited_context,
+            inherited_configuration=inherited_configuration,
+            inherit_profile_configuration=inherit_profile_configuration,
+            inherit_vision_configuration=inherit_vision_configuration,
+            inherit_workflow_configuration=inherit_workflow_configuration,
+            visual_artifact_ids=[artifact.id for artifact in visuals],
+            strict_artifact_ids=strict_ids,
+            verification_profile_id=(
+                verifier.id
+                if chat is not None
+                and run.operation == Operation.IMAGE_TO_IMAGE.value
+                and chat.vision_settings_json.get("verify_image_edits") is True
+                and (verifier := self._vision_profile_for_chat(session, chat, None)) is not None
+                else None
+            ),
+            vision_bridge_max_tokens=self.engines.settings.vision_bridge_max_tokens,
+            vision_settings=dict(chat.vision_settings_json) if chat else {},
+            vision_sampling=self.vision.sampling_policy(
+                dict(chat.vision_settings_json) if chat else {}
+            ),
+            chat_engine=self.engines.settings.chat_engine,
+            media_engine=self.engines.settings.media_engine,
+            media_prompt=self._media_prompt(run),
+            context_limit=int(
+                (profile.load_settings_json if profile else {}).get("context_length", 8192)
+            ),
+        )
+
     @staticmethod
     def _context_messages(session: Session, run: Run) -> list[dict[str, str]]:
         messages, _ = ConversationOrchestrator._context_messages_with_sources(session, run)
@@ -8813,12 +9767,27 @@ class ConversationOrchestrator:
     def _context_messages_with_sources(
         session: Session,
         run: Run,
+        *,
+        include_step_context: bool = True,
     ) -> tuple[list[dict[str, str]], list[str | None]]:
+        messages: list[dict[str, str]]
+        source_message_ids: list[str | None]
+        snapshot = accepted_context(session, run)
+        if snapshot is not None:
+            messages = [
+                {"role": entry.role, "content": entry.content} for entry in snapshot.messages
+            ]
+            source_message_ids = [entry.source_message_id for entry in snapshot.messages]
+            if include_step_context:
+                return ConversationOrchestrator._append_step_context(
+                    run, messages, source_message_ids, snapshot.compiled_prompt
+                )
+            return messages, source_message_ids
         chat = session.get(Chat, run.chat_id)
         if not chat:
             return [], []
-        messages: list[dict[str, str]] = []
-        source_message_ids: list[str | None] = []
+        messages = []
+        source_message_ids = []
         if chat.scope == PROMPT_HELPER_SCOPE:
             messages.append(
                 {"role": "system", "content": prompt_helper_system_message(chat.draft_prompt)}
@@ -8865,28 +9834,38 @@ class ConversationOrchestrator:
             if text:
                 messages.append({"role": message.role, "content": text})
                 source_message_ids.append(message.id)
-        provenance = run.provenance_json if isinstance(run.provenance_json, dict) else {}
-        compiled_step = provenance.get("compiled_step")
-        if run.operation == Operation.TEXT.value and isinstance(compiled_step, dict):
-            dependency_text = provenance.get("resolved_dependency_text")
-            if isinstance(dependency_text, list):
-                for item in dependency_text:
-                    if (
-                        isinstance(item, dict)
-                        and isinstance(item.get("text"), str)
-                        and item["text"].strip()
-                    ):
-                        messages.append(
-                            {
-                                "role": MessageRole.ASSISTANT.value,
-                                "content": item["text"].strip(),
-                            }
-                        )
-                        source_message_ids.append(None)
-            step_prompt = compiled_step.get("prompt")
-            if isinstance(step_prompt, str) and step_prompt.strip():
-                messages.append({"role": MessageRole.USER.value, "content": step_prompt.strip()})
-                source_message_ids.append(None)
+        if not include_step_context:
+            return messages, source_message_ids
+        compiled = run.provenance_json.get("compiled_step")
+        prompt = compiled.get("prompt") if isinstance(compiled, dict) else None
+        return ConversationOrchestrator._append_step_context(
+            run, messages, source_message_ids, prompt if isinstance(prompt, str) else None
+        )
+
+    @staticmethod
+    def _append_step_context(
+        run: Run,
+        messages: list[dict[str, str]],
+        source_message_ids: list[str | None],
+        step_prompt: str | None,
+    ) -> tuple[list[dict[str, str]], list[str | None]]:
+        if run.operation != Operation.TEXT.value:
+            return messages, source_message_ids
+        dependency_text = run.provenance_json.get("resolved_dependency_text")
+        if isinstance(dependency_text, list):
+            for item in dependency_text:
+                if (
+                    isinstance(item, dict)
+                    and isinstance(item.get("text"), str)
+                    and item["text"].strip()
+                ):
+                    messages.append(
+                        {"role": MessageRole.ASSISTANT.value, "content": item["text"].strip()}
+                    )
+                    source_message_ids.append(None)
+        if step_prompt is not None and step_prompt.strip():
+            messages.append({"role": MessageRole.USER.value, "content": step_prompt.strip()})
+            source_message_ids.append(None)
         return messages, source_message_ids
 
     @staticmethod
