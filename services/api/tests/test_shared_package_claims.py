@@ -230,7 +230,10 @@ def test_release_refuses_an_unexplained_finalized_claim(settings: Settings, tmp_
     with pytest.raises(api.SharedPackageBindingError):
         api.release_binding_claim(sessions=db.SessionLocal, root=root, binding_id=binding_id)
 
-    assert _row(binding_id) is not None, "the binding must survive the refusal"
+    # Surviving is not enough: a refusal that had already moved the row, or
+    # already written a claim onto it, would leave the next release believing
+    # the finalized claim was its own. The binding has to be exactly as it was.
+    assert _row(binding_id) == ("preparing", None), "the refusal must leave the binding untouched"
     remaining = claims_for_consumer(
         database=root / "index.sqlite3", consumer_id=reference.consumer_id
     )
