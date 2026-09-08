@@ -2010,7 +2010,7 @@ class CatalogPreflight(ApiModel):
     can_install: bool
     checks: list[CatalogPreflightCheck]
     install_plan: InstallPlanOut | None = None
-    auxiliary_kind: str | None = None
+    auxiliary_kind: AuxiliaryAssetKind | None = None
     # The choices behind any filename this version could not settle, so a
     # refusal arrives with the answer to it. Asking someone to pick a variant
     # and then making them go and find the variants is not a choice, it is a

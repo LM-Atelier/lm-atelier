@@ -753,7 +753,7 @@ export interface CatalogPreflight {
    * only for names that are genuinely ambiguous, so a list of one never
    * turns an ordinary install into a decision. */
   file_variants?: Record<string, CatalogFileVariant[]>;
-  auxiliary_kind?: string | null;
+  auxiliary_kind?: "lora" | "vae" | "controlnet" | "upscaler" | "embedding" | "ip_adapter" | null;
   content_rating?: ContentRating;
   install_plan: {
     id: string;
