@@ -9,6 +9,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from .comfy_workflow_packages import WorkflowAssetReference
+from .model_asset_types import InstalledAssetKind
 from .models import InstallPlan
 
 WORKFLOW_ASSET_BINDING_VERSION = 1
@@ -18,7 +19,7 @@ _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _IMMUTABLE_REVISION = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64}|[1-9][0-9]{0,19})$")
 _PLAN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")
 
-_REFERENCE_ARTIFACT_KINDS: dict[str, frozenset[str]] = {
+_REFERENCE_ARTIFACT_KINDS: dict[str, frozenset[InstalledAssetKind]] = {
     "checkpoint": frozenset(
         {
             "checkpoint",
@@ -36,7 +37,7 @@ _REFERENCE_ARTIFACT_KINDS: dict[str, frozenset[str]] = {
     "vae": frozenset({"vae"}),
 }
 
-_ARTIFACT_TARGET_FOLDERS: dict[str, frozenset[str]] = {
+_ARTIFACT_TARGET_FOLDERS: dict[InstalledAssetKind, frozenset[str]] = {
     "checkpoint": frozenset({"checkpoints"}),
     "clip_vision": frozenset({"clip_vision"}),
     "controlnet": frozenset({"controlnet"}),
@@ -76,7 +77,7 @@ class BoundWorkflowAsset:
     remote_id: str
     revision: str
     artifact_path: str
-    artifact_kind: str
+    artifact_kind: InstalledAssetKind
     target_folder: str
     size_bytes: int
     sha256: str
