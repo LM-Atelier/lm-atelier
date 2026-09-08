@@ -156,6 +156,39 @@ class _Candidate:
     matched_terms: tuple[str, ...]
 
 
+def resolve_exact_workflow_revision(
+    session: Session,
+    revision_id: str,
+    *,
+    capability: WorkflowSelectorCapability,
+    operation: Operation,
+    engine: str,
+) -> tuple[WorkflowRevision, WorkflowActivation | None, ModelProfile | None]:
+    """Validate the selected revision without advancing to its family's current head."""
+    revision = session.get(WorkflowRevision, revision_id)
+    definition = session.get(WorkflowDefinition, revision.workflow_id) if revision else None
+    if revision is None or definition is None:
+        raise _error(capability, operation, "revision_missing")
+    activation = _validate_revision(
+        session,
+        revision,
+        capability=capability,
+        operation=operation,
+        engine=engine,
+        workflow_family_id=definition.family_id or "",
+        required_capabilities=frozenset(),
+    )
+    profile = _activation_profile(
+        session,
+        activation,
+        role=_CAPABILITY_ROLE[capability],
+        engine=engine,
+    )
+    if operation == Operation.TEXT and profile is None:
+        raise _error(capability, operation, "profile_binding_missing", definition.family_id)
+    return revision, activation, profile
+
+
 def resolve_workflow_family(
     session: Session,
     *,

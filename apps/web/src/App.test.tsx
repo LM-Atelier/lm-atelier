@@ -1,3 +1,6 @@
+import { exerciseEditedBranchNavigation } from "./editedBranchAppCase.test-support";
+import { exerciseQueuedOutputActions } from "./queuedOutputActions.test-support";
+import { exercisePriorTurnEditor } from "./priorTurnEditAppCase.test-support";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -92,7 +95,8 @@ const roleAwareMediaEngine: EngineCapabilities = {
   details: {},
 };
 
-vi.mock("./api", () => ({
+vi.mock("./api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./api")>()),
   api: {
     initialize: vi.fn().mockResolvedValue(undefined),
     setupReadiness: vi.fn().mockResolvedValue({ version: 2, state: "ready", roles: [] }),
@@ -129,9 +133,13 @@ vi.mock("./api", () => ({
     deleteExchange: vi.fn(),
     forkThread: vi.fn(),
     branchMessage: vi.fn(),
+    getPriorTurnEditSource: vi.fn(),
+    queueEditedMessage: vi.fn(),
     cancelChat: vi.fn(),
     jobs: vi.fn().mockResolvedValue([]),
     workPlans: vi.fn().mockResolvedValue([]),
+    editedBranches: vi.fn().mockResolvedValue({ items: [], next_cursor: null }),
+    activateEditedBranch: vi.fn(),
     workPlan: vi.fn(),
     workStep: vi.fn(),
     cancelWorkPlan: vi.fn(),
@@ -345,6 +353,7 @@ describe("App", () => {
     vi.mocked(api.runtimes).mockResolvedValue([]);
     vi.mocked(api.jobs).mockResolvedValue([]);
     vi.mocked(api.workPlans).mockResolvedValue([]);
+    vi.mocked(api.editedBranches).mockResolvedValue({ items: [], next_cursor: null });
     vi.mocked(api.backups).mockResolvedValue([]);
     vi.mocked(api.models).mockResolvedValue([]);
     vi.mocked(api.modelAssets).mockResolvedValue([]);
@@ -2620,8 +2629,6 @@ describe("App", () => {
     expect(screen.getAllByText("LoRA Auto used Atelier Ink — matched ink, watercolor" )).toHaveLength(2);
     expect(screen.getAllByText("Compacted 4 earlier messages · full transcript preserved")).toHaveLength(2);
     expect(screen.queryByText(/earlier messages omitted/)).not.toBeInTheDocument();
-    fireEvent.click(screen.getAllByRole("button", { name: "Edit message" }).at(-1)!);
-    expect(screen.getByDisplayValue("Edited question")).toBeInTheDocument();
   });
 
   it("keeps cancelled assistant text above subdued cancellation metadata", async () => {
@@ -6004,6 +6011,11 @@ describe("App", () => {
     expect(screen.queryByRole("button", { name: /Remove Generated image: sha256:synthetic/ })).not.toBeInTheDocument();
   });
 
+  it.each(["other-message", "other-revision", "target-revision"] as const)(
+    "keeps completed output actions local while %s is pending",
+    async (pending) => exerciseQueuedOutputActions(roleAwareMediaEngine, pending),
+  );
+
   it("animates a completed image through the image-to-video workflow path", async () => {
     const stamp = "2026-07-28T00:00:00Z";
     const chat: Chat = {
@@ -6186,115 +6198,12 @@ describe("App", () => {
     expect(screen.getByText("Predicted: replacement")).toBeInTheDocument();
   });
 
-  it("applies turn controls to send, edit-and-branch, and regenerate actions", async () => {
-    const stamp = "2026-07-22T00:00:00Z";
-    const chat = {
-      id: "chat-turn-overrides",
-      project_id: null,
-      title: "Turn overrides",
-      pinned: false, archived: false,
-      routing_mode: "text" as const,
-      confirm_uncertain_media: false,
-      active_chat_profile_id: null,
-      active_image_profile_id: null,
-      active_video_profile_id: null,
-      active_head_message_id: "assistant-turn-overrides",
-      created_at: stamp,
-      updated_at: stamp,
-    };
-    const userMessage = {
-      id: "user-turn-overrides",
-      chat_id: chat.id,
-      parent_id: null,
-      role: "user" as const,
-      status: "complete" as const,
-      parts: [{ id: "user-part", position: 0, type: "text" as const, text: "Count to 100", artifact_id: null, metadata_json: {} }],
-      created_at: stamp,
-      updated_at: stamp,
-    };
-    const assistantMessage = {
-      id: "assistant-turn-overrides",
-      chat_id: chat.id,
-      parent_id: userMessage.id,
-      role: "assistant" as const,
-      status: "complete" as const,
-      parts: [{ id: "assistant-part", position: 0, type: "text" as const, text: "1 2 3", artifact_id: null, metadata_json: {} }],
-      created_at: stamp,
-      updated_at: stamp,
-    };
-    localStorage.setItem("local-lm-chat", chat.id);
-    vi.mocked(api.engines).mockResolvedValue([{
-      ...roleAwareMediaEngine,
-      roles: ["chat"],
-      operations: ["text"],
-      settings: [contextLengthSetting, maxTokensSetting],
-      settings_by_role: { chat: [contextLengthSetting, maxTokensSetting] },
-    }]);
-    vi.mocked(api.chats).mockResolvedValue([chat]);
-    let persistedChat: Chat = { ...chat };
-    vi.mocked(api.chat).mockImplementation(async () => ({
-      ...persistedChat,
-      messages: [userMessage, assistantMessage],
-    }));
-    vi.mocked(api.updateChat).mockImplementation(async (_id, values) => {
-      persistedChat = { ...persistedChat, ...values };
-      return persistedChat;
-    });
-    vi.mocked(api.sendTurn).mockReturnValue(new Promise(() => {}));
-    vi.mocked(api.branchMessage).mockReturnValue(new Promise(() => {}));
-    vi.mocked(api.regenerateMessage).mockReturnValue(new Promise(() => {}));
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(
-      <QueryClientProvider client={client}>
-        <App />
-      </QueryClientProvider>,
-    );
+  it("isolates prior-turn edits from chat defaults and retains retries during other actions", async () => {
+    await exercisePriorTurnEditor(roleAwareMediaEngine, contextLengthSetting, maxTokensSetting);
+  });
 
-    fireEvent.click(await screen.findByRole("button", { name: "Turn settings" }));
-    expect(screen.queryByRole("spinbutton", { name: /Context length/ })).not.toBeInTheDocument();
-    fireEvent.change(screen.getByRole("spinbutton", { name: /Maximum output/ }), { target: { value: "4096" } });
-    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
-    await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, {
-      generation_settings_json: { chat: { max_tokens: 4096 } },
-    }));
-
-    fireEvent.click(screen.getByRole("button", { name: "Regenerate response" }));
-    await waitFor(() => expect(api.regenerateMessage).toHaveBeenCalledWith(assistantMessage.id, { max_tokens: 4096 }));
-
-    fireEvent.click(screen.getByRole("button", { name: "Edit message" }));
-    fireEvent.change(screen.getByLabelText("Edit message"), { target: { value: "Count to 1000" } });
-    fireEvent.click(screen.getByText("Send edited message"));
-    await waitFor(() => expect(api.branchMessage).toHaveBeenCalledWith(
-      userMessage.id,
-      "Count to 1000",
-      "text",
-      { max_tokens: 4096 },
-    ));
-
-    // Deleting a turn is two-step: the intent button, then a confirmation
-    // that names what else goes with it.
-    vi.mocked(api.deleteExchange).mockResolvedValue({
-      chat_id: chat.id,
-      user_message_id: userMessage.id,
-      message_ids: [userMessage.id, assistantMessage.id],
-      run_ids: [],
-      job_ids: [],
-      work_plan_ids: [],
-      released_artifact_ids: [],
-      retained_artifact_ids: [],
-      new_head_message_id: null,
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Delete this turn" }));
-    expect(api.deleteExchange).not.toHaveBeenCalled();
-    expect(screen.getByText("Also deletes the answer and its media.")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Delete turn" }));
-    await waitFor(() => expect(api.deleteExchange).toHaveBeenCalledWith(userMessage.id));
-
-    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Count to 1000" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
-    await waitFor(() => expect(api.sendTurn).toHaveBeenCalledWith(
-      chat.id, "Count to 1000", "text", [], { max_tokens: 4096 }, expect.any(String), "turns", undefined, [], undefined, undefined, expect.any(Function),
-    ));
+  it("previews an edited branch locally and continues only after explicit selection", async () => {
+    await exerciseEditedBranchNavigation();
   });
 
   it("switches completed response revisions without branching the chat", async () => {

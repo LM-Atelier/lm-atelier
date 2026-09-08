@@ -731,7 +731,7 @@ async def test_inline_video_and_project_export(client: AsyncClient) -> None:
         assert "manifest.json" in bundle.namelist()
         assert any(name.startswith("artifacts/") for name in bundle.namelist())
         manifest = json.loads(bundle.read("manifest.json"))
-        assert manifest["version"] == 6
+        assert manifest["version"] == 7
         assert set(manifest["dependencies"]) == {"profiles", "presets", "workflows"}
 
     imported = await client.post(
@@ -822,7 +822,7 @@ async def test_project_archive_uses_immutable_auxiliary_requirements_without_wei
         assert all(not name.endswith(".safetensors") for name in archive.namelist())
         manifest = json.loads(archive.read("manifest.json"))
     reference = f"auxiliary:lora:sha256:{digest}"
-    assert manifest["version"] == 6
+    assert manifest["version"] == 7
     assert manifest["auxiliary_requirements"] == [
         {
             "id": reference,
@@ -1212,7 +1212,7 @@ async def test_project_v3_round_trip_remaps_portable_dependencies_in_a_fresh_dat
     ).json()
     archive = await client.get(exported["url"])
     manifest = project_manifest(archive.content)
-    assert manifest["version"] == 6
+    assert manifest["version"] == 7
     assert {item["source_id"] for item in manifest["dependencies"]["profiles"]} == {
         chat_profile["id"],
         image_profile["id"],
@@ -6265,7 +6265,7 @@ async def test_project_export_snapshots_local_preset_bindings(
     archive = await client.get(exported["url"])
     with zipfile.ZipFile(io.BytesIO(archive.content)) as bundle:
         manifest = json.loads(bundle.read("manifest.json"))
-    assert manifest["version"] == 6
+    assert manifest["version"] == 7
     assert manifest["project"]["generation_preset_ids_json"] == {"chat": preset["id"]}
     assert manifest["project"]["generation_settings_json"]["chat"] == {
         "temperature": 0.1,

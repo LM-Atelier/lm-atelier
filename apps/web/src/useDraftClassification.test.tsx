@@ -3,9 +3,10 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { api } from "./api";
 import { useDraftClassification } from "./useDraftClassification";
+import type { PriorTurnEditBinding } from "./types";
 
-function Probe({ text, hasPriorVisual }: { text: string; hasPriorVisual: boolean }) {
-  const reuses = useDraftClassification("chat-1", text, "image", hasPriorVisual);
+function Probe({ text, hasPriorVisual, editSource }: { text: string; hasPriorVisual: boolean; editSource?: PriorTurnEditBinding }) {
+  const reuses = useDraftClassification("chat-1", text, "image", hasPriorVisual, editSource);
   return <div data-testid="answer">{String(reuses)}</div>;
 }
 
@@ -66,4 +67,25 @@ describe("useDraftClassification", () => {
 
     expect(screen.getByTestId("answer")).toHaveTextContent("false");
   });
+});
+
+it("binds source classification and never reuses an answer from a different source snapshot", async () => {
+  const classify = vi.spyOn(api, "classifyDraft")
+    .mockResolvedValueOnce({ references_prior_visual: true })
+    .mockReturnValue(new Promise(() => undefined));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const binding = { source_message_id: "source-user", source_run_id: "source-run", source_snapshot_sha256: "a".repeat(64) };
+  const view = (editSource: PriorTurnEditBinding) => <QueryClientProvider client={client}>
+    <Probe text="Recolor the previous image" hasPriorVisual editSource={editSource} />
+  </QueryClientProvider>;
+  const rendered = render(view(binding));
+  await waitFor(() => expect(screen.getByTestId("answer")).toHaveTextContent("true"));
+  expect(classify).toHaveBeenCalledWith("chat-1", "Recolor the previous image", "image", binding);
+  const changed = { ...binding, source_snapshot_sha256: "b".repeat(64) };
+  rendered.rerender(view(changed));
+  await waitFor(() => expect(classify).toHaveBeenCalledWith("chat-1", "Recolor the previous image", "image", changed));
+  expect(screen.getByTestId("answer")).toHaveTextContent("false");
+  rendered.unmount();
+  client.clear();
+  vi.restoreAllMocks();
 });

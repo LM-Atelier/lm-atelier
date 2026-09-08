@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import (
     BaseModel,
@@ -13,6 +13,7 @@ from pydantic import (
     StrictStr,
     StringConstraints,
     field_serializer,
+    field_validator,
 )
 
 from .domain import (
@@ -696,8 +697,45 @@ class PromptComposerSourceIn(ApiModel):
     contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class TurnWorkflowDefaultIn(ApiModel):
+    selector_capability: Literal["chat", "image", "video"]
+    mode: Literal["default", "automatic"]
+
+
+class TurnWorkflowFamilyIn(ApiModel):
+    selector_capability: Literal["chat", "image", "video"]
+    mode: Literal["family"]
+    workflow_family_id: str = Field(min_length=1, max_length=64)
+
+
+class TurnWorkflowRevisionIn(ApiModel):
+    selector_capability: Literal["chat", "image", "video"]
+    mode: Literal["revision"]
+    workflow_revision_id: str = Field(min_length=1, max_length=40)
+
+
+TurnWorkflowSelectionIn = Annotated[
+    TurnWorkflowDefaultIn | TurnWorkflowFamilyIn | TurnWorkflowRevisionIn,
+    Field(discriminator="mode"),
+]
+
+
+class TurnRoleOverrides(ApiModel):
+    """Deliberate choices for whichever steps route to this role."""
+
+    settings: dict[str, Any] = Field(default_factory=dict)
+    preset_id: str | None = Field(default=None, min_length=1, max_length=40)
+    profile_id: str | None = Field(default=None, min_length=1, max_length=40)
+    vision_profile_id: str | None = Field(default=None, min_length=1, max_length=40)
+    workflow_revision_id: str | None = Field(default=None, min_length=1, max_length=40)
+    workflow_selection: TurnWorkflowSelectionIn | None = None
+
+
 class TurnRequest(ApiModel):
     text: str = Field(min_length=1, max_length=200_000)
+    preset_id: str | None = Field(default=None, min_length=1, max_length=40)
+    profile_id: str | None = Field(default=None, min_length=1, max_length=40)
+    vision_profile_id: str | None = Field(default=None, min_length=1, max_length=40)
     mode: RoutingMode | None = None
     parent_message_id: str | None = None
     input_artifact_ids: list[str] = Field(default_factory=list, max_length=16)
@@ -707,6 +745,7 @@ class TurnRequest(ApiModel):
     prompt_source: PromptComposerSourceIn | None = None
     settings: dict[str, Any] = Field(default_factory=dict)
     ordered_settings: dict[str, dict[str, Any]] = Field(default_factory=dict, max_length=3)
+    role_overrides: dict[str, TurnRoleOverrides] = Field(default_factory=dict, max_length=3)
     output_count: int | None = Field(default=None, ge=1, le=16)
     # The workflow a recipe recorded. A recipe that stored which workflow made
     # a result and then ran against whichever one happens to be current is not
@@ -714,8 +753,102 @@ class TurnRequest(ApiModel):
     # match this operation, engine, or install is not honored - the turn
     # refuses rather than quietly substituting.
     workflow_revision_id: str | None = Field(default=None, max_length=40)
+    workflow_selection: TurnWorkflowSelectionIn | None = None
     confirm_media: bool = False
     idempotency_key: str | None = Field(default=None, max_length=200)
+
+    @field_validator("role_overrides")
+    @classmethod
+    def validate_role_overrides(
+        cls, value: dict[str, TurnRoleOverrides]
+    ) -> dict[str, TurnRoleOverrides]:
+        for role, override in value.items():
+            if role not in {"chat", "image", "video"}:
+                raise ValueError("Turn overrides contain an unsupported role.")
+            if override.workflow_selection is not None and (
+                override.workflow_selection.selector_capability != role
+            ):
+                raise ValueError("Turn workflow selection has a different role.")
+        return value
+
+    def for_role(self, role: str, *, ordered: bool = False) -> Self:
+        """Resolve one role without changing the routing request or another role."""
+        override = self.role_overrides.get(role)
+        if override is None and not ordered:
+            return self
+        values = override.model_dump(exclude_unset=True) if override is not None else {}
+        if "workflow_selection" in values:
+            values.setdefault("workflow_revision_id", None)
+        elif "workflow_revision_id" in values:
+            values["workflow_selection"] = None
+        values["settings"] = {
+            **(self.ordered_settings.get(role, {}) if ordered else self.settings),
+            **values.get("settings", {}),
+        }
+        # Keep validated workflow models; model_copy deliberately does not reparse.
+        if override is not None and "workflow_selection" in override.model_fields_set:
+            values["workflow_selection"] = override.workflow_selection
+        return self.model_copy(update=values)
+
+
+class PriorTurnEditRequest(TurnRequest):
+    """An exact retryable edit; omitted collection fields inherit the source."""
+
+    step_overrides: dict[str, TurnRoleOverrides] = Field(default_factory=dict, max_length=64)
+
+    idempotency_key: StrictStr = Field(min_length=1, max_length=200)
+    source_run_id: str | None = Field(default=None, min_length=1, max_length=40)
+    source_snapshot_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+class PriorTurnEditConfiguration(ApiModel):
+    image_edit_strength: dict[str, Any] | None = None
+    operation: str
+    profile_engine: str | None = None
+    settings: dict[str, Any]
+    resolved_settings: dict[str, Any]
+    settings_role: str
+    output_count: int
+    profile_id: str | None
+    vision_profile_id: str | None
+    preset_id: str | None
+    preset: dict[str, Any] | None
+    model_selection: dict[str, Any]
+    workflow_selection: WorkflowSelectionOut
+    workflow_revision_id: str | None
+    workflow_schema: dict[str, Any] | None
+    profile_settings: dict[str, Any] = Field(default_factory=dict)
+
+
+class PriorTurnEditStepSource(PriorTurnEditConfiguration):
+    step_id: str
+    ordinal: int
+    source_run_id: str
+    depends_on: list[str] = Field(default_factory=list)
+
+
+class PriorTurnEditSource(PriorTurnEditConfiguration):
+    source_user_message_id: str
+    source_run_id: str
+    source_snapshot_sha256: str
+    chat_id: str
+    text: str
+    mode: RoutingMode
+    original_mode: RoutingMode | None = None
+    plan_kind: Literal["single", "ordered"] = "single"
+    steps: list[PriorTurnEditStepSource] = Field(default_factory=list)
+    input_artifact_ids: list[str]
+    input_artifacts: list[ArtifactOut]
+    references: list[MessageReferenceOut]
+    context_messages: list[dict[str, str]]
+    context_visual_artifacts: list[ArtifactOut] = Field(default_factory=list)
+    prompt_source: dict[str, Any] | None
+
+
+class PriorTurnEditBinding(ApiModel):
+    source_message_id: str = Field(min_length=1, max_length=40)
+    source_run_id: str = Field(min_length=1, max_length=40)
+    source_snapshot_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class DraftClassificationRequest(ApiModel):
@@ -724,6 +857,7 @@ class DraftClassificationRequest(ApiModel):
     text: str = Field(default="", max_length=200_000)
     mode: RoutingMode | None = None
     parent_message_id: str | None = None
+    edit_source: PriorTurnEditBinding | None = None
 
 
 class DraftClassification(ApiModel):
@@ -776,6 +910,7 @@ class TrustDerivation(ApiModel):
 
 class RegenerateRequest(ApiModel):
     settings: dict[str, Any] = Field(default_factory=dict)
+    idempotency_key: StrictStr | None = Field(default=None, min_length=1, max_length=200)
 
 
 class RoutingReasonCode(StrEnum):
@@ -888,6 +1023,15 @@ class TurnAccepted(ApiModel):
     assistant_message: MessageOut
 
 
+class PriorTurnEditAccepted(TurnAccepted):
+    source_message_id: str
+    source_run_id: str
+    work_plan_id: str
+    branch_head_message_id: str
+    branch_activated: Literal[False] = False
+    accepted_context_sha256: str
+
+
 class ProgressStageTiming(ApiModel):
     stage: str
     duration_ms: int = Field(ge=0)
@@ -981,6 +1125,30 @@ class WorkPlanOut(ApiModel):
     steps: list[WorkStepOut]
     created_at: datetime
     updated_at: datetime
+
+
+class EditedBranchOut(ApiModel):
+    source_message_id: str
+    source_run_id: str
+    branch_head_message_id: str
+    source_available: bool
+    can_continue: bool
+    plan: WorkPlanOut
+    jobs: list[JobOut]
+
+
+class EditedBranchPage(ApiModel):
+    items: list[EditedBranchOut]
+    next_cursor: str | None
+
+
+class EditedBranchActivationRequest(ApiModel):
+    expected_active_head_message_id: str | None = Field(max_length=40)
+
+
+class EditedBranchActivationOut(ApiModel):
+    chat_id: str
+    active_head_message_id: str
 
 
 class ModelSourceOut(ApiModel):

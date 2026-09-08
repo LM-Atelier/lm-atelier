@@ -7,6 +7,7 @@ export function useWorkPlanMutations(activeChatId: string | null) {
     void client.invalidateQueries({ queryKey: ["chat", chatId] });
     void client.invalidateQueries({ queryKey: ["work-plans", chatId] });
     void client.invalidateQueries({ queryKey: ["jobs"] });
+    void client.invalidateQueries({ queryKey: ["edited-branches", chatId] });
   };
   const cancelWorkPlan = useMutation({
     mutationFn: api.cancelWorkPlan,

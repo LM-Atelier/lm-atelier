@@ -219,3 +219,59 @@ async def test_bridge_observation_is_query_specific_and_bounded(
 
     assert observation == "A red square is visible."
     assert completion["finish_reason"] == "stop"
+
+
+@pytest.mark.parametrize("later_dimension", [256, 1024])
+async def test_accepted_video_sampling_uses_original_count_and_dimension(
+    vision_store: tuple[Settings, ArtifactStore, Session],
+    monkeypatch: pytest.MonkeyPatch,
+    later_dimension: int,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from local_lm import vision
+    from local_lm.models import Artifact
+
+    settings, store, _session = vision_store
+    settings.vision_max_images = 6
+    settings.vision_max_video_frames = 3
+    settings.vision_max_frame_dimension = 512
+    service = VisionContextService(settings, store)
+    policy = service.sampling_policy({})
+    settings.vision_max_video_frames = 6
+    settings.vision_max_frame_dimension = later_dimension
+    artifact = Artifact(id="neutral-video", sha256="a" * 64, media_type="video/mp4")
+    path = settings.data_dir / "neutral-video.mp4"
+    path.write_bytes(b"neutral local video fixture")
+    monkeypatch.setattr(store, "verified_path", lambda _artifact: path)
+    monkeypatch.setattr(vision.shutil, "which", lambda _name: str(path))
+    monkeypatch.setattr(
+        service,
+        "_probe_video",
+        AsyncMock(return_value={"duration": 9, "width": 100, "height": 100}),
+    )
+    commands = []
+    process = type("Process", (), {"returncode": 0})()
+
+    async def start(*args: object, **_kwargs: object) -> object:
+        commands.append(args)
+        return process
+
+    monkeypatch.setattr(vision.asyncio, "create_subprocess_exec", start)
+    monkeypatch.setattr(
+        vision, "_communicate_bounded", AsyncMock(return_value=(ONE_PIXEL_PNG, b""))
+    )
+    if later_dimension < 512:
+        with pytest.raises(VisionInputError, match="Accepted visual"):
+            await service.prepare(
+                [artifact], strict_artifact_ids={artifact.id}, sampling_policy=policy
+            )
+        assert commands == []
+    else:
+        result = await service.prepare(
+            [artifact], strict_artifact_ids={artifact.id}, sampling_policy=policy
+        )
+        assert len(result.frames) == 3
+        assert [frame.timestamp_seconds for frame in result.frames] == [0.0, 4.475, 8.95]
+        assert len(commands) == 3
+        assert all("min(512,iw)" in str(command) for command in commands)

@@ -718,6 +718,7 @@ async def test_automatic_retry_reuses_source_turn_as_a_response_revision() -> No
     assert request.input_artifact_ids == ["artifact-original"]
     assert request.settings == {"steps": 8, "denoise": 0.62}
     assert {k: v for k, v in call.kwargs.items() if k != "before_commit"} == {
+        "resolve_source": None,
         "use_explicit_parent": True,
         "replacement_message_id": source_assistant.id,
         "source_action": "image_edit_verification_retry",
@@ -733,6 +734,7 @@ async def test_automatic_retry_reuses_source_turn_as_a_response_revision() -> No
     assert retry_run.provenance_json["image_edit_verification_retry"] == {
         "version": "image-edit-verification-v1",
         "source_run_id": source_run.id,
+        "source_message_id": source_user.id,
         "source_job_id": payload.source_job_id,
         "source_verification_job_id": image_edit_verification_job_id(source_run.id),
         "attempt": 1,
@@ -774,6 +776,7 @@ def _verification_world(*, lose_at: str):  # type: ignore[no-untyped-def]
         status=RunStatus.COMPLETE.value,
         chat_id="chat-v",
         standalone_prompt="make the mug green",
+        provenance_json={},
     )
     chat = SimpleNamespace(id="chat-v", vision_settings_json={"verify_image_edits": True})
     source = SimpleNamespace(id="artifact-source")

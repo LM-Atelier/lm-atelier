@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { SettingControl } from "./SettingControl";
 import {
   IMAGE_EDIT_STRENGTH_MODE_KEY,
@@ -35,7 +35,9 @@ function ImageEditStrengthControl({
   numericManualLayers,
   values,
   onValues,
+  manualLabel,
 }: {
+  manualLabel: string;
   field: SettingField;
   parameter: string;
   calibration: WorkflowImageEditCalibration | null;
@@ -44,7 +46,7 @@ function ImageEditStrengthControl({
   layers: Array<Record<string, unknown> | undefined>;
   numericManualLayers: boolean[];
   values: Record<string, unknown>;
-  onValues: (values: Record<string, unknown>) => void;
+  onValues: (values: Record<string, unknown>, changedKeys?: string[]) => void;
 }) {
   // The same bounds the server resolves the strength within: the field's if it
   // declares them, otherwise the workflow's calibration, otherwise the whole
@@ -80,18 +82,18 @@ function ImageEditStrengthControl({
       [IMAGE_EDIT_STRENGTH_MODE_KEY]: "auto",
     };
     delete next[parameter];
-    onValues(next);
+    onValues(next, [IMAGE_EDIT_STRENGTH_MODE_KEY, parameter]);
   };
   const selectManual = () => onValues({
     ...values,
     [IMAGE_EDIT_STRENGTH_MODE_KEY]: "manual",
     [parameter]: typeof values[parameter] === "number" ? values[parameter] : manualValue,
-  });
+  }, [IMAGE_EDIT_STRENGTH_MODE_KEY, parameter]);
   return (
     <div className="setting-row image-edit-strength-control">
       <span>
         <strong>Change strength</strong>
-        <small>{mode === "auto" ? `Predicted: ${estimate.scope}` : "Set for this chat"}</small>
+        <small>{mode === "auto" ? `Predicted: ${estimate.scope}` : manualLabel}</small>
       </span>
       <div className="image-edit-strength-inputs">
         <div className="segmented compact" role="group" aria-label="Image edit change strength mode">
@@ -110,7 +112,7 @@ function ImageEditStrengthControl({
               ...values,
               [IMAGE_EDIT_STRENGTH_MODE_KEY]: "manual",
               [parameter]: Number(event.target.value),
-            })}
+            }, [IMAGE_EDIT_STRENGTH_MODE_KEY, parameter])}
           />
         )}
       </div>
@@ -135,11 +137,12 @@ export function GenerationSettingsPanel({
   presetLabel = `${role} preset`,
   resetLabel,
   onReset,
+  editSettings,
 }: {
   role: EngineRole;
   engines: EngineCapabilities[];
   values: Record<string, unknown>;
-  onValues: (values: Record<string, unknown>) => void;
+  onValues: (values: Record<string, unknown>, changedKeys?: string[]) => void;
   presets: GenerationPreset[];
   presetId: string | null;
   onPreset: (presetId: string | null) => void;
@@ -152,13 +155,14 @@ export function GenerationSettingsPanel({
   presetLabel?: string;
   resetLabel: string;
   onReset: () => void;
+  editSettings?: { presetControl: ReactNode };
 }) {
   const [visibility, setVisibility] = useState<Visibility>("basic");
   const engine = engines.find((item) => item.roles.includes(role));
   const rolePresets = presets.filter((preset) => preset.role === role);
-  const defaultPreset = rolePresets.find((preset) => preset.is_default);
-  const inheritedPreset = rolePresets.find((preset) => preset.id === inheritedPresetId);
-  const selectedPreset = rolePresets.find((preset) => preset.id === presetId);
+  const defaultPreset = !editSettings ? rolePresets.find((preset) => preset.is_default) : undefined;
+  const inheritedPreset = !editSettings ? rolePresets.find((preset) => preset.id === inheritedPresetId) : undefined;
+  const selectedPreset = !editSettings ? rolePresets.find((preset) => preset.id === presetId) : undefined;
   const inheritedName = inheritedPreset?.name ?? defaultPreset?.name;
   const allFields = resolveWorkflowSettings(
     resolveCapabilitySettings(engine, role),
@@ -227,7 +231,7 @@ export function GenerationSettingsPanel({
         ))}
       </div>
       <div className="settings-list">
-        <label className="setting-row">
+        {editSettings?.presetControl ?? <label className="setting-row">
           <span><strong>Preset</strong></span>
           <select
             aria-label={presetLabel}
@@ -239,9 +243,10 @@ export function GenerationSettingsPanel({
               <option key={preset.id} value={preset.id}>{preset.name}</option>
             ))}
           </select>
-        </label>
+        </label>}
         {imageEdit && strengthField && (
           <ImageEditStrengthControl
+            manualLabel={editSettings ? "Set for this version" : "Set for this chat"}
             field={strengthField}
             parameter={strengthParameter}
             calibration={editCalibration}
@@ -265,7 +270,7 @@ export function GenerationSettingsPanel({
             key={`${field.scope}:${field.key}`}
             field={field}
             value={effectiveValue(field)}
-            onChange={(value) => onValues({ ...values, [field.key]: value })}
+            onChange={(value) => onValues({ ...values, [field.key]: value }, [field.key])}
           />
         ))}
         {!engine && <p className="muted">No {role} engine is configured.</p>}
@@ -277,8 +282,11 @@ export function GenerationSettingsPanel({
             <SettingControl
               field={loraField}
               value={effectiveValue(loraField)}
-              onChange={(value) => onValues({ ...values, [loraField.key]: value })}
+              onChange={(value) => onValues({ ...values, [loraField.key]: value }, [loraField.key])}
             />
+            {editSettings && <button type="button" className="secondary" onClick={() => onValues(
+              { ...values, loras: effectiveValue(loraField) }, ["loras"],
+            )}>Use current LoRA selection</button>}
           </div>
         </section>
       )}

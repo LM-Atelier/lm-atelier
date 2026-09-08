@@ -111,6 +111,8 @@ def test_successful_media_evidence_requires_an_exact_official_contract(monkeypat
         },
     )
     run = SimpleNamespace(
+        id="run-image",
+        provenance_json={},
         operation="image_to_image",
         profile_id=profile.id,
         workflow_revision_id=revision.id,
@@ -244,7 +246,7 @@ async def test_context_folding_preserves_system_and_current_messages() -> None:
 
 
 async def test_managed_chat_worker_is_aligned_to_the_run_profile() -> None:
-    run = SimpleNamespace(profile_id="profile-selected")
+    run = SimpleNamespace(id="run-1", profile_id="profile-selected", provenance_json={})
     profile = SimpleNamespace(id="profile-selected", model_install_id="install-selected")
     install = SimpleNamespace(id="install-selected")
 
@@ -1213,6 +1215,7 @@ async def test_vision_bridge_restores_the_text_profile_after_completion_or_cance
         profile_id="profile-text",
         vision_profile_id="profile-vision",
         standalone_prompt="What is visible?",
+        provenance_json={},
     )
     text_profile = SimpleNamespace(id="profile-text", model_install_id="install-text")
     vision_profile = SimpleNamespace(id="profile-vision", model_install_id="install-vision")
@@ -1263,7 +1266,7 @@ async def test_vision_bridge_restores_the_text_profile_after_completion_or_cance
         scheduler=Mock(),
         processes=processes,
     )
-    orchestrator._set_chat_phase = AsyncMock()  # type: ignore[method-assign]
+    orchestrator._set_chat_phase = AsyncMock(return_value=True)  # type: ignore[method-assign]
     # This case is about WHICH profiles the bridge loads and in what order, not
     # about ownership; its world has no jobs table for the per-event fence or
     # the teardown's ownership read to consult. A bridge that keeps its claim is
@@ -1317,6 +1320,7 @@ async def test_vision_bridge_stops_and_moves_no_worker_once_reclaimed() -> None:
     text model back over the top of whatever the successor loaded.
     """
     run = SimpleNamespace(
+        provenance_json={},
         id="run-vision",
         chat_id="chat-vision",
         user_message_id="message-vision",
@@ -1905,7 +1909,9 @@ async def test_a_queued_text_job_still_recycles_before_its_model_loads() -> None
     resume.assert_awaited_once_with("profile-next")
 
 
-async def test_shutdown_does_not_restore_chat_from_active_bridge() -> None:
+async def test_shutdown_does_not_restore_chat_from_active_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     run = SimpleNamespace(
         id="run-vision",
         chat_id="chat-vision",
@@ -1913,6 +1919,7 @@ async def test_shutdown_does_not_restore_chat_from_active_bridge() -> None:
         profile_id="profile-text",
         vision_profile_id="profile-vision",
         standalone_prompt="What is visible?",
+        provenance_json={},
     )
     text_profile = SimpleNamespace(id="profile-text", model_install_id="install-text")
     vision_profile = SimpleNamespace(id="profile-vision", model_install_id="install-vision")
@@ -1970,7 +1977,7 @@ async def test_shutdown_does_not_restore_chat_from_active_bridge() -> None:
     # this world does not have, raises inside the `finally`, and `close` swallows
     # it - the restore is then skipped for a reason that has nothing to do with
     # shutting down, and the case passes with the shutdown guard removed.
-    orchestrator._attempt_current = Mock(return_value=True)  # type: ignore[method-assign]
+    monkeypatch.setattr(orchestrator, "_attempt_current", Mock(return_value=True))
     orchestrator._attach_visual_context = AsyncMock(  # type: ignore[method-assign]
         return_value=(
             [{"role": "user", "content": [{"type": "text", "text": "Question"}]}],
@@ -2027,6 +2034,7 @@ async def test_a_replaced_bridge_leaves_the_chat_worker_where_it_is(
     """
 
     run = SimpleNamespace(
+        provenance_json={},
         id="run-vision",
         chat_id="chat-vision",
         user_message_id="message-vision",

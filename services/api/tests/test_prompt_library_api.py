@@ -2702,3 +2702,106 @@ async def test_model_slot_failure_names_the_stage_without_persisting_partial_wor
         assert session.query(PromptExpansionBatch).count() == 0
         assert session.query(PromptExpansionItem).count() == 0
         assert session.query(Job).count() == 0
+
+
+@pytest.mark.parametrize(
+    "case", ["inherit", "clear", "wrong_operation", "multiple_outputs", "different_workflow"]
+)
+async def test_auto_prior_edit_keeps_only_a_compatible_accepted_recipe(
+    app: FastAPI, client: AsyncClient, case: str
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Edited recipe reference"})).json()
+    resources = None
+    alternative = None
+    if case == "different_workflow":
+        revisions = []
+        for name in ("Recipe workflow", "Alternative workflow"):
+            response = await client.post(
+                "/api/workflows",
+                json={
+                    "name": name,
+                    "operation": "text_to_image",
+                    "engine": "mock",
+                    "api_graph": {},
+                },
+            )
+            assert response.status_code == 201, response.text
+            revision_id = response.json()["current_revision_id"]
+            seed_workflow_trust(revision_id)
+            revisions.append(revision_id)
+        resources = {
+            "mode": "fixed",
+            "workflow_revision_id": revisions[0],
+            "lora_policy": {"mode": "none"},
+        }
+        alternative = revisions[1]
+    created = await client.post(
+        "/api/prompt-templates",
+        json=_create_payload(name="Circle fixture", contract=_contract(resource_policy=resources)),
+    )
+    assert created.status_code == 201, created.text
+    revision = created.json()["revision"]
+    response = await client.post(
+        f"/api/chats/{chat['id']}/prompt-batches",
+        json={
+            "idempotency_key": "edit-recipe-batch",
+            "template_revision_id": revision["id"],
+            "contract_sha256": revision["contract_sha256"],
+            "item_count": 1,
+            "selection_seed": 7,
+            "inputs": {"subject": ["blue circle"]},
+        },
+    )
+    assert response.status_code == 201, response.text
+    batch = response.json()
+    async with app.state.services.scheduler.lease("primary"):
+        original = await client.post(
+            f"/api/chats/{chat['id']}/turns",
+            json={
+                "text": "Draw a blue circle",
+                "mode": "image",
+                "prompt_source": _composer_source(batch, batch["items"][0]),
+            },
+        )
+        assert original.status_code == 202, original.text
+        source = original.json()
+        witness = source["run"]["provenance_json"]["prompt_source"]
+        payload: dict[str, Any] = {
+            "text": "Summarize briefly" if case == "wrong_operation" else "Draw a green circle",
+            "mode": "auto",
+            "confirm_media": True,
+            "idempotency_key": "edit-recipe",
+        }
+        if case == "different_workflow":
+            payload["role_overrides"] = {
+                "image": {
+                    "workflow_selection": {
+                        "selector_capability": "image",
+                        "mode": "revision",
+                        "workflow_revision_id": alternative,
+                    }
+                }
+            }
+        if case == "clear":
+            payload["prompt_source"] = None
+        if case == "multiple_outputs":
+            payload["output_count"] = 2
+        edited = await client.post(
+            f"/api/messages/{source['user_message']['id']}/edits", json=payload
+        )
+        if case in {"wrong_operation", "multiple_outputs", "different_workflow"}:
+            assert edited.status_code == 422, edited.text
+            with SessionLocal() as session:
+                assert len(list(session.scalars(select(WorkPlan)))) == 1
+            return
+        assert edited.status_code == 202, edited.text
+        inherited = edited.json()["run"]["provenance_json"].get("prompt_source")
+        if case == "clear":
+            assert inherited is None
+        else:
+            assert inherited["batch_id"] == witness["batch_id"]
+            assert inherited["queued_plan_version"] == witness["queued_plan_version"]
+            assert inherited["reviewed_sha256"] == witness["reviewed_sha256"]
+            assert inherited["submitted_sha256"] != witness["submitted_sha256"]
+        current = await client.get(f"/api/prompt-batches/{batch['id']}")
+        assert current.json()["plan_version"] == witness["queued_plan_version"]

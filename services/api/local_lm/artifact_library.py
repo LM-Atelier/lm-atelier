@@ -41,6 +41,7 @@ from .models import (
     ResponseRevision,
     ResponseRevisionPart,
     Run,
+    RunContextArtifact,
     SetupVerification,
     WorkStep,
 )
@@ -662,6 +663,7 @@ def referenced_artifact_ids(
         MessageReference,
         ComfyRegistrySourceArtifactReview,
         Run,
+        RunContextArtifact,
         WorkStep,
         Chat,
         Job,
@@ -681,6 +683,7 @@ def referenced_artifact_ids(
     # foreign key is deliberately SET NULL when those bytes are removed.
     direct_columns = (
         ReferenceAsset.artifact_id,
+        RunContextArtifact.artifact_id,
         SetupVerification.input_artifact_id,
         ArtifactLibraryEntry.artifact_id,
         ComfyRegistrySourceArtifactReview.artifact_id,

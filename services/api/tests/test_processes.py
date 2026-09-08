@@ -1354,10 +1354,12 @@ async def test_teardown_suppression_is_bounded_when_the_block_never_ends(
     assert tail.count("frame line") <= WORKER_STDERR_DISPLAY_LINES
 
 
+@pytest.mark.parametrize("scope", [None, "a" * 64])
 async def test_chat_first_use_provisions_missing_runtime(
     settings,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    scope: str | None,
 ) -> None:  # type: ignore[no-untyped-def]
     model_path = tmp_path / "model.gguf"
     model_path.write_bytes(b"GGUF")
@@ -1379,7 +1381,9 @@ async def test_chat_first_use_provisions_missing_runtime(
         _profile_id: str | None = None,
         *,
         estimated_memory_bytes: int | None = None,
+        launch_scope_sha256: str | None = None,
     ) -> None:
+        assert launch_scope_sha256 == scope
         assert name == "chat"
         assert estimated_memory_bytes is not None
         captured["command"] = command
@@ -1402,7 +1406,10 @@ async def test_chat_first_use_provisions_missing_runtime(
         active=True,
     )
 
-    await supervisor.load_chat(profile, install)
+    if scope is None:
+        await supervisor.load_chat(profile, install)
+    else:
+        await supervisor.load_chat(profile, install, launch_scope_sha256=scope)
 
     runtimes.ensure.assert_awaited_once_with("llama.cpp")
     assert captured["command"][0] == str(executable.resolve())
@@ -1707,10 +1714,14 @@ async def test_a_broken_media_phase_report_does_not_stop_the_start(
     assert launched == ["media"]
 
 
+@pytest.mark.parametrize("scope", [None, "a" * 64])
+@pytest.mark.parametrize("frozen_image_limit", [None, 2, 8])
 async def test_vllm_chat_launches_complete_modelopt_snapshot(
     settings,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    scope: str | None,
+    frozen_image_limit: int | None,
 ) -> None:  # type: ignore[no-untyped-def]
     model_dir = tmp_path / "modelopt-snapshot"
     model_dir.mkdir()
@@ -1724,6 +1735,7 @@ async def test_vllm_chat_launches_complete_modelopt_snapshot(
     executable = tmp_path / "python.exe"
     executable.write_bytes(b"runtime")
     settings.vllm_executable = executable
+    settings.vision_max_images = 4
     supervisor = ProcessSupervisor(settings)
     captured: dict[str, object] = {}
 
@@ -1734,7 +1746,9 @@ async def test_vllm_chat_launches_complete_modelopt_snapshot(
         profile_id: str | None = None,
         *,
         estimated_memory_bytes: int | None = None,
+        launch_scope_sha256: str | None = None,
     ) -> None:
+        assert launch_scope_sha256 == scope
         captured.update(
             name=name,
             command=command,
@@ -1771,7 +1785,21 @@ async def test_vllm_chat_launches_complete_modelopt_snapshot(
         active=True,
     )
 
-    await supervisor.load_chat(profile, install)
+    if frozen_image_limit is not None and frozen_image_limit > 4:
+        with pytest.raises(RuntimeError, match="Accepted visual input limit"):
+            await supervisor.load_chat(
+                profile, install, launch_scope_sha256=scope, vision_max_images=frozen_image_limit
+            )
+        assert captured == {}
+        return
+    if frozen_image_limit is not None:
+        await supervisor.load_chat(
+            profile, install, launch_scope_sha256=scope, vision_max_images=frozen_image_limit
+        )
+    elif scope is None:
+        await supervisor.load_chat(profile, install)
+    else:
+        await supervisor.load_chat(profile, install, launch_scope_sha256=scope)
 
     command = captured["command"]
     assert isinstance(command, list)
@@ -1781,6 +1809,10 @@ async def test_vllm_chat_launches_complete_modelopt_snapshot(
         "vllm.entrypoints.openai.api_server",
     ]
     assert command[command.index("--model") + 1] == str(model_dir.resolve())
+    assert json.loads(command[command.index("--limit-mm-per-prompt") + 1]) == {
+        "image": frozen_image_limit if frozen_image_limit is not None else 4,
+        "video": 1,
+    }
     assert command[command.index("--quantization") + 1] == "modelopt"
     assert command[command.index("--max-model-len") + 1] == "4096"
     assert command[command.index("--cpu-offload-gb") + 1] == "2.0"
@@ -1851,6 +1883,7 @@ async def test_chat_launches_split_gguf_from_first_shard(
         _profile_id: str | None = None,
         *,
         estimated_memory_bytes: int | None = None,
+        launch_scope_sha256: str | None = None,
     ) -> None:
         captured["command"] = command
         captured["estimated_memory_bytes"] = estimated_memory_bytes
@@ -1909,6 +1942,7 @@ async def test_chat_launches_multimodal_projector_and_includes_its_memory(
         _profile_id: str | None = None,
         *,
         estimated_memory_bytes: int | None = None,
+        launch_scope_sha256: str | None = None,
     ) -> None:
         captured["command"] = command
         captured["estimated_memory_bytes"] = estimated_memory_bytes
