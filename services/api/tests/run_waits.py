@@ -84,5 +84,5 @@ async def wait_for_terminal_status(
         await asyncio.sleep(INTERVAL_SECONDS)
     waited = time.monotonic() - started
     raise AssertionError(
-        f"{what} was still {last!r} after {waited:.2f}s, giving up at {PATIENCE_SECONDS:.0f}s"
+        f"{what} was still {last!r} after {waited:.2f}s, giving up at {PATIENCE_SECONDS:g}s"
     )
