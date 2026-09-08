@@ -1461,6 +1461,37 @@ class WorkflowRevisionOut(ApiModel):
     created_at: datetime
 
 
+class WorkflowOutputGeometryBindingOut(ApiModel):
+    key: Literal["width", "height"]
+    node_id: str
+    input_name: Literal["width", "height"]
+    default: int
+    minimum: int
+    maximum: int
+    multiple_of: int
+
+
+class WorkflowOutputGeometryCapabilityOut(ApiModel):
+    version: Literal[1]
+    available: bool
+    reason: Literal["unsupported_workflow_geometry"] | None
+    revision_id: str | None
+    workflow_id: str | None
+    artifact_sha256: str | None
+    operation: Literal["text_to_image"] | None
+    engine: Literal["comfyui"] | None
+    size_modes: list[Literal["exact"]]
+    width: WorkflowOutputGeometryBindingOut | None
+    height: WorkflowOutputGeometryBindingOut | None
+    latent_node_id: str | None
+    sampler_node_ids: list[str]
+    decode_node_ids: list[str]
+    save_node_ids: list[str]
+    capability: dict[str, Any] | None
+    graph_binding_verified: bool
+    request_authorized: Literal[False]
+
+
 class WorkflowOut(ApiModel):
     id: str
     name: str
