@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import asyncio
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
 from httpx2 import AsyncClient
+from run_waits import wait_for_terminal_status
 from test_custom_node_source_identity import _git
 from test_custom_node_source_identity import installed_source as installed_source
 from test_workflow_revision_review import reviewed_runtime as reviewed_runtime
@@ -196,14 +197,15 @@ async def test_explicit_reviewed_custom_workflow_reaches_dispatch_only_with_curr
     assert accepted.status_code == 202, accepted.text
     run = accepted.json()["run"]
     assert run["workflow_revision_id"] == workflow["current_revision_id"]
-    deadline = asyncio.get_running_loop().time() + 5
-    while asyncio.get_running_loop().time() < deadline:
-        current = (await client.get(f"/api/runs/{run['id']}")).json()
-        if current["status"] in {"complete", "failed", "cancelled"}:
-            break
-        await asyncio.sleep(0.03)
-    else:
-        raise AssertionError("constructed run did not terminate")
+
+    async def read() -> dict[str, Any]:
+        return cast(dict[str, Any], (await client.get(f"/api/runs/{run['id']}")).json())
+
+    # Either ending is a result here: the caller below decides which one this
+    # case required.
+    current = await wait_for_terminal_status(
+        read, what=f"the constructed run {run['id']}", expected=None
+    )
     if change_source:
         assert current["status"] == "failed", current
         assert captured == []

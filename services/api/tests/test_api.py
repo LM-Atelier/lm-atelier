@@ -11,12 +11,14 @@ from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import FastAPI
 from httpx2 import ASGITransport, AsyncClient
 from PIL import Image
+from run_waits import wait_for_terminal_status
 from sqlalchemy import func, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
@@ -79,36 +81,32 @@ ONE_PIXEL_PNG = base64.b64decode(
 
 
 async def wait_for_assistant(client: AsyncClient, chat_id: str, expected_type: str) -> dict:  # type: ignore[type-arg]
-    deadline = asyncio.get_running_loop().time() + 5
-    while asyncio.get_running_loop().time() < deadline:
+    async def read() -> dict[str, Any] | None:
         response = await client.get(f"/api/chats/{chat_id}")
         assert response.status_code == 200
-        chat = response.json()
-        assistant = [message for message in chat["messages"] if message["role"] == "assistant"][-1]
-        if assistant["status"] in {"complete", "failed", "cancelled"}:
-            assert assistant["status"] == "complete", assistant
-            assert any(part["type"] == expected_type for part in assistant["parts"])
-            return assistant
-        await asyncio.sleep(0.03)
-    raise AssertionError("assistant run did not complete")
+        assistants = [
+            message for message in response.json()["messages"] if message["role"] == "assistant"
+        ]
+        return cast(dict[str, Any], assistants[-1]) if assistants else None
+
+    assistant = await wait_for_terminal_status(read, what=f"the assistant run in chat {chat_id}")
+    assert any(part["type"] == expected_type for part in assistant["parts"])
+    return cast(dict, assistant)
 
 
 async def wait_for_run(client: AsyncClient, run_id: str) -> dict:  # type: ignore[type-arg]
-    deadline = asyncio.get_running_loop().time() + 5
-    while asyncio.get_running_loop().time() < deadline:
+    async def read() -> dict[str, Any]:
         response = await client.get(f"/api/runs/{run_id}")
         assert response.status_code == 200
-        run = response.json()
-        if run["status"] in {"complete", "failed", "cancelled"}:
-            assert run["status"] == "complete", run
-            assert run["started_at"] is not None
-            assert run["completed_at"] is not None
-            assert isinstance(run["duration_ms"], int)
-            assert run["duration_ms"] >= 0
-            assert run["provenance_json"]["timings"]["duration_ms"] == run["duration_ms"]
-            return run
-        await asyncio.sleep(0.03)
-    raise AssertionError("run did not complete")
+        return cast(dict[str, Any], response.json())
+
+    run = await wait_for_terminal_status(read, what=f"run {run_id}")
+    assert run["started_at"] is not None
+    assert run["completed_at"] is not None
+    assert isinstance(run["duration_ms"], int)
+    assert run["duration_ms"] >= 0
+    assert run["provenance_json"]["timings"]["duration_ms"] == run["duration_ms"]
+    return cast(dict, run)
 
 
 def extend_capability_role(

@@ -9,7 +9,6 @@ the property the record is for, and the one a shorter control would miss.
 
 from __future__ import annotations
 
-import asyncio
 import io
 import json
 from collections.abc import AsyncIterator
@@ -19,6 +18,7 @@ import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
 from PIL import Image
+from run_waits import wait_for_terminal_status
 from sqlalchemy import select
 
 from local_lm.adapters.base import ChatEvent, ChatRequest, GeneratedAsset, MediaEvent, MediaRequest
@@ -35,6 +35,18 @@ from local_lm.models import (
 )
 from local_lm.schemas import EngineCapabilities, JobOut
 
+# A job can also end as INTERRUPTED, which the generic set does not carry: these
+# two modules exercise interruption deliberately, so it is an ending here rather
+# than a state still worth waiting on.
+_JOB_TERMINAL = frozenset(
+    {
+        JobStatus.COMPLETE.value,
+        JobStatus.FAILED.value,
+        JobStatus.CANCELLED.value,
+        JobStatus.INTERRUPTED.value,
+    }
+)
+
 
 def _png(color: tuple[int, int, int]) -> bytes:
     content = io.BytesIO()
@@ -44,21 +56,25 @@ def _png(color: tuple[int, int, int]) -> bytes:
 
 async def _wait_for_job(client: AsyncClient, kind: str) -> dict:  # type: ignore[type-arg]
     del client
-    deadline = asyncio.get_running_loop().time() + 5
-    while asyncio.get_running_loop().time() < deadline:
+
+    async def read() -> dict[str, Any] | None:
         with SessionLocal() as session:
             matching = session.scalar(
                 select(Job).where(Job.kind == kind).order_by(Job.created_at.desc())
             )
-            if matching and matching.status in {
-                JobStatus.COMPLETE.value,
-                JobStatus.FAILED.value,
-                JobStatus.CANCELLED.value,
-                JobStatus.INTERRUPTED.value,
-            }:
-                return JobOut.model_validate(matching).model_dump(mode="json")
-        await asyncio.sleep(0.03)
-    raise AssertionError(f"{kind} job did not finish")
+            if matching is None:
+                return None
+            return cast(dict[str, Any], JobOut.model_validate(matching).model_dump(mode="json"))
+
+    return cast(
+        dict,
+        await wait_for_terminal_status(
+            read,
+            what=f"the {kind} job",
+            terminal=_JOB_TERMINAL,
+            expected=None,
+        ),
+    )
 
 
 _RETRY_ASSESSMENT = json.dumps(
@@ -73,19 +89,18 @@ _RETRY_ASSESSMENT = json.dumps(
 
 
 async def _wait_for_run(client: AsyncClient, run_id: str) -> dict[str, Any]:
-    deadline = asyncio.get_running_loop().time() + 5
-    while asyncio.get_running_loop().time() < deadline:
-        run = (await client.get(f"/api/runs/{run_id}")).json()
-        if run["status"] in {
-            JobStatus.COMPLETE.value,
-            JobStatus.FAILED.value,
-            JobStatus.CANCELLED.value,
-            JobStatus.INTERRUPTED.value,
-        }:
-            assert run["status"] == JobStatus.COMPLETE.value
-            return cast(dict[str, Any], run)
-        await asyncio.sleep(0.03)
-    raise AssertionError(f"run {run_id} did not finish")
+    async def read() -> dict[str, Any]:
+        return cast(dict[str, Any], (await client.get(f"/api/runs/{run_id}")).json())
+
+    return cast(
+        dict[str, Any],
+        await wait_for_terminal_status(
+            read,
+            what=f"run {run_id}",
+            terminal=_JOB_TERMINAL,
+            expected=JobStatus.COMPLETE.value,
+        ),
+    )
 
 
 @pytest.mark.parametrize("refusal_point", ["announcement", "start"])
