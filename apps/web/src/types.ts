@@ -993,10 +993,13 @@ export interface CatalogPreflight {
   checks: CatalogPreflightCheck[];
 }
 
+export type BoundWorkflowAssetKind = "checkpoint" | "embedding" | "lora" | "upscaler" | "vae";
+export type WorkflowAssetKind = BoundWorkflowAssetKind | "configuration";
+
 /** One missing workflow file bound to an exact plan artifact. */
 export interface BoundWorkflowAsset {
   reference_filename: string;
-  kind: string;
+  kind: BoundWorkflowAssetKind;
   install_plan_id: string;
   install_plan_hash: string;
   provider: string;
@@ -1285,7 +1288,7 @@ export interface WorkflowAssetReference {
   filename: string;
   suffix: string;
   policy: "supported" | "blocked" | "unsupported";
-  kind: "checkpoint" | "configuration" | "embedding" | "lora" | "upscaler" | "vae";
+  kind: WorkflowAssetKind;
   source_url: string | null;
   present_locally: boolean;
   /** Present only when the author's text names this exact file. */

@@ -9,7 +9,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from .comfy_workflow_packages import WorkflowAssetReference
-from .model_asset_types import InstalledAssetKind
+from .model_asset_types import BoundWorkflowAssetKind, InstalledAssetKind
 from .models import InstallPlan
 
 WORKFLOW_ASSET_BINDING_VERSION = 1
@@ -70,7 +70,7 @@ class WorkflowAssetPlanSelection:
 @dataclass(frozen=True)
 class BoundWorkflowAsset:
     reference_filename: str
-    kind: str
+    kind: BoundWorkflowAssetKind
     install_plan_id: str
     install_plan_hash: str
     provider: str
@@ -285,7 +285,8 @@ def _bound_asset(
     target_folder = artifact.get("target_folder")
     expected_kinds = _REFERENCE_ARTIFACT_KINDS.get(reference.kind)
     if (
-        expected_kinds is None
+        reference.kind == "configuration"
+        or expected_kinds is None
         or not isinstance(artifact_kind, str)
         or artifact_kind not in expected_kinds
     ):

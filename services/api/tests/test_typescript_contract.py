@@ -488,7 +488,6 @@ VOCABULARY_TOKENS = frozenset(
 # readiness-wording break reached main.
 OPEN_VOCABULARY_BASELINE = frozenset(
     {
-        "BoundWorkflowAssetOut.kind",
         "ReferenceSubjectCreate.kind",
         "WorkflowInstallOfferOut.invalidation_code",
     }
