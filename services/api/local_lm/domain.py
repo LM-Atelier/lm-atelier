@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Literal, assert_never
 from uuid import uuid4
 
 
@@ -100,6 +101,18 @@ class Operation(StrEnum):
     IMAGE_TO_IMAGE = "image_to_image"
     TEXT_TO_VIDEO = "text_to_video"
     IMAGE_TO_VIDEO = "image_to_video"
+
+
+def operation_model_role(operation: Operation) -> Literal["chat", "image", "video"]:
+    """Choose a model role explicitly for every supported operation."""
+    match operation:
+        case Operation.TEXT:
+            return "chat"
+        case Operation.TEXT_TO_IMAGE | Operation.IMAGE_TO_IMAGE:
+            return "image"
+        case Operation.TEXT_TO_VIDEO | Operation.IMAGE_TO_VIDEO:
+            return "video"
+    assert_never(operation)
 
 
 class RunStatus(StrEnum):

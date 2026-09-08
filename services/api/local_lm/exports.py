@@ -28,6 +28,7 @@ from .domain import (
     PartType,
     RoutingMode,
     RunStatus,
+    operation_model_role,
 )
 from .models import (
     Artifact,
@@ -2494,11 +2495,7 @@ class ProjectExporter:
 
     @staticmethod
     def _role_for_operation(operation: Operation) -> str:
-        if operation == Operation.TEXT:
-            return "chat"
-        if operation in {Operation.TEXT_TO_IMAGE, Operation.IMAGE_TO_IMAGE}:
-            return "image"
-        return "video"
+        return operation_model_role(operation)
 
     @staticmethod
     def _text(value: object, label: str, maximum: int) -> str:
