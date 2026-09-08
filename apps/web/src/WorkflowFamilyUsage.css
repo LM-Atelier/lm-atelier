@@ -1,0 +1,7 @@
+.workflow-family-usage { padding: 14px 0; }
+.workflow-family-usage h3 { margin: 0 0 8px; font-size: 14px; }
+.workflow-family-usage dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.workflow-family-usage dl > div { padding: 10px; border: 1px solid var(--border); border-radius: 8px; }
+.workflow-family-usage dt { color: var(--ink-secondary); font-size: 12px; }
+.workflow-family-usage dd { margin: 6px 0 0; font-size: 18px; }
+.workflow-family-usage p { font-size: 12px; }

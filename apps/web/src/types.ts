@@ -1086,6 +1086,7 @@ export interface WorkflowRevision {
 
 export interface Workflow {
   id: string;
+  family_id?: string | null;
   name: string;
   operation: string;
   description: string;

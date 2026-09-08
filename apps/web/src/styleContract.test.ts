@@ -17,8 +17,13 @@ const STYLESHEET = join(SOURCE_DIR, "styles.css");
 /** Classes that are deliberately not styled here, with the reason. */
 const UNSTYLED_BY_DESIGN = new Set<string>([]);
 
-function definedClasses(): Set<string> {
-  const css = readFileSync(STYLESHEET, "utf8");
+function definedClasses(file: string): Set<string> {
+  const source = readFileSync(join(SOURCE_DIR, file), "utf8");
+  // Component styles count only when that component actually imports them.
+  const imports = [...source.matchAll(/^import\s+["'](\.\/[^"']+\.css)["'];?\s*$/gm)];
+  const css = [STYLESHEET, ...imports.map((match) => join(SOURCE_DIR, match[1]))]
+    .map((path) => readFileSync(path, "utf8"))
+    .join("\n");
   const defined = new Set<string>();
   for (const match of css.matchAll(/\.(-?[_a-zA-Z][\w-]*)/g)) defined.add(match[1]);
   return defined;
@@ -63,10 +68,13 @@ function contrast(a: string, b: string): number {
 
 describe("style contract", () => {
   it("leaves no element without any styling at all", () => {
-    const defined = definedClasses();
+    const byFile = new Map<string, Set<string>>();
     const unstyled = styledElements()
-      .filter(({ tokens }) =>
-        tokens.every((token) => !defined.has(token) && !UNSTYLED_BY_DESIGN.has(token)))
+      .filter(({ tokens, file }) => {
+        const defined = byFile.get(file) ?? definedClasses(file);
+        byFile.set(file, defined);
+        return tokens.every((token) => !defined.has(token) && !UNSTYLED_BY_DESIGN.has(token));
+      })
       .map(({ tokens, file }) => `${tokens.join(" ")} (${file})`)
       .sort();
 

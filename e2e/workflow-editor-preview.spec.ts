@@ -370,7 +370,7 @@ test("certifies the synthetic native-editor browser protocol without claiming ma
   expect(untouched.revisions[0].api_graph_json).toEqual(apiGraph());
 
   await page.getByRole("button", { name: "Workflows" }).click();
-  await page.getByText(WORKFLOW_NAME, { exact: true }).click();
+  await page.getByRole("button").filter({ has: page.getByText(WORKFLOW_NAME, { exact: true }) }).click();
 
   const popupPromise = page.waitForEvent("popup");
   const sessionResponsePromise = page.waitForResponse((response) => (

@@ -32,7 +32,7 @@ export function WorkflowFamilyArchive({
     },
   });
 
-  if (impact.isLoading) {
+  if (impact.isPending || impact.isFetching) {
     return (
       <ConfirmDialog
         tone="action"
