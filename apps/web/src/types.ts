@@ -689,11 +689,24 @@ export interface ModelInstall {
   updated_at: string;
 }
 
+export type InstalledAssetKind =
+  | "checkpoint"
+  | "clip_vision"
+  | "controlnet"
+  | "diffusion_model"
+  | "embedding"
+  | "gguf_model"
+  | "ip_adapter"
+  | "lora"
+  | "text_encoder"
+  | "upscaler"
+  | "vae";
+
 export interface ModelAssetInstall {
   id: string;
   source_id: string | null;
   name: string;
-  kind: string;
+  kind: InstalledAssetKind;
   family: string | null;
   size_bytes: number;
   manifest_json: Record<string, unknown>;
@@ -1283,7 +1296,7 @@ export interface WorkflowPackagePreparation {
 export interface ModelUpdate {
   install_id: string;
   name: string;
-  kind: string;
+  kind: InstalledAssetKind;
   model_id: string;
   installed_version_id: string;
   installed_version_name: string | null;

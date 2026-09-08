@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ApiError, api } from "./api";
 import { PromptLibraryView } from "./PromptLibraryView";
 import type {
+  ModelAssetInstall,
   PromptTemplateContract,
   PromptTemplateDefinition,
   PromptTemplateDetail,
@@ -100,7 +101,7 @@ const installedLoraDigests = [
   "1".repeat(64), "2".repeat(64),
   ...Array.from({ length: 70 }, (_, index) => index.toString(16).padStart(64, "0")),
 ];
-const installedLoras = installedLoraDigests.map((sha256, index) => ({
+const installedLoras: ModelAssetInstall[] = installedLoraDigests.map((sha256, index) => ({
   id: `asset_${index}`,
   source_id: null,
   kind: "lora",

@@ -46,6 +46,21 @@ class ApiModel(BaseModel):
     model_config = ConfigDict(from_attributes=True, extra="forbid")
 
 
+InstalledAssetKind = Literal[
+    "checkpoint",
+    "clip_vision",
+    "controlnet",
+    "diffusion_model",
+    "embedding",
+    "gguf_model",
+    "ip_adapter",
+    "lora",
+    "text_encoder",
+    "upscaler",
+    "vae",
+]
+
+
 ContentRating = Literal["general", "mature", "unknown"]
 #: What a compute device is. Produced only by hardware.py, which builds every
 #: DeviceInfo and passes one of these three literals; there is no stored column
@@ -1242,7 +1257,7 @@ class ModelUpdateOut(ApiModel):
 
     install_id: str
     name: str
-    kind: str
+    kind: InstalledAssetKind
     model_id: str
     installed_version_id: str
     installed_version_name: str | None
@@ -2213,29 +2228,14 @@ class DownloadRequest(ApiModel):
     # A dependency owned by one reviewed workflow binding. Unlike an
     # auxiliary asset it is never offered for auto-application or activated as
     # a standalone profile.
-    workflow_asset_kind: (
-        Literal[
-            "checkpoint",
-            "clip_vision",
-            "controlnet",
-            "diffusion_model",
-            "embedding",
-            "gguf_model",
-            "ip_adapter",
-            "lora",
-            "text_encoder",
-            "upscaler",
-            "vae",
-        ]
-        | None
-    ) = None
+    workflow_asset_kind: InstalledAssetKind | None = None
 
 
 class ModelAssetOut(ApiModel):
     id: str
     source_id: str | None
     name: str
-    kind: str
+    kind: InstalledAssetKind
     family: str | None
     size_bytes: int
     manifest_json: dict[str, Any]
