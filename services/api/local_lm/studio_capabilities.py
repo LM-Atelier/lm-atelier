@@ -14,15 +14,18 @@ it is still cheap to hear.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from .outpaint_workflows import workflow_declares_outpaint
 from .studio_masks import workflow_accepts_mask
 from .upscale_workflows import workflow_declares_upscale
 
+StudioToolKind = Literal["instruct", "brush", "eraser", "rect", "lasso", "enhance", "extend"]
+
+
 #: The tool kinds the surface offers, paired with what each needs installed.
 #: Selection tools share one class: they are four ways to draw one mask.
-TOOL_WORKFLOW_CLASSES: dict[str, str] = {
+TOOL_WORKFLOW_CLASSES: dict[StudioToolKind, str] = {
     "instruct": "image_to_image",
     "brush": "inpaint",
     "eraser": "inpaint",
@@ -44,7 +47,7 @@ _CLASS_GUIDANCE = {
 class ToolCapability:
     """One tool's answer, phrased so the surface can show it unchanged."""
 
-    kind: str
+    kind: StudioToolKind
     workflow_class: str
     available: bool
     reason: str | None
