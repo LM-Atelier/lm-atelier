@@ -328,7 +328,7 @@ async def test_planned_chat_activation_requires_completion_and_records_evidence(
     with SessionLocal() as session:
         assert session.get(ModelInstall, "model_planned_chat").active is True  # type: ignore[union-attr]
         evidence = session.query(ModelCapabilityEvidence).one()
-        assert evidence.result == "ready"
+        assert evidence.evidence_key and evidence.probe_version
         assert evidence.runtime_build == "llama-test"
         assert evidence.details_json["input_modalities"] == ["text", "image"]
         assert evidence.details_json["projector_expected"] is True
@@ -742,7 +742,7 @@ async def test_chat_plan_downloads_a_pinned_projector_from_a_companion_repo(
             component.relative_path for component in session.query(ModelComponentManifest)
         }
         assert components == {model_name, projector_name}
-        assert session.query(ModelCapabilityEvidence).one().result == "ready"
+        assert session.query(ModelCapabilityEvidence).one().evidence_key
 
 
 def test_companion_relocation_rejects_a_worker_path_outside_staging(
@@ -2020,7 +2020,7 @@ async def test_planned_media_activation_requires_output_and_records_evidence(
         install = session.get(ModelInstall, "model_planned_image")
         evidence = session.query(ModelCapabilityEvidence).one()
         assert install and install.active is True
-        assert evidence.result == "ready"
+        assert evidence.evidence_key and evidence.probe_version
         assert evidence.runtime_build == "comfy-test"
         # Evidence is keyed on what the workflow executes, not the compiler
         # version, so a compiler change that alters nothing leaves it valid.

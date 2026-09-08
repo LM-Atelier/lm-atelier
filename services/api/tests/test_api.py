@@ -241,7 +241,6 @@ async def test_model_readiness_requires_matching_capability_evidence(
             ModelCapabilityEvidence(
                 model_install_id=verified.id,
                 evidence_key="a" * 64,
-                result="ready",
                 component_hashes_json={"verified.gguf": "b" * 64},
                 runtime_build="llama-test",
                 adapter_contract_version=1,
