@@ -28,7 +28,13 @@ from .domain import (
     RoutingMode,
     RunStatus,
 )
-from .references import MAX_REFERENCES_PER_TURN, MAX_ROLE, MentionSource, ValidationState
+from .references import (
+    MAX_REFERENCES_PER_TURN,
+    MAX_ROLE,
+    MentionSource,
+    ReferenceKind,
+    ValidationState,
+)
 from .saved_settings import GenerationSettingsByRole, SavedRoleSettings
 from .worker_failures import WorkerFailureCode
 
@@ -243,7 +249,7 @@ class ResponseRevisionOut(ApiModel):
     message_id: str
     run_id: str | None
     sequence: int
-    status: str
+    status: MessageStatus
     parts: list[MessagePartOut]
     feedback: Literal["up", "down"] | None = None
     created_at: datetime
@@ -262,7 +268,7 @@ class MessageReferenceOut(ApiModel):
     reference_subject_id: str
     mention_slug: str
     subject_name: str
-    subject_kind: str
+    subject_kind: ReferenceKind
     role: str | None = None
     strength: float | None = None
     source: str
@@ -356,7 +362,7 @@ class ChatItemRemovalReferenceOut(ApiModel):
     id: str
     subject_name: str
     mention_slug: str
-    subject_kind: str
+    subject_kind: ReferenceKind
 
 
 class ChatItemRemovalImpactOut(ApiModel):
@@ -2347,7 +2353,7 @@ class ReferenceSubjectOut(ApiModel):
     id: str
     name: str
     mention_slug: str
-    kind: str
+    kind: ReferenceKind
     description: str | None
     aliases_json: list[str]
     tags_json: list[str]

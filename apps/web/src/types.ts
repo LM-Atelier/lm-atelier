@@ -150,7 +150,7 @@ export interface MessageReference {
   reference_subject_id: string;
   mention_slug: string;
   subject_name: string;
-  subject_kind: string;
+  subject_kind: ReferenceKind;
   role?: string | null;
   strength?: number | null;
   source: string;
@@ -785,7 +785,7 @@ export interface ChatItemRemovalReference {
   id: string;
   subject_name: string;
   mention_slug: string;
-  subject_kind: string;
+  subject_kind: ReferenceKind;
 }
 
 export interface ChatItemRemovalImpact {
@@ -1525,7 +1525,7 @@ export interface ReferenceSubject {
   id: string;
   name: string;
   mention_slug: string;
-  kind: string;
+  kind: ReferenceKind;
   description: string | null;
   aliases_json: string[];
   tags_json: string[];
