@@ -29,15 +29,20 @@ from local_lm.domain import (
     RoutingMode,
     RunStatus,
 )
+from local_lm.references import ReferenceKind
 from local_lm.schemas import (
     ArtifactOut,
     AuxiliaryAssetKind,
     CatalogPreflight,
     ChatDetail,
+    ChatItemRemovalReferenceOut,
     ChatOut,
     JobOut,
     MessageOut,
     MessagePartOut,
+    MessageReferenceOut,
+    ReferenceSubjectOut,
+    ResponseRevisionOut,
     RunOut,
 )
 
@@ -53,6 +58,10 @@ CLOSED: list[tuple[type[BaseModel], str, type[StrEnum]]] = [
     # too. Pinned because it is easy to undo by accident: redeclaring
     # routing_mode on the subclass as a str would silently reopen it.
     (ChatDetail, "routing_mode", RoutingMode),
+    (ResponseRevisionOut, "status", MessageStatus),
+    (ReferenceSubjectOut, "kind", ReferenceKind),
+    (MessageReferenceOut, "subject_kind", ReferenceKind),
+    (ChatItemRemovalReferenceOut, "subject_kind", ReferenceKind),
 ]
 
 
