@@ -59,6 +59,7 @@ from .gguf import (
     automatic_mmproj_selection,
     validate_gguf_selection,
 )
+from .install_plan_types import InstallPlanFailureCode
 from .model_manifests import (
     COMFY_MODEL_ASSET_KINDS,
     COMFY_MODEL_FOLDERS,
@@ -532,7 +533,7 @@ class DownloadManager:
             raise ValueError("downloaded media bundle has no primary generation model")
 
     @staticmethod
-    def _stable_failure_code(exc: Exception) -> str:
+    def _stable_failure_code(exc: Exception) -> InstallPlanFailureCode:
         message = str(exc).casefold()
         if isinstance(exc, TimeoutError) or "timeout" in message:
             return "activation_probe_timeout"

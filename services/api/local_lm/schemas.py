@@ -29,6 +29,7 @@ from .domain import (
     RoutingMode,
     RunStatus,
 )
+from .install_plan_types import InstallPlanFailureCode
 from .model_asset_types import InstalledAssetKind
 from .references import (
     MAX_REFERENCES_PER_TURN,
@@ -1196,7 +1197,7 @@ class InstallPlanOut(ApiModel):
     runtime_contract_json: dict[str, Any]
     activation_probe_json: dict[str, Any]
     status: Literal["planned", "downloading", "activated", "failed", "cancelled"]
-    failure_code: str | None
+    failure_code: InstallPlanFailureCode | None
     failure_reason: str | None
     created_at: datetime
     updated_at: datetime

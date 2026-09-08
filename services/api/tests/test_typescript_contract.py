@@ -41,6 +41,7 @@ CHECKED_CONTRACTS = {
     "CatalogDetail": "CatalogDetail",
     "CatalogModel": "CatalogModel",
     "CatalogPage": "CatalogPage",
+    "CatalogInstallPlan": "InstallPlanOut",
     "CatalogPreflight": "CatalogPreflight",
     "CatalogPreflightCheck": "CatalogPreflightCheck",
     "ChatDetail": "ChatDetail",
@@ -110,6 +111,20 @@ CHECKED_CONTRACTS = {
 # Fields the browser deliberately does not mirror, with the reason. Anything
 # not listed here is drift, not a decision.
 ALLOWED_MISSING = {
+    # Catalog preflight consumes only the plan summary, not its stored metadata.
+    ("CatalogInstallPlan", "activation_probe_json"): "not part of the catalog plan summary",
+    ("CatalogInstallPlan", "architecture"): "not part of the catalog plan summary",
+    ("CatalogInstallPlan", "artifacts_json"): "not part of the catalog plan summary",
+    ("CatalogInstallPlan", "created_at"): "not part of the catalog plan summary",
+    ("CatalogInstallPlan", "engine"): "not part of the catalog plan summary",
+    ("CatalogInstallPlan", "provider"): "not part of the catalog plan summary",
+    ("CatalogInstallPlan", "remote_id"): "not part of the catalog plan summary",
+    ("CatalogInstallPlan", "resolver_version"): "not part of the catalog plan summary",
+    ("CatalogInstallPlan", "revision"): "not part of the catalog plan summary",
+    ("CatalogInstallPlan", "role"): "not part of the catalog plan summary",
+    ("CatalogInstallPlan", "runtime_contract_json"): "not part of the catalog plan summary",
+    ("CatalogInstallPlan", "status"): "not part of the catalog plan summary",
+    ("CatalogInstallPlan", "updated_at"): "not part of the catalog plan summary",
     ("Job", "payload_json"): "opaque server payload; the browser reads named fields",
     ("Run", "provenance_json"): "read through helpers, not as a typed shape",
 }
@@ -451,7 +466,6 @@ VOCABULARY_TOKENS = frozenset(
 OPEN_VOCABULARY_BASELINE = frozenset(
     {
         "BoundWorkflowAssetOut.kind",
-        "InstallPlanOut.failure_code",
         "JobOut.phase",
         "ReferenceSubjectCreate.kind",
         "SetupReadinessCheck.code",
