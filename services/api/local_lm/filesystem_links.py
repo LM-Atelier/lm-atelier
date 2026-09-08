@@ -79,6 +79,7 @@ _FILE_WRITE_DATA: Final = 0x00000002
 _FILE_TRAVERSE: Final = 0x00000020
 _FILE_READ_ATTRIBUTES: Final = 0x00000080
 _DELETE: Final = 0x00010000
+_READ_CONTROL: Final = 0x00020000
 _SYNCHRONIZE: Final = 0x00100000
 _FILE_SHARE_READ: Final = 0x00000001
 _FILE_SHARE_WRITE: Final = 0x00000002
@@ -205,11 +206,15 @@ class AnchoredDirectory:
     the anchor resolve against the leaf. Windows holds also prevent directory
     rename/deletion; POSIX descriptors preserve the opened objects but do not
     pin their names. A POSIX pathname caller needs separate confinement.
+
+    read_security requests access to owner/group/DACL metadata on the Windows
+    leaf handle. POSIX ownership metadata is already available through fstat.
+    This option requests access; it does not decide whether a root is eligible.
     """
 
     __slots__ = ("_chain", "_windows", "path")
 
-    def __init__(self, path: Path, *, create: bool = False) -> None:
+    def __init__(self, path: Path, *, create: bool = False, read_security: bool = False) -> None:
         self.path = path
         self._chain: list[int] = []
         self._windows = not _HAS_DIR_FD and os.name == "nt"
@@ -217,7 +222,7 @@ class AnchoredDirectory:
             if _HAS_DIR_FD:
                 self._chain = _walk_posix(path, create=create)
             elif self._windows:
-                self._chain = _walk_windows(path, create=create)
+                self._chain = _walk_windows(path, create=create, read_security=read_security)
             else:  # pragma: no cover - no third platform is supported
                 _refuse()
         except OSError:
@@ -1558,7 +1563,7 @@ def _walk_posix(path: Path, *, create: bool = False) -> list[int]:
     return chain
 
 
-def _walk_windows(path: Path, *, create: bool = False) -> list[int]:
+def _walk_windows(path: Path, *, create: bool = False, read_security: bool = False) -> list[int]:
     """Walk the chain handle-relative, refusing a reparse point at any depth."""
 
     parts = path.parts
@@ -1566,7 +1571,8 @@ def _walk_windows(path: Path, *, create: bool = False) -> list[int]:
     # the one name given to the object manager directly - and it must be in
     # the NT namespace: measured, "C:\\" is STATUS_OBJECT_PATH_SYNTAX_BAD and
     # "\\??\\C:" is STATUS_ACCESS_DENIED, while "\\??\\C:\\" opens.
-    chain = [_nt_open_relative(None, f"{_NT_NAMESPACE}{parts[0]}", intent="open_dir")]
+    root_intent = "open_security_dir" if read_security and len(parts) == 1 else "open_dir"
+    chain = [_nt_open_relative(None, f"{_NT_NAMESPACE}{parts[0]}", intent=root_intent)]
     try:
         for index, component in enumerate(parts[1:], start=1):
             # Validate the component BEFORE the native open, not inside it.
@@ -1581,7 +1587,10 @@ def _walk_windows(path: Path, *, create: bool = False) -> list[int]:
             # Only the leaf may be created, and only through its parent's
             # handle. Creating an ancestor would mean deciding, by path, that
             # a directory the caller never named should exist.
-            intent = "create_dir" if last and create else "open_dir"
+            if last and read_security:
+                intent = "create_security_dir" if create else "open_security_dir"
+            else:
+                intent = "create_dir" if last and create else "open_dir"
             chain.append(_nt_open_relative(chain[-1], component, intent=intent))
             if _nt_is_reparse(chain[-1]):
                 _refuse()
@@ -1729,7 +1738,8 @@ def _nt_try_open_relative(parent: int | None, name: str, *, intent: str) -> tupl
     absent entry and a name collision from a genuine failure. Everything that
     does not need that distinction goes through _nt_open_relative.
 
-    `intent` is one of open_dir, create_dir, open_file, create_file,
+    `intent` is one of open_dir, create_dir, open_security_dir, create_security_dir,
+    open_file, create_file,
     delete_directory or rename_source. It is spelled out rather than inferred from a flag because
     the access mask and the disposition have to agree, and getting that pair
     wrong fails in ways that look like a filesystem problem rather than a
@@ -1753,10 +1763,14 @@ def _nt_try_open_relative(parent: int | None, name: str, *, intent: str) -> tupl
 
     access = _FILE_READ_ATTRIBUTES | _SYNCHRONIZE
     options = _FILE_SYNCHRONOUS_IO_NONALERT | _FILE_OPEN_REPARSE_POINT
-    if intent in ("open_dir", "create_dir"):
+    if intent in ("open_dir", "create_dir", "open_security_dir", "create_security_dir"):
         access |= _FILE_LIST_DIRECTORY | _FILE_TRAVERSE
+        if intent in ("open_security_dir", "create_security_dir"):
+            access |= _READ_CONTROL
         options |= _FILE_DIRECTORY_FILE
-        disposition = _FILE_OPEN_IF if intent == "create_dir" else _FILE_OPEN
+        disposition = (
+            _FILE_OPEN_IF if intent in ("create_dir", "create_security_dir") else _FILE_OPEN
+        )
     elif intent == "create_file":
         access |= _FILE_WRITE_DATA
         options |= _FILE_NON_DIRECTORY_FILE
