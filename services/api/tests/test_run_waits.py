@@ -11,6 +11,7 @@ change.
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
@@ -82,7 +83,22 @@ async def test_a_timeout_reports_how_long_it_waited_and_what_it_last_saw(
     message = str(caught.value)
     assert "run r3" in message
     assert "'running'" in message, "the last status seen is the whole diagnosis"
-    assert "0.2" in message, "the elapsed time distinguishes a slow machine from a stuck one"
+
+    # Read the number back rather than looking for "0.2" in the text. The
+    # budget is what the wait is willing to spend, not what it will have spent:
+    # a poll that wakes late spends more, and the message then says 0.35 and
+    # contains no "0.2" at all - so a substring made this control fail on a
+    # loaded machine while the helper was working exactly as intended, which is
+    # the very fault this file exists to remove.
+    reported = re.search(r"after (\d+\.\d+)s", message)
+    assert reported is not None, f"no elapsed time in the message: {message}"
+    assert float(reported.group(1)) >= run_waits.PATIENCE_SECONDS, (
+        "the elapsed time must be the real one; a late wakeup can only make it larger"
+    )
+    # And the ceiling has to read as itself. Formatted to no decimal places it
+    # rendered a fifth of a second as "0s", which is the one number in the
+    # sentence that is not a measurement and so has no excuse for being wrong.
+    assert "giving up at 0.2s" in message
 
 
 async def test_a_caller_can_accept_any_ending(monkeypatch: pytest.MonkeyPatch) -> None:
