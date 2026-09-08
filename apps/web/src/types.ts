@@ -645,12 +645,19 @@ export interface SetupReadinessReport {
   roles: SetupRoleReadiness[];
 }
 
+export type SetupVerificationFailureCode =
+  | "application_restarted"
+  | "empty_generation"
+  | "generation_cancelled"
+  | "generation_failed"
+  | "generation_not_started";
+
 export interface SetupVerification {
   id: string;
   role: "chat" | "image" | "video";
   state: "queued" | "running" | "ready" | "failed";
   job_id: string | null;
-  failure_code: string | null;
+  failure_code: SetupVerificationFailureCode | null;
   started_at: string | null;
   completed_at: string | null;
 }

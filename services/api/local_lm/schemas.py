@@ -2702,7 +2702,16 @@ class SetupVerificationOut(ApiModel):
     role: Literal["chat", "image", "video"]
     state: Literal["queued", "running", "ready", "failed"]
     job_id: str | None
-    failure_code: str | None
+    failure_code: (
+        Literal[
+            "application_restarted",
+            "empty_generation",
+            "generation_cancelled",
+            "generation_failed",
+            "generation_not_started",
+        ]
+        | None
+    )
     started_at: datetime | None
     completed_at: datetime | None
 
