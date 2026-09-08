@@ -16,6 +16,7 @@ from pydantic import (
     field_validator,
 )
 
+from .comfy_workflow_packages import WorkflowPackageIssueCode
 from .domain import (
     ArtifactKind,
     JobKind,
@@ -1961,7 +1962,7 @@ class WorkflowAssetReferenceOut(ApiModel):
 
 
 class WorkflowPackageIssueOut(ApiModel):
-    code: str
+    code: WorkflowPackageIssueCode
     count: int
     node_types: list[str]
     severity: Literal["blocking", "advisory"]
