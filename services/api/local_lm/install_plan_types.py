@@ -1,0 +1,35 @@
+"""Failure codes produced while planning and installing model artifacts."""
+
+from typing import Literal
+
+InstallPlanFailureCode = Literal[
+    "activation_contract_failed",
+    "activation_probe_timeout",
+    "activation_runtime_failed",
+    "auxiliary_asset_not_primary",
+    "auxiliary_kind_mismatch",
+    "auxiliary_kind_not_implemented",
+    "component_verification_failed",
+    "conflicting_asset_ownership",
+    "conflicting_workflow_contract",
+    "incomplete_modelopt_snapshot",
+    "install_cancelled",
+    "install_failed",
+    "insufficient_storage",
+    "manifest_inspection_failed",
+    "metadata_inspection_failed",
+    "preflight_blocked",
+    "unsafe_model_format",
+    "unsafe_workflow_asset_format",
+    "unsupported_auxiliary_engine",
+    "unsupported_chat_engine",
+    "unsupported_chat_layout",
+    "unsupported_media_engine",
+    "unsupported_workflow_asset_runtime",
+    "unverified_workflow_asset",
+    "workflow_asset_folder_mismatch",
+    "workflow_asset_kind_mismatch",
+    "workflow_asset_selection_required",
+    "workflow_contract_changed",
+    "workflow_contract_missing",
+]
