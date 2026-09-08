@@ -316,6 +316,113 @@ def directory_identity(anchor: AnchoredDirectory) -> DirectoryIdentity:
     )
 
 
+def directory_owned_by_current_user(anchor: AnchoredDirectory) -> bool:
+    """Compare the held directory owner with the effective user at this call.
+
+    Windows anchors need read_security=True. Failure to obtain either identity
+    refuses the query. Equality does not certify permissions, volume eligibility,
+    or protection against subsequent ownership changes.
+    """
+
+    descriptor = anchor.descriptor
+    if descriptor is not None and sys.platform != "win32":
+        try:
+            return os.fstat(descriptor).st_uid == os.geteuid()
+        except OSError:
+            _refuse()
+    handle = anchor.handle
+    if handle is None:
+        _refuse()
+    api = _windows_ownership_api()
+    owner = ctypes.c_void_p()
+    security_descriptor = ctypes.c_void_p()
+    try:
+        result = api.security.GetSecurityInfo(
+            ctypes.c_void_p(handle),
+            1,
+            1,
+            ctypes.byref(owner),
+            None,
+            None,
+            None,
+            ctypes.byref(security_descriptor),
+        )
+        if result != 0 or not security_descriptor.value or not owner.value:
+            _refuse()
+        if not api.security.IsValidSid(owner):
+            _refuse()
+        # GetCurrentThreadEffectiveToken is an SDK inline returning HANDLE(-6).
+        # It selects an impersonation token when present, otherwise the process
+        # token. This query-only pseudo-handle must not be closed.
+        token = ctypes.c_void_p(-6)
+        needed = ctypes.c_ulong()
+        sized = api.security.GetTokenInformation(token, 1, None, 0, ctypes.byref(needed))
+        if sized or api.ctypes.get_last_error() != 122:
+            _refuse()
+        minimum = ctypes.sizeof(api.TokenUser)
+        if not minimum <= needed.value <= 65536:
+            _refuse()
+        buffer = ctypes.create_string_buffer(needed.value)
+        if not api.security.GetTokenInformation(
+            token, 1, buffer, len(buffer), ctypes.byref(needed)
+        ):
+            _refuse()
+        if not minimum <= needed.value <= len(buffer):
+            _refuse()
+        user = api.TokenUser.from_buffer(buffer)
+        # TOKEN_USER's SID belongs to the returned buffer. Check its fixed
+        # header and variable subauthorities before passing it to native code.
+        start = ctypes.addressof(buffer)
+        sid = user.Sid
+        if not sid or not start + minimum <= sid <= start + needed.value - 8:
+            _refuse()
+        count = ctypes.c_ubyte.from_address(sid + 1).value
+        if sid + 8 + 4 * count > start + needed.value:
+            _refuse()
+        if not api.security.IsValidSid(ctypes.c_void_p(sid)):
+            _refuse()
+        return bool(api.security.EqualSid(owner, ctypes.c_void_p(sid)))
+    finally:
+        if security_descriptor.value:
+            api.kernel.LocalFree(security_descriptor)
+
+
+def _windows_ownership_api() -> Any:
+    import types
+
+    windows: Any = ctypes
+    security = windows.WinDLL("advapi32", use_last_error=True)
+    kernel = windows.WinDLL("kernel32", use_last_error=True)
+
+    class TokenUser(ctypes.Structure):
+        _fields_ = (("Sid", ctypes.c_void_p), ("Attributes", ctypes.c_ulong))
+
+    security.GetSecurityInfo.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_ulong,
+        *([ctypes.POINTER(ctypes.c_void_p)] * 5),
+    ]
+    security.GetSecurityInfo.restype = ctypes.c_ulong
+    security.GetTokenInformation.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_ulong),
+    ]
+    security.GetTokenInformation.restype = ctypes.c_int
+    security.IsValidSid.argtypes = [ctypes.c_void_p]
+    security.IsValidSid.restype = ctypes.c_int
+    security.EqualSid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    security.EqualSid.restype = ctypes.c_int
+    kernel.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel.LocalFree.restype = ctypes.c_void_p
+    return types.SimpleNamespace(
+        ctypes=windows, security=security, kernel=kernel, TokenUser=TokenUser
+    )
+
+
 def _adopt(path: Path, held: int, windows: bool) -> AnchoredDirectory:
     """Wrap an already-open child handle as its own anchor."""
 
