@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import pytest
@@ -67,6 +68,27 @@ def test_extending_by_nothing_is_refused() -> None:
 def test_a_margin_that_is_not_a_fraction_refuses(margins: Any) -> None:
     with pytest.raises(ValueError):
         normalize_margins(margins)
+
+
+def test_a_margin_that_is_not_a_finite_number_refuses() -> None:
+    """NaN is the one value that passes a range check without being in range.
+
+    Both bounds compare False against it, so a test of the form "below the
+    floor or above the ceiling" says neither and lets it through. It matters
+    here because the transport can carry one: the JSON parser behind the
+    request decodes a bare NaN token, and the settings this returns are
+    written back out as JSON, where the same token is not something a strict
+    reader will take back.
+
+    Infinity was already refused by the ceiling; it is asserted here so the
+    two non-finite cases fail for a stated reason rather than by accident.
+    """
+
+    assert not math.nan < 0 and not math.nan > MAX_MARGIN_FRACTION
+
+    for value in (math.nan, math.inf, -math.inf):
+        with pytest.raises(ValueError, match="finite"):
+            normalize_margins({"top": value})
 
 
 def test_the_bound_is_where_the_new_region_dwarfs_the_picture() -> None:

@@ -14,6 +14,7 @@ would force a symmetry nobody asked for.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 OUTPAINT_NODES = frozenset({"ImagePadForOutpaint"})
@@ -59,6 +60,13 @@ def normalize_margins(value: object) -> dict[str, float]:
         if isinstance(raw, bool) or not isinstance(raw, int | float):
             raise ValueError(f"The {side} margin must be a number.")
         margin = float(raw)
+        # NaN compares False against both bounds, so the range check below
+        # admits it: the one number that passes a test for being in range
+        # without being in it. It would reach the workflow as a margin and
+        # the run record as the bare token NaN, which is not JSON any strict
+        # reader will take back.
+        if not math.isfinite(margin):
+            raise ValueError(f"The {side} margin must be a finite number.")
         if margin < 0 or margin > MAX_MARGIN_FRACTION:
             raise ValueError(
                 f"The {side} margin must be between 0 and {MAX_MARGIN_FRACTION:g} "
