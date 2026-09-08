@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import type { QueryClient } from "@tanstack/react-query";
 import { connectEvents } from "./api";
-import type { AppEvent, Job, WorkPlan } from "./types";
+import type { AppEvent, Job, WorkPlan, WorkPlanStatus, WorkStepStatus } from "./types";
 
 const AUTHORITATIVE_QUERY_ROOTS = new Set([
   "about",
@@ -31,10 +31,10 @@ const AUTHORITATIVE_QUERY_ROOTS = new Set([
   "workflows",
 ]);
 
-function aggregateWorkPlanStatus(steps: WorkPlan["steps"]): string {
+function aggregateWorkPlanStatus(steps: WorkPlan["steps"]): WorkPlanStatus {
   const statuses = steps.map((step) => step.status);
   if (statuses.length === 0) return "queued";
-  for (const active of ["running", "queued", "paused", "blocked"]) {
+  for (const active of ["running", "queued", "paused", "blocked"] as const) {
     if (statuses.includes(active)) return active;
   }
   if (statuses.every((status) => status === "complete")) return "complete";
@@ -144,7 +144,7 @@ export function useLiveEvents(
                 { queryKey: ["work-plans"] },
                 (current) => current?.map((plan) => {
                   if (plan.id !== snapshot.work_plan_id) return plan;
-                  const stepStatus = snapshot.progress_json?.stage
+                  const stepStatus: WorkStepStatus = snapshot.progress_json?.stage
                     ?.startsWith("blocked by")
                     ? "blocked"
                     : snapshot.status;

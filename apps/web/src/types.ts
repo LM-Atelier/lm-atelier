@@ -406,6 +406,9 @@ export interface ProgressV2 {
   updated_at: string;
 }
 
+export type WorkStepStatus = JobStatus | "blocked";
+export type WorkPlanStatus = WorkStepStatus | "partial";
+
 export interface WorkStep {
   id: string;
   plan_id: string;
@@ -413,7 +416,7 @@ export interface WorkStep {
   ordinal: number;
   display_group: string | null;
   operation: string;
-  status: string;
+  status: WorkStepStatus;
   prompt: string;
   profile_id: string | null;
   workflow_revision_id: string | null;
@@ -432,7 +435,7 @@ export interface WorkPlan {
   idempotency_key: string | null;
   source_action: string;
   persistence_scope: "durable";
-  status: string;
+  status: WorkPlanStatus;
   context_head_message_id: string | null;
   transcript_sequence: number;
   priority: number;

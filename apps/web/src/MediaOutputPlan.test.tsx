@@ -5,7 +5,7 @@ import type { WorkPlan, WorkStep } from "./types";
 
 const stamp = "2026-08-21T12:00:00Z";
 
-function step(ordinal: number, status: string, prompt: string): WorkStep {
+function step(ordinal: number, status: WorkStep["status"], prompt: string): WorkStep {
   return {
     id: `step-${ordinal}`,
     plan_id: "plan-prompt-library",

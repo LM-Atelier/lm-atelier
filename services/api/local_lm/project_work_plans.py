@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session, selectinload
 from .domain import new_id
 from .models import Chat, Message, Run, WorkPlan, WorkStep, WorkStepDependency
 from .project_dependencies import ImportedDependencies
-from .schemas import WorkPlanOut
+from .schemas import WorkPlanImport, WorkPlanOut
 
 _TERMINAL = {"complete", "failed", "cancelled", "interrupted"}
 _PLAN_KEYS = {"plan_id", "work_plan_id"}
@@ -52,7 +52,7 @@ def export_work_plans(
     )
 
 
-def validate_work_plans(manifest: dict[str, Any]) -> list[WorkPlanOut]:
+def validate_work_plans(manifest: dict[str, Any]) -> list[WorkPlanImport]:
     if manifest["version"] < 7:
         return []
     records = manifest.get("work_plans")
@@ -61,7 +61,7 @@ def validate_work_plans(manifest: dict[str, Any]) -> list[WorkPlanOut]:
         raise ValueError("project manifest has invalid work plans")
     if not isinstance(edges, list) or len(edges) > 100_000:
         raise ValueError("project manifest has invalid work dependencies")
-    plans = [WorkPlanOut.model_validate(record) for record in records]
+    plans = [WorkPlanImport.model_validate(record) for record in records]
     chats = {chat["id"] for chat in manifest["chats"]}
     messages = {
         message["id"]: chat["id"] for chat in manifest["chats"] for message in chat["messages"]
@@ -249,7 +249,7 @@ def remap_work_references(
 
 def import_work_plans(
     session: Session,
-    records: list[WorkPlanOut],
+    records: list[WorkPlanImport],
     edges: list[dict[str, str]],
     chats: dict[str, Chat],
     messages: dict[str, Message],
