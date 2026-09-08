@@ -9,6 +9,10 @@ from local_lm.custom_nodes import CustomNodeManager
 from local_lm.models import CustomNodeInstall
 from local_lm.subprocess_env import git_subprocess_environment
 
+# Two Git subprocesses finish before the reader starts; their startup time is
+# independent of the cancellation ordering these tests exercise.
+_READER_START_TIMEOUT = 30
+
 
 def _git(root: Path, *arguments: str) -> str:
     return subprocess.run(
@@ -223,7 +227,7 @@ async def test_cancelled_verification_joins_reader_before_releasing_directory(
     monkeypatch.setattr(custom_nodes, "verify_pinned_source", reader, raising=False)
     verification = asyncio.create_task(manager.verify(install))
     try:
-        assert await asyncio.to_thread(started.wait, 2)
+        assert await asyncio.to_thread(started.wait, _READER_START_TIMEOUT)
         verification.cancel()
         with pytest.raises(asyncio.CancelledError):
             await verification
@@ -268,7 +272,7 @@ async def test_repeated_cancellation_keeps_directory_until_reader_stops(
     monkeypatch.setattr(custom_nodes, "verify_pinned_source", reader, raising=False)
     verification = asyncio.create_task(manager.verify(install))
     try:
-        assert await asyncio.to_thread(started.wait, 2)
+        assert await asyncio.to_thread(started.wait, _READER_START_TIMEOUT)
         verification.cancel()
         assert await asyncio.to_thread(stopped.wait, 2)
         verification.cancel()
