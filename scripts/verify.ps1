@@ -112,12 +112,16 @@ try {
     # pyproject from the repository root, so this ran with default settings
     # while being labelled strict. The label is the promise; the flag is
     # what keeps it.
+    # The scripts are named here for the same reason they are named in the ruff
+    # lines above: two of them decide whether verification happens at all, and
+    # until they were added the tools that judge the gate were the only Python
+    # in the repository the gate never judged.
     Invoke-Checked "Strict mypy" $Mypy @(
-        "--config-file", "services/api/pyproject.toml", "services/api/local_lm"
+        "--config-file", "services/api/pyproject.toml", "services/api/local_lm", "scripts"
     )
     Invoke-Checked "Strict mypy (Linux platform)" $Mypy @(
         "--platform", "linux",
-        "--config-file", "services/api/pyproject.toml", "services/api/local_lm"
+        "--config-file", "services/api/pyproject.toml", "services/api/local_lm", "scripts"
     )
     Invoke-Checked "Bandit high-severity scan" $Bandit @(
         "-q", "-lll", "-r", "services/api/local_lm"

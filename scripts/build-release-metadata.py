@@ -175,7 +175,13 @@ def python_components(licenses_root: Path) -> tuple[list[dict[str, Any]], list[s
             candidate = Path(str(entry))
             if not LICENSE_FILE_PATTERN.match(candidate.name):
                 continue
-            located = Path(distribution.locate_file(entry))
+            # `locate_file` is declared to return importlib's SimplePath
+            # protocol, not a filesystem path: an installed distribution
+            # can live inside a zip. Every install this reads gives a real
+            # path, so use it directly when it is one and fall back to its
+            # text form rather than assuming.
+            found = distribution.locate_file(entry)
+            located = found if isinstance(found, Path) else Path(str(found))
             copied_name = copy_license_file(located, package_dir, str(candidate))
             if copied_name:
                 copied.append(copied_name)

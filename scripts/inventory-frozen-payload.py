@@ -135,7 +135,13 @@ def distribution_file_index() -> tuple[
         key = (canonical_name(name), version)
         distributions[key] = distribution
         for entry in distribution.files or []:
-            located = Path(distribution.locate_file(entry))
+            # `locate_file` is declared to return importlib's SimplePath
+            # protocol, not a filesystem path: an installed distribution
+            # can live inside a zip. Every install this reads gives a real
+            # path, so use it directly when it is one and fall back to its
+            # text form rather than assuming.
+            found = distribution.locate_file(entry)
+            located = found if isinstance(found, Path) else Path(str(found))
             normalized = os.path.normcase(os.path.realpath(located))
             files.setdefault(normalized, set()).add(key)
     return distributions, files

@@ -6,8 +6,9 @@ import os
 import re
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict, cast
 
 import yaml
 
@@ -56,7 +57,7 @@ def validate_permissions(path: Path, workflow: dict[str, Any]) -> list[str]:
     if top_level != {"contents": "read"}:
         errors.append(f"{path}: top-level permissions must be exactly contents: read")
 
-    allowed_writes = {
+    allowed_writes: dict[tuple[str, ...], set[str]] = {
         (
             "jobs",
             "release-candidate",
@@ -231,7 +232,7 @@ GREEN_MERGE_GATE = {
     "WINDOWS_REQUIRED": "true",
 }
 
-GREEN_MERGE_GROUP = {
+GREEN_MERGE_GROUP: dict[str, str | None] = {
     "EVENT_NAME": "merge_group",
     "REPOSITORY_PRIVATE": "false",
     "ACTION": "checks_requested",
@@ -248,7 +249,10 @@ GREEN_MERGE_GROUP = {
     "WINDOWS_REQUIRED": "true",
 }
 
-MERGE_GATE_MATRIX = (
+# A case is a label, the environment it runs under, and the exit status the
+# gate must produce. A value of None means the variable is absent entirely,
+# which is a different assertion from it being empty.
+MERGE_GATE_MATRIX: tuple[tuple[str, dict[str, str | None], int], ...] = (
     ("verified merge group without PR-only fields", GREEN_MERGE_GROUP, 0),
     (
         "merge group with unrequired Windows",
@@ -616,12 +620,23 @@ MERGE_GATE_ENV = {
     ),
 }
 
+
 # The gate runs a tracked file, so the job has to fetch that file before it can
 # decide anything, and it must fetch the copy belonging to the head under
 # judgement. Without these two steps the job fails for want of a script rather
 # than for want of verification - which fails closed, but can never authorize a
 # valid head either, so the gate is useless in both directions.
-MERGE_GATE_SETUP = (
+class MergeGateSetupStep(TypedDict):
+    """One step the merge-gate job must run before it can decide anything."""
+
+    label: str
+    missing: str
+    action: str
+    ref: str
+    required_with: dict[str, str | bool]
+
+
+MERGE_GATE_SETUP: tuple[MergeGateSetupStep, ...] = (
     {
         "label": "checkout",
         "missing": f"so {MERGE_GATE_SCRIPT.name} is not present when the job runs",
@@ -920,7 +935,14 @@ def validate_pull_request_triggers(path: Path, workflow: dict[str, Any]) -> list
         return []
     problems: list[str] = []
     # `on` is YAML's boolean true once parsed, which is a well-known trap here.
-    triggers = workflow.get("on") or workflow.get(True) or {}
+    # The parsed document therefore really does carry a key that is not a
+    # string, so it has to be read through a mapping that admits one; declaring
+    # str keys and then looking up True is the annotation being wrong, not the
+    # lookup.
+    # Mapping's key type is invariant, so the cast is what says the declared
+    # str-keyed shape is narrower than the document actually is.
+    keyed = cast("Mapping[object, Any]", workflow)
+    triggers = keyed.get("on") or keyed.get(True) or {}
     pull_request = triggers.get("pull_request") if isinstance(triggers, dict) else None
     if not isinstance(pull_request, dict):
         return [f"{path}: ci.yml has no pull_request trigger"]
