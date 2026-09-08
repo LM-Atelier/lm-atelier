@@ -1099,7 +1099,9 @@ class JobOut(ApiModel):
     updated_at: datetime
 
 
-class WorkStepOut(ApiModel):
+class WorkStepImport(ApiModel):
+    """Portable step input; unknown historical statuses normalize during import."""
+
     id: str
     plan_id: str
     run_id: str | None
@@ -1119,7 +1121,15 @@ class WorkStepOut(ApiModel):
     updated_at: datetime
 
 
-class WorkPlanOut(ApiModel):
+WorkStepStatus = JobStatus | Literal["blocked"]
+WorkPlanStatus = WorkStepStatus | Literal["partial"]
+
+
+class WorkStepOut(WorkStepImport):
+    status: WorkStepStatus
+
+
+class _WorkPlanFields(ApiModel):
     id: str
     chat_id: str
     idempotency_key: str | None
@@ -1132,9 +1142,19 @@ class WorkPlanOut(ApiModel):
     planner_version: str
     failure_policy: str
     summary_json: dict[str, Any]
-    steps: list[WorkStepOut]
     created_at: datetime
     updated_at: datetime
+
+
+class WorkPlanImport(_WorkPlanFields):
+    """Portable plan input, independent of the live response vocabulary."""
+
+    steps: list[WorkStepImport]
+
+
+class WorkPlanOut(_WorkPlanFields):
+    status: WorkPlanStatus
+    steps: list[WorkStepOut]
 
 
 class EditedBranchOut(ApiModel):

@@ -6,7 +6,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { api, connectEvents } from "./api";
-import type { BackupInfo, Chat, ChatDetail, EngineCapabilities, EngineRole, Job, ModelAssetInstall, SettingField, SetupReadinessReport, SetupRoleReadiness, TurnAccepted } from "./types";
+import type { BackupInfo, Chat, ChatDetail, EngineCapabilities, EngineRole, Job, ModelAssetInstall, SettingField, SetupReadinessReport, SetupRoleReadiness, TurnAccepted, WorkPlan } from "./types";
 import { DEFAULT_CHAT_WORKFLOW_SELECTIONS, DEFAULT_PROJECT_WORKFLOW_SELECTIONS, familiesForWorkflows } from "./workflowSelectionFixtures";
 const clipboardWrite = vi.fn();
 
@@ -5256,7 +5256,7 @@ describe("App", () => {
       created_at: stamp,
       updated_at: stamp,
     };
-    const plan = {
+    const plan: WorkPlan = {
       id: "plan-queued",
       chat_id: chat.id,
       idempotency_key: "queued-key",
@@ -5340,7 +5340,7 @@ describe("App", () => {
       created_at: stamp,
       updated_at: stamp,
     };
-    const step = (ordinal: number, status: string) => ({
+    const step = (ordinal: number, status: WorkPlan["steps"][number]["status"]) => ({
       id: `step-${ordinal}`,
       plan_id: "plan-media-batch",
       run_id: `run-${ordinal}`,
@@ -5359,7 +5359,7 @@ describe("App", () => {
       created_at: stamp,
       updated_at: stamp,
     });
-    const plan = {
+    const plan: WorkPlan = {
       id: "plan-media-batch",
       chat_id: chat.id,
       idempotency_key: null,
