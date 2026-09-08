@@ -15,6 +15,7 @@ quietly return.
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import get_args
 
 import pytest
 from pydantic import BaseModel
@@ -30,6 +31,8 @@ from local_lm.domain import (
 )
 from local_lm.schemas import (
     ArtifactOut,
+    AuxiliaryAssetKind,
+    CatalogPreflight,
     ChatDetail,
     ChatOut,
     JobOut,
@@ -103,3 +106,7 @@ def test_the_wire_form_is_still_a_plain_string() -> None:
 
     assert json.dumps(JobStatus.QUEUED) == json.dumps(JobStatus.QUEUED.value)
     assert isinstance(JobStatus.QUEUED.value, str)
+
+
+def test_catalog_preflight_publishes_the_request_auxiliary_vocabulary() -> None:
+    assert _schema_values(CatalogPreflight, "auxiliary_kind") == set(get_args(AuxiliaryAssetKind))

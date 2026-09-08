@@ -445,7 +445,6 @@ OPEN_VOCABULARY_BASELINE = frozenset(
     {
         "BoundWorkflowAssetOut.artifact_kind",
         "BoundWorkflowAssetOut.kind",
-        "CatalogPreflight.auxiliary_kind",
         "ChatItemRemovalReferenceOut.subject_kind",
         "InstallPlanOut.failure_code",
         "InstallPlanOut.status",
