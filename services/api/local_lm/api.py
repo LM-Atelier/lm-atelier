@@ -464,6 +464,7 @@ from .schemas import (
     WorkflowMissingNodeOut,
     WorkflowOpenTarget,
     WorkflowOut,
+    WorkflowOutputGeometryCapabilityOut,
     WorkflowPackageAnalysisOut,
     WorkflowPackageAnalyzeRequest,
     WorkflowPackageDraftRequest,
@@ -562,6 +563,10 @@ from .workflow_library import (
     workflow_resource_name,
 )
 from .workflow_node_dependencies import node_dependency_errors
+from .workflow_output_geometry import (
+    prove_workflow_output_geometry,
+    workflow_output_geometry_payload,
+)
 from .workflow_ownership import ensure_workflow_family_ownership
 from .workflow_package_drafts import (
     is_workflow_package_draft,
@@ -11440,6 +11445,35 @@ async def _persist_workflow_revision(
     session.commit()
     session.refresh(revision)
     return revision
+
+
+@router.get(
+    "/workflow-revisions/{revision_id}/output-geometry",
+    response_model=WorkflowOutputGeometryCapabilityOut,
+)
+async def get_workflow_revision_output_geometry(
+    revision_id: str,
+    session: SessionDep,
+) -> dict[str, object]:
+    revision = session.get(WorkflowRevision, revision_id)
+    if revision is None:
+        raise api_error(404, "workflow-revision-not-found", "workflow revision not found")
+    definition = session.get(WorkflowDefinition, revision.workflow_id)
+    if definition is None:
+        raise api_error(404, "workflow-not-found", "workflow not found")
+    return workflow_output_geometry_payload(
+        prove_workflow_output_geometry(
+            workflow_id=definition.id,
+            revision_id=revision.id,
+            operation=definition.operation,
+            engine=revision.engine,
+            api_graph=revision.api_graph_json,
+            input_schema=revision.input_schema_json,
+            dependencies=revision.dependencies_json,
+            artifact_sha256=revision.artifact_sha256,
+            trusted=revision.trusted,
+        )
+    )
 
 
 @router.post(
