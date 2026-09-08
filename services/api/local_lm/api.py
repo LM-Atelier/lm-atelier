@@ -4404,15 +4404,6 @@ async def list_artifacts(
     favorites: bool = False,
     query: str = Query(default="", max_length=200),
 ) -> list[ArtifactLibraryItem]:
-    reference_rows = session.execute(
-        select(MessagePart.artifact_id, Message.chat_id, Chat.project_id)
-        .join(Message, Message.id == MessagePart.message_id)
-        .join(Chat, Chat.id == Message.chat_id)
-        .where(MessagePart.artifact_id.is_not(None))
-    ).all()
-    references: dict[str, list[tuple[str, str | None]]] = {}
-    for artifact_id, referenced_chat_id, referenced_project_id in reference_rows:
-        references.setdefault(artifact_id, []).append((referenced_chat_id, referenced_project_id))
     statement = select(Artifact).where(
         Artifact.kind.in_([ArtifactKind.IMAGE.value, ArtifactKind.VIDEO.value])
     )
@@ -4427,7 +4418,32 @@ async def list_artifacts(
                 normalized_query
             )
         )
+    membership = (
+        select(MessagePart.id)
+        .join(Message, Message.id == MessagePart.message_id)
+        .join(Chat, Chat.id == Message.chat_id)
+        .where(MessagePart.artifact_id == Artifact.id)
+    )
+    # Each filter describes membership of the artifact, not necessarily one reference.
+    if chat_id:
+        statement = statement.where(membership.where(Message.chat_id == chat_id).exists())
+    if project_id:
+        statement = statement.where(membership.where(Chat.project_id == project_id).exists())
     artifacts = session.scalars(statement.order_by(Artifact.created_at.desc())).all()
+    references: dict[str, list[tuple[str, str | None]]] = {}
+    artifact_ids = [artifact.id for artifact in artifacts]
+    for offset in range(0, len(artifact_ids), 400):
+        batch = artifact_ids[offset : offset + 400]
+        reference_rows = session.execute(
+            select(MessagePart.artifact_id, Message.chat_id, Chat.project_id)
+            .join(Message, Message.id == MessagePart.message_id)
+            .join(Chat, Chat.id == Message.chat_id)
+            .where(MessagePart.artifact_id.in_(batch))
+        ).all()
+        for artifact_id, referenced_chat_id, referenced_project_id in reference_rows:
+            references.setdefault(artifact_id, []).append(
+                (referenced_chat_id, referenced_project_id)
+            )
     run_ids = {
         run_id
         for artifact in artifacts
@@ -4445,10 +4461,6 @@ async def list_artifacts(
         artifact_references = references.get(artifact.id, [])
         chat_ids = sorted({item[0] for item in artifact_references})
         project_ids = sorted({item[1] for item in artifact_references if item[1]})
-        if chat_id and chat_id not in chat_ids:
-            continue
-        if project_id and project_id not in project_ids:
-            continue
         result = ArtifactLibraryItem.model_validate(artifact)
         result.reference_count = len(artifact_references)
         result.chat_ids = chat_ids
