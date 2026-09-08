@@ -17,6 +17,7 @@ import os
 import threading
 import time
 from contextlib import suppress
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -423,13 +424,28 @@ async def test_a_completed_pass_that_removed_something_is_followed_by_another(
             _aged_temporary(store, session, index)
         session.commit()
     monkeypatch.setattr(main_module, "RETENTION_BATCH_PAUSE_SECONDS", 0.0)
+    # This test is about what counts as a pass, not about the time budget, and
+    # the two must not be tangled: a batch that runs out of wall clock truncates,
+    # which changes both the number of calls and how the removals are split
+    # across them. The budget has its own tests. Putting it out of reach here
+    # leaves the shutdown flag - the other thing should_stop consults - working
+    # exactly as it does in production.
+    monkeypatch.setattr(main_module, "RETENTION_BATCH_SECONDS", 3600.0)
 
-    removed_per_call: list[int] = []
+    # A truncated batch is not a pass: the sweep only counts one when a batch
+    # examines everything, and it decides to stop on the pass count. Counting
+    # every CALL instead made this assertion depend on how many batches the
+    # machine happened to need, and on a loaded runner a batch that examined
+    # nothing still took 2.156s against the 2.0s budget, truncated, and added a
+    # third call - failing the test twice in the merge queue while the sweep
+    # behaved exactly as documented.
+    completed_passes: list[int] = []
     real_cleanup = ArtifactStore.cleanup_retention
 
     def recording_cleanup(self: ArtifactStore, session: Session, **kwargs: Any) -> Any:
         summary = real_cleanup(self, session, **kwargs)
-        removed_per_call.append(summary.removed_count)
+        if not summary.truncated:
+            completed_passes.append(summary.removed_count)
         return summary
 
     monkeypatch.setattr(ArtifactStore, "cleanup_retention", recording_cleanup)
@@ -437,7 +453,54 @@ async def test_a_completed_pass_that_removed_something_is_followed_by_another(
     app = create_app(settings)
     async with app.router.lifespan_context(app):
         await asyncio.wait_for(app.state.retention_sweep, timeout=30)
-    assert removed_per_call == [3, 0]
+    assert completed_passes == [3, 0]
+
+
+async def test_a_truncated_batch_does_not_count_as_a_pass(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A slow batch must not shorten the sweep, or lengthen what the test sees.
+
+    This is the shape a loaded machine produces and a fast one never does: the
+    batch that finds nothing left runs out of its time budget before it can say
+    so, and the sweep has to run another before it may stop. Forced here rather
+    than waited for, because on a healthy machine it does not happen at all.
+    """
+
+    store = ArtifactStore(settings)
+    with SessionLocal() as session:
+        for index in range(3):
+            _aged_temporary(store, session, index)
+        session.commit()
+    monkeypatch.setattr(main_module, "RETENTION_BATCH_PAUSE_SECONDS", 0.0)
+    # The only truncation here is the one injected below. A real budget running
+    # out as well would change the sequence this asserts, which is the fault it
+    # exists to catch rather than a fault it should suffer from.
+    monkeypatch.setattr(main_module, "RETENTION_BATCH_SECONDS", 3600.0)
+
+    completed_passes: list[int] = []
+    every_call: list[tuple[int, bool]] = []
+    real_cleanup = ArtifactStore.cleanup_retention
+
+    def truncating_cleanup(self: ArtifactStore, session: Session, **kwargs: Any) -> Any:
+        summary = real_cleanup(self, session, **kwargs)
+        # The second batch is the one that finds nothing; make it run out of
+        # time saying so, exactly as the loaded runner did.
+        if len(every_call) == 1:
+            summary = replace(summary, truncated=True)
+        every_call.append((summary.removed_count, summary.truncated))
+        if not summary.truncated:
+            completed_passes.append(summary.removed_count)
+        return summary
+
+    monkeypatch.setattr(ArtifactStore, "cleanup_retention", truncating_cleanup)
+
+    app = create_app(settings)
+    async with app.router.lifespan_context(app):
+        await asyncio.wait_for(app.state.retention_sweep, timeout=30)
+
+    assert every_call == [(3, False), (0, True), (0, False)], every_call
+    assert completed_passes == [3, 0], "a truncated batch was counted as a pass"
 
 
 def _aged_orphan(store: ArtifactStore, index: int) -> Path:
