@@ -10,6 +10,7 @@ from pathlib import PurePosixPath
 from typing import Literal
 
 from .h3_node_observation_v1 import EXACT_H3_NODE_TYPES, H3NodeObservationV1, observe_h3_node_types
+from .model_asset_types import WorkflowAssetKind
 
 MAX_UI_GRAPH_BYTES = 1024 * 1024
 MAX_UI_GRAPH_NODES = 4_096
@@ -69,14 +70,7 @@ FRONTEND_SYSTEM_NODE_TYPES = frozenset(
 )
 
 AssetPolicy = Literal["supported", "blocked", "unsupported"]
-AssetKind = Literal[
-    "checkpoint",
-    "configuration",
-    "embedding",
-    "lora",
-    "upscaler",
-    "vae",
-]
+AssetKind = WorkflowAssetKind
 WorkflowPackageIssueCode = Literal[
     "blocked_asset_format",
     "conflicting_custom_node_versions",

@@ -15,3 +15,6 @@ InstalledAssetKind = Literal[
     "upscaler",
     "vae",
 ]
+
+BoundWorkflowAssetKind = Literal["checkpoint", "embedding", "lora", "upscaler", "vae"]
+WorkflowAssetKind = Literal[BoundWorkflowAssetKind, "configuration"]

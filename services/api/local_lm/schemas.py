@@ -30,7 +30,8 @@ from .domain import (
     RunStatus,
 )
 from .install_plan_types import InstallPlanFailureCode
-from .model_asset_types import InstalledAssetKind
+from .model_asset_types import BoundWorkflowAssetKind, InstalledAssetKind
+from .model_asset_types import WorkflowAssetKind as WorkflowAssetKind
 from .references import (
     MAX_REFERENCES_PER_TURN,
     MAX_ROLE,
@@ -1825,7 +1826,7 @@ class WorkflowAssetQueueRequest(WorkflowAssetReviewRequest):
 
 class BoundWorkflowAssetOut(ApiModel):
     reference_filename: str
-    kind: str
+    kind: BoundWorkflowAssetKind
     install_plan_id: str
     install_plan_hash: str
     provider: str
@@ -1944,7 +1945,6 @@ class WorkflowSourceCandidateOut(ApiModel):
 
 # What the workflow analyzer can say a referenced file is. One definition, so
 # a caller naming an exact file cannot name a kind the analyzer never emits.
-WorkflowAssetKind = Literal["checkpoint", "configuration", "embedding", "lora", "upscaler", "vae"]
 AuxiliaryAssetKind = Literal[
     "lora",
     "vae",
