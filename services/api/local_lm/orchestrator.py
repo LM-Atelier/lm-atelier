@@ -222,11 +222,11 @@ from .workflow_activations import (
     revalidate_workflow_activation,
 )
 from .workflow_compatibility import (
-    ChatSelectorCapability,
     ProjectSelectorCapability,
     ResolvedChatWorkflowSelection,
     WorkflowSelectionInvalid,
     mirror_legacy_project_workflow_selections,
+    operation_selector_capability,
     resolve_chat_workflow_selection,
     resolve_project_workflow_selection,
 )
@@ -8103,13 +8103,7 @@ class ConversationOrchestrator:
         operation: Operation,
         choice: TurnWorkflowSelectionIn | None,
     ) -> ResolvedChatWorkflowSelection:
-        capability: ChatSelectorCapability = (
-            "chat"
-            if operation == Operation.TEXT
-            else "video"
-            if "video" in operation.value
-            else "image"
-        )
+        capability = operation_selector_capability(operation)
         if choice is None:
             return resolve_chat_workflow_selection(session, chat, capability)
         if choice.selector_capability != capability:
@@ -8198,13 +8192,7 @@ class ConversationOrchestrator:
         if setup_id is not None:
             revision_id, choice = setup_id, None
         if revision_id is not None:
-            capability: ChatSelectorCapability = (
-                "chat"
-                if operation == Operation.TEXT
-                else "video"
-                if "video" in operation.value
-                else "image"
-            )
+            capability = operation_selector_capability(operation)
             revision, activation, bound_profile = resolve_exact_workflow_revision(
                 session,
                 revision_id,
@@ -8621,13 +8609,7 @@ class ConversationOrchestrator:
 
         if preferred_revision_id:
             return None
-        capability: ChatSelectorCapability
-        if operation == Operation.TEXT:
-            capability = "chat"
-        elif "image" in operation.value and "video" not in operation.value:
-            capability = "image"
-        else:
-            capability = "video"
+        capability = operation_selector_capability(operation)
 
         mode: WorkflowSelectionMode
         workflow_family_id: str | None
