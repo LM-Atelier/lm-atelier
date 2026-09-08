@@ -22,6 +22,7 @@ from .models import (
 from .schemas import (
     RuntimeStatus,
     SetupReadinessCheck,
+    SetupReadinessCode,
     SetupReadinessReport,
     SetupRoleReadiness,
     WorkerStatus,
@@ -563,7 +564,7 @@ def _worker_check(
 
 
 def _check(
-    code: str,
+    code: SetupReadinessCode,
     status: CheckStatus,
     message: str,
     action: str | None = None,
