@@ -454,7 +454,6 @@ OPEN_VOCABULARY_BASELINE = frozenset(
         "InstallPlanOut.failure_code",
         "JobOut.phase",
         "ReferenceSubjectCreate.kind",
-        "SetupReadinessCheck.code",
         "WorkPlanOut.status",
         "WorkStepOut.status",
         "WorkflowInstallOfferOut.invalidation_code",

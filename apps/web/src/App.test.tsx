@@ -301,7 +301,9 @@ function setupRole(
     workflow_revision_id: state === "ready" && role !== "chat" ? `workflow-${role}` : null,
     next_action: nextAction,
     checks: [{
-      code: state === "ready" ? "generation_verified" : nextAction === "select_model" ? "model_missing" : "setup_issue",
+      code: state === "ready" ? "generation_verified"
+        : state === "in_progress" ? "install_in_progress"
+          : nextAction === "install_runtime" ? "runtime_missing" : "model_missing",
       status: state === "ready" ? "pass" : state === "in_progress" ? "pending" : "fail",
       message: state === "ready" ? "A local generation completed with this setup." : "Setup needs attention.",
       action: nextAction,

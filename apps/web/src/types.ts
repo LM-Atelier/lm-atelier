@@ -618,8 +618,40 @@ export interface RuntimeStatus {
   message: string;
 }
 
+export type SetupReadinessCode =
+  | "activation_ready"
+  | "activation_required"
+  | "activation_stale"
+  | "generation_verification_failed"
+  | "generation_verification_required"
+  | "generation_verification_running"
+  | "generation_verified"
+  | "install_failed"
+  | "install_in_progress"
+  | "model_missing"
+  | "model_ready"
+  | "model_unsupported"
+  | "profile_missing"
+  | "profile_ready"
+  | "runtime_external"
+  | "runtime_failed"
+  | "runtime_installing"
+  | "runtime_missing"
+  | "runtime_ready"
+  | "runtime_unsupported"
+  | "worker_failed"
+  | "worker_not_loaded"
+  | "worker_ready"
+  | "worker_starting"
+  | "worker_status_unavailable"
+  | "workflow_activation_not_ready"
+  | "workflow_invalid"
+  | "workflow_missing"
+  | "workflow_ready"
+  | "workflow_untrusted";
+
 export interface SetupReadinessCheck {
-  code: string;
+  code: SetupReadinessCode;
   status: "pass" | "pending" | "fail";
   message: string;
   action: string | null;
