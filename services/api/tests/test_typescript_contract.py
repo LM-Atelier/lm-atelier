@@ -462,7 +462,6 @@ OPEN_VOCABULARY_BASELINE = frozenset(
         "WorkPlanOut.status",
         "WorkStepOut.status",
         "WorkflowInstallOfferOut.invalidation_code",
-        "WorkflowMissingNodeOut.node_type",
         "WorkflowPackageIssueOut.code",
     }
 )
@@ -624,6 +623,11 @@ VOCABULARY_NAME_EXCLUSIONS = (
 
 VOCABULARY_COMPONENT_EXCLUSION = "FastAPI validation models, which the application does not define"
 
+# These exact fields name third-party values the application cannot enumerate.
+OPEN_VOCABULARY_FIELDS = {
+    "WorkflowMissingNodeOut.node_type": "ComfyUI class names from user-supplied workflow graphs",
+}
+
 
 def _resolve_reference(
     spec: dict, schemas: dict[str, dict], seen: frozenset[str]
@@ -712,6 +716,8 @@ def _open_vocabulary_fields(schemas: dict[str, dict]) -> set[str]:
         if component in EXCLUDED_COMPONENTS:
             continue
         for field, field_spec in (spec.get("properties") or {}).items():
+            if f"{component}.{field}" in OPEN_VOCABULARY_FIELDS:
+                continue
             if field.split("_")[-1] not in VOCABULARY_TOKENS:
                 continue
             lowered = field.lower()
@@ -864,3 +870,19 @@ def test_a_reference_cycle_terminates_instead_of_recursing() -> None:
     assert _open_vocabulary_fields(schemas) == set()
     assert not _is_closed_vocabulary({"$ref": "#/components/schemas/Loop"}, schemas)
     assert not _is_closed_vocabulary({"$ref": "#/components/schemas/Missing"}, schemas)
+
+
+def test_custom_node_names_do_not_exempt_other_components() -> None:
+    schemas = {
+        "WorkflowMissingNodeOut": {
+            "properties": {
+                "node_type": {"type": "string"},
+                "status": {"type": "string"},
+            }
+        },
+        "OtherNodeOut": {"properties": {"node_type": {"type": "string"}}},
+    }
+    assert _open_vocabulary_fields(schemas) == {
+        "WorkflowMissingNodeOut.status",
+        "OtherNodeOut.node_type",
+    }
