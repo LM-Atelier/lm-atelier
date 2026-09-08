@@ -1192,7 +1192,7 @@ class InstallPlanOut(ApiModel):
     artifacts_json: list[dict[str, Any]]
     runtime_contract_json: dict[str, Any]
     activation_probe_json: dict[str, Any]
-    status: str
+    status: Literal["planned", "downloading", "activated", "failed", "cancelled"]
     failure_code: str | None
     failure_reason: str | None
     created_at: datetime

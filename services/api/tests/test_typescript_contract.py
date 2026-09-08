@@ -448,7 +448,6 @@ OPEN_VOCABULARY_BASELINE = frozenset(
         "BoundWorkflowAssetOut.artifact_kind",
         "BoundWorkflowAssetOut.kind",
         "InstallPlanOut.failure_code",
-        "InstallPlanOut.status",
         "JobOut.phase",
         "ModelAssetOut.kind",
         "ModelUpdateOut.kind",
