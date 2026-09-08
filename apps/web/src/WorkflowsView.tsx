@@ -7,6 +7,7 @@ import { CustomNodesPanel } from "./CustomNodesPanel";
 import { EmptyState } from "./EmptyState";
 import { ErrorCallout } from "./ErrorCallout";
 import { RegistryInstallsPanel } from "./RegistryInstallsPanel";
+import { WorkflowFamilyArchive } from "./WorkflowFamilyArchive";
 import { WorkflowFamilyPreferences } from "./WorkflowFamilyPreferences";
 import { WorkflowPackageReview } from "./WorkflowPackageReview";
 import { WorkflowRevisionReviewPanel } from "./WorkflowRevisionReviewPanel";
@@ -18,7 +19,7 @@ import {
   type WorkflowEditorPhase,
   type WorkflowEditorSubmission,
 } from "./workflowEditorBridge";
-import type { WorkflowEditorReturn } from "./types";
+import type { WorkflowEditorReturn, WorkflowFamily } from "./types";
 
 const editorPhaseLabel: Record<WorkflowEditorPhase, string> = {
   preparing: "Preparing the native editor…",
@@ -85,6 +86,7 @@ export function WorkflowsView() {
   const workflows = useQuery({ queryKey: ["workflows"], queryFn: api.workflows }); const families = useQuery({ queryKey: ["workflow-families"], queryFn: () => api.workflowFamilies() });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selected = workflows.data?.find((workflow) => workflow.id === selectedId) ?? null; const selectedFamily = families.data?.find((family) => family.variants.some((variant) => variant.id === selectedId));
+  const [archiveFamily, setArchiveFamily] = useState<WorkflowFamily | null>(null);
   const [selectedRevisionId, setSelectedRevisionId] = useState<string | null>(null);
   const [newOpen, setNewOpen] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -362,6 +364,20 @@ export function WorkflowsView() {
         </div>
       )}
       {selectedFamily && <WorkflowFamilyPreferences family={selectedFamily} />}
+      {selectedFamily && !selectedFamily.archived && (
+        <div className="storage-actions">
+          <button className="secondary" onClick={() => setArchiveFamily(selectedFamily)}>
+            Archive family
+          </button>
+        </div>
+      )}
+      {archiveFamily && (
+        <WorkflowFamilyArchive
+          family={archiveFamily}
+          onArchived={refresh}
+          onClose={() => setArchiveFamily(null)}
+        />
+      )}
       <div className="workflow-layout">
         <div className="workflow-list">{workflows.data?.map((workflow) => <button key={workflow.id} className={selected?.id === workflow.id ? "selected" : ""} onClick={() => { setSelectedId(workflow.id); setSelectedRevisionId(workflow.current_revision_id); }}><span><strong>{workflow.name}</strong><small>{workflow.operation} · {workflow.revisions.length} revision{workflow.revisions.length === 1 ? "" : "s"}</small></span></button>)}</div>
         <div className="workflow-detail">{selected && selectedRevision ? <><div className="detail-title"><div><small>{selected.operation}</small><h2>{selected.name}</h2><p>{selected.description}</p></div><div className="row-actions"><button className="secondary compact-button" onClick={openEdit}>New revision</button><button className="secondary compact-button" onClick={() => clone.mutate(selected.id)}>Duplicate</button><button className="secondary compact-button" onClick={() => exportBundle.mutate(selected.id)}>Export</button><button className="secondary compact-button" onClick={() => validate.mutate(selected.id)}>Validate</button></div></div><div className="workflow-revision-bar"><label>Revision<select value={selectedRevision.id} onChange={(event) => setSelectedRevisionId(event.target.value)}>{[...selected.revisions].sort((a, b) => b.version - a.version).map((revision) => <option key={revision.id} value={revision.id}>v{revision.version}{revision.id === selected.current_revision_id ? " · current" : ""}</option>)}</select></label>{selectedRevision.id !== selected.current_revision_id && <button className="secondary compact-button" onClick={() => restore.mutate({ id: selected.id, revisionId: selectedRevision.id })}>Restore as new revision</button>}<span className={`badge ${selectedRevision.trusted ? "likely" : "advanced_import"}`}>{selectedRevision.trusted ? "Trusted" : "Untrusted"}</span></div>
