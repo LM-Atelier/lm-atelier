@@ -9,6 +9,7 @@ import { ErrorCallout } from "./ErrorCallout";
 import { RegistryInstallsPanel } from "./RegistryInstallsPanel";
 import { WorkflowFamilyArchive } from "./WorkflowFamilyArchive";
 import { WorkflowFamilyPreferences } from "./WorkflowFamilyPreferences";
+import { WorkflowFamilyDependencies } from "./WorkflowFamilyDependencies";
 import { WorkflowPackageReview } from "./WorkflowPackageReview";
 import { WorkflowRevisionReviewPanel } from "./WorkflowRevisionReviewPanel";
 import { useWorkflowPackageImport } from "./useWorkflowPackageImport";
@@ -363,6 +364,7 @@ export function WorkflowsView() {
           {editorNotice && <span role="status" className="muted">{editorNotice}</span>}
         </div>
       )}
+      {selectedFamily && <WorkflowFamilyDependencies key={selectedFamily.id} familyId={selectedFamily.id} />}
       {selectedFamily && <WorkflowFamilyPreferences family={selectedFamily} />}
       {selectedFamily && !selectedFamily.archived && (
         <div className="storage-actions">
