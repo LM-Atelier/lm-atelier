@@ -193,8 +193,19 @@ export function videoLengthDelivery(
   const candidates = [lower, upper].filter(
     (value) => value >= control.minimum_frames && value <= control.maximum_frames,
   );
+  // A request landing exactly halfway between two frame counts is a tie, and the
+  // server - which computes in exact fractions of the decimal the reader typed -
+  // resolves it by taking the shorter one. Here `target` is a floating
+  // multiplication, so an exact half lands a hair above or below and the tie
+  // silently becomes a decision. Treating distances this close as equal gives
+  // the server's answer instead of one frame away from it.
+  const tie = 1e-9;
+  const nearer = (left: number, right: number): number => {
+    const difference = Math.abs(left - target) - Math.abs(right - target);
+    return Math.abs(difference) < tie ? left - right : difference;
+  };
   const frames = candidates.length
-    ? candidates.sort((left, right) => Math.abs(left - target) - Math.abs(right - target) || left - right)[0]!
+    ? candidates.sort(nearer)[0]!
     : target < control.minimum_frames
       ? control.minimum_frames
       : control.maximum_frames;
