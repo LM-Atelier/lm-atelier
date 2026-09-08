@@ -77,6 +77,19 @@ AssetKind = Literal[
     "upscaler",
     "vae",
 ]
+WorkflowPackageIssueCode = Literal[
+    "blocked_asset_format",
+    "conflicting_custom_node_versions",
+    "custom_node_package_awaiting_review",
+    "dangling_link",
+    "missing_asset",
+    "remote_url_reference",
+    "unidentified_custom_node_package",
+    "unresolved_custom_node_package",
+    "unsafe_asset_reference",
+    "unsupported_asset_format",
+    "unversioned_custom_node_package",
+]
 IssueSeverity = Literal["advisory", "blocking"]
 OperationGuess = Literal["image", "unknown", "video"]
 
@@ -107,7 +120,7 @@ class WorkflowAssetReference:
 
 @dataclass(frozen=True)
 class WorkflowPackageIssue:
-    code: str
+    code: WorkflowPackageIssueCode
     count: int
     node_types: tuple[str, ...] = ()
     severity: IssueSeverity = "blocking"
@@ -722,7 +735,7 @@ def _asset_references(
     available_asset_filenames: Collection[str],
 ) -> tuple[tuple[WorkflowAssetReference, ...], tuple[WorkflowPackageIssue, ...]]:
     references: dict[str, WorkflowAssetReference] = {}
-    issue_counts: dict[str, int] = defaultdict(int)
+    issue_counts: dict[WorkflowPackageIssueCode, int] = defaultdict(int)
     available = {
         value.replace("\\", "/").casefold()
         for value in available_asset_filenames

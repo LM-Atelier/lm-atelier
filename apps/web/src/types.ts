@@ -1224,8 +1224,21 @@ export interface WorkflowAssetReference {
   source_candidates: WorkflowSourceCandidate[];
 }
 
+export type WorkflowPackageIssueCode =
+  | "blocked_asset_format"
+  | "conflicting_custom_node_versions"
+  | "custom_node_package_awaiting_review"
+  | "dangling_link"
+  | "missing_asset"
+  | "remote_url_reference"
+  | "unidentified_custom_node_package"
+  | "unresolved_custom_node_package"
+  | "unsafe_asset_reference"
+  | "unsupported_asset_format"
+  | "unversioned_custom_node_package";
+
 export interface WorkflowPackageIssue {
-  code: string;
+  code: WorkflowPackageIssueCode;
   count: number;
   node_types: string[];
   severity: "blocking" | "advisory";

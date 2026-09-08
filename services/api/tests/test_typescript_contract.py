@@ -458,7 +458,6 @@ OPEN_VOCABULARY_BASELINE = frozenset(
         "WorkPlanOut.status",
         "WorkStepOut.status",
         "WorkflowInstallOfferOut.invalidation_code",
-        "WorkflowPackageIssueOut.code",
     }
 )
 
