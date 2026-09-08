@@ -1293,7 +1293,7 @@ class ModelCapabilityEvidence(TimestampMixin, Base):
             "evidence_key",
             name="uq_model_capability_evidence_install_key",
         ),
-        Index("ix_model_capability_evidence_install_result", "model_install_id", "result"),
+        Index("ix_model_capability_evidence_install", "model_install_id"),
     )
 
     id: Mapped[str] = mapped_column(
@@ -1306,7 +1306,6 @@ class ModelCapabilityEvidence(TimestampMixin, Base):
         index=True,
     )
     evidence_key: Mapped[str] = mapped_column(String(64), index=True)
-    result: Mapped[str] = mapped_column(String(24))
     component_hashes_json: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
     runtime_build: Mapped[str] = mapped_column(String(200))
     adapter_contract_version: Mapped[int] = mapped_column(Integer)
@@ -1318,8 +1317,6 @@ class ModelCapabilityEvidence(TimestampMixin, Base):
     # to comparing `hardware_class` for equality.
     hardware_envelope_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     probe_version: Mapped[str] = mapped_column(String(40))
-    failure_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
-    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     details_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     probed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

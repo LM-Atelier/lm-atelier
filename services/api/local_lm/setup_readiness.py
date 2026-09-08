@@ -206,16 +206,10 @@ def _role_readiness(
             .order_by(ModelCapabilityEvidence.probed_at.desc(), ModelCapabilityEvidence.id)
             .limit(1)
         )
-        if latest and latest.result != "ready":
-            checks.append(
-                _check(
-                    "activation_failed",
-                    "fail",
-                    "The model did not pass its activation probe.",
-                    "activate_model",
-                )
-            )
-        elif latest:
+        # An activation that fails writes no evidence at all - both callers
+        # record only after it succeeded - so a row that exists is a probe that
+        # passed, and what is left to say is whether it still applies.
+        if latest:
             checks.append(
                 _check(
                     "activation_stale",

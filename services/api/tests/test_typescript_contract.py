@@ -451,7 +451,6 @@ OPEN_VOCABULARY_BASELINE = frozenset(
         "InstallPlanOut.status",
         "JobOut.phase",
         "ModelAssetOut.kind",
-        "ModelCapabilityEvidenceOut.failure_code",
         "ModelUpdateOut.kind",
         "ReferenceSubjectCreate.kind",
         "SetupReadinessCheck.code",

@@ -1203,7 +1203,6 @@ class ModelCapabilityEvidenceOut(ApiModel):
     id: str
     model_install_id: str
     evidence_key: str
-    result: str
     component_hashes_json: dict[str, str]
     runtime_build: str
     adapter_contract_version: int
@@ -1211,8 +1210,6 @@ class ModelCapabilityEvidenceOut(ApiModel):
     workflow_contract_version: str | None
     hardware_class: str
     probe_version: str
-    failure_code: str | None
-    failure_reason: str | None
     details_json: dict[str, Any]
     probed_at: datetime
 

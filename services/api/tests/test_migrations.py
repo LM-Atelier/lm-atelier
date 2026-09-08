@@ -1096,6 +1096,97 @@ def test_workflow_family_migration_refuses_lossy_downgrade(tmp_path: Path) -> No
         assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
 
 
+def test_dropping_the_capability_outcomes_refuses_an_unexpected_one(
+    tmp_path: Path,
+) -> None:
+    """A recorded outcome this application cannot write stops the upgrade.
+
+    Dropping the discriminator turns every surviving row into a pass, because
+    the readers that distinguished them go with it. That is right for the rows
+    this application writes - it only ever writes "ready" - and wrong for a row
+    that came from somewhere else: a restored database, a hand edit, a version
+    that had the writer this one lacks. There is nothing here that can tell
+    whether such a row should become a pass, so it refuses and leaves both the
+    row and the columns for someone who can.
+    """
+
+    settings = Settings(data_dir=tmp_path / "capability-outcome-refusal")
+    settings.prepare()
+    config = alembic_config(settings)
+    command.upgrade(config, "b8f31d0a6c42")
+    database = settings.state_dir / "local-lm.sqlite3"
+    timestamp = "2026-09-01 00:00:00"
+    model_id = f"model_{'a' * 32}"
+    # The evidence row stands alone: the refusal counts rows and reads no
+    # install, so the install it names need not exist for the guard to answer.
+    _run(
+        database,
+        (
+            """
+            INSERT INTO model_capability_evidence (
+                id, model_install_id, evidence_key, result,
+                component_hashes_json, runtime_build, adapter_contract_version,
+                launch_contract_version, hardware_class, probe_version,
+                details_json, probed_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, '{}', ?, 1, ?, ?, ?, '{}', ?, ?, ?)
+            """,
+            (
+                f"evidence_{'b' * 32}",
+                model_id,
+                "an-outcome-from-elsewhere",
+                "failed",
+                "build",
+                "launch",
+                "class",
+                "probe",
+                timestamp,
+                timestamp,
+                timestamp,
+            ),
+        ),
+    )
+
+    with pytest.raises(Exception, match="other than 'ready'"):
+        command.upgrade(config, "head")
+
+    surviving = _query(database, "SELECT result FROM model_capability_evidence")
+    assert surviving == [("failed",)], "the refusal did not leave the row alone"
+
+
+def test_restoring_the_capability_outcomes_leaves_no_default_behind(
+    tmp_path: Path,
+) -> None:
+    """The downgrade puts the column back as it was, defaults included.
+
+    Restoring a NOT NULL column to a table that already has rows needs a
+    default for those rows, and alembic leaves it on the column unless it is
+    dropped again. Leaving it would mean a later insert that omits the outcome
+    silently records a pass - the one thing the upgrade refuses to do on the
+    way out, arriving through the back door on the way in.
+    """
+
+    settings = Settings(data_dir=tmp_path / "capability-outcome-downgrade")
+    settings.prepare()
+    config = alembic_config(settings)
+    command.upgrade(config, "head")
+    command.downgrade(config, "b8f31d0a6c42")
+    database = settings.state_dir / "local-lm.sqlite3"
+
+    columns = {
+        str(row[1]): row
+        for row in _query(database, "PRAGMA table_info('model_capability_evidence')")
+    }
+    assert {"result", "failure_code", "failure_reason"} <= set(columns)
+    result_column = columns["result"]
+    assert result_column[3] == 1, "the restored result column should still be NOT NULL"
+    assert result_column[4] is None, (
+        f"the restored result column kept a default of {result_column[4]!r}; "
+        "an insert that omits the outcome would record a pass"
+    )
+    assert columns["failure_code"][3] == 0
+    assert columns["failure_reason"][3] == 0
+
+
 def test_generated_identifier_width_migration_preserves_existing_rows(
     tmp_path: Path,
 ) -> None:
@@ -1165,7 +1256,11 @@ def test_generated_identifier_width_migration_preserves_existing_rows(
                 evidence_id,
                 model_id,
                 "existing-evidence",
-                "passed",
+                # "ready" rather than arbitrary filler: the outcome columns are
+                # dropped further along this chain, and that migration REFUSES
+                # to run against a row recording anything else rather than
+                # promoting it to a pass. This row is here for its id width.
+                "ready",
                 "{}",
                 "test-runtime",
                 1,

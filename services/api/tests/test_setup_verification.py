@@ -70,7 +70,6 @@ def seed_ready_role(
     evidence = ModelCapabilityEvidence(
         model_install_id=install.id,
         evidence_key=role[0] * 64,
-        result="ready",
         component_hashes_json=install.manifest_json["expected_sha256"],
         runtime_build="mock-test",
         adapter_contract_version=ADAPTER_CONTRACT_VERSION,

@@ -80,7 +80,6 @@ def _evidence(
     return ModelCapabilityEvidence(
         model_install_id=install.id,
         evidence_key=f"{install.id:e<64}"[:64],
-        result="ready",
         component_hashes_json=dict(install.manifest_json["expected_sha256"]),
         runtime_build="comfy-test",
         adapter_contract_version=ADAPTER_CONTRACT_VERSION,
