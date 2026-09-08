@@ -4401,6 +4401,11 @@ class ConversationOrchestrator:
                         scope_id=self.scope_id,
                     )
                 ):
+                    # Every event of the bridge is this execution's to consume
+                    # only while it owns the row, exactly as the assessment
+                    # stream is. Without this a reclaimed attempt reads the
+                    # whole observation out of a model the successor is using.
+                    self._require_ownership(job_id, claim, "mid-vision-bridge")
                     if event.type == "delta":
                         observation += event.text
                         if len(observation) > 16_000:
@@ -4421,19 +4426,35 @@ class ConversationOrchestrator:
             return observation, metadata
         finally:
             self._commit_before_await(session)
-            await self._set_chat_phase(
+            announced = await self._set_chat_phase(
                 job_id,
                 run.id,
                 "Restoring chat model",
                 claim,
             )
-            # Shutdown reaches this `finally` the same way it reaches the
-            # dispatch teardown: the task is cancelled and then awaited, and a
-            # cancel does not stop a finally from running. Restoring the text
-            # model here would cold-load it while the supervisor is a moment
-            # from closing both workers. Nothing is owed back to a process that
-            # is going away.
-            if not self._closing:
+            # Two different questions, and both are asked before the global chat
+            # worker moves. Neither replaces the other.
+            #
+            # `not self._closing` first. Shutdown cancels this task and then
+            # awaits it, and a cancel does not stop a `finally` from running, so
+            # without it this teardown cold-loads the text model a moment before
+            # the supervisor closes both workers. Asking it first also keeps a
+            # database read out of the teardown.
+            #
+            # Then ownership. `_set_chat_phase` answers False when the row is no
+            # longer this execution's, and ignoring that refusal is how an
+            # attempt a successor has already replaced takes the worker out from
+            # under it. Ownership is read AGAIN after the phase rather than
+            # trusted from it, because the phase write is an await: by the time
+            # the worker moves, the phase's answer describes what was true
+            # beforehand. `_attempt_current` rather than ownership alone, so a
+            # bridge whose row finished under this same attempt still puts the
+            # text model back instead of leaving the vision model loaded.
+            #
+            # Deliberately a guard and not an early return: a return inside
+            # `finally` discards whatever is propagating, which here includes the
+            # ClaimLost the per-event fence raises.
+            if not self._closing and announced and self._attempt_current(job_id, claim):
                 if text_profile and text_install:
                     await self.processes.load_chat(text_profile, text_install)
                 else:
