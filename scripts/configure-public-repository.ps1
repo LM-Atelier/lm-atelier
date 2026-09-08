@@ -13,13 +13,13 @@ $ApiVersion = "2026-03-10"
 $ExpectedOwnerId = 325157610
 $ExpectedRepositoryId = 1308948872
 $AllowedActionPatterns = @(
-    "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d",
+    "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6",
     "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
     "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
     "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
     "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
     "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
-    "astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9"
+    "astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d"
 )
 
 function Invoke-GitHubApi {
