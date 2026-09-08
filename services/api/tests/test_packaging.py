@@ -1034,12 +1034,12 @@ DEPENDENCY_MANIFEST_NAMES = frozenset(
 )
 
 
-def _tracked_dependency_manifests(root: Path) -> set[str]:
-    """Every tracked file under `root` whose name is a dependency manifest.
+def _tracked_paths(root: Path) -> set[str]:
+    """Every path in `root`'s index, exactly as git spells it.
 
-    The whole index is listed and filtered on the final path segment rather
-    than matched with a glob, because `*package.json` also matches a file
-    named `old-package.json`, which is not one.
+    Records are NUL-separated and decoded rather than read through `text=True`
+    for the same reasons the document inventory above gives: a path may contain
+    a space, and a name outside UTF-8 must round-trip rather than fail the run.
     """
 
     records = subprocess.run(
@@ -1049,8 +1049,22 @@ def _tracked_dependency_manifests(root: Path) -> set[str]:
         cwd=root,
     ).stdout
     decoded = records.decode("utf-8", "surrogateescape")
-    paths = (path for path in decoded.split("\0") if path)
-    return {path for path in paths if path.rsplit("/", 1)[-1] in DEPENDENCY_MANIFEST_NAMES}
+    return {path for path in decoded.split("\0") if path}
+
+
+def _tracked_dependency_manifests(root: Path) -> set[str]:
+    """Every tracked file under `root` whose name is a dependency manifest.
+
+    Filtered on the final path segment rather than matched with a glob, because
+    `*package.json` also matches a file named `old-package.json`, which is not
+    one.
+    """
+
+    return {
+        path
+        for path in _tracked_paths(root)
+        if path.rsplit("/", 1)[-1] in DEPENDENCY_MANIFEST_NAMES
+    }
 
 
 def test_every_tracked_dependency_manifest_asks_for_the_audit() -> None:
@@ -1078,6 +1092,42 @@ def test_every_tracked_dependency_manifest_asks_for_the_audit() -> None:
     )
     assert audited - tracked == set(), (
         "these entries name dependency manifests that are no longer tracked"
+    )
+
+
+# A file with one of these suffixes only ever runs on Windows: PowerShell and
+# batch scripts, the Inno Setup installer definition, and the PyInstaller spec
+# the Windows build reads. Whether an explicit path or a directory prefix is
+# what reaches one does not matter; being reached does.
+WINDOWS_ONLY_SUFFIXES = (".ps1", ".psm1", ".bat", ".cmd", ".iss", ".spec")
+
+
+def test_every_windows_only_file_asks_for_windows_verification() -> None:
+    """A Windows script somewhere new must not land with Windows skipped.
+
+    `requires_windows_verification` answers from an explicit path set plus three
+    directory prefixes - scripts/, packaging/windows/ and services/api/. Every
+    Windows-only file lives under one of them today. Put one anywhere else - a
+    tools/ or ops/ directory, a second packaging tree - and the answer is no:
+    the change lands with Windows compatibility reported as skipped, which on
+    the run page is indistinguishable from a change that did not need it.
+
+    This does not claim the prefixes are a closed list, which they are not. It
+    claims the coverage they exist to provide, which is checkable.
+    """
+
+    namespace = runpy.run_path(str(ROOT / "scripts/ci-plan.py"))
+    requires_windows = namespace["requires_windows_verification"]
+
+    windows_only = sorted(
+        path for path in _tracked_paths(ROOT) if path.lower().endswith(WINDOWS_ONLY_SUFFIXES)
+    )
+    assert windows_only, "no tracked Windows-only files were found"
+
+    assert [path for path in windows_only if not requires_windows([path])] == [], (
+        "these tracked Windows-only files are not reached by WINDOWS_PATHS or "
+        "WINDOWS_PATH_PREFIXES, so changing one skips Windows verification "
+        "instead of running it"
     )
 
 
