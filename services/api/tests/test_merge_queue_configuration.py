@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
 REPOSITORY = "LM-Atelier/lm-atelier"
@@ -290,3 +291,61 @@ def test_queue_configuration_refuses_incorrect_or_missing_readback(
     assert result.returncode != 0
     assert reason in result.stdout + result.stderr
     assert "applied and verified" not in result.stdout
+
+
+def _required_contexts() -> list[str]:
+    """The checks the public branch ruleset will not merge without."""
+
+    ruleset = json.loads(
+        (ROOT / ".github/rulesets/public-branches.json").read_text(encoding="utf-8")
+    )
+    for rule in ruleset["rules"]:
+        if rule["type"] == "required_status_checks":
+            return [check["context"] for check in rule["parameters"]["required_status_checks"]]
+    raise AssertionError("the public branch ruleset declares no required status checks")
+
+
+def _workflow_job_names() -> dict[str, str]:
+    """Each CI job's identifier mapped to the name a check reports under."""
+
+    # `on` parses to the boolean True, so this reads jobs rather than triggers
+    # and does not have to care.
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    return {key: job.get("name", key) for key, job in workflow["jobs"].items()}
+
+
+def test_every_required_check_is_a_job_this_workflow_runs() -> None:
+    """A required check nobody reports blocks every merge, silently.
+
+    The ruleset names checks by the string a job reports under. Rename a job in
+    ci.yml and the ruleset still demands the old name: nothing fails, no run
+    goes red, and every pull request simply waits forever for a check that will
+    never arrive. That is safe in the sense that nothing wrong merges, and
+    unhelpful in every other sense, because the symptom names no cause.
+    """
+
+    names = set(_workflow_job_names().values())
+    missing = [context for context in _required_contexts() if context not in names]
+
+    assert missing == [], (
+        "these required checks name no job in .github/workflows/ci.yml, so "
+        "nothing will ever report them and no pull request can merge"
+    )
+
+
+def test_the_merge_gate_is_one_of_the_required_checks() -> None:
+    """Dropping the gate from the required list weakens what green means.
+
+    Windows compatibility is deliberately not a required check of its own: it
+    is conditional, and the merge-gate job is what reads its result together
+    with the plan's decision about whether it was needed. So the gate is the
+    only check that can refuse a head whose Windows leg failed. Remove it from
+    the ruleset and Ubuntu alone decides, which is green for a change that
+    broke Windows.
+    """
+
+    jobs = _workflow_job_names()
+    assert jobs["merge-gate"] in _required_contexts(), (
+        "the merge gate is the only check that inspects the Windows result, so "
+        "a ruleset that does not require it lets a Windows failure merge"
+    )
