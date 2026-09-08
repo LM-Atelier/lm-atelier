@@ -10,6 +10,7 @@ import {
   type WorkflowImageEditCalibration,
 } from "./imageEditStrength";
 import {
+  normalizeSettingsForFields,
   resolveCapabilitySettings,
   resolveWorkflowSettings,
   visibilityRank,
@@ -169,16 +170,26 @@ export function GenerationSettingsPanel({
   // deliberate act rather than scrolling past it.
   const loraField = visibleFields.find((field) => field.key === "loras");
   const fields = visibleFields.filter((field) => field.key !== "loras");
+  // The server resolves this same hierarchy and drops, per layer, any value the
+  // field cannot accept - the workflow changed, and a saved sampler or a saved
+  // step count is no longer one this graph allows. Showing the stored value
+  // anyway does not preserve the user's choice, because the run will not use it:
+  // it shows a number the run replaces with the default, and for a closed
+  // vocabulary it is worse, since a select whose value matches no option falls
+  // to the FIRST option, which is not the default either. Normalizing each layer
+  // with the same filter the dispatch path already applies is what keeps the
+  // panel showing the setting the run will actually use.
+  const acceptedLayers = [
+    profileValues,
+    defaultPreset?.settings_json,
+    inheritedPreset?.settings_json,
+    inheritedValues,
+    selectedPreset?.settings_json,
+    values,
+  ].map((layer) => (layer ? normalizeSettingsForFields(layer, allFields) : null));
   const effectiveValue = (field: SettingField): unknown => {
     let value = field.default;
-    for (const layer of [
-      profileValues,
-      defaultPreset?.settings_json,
-      inheritedPreset?.settings_json,
-      inheritedValues,
-      selectedPreset?.settings_json,
-      values,
-    ]) {
+    for (const layer of acceptedLayers) {
       if (layer && Object.prototype.hasOwnProperty.call(layer, field.key)) {
         value = layer[field.key];
       }
