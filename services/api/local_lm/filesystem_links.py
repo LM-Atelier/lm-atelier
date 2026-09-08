@@ -201,10 +201,10 @@ def _refuse() -> NoReturn:
 class AnchoredDirectory:
     """A held reference to a verified directory itself, never to its path.
 
-    The whole ancestry is retained rather than released. Operations performed
-    through the anchor do not need it - they resolve against the leaf - but a
-    caller that still reads by path gets a path that keeps meaning what it
-    meant, because a held directory can be neither renamed nor deleted.
+    The whole ancestry is retained rather than released. Operations through
+    the anchor resolve against the leaf. Windows holds also prevent directory
+    rename/deletion; POSIX descriptors preserve the opened objects but do not
+    pin their names. A POSIX pathname caller needs separate confinement.
     """
 
     __slots__ = ("_chain", "_windows", "path")
@@ -255,6 +255,51 @@ class AnchoredDirectory:
 
     def __exit__(self, *_exc: object) -> None:
         self.close()
+
+
+@dataclasses.dataclass(frozen=True)
+class DirectoryIdentity:
+    """Platform-specific identity of a held directory, independent of its name."""
+
+    platform: Literal["posix", "windows"]
+    volume_id: int
+    file_id: int
+
+
+def directory_identity(anchor: AnchoredDirectory) -> DirectoryIdentity:
+    """Identify the open directory without resolving its pathname again.
+
+    Identity is not a promise that its namespace cannot change. In particular,
+    POSIX callers still need their operation's separate confinement contract.
+    """
+
+    descriptor = anchor.descriptor
+    if descriptor is not None:
+        try:
+            measured = os.fstat(descriptor)
+        except OSError:
+            _refuse()
+        return DirectoryIdentity("posix", measured.st_dev, measured.st_ino)
+    handle = anchor.handle
+    if handle is None:
+        _refuse()
+    api = _windows_api()
+    information = api.FileIdInformation()
+    # FileIdInfo returns the volume serial and the full 128-bit file ID.
+    # https://learn.microsoft.com/windows/win32/api/winbase/ns-winbase-file_id_info
+    queried = api.kernel32.GetFileInformationByHandleEx(
+        api.ctypes.c_void_p(handle),
+        api.ctypes.c_int(18),
+        api.ctypes.byref(information),
+        api.ctypes.c_ulong(api.ctypes.sizeof(information)),
+    )
+    if not queried:
+        _refuse()
+    return DirectoryIdentity(
+        "windows",
+        int(information.VolumeSerialNumber),
+        int.from_bytes(bytes(information.FileId), "little"),
+    )
 
 
 def _adopt(path: Path, held: int, windows: bool) -> AnchoredDirectory:
@@ -1592,6 +1637,12 @@ def _windows_api() -> Any:
             ("BytesPerSector", ctypes.c_ulong),
         )
 
+    class FileIdInformation(ctypes.Structure):
+        _fields_ = (
+            ("VolumeSerialNumber", ctypes.c_ulonglong),
+            ("FileId", ctypes.c_ubyte * 16),
+        )
+
     class FileNameInformation(ctypes.Structure):
         # BOOLEAN then HANDLE: the seven bytes of padding are the 64-bit
         # layout the kernel expects, not decoration. The link and rename
@@ -1608,11 +1659,13 @@ def _windows_api() -> Any:
         ctypes=ctypes,
         wintypes=wintypes,
         ntdll=windows.WinDLL("ntdll", use_last_error=True),
+        kernel32=windows.WinDLL("kernel32", use_last_error=True),
         UnicodeString=UnicodeString,
         ObjectAttributes=ObjectAttributes,
         IoStatusBlock=IoStatusBlock,
         FileBasicInformation=FileBasicInformation,
         FileFsSizeInformation=FileFsSizeInformation,
+        FileIdInformation=FileIdInformation,
         FileNameInformation=FileNameInformation,
     )
 

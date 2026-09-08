@@ -177,3 +177,54 @@ def test_unreadable_path_can_propagate(
             missing="raise",
             unreadable="raise",
         )
+
+
+def test_held_directory_identity_matches_another_open_of_the_same_directory(tmp_path: Path) -> None:
+    from local_lm import filesystem_links as links
+
+    with links.AnchoredDirectory(tmp_path) as first, links.AnchoredDirectory(tmp_path) as second:
+        identity = links.directory_identity(first)
+        assert links.directory_identity(first) == identity
+        assert links.directory_identity(second) == identity
+
+
+def test_held_directory_identity_distinguishes_another_directory(tmp_path: Path) -> None:
+    from local_lm import filesystem_links as links
+
+    other = tmp_path / "other"
+    other.mkdir()
+    with links.AnchoredDirectory(tmp_path) as first, links.AnchoredDirectory(other) as second:
+        assert links.directory_identity(first) != links.directory_identity(second)
+
+
+def test_held_directory_identity_does_not_reopen_its_path(tmp_path: Path) -> None:
+    from local_lm import filesystem_links as links
+
+    other = tmp_path / "other"
+    other.mkdir()
+    with links.AnchoredDirectory(tmp_path) as anchor:
+        identity = links.directory_identity(anchor)
+        anchor.path = other
+        assert links.directory_identity(anchor) == identity
+
+
+def test_directory_identity_distinguishes_a_replacement_at_the_same_path(tmp_path: Path) -> None:
+    from local_lm import filesystem_links as links
+
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    with links.AnchoredDirectory(selected) as anchor:
+        identity = links.directory_identity(anchor)
+    selected.rename(tmp_path / "previous")
+    selected.mkdir()
+    with links.AnchoredDirectory(selected) as replacement:
+        assert links.directory_identity(replacement) != identity
+
+
+def test_closed_directory_identity_is_refused(tmp_path: Path) -> None:
+    from local_lm import filesystem_links as links
+
+    anchor = links.AnchoredDirectory(tmp_path)
+    anchor.close()
+    with pytest.raises(links.AnchoredDirectoryError):
+        links.directory_identity(anchor)
