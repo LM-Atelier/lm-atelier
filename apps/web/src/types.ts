@@ -681,7 +681,6 @@ export interface ModelInstall {
   capability_evidence: {
     id: string;
     evidence_key: string;
-    result: string;
     runtime_build: string;
     probed_at: string;
   } | null;
