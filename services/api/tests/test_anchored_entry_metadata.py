@@ -325,3 +325,22 @@ def test_a_name_that_is_not_one_component_refuses(tmp_path: Path) -> None:
                 remove_directory_entry(anchor, hostile)
 
     assert (root / "nested" / "deeper").is_dir()
+
+
+def test_names_and_kinds_can_be_listed_without_acquiring_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "payload.bin").write_bytes(b"data")
+    (tmp_path / "nested").mkdir()
+
+    def no_metadata(*_args: object, **_kwargs: object) -> AnchoredEntry:
+        raise AssertionError("metadata acquisition was not requested")
+
+    monkeypatch.setattr(filesystem_links, "_with_posix_metadata", no_metadata)
+    with AnchoredDirectory(tmp_path) as anchor:
+        entries = list_entries(anchor, include_metadata=False)
+    assert {entry.name: entry.kind for entry in entries} == {
+        "payload.bin": AnchoredEntryKind.FILE,
+        "nested": AnchoredEntryKind.DIRECTORY,
+    }
+    assert all(entry.size_bytes is None and entry.modified_at is None for entry in entries)

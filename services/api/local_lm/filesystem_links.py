@@ -958,6 +958,7 @@ def list_entries(
     anchor: AnchoredDirectory,
     *,
     limit: int = _MAX_LISTED_ENTRIES,
+    include_metadata: bool = True,
     should_stop: Callable[[], bool] | None = None,
 ) -> tuple[AnchoredEntry, ...]:
     """List a held directory, taking each name and kind from one record.
@@ -983,6 +984,10 @@ def list_entries(
     through the held parent and measured with `fstat` - one anchored lookup
     after the enumeration. Unsafe kinds are never measured on either platform,
     and an entry that vanished or refused carries no metadata.
+
+    With `include_metadata=False`, return only names and kinds, without
+    reacquiring entries to measure them. This is needed for live SQLite files:
+    closing an extra POSIX descriptor could release another connection's locks.
 
     When `should_stop` is supplied, it is observed before and after native
     record reads and around POSIX's anchored metadata work. A request raises
@@ -1019,7 +1024,9 @@ def list_entries(
                 _refuse()
             seen.add(entry.name)
 
-            if posix_metadata:
+            if not include_metadata:
+                entry = AnchoredEntry(entry.name, entry.kind)
+            elif posix_metadata:
                 entry = _with_posix_metadata(anchor, entry, should_stop=should_stop)
             _raise_if_listing_stopped(should_stop)
             entries.append(entry)
