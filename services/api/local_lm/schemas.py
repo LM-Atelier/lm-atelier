@@ -36,6 +36,7 @@ from .references import (
     ValidationState,
 )
 from .saved_settings import GenerationSettingsByRole, SavedRoleSettings
+from .studio_capabilities import StudioToolKind
 from .worker_failures import WorkerFailureCode
 
 
@@ -1412,7 +1413,7 @@ class WorkflowBundle(ApiModel):
 class StudioToolCapability(ApiModel):
     """Whether one studio tool can run here, and what would fix it."""
 
-    kind: str
+    kind: StudioToolKind
     workflow_class: str
     available: bool
     reason: str | None

@@ -1498,8 +1498,10 @@ export interface WorkflowResourceConsumers {
   consumers: WorkflowResourceConsumer[];
 }
 
+export type StudioToolKind = "instruct" | "brush" | "eraser" | "rect" | "lasso" | "enhance" | "extend";
+
 export interface StudioToolCapability {
-  kind: string;
+  kind: StudioToolKind;
   workflow_class: string;
   available: boolean;
   reason: string | null;
