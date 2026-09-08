@@ -182,6 +182,14 @@ describe("PromptTemplatesDialog", () => {
       "The chat model could not be made ready. Check it in Settings, or use authored inputs and choices instead.",
     ],
     [
+      "prompt-model-values-invalid",
+      "The values for the model-guided slots do not match this request. Try fewer prompts or simpler slot guidance, or use authored inputs and choices.",
+    ],
+    [
+      "prompt-model-expansion-failed",
+      "The model values could not be combined with this template. Shorten the template or simplify its slots, or use authored inputs and choices.",
+    ],
+    [
       "prompt-model-invocation-failed",
       "The chat model could not fill the template slots. Retry, or use authored inputs and choices instead.",
     ],

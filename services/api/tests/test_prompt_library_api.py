@@ -2587,3 +2587,118 @@ async def test_a_busy_media_worker_is_not_stopped_for_a_model_slot_batch(
     assert refused.json()["code"] == "worker-busy"
     assert state["stopped"] == [], "a running job's device was taken anyway"
     assert state["loaded"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "code", "detail"),
+    [
+        (
+            "stream_values",
+            "prompt-model-values-invalid",
+            "The values for the model-guided slots do not match this request. "
+            "Try fewer prompts or simpler slot guidance, or use authored inputs and choices.",
+        ),
+        (
+            "contract_values",
+            "prompt-model-values-invalid",
+            "The values for the model-guided slots do not match this request. "
+            "Try fewer prompts or simpler slot guidance, or use authored inputs and choices.",
+        ),
+        (
+            "render",
+            "prompt-model-expansion-failed",
+            "The model values could not be combined with this template. "
+            "Shorten the template or simplify its slots, or use authored inputs and choices.",
+        ),
+    ],
+)
+async def test_model_slot_failure_names_the_stage_without_persisting_partial_work(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    code: str,
+    detail: str,
+) -> None:
+    from local_lm.adapters.base import ChatEvent
+    from local_lm.prompt_expansion import PromptExpansionError
+    from local_lm.prompt_model_values import PromptModelValuesError
+
+    _ready_chat_model(app, monkeypatch)
+    calls = 0
+
+    async def stream(_request):
+        nonlocal calls
+        calls += 1
+        values = {
+            "version": 1,
+            "batch_values": {},
+            "items": [{"ordinal": 1, "values": {"subject": "blue bird"}}],
+        }
+        if failure == "stream_values":
+            values["items"] = []
+        yield ChatEvent(
+            type="tool_delta",
+            data={
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call_1",
+                        "function": {
+                            "name": "supply_prompt_model_values",
+                            "arguments": json.dumps(values),
+                        },
+                    }
+                ]
+            },
+        )
+        yield ChatEvent(type="complete")
+
+    monkeypatch.setattr(app.state.services.engines.chat, "stream", stream)
+
+    def refuse(*_args, **_kwargs):
+        if failure == "contract_values":
+            raise PromptModelValuesError("constructed-value-detail")
+        raise PromptExpansionError("constructed-render-detail")
+
+    if failure == "contract_values":
+        monkeypatch.setattr(api_module, "prompt_model_slot_contract", refuse)
+    elif failure == "render":
+        monkeypatch.setattr(api_module, "complete_prompt_expansion_with_model_values", refuse)
+
+    chat = (await client.post("/api/chats", json={"title": "Failure categories"})).json()
+    contract = _contract()
+    contract["slots"] = [
+        {
+            "name": "subject",
+            "mode": "model",
+            "variation_scope": "item",
+            "guidance": "a simple subject",
+        }
+    ]
+    created = (
+        await client.post(
+            "/api/prompt-templates",
+            json=_create_payload(key="failure-categories", contract=contract),
+        )
+    ).json()
+    revision = created["revision"]
+    response = await client.post(
+        f"/api/chats/{chat['id']}/prompt-batches",
+        json={
+            "idempotency_key": "failure-category-batch",
+            "template_revision_id": revision["id"],
+            "contract_sha256": revision["contract_sha256"],
+            "item_count": 1,
+            "selection_seed": 3,
+            "inputs": {},
+        },
+    )
+    assert response.status_code == 503
+    assert response.json() == {"code": code, "detail": detail}
+    assert calls == {"stream_values": 2, "contract_values": 0, "render": 1}[failure]
+    with SessionLocal() as session:
+        assert session.query(PromptExpansionBatch).count() == 0
+        assert session.query(PromptExpansionItem).count() == 0
+        assert session.query(Job).count() == 0
