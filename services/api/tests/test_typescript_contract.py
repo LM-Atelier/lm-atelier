@@ -310,81 +310,104 @@ def _typescript_field_type(source: str, interface: str, field: str) -> str | Non
 
 
 def _declared_literals(source: str, expression: str | None) -> set[str] | None:
-    """The string literals a type expression admits, or None if it is not a union.
-
-    Resolves one level of named alias, because the readiness and status unions
-    are written that way and comparing against the alias name proves nothing.
-    """
+    """Resolve finite string unions, including named members and array elements."""
 
     if expression is None:
         return None
-    # `Foo[]` and `Foo[] | null` declare the same vocabulary as `Foo`; the
-    # server side compares a list against its element values, so the element
-    # type is what has to be read here.
-    array = re.fullmatch(r"(.+?)\[\](\s*\|\s*null)?", expression.strip())
-    if array:
-        expression = array.group(1).strip()
-    if '"' in expression:
-        return set(re.findall(r'"([^"]+)"', expression))
-    alias = re.fullmatch(r"(\w+)(\s*\|\s*null)?", expression.strip())
-    if alias:
-        # Comments are removed first. A union is read up to its semicolon, and
-        # a member documented in a sentence containing one would otherwise cut
-        # the union short and report the rest as missing - a contract check
-        # that punctuation can defeat is worse than none.
-        uncommented = re.sub(r"//.*", "", source)
-        declaration = re.search(
-            rf"^export type {alias.group(1)} =\s*(.+?);", uncommented, re.MULTILINE | re.DOTALL
-        )
-        if declaration:
-            return set(re.findall(r'"([^"]+)"', declaration.group(1)))
-    return None
+    # Semicolons in comments must not end an alias declaration.
+    uncommented = re.sub(r"//.*", "", source)
+    decoder = json.JSONDecoder()
+
+    def resolve(expression: str, seen: frozenset[str]) -> set[str] | None:
+        array = re.fullmatch(r"(.+?)\[\](\s*\|\s*null)?", expression.strip())
+        if array:
+            expression = array.group(1)
+        remaining = expression.strip().removeprefix("|").lstrip()
+        values: set[str] = set()
+        while remaining:
+            if remaining.startswith('"'):
+                try:
+                    value, end = decoder.raw_decode(remaining)
+                except ValueError:
+                    return None
+                members = {value}
+            else:
+                atom = re.match(r"\w+", remaining)
+                if atom is None:
+                    return None
+                name = atom.group()
+                end = atom.end()
+                if name == "null":
+                    members = set()
+                else:
+                    if name in seen:
+                        return None
+                    declaration = re.search(
+                        rf"^export type {name} =\s*(.+?);",
+                        uncommented,
+                        re.MULTILINE | re.DOTALL,
+                    )
+                    if declaration is None:
+                        return None
+                    resolved = resolve(declaration.group(1), seen | {name})
+                    if resolved is None:
+                        return None
+                    members = resolved
+            values |= members
+            remaining = remaining[end:].strip()
+            if remaining.startswith("[]"):
+                remaining = remaining[2:].strip()
+            if not remaining:
+                return values
+            if not remaining.startswith("|"):
+                return None
+            remaining = remaining[1:].lstrip()
+        return None
+
+    return resolve(expression, frozenset())
 
 
 def _admissible_values(spec: dict, schemas: dict[str, dict]) -> list[str] | None:
-    """The string values one field admits, following a component reference.
+    """Read finite string vocabularies from the forms emitted by OpenAPI.
 
-    An inline `enum` is the shape a bare pydantic model produces. OpenAPI does
-    not use it for an enum-typed field - it emits a reference instead:
-
-        JobOut.status  ->  {"$ref": "#/components/schemas/JobStatus"}
-        JobStatus      ->  {"enum": [...], "type": "string"}
-
-    Reading only the inline form therefore saw NOTHING for every enum field in
-    every checked component - eight of them, which is the entire population
-    this check was written for. It had never failed because it had never
-    looked. Found by removing a member from a browser union and watching the
-    suite stay green.
-
-    One level of reference is followed, which is all the generator emits.
+    Enums, singleton constants and named components can be combined in nullable
+    anyOf branches or used as array elements. An open or unresolved branch does
+    not become finite merely because another branch has a closed vocabulary.
     """
 
-    # An array field admits its ITEM's values. Reading only the field saw
-    # nothing for every array of a closed vocabulary, in exactly the way the
-    # docstring above describes for references: it had never failed because it
-    # had never looked. Today one checked field is shaped that way and its
-    # vocabulary happens to be compared elsewhere too, so nothing is currently
-    # unguarded - the cost of leaving it is that the first vocabulary used ONLY
-    # in an array position would be silently unchecked.
-    if spec.get("type") == "array":
-        return _admissible_values(spec.get("items") or {}, schemas)
+    def resolve(spec: dict, seen: frozenset[str]) -> list[str] | None:
+        if "enum" in spec:
+            return [value for value in spec["enum"] if isinstance(value, str)]
+        if "const" in spec:
+            value = spec["const"]
+            return [value] if isinstance(value, str) else []
+        if spec.get("type") == "null":
+            return []
+        if spec.get("type") == "array":
+            return resolve(spec.get("items") or {}, seen)
+        reference = spec.get("$ref")
+        if isinstance(reference, str):
+            prefix = "#/components/schemas/"
+            if not reference.startswith(prefix) or reference in seen:
+                return None
+            target = schemas.get(reference[len(prefix) :])
+            return resolve(target, seen | {reference}) if target is not None else None
+        branches = spec.get("anyOf")
+        if isinstance(branches, list):
+            combined: list[str] = []
+            for branch in branches:
+                values = resolve(branch, seen)
+                if values is None:
+                    return None
+                combined.extend(values)
+            return list(dict.fromkeys(combined))
+        # Retain the single-component wrapper used by earlier OpenAPI exports.
+        wrappers = spec.get("allOf")
+        if isinstance(wrappers, list) and len(wrappers) == 1:
+            return resolve(wrappers[0], seen)
+        return None
 
-    seen = spec
-    for _ in range(2):
-        values = seen.get("enum") or next(
-            (option.get("enum") for option in seen.get("anyOf", []) if option.get("enum")),
-            None,
-        )
-        if values:
-            return values
-        reference = seen.get("$ref") or next(
-            (option.get("$ref") for option in seen.get("allOf", []) if option.get("$ref")),
-            None,
-        )
-        if not reference:
-            return None
-        seen = schemas.get(reference.rsplit("/", 1)[-1]) or {}
-    return None
+    return resolve(spec, frozenset())
 
 
 @pytest.mark.parametrize(("interface", "component"), sorted(CHECKED_CONTRACTS.items()))
@@ -880,3 +903,115 @@ def test_custom_node_names_do_not_exempt_other_components() -> None:
         "WorkflowMissingNodeOut.status",
         "OtherNodeOut.node_type",
     }
+
+
+def _composed_status_schemas() -> dict[str, dict]:
+    return {
+        "BaseStatus": {"type": "string", "enum": ["ready", "failed"]},
+        "MixedStatus": {
+            "anyOf": [
+                {"$ref": "#/components/schemas/BaseStatus"},
+                {"type": "string", "const": "blocked"},
+            ]
+        },
+        "AliasStatus": {"$ref": "#/components/schemas/MixedStatus"},
+        "MixedResponse": {"properties": {"status": {"$ref": "#/components/schemas/MixedStatus"}}},
+    }
+
+
+def _composed_status_source(base: str = '"ready" | "failed"') -> str:
+    return f"""
+export type BaseStatus = {base};
+export type MixedStatus =
+  | BaseStatus
+  | "blocked";
+export type AliasStatus = MixedStatus | null;
+export type CycleOne = CycleTwo;
+export type CycleTwo = CycleOne;
+export interface MixedResponse {{
+  status: MixedStatus;
+}}
+"""
+
+
+@pytest.mark.parametrize(
+    "expression", ["MixedStatus", "MixedStatus | null", "MixedStatus[] | null", "AliasStatus"]
+)
+def test_composed_browser_alias_keeps_every_member(expression: str) -> None:
+    assert _declared_literals(_composed_status_source(), expression) == {
+        "ready",
+        "failed",
+        "blocked",
+    }
+
+
+@pytest.mark.parametrize(
+    "expression",
+    ["BaseStatus | string", "BaseStatus | MissingStatus", '"blocked" | MissingStatus', "CycleOne"],
+)
+def test_composed_open_or_cyclic_browser_alias_is_not_a_finite_vocabulary(expression: str) -> None:
+    assert _declared_literals(_composed_status_source(), expression) is None
+
+
+def test_composed_browser_literals_can_contain_a_union_separator() -> None:
+    assert _declared_literals("", '"value|with|pipes" | "other"') == {"value|with|pipes", "other"}
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"$ref": "#/components/schemas/MixedStatus"},
+        {"anyOf": [{"$ref": "#/components/schemas/MixedStatus"}, {"type": "null"}]},
+        {"type": "array", "items": {"$ref": "#/components/schemas/MixedStatus"}},
+        {"$ref": "#/components/schemas/AliasStatus"},
+    ],
+)
+def test_composed_server_vocabulary_keeps_references_and_constants(spec: dict) -> None:
+    assert set(_admissible_values(spec, _composed_status_schemas()) or []) == {
+        "ready",
+        "failed",
+        "blocked",
+    }
+
+
+def test_composed_server_singleton_is_a_vocabulary() -> None:
+    assert _admissible_values({"type": "string", "const": "blocked"}, {}) == ["blocked"]
+
+
+def test_composed_open_server_union_is_not_a_finite_vocabulary() -> None:
+    spec = {"anyOf": [{"type": "string", "enum": ["ready"]}, {"type": "string"}]}
+    assert _admissible_values(spec, {}) is None
+
+
+def test_composed_cyclic_server_reference_is_not_a_finite_vocabulary() -> None:
+    schemas = {
+        "CycleOne": {"$ref": "#/components/schemas/CycleTwo"},
+        "CycleTwo": {"$ref": "#/components/schemas/CycleOne"},
+    }
+    assert _admissible_values({"$ref": "#/components/schemas/CycleOne"}, schemas) is None
+
+
+def test_composed_contract_rejects_a_missing_base_member() -> None:
+    with pytest.raises(AssertionError, match="cannot represent.*failed"):
+        test_browser_can_represent_every_value_the_server_returns(
+            "MixedResponse",
+            "MixedResponse",
+            _composed_status_schemas(),
+            _composed_status_source('"ready"'),
+        )
+
+
+def test_composed_contract_rejects_an_invented_base_member() -> None:
+    with pytest.raises(AssertionError, match="admits.*invented"):
+        test_browser_can_represent_every_value_the_server_returns(
+            "MixedResponse",
+            "MixedResponse",
+            _composed_status_schemas(),
+            _composed_status_source('"ready" | "failed" | "invented"'),
+        )
+
+
+def test_composed_matching_contract_remains_valid() -> None:
+    test_browser_can_represent_every_value_the_server_returns(
+        "MixedResponse", "MixedResponse", _composed_status_schemas(), _composed_status_source()
+    )
