@@ -6,7 +6,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { api, connectEvents } from "./api";
-import type { BackupInfo, Chat, ChatDetail, EngineCapabilities, EngineRole, Job, SettingField, SetupReadinessReport, SetupRoleReadiness, TurnAccepted } from "./types";
+import type { BackupInfo, Chat, ChatDetail, EngineCapabilities, EngineRole, Job, ModelAssetInstall, SettingField, SetupReadinessReport, SetupRoleReadiness, TurnAccepted } from "./types";
 import { DEFAULT_CHAT_WORKFLOW_SELECTIONS, DEFAULT_PROJECT_WORKFLOW_SELECTIONS, familiesForWorkflows } from "./workflowSelectionFixtures";
 const clipboardWrite = vi.fn();
 
@@ -3415,7 +3415,7 @@ describe("App", () => {
   });
 
   it("edits opt-in Auto rules and default strengths for an installed LoRA", async () => {
-    const asset = {
+    const asset: ModelAssetInstall = {
       id: "asset-auto-ink",
       source_id: null,
       name: "Atelier Ink",
