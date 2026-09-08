@@ -46,10 +46,16 @@ function ImageEditStrengthControl({
   values: Record<string, unknown>;
   onValues: (values: Record<string, unknown>) => void;
 }) {
+  // The same bounds the server resolves the strength within: the field's if it
+  // declares them, otherwise the workflow's calibration, otherwise the whole
+  // range.
+  const strengthMinimum = field.minimum ?? calibration?.minimum ?? 0;
+  const strengthMaximum = field.maximum ?? calibration?.maximum ?? 1;
   const mode: ImageEditStrengthMode = resolveImageEditStrengthMode(
     parameter,
     layers,
     numericManualLayers,
+    { minimum: strengthMinimum, maximum: strengthMaximum },
   );
   const activeCalibration = calibration ? {
     ...calibration,
@@ -61,7 +67,12 @@ function ImageEditStrengthControl({
     : estimateImageEditStrength(prompt, field.minimum ?? 0, field.maximum ?? 1);
   let manualValue = estimate.value;
   for (const layer of layers) {
-    if (typeof layer?.[parameter] === "number") manualValue = layer[parameter];
+    const stored = layer?.[parameter];
+    // Same bound as the mode above: a stored strength this workflow cannot
+    // accept is not the manual value either.
+    if (typeof stored === "number" && stored >= strengthMinimum && stored <= strengthMaximum) {
+      manualValue = stored;
+    }
   }
   const selectAuto = () => {
     const next: Record<string, unknown> = {
