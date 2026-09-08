@@ -28,6 +28,7 @@ from .domain import (
     RoutingMode,
     RunStatus,
 )
+from .model_asset_types import InstalledAssetKind
 from .references import (
     MAX_REFERENCES_PER_TURN,
     MAX_ROLE,
@@ -45,21 +46,6 @@ class ApiModel(BaseModel):
     # silently applied default. Response construction is unaffected - servers
     # build these from exact attributes.
     model_config = ConfigDict(from_attributes=True, extra="forbid")
-
-
-InstalledAssetKind = Literal[
-    "checkpoint",
-    "clip_vision",
-    "controlnet",
-    "diffusion_model",
-    "embedding",
-    "gguf_model",
-    "ip_adapter",
-    "lora",
-    "text_encoder",
-    "upscaler",
-    "vae",
-]
 
 
 ContentRating = Literal["general", "mature", "unknown"]
@@ -1824,7 +1810,7 @@ class BoundWorkflowAssetOut(ApiModel):
     remote_id: str
     revision: str
     artifact_path: str
-    artifact_kind: str
+    artifact_kind: InstalledAssetKind
     target_folder: str
     size_bytes: int
     sha256: str

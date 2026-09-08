@@ -37,6 +37,7 @@ CHECKED_CONTRACTS = {
     "ArtifactLibraryItem": "ArtifactLibraryItem",
     "ArtifactStorageInfo": "ArtifactStorageInfo",
     "BackupInfo": "BackupInfo",
+    "BoundWorkflowAsset": "BoundWorkflowAssetOut",
     "CatalogDetail": "CatalogDetail",
     "CatalogModel": "CatalogModel",
     "CatalogPage": "CatalogPage",
@@ -448,7 +449,6 @@ VOCABULARY_TOKENS = frozenset(
 # readiness-wording break reached main.
 OPEN_VOCABULARY_BASELINE = frozenset(
     {
-        "BoundWorkflowAssetOut.artifact_kind",
         "BoundWorkflowAssetOut.kind",
         "InstallPlanOut.failure_code",
         "JobOut.phase",

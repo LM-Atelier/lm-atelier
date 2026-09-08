@@ -928,7 +928,7 @@ export interface BoundWorkflowAsset {
   remote_id: string;
   revision: string;
   artifact_path: string;
-  artifact_kind: string;
+  artifact_kind: InstalledAssetKind;
   target_folder: string;
   size_bytes: number;
   sha256: string;
