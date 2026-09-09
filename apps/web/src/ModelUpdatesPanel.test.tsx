@@ -94,8 +94,8 @@ describe("ModelUpdatesPanel", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /Check for updates/ }));
 
-    expect(await screen.findByText(/Everything checkable is up to date/)).toBeInTheDocument();
-    expect(screen.getByText(/1 unreachable/)).toBeInTheDocument();
+    expect(await screen.findByText(/Checked versions are up to date/)).toBeInTheDocument();
+    expect(screen.getByText(/1 could not be checked/)).toBeInTheDocument();
     expect(screen.getByText(/Could not check: mystery-lora/)).toBeInTheDocument();
   });
 
@@ -185,7 +185,8 @@ describe("ModelUpdatesPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: /Check for updates/ }));
 
     expect(
-      await screen.findByText(/Nothing installed names an exact provider version/),
+      await screen.findByText(/Nothing installed has a CivitAI version available for comparison/),
     ).toBeInTheDocument();
+    expect(screen.getByText(/No versions could be compared/)).toBeInTheDocument();
   });
 });

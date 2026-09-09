@@ -1185,6 +1185,7 @@ h1, h2, h3 { margin: 0; }
 .package-import-form label { display: grid; gap: 4px; color: var(--muted); font-size: 11px; }
 .package-import-form input, .package-import-form select { border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); color: var(--cream); padding: 8px 10px; font-size: 13px; }
 .model-updates, .media-selection-bar { display: grid; gap: 8px; }
+.model-updates .storage-pill { white-space: normal; }
 .media-selection-bar { grid-auto-flow: column; justify-content: start; align-items: center; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); padding: 8px 11px; margin-bottom: 11px; }
 .project-group { display: grid; gap: 4px; margin-bottom: 7px; }
 .lineage-dialog { width: min(560px, 96vw); }
