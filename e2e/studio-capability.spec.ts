@@ -1,16 +1,6 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
-/** The studio's honesty about what it cannot do, driven through the browser.
- *
- * The project had exactly one end-to-end test, and the studio is where three
- * separate defects reached the owner: a masked edit refused by the settings
- * hierarchy, a selection that only appeared after the stroke ended, and every
- * tool looking ready whether or not any installed workflow could honor it.
- *
- * Unit tests cover each of those now. What no test covered is the surface as a
- * person meets it: open the studio with nothing installed and see whether it
- * says so before the work or after it.
- */
+/** Studio readiness, mask editing, and selection match workflow capabilities. */
 
 async function dismissSetup(page: Page) {
   const setupDialog = page.getByRole("dialog", { name: "Set up LM Atelier" });

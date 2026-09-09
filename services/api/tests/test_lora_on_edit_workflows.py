@@ -1,11 +1,4 @@
-"""Edit workflows carry the LoRA stack: the item-22 slice-1 verification.
-
-The owner asked for LoRAs on image edits. The orchestrator already resolves
-the stack for every non-text operation, and the revision builder already
-adds the `loras` schema wherever `detect_lora_extension` finds an insertion
-point - so what needed proving is that a checkpoint-shaped image_to_image
-template actually gets both. It does; these pin it.
-"""
+"""Edit workflows expose and resolve LoRA stacks."""
 
 from __future__ import annotations
 
@@ -108,14 +101,7 @@ async def test_a_checkpoint_edit_template_gains_the_lora_stack(
 async def test_an_edit_turn_resolves_the_stack_and_records_its_trigger_words(
     client: AsyncClient,
 ) -> None:
-    """The second half of the item-22 verification, which nothing covered.
-
-    The schema landing on the revision proves an edit workflow can carry a
-    stack. It does not prove a turn that edits a picture resolves one, and
-    `trigger_words_applied` appeared in no test at all - so the provenance
-    that tells someone which words their LoRA added was unproven for exactly
-    the operation the owner asked about.
-    """
+    """An edit resolves its LoRA stack and records applied trigger words."""
     from local_lm.auxiliary_assets import checkpoint_lora_extension
     from local_lm.domain import utcnow
     from local_lm.models import (
