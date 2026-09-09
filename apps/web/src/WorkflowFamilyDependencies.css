@@ -1,0 +1,10 @@
+.workflow-family-dependencies { min-width: 0; padding: 14px 0; }
+.workflow-family-dependencies h3 { margin: 0 0 8px; font-size: 14px; }
+.workflow-family-dependencies h4 { margin: 18px 0 8px; font-size: 13px; }
+.workflow-family-dependencies p { font-size: 12px; line-height: 1.5; }
+.workflow-family-dependencies .workflow-family-dependency-filter { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.workflow-family-dependency-filter input { margin: 0; accent-color: var(--atelier); }
+.workflow-family-dependencies ul { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); gap: 10px; padding: 0; list-style: none; }
+.workflow-family-dependencies li { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; min-width: 0; padding: 10px; border: 1px solid var(--border); border-radius: 8px; overflow-wrap: anywhere; }
+.workflow-family-dependencies strong { max-width: 100%; font-size: 13px; }
+.workflow-family-dependencies small { color: var(--ink-secondary); font-size: 12px; }
