@@ -202,7 +202,7 @@ it("queues template prompts from chat without changing the composer or generatio
   const mode = screen.getByRole("combobox", { name: "Generation mode" });
   const outputCount = screen.getByRole("combobox", { name: "Number of outputs" });
   fireEvent.change(outputCount, { target: { value: "3" } });
-  const workflow = screen.getByRole("combobox", { name: "Workflow for this request type" });
+  const workflow = screen.getByRole("combobox", { name: "Image workflow" });
   const workflowValue = workflow.getAttribute("value") ?? (workflow as HTMLSelectElement).value;
 
   fireEvent.click(screen.getByRole("button", { name: "Open prompt templates" }));

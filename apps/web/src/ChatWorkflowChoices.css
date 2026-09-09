@@ -1,0 +1,10 @@
+.chat-workflow-choices { display: grid; gap: 6px; margin-bottom: 8px; min-width: 0; }
+.chat-workflow-choice-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; align-items: start; }
+.chat-workflow-choice-fields .workflow-selector > label { color: var(--ink-secondary); font-size: 11px; font-weight: 600; }
+.chat-workflow-choice-fields .workflow-selector select { width: 100%; min-width: 0; text-overflow: ellipsis; }
+.chat-workflow-choice-fields .workflow-selector small { overflow-wrap: anywhere; }
+.chat-workflow-choices > small { color: var(--ink-muted); font-size: 11px; }
+@media (max-width: 600px) { .chat-workflow-choice-fields { grid-template-columns: 1fr; } }
+
+.turn-editor-with-workflow-choices .composer-wrap { position: relative; padding-top: 12px; }
+.chat-view:has(> .turn-editor-with-workflow-choices) > .messages { padding-bottom: 24px; }

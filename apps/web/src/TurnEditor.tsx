@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode, type SetState
 import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, CircleStop, Film, Image as ImageIcon, MessageSquare, Send, SlidersHorizontal, Sparkles, Wand2, Workflow as WorkflowIcon, X } from "lucide-react";
 import { api } from "./api";
-import { ActiveChatWorkflowSelector } from "./ActiveChatWorkflowSelector";
+import { ChatWorkflowChoices } from "./ChatWorkflowChoices";
 import { AttachControls } from "./AttachControls";
 import { ComposerPromptTemplatesAction } from "./ComposerPromptTemplatesAction";
 import { EditingStudio } from "./EditingStudio";
@@ -346,7 +346,7 @@ export function TurnEditor({
   };
 
   return (
-    <fieldset aria-label="Turn editor" disabled={accepting} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
+    <fieldset className={workflowControl === undefined ? "turn-editor-with-workflow-choices" : undefined} aria-label="Turn editor" disabled={accepting} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
       <div
         className={`composer-wrap${dropActive ? " drop-active" : ""}`}
         style={onAccept ? { position: "relative", padding: 0 } : undefined}
@@ -393,6 +393,7 @@ export function TurnEditor({
             <button aria-label="Remove Prompt Library source" onClick={detachPromptSource}><X size={12} /></button>
           </div>
         )}
+        {workflowControl === undefined && <ChatWorkflowChoices chatId={chat.id} routingMode={mode} />}
         <div className="composer">
           <MessageField field={textInput} value={text} onChange={setText} onSubmit={submit} onMention={(mention) => { updateState((current) => ({ ...current, referenceIntent: "replace", mentions: [...current.mentions, mention] })); detachPromptSource(); }} onPasteFiles={(files) => { detachPromptSource(); void uploadPastedImages(files); }} />
           <div className="composer-tools">
@@ -424,10 +425,10 @@ export function TurnEditor({
                 <ChevronDown size={13} />
               </label>
               <OutputCountControl mode={mode} maximum={maxMediaOutputsPerPlan} value={outputCount} onChange={(nextCount) => { setOutputCount(nextCount); if (nextCount > 1) detachPromptSource(); }} />
-              <div className="composer-workflow-selector">
+              {workflowControl !== undefined && <div className="composer-workflow-selector">
                 <WorkflowIcon aria-hidden="true" size={15} />
-                {workflowControl === undefined ? <ActiveChatWorkflowSelector chatId={chat.id} routingMode={mode} /> : workflowControl}
-              </div>
+                {workflowControl}
+              </div>}
               {imageEdit && <button className="icon-button" onClick={() => setStudioOpen(true)} aria-label="Open editing studio" title="One-click edits"><Wand2 size={18} /></button>}
               <button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="Turn settings"><SlidersHorizontal size={18} /></button>
             </div>
