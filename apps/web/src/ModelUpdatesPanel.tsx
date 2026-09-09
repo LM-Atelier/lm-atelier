@@ -52,17 +52,17 @@ export function ModelUpdatesPanel({
         {report && (
           <span className="storage-pill">
             {updates.length === 0
-              ? "Everything checkable is up to date"
+              ? current.length > 0 ? "Checked versions are up to date" : "No versions could be compared"
               : `${updates.length} update${updates.length === 1 ? "" : "s"} available`}
             {` · ${current.length} current`}
-            {unknown.length > 0 ? ` · ${unknown.length} unreachable` : ""}
+            {unknown.length > 0 ? ` · ${unknown.length} could not be checked` : ""}
           </span>
         )}
       </div>
       {error && <ErrorCallout message={(error as Error).message} />}
       {report && report.length === 0 && (
         <p className="package-review-note">
-          Nothing installed names an exact provider version yet, so there is nothing to compare.
+          Nothing installed has a CivitAI version available for comparison.
         </p>
       )}
       {updates.length > 0 && (
