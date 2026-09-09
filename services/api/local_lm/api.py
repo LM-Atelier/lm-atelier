@@ -159,7 +159,11 @@ from .model_planner import (
     resolve_install_plan,
     workflow_artifact_contract,
 )
-from .model_updates import installed_civitai_identities, newer_version
+from .model_updates import (
+    ModelUpdateBaselineUnavailable,
+    installed_civitai_identities,
+    newer_version,
+)
 from .models import (
     AdapterPromptGrammar,
     AppSetting,
@@ -4729,10 +4733,10 @@ def _installed_counts_by_parent(session: Session) -> dict[str, int]:
     this map has no recorded identity at all, which is not the same as having
     none installed - see `_grouped_by_parent`.
     """
-    counts: dict[str, int] = {}
+    versions: dict[str, set[str]] = {}
     for identity in installed_civitai_identities(session):
-        counts[identity.model_id] = counts.get(identity.model_id, 0) + 1
-    return counts
+        versions.setdefault(identity.model_id, set()).add(identity.version_id)
+    return {model_id: len(installed) for model_id, installed in versions.items()}
 
 
 def _grouped_by_parent(items: list[CatalogModel]) -> list[CatalogModel]:
@@ -6735,7 +6739,11 @@ async def check_model_updates(request: Request, session: SessionDep) -> list[Mod
     report: list[ModelUpdateOut] = []
     for identity in identities:
         summary = summaries.get(identity.model_id)
-        candidate = newer_version(identity, summary) if summary is not None else None
+        try:
+            candidate = newer_version(identity, summary) if summary is not None else None
+        except ModelUpdateBaselineUnavailable:
+            summary = None
+            candidate = None
         state: Literal["update_available", "current", "unknown"] = (
             "unknown" if summary is None else "current" if candidate is None else "update_available"
         )
