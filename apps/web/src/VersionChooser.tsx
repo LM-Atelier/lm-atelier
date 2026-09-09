@@ -17,10 +17,9 @@ import type { CatalogVersionRow } from "./types";
  * before its cards could open this, and offering it early would send a model
  * id to a source that has never heard of it.
  *
- * Installed state has three answers. Where a kind records no provider version
- * - checkpoints today - the row says so plainly instead of claiming the
- * version is absent, since "not installed" about something we cannot see is
- * how a person ends up with a second copy.
+ * Installed state has three answers. Exact recorded identities identify both
+ * checkpoints and auxiliary versions. Without comparison evidence, the
+ * chooser preserves unknown and leaves the installed-state label blank.
  */
 export function VersionChooser({
   modelId,

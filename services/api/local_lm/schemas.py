@@ -1260,7 +1260,8 @@ class ModelUpdateOut(ApiModel):
     """One installed asset's staleness verdict against its provider.
 
     `state` is "update_available", "current", or "unknown" - unknown means the
-    provider could not answer, never a guess. Update fields are set only with
+    provider could not answer or the comparison baseline is unavailable.
+    Update fields are set only with
     "update_available"; installing the candidate goes through the normal
     verified catalog flow for its version id.
     """
@@ -2154,11 +2155,9 @@ class CatalogVersionRow(ApiModel):
     base_model: str | None = None
     size_bytes: int = 0
     changelog: str | None = None
-    # True, false, or unknown - and unknown is a real answer. Checkpoint
-    # installs do not record a provider version, so for those we cannot tell
-    # whether this exact version is on disk. Reporting `false` there would be
-    # a claim we cannot support, and the one that would make someone install
-    # a second copy of what they already have.
+    # True for an exact recorded installation. An unmatched version is false
+    # only when this model has another recorded version identity; otherwise
+    # it remains unknown. This applies to checkpoints and auxiliary assets.
     installed: bool | None = None
     installed_as: str | None = None
 
