@@ -1,11 +1,4 @@
-"""Edit workflows carry the LoRA stack: the item-22 slice-1 verification.
-
-The owner asked for LoRAs on image edits. The orchestrator already resolves
-the stack for every non-text operation, and the revision builder already
-adds the `loras` schema wherever `detect_lora_extension` finds an insertion
-point - so what needed proving is that a checkpoint-shaped image_to_image
-template actually gets both. It does; these pin it.
-"""
+"""Edit workflows expose and resolve LoRA stacks."""
 
 from __future__ import annotations
 

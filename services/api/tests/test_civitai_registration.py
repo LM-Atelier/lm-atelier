@@ -82,7 +82,7 @@ async def test_the_preflight_route_refuses_unknown_sources_and_bad_ids(
 async def test_a_civitai_preflight_composes_into_the_download_manager(
     client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """R238/R245: provider and both identities survive from the normalized
+    """Provider and both identities survive from the normalized
     detail through the plan into the manager's own source synthesis, and the
     request carries no catalog file sources - the immutable plan is the only
     identity the manager accepts. No Hugging Face call anywhere."""
@@ -231,7 +231,7 @@ async def test_a_civitai_preflight_composes_into_the_download_manager(
 async def test_installed_asset_manifests_feed_the_workflow_inventory(
     client: AsyncClient,
 ) -> None:
-    """A verified LoRA must not read as missing once installed (R240)."""
+    """A verified LoRA must not read as missing once installed."""
 
     from local_lm.api import _local_asset_filenames
     from local_lm.db import SessionLocal
