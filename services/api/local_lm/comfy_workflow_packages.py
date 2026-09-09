@@ -11,6 +11,7 @@ from typing import Literal
 
 from .h3_node_observation_v1 import EXACT_H3_NODE_TYPES, H3NodeObservationV1, observe_h3_node_types
 from .model_asset_types import WorkflowAssetKind
+from .workflow_graph_error_types import WorkflowGraphErrorCode
 
 MAX_UI_GRAPH_BYTES = 1024 * 1024
 MAX_UI_GRAPH_NODES = 4_096
@@ -89,7 +90,7 @@ OperationGuess = Literal["image", "unknown", "video"]
 
 
 class WorkflowPackageError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: WorkflowGraphErrorCode, message: str) -> None:
         super().__init__(message)
         self.code = code
 
