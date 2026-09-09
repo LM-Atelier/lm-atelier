@@ -1494,6 +1494,7 @@ class WorkflowOutputGeometryCapabilityOut(ApiModel):
 
 class WorkflowOut(ApiModel):
     id: str
+    family_id: str | None = None
     name: str
     operation: str
     description: str

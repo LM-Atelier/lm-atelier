@@ -1,0 +1,16 @@
+.workflow-family-browser { min-width: 0; padding: 12px; border-right: 1px solid var(--border); }
+.workflow-family-filters { display: grid; gap: 10px; margin-bottom: 18px; }
+.workflow-family-filters label { display: grid; gap: 5px; color: var(--ink-secondary); font-size: 12px; }
+.workflow-family-filters input[type="search"], .workflow-family-filters select { width: 100%; min-width: 0; color: var(--ink-primary); border: 1px solid var(--line-control); border-radius: 8px; background: var(--panel-2); padding: 8px; }
+.workflow-family-filters .workflow-family-checkbox { display: flex; align-items: center; gap: 8px; }
+.workflow-family-checkbox input { margin: 0; accent-color: var(--atelier); }
+.workflow-family-browser section + section { margin-top: 18px; }
+.workflow-family-browser h3 { margin: 0 0 6px; font-size: 14px; overflow-wrap: anywhere; }
+.workflow-family-browser p { font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.workflow-family-browser .workflow-list { padding: 0; border: 0; }
+.workflow-family-browser .workflow-list button > span { min-width: 0; align-items: flex-start; overflow-wrap: anywhere; }
+.workflow-family-browser .workflow-list button:disabled { opacity: .6; cursor: default; }
+@media (max-width: 680px) {
+  .workflow-family-browser { border-right: 0; border-bottom: 1px solid var(--border); }
+  .workflow-family-browser .workflow-list { max-height: none; overflow: visible; }
+}

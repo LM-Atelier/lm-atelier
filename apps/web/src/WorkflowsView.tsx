@@ -8,6 +8,8 @@ import { EmptyState } from "./EmptyState";
 import { ErrorCallout } from "./ErrorCallout";
 import { RegistryInstallsPanel } from "./RegistryInstallsPanel";
 import { WorkflowFamilyArchive } from "./WorkflowFamilyArchive";
+import { WorkflowFamilyList } from "./WorkflowFamilyList";
+import { WorkflowFamilyUsage } from "./WorkflowFamilyUsage";
 import { WorkflowFamilyPreferences } from "./WorkflowFamilyPreferences";
 import { WorkflowFamilyDependencies } from "./WorkflowFamilyDependencies";
 import { WorkflowPackageReview } from "./WorkflowPackageReview";
@@ -84,7 +86,12 @@ export function WorkflowControls({ schema }: { schema: Record<string, unknown> }
 }
 export function WorkflowsView() {
   const client = useQueryClient();
-  const workflows = useQuery({ queryKey: ["workflows"], queryFn: api.workflows }); const families = useQuery({ queryKey: ["workflow-families"], queryFn: () => api.workflowFamilies() });
+  const [includeArchived, setIncludeArchived] = useState(false);
+  const workflows = useQuery({ queryKey: ["workflows"], queryFn: api.workflows });
+  const families = useQuery({
+    queryKey: ["workflow-families", "library", includeArchived],
+    queryFn: () => api.workflowFamilies(undefined, includeArchived),
+  });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selected = workflows.data?.find((workflow) => workflow.id === selectedId) ?? null; const selectedFamily = families.data?.find((family) => family.variants.some((variant) => variant.id === selectedId));
   const [archiveFamily, setArchiveFamily] = useState<WorkflowFamily | null>(null);
@@ -366,6 +373,7 @@ export function WorkflowsView() {
       )}
       {selectedFamily && <WorkflowFamilyDependencies key={selectedFamily.id} familyId={selectedFamily.id} />}
       {selectedFamily && <WorkflowFamilyPreferences family={selectedFamily} />}
+      {selectedFamily && <WorkflowFamilyUsage key={selectedFamily.id} familyId={selectedFamily.id} />}
       {selectedFamily && !selectedFamily.archived && (
         <div className="storage-actions">
           <button className="secondary" onClick={() => setArchiveFamily(selectedFamily)}>
@@ -381,7 +389,18 @@ export function WorkflowsView() {
         />
       )}
       <div className="workflow-layout">
-        <div className="workflow-list">{workflows.data?.map((workflow) => <button key={workflow.id} className={selected?.id === workflow.id ? "selected" : ""} onClick={() => { setSelectedId(workflow.id); setSelectedRevisionId(workflow.current_revision_id); }}><span><strong>{workflow.name}</strong><small>{workflow.operation} · {workflow.revisions.length} revision{workflow.revisions.length === 1 ? "" : "s"}</small></span></button>)}</div>
+        <WorkflowFamilyList
+          families={families.data ?? []}
+          workflows={workflows.data ?? []}
+          selectedId={selectedId}
+          onSelect={(workflow) => {
+            setSelectedId(workflow.id);
+            setSelectedRevisionId(workflow.current_revision_id);
+          }}
+          includeArchived={includeArchived}
+          onIncludeArchivedChange={setIncludeArchived}
+          loading={families.isPending || workflows.isPending}
+        />
         <div className="workflow-detail">{selected && selectedRevision ? <><div className="detail-title"><div><small>{selected.operation}</small><h2>{selected.name}</h2><p>{selected.description}</p></div><div className="row-actions"><button className="secondary compact-button" onClick={openEdit}>New revision</button><button className="secondary compact-button" onClick={() => clone.mutate(selected.id)}>Duplicate</button><button className="secondary compact-button" onClick={() => exportBundle.mutate(selected.id)}>Export</button><button className="secondary compact-button" onClick={() => validate.mutate(selected.id)}>Validate</button></div></div><div className="workflow-revision-bar"><label>Revision<select value={selectedRevision.id} onChange={(event) => setSelectedRevisionId(event.target.value)}>{[...selected.revisions].sort((a, b) => b.version - a.version).map((revision) => <option key={revision.id} value={revision.id}>v{revision.version}{revision.id === selected.current_revision_id ? " · current" : ""}</option>)}</select></label>{selectedRevision.id !== selected.current_revision_id && <button className="secondary compact-button" onClick={() => restore.mutate({ id: selected.id, revisionId: selectedRevision.id })}>Restore as new revision</button>}<span className={`badge ${selectedRevision.trusted ? "likely" : "advanced_import"}`}>{selectedRevision.trusted ? "Trusted" : "Untrusted"}</span></div>
           <WorkflowRevisionReviewPanel
             key={`${selected.id}:${selectedRevision.id}`}
