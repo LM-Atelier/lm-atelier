@@ -990,7 +990,7 @@ describe("App", () => {
     );
 
     const selector = await screen.findByRole("combobox", {
-      name: "Workflow for this request type",
+      name: "Text workflow",
     });
     await waitFor(() => expect(selector).toHaveValue("default"));
     expect(screen.queryByRole("combobox", { name: "vision" })).not.toBeInTheDocument();
@@ -5170,11 +5170,12 @@ describe("App", () => {
 
     const composer = await screen.findByRole("textbox", { name: "Message" });
     expect(screen.getByRole("combobox", { name: "Generation mode" })).toHaveValue("auto");
-    expect(screen.getByText("Chosen after request classification")).toBeVisible();
-    expect(screen.queryByRole("combobox", { name: "Workflow for this request type" }))
-      .not.toBeInTheDocument();
-    expect(api.workflowFamilies).not.toHaveBeenCalled();
-    expect(api.chatWorkflowSelections).not.toHaveBeenCalled();
+    expect(screen.getByText("Auto chooses the request type at send.")).toBeVisible();
+    for (const label of ["Text workflow", "Image workflow", "Video workflow"]) {
+      expect(screen.getByRole("combobox", { name: label })).toBeVisible();
+    }
+    await waitFor(() => expect(api.chatWorkflowSelections).toHaveBeenCalledWith(chat.id));
+    expect(api.setChatWorkflowSelection).not.toHaveBeenCalled();
     expect(api.projectWorkflowSelections).not.toHaveBeenCalled();
     fireEvent.change(composer, { target: { value: "Surprise me with a tiny story" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
