@@ -243,7 +243,8 @@ async function main() {
     await terminate(testProcess);
     await terminate(appProcess);
     await validateTemporaryRoot(temporaryRoot);
-    await rm(temporaryRoot, { recursive: true, force: true });
+    // Windows can retain a directory lock briefly after the child processes exit.
+    await rm(temporaryRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
