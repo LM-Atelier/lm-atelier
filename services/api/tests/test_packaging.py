@@ -826,7 +826,7 @@ def test_release_notes_are_complete_and_fail_closed() -> None:
 def test_prior_release_installer_checksums_are_complete_and_exact() -> None:
     checksums = json.loads((ROOT / "packaging/prior-release-checksums.json").read_text())
 
-    assert set(checksums) == {f"v0.1.{patch}" for patch in range(8)}
+    assert set(checksums) == {f"v0.1.{patch}" for patch in range(9)}
     for tag, platforms in checksums.items():
         assert set(platforms) == {"linux-x86_64", "windows-x86_64"}
         for platform, checksum in platforms.items():

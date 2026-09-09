@@ -7,21 +7,44 @@ LM Atelier is preview software. These installers were build-smoked for:
 - Windows 11 x64: <!-- build-smoked / physically tested / certified -->
 - Ubuntu 24.04 LTS x86_64: <!-- build-smoked / physically tested / certified -->
 
-Do not describe a platform, GPU, model, or workflow as certified unless its
-recorded test matrix is complete.
+Platform and model support remains limited to the combinations tested for this
+preview.
 
 Managed llama.cpp chat setup is one-click on both installer targets where the
 pinned runtime is compatible. Managed media setup is currently limited to the
 reviewed compatible Windows NVIDIA runtime. Linux image/video require an
 externally configured compatible media engine and are not certified.
 
+## What changed
+
+- Browse workflow families and variants with search, readiness filters, dependency
+  details, editable use cases, and defaults for each operation.
+- Reuse Prompt Templates, generate grouped outputs, and manage image references
+  from the media library.
+- Recognize installed CivitAI checkpoint versions and derive editable profile
+  use cases from model metadata.
+- Improve queue recovery, artifact retention, shared model storage, and
+  workflow validation.
+
 ## Install and upgrade
 
-<!-- State prerequisites, supported upgrade path, and data-preservation behavior. -->
+Installers include Python and the built web interface; no separate Python or
+Node.js installation is required. Models and inference engines are downloaded
+separately. Back up your local data before upgrading from 0.1.8;
+the release checks exercise a fresh installation and the 0.1.8 upgrade path.
+
+Upgrades preserve local data. Uninstall preserves it unless purge is explicitly
+selected. Application downgrades and data-schema rollback are not guaranteed.
 
 ## Known limitations
 
-<!-- List material limitations, including unsigned status when applicable. -->
+These preview binaries are not code-signed. Model, workflow, and hardware support
+depends on the configured runtime and available resources. Automated installer
+checks do not certify every GPU or model combination.
+
+A working local chat model is required for model-filled Prompt Template slots.
+Model output that cannot satisfy a template reports an error. Check the template
+and chat setup before retrying.
 
 ## Verify the download
 

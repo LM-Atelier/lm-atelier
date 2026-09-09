@@ -30,5 +30,9 @@
   "v0.1.7": {
     "linux-x86_64": "24bc34760bd7825bc81e8b5354d5c7c4ae6bb29c5159abbb52ff74ad55cc9b63",
     "windows-x86_64": "3bba7df9184a6fad1a5ebd3c1ad99aab8cd107ea56a2adf50783fd2901a96730"
+  },
+  "v0.1.8": {
+    "linux-x86_64": "fd3dc43508b25abdb5c674261238fb104d79c11001fd6ab520b607f4106e309e",
+    "windows-x86_64": "9e7ce60e525aa8078f78392bf8bfcc665dbb1de84d9a01717407e6ff70153cc7"
   }
 }
