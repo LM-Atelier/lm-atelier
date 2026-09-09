@@ -11,6 +11,7 @@ from typing import Any
 from .comfy_workflow_packages import WorkflowAssetReference
 from .model_asset_types import BoundWorkflowAssetKind, InstalledAssetKind
 from .models import InstallPlan
+from .workflow_dependency_error_types import WorkflowAssetBindingErrorCode
 
 WORKFLOW_ASSET_BINDING_VERSION = 1
 MAX_WORKFLOW_ASSET_BINDINGS = 512
@@ -55,7 +56,7 @@ _ARTIFACT_TARGET_FOLDERS: dict[InstalledAssetKind, frozenset[str]] = {
 
 
 class WorkflowAssetBindingError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: WorkflowAssetBindingErrorCode, message: str) -> None:
         super().__init__(message)
         self.code = code
 
@@ -230,7 +231,9 @@ def validate_workflow_asset_candidate(
         if isinstance(artifact, Mapping) and artifact.get("path") == normalized_path
     ]
     if len(matches) != 1:
-        code = "artifact_not_found" if not matches else "ambiguous_plan_artifact"
+        code: WorkflowAssetBindingErrorCode = (
+            "artifact_not_found" if not matches else "ambiguous_plan_artifact"
+        )
         raise WorkflowAssetBindingError(code, "install plan does not name one exact artifact")
     artifact = matches[0]
     _bound_asset(reference, plan, artifact)
@@ -327,7 +330,7 @@ def _bound_asset(
     )
 
 
-def _validated_path(value: object, *, code: str) -> str:
+def _validated_path(value: object, *, code: WorkflowAssetBindingErrorCode) -> str:
     if (
         not isinstance(value, str)
         or not value

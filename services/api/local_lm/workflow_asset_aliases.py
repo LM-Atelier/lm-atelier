@@ -27,12 +27,13 @@ from .workflow_asset_downloads import (
     WorkflowAssetDownloadError,
     install_plan_download_request,
 )
+from .workflow_dependency_error_types import WorkflowAssetAliasErrorCode
 
 WORKFLOW_ASSET_ALIAS_VERSION = 1
 
 
 class WorkflowAssetAliasError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: WorkflowAssetAliasErrorCode, message: str) -> None:
         super().__init__(message)
         self.code = code
 
@@ -201,7 +202,7 @@ def _resolved_alias_plan(
     )
 
 
-def _safe_path(value: object, code: str) -> str:
+def _safe_path(value: object, code: WorkflowAssetAliasErrorCode) -> str:
     if (
         not isinstance(value, str)
         or not value
