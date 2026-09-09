@@ -10,6 +10,7 @@ import { RegistryInstallsPanel } from "./RegistryInstallsPanel";
 import { WorkflowFamilyArchive } from "./WorkflowFamilyArchive";
 import { WorkflowFamilyList } from "./WorkflowFamilyList";
 import { WorkflowFamilyUsage } from "./WorkflowFamilyUsage";
+import { WorkflowFamilyVariants } from "./WorkflowFamilyVariants";
 import { WorkflowFamilyPreferences } from "./WorkflowFamilyPreferences";
 import { WorkflowFamilyDependencies } from "./WorkflowFamilyDependencies";
 import { WorkflowPackageReview } from "./WorkflowPackageReview";
@@ -371,9 +372,10 @@ export function WorkflowsView() {
           {editorNotice && <span role="status" className="muted">{editorNotice}</span>}
         </div>
       )}
-      {selectedFamily && <WorkflowFamilyDependencies key={selectedFamily.id} familyId={selectedFamily.id} />}
+      {selectedFamily && <WorkflowFamilyVariants key={`variants-${selectedFamily.id}`} family={selectedFamily} />}
+      {selectedFamily && <WorkflowFamilyDependencies key={`dependencies-${selectedFamily.id}`} familyId={selectedFamily.id} />}
       {selectedFamily && <WorkflowFamilyPreferences family={selectedFamily} />}
-      {selectedFamily && <WorkflowFamilyUsage key={selectedFamily.id} familyId={selectedFamily.id} />}
+      {selectedFamily && <WorkflowFamilyUsage key={`usage-${selectedFamily.id}`} familyId={selectedFamily.id} />}
       {selectedFamily && !selectedFamily.archived && (
         <div className="storage-actions">
           <button className="secondary" onClick={() => setArchiveFamily(selectedFamily)}>
