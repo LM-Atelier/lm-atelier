@@ -465,6 +465,7 @@ from .schemas import (
     WorkflowOpenTarget,
     WorkflowOut,
     WorkflowOutputGeometryCapabilityOut,
+    WorkflowOutputGeometryResolutionOut,
     WorkflowPackageAnalysisOut,
     WorkflowPackageAnalyzeRequest,
     WorkflowPackageDraftRequest,
@@ -564,8 +565,11 @@ from .workflow_library import (
 )
 from .workflow_node_dependencies import node_dependency_errors
 from .workflow_output_geometry import (
+    WorkflowOutputGeometryResult,
     prove_workflow_output_geometry,
+    resolve_workflow_output_geometry,
     workflow_output_geometry_payload,
+    workflow_output_geometry_resolution_payload,
 )
 from .workflow_ownership import ensure_workflow_family_ownership
 from .workflow_package_drafts import (
@@ -11457,6 +11461,30 @@ async def _persist_workflow_revision(
     return revision
 
 
+def _prove_stored_revision_geometry(
+    revision_id: str, session: Session
+) -> WorkflowOutputGeometryResult:
+    """Re-load and re-prove one stored revision, from the stored bytes only."""
+
+    revision = session.get(WorkflowRevision, revision_id)
+    if revision is None:
+        raise api_error(404, "workflow-revision-not-found", "workflow revision not found")
+    definition = session.get(WorkflowDefinition, revision.workflow_id)
+    if definition is None:
+        raise api_error(404, "workflow-not-found", "workflow not found")
+    return prove_workflow_output_geometry(
+        workflow_id=definition.id,
+        revision_id=revision.id,
+        operation=definition.operation,
+        engine=revision.engine,
+        api_graph=revision.api_graph_json,
+        input_schema=revision.input_schema_json,
+        dependencies=revision.dependencies_json,
+        artifact_sha256=revision.artifact_sha256,
+        trusted=revision.trusted,
+    )
+
+
 @router.get(
     "/workflow-revisions/{revision_id}/output-geometry",
     response_model=WorkflowOutputGeometryCapabilityOut,
@@ -11465,25 +11493,35 @@ async def get_workflow_revision_output_geometry(
     revision_id: str,
     session: SessionDep,
 ) -> dict[str, object]:
-    revision = session.get(WorkflowRevision, revision_id)
-    if revision is None:
-        raise api_error(404, "workflow-revision-not-found", "workflow revision not found")
-    definition = session.get(WorkflowDefinition, revision.workflow_id)
-    if definition is None:
-        raise api_error(404, "workflow-not-found", "workflow not found")
-    return workflow_output_geometry_payload(
-        prove_workflow_output_geometry(
-            workflow_id=definition.id,
-            revision_id=revision.id,
-            operation=definition.operation,
-            engine=revision.engine,
-            api_graph=revision.api_graph_json,
-            input_schema=revision.input_schema_json,
-            dependencies=revision.dependencies_json,
-            artifact_sha256=revision.artifact_sha256,
-            trusted=revision.trusted,
-        )
+    return workflow_output_geometry_payload(_prove_stored_revision_geometry(revision_id, session))
+
+
+@router.post(
+    "/workflow-revisions/{revision_id}/output-geometry/resolve",
+    response_model=WorkflowOutputGeometryResolutionOut,
+)
+async def resolve_workflow_revision_output_geometry(
+    revision_id: str,
+    payload: dict[str, Any],
+    session: SessionDep,
+) -> dict[str, object]:
+    """Preview the geometry one request resolves to for a stored revision.
+
+    Read-only, and re-proves the stored revision on every call, so the answer
+    is bound to the revision as it is now rather than to anything a caller
+    remembers. Resolving grants no admission, queueing or generation.
+    """
+
+    resolution = resolve_workflow_output_geometry(
+        _prove_stored_revision_geometry(revision_id, session), payload
     )
+    if resolution is None:
+        raise api_error(
+            422,
+            "workflow-geometry-request-invalid",
+            "Output geometry request is invalid or unsupported for this workflow revision",
+        )
+    return workflow_output_geometry_resolution_payload(resolution)
 
 
 @router.post(

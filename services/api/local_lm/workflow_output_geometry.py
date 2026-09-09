@@ -9,8 +9,11 @@ from .output_geometry import (
     MAX_DIMENSION,
     MAX_PIXELS,
     OutputGeometryCapability,
+    OutputGeometryError,
+    ResolvedOutputGeometry,
     declare_output_geometry,
     output_geometry_capability_payload,
+    resolve_output_geometry,
 )
 from .settings_registry import IMAGE_SETTINGS, workflow_settings
 
@@ -26,6 +29,7 @@ _MAX_IDENTIFIER_LENGTH = 256
 _SHA256_CHARS = frozenset("0123456789abcdef")
 _LATENT_ROOTS = frozenset({"EmptyLatentImage", "EmptySD3LatentImage"})
 _PROOF_TOKEN = object()
+_RESOLUTION_TOKEN = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +78,36 @@ class WorkflowOutputGeometryResult:
     available: bool
     reason: str | None
     proof: WorkflowOutputGeometryProof | None
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class WorkflowOutputGeometryResolution:
+    """What one request resolves to for one revision; preview evidence only.
+
+    Construction is reserved to this module for the same reason the proof's is.
+    A value carrying a workflow, revision and artifact bind must never be
+    assemblable by the caller who supplied the request, or the bind stops being
+    evidence of anything.
+    """
+
+    version: Literal[1]
+    workflow_id: str
+    revision_id: str
+    artifact_sha256: str
+    operation: Literal["text_to_image"]
+    engine: Literal["comfyui"]
+    geometry: ResolvedOutputGeometry
+    graph_binding_verified: Literal[True] = field(default=True, init=False)
+    request_authorized: Literal[False] = field(default=False, init=False)
+
+    def __new__(cls, token: object) -> WorkflowOutputGeometryResolution:
+        if token is not _RESOLUTION_TOKEN:
+            _refuse()
+        return object.__new__(cls)
+
+    def __init__(self, token: object) -> None:
+        if token is not _RESOLUTION_TOKEN:
+            _refuse()
 
 
 class WorkflowOutputGeometryError(ValueError):
@@ -161,6 +195,72 @@ def workflow_output_geometry_payload(result: WorkflowOutputGeometryResult) -> di
         "decode_node_ids": list(proof.decode_node_ids),
         "save_node_ids": list(proof.save_node_ids),
         "capability": output_geometry_capability_payload(proof.capability),
+        "graph_binding_verified": True,
+        "request_authorized": False,
+    }
+
+
+def resolve_workflow_output_geometry(
+    result: WorkflowOutputGeometryResult, request: object
+) -> WorkflowOutputGeometryResolution | None:
+    """Resolve one caller request against a proof this verifier produced.
+
+    Returns None when the revision has no proof or when the proven capability
+    does not admit the request. One answer covers both on purpose: telling them
+    apart would let a caller who cannot see a workflow learn whether its graph
+    is one this proof supports, and the request is the only thing the caller is
+    entitled to reason about.
+
+    Nothing the caller sends becomes capability, binding or authority. The only
+    value that crosses into resolution is the capability the proof built from
+    the stored revision.
+    """
+
+    if type(result) is not WorkflowOutputGeometryResult:
+        _refuse()
+    proof = result.proof
+    if not result.available or type(proof) is not WorkflowOutputGeometryProof:
+        return None
+    try:
+        geometry = resolve_output_geometry(proof.capability, request)
+    except OutputGeometryError:
+        # Narrow on purpose. output_geometry.py raises through exactly one site,
+        # `_refuse`, and every value it touches on the way there is type-guarded
+        # first, so this is the only exception a request can produce. Catching
+        # more would turn a defect in the resolver into "your request is
+        # invalid", which is the hardest kind of wrong answer to find.
+        return None
+
+    resolution = WorkflowOutputGeometryResolution(_RESOLUTION_TOKEN)
+    object.__setattr__(resolution, "version", WORKFLOW_OUTPUT_GEOMETRY_VERSION)
+    object.__setattr__(resolution, "workflow_id", proof.workflow_id)
+    object.__setattr__(resolution, "revision_id", proof.revision_id)
+    object.__setattr__(resolution, "artifact_sha256", proof.artifact_sha256)
+    object.__setattr__(resolution, "operation", proof.operation)
+    object.__setattr__(resolution, "engine", proof.engine)
+    object.__setattr__(resolution, "geometry", geometry)
+    object.__setattr__(resolution, "graph_binding_verified", True)
+    object.__setattr__(resolution, "request_authorized", False)
+    return resolution
+
+
+def workflow_output_geometry_resolution_payload(
+    resolution: WorkflowOutputGeometryResolution,
+) -> dict[str, object]:
+    if type(resolution) is not WorkflowOutputGeometryResolution:
+        _refuse()
+    geometry = resolution.geometry
+    return {
+        "version": resolution.version,
+        "workflow_id": resolution.workflow_id,
+        "revision_id": resolution.revision_id,
+        "artifact_sha256": resolution.artifact_sha256,
+        "operation": resolution.operation,
+        "engine": resolution.engine,
+        "mode": geometry.mode,
+        "size_mode": geometry.size_mode,
+        "width": geometry.width,
+        "height": geometry.height,
         "graph_binding_verified": True,
         "request_authorized": False,
     }

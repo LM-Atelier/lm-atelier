@@ -1492,6 +1492,21 @@ class WorkflowOutputGeometryCapabilityOut(ApiModel):
     request_authorized: Literal[False]
 
 
+class WorkflowOutputGeometryResolutionOut(ApiModel):
+    version: Literal[1]
+    workflow_id: str
+    revision_id: str
+    artifact_sha256: str
+    operation: Literal["text_to_image"]
+    engine: Literal["comfyui"]
+    mode: Literal["image"]
+    size_mode: Literal["exact"]
+    width: int
+    height: int
+    graph_binding_verified: Literal[True]
+    request_authorized: Literal[False]
+
+
 class WorkflowOut(ApiModel):
     id: str
     family_id: str | None = None

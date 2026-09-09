@@ -11,8 +11,11 @@ from local_lm.workflow_output_geometry import (
     WORKFLOW_OUTPUT_GEOMETRY_UNAVAILABLE,
     WorkflowOutputGeometryError,
     WorkflowOutputGeometryProof,
+    WorkflowOutputGeometryResolution,
     prove_workflow_output_geometry,
+    resolve_workflow_output_geometry,
     workflow_output_geometry_payload,
+    workflow_output_geometry_resolution_payload,
 )
 
 
@@ -454,3 +457,155 @@ def test_annotation_keywords_do_not_stop_a_supported_schema() -> None:
     assert result.available is True
     assert result.proof is not None
     assert result.proof.width.maximum == 2048
+
+
+def _request(**overrides: object) -> dict[str, object]:
+    request: dict[str, object] = {
+        "mode": "image",
+        "size_mode": "exact",
+        "width": 1024,
+        "height": 768,
+    }
+    request.update(overrides)
+    return request
+
+
+def test_resolution_binds_the_exact_revision_and_grants_no_authority() -> None:
+    result = _prove()
+
+    resolution = resolve_workflow_output_geometry(result, _request())
+
+    assert resolution is not None
+    assert resolution.workflow_id == "workflow-1"
+    assert resolution.revision_id == "revision-1"
+    assert result.proof is not None
+    assert resolution.artifact_sha256 == result.proof.artifact_sha256
+    assert resolution.operation == "text_to_image"
+    assert resolution.engine == "comfyui"
+    assert (resolution.geometry.width, resolution.geometry.height) == (1024, 768)
+    assert resolution.geometry.size_mode == "exact"
+    assert resolution.graph_binding_verified is True
+    assert resolution.request_authorized is False
+    assert resolution.geometry.request_authorized is False
+
+    payload = workflow_output_geometry_resolution_payload(resolution)
+    assert payload == {
+        "version": 1,
+        "workflow_id": "workflow-1",
+        "revision_id": "revision-1",
+        "artifact_sha256": result.proof.artifact_sha256,
+        "operation": "text_to_image",
+        "engine": "comfyui",
+        "mode": "image",
+        "size_mode": "exact",
+        "width": 1024,
+        "height": 768,
+        "graph_binding_verified": True,
+        "request_authorized": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("width", "height"),
+    [(128, 128), (2048, 2048), (2048, 128), (128, 2048)],
+)
+def test_boundary_dimensions_resolve(width: int, height: int) -> None:
+    resolution = resolve_workflow_output_geometry(_prove(), _request(width=width, height=height))
+
+    assert resolution is not None
+    assert (resolution.geometry.width, resolution.geometry.height) == (width, height)
+
+
+def test_every_bound_the_capability_advertises_resolves() -> None:
+    result = _prove()
+    assert result.proof is not None
+    combination = result.proof.capability.combinations[0]
+    corners = (
+        (combination.min_width, combination.min_height),
+        (combination.max_width, combination.max_height),
+        (combination.default_width, combination.default_height),
+    )
+
+    for width, height in corners:
+        resolution = resolve_workflow_output_geometry(result, _request(width=width, height=height))
+        assert resolution is not None
+        assert (resolution.geometry.width, resolution.geometry.height) == (width, height)
+
+
+def test_resolution_is_sealed_and_frozen() -> None:
+    result = _prove()
+    resolution = resolve_workflow_output_geometry(result, _request())
+    assert resolution is not None
+
+    with pytest.raises(WorkflowOutputGeometryError):
+        WorkflowOutputGeometryResolution(object())
+    with pytest.raises(FrozenInstanceError):
+        resolution.revision_id = "other"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    "request_value",
+    [
+        _request(width=True),
+        _request(height=False),
+        _request(width=1024.0),
+        _request(height=768.5),
+        _request(width="1024"),
+        _request(width=None),
+        _request(width=64),
+        _request(height=4096),
+        _request(width=1000),
+        _request(height=700),
+        _request(mode="video"),
+        _request(mode="IMAGE"),
+        _request(size_mode="preset"),
+        _request(size_mode="workflow_native"),
+        _request(request_authorized=True),
+        _request(graph_binding_verified=True),
+        _request(revision_id="revision-1"),
+        _request(capability={"version": 1}),
+        {"mode": "image", "size_mode": "exact", "width": 1024},
+        {"mode": "image", "size_mode": "exact"},
+        {},
+        [],
+        "exact",
+        None,
+    ],
+)
+def test_invalid_and_forged_requests_resolve_to_nothing(request_value: object) -> None:
+    assert resolve_workflow_output_geometry(_prove(), request_value) is None
+
+
+def test_an_unsupported_revision_resolves_nothing_for_a_valid_request() -> None:
+    arguments = _arguments()
+    graph = arguments["api_graph"]
+    assert isinstance(graph, dict)
+    _insert_downstream_transform(graph, "PrivateImageScaleNode")
+    _rehash(arguments)
+    result = _prove(arguments)
+    assert result.available is False
+
+    assert resolve_workflow_output_geometry(result, _request()) is None
+
+
+def test_stored_artifact_drift_resolves_nothing_for_a_valid_request() -> None:
+    arguments = _arguments()
+    schema = arguments["input_schema"]
+    assert isinstance(schema, dict)
+    width = schema["properties"]["width"]  # type: ignore[index]
+    width["maximum"] = 4096
+
+    assert resolve_workflow_output_geometry(_prove(arguments), _request()) is None
+
+    # The stale contract is the whole reason, and rehashing the same edited
+    # schema is what shows it: the widened schema is perfectly provable once
+    # the stored digest describes it again.
+    _rehash(arguments)
+    assert resolve_workflow_output_geometry(_prove(arguments), _request()) is not None
+
+
+def test_a_result_that_is_not_this_verifier_own_is_refused() -> None:
+    with pytest.raises(WorkflowOutputGeometryError):
+        resolve_workflow_output_geometry(cast(Any, {"available": True}), _request())
+    with pytest.raises(WorkflowOutputGeometryError):
+        workflow_output_geometry_resolution_payload(cast(Any, {"width": 1024}))
