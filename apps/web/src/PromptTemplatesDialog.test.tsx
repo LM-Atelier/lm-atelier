@@ -2,7 +2,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, api } from "./api";
-import type { PromptDirectQueueAttempt } from "./ComposerPromptTemplatesAction";
+import type {
+  PromptDirectQueueAttempt,
+  PromptDirectQueueRequest,
+} from "./ComposerPromptTemplatesAction";
 import { PromptTemplatesDialog } from "./PromptTemplatesDialog";
 import type {
   PromptTemplateContract,
@@ -62,7 +65,7 @@ function renderDialog({
 }: {
   currentPrompt?: string;
   maximum?: number;
-  onCreate?: ReturnType<typeof vi.fn>;
+  onCreate?: ReturnType<typeof vi.fn<(request: PromptDirectQueueRequest) => void>>;
   attempt?: PromptDirectQueueAttempt | null;
 } = {}) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
