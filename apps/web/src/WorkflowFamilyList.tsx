@@ -8,6 +8,12 @@ const readinessLabels: Record<WorkflowVariantReadiness, string> = {
   review_required: "Needs review",
   unavailable: "Unavailable",
 };
+const readinessOrder: Record<WorkflowVariantReadiness, number> = {
+  ready: 0, setup_required: 1, review_required: 2, unavailable: 3,
+};
+function bestReadiness(variants: WorkflowFamily["variants"]): number {
+  return variants.reduce((best, variant) => Math.min(best, readinessOrder[variant.readiness]), 3);
+}
 const operationLabels: Record<string, string> = {
   text_to_image: "Text to image",
   image_to_image: "Image to image",
@@ -32,6 +38,8 @@ export function WorkflowFamilyList({
   const [search, setSearch] = useState("");
   const [operation, setOperation] = useState("");
   const [readiness, setReadiness] = useState("");
+  const [source, setSource] = useState("");
+  const [sort, setSort] = useState("name");
   const [defaultsOnly, setDefaultsOnly] = useState(false);
   const query = search.trim().toLocaleLowerCase();
   const matchesSearch = (values: string[]) => values.some((value) => value.toLocaleLowerCase().includes(query));
@@ -46,6 +54,7 @@ export function WorkflowFamilyList({
     ...workflows.map((workflow) => workflow.operation),
   ])].sort();
   const visibleFamilies = families.filter((family) => includeArchived || !family.archived)
+    .filter((family) => !source || family.compatibility === (source === "profile"))
     .filter((family) => !defaultsOnly || family.preferences.some((preference) => preference.is_default))
     .filter((family) => matchesSearch([
       family.name, family.description, family.use_case, ...family.tags,
@@ -54,10 +63,11 @@ export function WorkflowFamilyList({
     .map((family) => ({ family, variants: family.variants.filter((variant) =>
       (!operation || variant.operation === operation) && (!readiness || variant.readiness === readiness)) }))
     .filter(({ variants }) => variants.length > 0)
-    .sort((a, b) => a.family.name.localeCompare(b.family.name) || a.family.id.localeCompare(b.family.id));
+    .sort((a, b) => (sort === "readiness" ? bestReadiness(a.variants) - bestReadiness(b.variants) : 0)
+      || a.family.name.localeCompare(b.family.name) || a.family.id.localeCompare(b.family.id));
   const remaining = workflows.filter((workflow) => !represented.has(workflow.id)
     && workflow.family_id == null
-    && !defaultsOnly && !readiness
+    && !defaultsOnly && !readiness && !source
     && (!operation || workflow.operation === operation)
     && matchesSearch([workflow.name, workflow.description]))
     .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
@@ -87,6 +97,19 @@ export function WorkflowFamilyList({
           <select value={readiness} onChange={(event) => setReadiness(event.target.value)}>
             <option value="">All readiness states</option>
             {Object.entries(readinessLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+          </select>
+        </label>
+        <label>Family source
+          <select value={source} onChange={(event) => setSource(event.target.value)}>
+            <option value="">All sources</option>
+            <option value="profile">From model profiles</option>
+            <option value="workflow">Other workflow families</option>
+          </select>
+        </label>
+        <label>Sort workflow families
+          <select value={sort} onChange={(event) => setSort(event.target.value)}>
+            <option value="name">Name</option>
+            <option value="readiness">Readiness</option>
           </select>
         </label>
         <label className="workflow-family-checkbox"><input type="checkbox" checked={defaultsOnly} onChange={(event) => setDefaultsOnly(event.target.checked)} /> Defaults only</label>
