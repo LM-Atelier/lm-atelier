@@ -10,6 +10,7 @@ export function WorkflowFamilyMetadata({ family }: { family: WorkflowFamily }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(family.name);
   const [useCase, setUseCase] = useState(family.use_case);
+  const [useCaseEdited, setUseCaseEdited] = useState(false);
   const [saved, setSaved] = useState(false);
   // Compatibility families also update the profile that can be exported.
   const nameLimit = family.compatibility ? 200 : 240;
@@ -17,7 +18,7 @@ export function WorkflowFamilyMetadata({ family }: { family: WorkflowFamily }) {
   const valid = name.trim().length > 0 && name.trim().length <= nameLimit
     && useCase.trim().length <= useCaseLimit;
   const save = useMutation({
-    mutationFn: ({ familyId, values }: { familyId: string; values: { name: string; use_case: string } }) =>
+    mutationFn: ({ familyId, values }: { familyId: string; values: { name: string; use_case?: string } }) =>
       api.updateWorkflowFamily(familyId, values),
     onSuccess: (updated, { familyId }) => {
       client.setQueriesData<WorkflowFamily[]>({ queryKey: ["workflow-families"] },
@@ -39,7 +40,9 @@ export function WorkflowFamilyMetadata({ family }: { family: WorkflowFamily }) {
         <form onSubmit={(event) => {
           event.preventDefault();
           if (valid && !save.isPending) {
-            save.mutate({ familyId: family.id, values: { name: name.trim(), use_case: useCase.trim() } });
+            save.mutate({ familyId: family.id, values: {
+              name: name.trim(), ...(useCaseEdited ? { use_case: useCase.trim() } : {}),
+            } });
           }
         }}>
           <label>Family name
@@ -47,7 +50,7 @@ export function WorkflowFamilyMetadata({ family }: { family: WorkflowFamily }) {
               maxLength={nameLimit} required disabled={save.isPending} />
           </label>
           <label>Use case
-            <textarea value={useCase} onChange={(event) => setUseCase(event.target.value)}
+            <textarea value={useCase} onChange={(event) => { setUseCase(event.target.value); setUseCaseEdited(true); }}
               maxLength={useCaseLimit} rows={3} disabled={save.isPending} />
           </label>
           <p className="muted">Describe when this family is useful. Automatic workflow selection uses this description.</p>
@@ -72,6 +75,7 @@ export function WorkflowFamilyMetadata({ family }: { family: WorkflowFamily }) {
             <button className="secondary compact-button" onClick={() => {
               setName(family.name);
               setUseCase(family.use_case);
+              setUseCaseEdited(false);
               setSaved(false);
               save.reset();
               setEditing(true);
