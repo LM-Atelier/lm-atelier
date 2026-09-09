@@ -97,6 +97,7 @@ from .profile_service import (
     ensure_profile_for_install,
     retire_profiles_for_installs,
 )
+from .profile_use_cases import normalize_provider_use_case_metadata
 from .progress import completed_progress, update_job_progress
 from .scheduler import ResourceScheduler
 from .schemas import DownloadRequest
@@ -1637,6 +1638,9 @@ class DownloadManager:
                             "default_settings": default_settings,
                             "family": inspection.family if inspection else None,
                             "trigger_words": self._planned_trigger_words(plan),
+                            "use_case_metadata": normalize_provider_use_case_metadata(
+                                source_metadata
+                            ),
                         },
                         active=compiled_template is None and not request.install_plan_id,
                     )
@@ -1854,9 +1858,11 @@ class DownloadManager:
                 job = session.get(Job, job_id)
                 if not install or not job:
                     return None
+                source = session.get(ModelSource, install.source_id) if install.source_id else None
                 profile = build_profile_for_install(
                     install,
                     default_settings=default_settings,
+                    source_metadata=source.metadata_json if source else None,
                 )
                 manifest_files = install.manifest_json.get("files")
                 projector_expected = any(
@@ -2840,7 +2846,17 @@ class DownloadManager:
                 filename=filename,
                 source_file_id=file_id,
             )
-        return siblings, sources, plan.revision, {"source_version_id": plan.revision}
+        return (
+            siblings,
+            sources,
+            plan.revision,
+            {
+                **normalize_provider_use_case_metadata(
+                    plan.runtime_contract_json.get("use_case_metadata")
+                ),
+                "source_version_id": plan.revision,
+            },
+        )
 
     async def _huggingface_download_sources(
         self,

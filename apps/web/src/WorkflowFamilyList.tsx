@@ -121,6 +121,7 @@ export function WorkflowFamilyList({
             <section key={family.id} aria-labelledby={`workflow-family-${family.id}`}>
               <h3 id={`workflow-family-${family.id}`}>{family.name}</h3>
               {(family.use_case || family.description) && <p className="muted">{family.use_case || family.description}</p>}
+              {family.use_case_derived && <p className="muted">Derived from model metadata</p>}
               {family.archived && <span className="badge">Archived</span>}
               <div className="workflow-list">
                 {variants.map((variant) => {

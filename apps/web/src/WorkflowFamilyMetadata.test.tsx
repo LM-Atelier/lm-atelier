@@ -127,3 +127,24 @@ describe("editing workflow family metadata", () => {
     expect(api.updateWorkflowFamily).toHaveBeenCalledTimes(1);
   });
 });
+
+
+it("labels a derived family use case until its text is edited", () => {
+  renderFamily({ ...family("a"), use_case_derived: true });
+  expect(screen.getByText("Derived from model metadata")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Edit family details" }));
+  expect(screen.getByText("Derived from model metadata")).toBeInTheDocument();
+  fireEvent.change(screen.getByRole("textbox", { name: "Family name" }), { target: { value: "Renamed family" } });
+  expect(screen.getByText("Derived from model metadata")).toBeInTheDocument();
+  fireEvent.change(screen.getByRole("textbox", { name: "Use case" }), { target: { value: "My own use case" } });
+  expect(screen.queryByText("Derived from model metadata")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Cancel family changes" }));
+  expect(screen.getByText("Derived from model metadata")).toBeInTheDocument();
+});
+
+it("does not label an authored family use case as derived", () => {
+  renderFamily({ ...family("a"), use_case_derived: false });
+  expect(screen.queryByText("Derived from model metadata")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Edit family details" }));
+  expect(screen.queryByText("Derived from model metadata")).not.toBeInTheDocument();
+});

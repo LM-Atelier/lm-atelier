@@ -53,6 +53,7 @@ export function WorkflowFamilyMetadata({ family }: { family: WorkflowFamily }) {
             <textarea value={useCase} onChange={(event) => { setUseCase(event.target.value); setUseCaseEdited(true); }}
               maxLength={useCaseLimit} rows={3} disabled={save.isPending} />
           </label>
+          {family.use_case_derived && !useCaseEdited && <p className="muted">Derived from model metadata</p>}
           <p className="muted">Describe when this family is useful. Automatic workflow selection uses this description.</p>
           {(name.trim().length > nameLimit || useCase.trim().length > useCaseLimit) && (
             <p role="alert">Use up to {nameLimit} characters for the name and {useCaseLimit} for the use case.</p>
@@ -82,6 +83,7 @@ export function WorkflowFamilyMetadata({ family }: { family: WorkflowFamily }) {
             }}>Edit family details</button>
           </div>
           <p className="muted">{family.use_case || "No use case has been added."}</p>
+          {family.use_case_derived && <p className="muted">Derived from model metadata</p>}
           {saved && <p role="status">Family details saved.</p>}
         </>
       )}

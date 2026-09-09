@@ -516,6 +516,7 @@ export interface ModelProfile {
   model_install_id: string | null;
   name: string;
   use_case: string;
+  use_case_derived?: boolean;
   role: "chat" | "image" | "video";
   engine: string;
   load_settings_json: Record<string, unknown>;
@@ -529,6 +530,7 @@ export interface ModelProfileBundle {
   version: 1;
   name: string;
   use_case: string;
+  use_case_derived?: boolean;
   role: "chat" | "image" | "video";
   engine: string;
   model_install_id: string | null;
@@ -1485,6 +1487,7 @@ export interface WorkflowFamily {
   name: string;
   description: string;
   use_case: string;
+  use_case_derived?: boolean;
   tags: string[];
   enabled: boolean;
   archived: boolean;

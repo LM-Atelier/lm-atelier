@@ -168,3 +168,12 @@ describe("browsing workflow families", () => {
     expect(screen.getByRole("button", { name: "New revision" })).toBeInTheDocument();
   });
 });
+
+
+it("labels derived use cases in the family browser", async () => {
+  const derived = { ...family("a"), use_case_derived: true };
+  vi.mocked(api.workflowFamilies).mockResolvedValue([derived, family("b")]);
+  wrap(<WorkflowsView />);
+  await screen.findByText("Derived from model metadata");
+  expect(screen.getAllByText("Derived from model metadata")).toHaveLength(1);
+});
