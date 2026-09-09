@@ -13,6 +13,16 @@ default and can select an appropriate configured model for each request.
 
 ![LM Atelier empty local workspace](docs/assets/application-preview.png)
 
+## Explore the workspace
+
+Start with [Getting started](docs/GETTING-STARTED.md) to configure a local model,
+then follow the [workspace guide](docs/GETTING-STARTED.md#explore-the-workspace) through a conversation,
+the media library, reusable prompts, and workflow selection.
+
+This branch describes the current source. Downloadable previews are listed on
+[Releases](https://github.com/LM-Atelier/lm-atelier/releases); check the release
+notes for the features and platform coverage of a particular installer.
+
 ## Core features
 
 - Chat, image creation and editing, video generation, and vision analysis
@@ -28,6 +38,11 @@ default and can select an appropriate configured model for each request.
   answer they shaped
 - Installer-driven first-run setup that chooses models, downloads with one
   combined figure and time estimate, and loads workers before the first request
+- A searchable workflow library with grouped variants, dependency details,
+  readiness explanations, and defaults for each operation
+- Reusable Prompt Templates with configurable choices and local model-filled
+  slots, plus grouped output from multi-prompt requests
+- A media library for browsing outputs and managing reusable image references
 - Durable queues, regeneration history, per-chat settings, and reusable presets
 - Local model, media, conversation, and storage management
 
@@ -119,7 +134,7 @@ Windows, or PowerShell 7 on Linux. Install the pinned Chromium build once with
 
 ## Documentation
 
-- [Getting started](docs/GETTING-STARTED.md)
+- [Getting started and workspace guide](docs/GETTING-STARTED.md)
 - [Editing studio](docs/EDITING-STUDIO.md)
 - [Workflow packages](docs/WORKFLOW-PACKAGES.md)
 - [Architecture](docs/ARCHITECTURE.md)

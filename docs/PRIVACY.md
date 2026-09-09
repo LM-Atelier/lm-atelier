@@ -3,7 +3,7 @@
 LM Atelier stores chats, prompts, settings, model metadata, and generated media
 locally. It does not include a telemetry or analytics service.
 
-LM Atelier uses the network when you browse the Hugging Face catalog, download a
+LM Atelier uses the network when you browse the Hugging Face or CivitAI catalog, check for model updates, download a
 model, or use an installed model whose supported engine must be downloaded. A
 configured adapter, model, or custom node may also make network requests.
 Credentials entered in the app use the operating-system vault rather than
