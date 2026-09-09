@@ -6662,10 +6662,10 @@ async def catalog_model_versions(
     from; picking a row goes back through the ordinary preflight and install
     for that exact version, and nothing about the verified path changes.
 
-    Installed state is read from the same manifest field update checks use.
-    Where a kind does not record a provider version - checkpoints today - the
-    answer is `null` rather than `false`: saying "not installed" about
-    something we cannot see is how a person ends up with a second copy.
+    Installed state uses the same exact checkpoint and auxiliary identities
+    as update checks. A matching version is true. An unmatched version is
+    false only if this model has at least one recorded identity; otherwise
+    it is null.
     """
 
     services = _services(request)
