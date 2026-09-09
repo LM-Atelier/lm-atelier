@@ -44,6 +44,51 @@ beforeEach(() => {
 afterEach(() => { cleanup(); clients.splice(0).forEach((client) => client.clear()); });
 
 describe("browsing workflow families", () => {
+  it("filters the family source without guessing the origin of ungrouped definitions", async () => {
+    vi.mocked(api.workflowFamilies).mockResolvedValue([
+      { ...family("a"), compatibility: true }, family("b"),
+    ]);
+    vi.mocked(api.workflows).mockResolvedValue([
+      workflow("a"), workflow("b"), { ...workflow("c"), family_id: null },
+    ]);
+    wrap(<WorkflowsView />);
+    await screen.findByRole("heading", { name: "Family a" });
+    expect(screen.getByRole("heading", { name: "Ungrouped workflows" })).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("combobox", { name: "Family source" }), { target: { value: "profile" } });
+    expect(screen.getByRole("heading", { name: "Family a" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Family b" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Ungrouped workflows" })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole("combobox", { name: "Family source" }), { target: { value: "workflow" } });
+    expect(screen.queryByRole("heading", { name: "Family a" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Family b" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Ungrouped workflows" })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole("combobox", { name: "Family source" }), { target: { value: "" } });
+    expect(screen.getByRole("heading", { name: "Ungrouped workflows" })).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Workflow c"));
+    expect(screen.getByRole("button", { name: "New revision" })).toBeInTheDocument();
+  });
+
+  it("sorts readiness using only the variants matching the operation filter", async () => {
+    const alpha = { ...family("a"), name: "Alpha family" };
+    alpha.variants[0] = { ...alpha.variants[0], readiness: "unavailable" };
+    alpha.variants.push({ ...family("c").variants[0], operation: "text_to_video", readiness: "ready" });
+    const beta = { ...family("b"), name: "Beta family" };
+    beta.variants[0] = { ...beta.variants[0], readiness: "setup_required" };
+    vi.mocked(api.workflowFamilies).mockResolvedValue([beta, alpha]);
+    wrap(<WorkflowsView />);
+    await screen.findByRole("heading", { name: "Alpha family" });
+    const names = () => screen.getAllByRole("heading", { level: 3 })
+      .filter((heading) => heading.id.startsWith("workflow-family-"))
+      .map((heading) => heading.textContent);
+    expect(names()).toEqual(["Alpha family", "Beta family"]);
+    fireEvent.change(screen.getByRole("combobox", { name: "Sort workflow families" }), { target: { value: "readiness" } });
+    expect(names()).toEqual(["Alpha family", "Beta family"]);
+    fireEvent.change(screen.getByRole("combobox", { name: "Filter by operation" }), { target: { value: "text_to_image" } });
+    expect(names()).toEqual(["Beta family", "Alpha family"]);
+    fireEvent.change(screen.getByRole("combobox", { name: "Sort workflow families" }), { target: { value: "name" } });
+    expect(names()).toEqual(["Alpha family", "Beta family"]);
+  });
+
   it("groups variants by family and searches family metadata without losing the revision editor", async () => {
     vi.mocked(api.workflowFamilies).mockResolvedValue([
       { ...family("a"), name: "Landscape family", use_case: "Outdoor scenes" },
