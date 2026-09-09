@@ -36,6 +36,7 @@ _SORTS = {
 }
 _MAX_RETRY_AFTER_SECONDS = 30.0
 _MAX_METADATA_VALUES = 128
+_NORMALIZATION_VERSION = 2
 _MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 _GENERAL_LEVEL_MASK = 1 | 2
 _MATURE_LEVEL_MASK = 4 | 8 | 16 | 32
@@ -287,7 +288,7 @@ class CivitaiCatalog:
                         "version_id": str(version.get("id") or ""),
                         "version_name": str(version.get("name") or "") or None,
                         "published_at": str(version.get("publishedAt") or "") or None,
-                        "base_model": str(version.get("baseModel") or "") or None,
+                        "base_model": self._version_base_model(version) or None,
                         "changelog": str(version.get("description") or "")[:4096] or None,
                         # The chooser has to say what a version costs before
                         # someone picks it. The payload already carries the
@@ -375,8 +376,7 @@ class CivitaiCatalog:
             }
         )
         tags = cls._string_list(item.get("tags"))
-        base_models = cls._string_list(item.get("baseModels"))
-        base_model = str(selected.get("baseModel") or "") or next(iter(base_models), "")
+        base_model = cls._version_base_model(selected)
         if base_model and base_model not in tags:
             tags.append(base_model)
         model_type = str(item.get("type") or "")
@@ -439,8 +439,8 @@ class CivitaiCatalog:
     ) -> list[dict[str, Any]]:
         trained_words = cls._string_list(version.get("trainedWords"))
         tags = cls._string_list(item.get("tags"))
-        base_models = cls._string_list(item.get("baseModels"))
-        base_model = str(version.get("baseModel") or "") or next(iter(base_models), "")
+        base_model = cls._version_base_model(version)
+        base_models = [base_model] if base_model else []
         declared_values = [
             *tags,
             *base_models,
@@ -659,7 +659,12 @@ class CivitaiCatalog:
         return cursor
 
     def _cache_path(self, *parts: Any) -> Path:
-        payload = json.dumps(parts, sort_keys=True, separators=(",", ":"), default=str)
+        payload = json.dumps(
+            (_NORMALIZATION_VERSION, *parts),
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
         return self._cache.path(hashlib.sha256(payload.encode()).hexdigest())
 
     def _read_page_cache(
@@ -714,6 +719,11 @@ class CivitaiCatalog:
         return isinstance(error, httpx.HTTPStatusError) and (
             error.response.status_code == 429 or error.response.status_code >= 500
         )
+
+    @staticmethod
+    def _version_base_model(version: dict[str, Any]) -> str:
+        value = version.get("baseModel")
+        return value.strip() if isinstance(value, str) else ""
 
     @staticmethod
     def _string_list(value: Any) -> list[str]:

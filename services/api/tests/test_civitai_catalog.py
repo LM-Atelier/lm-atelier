@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
@@ -545,3 +546,92 @@ def test_a_card_names_the_model_it_is_a_version_of() -> None:
     assert card.parent_model_name == "Lustify"
     # The version identity is untouched: install still binds to the version.
     assert card.parent_model_id != card.remote_id
+
+
+@pytest.mark.parametrize("base_model", [None, "", " \t ", 42, ["SDXL 1.0"]])
+def test_missing_version_base_family_is_not_inherited(base_model: Any) -> None:
+    item = _item(baseModels=["SDXL 1.0", "Flux.1 D"], tags=["landscape"])
+    version = _version(baseModel=base_model)
+    card = CivitaiCatalog._normalize(item, "image", version=version)
+    metadata = CivitaiCatalog._normalize_files(item, version)[0]["metadata"]
+    assert card.architecture is None
+    assert "SDXL 1.0" not in card.tags
+    assert "Flux.1 D" not in card.tags
+    assert metadata["base_model"] is None
+    assert metadata["base_models"] == []
+
+
+@pytest.mark.parametrize("base_model", ["Flux.1 D", "  Flux.1 D  "])
+def test_base_family_metadata_belongs_to_the_selected_version(base_model: str) -> None:
+    item = _item(baseModels=["SDXL 1.0", "Flux.1 D"], tags=["landscape"])
+    version = _version(id=202, baseModel=base_model, trainedWords=["landscape-style"])
+    card = CivitaiCatalog._normalize(item, "image", version=version)
+    metadata = CivitaiCatalog._normalize_files(item, version)[0]["metadata"]
+    assert card.remote_id == "202"
+    assert card.architecture == "Flux.1 D"
+    assert metadata["source_version_id"] == "202"
+    assert metadata["base_model"] == "Flux.1 D"
+    assert metadata["base_models"] == ["Flux.1 D"]
+    assert metadata["trained_words"] == ["landscape-style"]
+
+
+async def test_version_summaries_normalize_only_their_own_base_family(tmp_path: Path) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_item(
+                baseModels=["SDXL 1.0", "Flux.1 D"],
+                modelVersions=[
+                    _version(id=201, baseModel="  Flux.1 D  "),
+                    _version(id=202, baseModel=None),
+                    _version(id=203, baseModel=["SDXL 1.0"]),
+                ],
+            ),
+        )
+
+    catalog = _catalog(tmp_path, handler)
+    try:
+        summary = await catalog.versions("101")
+    finally:
+        await catalog.close()
+    assert [version["base_model"] for version in summary["versions"]] == [
+        "Flux.1 D",
+        None,
+        None,
+    ]
+
+
+async def test_legacy_detail_cache_cannot_restore_an_inherited_base_family(tmp_path: Path) -> None:
+    requested_paths: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        if request.url.path == "/api/v1/model-versions/202":
+            return httpx.Response(200, json=_version_detail(id=202, baseModel=None))
+        return httpx.Response(
+            200,
+            json=_item(baseModels=["SDXL 1.0", "Flux.1 D"]),
+        )
+
+    catalog = _catalog(tmp_path, handler)
+    legacy_version = _version(id=202, baseModel="SDXL 1.0")
+    legacy_item = _item(baseModels=["SDXL 1.0", "Flux.1 D"])
+    legacy = {
+        "model": CivitaiCatalog._normalize(legacy_item, "image", version=legacy_version).model_dump(
+            mode="json"
+        ),
+        "revision": "202",
+        "files": CivitaiCatalog._normalize_files(legacy_item, legacy_version),
+    }
+    # The unversioned cache key used for this inspection before normalization changed.
+    legacy_path = catalog._cache.path(
+        "87ed57cd2889289fc1aaac2c23ac1e3ffc52c858c65396da428f216ad22838d0"
+    )
+    catalog._cache.write_text(legacy_path, json.dumps(legacy))
+    try:
+        detail = await catalog.inspect("202", requested_role="image")
+    finally:
+        await catalog.close()
+    assert requested_paths == ["/api/v1/model-versions/202", "/api/v1/models/101"]
+    assert detail["model"]["architecture"] is None
+    assert detail["files"][0]["metadata"]["base_models"] == []
