@@ -1,16 +1,17 @@
 from __future__ import annotations
 
-import asyncio
 import io
 import json
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from httpx2 import ASGITransport, AsyncClient
+from run_waits import wait_for_terminal_status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from workflow_fixtures import seed_workflow_trust
 
 from local_lm.artifacts import ArtifactStore
 from local_lm.config import Settings
@@ -65,16 +66,12 @@ def test_portability_scrubber_preserves_remote_ids_and_redacts_path_keys() -> No
 
 
 async def _wait_for_run(client: AsyncClient, run_id: str) -> dict[str, Any]:
-    deadline = asyncio.get_running_loop().time() + 5
-    while asyncio.get_running_loop().time() < deadline:
+    async def read() -> dict[str, Any]:
         response = await client.get(f"/api/runs/{run_id}")
         assert response.status_code == 200
-        run = response.json()
-        if run["status"] in {"complete", "failed", "cancelled"}:
-            assert run["status"] == "complete", run
-            return run
-        await asyncio.sleep(0.03)
-    raise AssertionError("run did not complete")
+        return cast(dict[str, Any], response.json())
+
+    return cast(dict[str, Any], await wait_for_terminal_status(read, what=f"run {run_id}"))
 
 
 def _manifest(archive_bytes: bytes) -> dict[str, Any]:
@@ -194,7 +191,7 @@ async def test_project_vision_context_round_trip_and_legacy_defaults(
     exported = await client.post(f"/api/projects/{project['id']}/export")
     archive = await client.get(exported.json()["url"])
     manifest = _manifest(archive.content)
-    assert manifest["version"] == 6
+    assert manifest["version"] == 7
     assert manifest["chats"][0]["active_vision_profile_id"] == profile["id"]
     assert manifest["chats"][0]["vision_settings_json"] == {
         "max_images": 2,
@@ -324,10 +321,10 @@ async def test_project_round_trip_redacts_paths_and_remaps_portable_identifiers(
                 "operation": "text_to_image",
                 "engine": "mock",
                 "api_graph": {"loader": {"class_type": "PortableLoader"}},
-                "trusted": True,
             },
         )
     ).json()
+    seed_workflow_trust(workflow["current_revision_id"])
     source_revision = workflow["revisions"][0]
     project = (
         await client.post(

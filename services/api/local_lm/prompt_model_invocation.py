@@ -12,7 +12,7 @@ import json
 import math
 import re
 from dataclasses import dataclass, field
-from typing import Any, NoReturn, cast
+from typing import Any, Literal, NoReturn, cast
 
 from .adapters.base import ChatAdapter, ChatEvent, ChatRequest
 from .domain import new_id
@@ -38,10 +38,14 @@ from .prompt_templates import (
 
 PROMPT_MODEL_INVOCATION_FAILED = "Prompt model invocation failed."
 PROMPT_MODEL_INVOCATION_TIMEOUT_SECONDS = 20.0
-MAX_PROMPT_MODEL_EVENTS = 128
+# A local model can emit narration and one argument fragment per token.
+# Leave framing room around the 4096-token request; aggregate bounds still
+# account for every event, including ignored narration and usage metadata.
+MAX_PROMPT_MODEL_EVENTS = 8_192
 MAX_PROMPT_MODEL_CALLS = 1
 MAX_PROMPT_MODEL_NAME_FRAGMENTS = 8
-MAX_PROMPT_MODEL_ARGUMENT_FRAGMENTS = 128
+MAX_PROMPT_MODEL_ARGUMENT_FRAGMENTS = 4_096
+MAX_PROMPT_MODEL_DATA_NODES = 32_768
 MAX_PROMPT_MODEL_TOOL_NAME_CHARS = 128
 
 _SLOT_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}", re.ASCII)
@@ -60,12 +64,13 @@ _REPAIR_INSTRUCTION = (
 class PromptModelInvocationError(RuntimeError):
     """A fixed, non-echoing failure at the model invocation boundary."""
 
-    def __init__(self) -> None:
+    def __init__(self, reason: Literal["invocation", "values"] = "invocation") -> None:
         super().__init__(PROMPT_MODEL_INVOCATION_FAILED)
+        self.reason = reason
 
 
-def _fail() -> NoReturn:
-    raise PromptModelInvocationError() from None
+def _fail(reason: Literal["invocation", "values"] = "invocation") -> NoReturn:
+    raise PromptModelInvocationError(reason) from None
 
 
 class _InvalidOutput(Exception):
@@ -241,7 +246,7 @@ def _invocation_payload(
 
 
 def _invocation_tool(contract: PromptModelSlotContract) -> dict[str, object]:
-    """Return the reviewed closed schema without putting guidance in authority."""
+    """Build the generation schema without putting guidance in authority."""
 
     prompt_model_values_tool(contract)
 
@@ -258,7 +263,18 @@ def _invocation_tool(contract: PromptModelSlotContract) -> dict[str, object]:
         batch_slots=tuple(safe_slot(slot) for slot in contract.batch_slots),
         item_slots=tuple(safe_slot(slot) for slot in contract.item_slots),
     )
-    return prompt_model_values_tool(safe_contract)
+    tool = prompt_model_values_tool(safe_contract)
+    schema = cast(dict[str, Any], tool["function"])["parameters"]
+    value_schemas = (
+        *schema["properties"]["batch_values"]["properties"].values(),
+        *schema["properties"]["items"]["items"]["properties"]["values"]["properties"].values(),
+    )
+    # Expanding maxLength into grammar repetitions can make the local runtime
+    # reject the entire grammar. Generation omits that keyword; the local
+    # parser still requires every value to fit MAX_TEMPLATE_VALUE_CHARS.
+    for value_schema in value_schemas:
+        del value_schema["maxLength"]
+    return tool
 
 
 class _Collector:
@@ -269,6 +285,7 @@ class _Collector:
         self.argument_fragment_count = 0
         self.aggregate_characters = 0
         self.aggregate_bytes = 0
+        self._data_nodes = 0
         self._name = ""
         self._arguments = ""
         self._saw_call = False
@@ -296,7 +313,12 @@ class _Collector:
         while stack:
             item, depth = stack.pop()
             nodes += 1
-            if nodes > MAX_TEMPLATE_DOCUMENT_NODES or depth > MAX_TEMPLATE_DOCUMENT_DEPTH:
+            self._data_nodes += 1
+            if (
+                nodes > MAX_TEMPLATE_DOCUMENT_NODES
+                or self._data_nodes > MAX_PROMPT_MODEL_DATA_NODES
+                or depth > MAX_TEMPLATE_DOCUMENT_DEPTH
+            ):
                 raise _InvalidOutput
             if type(item) is str:
                 self._measure_string(item)
@@ -451,6 +473,8 @@ def _request(
         messages=messages,
         settings={"temperature": 0, "max_tokens": 4096},
         tools=[_invocation_tool(contract)],
+        tool_choice="required",
+        parallel_tool_calls=False,
         persistence_scope="ephemeral",
     )
 
@@ -490,7 +514,7 @@ async def invoke_prompt_model_values(
             evidence.append(collector.evidence())
             if attempt == 1:
                 continue
-            _fail()
+            _fail("values")
         except _InvalidOutput:
             evidence.append(collector.evidence())
             if attempt == 1:
@@ -502,7 +526,7 @@ async def invoke_prompt_model_values(
         try:
             digest = prompt_model_values_sha256(values, contract=contract_snapshot)
         except PromptModelValuesError:
-            _fail()
+            _fail("values")
         return PromptModelInvocationResult(
             values=values,
             values_sha256=digest,

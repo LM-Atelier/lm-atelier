@@ -31,6 +31,7 @@ from .filesystem_links import (
     discard_entry,
     link_entry,
     list_entries,
+    open_entry,
     sync_directory,
 )
 
@@ -152,12 +153,28 @@ _MALFORMED_LEASES_SQL: Final = (
 )
 
 
+_PACKAGE_MEMBERS_SQL: Final = (
+    "CREATE TABLE package_members (package_digest TEXT NOT NULL "
+    f"CHECK ({_lowercase_hex('package_digest', low=64, high=64)}), "
+    "member_digest TEXT NOT NULL "
+    f"CHECK ({_lowercase_hex('member_digest', low=64, high=64)}), "
+    "PRIMARY KEY (package_digest, member_digest), "
+    "UNIQUE (member_digest, package_digest)) STRICT"
+)
+_MALFORMED_MEMBERS_SQL: Final = (
+    "SELECT COUNT(*) FROM package_members WHERE NOT COALESCE("
+    f"{_lowercase_hex('package_digest', low=64, high=64)}"
+    f" AND {_lowercase_hex('member_digest', low=64, high=64)}, 0)"
+)
+
+
 _V1_TABLES: Final = {
     "registry_meta": _REGISTRY_META_SQL,
     "package_claims": _PACKAGE_CLAIMS_SQL,
 }
 _V2_TABLES: Final = {**_V1_TABLES, "package_leases": _PACKAGE_LEASES_SQL}
-_EXPECTED_TABLES_BY_VERSION: Final = {1: _V1_TABLES, 2: _V2_TABLES}
+_V3_TABLES: Final = {**_V2_TABLES, "package_members": _PACKAGE_MEMBERS_SQL}
+_EXPECTED_TABLES_BY_VERSION: Final = {1: _V1_TABLES, 2: _V2_TABLES, 3: _V3_TABLES}
 # Stamped at creation, verified on every open: schema markers can be
 # counterfeited, so the application id and version are part of identity.
 _APPLICATION_ID: Final = 0x4C4D4153
@@ -317,6 +334,10 @@ def _validate_connection(connection: sqlite3.Connection) -> int:
         malformed_leases = connection.execute(_MALFORMED_LEASES_SQL).fetchone()
         if malformed_leases is None or malformed_leases[0] != 0:
             _invalid()
+    if version >= 3:
+        malformed_members = connection.execute(_MALFORMED_MEMBERS_SQL).fetchone()
+        if malformed_members is None or malformed_members[0] != 0:
+            _invalid()
     return version
 
 
@@ -361,10 +382,30 @@ def _ensure_lease_schema(connection: sqlite3.Connection) -> None:
         if version == 1:
             connection.execute(_PACKAGE_LEASES_SQL)
             connection.execute(f"PRAGMA user_version={_USER_VERSION}")
-        elif version != _USER_VERSION:
+        elif version not in (2, 3):
             _invalid()
         connection.execute("COMMIT")
-        if _validate_connection(connection) != _USER_VERSION:
+        if _validate_connection(connection) not in (2, 3):
+            _invalid()
+    except (sqlite3.Error, SharedAssetRegistryError):
+        with contextlib.suppress(sqlite3.Error):
+            connection.execute("ROLLBACK")
+        raise
+
+
+def _ensure_membership_schema(connection: sqlite3.Connection) -> None:
+    """Add neutral package edges; unknown older memberships remain unknown."""
+
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        version = _validate_connection(connection)
+        if version == 1:
+            connection.execute(_PACKAGE_LEASES_SQL)
+        if version < 3:
+            connection.execute(_PACKAGE_MEMBERS_SQL)
+            connection.execute("PRAGMA user_version=3")
+        connection.execute("COMMIT")
+        if _validate_connection(connection) != 3:
             _invalid()
     except (sqlite3.Error, SharedAssetRegistryError):
         with contextlib.suppress(sqlite3.Error):
@@ -373,7 +414,9 @@ def _ensure_lease_schema(connection: sqlite3.Connection) -> None:
 
 
 @contextlib.contextmanager
-def _registry(database: Path, *, require_leases: bool = False) -> Iterator[sqlite3.Connection]:
+def _registry(
+    database: Path, *, require_leases: bool = False, require_membership: bool = False
+) -> Iterator[sqlite3.Connection]:
     """Hold the registry's directory itself for the whole operation.
 
     Every public entry point goes through here, and the anchor is what makes
@@ -400,7 +443,7 @@ def _registry(database: Path, *, require_leases: bool = False) -> Iterator[sqlit
         anchor = AnchoredDirectory(parent)
     except AnchoredDirectoryError:
         _invalid()
-    with anchor:
+    with anchor, contextlib.ExitStack() as held:
         # What the registry name IS, from the directory's own enumeration
         # record rather than from a second lookup by path.
         #
@@ -412,7 +455,7 @@ def _registry(database: Path, *, require_leases: bool = False) -> Iterator[sqlit
         # then follows the link by path into somebody else's database. The
         # listing is the only place the LINK kind survives.
         try:
-            listed = {entry.name: entry for entry in list_entries(anchor)}
+            listed = {entry.name: entry for entry in list_entries(anchor, include_metadata=False)}
         except AnchoredDirectoryError:
             _invalid()
         present = listed.get(leaf)
@@ -422,6 +465,31 @@ def _registry(database: Path, *, require_leases: bool = False) -> Iterator[sqlit
             # A link, a directory, or a kind the filesystem would not name.
             # Refusing beats adopting whatever it points at.
             _invalid()
+        # An extra POSIX close can clear SQLite locks held by another connection.
+        # Namespace pinning uses Windows share modes only.
+        if os.name == "nt":
+            # Keep the file as well as its directory until SQLite closes. On Windows,
+            # the anchored descriptor denies deletion and rename without preventing
+            # SQLite from opening the same regular file for ordinary reads and writes.
+            try:
+                descriptor = open_entry(anchor, leaf)
+                if descriptor is None:
+                    _invalid()
+                held.callback(os.close, descriptor)
+                # Acquisition can land after the initial listing. Check the held
+                # name again: a Windows reparse file can look regular to fstat.
+                present = next(
+                    (
+                        entry
+                        for entry in list_entries(anchor, include_metadata=False)
+                        if entry.name == leaf
+                    ),
+                    None,
+                )
+            except AnchoredDirectoryError:
+                _invalid()
+            if present is None or present.kind is not AnchoredEntryKind.FILE:
+                _invalid()
         path = parent / leaf
         _validate_registry(path)
         try:
@@ -447,7 +515,9 @@ def _registry(database: Path, *, require_leases: bool = False) -> Iterator[sqlit
             # above covers the contention.
             with contextlib.suppress(sqlite3.Error):
                 connection.execute("PRAGMA journal_mode=WAL")
-            if require_leases:
+            if require_membership:
+                _ensure_membership_schema(connection)
+            elif require_leases:
                 _ensure_lease_schema(connection)
         except (sqlite3.Error, SharedAssetRegistryError):
             connection.close()

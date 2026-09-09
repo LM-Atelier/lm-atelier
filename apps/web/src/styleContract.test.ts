@@ -17,8 +17,13 @@ const STYLESHEET = join(SOURCE_DIR, "styles.css");
 /** Classes that are deliberately not styled here, with the reason. */
 const UNSTYLED_BY_DESIGN = new Set<string>([]);
 
-function definedClasses(): Set<string> {
-  const css = readFileSync(STYLESHEET, "utf8");
+function definedClasses(file: string): Set<string> {
+  const source = readFileSync(join(SOURCE_DIR, file), "utf8");
+  // Component styles count only when that component actually imports them.
+  const imports = [...source.matchAll(/^import\s+["'](\.\/[^"']+\.css)["'];?\s*$/gm)];
+  const css = [STYLESHEET, ...imports.map((match) => join(SOURCE_DIR, match[1]))]
+    .map((path) => readFileSync(path, "utf8"))
+    .join("\n");
   const defined = new Set<string>();
   for (const match of css.matchAll(/\.(-?[_a-zA-Z][\w-]*)/g)) defined.add(match[1]);
   return defined;
@@ -63,10 +68,13 @@ function contrast(a: string, b: string): number {
 
 describe("style contract", () => {
   it("leaves no element without any styling at all", () => {
-    const defined = definedClasses();
+    const byFile = new Map<string, Set<string>>();
     const unstyled = styledElements()
-      .filter(({ tokens }) =>
-        tokens.every((token) => !defined.has(token) && !UNSTYLED_BY_DESIGN.has(token)))
+      .filter(({ tokens, file }) => {
+        const defined = byFile.get(file) ?? definedClasses(file);
+        byFile.set(file, defined);
+        return tokens.every((token) => !defined.has(token) && !UNSTYLED_BY_DESIGN.has(token));
+      })
       .map(({ tokens, file }) => `${tokens.join(" ")} (${file})`)
       .sort();
 
@@ -258,11 +266,21 @@ describe("scale and rhythm", () => {
     expect(stepsOf("gap").length).toBeLessThanOrEqual(7);
   });
 
+  it("keeps the sidebar Setup row level with the one beneath it", () => {
+    const css = readFileSync(STYLESHEET, "utf8");
+    // Named explicitly because the failure is silent and only appears at one end
+    // of a range the reader can drag to. Below 210px the status "Action needed"
+    // no longer fits on one line beside the label, and the row's height is set
+    // by its 24px icon: two lines at 12px are exactly 24px, so the wrap costs
+    // nothing. Without this the Setup button grows to 46px while the Settings
+    // button directly beneath it stays 42px.
+    const rule = /\.setup-nav-state\s*\{[^}]*\}/.exec(css)?.[0] ?? "";
+    expect(rule).toMatch(/line-height:\s*12px/);
+  });
+
   it("leaves the density floor alone", () => {
-    // Whether this interface should be denser or airier is a design
-    // decision. This change is only about it having a scale at all, so the
-    // smallest step must not drift while nobody is looking.
-    expect(Math.min(...stepsOf("font-size"))).toBe(9);
+    // Small labels remain legible without changing the larger type scale.
+    expect(Math.min(...stepsOf("font-size"))).toBe(11);
   });
 });
 

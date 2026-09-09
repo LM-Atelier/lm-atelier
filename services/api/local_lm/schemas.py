@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import (
     BaseModel,
@@ -13,8 +13,10 @@ from pydantic import (
     StrictStr,
     StringConstraints,
     field_serializer,
+    field_validator,
 )
 
+from .comfy_workflow_packages import WorkflowPackageIssueCode
 from .domain import (
     ArtifactKind,
     JobKind,
@@ -27,7 +29,18 @@ from .domain import (
     RoutingMode,
     RunStatus,
 )
-from .references import MAX_REFERENCES_PER_TURN, MAX_ROLE, MentionSource, ValidationState
+from .install_plan_types import InstallPlanFailureCode
+from .model_asset_types import BoundWorkflowAssetKind, InstalledAssetKind
+from .model_asset_types import WorkflowAssetKind as WorkflowAssetKind
+from .references import (
+    MAX_REFERENCES_PER_TURN,
+    MAX_ROLE,
+    MentionSource,
+    ReferenceKind,
+    ValidationState,
+)
+from .saved_settings import GenerationSettingsByRole, SavedRoleSettings
+from .studio_capabilities import StudioToolKind
 from .worker_failures import WorkerFailureCode
 
 
@@ -44,10 +57,6 @@ ContentRating = Literal["general", "mature", "unknown"]
 #: behind it and so no constraint to derive. Bound to those producers by test.
 DeviceKind = Literal["accelerator", "cpu", "gpu"]
 
-GenerationSettingsByRole = dict[
-    Literal["chat", "image", "video"],
-    dict[str, Any],
-]
 GenerationPresetIdsByRole = dict[
     Literal["chat", "image", "video"],
     str | None,
@@ -218,6 +227,9 @@ class ArtifactCleanupResult(ApiModel):
     retention_pending_count: int
     removed_count: int
     reclaimed_bytes: int
+    # A real run is one bounded batch; True means eligible artifacts remain
+    # and another call continues from where this one stopped.
+    truncated: bool = False
 
 
 class ArtifactDeleteResult(ApiModel):
@@ -242,7 +254,7 @@ class ResponseRevisionOut(ApiModel):
     message_id: str
     run_id: str | None
     sequence: int
-    status: str
+    status: MessageStatus
     parts: list[MessagePartOut]
     feedback: Literal["up", "down"] | None = None
     created_at: datetime
@@ -261,7 +273,7 @@ class MessageReferenceOut(ApiModel):
     reference_subject_id: str
     mention_slug: str
     subject_name: str
-    subject_kind: str
+    subject_kind: ReferenceKind
     role: str | None = None
     strength: float | None = None
     source: str
@@ -355,7 +367,7 @@ class ChatItemRemovalReferenceOut(ApiModel):
     id: str
     subject_name: str
     mention_slug: str
-    subject_kind: str
+    subject_kind: ReferenceKind
 
 
 class ChatItemRemovalImpactOut(ApiModel):
@@ -696,8 +708,45 @@ class PromptComposerSourceIn(ApiModel):
     contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class TurnWorkflowDefaultIn(ApiModel):
+    selector_capability: Literal["chat", "image", "video"]
+    mode: Literal["default", "automatic"]
+
+
+class TurnWorkflowFamilyIn(ApiModel):
+    selector_capability: Literal["chat", "image", "video"]
+    mode: Literal["family"]
+    workflow_family_id: str = Field(min_length=1, max_length=64)
+
+
+class TurnWorkflowRevisionIn(ApiModel):
+    selector_capability: Literal["chat", "image", "video"]
+    mode: Literal["revision"]
+    workflow_revision_id: str = Field(min_length=1, max_length=40)
+
+
+TurnWorkflowSelectionIn = Annotated[
+    TurnWorkflowDefaultIn | TurnWorkflowFamilyIn | TurnWorkflowRevisionIn,
+    Field(discriminator="mode"),
+]
+
+
+class TurnRoleOverrides(ApiModel):
+    """Deliberate choices for whichever steps route to this role."""
+
+    settings: dict[str, Any] = Field(default_factory=dict)
+    preset_id: str | None = Field(default=None, min_length=1, max_length=40)
+    profile_id: str | None = Field(default=None, min_length=1, max_length=40)
+    vision_profile_id: str | None = Field(default=None, min_length=1, max_length=40)
+    workflow_revision_id: str | None = Field(default=None, min_length=1, max_length=40)
+    workflow_selection: TurnWorkflowSelectionIn | None = None
+
+
 class TurnRequest(ApiModel):
     text: str = Field(min_length=1, max_length=200_000)
+    preset_id: str | None = Field(default=None, min_length=1, max_length=40)
+    profile_id: str | None = Field(default=None, min_length=1, max_length=40)
+    vision_profile_id: str | None = Field(default=None, min_length=1, max_length=40)
     mode: RoutingMode | None = None
     parent_message_id: str | None = None
     input_artifact_ids: list[str] = Field(default_factory=list, max_length=16)
@@ -707,6 +756,7 @@ class TurnRequest(ApiModel):
     prompt_source: PromptComposerSourceIn | None = None
     settings: dict[str, Any] = Field(default_factory=dict)
     ordered_settings: dict[str, dict[str, Any]] = Field(default_factory=dict, max_length=3)
+    role_overrides: dict[str, TurnRoleOverrides] = Field(default_factory=dict, max_length=3)
     output_count: int | None = Field(default=None, ge=1, le=16)
     # The workflow a recipe recorded. A recipe that stored which workflow made
     # a result and then ran against whichever one happens to be current is not
@@ -714,8 +764,102 @@ class TurnRequest(ApiModel):
     # match this operation, engine, or install is not honored - the turn
     # refuses rather than quietly substituting.
     workflow_revision_id: str | None = Field(default=None, max_length=40)
+    workflow_selection: TurnWorkflowSelectionIn | None = None
     confirm_media: bool = False
     idempotency_key: str | None = Field(default=None, max_length=200)
+
+    @field_validator("role_overrides")
+    @classmethod
+    def validate_role_overrides(
+        cls, value: dict[str, TurnRoleOverrides]
+    ) -> dict[str, TurnRoleOverrides]:
+        for role, override in value.items():
+            if role not in {"chat", "image", "video"}:
+                raise ValueError("Turn overrides contain an unsupported role.")
+            if override.workflow_selection is not None and (
+                override.workflow_selection.selector_capability != role
+            ):
+                raise ValueError("Turn workflow selection has a different role.")
+        return value
+
+    def for_role(self, role: str, *, ordered: bool = False) -> Self:
+        """Resolve one role without changing the routing request or another role."""
+        override = self.role_overrides.get(role)
+        if override is None and not ordered:
+            return self
+        values = override.model_dump(exclude_unset=True) if override is not None else {}
+        if "workflow_selection" in values:
+            values.setdefault("workflow_revision_id", None)
+        elif "workflow_revision_id" in values:
+            values["workflow_selection"] = None
+        values["settings"] = {
+            **(self.ordered_settings.get(role, {}) if ordered else self.settings),
+            **values.get("settings", {}),
+        }
+        # Keep validated workflow models; model_copy deliberately does not reparse.
+        if override is not None and "workflow_selection" in override.model_fields_set:
+            values["workflow_selection"] = override.workflow_selection
+        return self.model_copy(update=values)
+
+
+class PriorTurnEditRequest(TurnRequest):
+    """An exact retryable edit; omitted collection fields inherit the source."""
+
+    step_overrides: dict[str, TurnRoleOverrides] = Field(default_factory=dict, max_length=64)
+
+    idempotency_key: StrictStr = Field(min_length=1, max_length=200)
+    source_run_id: str | None = Field(default=None, min_length=1, max_length=40)
+    source_snapshot_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+class PriorTurnEditConfiguration(ApiModel):
+    image_edit_strength: dict[str, Any] | None = None
+    operation: str
+    profile_engine: str | None = None
+    settings: dict[str, Any]
+    resolved_settings: dict[str, Any]
+    settings_role: str
+    output_count: int
+    profile_id: str | None
+    vision_profile_id: str | None
+    preset_id: str | None
+    preset: dict[str, Any] | None
+    model_selection: dict[str, Any]
+    workflow_selection: WorkflowSelectionOut
+    workflow_revision_id: str | None
+    workflow_schema: dict[str, Any] | None
+    profile_settings: dict[str, Any] = Field(default_factory=dict)
+
+
+class PriorTurnEditStepSource(PriorTurnEditConfiguration):
+    step_id: str
+    ordinal: int
+    source_run_id: str
+    depends_on: list[str] = Field(default_factory=list)
+
+
+class PriorTurnEditSource(PriorTurnEditConfiguration):
+    source_user_message_id: str
+    source_run_id: str
+    source_snapshot_sha256: str
+    chat_id: str
+    text: str
+    mode: RoutingMode
+    original_mode: RoutingMode | None = None
+    plan_kind: Literal["single", "ordered"] = "single"
+    steps: list[PriorTurnEditStepSource] = Field(default_factory=list)
+    input_artifact_ids: list[str]
+    input_artifacts: list[ArtifactOut]
+    references: list[MessageReferenceOut]
+    context_messages: list[dict[str, str]]
+    context_visual_artifacts: list[ArtifactOut] = Field(default_factory=list)
+    prompt_source: dict[str, Any] | None
+
+
+class PriorTurnEditBinding(ApiModel):
+    source_message_id: str = Field(min_length=1, max_length=40)
+    source_run_id: str = Field(min_length=1, max_length=40)
+    source_snapshot_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class DraftClassificationRequest(ApiModel):
@@ -724,6 +868,7 @@ class DraftClassificationRequest(ApiModel):
     text: str = Field(default="", max_length=200_000)
     mode: RoutingMode | None = None
     parent_message_id: str | None = None
+    edit_source: PriorTurnEditBinding | None = None
 
 
 class DraftClassification(ApiModel):
@@ -776,6 +921,7 @@ class TrustDerivation(ApiModel):
 
 class RegenerateRequest(ApiModel):
     settings: dict[str, Any] = Field(default_factory=dict)
+    idempotency_key: StrictStr | None = Field(default=None, min_length=1, max_length=200)
 
 
 class RoutingReasonCode(StrEnum):
@@ -888,6 +1034,15 @@ class TurnAccepted(ApiModel):
     assistant_message: MessageOut
 
 
+class PriorTurnEditAccepted(TurnAccepted):
+    source_message_id: str
+    source_run_id: str
+    work_plan_id: str
+    branch_head_message_id: str
+    branch_activated: Literal[False] = False
+    accepted_context_sha256: str
+
+
 class ProgressStageTiming(ApiModel):
     stage: str
     duration_ms: int = Field(ge=0)
@@ -945,7 +1100,9 @@ class JobOut(ApiModel):
     updated_at: datetime
 
 
-class WorkStepOut(ApiModel):
+class WorkStepImport(ApiModel):
+    """Portable step input; unknown historical statuses normalize during import."""
+
     id: str
     plan_id: str
     run_id: str | None
@@ -965,7 +1122,15 @@ class WorkStepOut(ApiModel):
     updated_at: datetime
 
 
-class WorkPlanOut(ApiModel):
+WorkStepStatus = JobStatus | Literal["blocked"]
+WorkPlanStatus = WorkStepStatus | Literal["partial"]
+
+
+class WorkStepOut(WorkStepImport):
+    status: WorkStepStatus
+
+
+class _WorkPlanFields(ApiModel):
     id: str
     chat_id: str
     idempotency_key: str | None
@@ -978,9 +1143,43 @@ class WorkPlanOut(ApiModel):
     planner_version: str
     failure_policy: str
     summary_json: dict[str, Any]
-    steps: list[WorkStepOut]
     created_at: datetime
     updated_at: datetime
+
+
+class WorkPlanImport(_WorkPlanFields):
+    """Portable plan input, independent of the live response vocabulary."""
+
+    steps: list[WorkStepImport]
+
+
+class WorkPlanOut(_WorkPlanFields):
+    status: WorkPlanStatus
+    steps: list[WorkStepOut]
+
+
+class EditedBranchOut(ApiModel):
+    source_message_id: str
+    source_run_id: str
+    branch_head_message_id: str
+    source_available: bool
+    can_continue: bool
+    plan: WorkPlanOut
+    jobs: list[JobOut]
+
+
+class EditedBranchPage(ApiModel):
+    items: list[EditedBranchOut]
+    next_cursor: str | None
+
+
+class EditedBranchActivationRequest(ApiModel):
+    expected_active_head_message_id: str | None = Field(max_length=40)
+
+
+class EditedBranchActivationOut(ApiModel):
+    chat_id: str
+    active_head_message_id: str
 
 
 class ModelSourceOut(ApiModel):
@@ -1018,8 +1217,8 @@ class InstallPlanOut(ApiModel):
     artifacts_json: list[dict[str, Any]]
     runtime_contract_json: dict[str, Any]
     activation_probe_json: dict[str, Any]
-    status: str
-    failure_code: str | None
+    status: Literal["planned", "downloading", "activated", "failed", "cancelled"]
+    failure_code: InstallPlanFailureCode | None
     failure_reason: str | None
     created_at: datetime
     updated_at: datetime
@@ -1029,7 +1228,6 @@ class ModelCapabilityEvidenceOut(ApiModel):
     id: str
     model_install_id: str
     evidence_key: str
-    result: str
     component_hashes_json: dict[str, str]
     runtime_build: str
     adapter_contract_version: int
@@ -1037,8 +1235,6 @@ class ModelCapabilityEvidenceOut(ApiModel):
     workflow_contract_version: str | None
     hardware_class: str
     probe_version: str
-    failure_code: str | None
-    failure_reason: str | None
     details_json: dict[str, Any]
     probed_at: datetime
 
@@ -1064,14 +1260,15 @@ class ModelUpdateOut(ApiModel):
     """One installed asset's staleness verdict against its provider.
 
     `state` is "update_available", "current", or "unknown" - unknown means the
-    provider could not answer, never a guess. Update fields are set only with
+    provider could not answer or the comparison baseline is unavailable.
+    Update fields are set only with
     "update_available"; installing the candidate goes through the normal
     verified catalog flow for its version id.
     """
 
     install_id: str
     name: str
-    kind: str
+    kind: InstalledAssetKind
     model_id: str
     installed_version_id: str
     installed_version_name: str | None
@@ -1110,7 +1307,7 @@ class ModelProfileCreate(ApiModel):
     engine: str = Field(min_length=1, max_length=32)
     model_install_id: str | None = None
     load_settings: dict[str, Any] = Field(default_factory=dict)
-    request_settings: dict[str, Any] = Field(default_factory=dict)
+    request_settings: SavedRoleSettings = Field(default_factory=dict)
     is_default: bool = False
 
 
@@ -1131,11 +1328,12 @@ class ModelProfileBundle(ApiModel):
     version: Literal[1] = 1
     name: str = Field(min_length=1, max_length=200)
     use_case: str = Field(default="", max_length=1_000)
+    use_case_derived: bool = False
     role: Literal["chat", "image", "video"]
     engine: str = Field(min_length=1, max_length=32)
     model_install_id: str | None = None
     load_settings: dict[str, Any] = Field(default_factory=dict)
-    request_settings: dict[str, Any] = Field(default_factory=dict)
+    request_settings: SavedRoleSettings = Field(default_factory=dict)
 
 
 class ModelProfileOut(ApiModel):
@@ -1143,10 +1341,11 @@ class ModelProfileOut(ApiModel):
     model_install_id: str | None
     name: str
     use_case: str
+    use_case_derived: bool = False
     role: str
     engine: str
     load_settings_json: dict[str, Any]
-    request_settings_json: dict[str, Any]
+    request_settings_json: SavedRoleSettings
     is_default: bool
     input_modalities: list[str] = Field(default_factory=lambda: ["text"])
     created_at: datetime
@@ -1156,7 +1355,7 @@ class ModelProfileOut(ApiModel):
 class PresetCreate(ApiModel):
     name: str = Field(min_length=1, max_length=200)
     role: Literal["chat", "image", "video"]
-    settings: dict[str, Any] = Field(default_factory=dict)
+    settings: SavedRoleSettings = Field(default_factory=dict)
     is_default: bool = False
 
 
@@ -1175,14 +1374,14 @@ class PresetBundle(ApiModel):
     version: Literal[1] = 1
     name: str = Field(min_length=1, max_length=200)
     role: Literal["chat", "image", "video"]
-    settings: dict[str, Any] = Field(default_factory=dict)
+    settings: SavedRoleSettings = Field(default_factory=dict)
 
 
 class PresetOut(ApiModel):
     id: str
     name: str
     role: str
-    settings_json: dict[str, Any]
+    settings_json: SavedRoleSettings
     is_default: bool
     created_at: datetime
     updated_at: datetime
@@ -1198,7 +1397,6 @@ class WorkflowCreate(ApiModel):
     api_graph: dict[str, Any]
     input_schema: dict[str, Any] = Field(default_factory=dict)
     dependencies: dict[str, Any] = Field(default_factory=dict)
-    trusted: bool = False
 
 
 class WorkflowRevisionCreate(ApiModel):
@@ -1207,7 +1405,11 @@ class WorkflowRevisionCreate(ApiModel):
     api_graph: dict[str, Any]
     input_schema: dict[str, Any] = Field(default_factory=dict)
     dependencies: dict[str, Any] = Field(default_factory=dict)
-    trusted: bool = False
+
+
+class WorkflowRevisionReviewRequest(ApiModel):
+    action: Literal["approve", "revoke"]
+    subject_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class WorkflowUpdate(ApiModel):
@@ -1238,7 +1440,7 @@ class WorkflowBundle(ApiModel):
 class StudioToolCapability(ApiModel):
     """Whether one studio tool can run here, and what would fix it."""
 
-    kind: str
+    kind: StudioToolKind
     workflow_class: str
     available: bool
     reason: str | None
@@ -1262,8 +1464,55 @@ class WorkflowRevisionOut(ApiModel):
     created_at: datetime
 
 
+class WorkflowOutputGeometryBindingOut(ApiModel):
+    key: Literal["width", "height"]
+    node_id: str
+    input_name: Literal["width", "height"]
+    default: int
+    minimum: int
+    maximum: int
+    multiple_of: int
+
+
+class WorkflowOutputGeometryCapabilityOut(ApiModel):
+    version: Literal[1]
+    available: bool
+    reason: Literal["unsupported_workflow_geometry"] | None
+    revision_id: str | None
+    workflow_id: str | None
+    artifact_sha256: str | None
+    operation: Literal["text_to_image"] | None
+    engine: Literal["comfyui"] | None
+    size_modes: list[Literal["exact"]]
+    width: WorkflowOutputGeometryBindingOut | None
+    height: WorkflowOutputGeometryBindingOut | None
+    latent_node_id: str | None
+    sampler_node_ids: list[str]
+    decode_node_ids: list[str]
+    save_node_ids: list[str]
+    capability: dict[str, Any] | None
+    graph_binding_verified: bool
+    request_authorized: Literal[False]
+
+
+class WorkflowOutputGeometryResolutionOut(ApiModel):
+    version: Literal[1]
+    workflow_id: str
+    revision_id: str
+    artifact_sha256: str
+    operation: Literal["text_to_image"]
+    engine: Literal["comfyui"]
+    mode: Literal["image"]
+    size_mode: Literal["exact"]
+    width: int
+    height: int
+    graph_binding_verified: Literal[True]
+    request_authorized: Literal[False]
+
+
 class WorkflowOut(ApiModel):
     id: str
+    family_id: str | None = None
     name: str
     operation: str
     description: str
@@ -1323,6 +1572,7 @@ class WorkflowFamilyOut(ApiModel):
     name: str
     description: str
     use_case: str
+    use_case_derived: bool = False
     tags: list[str] = Field(default_factory=list)
     enabled: bool
     archived: bool
@@ -1627,14 +1877,14 @@ class WorkflowAssetQueueRequest(WorkflowAssetReviewRequest):
 
 class BoundWorkflowAssetOut(ApiModel):
     reference_filename: str
-    kind: str
+    kind: BoundWorkflowAssetKind
     install_plan_id: str
     install_plan_hash: str
     provider: str
     remote_id: str
     revision: str
     artifact_path: str
-    artifact_kind: str
+    artifact_kind: InstalledAssetKind
     target_folder: str
     size_bytes: int
     sha256: str
@@ -1746,7 +1996,6 @@ class WorkflowSourceCandidateOut(ApiModel):
 
 # What the workflow analyzer can say a referenced file is. One definition, so
 # a caller naming an exact file cannot name a kind the analyzer never emits.
-WorkflowAssetKind = Literal["checkpoint", "configuration", "embedding", "lora", "upscaler", "vae"]
 AuxiliaryAssetKind = Literal[
     "lora",
     "vae",
@@ -1771,7 +2020,7 @@ class WorkflowAssetReferenceOut(ApiModel):
 
 
 class WorkflowPackageIssueOut(ApiModel):
-    code: str
+    code: WorkflowPackageIssueCode
     count: int
     node_types: list[str]
     severity: Literal["blocking", "advisory"]
@@ -1906,11 +2155,9 @@ class CatalogVersionRow(ApiModel):
     base_model: str | None = None
     size_bytes: int = 0
     changelog: str | None = None
-    # True, false, or unknown - and unknown is a real answer. Checkpoint
-    # installs do not record a provider version, so for those we cannot tell
-    # whether this exact version is on disk. Reporting `false` there would be
-    # a claim we cannot support, and the one that would make someone install
-    # a second copy of what they already have.
+    # True for an exact recorded installation. An unmatched version is false
+    # only when this model has another recorded version identity; otherwise
+    # it remains unknown. This applies to checkpoints and auxiliary assets.
     installed: bool | None = None
     installed_as: str | None = None
 
@@ -2007,7 +2254,7 @@ class CatalogPreflight(ApiModel):
     can_install: bool
     checks: list[CatalogPreflightCheck]
     install_plan: InstallPlanOut | None = None
-    auxiliary_kind: str | None = None
+    auxiliary_kind: AuxiliaryAssetKind | None = None
     # The choices behind any filename this version could not settle, so a
     # refusal arrives with the answer to it. Asking someone to pick a variant
     # and then making them go and find the variants is not a choice, it is a
@@ -2039,29 +2286,14 @@ class DownloadRequest(ApiModel):
     # A dependency owned by one reviewed workflow binding. Unlike an
     # auxiliary asset it is never offered for auto-application or activated as
     # a standalone profile.
-    workflow_asset_kind: (
-        Literal[
-            "checkpoint",
-            "clip_vision",
-            "controlnet",
-            "diffusion_model",
-            "embedding",
-            "gguf_model",
-            "ip_adapter",
-            "lora",
-            "text_encoder",
-            "upscaler",
-            "vae",
-        ]
-        | None
-    ) = None
+    workflow_asset_kind: InstalledAssetKind | None = None
 
 
 class ModelAssetOut(ApiModel):
     id: str
     source_id: str | None
     name: str
-    kind: str
+    kind: InstalledAssetKind
     family: str | None
     size_bytes: int
     manifest_json: dict[str, Any]
@@ -2176,7 +2408,7 @@ class ReferenceSubjectOut(ApiModel):
     id: str
     name: str
     mention_slug: str
-    kind: str
+    kind: ReferenceKind
     description: str | None
     aliases_json: list[str]
     tags_json: list[str]
@@ -2495,8 +2727,42 @@ class RuntimeStatus(ApiModel):
     message: str = ""
 
 
+SetupReadinessCode = Literal[
+    "activation_ready",
+    "activation_required",
+    "activation_stale",
+    "generation_verification_failed",
+    "generation_verification_required",
+    "generation_verification_running",
+    "generation_verified",
+    "install_failed",
+    "install_in_progress",
+    "model_missing",
+    "model_ready",
+    "model_unsupported",
+    "profile_missing",
+    "profile_ready",
+    "runtime_external",
+    "runtime_failed",
+    "runtime_installing",
+    "runtime_missing",
+    "runtime_ready",
+    "runtime_unsupported",
+    "worker_failed",
+    "worker_not_loaded",
+    "worker_ready",
+    "worker_starting",
+    "worker_status_unavailable",
+    "workflow_activation_not_ready",
+    "workflow_invalid",
+    "workflow_missing",
+    "workflow_ready",
+    "workflow_untrusted",
+]
+
+
 class SetupReadinessCheck(ApiModel):
-    code: str = Field(min_length=1, max_length=80)
+    code: SetupReadinessCode = Field(min_length=1, max_length=80)
     status: Literal["pass", "pending", "fail"]
     message: str = Field(min_length=1, max_length=240)
     action: str | None = Field(default=None, min_length=1, max_length=80)
@@ -2527,7 +2793,16 @@ class SetupVerificationOut(ApiModel):
     role: Literal["chat", "image", "video"]
     state: Literal["queued", "running", "ready", "failed"]
     job_id: str | None
-    failure_code: str | None
+    failure_code: (
+        Literal[
+            "application_restarted",
+            "empty_generation",
+            "generation_cancelled",
+            "generation_failed",
+            "generation_not_started",
+        ]
+        | None
+    )
     started_at: datetime | None
     completed_at: datetime | None
 

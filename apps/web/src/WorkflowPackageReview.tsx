@@ -6,23 +6,10 @@ import { api } from "./api";
 import { preparationErrorDescription } from "./registryPreparationErrors";
 import { WorkflowAssetInstaller } from "./WorkflowAssetInstaller";
 import { ErrorCallout } from "./ErrorCallout";
-import type { WorkflowPackageAnalysis } from "./types";
+import type { WorkflowPackageAnalysis, WorkflowPackageIssueCode } from "./types";
 
-/** What each analyzer finding means to the person deciding whether to import.
- *
- * Every code the analyzer can emit needs an entry. The fallback below turns an
- * unknown one into its own slug with the underscores taken out, which is how
- * `missing_asset` - far and away the commonest finding, since it fires for any
- * package whose models are not on this machine yet - reached the screen reading
- * `missing asset` beside nine entries that were sentences.
- *
- * `test_workflow_package_issue_wording.py` holds this table against the
- * analyzer. It has to read the *values* the analyzer produces rather than its
- * `WorkflowPackageIssue(...)` call sites, because five of the eleven codes are
- * accumulated into `issue_counts` and constructed in a loop - and those are
- * precisely the ones nobody remembers to add wording for.
- */
-const ISSUE_DESCRIPTIONS: Record<string, string> = {
+/** Wording for every issue in the analyzer response contract. */
+const ISSUE_DESCRIPTIONS: Record<WorkflowPackageIssueCode, string> = {
   blocked_asset_format: "References a model format this app never loads",
   missing_asset: "Needs model files that are not on this machine",
   conflicting_custom_node_versions: "Two nodes pin different versions of one package",
@@ -47,7 +34,7 @@ function installableAssets(analysis: WorkflowPackageAnalysis) {
   );
 }
 
-function issueDescription(code: string): string {
+function issueDescription(code: WorkflowPackageIssueCode): string {
   return ISSUE_DESCRIPTIONS[code] ?? code.replaceAll("_", " ");
 }
 

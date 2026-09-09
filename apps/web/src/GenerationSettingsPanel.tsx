@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { SettingControl } from "./SettingControl";
 import {
   IMAGE_EDIT_STRENGTH_MODE_KEY,
@@ -10,6 +10,7 @@ import {
   type WorkflowImageEditCalibration,
 } from "./imageEditStrength";
 import {
+  normalizeSettingsForFields,
   resolveCapabilitySettings,
   resolveWorkflowSettings,
   visibilityRank,
@@ -34,7 +35,9 @@ function ImageEditStrengthControl({
   numericManualLayers,
   values,
   onValues,
+  manualLabel,
 }: {
+  manualLabel: string;
   field: SettingField;
   parameter: string;
   calibration: WorkflowImageEditCalibration | null;
@@ -43,12 +46,18 @@ function ImageEditStrengthControl({
   layers: Array<Record<string, unknown> | undefined>;
   numericManualLayers: boolean[];
   values: Record<string, unknown>;
-  onValues: (values: Record<string, unknown>) => void;
+  onValues: (values: Record<string, unknown>, changedKeys?: string[]) => void;
 }) {
+  // The same bounds the server resolves the strength within: the field's if it
+  // declares them, otherwise the workflow's calibration, otherwise the whole
+  // range.
+  const strengthMinimum = field.minimum ?? calibration?.minimum ?? 0;
+  const strengthMaximum = field.maximum ?? calibration?.maximum ?? 1;
   const mode: ImageEditStrengthMode = resolveImageEditStrengthMode(
     parameter,
     layers,
     numericManualLayers,
+    { minimum: strengthMinimum, maximum: strengthMaximum },
   );
   const activeCalibration = calibration ? {
     ...calibration,
@@ -60,7 +69,12 @@ function ImageEditStrengthControl({
     : estimateImageEditStrength(prompt, field.minimum ?? 0, field.maximum ?? 1);
   let manualValue = estimate.value;
   for (const layer of layers) {
-    if (typeof layer?.[parameter] === "number") manualValue = layer[parameter];
+    const stored = layer?.[parameter];
+    // Same bound as the mode above: a stored strength this workflow cannot
+    // accept is not the manual value either.
+    if (typeof stored === "number" && stored >= strengthMinimum && stored <= strengthMaximum) {
+      manualValue = stored;
+    }
   }
   const selectAuto = () => {
     const next: Record<string, unknown> = {
@@ -68,18 +82,18 @@ function ImageEditStrengthControl({
       [IMAGE_EDIT_STRENGTH_MODE_KEY]: "auto",
     };
     delete next[parameter];
-    onValues(next);
+    onValues(next, [IMAGE_EDIT_STRENGTH_MODE_KEY, parameter]);
   };
   const selectManual = () => onValues({
     ...values,
     [IMAGE_EDIT_STRENGTH_MODE_KEY]: "manual",
     [parameter]: typeof values[parameter] === "number" ? values[parameter] : manualValue,
-  });
+  }, [IMAGE_EDIT_STRENGTH_MODE_KEY, parameter]);
   return (
     <div className="setting-row image-edit-strength-control">
       <span>
         <strong>Change strength</strong>
-        <small>{mode === "auto" ? `Predicted: ${estimate.scope}` : "Set for this chat"}</small>
+        <small>{mode === "auto" ? `Predicted: ${estimate.scope}` : manualLabel}</small>
       </span>
       <div className="image-edit-strength-inputs">
         <div className="segmented compact" role="group" aria-label="Image edit change strength mode">
@@ -98,7 +112,7 @@ function ImageEditStrengthControl({
               ...values,
               [IMAGE_EDIT_STRENGTH_MODE_KEY]: "manual",
               [parameter]: Number(event.target.value),
-            })}
+            }, [IMAGE_EDIT_STRENGTH_MODE_KEY, parameter])}
           />
         )}
       </div>
@@ -123,11 +137,12 @@ export function GenerationSettingsPanel({
   presetLabel = `${role} preset`,
   resetLabel,
   onReset,
+  editSettings,
 }: {
   role: EngineRole;
   engines: EngineCapabilities[];
   values: Record<string, unknown>;
-  onValues: (values: Record<string, unknown>) => void;
+  onValues: (values: Record<string, unknown>, changedKeys?: string[]) => void;
   presets: GenerationPreset[];
   presetId: string | null;
   onPreset: (presetId: string | null) => void;
@@ -140,13 +155,14 @@ export function GenerationSettingsPanel({
   presetLabel?: string;
   resetLabel: string;
   onReset: () => void;
+  editSettings?: { presetControl: ReactNode };
 }) {
   const [visibility, setVisibility] = useState<Visibility>("basic");
   const engine = engines.find((item) => item.roles.includes(role));
   const rolePresets = presets.filter((preset) => preset.role === role);
-  const defaultPreset = rolePresets.find((preset) => preset.is_default);
-  const inheritedPreset = rolePresets.find((preset) => preset.id === inheritedPresetId);
-  const selectedPreset = rolePresets.find((preset) => preset.id === presetId);
+  const defaultPreset = !editSettings ? rolePresets.find((preset) => preset.is_default) : undefined;
+  const inheritedPreset = !editSettings ? rolePresets.find((preset) => preset.id === inheritedPresetId) : undefined;
+  const selectedPreset = !editSettings ? rolePresets.find((preset) => preset.id === presetId) : undefined;
   const inheritedName = inheritedPreset?.name ?? defaultPreset?.name;
   const allFields = resolveWorkflowSettings(
     resolveCapabilitySettings(engine, role),
@@ -169,16 +185,26 @@ export function GenerationSettingsPanel({
   // deliberate act rather than scrolling past it.
   const loraField = visibleFields.find((field) => field.key === "loras");
   const fields = visibleFields.filter((field) => field.key !== "loras");
+  // The server resolves this same hierarchy and drops, per layer, any value the
+  // field cannot accept - the workflow changed, and a saved sampler or a saved
+  // step count is no longer one this graph allows. Showing the stored value
+  // anyway does not preserve the user's choice, because the run will not use it:
+  // it shows a number the run replaces with the default, and for a closed
+  // vocabulary it is worse, since a select whose value matches no option falls
+  // to the FIRST option, which is not the default either. Normalizing each layer
+  // with the same filter the dispatch path already applies is what keeps the
+  // panel showing the setting the run will actually use.
+  const acceptedLayers = [
+    profileValues,
+    defaultPreset?.settings_json,
+    inheritedPreset?.settings_json,
+    inheritedValues,
+    selectedPreset?.settings_json,
+    values,
+  ].map((layer) => (layer ? normalizeSettingsForFields(layer, allFields) : null));
   const effectiveValue = (field: SettingField): unknown => {
     let value = field.default;
-    for (const layer of [
-      profileValues,
-      defaultPreset?.settings_json,
-      inheritedPreset?.settings_json,
-      inheritedValues,
-      selectedPreset?.settings_json,
-      values,
-    ]) {
+    for (const layer of acceptedLayers) {
       if (layer && Object.prototype.hasOwnProperty.call(layer, field.key)) {
         value = layer[field.key];
       }
@@ -205,7 +231,7 @@ export function GenerationSettingsPanel({
         ))}
       </div>
       <div className="settings-list">
-        <label className="setting-row">
+        {editSettings?.presetControl ?? <label className="setting-row">
           <span><strong>Preset</strong></span>
           <select
             aria-label={presetLabel}
@@ -217,9 +243,10 @@ export function GenerationSettingsPanel({
               <option key={preset.id} value={preset.id}>{preset.name}</option>
             ))}
           </select>
-        </label>
+        </label>}
         {imageEdit && strengthField && (
           <ImageEditStrengthControl
+            manualLabel={editSettings ? "Set for this version" : "Set for this chat"}
             field={strengthField}
             parameter={strengthParameter}
             calibration={editCalibration}
@@ -240,10 +267,10 @@ export function GenerationSettingsPanel({
         )}
         {fields.map((field) => (
           <SettingControl
-            key={`${field.scope}:${field.key}:${JSON.stringify(values[field.key])}`}
+            key={`${field.scope}:${field.key}`}
             field={field}
             value={effectiveValue(field)}
-            onChange={(value) => onValues({ ...values, [field.key]: value })}
+            onChange={(value) => onValues({ ...values, [field.key]: value }, [field.key])}
           />
         ))}
         {!engine && <p className="muted">No {role} engine is configured.</p>}
@@ -255,8 +282,11 @@ export function GenerationSettingsPanel({
             <SettingControl
               field={loraField}
               value={effectiveValue(loraField)}
-              onChange={(value) => onValues({ ...values, [loraField.key]: value })}
+              onChange={(value) => onValues({ ...values, [loraField.key]: value }, [loraField.key])}
             />
+            {editSettings && <button type="button" className="secondary" onClick={() => onValues(
+              { ...values, loras: effectiveValue(loraField) }, ["loras"],
+            )}>Use current LoRA selection</button>}
           </div>
         </section>
       )}

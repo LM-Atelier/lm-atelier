@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import asyncio
+from typing import Any, cast
 
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import wait_for_terminal_status
 from sqlalchemy import select
 
 from local_lm.adapters.base import ChatRequest
@@ -12,35 +13,33 @@ from local_lm.db import SessionLocal
 from local_lm.models import Artifact, Run
 
 
-async def wait_for_assistant(client: AsyncClient, chat_id: str) -> dict:  # type: ignore[type-arg]
-    deadline = asyncio.get_running_loop().time() + 5
-    while asyncio.get_running_loop().time() < deadline:
+async def wait_for_assistant(client: AsyncClient, chat_id: str) -> dict[str, Any]:
+    async def read() -> dict[str, Any] | None:
         response = await client.get(f"/api/chats/{chat_id}")
         assert response.status_code == 200
-        assistants = [
+        assistants: list[dict[str, Any]] = [
             message for message in response.json()["messages"] if message["role"] == "assistant"
         ]
-        if assistants and assistants[-1]["status"] in {"complete", "failed", "cancelled"}:
-            assert assistants[-1]["status"] == "complete", assistants[-1]
-            return assistants[-1]
-        await asyncio.sleep(0.03)
-    raise AssertionError("assistant run did not complete")
+        return assistants[-1] if assistants else None
+
+    return cast(
+        dict[str, Any],
+        await wait_for_terminal_status(read, what=f"the assistant run in chat {chat_id}"),
+    )
 
 
-async def wait_for_run(client: AsyncClient, run_id: str) -> dict:  # type: ignore[type-arg]
-    deadline = asyncio.get_running_loop().time() + 5
-    while asyncio.get_running_loop().time() < deadline:
+async def wait_for_run(client: AsyncClient, run_id: str) -> dict[str, Any]:
+    async def read() -> dict[str, Any]:
         response = await client.get(f"/api/runs/{run_id}")
         assert response.status_code == 200
-        run = response.json()
-        if run["status"] in {"complete", "failed", "cancelled"}:
-            assert run["status"] == "complete", run
-            return run
-        await asyncio.sleep(0.03)
-    raise AssertionError("run did not complete")
+        return cast(dict[str, Any], response.json())
+
+    return cast(dict[str, Any], await wait_for_terminal_status(read, what=f"run {run_id}"))
 
 
-async def create_offer(client: AsyncClient, *, multiple: bool) -> tuple[dict, dict]:  # type: ignore[type-arg]
+async def create_offer(
+    client: AsyncClient, *, multiple: bool
+) -> tuple[dict[str, Any], dict[str, Any]]:
     chat = (
         await client.post(
             "/api/chats",

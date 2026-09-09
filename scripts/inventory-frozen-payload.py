@@ -135,7 +135,13 @@ def distribution_file_index() -> tuple[
         key = (canonical_name(name), version)
         distributions[key] = distribution
         for entry in distribution.files or []:
-            located = Path(distribution.locate_file(entry))
+            # `locate_file` is declared to return importlib's SimplePath
+            # protocol, not a filesystem path: an installed distribution
+            # can live inside a zip. Every install this reads gives a real
+            # path, so use it directly when it is one and fall back to its
+            # text form rather than assuming.
+            found = distribution.locate_file(entry)
+            located = found if isinstance(found, Path) else Path(str(found))
             normalized = os.path.normcase(os.path.realpath(located))
             files.setdefault(normalized, set()).add(key)
     return distributions, files
@@ -193,14 +199,10 @@ def write_notices(path: Path, components: list[dict[str, Any]]) -> None:
         ecosystem = _component_property(component, "lm-atelier:ecosystem")
         licenses = component.get("licenses")
         if not isinstance(licenses, list) or not licenses:
-            raise RuntimeError(
-                f"SBOM component {component.get('name')} has no license expression"
-            )
+            raise RuntimeError(f"SBOM component {component.get('name')} has no license expression")
         license_name = str(licenses[0].get("expression", "")).replace("|", "\\|")
         if not license_name:
-            raise RuntimeError(
-                f"SBOM component {component.get('name')} has no license expression"
-            )
+            raise RuntimeError(f"SBOM component {component.get('name')} has no license expression")
         name = str(component.get("name", "")).replace("|", "\\|")
         version = str(component.get("version", "")).replace("|", "\\|")
         lines.append(f"| {ecosystem} | {name} | {version} | {license_name} |")
@@ -236,9 +238,7 @@ def augment_sbom_with_frozen_metadata(
         name = metadata.get("Name")
         version = metadata.get("Version")
         if not name or not version:
-            raise RuntimeError(
-                f"Frozen distribution metadata is incomplete: {metadata_path}"
-            )
+            raise RuntimeError(f"Frozen distribution metadata is incomplete: {metadata_path}")
         key = (canonical_name(name), version)
         if key in existing or key[0] == "lm-atelier-api":
             continue
@@ -250,9 +250,7 @@ def augment_sbom_with_frozen_metadata(
             if path.is_file() and LICENSE_FILE_PATTERN.match(path.name)
         )
         if not license_files:
-            raise RuntimeError(
-                f"Frozen distribution has no copied license file: {name} {version}"
-            )
+            raise RuntimeError(f"Frozen distribution has no copied license file: {name} {version}")
         destination = (
             metadata_root
             / "third-party-licenses"
@@ -338,9 +336,7 @@ def bundled_node_packages(payload_root: Path) -> set[str]:
             raise TypeError(f"Vite source map has no sources list: {source_map}")
         for source in sources:
             if not isinstance(source, str):
-                raise TypeError(
-                    f"Vite source map contains a non-string source: {source_map}"
-                )
+                raise TypeError(f"Vite source map contains a non-string source: {source_map}")
             normalized = source.replace("\\", "/")
             if "node_modules/" not in normalized:
                 continue
@@ -357,9 +353,7 @@ def bundled_node_packages(payload_root: Path) -> set[str]:
             else:
                 packages.add(parts[0])
     if not packages:
-        raise RuntimeError(
-            "The Vite source maps do not identify any bundled npm packages"
-        )
+        raise RuntimeError("The Vite source maps do not identify any bundled npm packages")
     return packages
 
 
@@ -371,9 +365,7 @@ def component_ecosystem(component: dict[str, Any]) -> str | None:
 
 
 def set_property(component: dict[str, Any], name: str, value: str) -> None:
-    properties = [
-        item for item in component.get("properties", []) if item.get("name") != name
-    ]
+    properties = [item for item in component.get("properties", []) if item.get("name") != name]
     properties.append({"name": name, "value": value})
     component["properties"] = properties
 
@@ -458,9 +450,7 @@ def reconcile_sbom(
     )
     if missing:
         details = ", ".join(f"{name}=={version}" for name, version in missing)
-        raise RuntimeError(
-            "Frozen Python distributions are missing from the SBOM: " + details
-        )
+        raise RuntimeError("Frozen Python distributions are missing from the SBOM: " + details)
     missing_npm = sorted(included_npm - npm_components.keys())
     if missing_npm:
         raise RuntimeError(
@@ -505,9 +495,7 @@ def reconcile_sbom(
 
 def sync_release_metadata(metadata_root: Path, payload_root: Path) -> None:
     internal_entry = payload_root / "_internal"
-    if internal_entry.is_symlink() or bool(
-        getattr(internal_entry, "is_junction", lambda: False)()
-    ):
+    if internal_entry.is_symlink() or bool(getattr(internal_entry, "is_junction", lambda: False)()):
         raise RuntimeError(
             f"Frozen payload _internal must be a regular directory: {internal_entry}"
         )

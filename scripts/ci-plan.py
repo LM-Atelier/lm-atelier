@@ -9,10 +9,44 @@ from collections.abc import Iterable
 from pathlib import Path
 
 SHA = re.compile(r"[0-9a-f]{40}")
+# A documentation-only change runs repository hygiene and a whitespace check and
+# nothing else - not the test suite, not the browser suites. So the question this
+# answers is not "is this file prose" but "can this file be changed without any
+# test running". A path cannot answer that on its own: identical paths hold inert
+# prose or content a test reads, and the difference is invisible from the name.
+#
+# Both sets are therefore explicit, and a document in neither is NOT lightweight.
+# The cost of that default is one full run on a document nobody has classified;
+# the cost of the opposite default is a change landing with no suite at all
+# because someone added a document, or a test that reads one, and did not think
+# about this file. `test_every_tracked_document_is_classified` refuses a document
+# that is in neither set, so the decision cannot be skipped by omission.
+
+# Documents a test reads, so a change to one can fail the suite.
 CONTRACT_DOCUMENTS = {
     ".github/release_template.md",
     "docs/troubleshooting.md",
     "readme.md",
+}
+
+# Documents established to carry no executable contract: nothing reads them, and
+# they are not consumed by any tool. Adding a document here is the claim that
+# both remain true.
+INERT_DOCUMENTS = {
+    ".github/pull_request_template.md",
+    "code_of_conduct.md",
+    "contributing.md",
+    "docs/adapters.md",
+    "docs/architecture.md",
+    "docs/artifact-library-entry-contract.md",
+    "docs/decisions/0001-automatic-image-edit-strength.md",
+    "docs/editing-studio.md",
+    "docs/getting-started.md",
+    "docs/merge-queue.md",
+    "docs/privacy.md",
+    "docs/workflow-packages.md",
+    "security.md",
+    "support.md",
 }
 DEPENDENCY_FILES = {
     "apps/web/package.json",
@@ -30,6 +64,7 @@ WINDOWS_PATHS = {
     "scripts/verify.ps1",
 }
 WINDOWS_PATH_PREFIXES = (
+    "scripts/",
     "packaging/windows/",
     "services/api/",
 )
@@ -42,10 +77,14 @@ def normalized_path(value: str) -> str:
 
 
 def is_lightweight_documentation(path: str) -> bool:
-    """Return whether a path is documentation with no executable contract."""
+    """Return whether a path is a document established to have no contract.
 
-    normalized = normalized_path(path)
-    return normalized.endswith(".md") and normalized not in CONTRACT_DOCUMENTS
+    Membership, not the suffix. An unrecognized document is not lightweight, so
+    a document added without being classified takes the full plan rather than
+    silently skipping every test.
+    """
+
+    return normalized_path(path) in INERT_DOCUMENTS
 
 
 def requires_dependency_audit(paths: Iterable[str]) -> bool:
@@ -59,8 +98,7 @@ def requires_windows_verification(paths: Iterable[str]) -> bool:
 
     normalized = (normalized_path(path) for path in paths)
     return any(
-        path in WINDOWS_PATHS
-        or any(path.startswith(prefix) for prefix in WINDOWS_PATH_PREFIXES)
+        path in WINDOWS_PATHS or any(path.startswith(prefix) for prefix in WINDOWS_PATH_PREFIXES)
         for path in normalized
     )
 
@@ -124,9 +162,25 @@ def validate_develop_promotion(
     base_tree = git("rev-parse", f"{base}^{{tree}}")
     common_tree = git("rev-parse", f"{common}^{{tree}}")
     if base_tree != common_tree:
-        raise ValueError(
-            "main contains source changes not present in the develop lineage"
-        )
+        raise ValueError("main contains source changes not present in the develop lineage")
+
+
+def validate_merge_group(
+    *, base_ref: str, head_ref: str, base_sha: str, head_sha: str
+) -> tuple[str, str]:
+    """Bind a develop queue plan to the checked-out integration commit."""
+
+    if base_ref != "refs/heads/develop":
+        raise ValueError("merge groups must target refs/heads/develop")
+    if not head_ref.startswith("refs/heads/gh-readonly-queue/develop/"):
+        raise ValueError("merge group head must use the develop queue ref")
+    base = require_sha("base SHA", base_sha)
+    head = require_sha("head SHA", head_sha)
+    if git("rev-parse", "HEAD") != head:
+        raise ValueError("checkout does not match the merge group head")
+    if base == head or git("merge-base", base, head) != base:
+        raise ValueError("merge group head must integrate its event base")
+    return base, head
 
 
 def write_outputs(
@@ -159,6 +213,16 @@ def main() -> None:
     arguments = parse_arguments()
     if arguments.event == "workflow_dispatch":
         mode, dependency_audit, windows = "full", True, True
+    elif arguments.event == "merge_group":
+        base, head = validate_merge_group(
+            base_ref=arguments.base_ref,
+            head_ref=arguments.head_ref,
+            base_sha=arguments.base_sha,
+            head_sha=arguments.head_sha,
+        )
+        paths = changed_paths(base, head)
+        mode, dependency_audit = classify_develop_changes(paths)
+        windows = mode == "full" and requires_windows_verification(paths)
     elif arguments.event == "pull_request" and arguments.base_ref == "main":
         validate_develop_promotion(
             base_ref=arguments.base_ref,
@@ -181,10 +245,7 @@ def main() -> None:
         dependency_audit=dependency_audit,
         windows=windows,
     )
-    print(
-        f"Verification plan: {mode}; dependency audit: {dependency_audit}; "
-        f"Windows: {windows}"
-    )
+    print(f"Verification plan: {mode}; dependency audit: {dependency_audit}; Windows: {windows}")
 
 
 if __name__ == "__main__":

@@ -27,5 +27,10 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     setupFiles: "./src/test/setup.ts",
+    // Vitest 4 stopped clearing recorded calls as part of restoreAllMocks, which
+    // only restores original implementations. Suites here mock a module and then
+    // assert that a function was never called, so without this a call made by an
+    // earlier test is still on the record when the next one reads it.
+    clearMocks: true,
   },
 });

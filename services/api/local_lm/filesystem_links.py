@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import dataclasses
 import enum
+import errno
 import os
 import stat
 import sys
@@ -77,6 +79,7 @@ _FILE_WRITE_DATA: Final = 0x00000002
 _FILE_TRAVERSE: Final = 0x00000020
 _FILE_READ_ATTRIBUTES: Final = 0x00000080
 _DELETE: Final = 0x00010000
+_READ_CONTROL: Final = 0x00020000
 _SYNCHRONIZE: Final = 0x00100000
 _FILE_SHARE_READ: Final = 0x00000001
 _FILE_SHARE_WRITE: Final = 0x00000002
@@ -113,6 +116,8 @@ _DIRECTORY_QUERY_BUFFER: Final = 64 * 1024
 #: this primitive walks what it returns, so an unbounded answer is an
 #: unbounded amount of someone else's work.
 _MAX_LISTED_ENTRIES: Final = 8192
+#: linkat flag: oldpath is ignored and olddirfd is the file itself.
+_AT_EMPTY_PATH: Final = 0x1000
 #: POSIX d_type values. Only the four that map to a distinct kind are named;
 #: everything else is OTHER, and DT_UNKNOWN stays UNKNOWN rather than being
 #: resolved by a second lookup.
@@ -135,6 +140,7 @@ _FILETIME_EPOCH: Final = datetime(1601, 1, 1, tzinfo=UTC)
 #: is on, rather than for whatever a pathname resolves to at the moment it is
 #: read.
 _FILE_FS_SIZE_INFORMATION_CLASS: Final = 3
+_FILE_FS_DEVICE_INFORMATION_CLASS: Final = 4
 _MAX_ENTRY_NAME: Final = 260
 _NT_NAMESPACE: Final = "\\??\\"
 
@@ -197,15 +203,19 @@ def _refuse() -> NoReturn:
 class AnchoredDirectory:
     """A held reference to a verified directory itself, never to its path.
 
-    The whole ancestry is retained rather than released. Operations performed
-    through the anchor do not need it - they resolve against the leaf - but a
-    caller that still reads by path gets a path that keeps meaning what it
-    meant, because a held directory can be neither renamed nor deleted.
+    The whole ancestry is retained rather than released. Operations through
+    the anchor resolve against the leaf. Windows holds also prevent directory
+    rename/deletion; POSIX descriptors preserve the opened objects but do not
+    pin their names. A POSIX pathname caller needs separate confinement.
+
+    read_security requests access to owner/group/DACL metadata on the Windows
+    leaf handle. POSIX ownership metadata is already available through fstat.
+    This option requests access; it does not decide whether a root is eligible.
     """
 
     __slots__ = ("_chain", "_windows", "path")
 
-    def __init__(self, path: Path, *, create: bool = False) -> None:
+    def __init__(self, path: Path, *, create: bool = False, read_security: bool = False) -> None:
         self.path = path
         self._chain: list[int] = []
         self._windows = not _HAS_DIR_FD and os.name == "nt"
@@ -213,7 +223,7 @@ class AnchoredDirectory:
             if _HAS_DIR_FD:
                 self._chain = _walk_posix(path, create=create)
             elif self._windows:
-                self._chain = _walk_windows(path, create=create)
+                self._chain = _walk_windows(path, create=create, read_security=read_security)
             else:  # pragma: no cover - no third platform is supported
                 _refuse()
         except OSError:
@@ -251,6 +261,166 @@ class AnchoredDirectory:
 
     def __exit__(self, *_exc: object) -> None:
         self.close()
+
+
+@dataclasses.dataclass(frozen=True)
+class DirectoryIdentity:
+    """Platform-specific identity of a held directory, independent of its name."""
+
+    platform: Literal["posix", "windows"]
+    volume_id: int
+    file_id: int
+
+
+@dataclasses.dataclass(frozen=True)
+class DirectoryDeviceInformation:
+    """Raw Windows volume device fields, preserving unknown values and flag bits."""
+
+    device_type: int
+    characteristics: int
+
+
+def directory_identity(anchor: AnchoredDirectory) -> DirectoryIdentity:
+    """Identify the open directory without resolving its pathname again.
+
+    Identity is not a promise that its namespace cannot change. In particular,
+    POSIX callers still need their operation's separate confinement contract.
+    """
+
+    descriptor = anchor.descriptor
+    if descriptor is not None:
+        try:
+            measured = os.fstat(descriptor)
+        except OSError:
+            _refuse()
+        return DirectoryIdentity("posix", measured.st_dev, measured.st_ino)
+    handle = anchor.handle
+    if handle is None:
+        _refuse()
+    api = _windows_api()
+    information = api.FileIdInformation()
+    # FileIdInfo returns the volume serial and the full 128-bit file ID.
+    # https://learn.microsoft.com/windows/win32/api/winbase/ns-winbase-file_id_info
+    queried = api.kernel32.GetFileInformationByHandleEx(
+        api.ctypes.c_void_p(handle),
+        api.ctypes.c_int(18),
+        api.ctypes.byref(information),
+        api.ctypes.c_ulong(api.ctypes.sizeof(information)),
+    )
+    if not queried:
+        _refuse()
+    return DirectoryIdentity(
+        "windows",
+        int(information.VolumeSerialNumber),
+        int.from_bytes(bytes(information.FileId), "little"),
+    )
+
+
+def directory_owned_by_current_user(anchor: AnchoredDirectory) -> bool:
+    """Compare the held directory owner with the effective user at this call.
+
+    Windows anchors need read_security=True. Failure to obtain either identity
+    refuses the query. Equality does not certify permissions, volume eligibility,
+    or protection against subsequent ownership changes.
+    """
+
+    descriptor = anchor.descriptor
+    if descriptor is not None and sys.platform != "win32":
+        try:
+            return os.fstat(descriptor).st_uid == os.geteuid()
+        except OSError:
+            _refuse()
+    handle = anchor.handle
+    if handle is None:
+        _refuse()
+    api = _windows_ownership_api()
+    owner = ctypes.c_void_p()
+    security_descriptor = ctypes.c_void_p()
+    try:
+        result = api.security.GetSecurityInfo(
+            ctypes.c_void_p(handle),
+            1,
+            1,
+            ctypes.byref(owner),
+            None,
+            None,
+            None,
+            ctypes.byref(security_descriptor),
+        )
+        if result != 0 or not security_descriptor.value or not owner.value:
+            _refuse()
+        if not api.security.IsValidSid(owner):
+            _refuse()
+        # GetCurrentThreadEffectiveToken is an SDK inline returning HANDLE(-6).
+        # It selects an impersonation token when present, otherwise the process
+        # token. This query-only pseudo-handle must not be closed.
+        token = ctypes.c_void_p(-6)
+        needed = ctypes.c_ulong()
+        sized = api.security.GetTokenInformation(token, 1, None, 0, ctypes.byref(needed))
+        if sized or api.ctypes.get_last_error() != 122:
+            _refuse()
+        minimum = ctypes.sizeof(api.TokenUser)
+        if not minimum <= needed.value <= 65536:
+            _refuse()
+        buffer = ctypes.create_string_buffer(needed.value)
+        if not api.security.GetTokenInformation(
+            token, 1, buffer, len(buffer), ctypes.byref(needed)
+        ):
+            _refuse()
+        if not minimum <= needed.value <= len(buffer):
+            _refuse()
+        user = api.TokenUser.from_buffer(buffer)
+        # TOKEN_USER's SID belongs to the returned buffer. Check its fixed
+        # header and variable subauthorities before passing it to native code.
+        start = ctypes.addressof(buffer)
+        sid = user.Sid
+        if not sid or not start + minimum <= sid <= start + needed.value - 8:
+            _refuse()
+        count = ctypes.c_ubyte.from_address(sid + 1).value
+        if sid + 8 + 4 * count > start + needed.value:
+            _refuse()
+        if not api.security.IsValidSid(ctypes.c_void_p(sid)):
+            _refuse()
+        return bool(api.security.EqualSid(owner, ctypes.c_void_p(sid)))
+    finally:
+        if security_descriptor.value:
+            api.kernel.LocalFree(security_descriptor)
+
+
+def _windows_ownership_api() -> Any:
+    import types
+
+    windows: Any = ctypes
+    security = windows.WinDLL("advapi32", use_last_error=True)
+    kernel = windows.WinDLL("kernel32", use_last_error=True)
+
+    class TokenUser(ctypes.Structure):
+        _fields_ = (("Sid", ctypes.c_void_p), ("Attributes", ctypes.c_ulong))
+
+    security.GetSecurityInfo.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_ulong,
+        *([ctypes.POINTER(ctypes.c_void_p)] * 5),
+    ]
+    security.GetSecurityInfo.restype = ctypes.c_ulong
+    security.GetTokenInformation.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_ulong),
+    ]
+    security.GetTokenInformation.restype = ctypes.c_int
+    security.IsValidSid.argtypes = [ctypes.c_void_p]
+    security.IsValidSid.restype = ctypes.c_int
+    security.EqualSid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    security.EqualSid.restype = ctypes.c_int
+    kernel.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel.LocalFree.restype = ctypes.c_void_p
+    return types.SimpleNamespace(
+        ctypes=windows, security=security, kernel=kernel, TokenUser=TokenUser
+    )
 
 
 def _adopt(path: Path, held: int, windows: bool) -> AnchoredDirectory:
@@ -382,6 +552,190 @@ def _require_regular(descriptor: int) -> int:
             os.close(descriptor)
         _refuse()
     return descriptor
+
+
+def take_regular_file(anchor: AnchoredDirectory, name: str) -> int | None:
+    """Open an existing regular file through the held directory, with move rights.
+
+    None means the name is gone. A link, a directory, or anything else refuses.
+    The caller owns the descriptor and must close it.
+
+    Distinct from open_entry because a later publish must move THIS object.
+    Windows rename needs DELETE on the handle; open_entry's read intent cannot
+    rename.
+    """
+
+    _require_entry_name(name)
+    if anchor.descriptor is not None:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        try:
+            descriptor = os.open(name, flags, dir_fd=anchor.descriptor)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            _refuse()
+        return _require_regular(descriptor)
+    handle = anchor.handle
+    if handle is None:
+        _refuse()
+    opened, status = _nt_try_open_relative(handle, name, intent="rename_source")
+    if status in (_STATUS_OBJECT_NAME_NOT_FOUND, _STATUS_OBJECT_PATH_NOT_FOUND):
+        return None
+    if status != _STATUS_SUCCESS or not opened:
+        _refuse()
+    if _nt_is_reparse(opened):
+        _close_windows_handle(opened)
+        _refuse()
+    try:
+        descriptor = _descriptor_from_handle(opened)
+    except OSError:
+        _close_windows_handle(opened)
+        _refuse()
+    return _require_regular(descriptor)
+
+
+def publish_opened_file(
+    source: AnchoredDirectory,
+    name: str,
+    opened: int,
+    *,
+    into: AnchoredDirectory,
+    destination: str | None = None,
+) -> None:
+    """Move the already-open regular file into `into`.
+
+    The object published is the one `opened` refers to, not a later lookup of
+    `name`. `name` is used only to drop the source directory entry after a
+    POSIX hard-link of that same inode. Destination must not already exist.
+    """
+
+    dest_name = name if destination is None else destination
+    _require_entry_name(name)
+    _require_entry_name(dest_name)
+    if source.descriptor is not None:
+        if into.descriptor is None:
+            _refuse()
+        _publish_opened_posix(source.descriptor, name, opened, into.descriptor, dest_name)
+        return
+    dest_handle = into.handle
+    if dest_handle is None:
+        _refuse()
+    native = _handle_from_descriptor(opened)
+    moved = _nt_set_name(
+        native,
+        dest_handle,
+        dest_name,
+        _FILE_RENAME_INFORMATION_CLASS,
+        replace=False,
+    )
+    if not moved:
+        raise AnchoredEntryExists(CONTAINMENT_REFUSED) from None
+
+
+def _publish_opened_posix(
+    source_dirfd: int,
+    source_name: str,
+    opened: int,
+    dest_dirfd: int,
+    dest_name: str,
+) -> None:
+    before = os.fstat(opened)
+    if not stat.S_ISREG(before.st_mode):
+        _refuse()
+    if _link_opened_posix(opened, dest_dirfd, dest_name):
+        dest = os.open(
+            dest_name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=dest_dirfd,
+        )
+        try:
+            after = os.fstat(dest)
+        finally:
+            os.close(dest)
+        if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+            with contextlib.suppress(OSError):
+                os.unlink(dest_name, dir_fd=dest_dirfd)
+            _refuse()
+    else:
+        _copy_opened_posix(opened, dest_dirfd, dest_name)
+    try:
+        os.unlink(source_name, dir_fd=source_dirfd)
+    except OSError:
+        _refuse()
+
+
+def _link_opened_posix(opened: int, dest_dirfd: int, dest_name: str) -> bool:
+    """Hard-link the opened inode into dest. False means copy instead.
+
+    Only one linkat failure says anything about containment: EEXIST means the
+    destination name is already taken, and taking it anyway is the thing this
+    module exists to refuse. Every other failure says that this host, this
+    filesystem or this pair of mounts will not hard-link, which is a fact about
+    the machine rather than about the file, and copying is the correct answer.
+
+    An allow-list of "expected" errnos gets that backwards. It has to predict
+    every way a kernel can decline to link, and the ones it misses turn an
+    ordinary install into a refusal: EXDEV when staging and the model directory
+    sit on different mounts, ENOENT or EACCES where AT_EMPTY_PATH needs a
+    capability the process does not hold, EMLINK on a full link count. None of
+    those are unsafe, and none of them are rare.
+
+    Falling back does not weaken the boundary. `_copy_opened_posix` reads from
+    this same held descriptor rather than looking the name up again, creates the
+    destination with O_EXCL | O_NOFOLLOW so it can neither replace an entry nor
+    write through a link, and refuses on any error of its own. What it gives up
+    is a shared inode, which nothing here relies on.
+    """
+
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+    except OSError:
+        return False
+    linkat = getattr(libc, "linkat", None)
+    if linkat is None:
+        return False
+    encoded = os.fsencode(dest_name)
+    result = linkat(
+        ctypes.c_int(opened),
+        b"",
+        ctypes.c_int(dest_dirfd),
+        encoded,
+        ctypes.c_int(_AT_EMPTY_PATH),
+    )
+    if result == 0:
+        return True
+    if ctypes.get_errno() == errno.EEXIST:
+        raise AnchoredEntryExists(CONTAINMENT_REFUSED) from None
+    return False
+
+
+def _copy_opened_posix(opened: int, dest_dirfd: int, dest_name: str) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        dest = os.open(dest_name, flags, 0o600, dir_fd=dest_dirfd)
+    except FileExistsError:
+        raise AnchoredEntryExists(CONTAINMENT_REFUSED) from None
+    except OSError:
+        _refuse()
+    try:
+        os.lseek(opened, 0, os.SEEK_SET)
+        while True:
+            chunk = os.read(opened, 1024 * 1024)
+            if not chunk:
+                break
+            view = memoryview(chunk)
+            while view:
+                written = os.write(dest, view)
+                if written <= 0:
+                    raise OSError("incomplete write")
+                view = view[written:]
+        os.fsync(dest)
+    except OSError:
+        os.close(dest)
+        with contextlib.suppress(OSError):
+            os.unlink(dest_name, dir_fd=dest_dirfd)
+        _refuse()
+    os.close(dest)
 
 
 def read_entry(anchor: AnchoredDirectory, name: str) -> bytes | None:
@@ -725,6 +1079,7 @@ def list_entries(
     anchor: AnchoredDirectory,
     *,
     limit: int = _MAX_LISTED_ENTRIES,
+    include_metadata: bool = True,
     should_stop: Callable[[], bool] | None = None,
 ) -> tuple[AnchoredEntry, ...]:
     """List a held directory, taking each name and kind from one record.
@@ -750,6 +1105,10 @@ def list_entries(
     through the held parent and measured with `fstat` - one anchored lookup
     after the enumeration. Unsafe kinds are never measured on either platform,
     and an entry that vanished or refused carries no metadata.
+
+    With `include_metadata=False`, return only names and kinds, without
+    reacquiring entries to measure them. This is needed for live SQLite files:
+    closing an extra POSIX descriptor could release another connection's locks.
 
     When `should_stop` is supplied, it is observed before and after native
     record reads and around POSIX's anchored metadata work. A request raises
@@ -786,7 +1145,9 @@ def list_entries(
                 _refuse()
             seen.add(entry.name)
 
-            if posix_metadata:
+            if not include_metadata:
+                entry = AnchoredEntry(entry.name, entry.kind)
+            elif posix_metadata:
                 entry = _with_posix_metadata(anchor, entry, should_stop=should_stop)
             _raise_if_listing_stopped(should_stop)
             entries.append(entry)
@@ -1318,7 +1679,7 @@ def _walk_posix(path: Path, *, create: bool = False) -> list[int]:
     return chain
 
 
-def _walk_windows(path: Path, *, create: bool = False) -> list[int]:
+def _walk_windows(path: Path, *, create: bool = False, read_security: bool = False) -> list[int]:
     """Walk the chain handle-relative, refusing a reparse point at any depth."""
 
     parts = path.parts
@@ -1326,7 +1687,8 @@ def _walk_windows(path: Path, *, create: bool = False) -> list[int]:
     # the one name given to the object manager directly - and it must be in
     # the NT namespace: measured, "C:\\" is STATUS_OBJECT_PATH_SYNTAX_BAD and
     # "\\??\\C:" is STATUS_ACCESS_DENIED, while "\\??\\C:\\" opens.
-    chain = [_nt_open_relative(None, f"{_NT_NAMESPACE}{parts[0]}", intent="open_dir")]
+    root_intent = "open_security_dir" if read_security and len(parts) == 1 else "open_dir"
+    chain = [_nt_open_relative(None, f"{_NT_NAMESPACE}{parts[0]}", intent=root_intent)]
     try:
         for index, component in enumerate(parts[1:], start=1):
             # Validate the component BEFORE the native open, not inside it.
@@ -1341,7 +1703,10 @@ def _walk_windows(path: Path, *, create: bool = False) -> list[int]:
             # Only the leaf may be created, and only through its parent's
             # handle. Creating an ancestor would mean deciding, by path, that
             # a directory the caller never named should exist.
-            intent = "create_dir" if last and create else "open_dir"
+            if last and read_security:
+                intent = "create_security_dir" if create else "open_security_dir"
+            else:
+                intent = "create_dir" if last and create else "open_dir"
             chain.append(_nt_open_relative(chain[-1], component, intent=intent))
             if _nt_is_reparse(chain[-1]):
                 _refuse()
@@ -1404,6 +1769,18 @@ def _windows_api() -> Any:
             ("BytesPerSector", ctypes.c_ulong),
         )
 
+    class FileFsDeviceInformation(ctypes.Structure):
+        _fields_ = (
+            ("DeviceType", ctypes.c_ulong),
+            ("Characteristics", ctypes.c_ulong),
+        )
+
+    class FileIdInformation(ctypes.Structure):
+        _fields_ = (
+            ("VolumeSerialNumber", ctypes.c_ulonglong),
+            ("FileId", ctypes.c_ubyte * 16),
+        )
+
     class FileNameInformation(ctypes.Structure):
         # BOOLEAN then HANDLE: the seven bytes of padding are the 64-bit
         # layout the kernel expects, not decoration. The link and rename
@@ -1420,11 +1797,14 @@ def _windows_api() -> Any:
         ctypes=ctypes,
         wintypes=wintypes,
         ntdll=windows.WinDLL("ntdll", use_last_error=True),
+        kernel32=windows.WinDLL("kernel32", use_last_error=True),
         UnicodeString=UnicodeString,
         ObjectAttributes=ObjectAttributes,
         IoStatusBlock=IoStatusBlock,
         FileBasicInformation=FileBasicInformation,
         FileFsSizeInformation=FileFsSizeInformation,
+        FileFsDeviceInformation=FileFsDeviceInformation,
+        FileIdInformation=FileIdInformation,
         FileNameInformation=FileNameInformation,
     )
 
@@ -1481,7 +1861,8 @@ def _nt_try_open_relative(parent: int | None, name: str, *, intent: str) -> tupl
     absent entry and a name collision from a genuine failure. Everything that
     does not need that distinction goes through _nt_open_relative.
 
-    `intent` is one of open_dir, create_dir, open_file, create_file,
+    `intent` is one of open_dir, create_dir, open_security_dir, create_security_dir,
+    open_file, create_file,
     delete_directory or rename_source. It is spelled out rather than inferred from a flag because
     the access mask and the disposition have to agree, and getting that pair
     wrong fails in ways that look like a filesystem problem rather than a
@@ -1505,10 +1886,14 @@ def _nt_try_open_relative(parent: int | None, name: str, *, intent: str) -> tupl
 
     access = _FILE_READ_ATTRIBUTES | _SYNCHRONIZE
     options = _FILE_SYNCHRONOUS_IO_NONALERT | _FILE_OPEN_REPARSE_POINT
-    if intent in ("open_dir", "create_dir"):
+    if intent in ("open_dir", "create_dir", "open_security_dir", "create_security_dir"):
         access |= _FILE_LIST_DIRECTORY | _FILE_TRAVERSE
+        if intent in ("open_security_dir", "create_security_dir"):
+            access |= _READ_CONTROL
         options |= _FILE_DIRECTORY_FILE
-        disposition = _FILE_OPEN_IF if intent == "create_dir" else _FILE_OPEN
+        disposition = (
+            _FILE_OPEN_IF if intent in ("create_dir", "create_security_dir") else _FILE_OPEN
+        )
     elif intent == "create_file":
         access |= _FILE_WRITE_DATA
         options |= _FILE_NON_DIRECTORY_FILE
@@ -1635,6 +2020,38 @@ def _nt_mark_deleted(handle: int) -> None:
         _refuse()
 
 
+def directory_device_information(anchor: AnchoredDirectory) -> DirectoryDeviceInformation:
+    """Read device fields from the held Windows directory, without a path lookup.
+
+    These are the filesystem driver's reported fields, not an eligibility verdict.
+    Unsupported fields can be zero, and removable media is distinct from a
+    removable device. POSIX and closed anchors refuse rather than guess.
+    """
+
+    handle = anchor.handle
+    if handle is None:
+        _refuse()
+    api = _windows_api()
+    information = api.FileFsDeviceInformation()
+    status_block = api.IoStatusBlock()
+    size = api.ctypes.sizeof(information)
+    # FileFsDeviceInformation describes the volume associated with this handle.
+    # https://learn.microsoft.com/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntqueryvolumeinformationfile
+    status = api.ntdll.NtQueryVolumeInformationFile(
+        api.ctypes.c_void_p(handle),
+        api.ctypes.byref(status_block),
+        api.ctypes.byref(information),
+        api.ctypes.c_ulong(size),
+        api.ctypes.c_ulong(_FILE_FS_DEVICE_INFORMATION_CLASS),
+    )
+    if status & 0xFFFFFFFF != _STATUS_SUCCESS or status_block.Information != size:
+        _refuse()
+    return DirectoryDeviceInformation(
+        device_type=int(information.DeviceType),
+        characteristics=int(information.Characteristics),
+    )
+
+
 def available_bytes(anchor: AnchoredDirectory) -> int:
     """Free bytes on the volume holding the directory the caller HOLDS.
 
@@ -1708,6 +2125,18 @@ def _descriptor_from_handle(handle: int) -> int:
 
     windows: Any = msvcrt
     return int(windows.open_osfhandle(handle, getattr(os, "O_BINARY", 0)))
+
+
+def _handle_from_descriptor(descriptor: int) -> int:
+    """Recover the native handle the C runtime already owns.
+
+    The descriptor still owns the handle. Do not CloseHandle the result.
+    """
+
+    import msvcrt
+
+    windows: Any = msvcrt
+    return int(windows.get_osfhandle(descriptor))
 
 
 def _close_windows_handle(handle: int) -> None:

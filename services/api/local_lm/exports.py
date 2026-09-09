@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from sqlalchemy import event, select
 from sqlalchemy.orm import Session, selectinload
 
+from .accepted_turn_context import AcceptedContext, _digest
 from .artifact_library import ensure_library_entry
 from .artifact_library_schema import ARTIFACT_METADATA_REFERENCE_KEYS
 from .artifacts import ArtifactStore
@@ -27,6 +28,7 @@ from .domain import (
     PartType,
     RoutingMode,
     RunStatus,
+    operation_model_role,
 )
 from .models import (
     Artifact,
@@ -40,8 +42,15 @@ from .models import (
     ResponseRevision,
     ResponseRevisionPart,
     Run,
+    RunContextArtifact,
 )
 from .profile_service import AUTO_PROFILE_ID
+from .project_accepted_context import (
+    export_accepted_contexts,
+    import_accepted_contexts,
+    removed_at,
+    validate_accepted_contexts,
+)
 from .project_dependencies import (
     DependencySourceIndex,
     ImportedDependencies,
@@ -51,7 +60,9 @@ from .project_dependencies import (
     parse_dependency_manifest,
 )
 from .project_portability import has_local_path, redact_local_paths
+from .project_work_plans import export_work_plans, import_work_plans, validate_work_plans
 from .prompt_helpers import STANDARD_CHAT_SCOPE
+from .saved_settings import normalize_saved_settings
 from .schemas import ChatDetail, ProjectOut, RunOut, SettingField, VisionSettings
 from .settings_registry import validate_settings
 
@@ -132,15 +143,21 @@ class ProjectExporter:
             select(Run).where(Run.chat_id.in_([chat.id for chat in chats]))
         ).all()
         referenced: dict[str, Artifact] = {}
+        linked_artifact_ids: set[str] = set()
         for chat in chats:
             for message in chat.messages:
-                for part in message.parts:
+                retained_parts: list[MessagePart | ResponseRevisionPart] = [
+                    *message.parts,
+                    *(part for revision in message.response_revisions for part in revision.parts),
+                ]
+                for part in retained_parts:
                     if part.artifact:
                         referenced[part.artifact.id] = part.artifact
-                for revision in message.response_revisions:
-                    for revision_part in revision.parts:
-                        if revision_part.artifact:
-                            referenced[revision_part.artifact.id] = revision_part.artifact
+                        linked_artifact_ids.update(
+                            linked_id
+                            for key in ARTIFACT_METADATA_REFERENCE_KEYS
+                            if isinstance((linked_id := part.metadata_json.get(key)), str)
+                        )
         run_input_ids: set[str] = set()
         for run in runs:
             provenance = run.provenance_json if isinstance(run.provenance_json, dict) else {}
@@ -152,12 +169,21 @@ class ProjectExporter:
         if run_input_ids:
             for artifact in session.scalars(select(Artifact).where(Artifact.id.in_(run_input_ids))):
                 referenced[artifact.id] = artifact
-        linked_artifact_ids = {
+        context_artifact_ids = session.scalars(
+            select(RunContextArtifact.artifact_id).where(
+                RunContextArtifact.run_id.in_([run.id for run in runs])
+            )
+        ).all()
+        for artifact in session.scalars(
+            select(Artifact).where(Artifact.id.in_(context_artifact_ids))
+        ):
+            referenced[artifact.id] = artifact
+        linked_artifact_ids.update(
             linked_id
             for artifact in referenced.values()
             for key in ARTIFACT_METADATA_REFERENCE_KEYS
             if isinstance((linked_id := artifact.metadata_json.get(key)), str)
-        }
+        )
         if linked_artifact_ids:
             for artifact in session.scalars(
                 select(Artifact).where(Artifact.id.in_(linked_artifact_ids))
@@ -241,19 +267,64 @@ class ProjectExporter:
             )
             record["error"] = redact_local_paths(record["error"])
             run_records.append(record)
+        context_records = export_accepted_contexts(
+            self, session, list(runs), run_records, dependency_index
+        )
+        plan_records, plan_dependencies = export_work_plans(session, [chat.id for chat in chats])
+        for plan_record in plan_records:
+            for step_record in plan_record["steps"]:
+                step_operation = Operation(step_record["operation"])
+                step_record["profile_id"] = self._portable_profile_reference(
+                    step_record["profile_id"],
+                    dependency_index,
+                    self._role_for_operation(step_operation),
+                    allow_auto=False,
+                )
+                step_record["workflow_revision_id"] = self._portable_revision_reference(
+                    step_record["workflow_revision_id"],
+                    dependency_index,
+                    {step_operation.value},
+                )
+        plan_records = redact_local_paths(plan_records)
         auxiliary_requirements, auxiliary_references = self._auxiliary_requirements(
             session,
-            [project_record, *chat_records, *run_records],
+            [project_record, *chat_records, *run_records, *plan_records, *context_records],
         )
-        for record in [project_record, *chat_records, *run_records]:
+        for record in [
+            project_record,
+            *chat_records,
+            *run_records,
+            *plan_records,
+            *context_records,
+        ]:
             self._remap_auxiliary_asset_references(record, auxiliary_references)
+        portable_runs = {record["id"]: record for record in run_records}
+        for context_record in context_records:
+            digest = _digest(context_record["payload_json"])
+            context_record["sha256"] = digest
+            portable_runs[context_record["payload_json"]["run_id"]]["provenance_json"][
+                "accepted_context_sha256"
+            ] = digest
+        for chat_record in chat_records:
+            for message_record in chat_record["messages"]:
+                parts = list(message_record["parts"])
+                for revision_record in message_record.get("response_revisions", []):
+                    parts.extend(revision_record["parts"])
+                for part_record in parts:
+                    metadata = part_record.get("metadata_json") or {}
+                    source_run = portable_runs.get(metadata.get("run_id"))
+                    if source_run is not None and "provenance" in metadata:
+                        metadata["provenance"] = source_run["provenance_json"]
         manifest = {
             "format": "local-lm-project",
-            "version": 6,
+            "version": 7,
             "media_included": include_media,
             "project": project_record,
             "chats": chat_records,
             "runs": run_records,
+            "work_plans": plan_records,
+            "accepted_contexts": context_records,
+            "work_step_dependencies": plan_dependencies,
             "artifacts": [
                 {
                     "id": artifact.id,
@@ -301,7 +372,7 @@ class ProjectExporter:
                 original_name=f"{self._safe_name(project.name)}.lm-atelier.zip",
                 metadata={
                     "format": "local-lm-project",
-                    "version": 6,
+                    "version": 7,
                     "project_id": project.id,
                     "artifact_count": len(referenced),
                     "media_included": include_media,
@@ -1010,7 +1081,7 @@ class ProjectExporter:
             manifest.get("format") != "local-lm-project"
             or not isinstance(version, int)
             or isinstance(version, bool)
-            or version not in {1, 2, 3, 4, 5, 6}
+            or version not in {1, 2, 3, 4, 5, 6, 7}
         ):
             raise ValueError("unsupported project archive format")
         if not isinstance(manifest.get("project"), dict):
@@ -1164,6 +1235,16 @@ class ProjectExporter:
                     raise ValueError("project manifest has invalid message state") from exc
                 if version >= 4 and not isinstance(message_data.get("transcript_visible"), bool):
                     raise ValueError("project manifest has invalid transcript visibility")
+                if removed_at(message_data.get("content_removed_at")) is not None and (
+                    message_data.get("parts")
+                    or message_data.get("references")
+                    or any(
+                        revision.get("parts")
+                        for revision in message_data.get("response_revisions", [])
+                        if isinstance(revision, dict)
+                    )
+                ):
+                    raise ValueError("project removed message still carries payload")
                 message_chats[message_id] = chat_id
                 message_roles[message_id] = role
                 parent_id = message_data.get("parent_id")
@@ -1420,6 +1501,9 @@ class ProjectExporter:
             for _revision_id, chat_id, run_id in revision_run_references:
                 if run_chats.get(run_id) != chat_id:
                     raise ValueError("project response revision references an incompatible run")
+
+        validate_work_plans(manifest)
+        validate_accepted_contexts(manifest)
 
     def _validate_portable_provenance(
         self,
@@ -1901,6 +1985,7 @@ class ProjectExporter:
                     role=MessageRole(str(message_data.get("role"))).value,
                     status=MessageStatus(str(message_data.get("status"))).value,
                     transcript_visible=bool(message_data.get("transcript_visible", True)),
+                    content_removed_at=removed_at(message_data.get("content_removed_at")),
                 )
                 session.add(message)
                 session.flush()
@@ -1975,6 +2060,7 @@ class ProjectExporter:
                 else None
             )
         imported_runs: dict[str, Run] = {}
+        imported_revision_ids: dict[str, str] = {}
         for run_data in manifest["runs"]:
             if not isinstance(run_data, dict):
                 raise ValueError("project manifest has an invalid run")
@@ -2042,6 +2128,35 @@ class ProjectExporter:
             session.add(imported_run)
             session.flush()
             imported_runs[str(run_data["id"])] = imported_run
+        portable_plans = validate_work_plans(manifest)
+        for portable_plan in portable_plans:
+            portable_plan.summary_json, _ = self._remap_artifact_references(
+                portable_plan.summary_json,
+                artifacts,
+                declared_artifact_ids,
+                strict=strict_portability,
+            )
+            for portable_step in portable_plan.steps:
+                for field in ("settings_json", "input_bindings_json", "output_contract_json"):
+                    remapped, _ = self._remap_artifact_references(
+                        getattr(portable_step, field),
+                        artifacts,
+                        declared_artifact_ids,
+                        strict=strict_portability,
+                    )
+                    setattr(portable_step, field, remapped)
+        plan_ids: dict[str, str] = {}
+        step_ids: dict[str, str] = {}
+        if portable_plans:
+            plan_ids, step_ids = import_work_plans(
+                session,
+                portable_plans,
+                manifest["work_step_dependencies"],
+                chat_map,
+                message_map,
+                imported_runs,
+                dependencies,
+            )
         for chat_data in manifest["chats"]:
             if not isinstance(chat_data, dict):
                 continue
@@ -2080,6 +2195,7 @@ class ProjectExporter:
                         session.add(revision)
                         session.flush()
                         revision_map[str(revision_data["id"])] = revision
+                        imported_revision_ids[str(revision_data["id"])] = revision.id
                         revision_parts = revision_data.get("parts")
                         if not isinstance(revision_parts, list):
                             continue
@@ -2161,6 +2277,22 @@ class ProjectExporter:
                     session.add(revision)
                     session.flush()
                     imported_message.active_response_revision_id = revision.id
+        if manifest["version"] >= 7:
+            import_accepted_contexts(
+                session,
+                [
+                    AcceptedContext.model_validate(record["payload_json"])
+                    for record in manifest["accepted_contexts"]
+                ],
+                chats=chat_map,
+                messages=message_map,
+                runs=imported_runs,
+                revisions=imported_revision_ids,
+                plans=plan_ids,
+                steps=step_ids,
+                artifacts=artifacts,
+                dependencies=dependencies,
+            )
         for part, source_run_id in generation_metadata_parts:
             resolved_run = imported_runs.get(source_run_id)
             if not resolved_run:
@@ -2246,7 +2378,7 @@ class ProjectExporter:
     ) -> None:
         raw_settings = owner.generation_settings_json
         settings = {
-            role: dict(values)
+            role: normalize_saved_settings(values, role)
             for role, values in (raw_settings.items() if isinstance(raw_settings, dict) else [])
             if role in {"chat", "image", "video"} and isinstance(values, dict)
         }
@@ -2257,7 +2389,10 @@ class ProjectExporter:
                 continue
             preset = session.get(GenerationPreset, preset_id)
             if preset and preset.role == role:
-                settings[role] = {**preset.settings_json, **settings.get(role, {})}
+                settings[role] = {
+                    **normalize_saved_settings(preset.settings_json, role),
+                    **settings.get(role, {}),
+                }
                 if dependencies.preset_roles.get(preset_id) == role:
                     portable_bindings[role] = preset_id
         # The direct settings snapshot preserves effective behavior even when
@@ -2273,7 +2408,7 @@ class ProjectExporter:
             dict[str, dict[str, Any]],
             redact_local_paths(
                 {
-                    role: dict(settings)
+                    role: normalize_saved_settings(settings, role)
                     for role, settings in value.items()
                     if role in {"chat", "image", "video"} and isinstance(settings, dict)
                 }
@@ -2360,11 +2495,7 @@ class ProjectExporter:
 
     @staticmethod
     def _role_for_operation(operation: Operation) -> str:
-        if operation == Operation.TEXT:
-            return "chat"
-        if operation in {Operation.TEXT_TO_IMAGE, Operation.IMAGE_TO_IMAGE}:
-            return "image"
-        return "video"
+        return operation_model_role(operation)
 
     @staticmethod
     def _text(value: object, label: str, maximum: int) -> str:

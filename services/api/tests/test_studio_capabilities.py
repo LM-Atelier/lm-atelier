@@ -6,7 +6,8 @@ from typing import Any
 
 from httpx2 import AsyncClient
 
-from local_lm.studio_capabilities import tool_capabilities
+from local_lm.schemas import StudioToolCapability
+from local_lm.studio_capabilities import TOOL_WORKFLOW_CLASSES, tool_capabilities
 
 MASK_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -120,3 +121,8 @@ async def test_the_report_reads_what_is_installed_on_this_machine(
     after = (await client.get("/api/studio/capabilities")).json()["tools"]
 
     assert {tool["kind"]: tool["available"] for tool in after}["brush"] is True
+
+
+def test_studio_capability_kinds_match_the_tools_the_server_reports() -> None:
+    schema = StudioToolCapability.model_json_schema()
+    assert set(schema["properties"]["kind"].get("enum", [])) == set(TOOL_WORKFLOW_CLASSES)

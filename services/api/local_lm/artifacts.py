@@ -16,11 +16,19 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
-from typing import IO, Final
+from typing import IO, Any, Final
 
 from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session
 
+from .artifact_deletion_authority import (
+    activate_artifact_deletion_proof,
+    artifact_deletion_proof_references,
+    artifact_metadata_retains,
+    mint_artifact_deletion_proof,
+    record_artifact_deletion,
+    restrict_artifact_deletion_proof,
+)
 from .artifact_library import (
     artifacts_naming,
     begin_artifact_write_fence,
@@ -159,6 +167,14 @@ def _removed(anchor: AnchoredDirectory, name: str, *, counted: int, cutoff: date
     return True
 
 
+# Automatic and manual cleanup share a count ceiling and deletion-phase clock.
+# One required reference snapshot precedes that clock; the writer reservation
+# includes its fixed cost too. The ceiling lets fast authorized deletions
+# amortize that snapshot while the time budget still bounds slower deletion work.
+RETENTION_BATCH_DELETIONS = 1000
+RETENTION_BATCH_SECONDS = 2.0
+
+
 @dataclass(frozen=True)
 class RetentionCleanupSummary:
     marked_count: int
@@ -169,6 +185,8 @@ class RetentionCleanupSummary:
     #: bound was reached or the caller asked it to stop - so another pass is
     #: needed before the sweep can be called complete.
     truncated: bool = False
+    #: Rows inspected in this pass, including retained rows and the stopping boundary.
+    examined_count: int = 0
 
 
 class _DeletionBudget:
@@ -181,7 +199,14 @@ class _DeletionBudget:
     stopped short, so the caller knows another pass is owed.
     """
 
-    def __init__(self, remaining: int | None, should_stop: Callable[[], bool] | None) -> None:
+    def __init__(
+        self,
+        remaining: int | None,
+        should_stop: Callable[[], bool] | None,
+        *,
+        report_removed: Callable[[], None] | None = None,
+    ) -> None:
+        self.report_removed = report_removed
         self.remaining = remaining
         self.should_stop = should_stop
         self.truncated = False
@@ -198,6 +223,8 @@ class _DeletionBudget:
     def spend(self) -> None:
         if self.remaining is not None:
             self.remaining -= 1
+        if self.report_removed is not None:
+            self.report_removed()
 
 
 @dataclass(frozen=True)
@@ -705,11 +732,27 @@ class ArtifactStore:
         # this set. Taking the fence first is what makes the snapshot safe to
         # hand back, so the check costs one walk rather than two.
         begin_artifact_write_fence(session)
-        retained = self.referenced_artifact_ids(session)
+        retained = self.referenced_artifact_ids(session, for_deletion=True)
         if artifact.id in retained:
             return False
+        # Being unreachable from the walk is not the same as being
+        # deletable. A video that is itself unreferenced still NAMES its
+        # browser proxy in metadata, and the walk never reaches that
+        # naming because it does not enter an unreferenced artifact - but
+        # both the deletion proof and the delete trigger refuse while any
+        # surviving row names this one. Attempting it raises, and on the
+        # startup path raising is the application failing to start.
+        if artifact_metadata_retains(session, retained, artifact.id):
+            return False
+        # Being unreachable from the walk is not the same as being
+        # deletable. A video that is itself unreferenced still NAMES its
+        # browser proxy in metadata, and the walk never reaches that
+        # naming because it does not enter an unreferenced artifact - but
+        # both the deletion proof and the delete trigger refuse while any
+        # surviving row names this one. Attempting it raises, and on the
+        # startup path raising is the application failing to start.
         try:
-            self._delete_artifact(session, artifact, retained=retained)
+            self._delete_artifact(session, artifact, references=retained)
         except OSError as exc:
             if getattr(exc, "winerror", None) in {32, 33}:
                 return False
@@ -717,8 +760,10 @@ class ArtifactStore:
         return True
 
     @staticmethod
-    def referenced_artifact_ids(session: Session) -> set[str]:
-        return referenced_artifact_ids(session)
+    def referenced_artifact_ids(
+        session: Session, *, for_deletion: bool = False
+    ) -> AbstractSet[str]:
+        return referenced_artifact_ids(session, for_deletion=for_deletion)
 
     def cleanup_retention(
         self,
@@ -730,39 +775,45 @@ class ArtifactStore:
         now: datetime | None = None,
         max_deletions: int | None = None,
         should_stop: Callable[[], bool] | None = None,
+        report_phase: Callable[[str], None] | None = None,
     ) -> RetentionCleanupSummary:
-        """Sweep the store once, or once up to a deletion bound.
+        """Remove expired unretained artifacts within the caller's stop/budget.
 
-        Every deletion here pays for the JSON reference trigger's scan of the
-        referring tables, so a sweep over thousands of aged previews takes
-        hours and, in one session, commits nothing until the end. A caller
-        that wants progress to survive a kill and the write fence held only
-        briefly passes ``max_deletions`` and commits after each call; the
-        summary's ``truncated`` says whether another call is needed. A pass
-        that stops early leaves the marking of ``unreferenced_at`` and the
-        orphan-file sweep to the pass that completes, since both describe the
-        whole store rather than the artifacts examined so far.
-
-        ``should_stop`` is consulted before each deletion; a truthful answer
-        ends the pass at that boundary rather than mid-deletion.
+        Hold the writer reservation while deriving one reference snapshot and
+        deleting eligible rows. Each deletion receives exact authority from
+        that snapshot and advances it only after the flush succeeds. A stop is
+        observed immediately before an actual deletion. Metadata updates survive
+        truncated passes; orphan cleanup runs only after a complete row pass.
+        Callers may commit each bounded pass to preserve completed work.
         """
 
+        phase: Callable[[str], None] = report_phase or (lambda _name: None)
         current = now or datetime.now(UTC)
         if not dry_run:
+            phase("acquire-writer")
             begin_artifact_write_fence(session)
+            phase("writer-acquired")
+            phase("recover-staged-deletions")
             self._recover_staged_deletions(session)
-        referenced = self.referenced_artifact_ids(session)
+        phase("reference-snapshot")
+        referenced = self.referenced_artifact_ids(session, for_deletion=not dry_run)
+        examined_count = 0
         marked_count = 0
         pending_count = 0
         removed_count = 0
         reclaimed_bytes = 0
         truncated = False
+        phase("load-artifact-rows")
         ordered = session.scalars(select(Artifact).order_by(Artifact.created_at)).all()
         # Who names whom, from rows already loaded above: no extra query, and
         # bounded by this sweep's own working set rather than by the store.
+        phase("metadata-references")
         referrers = metadata_referrers(ordered)
         removed_ids: set[str] = set()
+        metadata_updates: list[tuple[Artifact, dict[str, Any]]] = []
+        phase("examine-artifacts")
         for artifact in ordered:
+            examined_count += 1
             metadata = dict(artifact.metadata_json)
             # A favorite pins against the automatic sweep exactly like a live
             # reference: never marked, never removed here. Explicit deletion
@@ -770,7 +821,7 @@ class ArtifactStore:
             if artifact.id in referenced or artifact.favorite:
                 if "unreferenced_at" in metadata and not dry_run:
                     metadata.pop("unreferenced_at", None)
-                    artifact.metadata_json = metadata
+                    metadata_updates.append((artifact, metadata))
                 continue
             temporary = bool(metadata.get("temporary_preview") or metadata.get("intermediate"))
             age = current - self._aware(artifact.created_at)
@@ -794,10 +845,13 @@ class ArtifactStore:
                 if max_deletions is not None and removed_count >= max_deletions:
                     truncated = True
                     break
+                if not dry_run:
+                    phase("delete-artifact")
+                    proof = mint_artifact_deletion_proof(session, {artifact.id}, referenced)
+                    self._delete_artifact(session, artifact, proof=proof)
+                    phase("examine-artifacts")
                 removed_count += 1
                 reclaimed_bytes += artifact.size_bytes
-                if not dry_run:
-                    self._delete_artifact(session, artifact, retained=referenced)
                 removed_ids.add(artifact.id)
                 continue
             if not temporary:
@@ -806,8 +860,11 @@ class ArtifactStore:
                     marked_count += 1
                     if not dry_run:
                         metadata["unreferenced_at"] = current.isoformat()
-                        artifact.metadata_json = metadata
+                        metadata_updates.append((artifact, metadata))
         if not dry_run:
+            phase("flush-metadata")
+            for artifact, metadata in metadata_updates:
+                artifact.metadata_json = metadata
             # Marking `unreferenced_at` makes an artifact dirty, and if its
             # metadata names a poster then _pending_json_reference_ids is
             # non-empty here, so the listener walks the graph again on this final
@@ -822,8 +879,11 @@ class ArtifactStore:
             # answers to the same stop request, so the final batch of a pass
             # is bounded exactly like the ones before it.
             remaining = None if max_deletions is None else max(max_deletions - removed_count, 0)
-            budget = _DeletionBudget(remaining, should_stop)
+            budget = _DeletionBudget(
+                remaining, should_stop, report_removed=lambda: phase("orphan-file-removed")
+            )
             if budget.allow():
+                phase("cleanup-orphan-files")
                 orphan_count, orphan_bytes = self._cleanup_orphan_files(
                     session,
                     current=current,
@@ -833,6 +893,7 @@ class ArtifactStore:
                 )
             truncated = budget.truncated
         return RetentionCleanupSummary(
+            examined_count=examined_count,
             marked_count=marked_count,
             pending_count=pending_count,
             removed_count=removed_count + orphan_count,
@@ -983,37 +1044,41 @@ class ArtifactStore:
         session: Session,
         artifact: Artifact,
         *,
-        retained: AbstractSet[str] | None = None,
+        references: AbstractSet[str] | None = None,
+        proof: object | None = None,
     ) -> None:
-        """Remove one artifact, staging its bytes so a failed flush can restore them.
+        """Delete one unretained artifact under the current writer reservation.
 
-        `retained` is an optimisation with a safety condition, not a shortcut. A
-        caller may pass the reference graph ONLY when it computed that graph
-        after taking this same write fence, in the same transaction: BEGIN
-        IMMEDIATE holds the writer reservation, so no other connection can create
-        a reference while it is held and the snapshot cannot go stale underneath
-        us. A caller that has not taken the fence, or that spans several
-        transactions, passes nothing and pays for its own check - that guard is
-        the safety property for explicit deletion and is deliberately kept.
-
-        Removing the wrapper call alone is NOT enough. The flush below fires a
-        listener that independently walks the same graph for every deleted
-        artifact, so the snapshot is lent to that listener too; otherwise the
-        per-deletion walk survives untouched behind a test that cannot see it,
-        because each module binds its own reference to that function.
+        A supplied proof must match this artifact and the unchanged reference
+        snapshot in the same session, connection and transaction. Without one,
+        derive that evidence here. Stage existing bytes before flushing and
+        restore them if the flush fails; commit finalizes their removal.
         """
 
         begin_artifact_write_fence(session)
-        known = self.referenced_artifact_ids(session) if retained is None else retained
+        if references is not None and proof is not None:
+            raise ValueError("artifact deletion accepts one authority source")
+        if proof is None:
+            known = (
+                self.referenced_artifact_ids(session, for_deletion=True)
+                if references is None
+                else references
+            )
+        else:
+            selected_proof = restrict_artifact_deletion_proof(session, proof, {artifact.id})
+            known = artifact_deletion_proof_references(selected_proof)
         if artifact.id in known:
             raise ValueError("This artifact is still retained.")
+        if proof is None:
+            selected_proof = mint_artifact_deletion_proof(session, {artifact.id}, known)
         try:
             path = self.resolve(artifact)
         except ValueError:
             # Invalid metadata must never redirect deletion to another file.
             session.delete(artifact)
-            with fenced_reference_snapshot(session, retained):
+            with activate_artifact_deletion_proof(session, selected_proof):
                 session.flush()
+                record_artifact_deletion(session, selected_proof)
             return
         staged: Path | None = None
         if path.exists():
@@ -1028,10 +1093,9 @@ class ArtifactStore:
             self._verified_files.pop(path, None)
         try:
             session.delete(artifact)
-            # The listener on this flush walks the whole reference graph unless a
-            # caller that already holds the fence lends it the graph it computed.
-            with fenced_reference_snapshot(session, retained):
+            with activate_artifact_deletion_proof(session, selected_proof):
                 session.flush()
+                record_artifact_deletion(session, selected_proof)
         except Exception:
             if staged is not None:
                 self._restore_staged_file(staged, path)
@@ -1151,7 +1215,12 @@ class ArtifactStore:
 
         removed_count = 0
         reclaimed_bytes = 0
-        entries = list_entries(anchor, limit=_ROOT_LISTING_LIMIT)
+        # Poll while the native listing is collected, not only after it has
+        # materialized. A stop also marks the shared budget truncated, so
+        # callers retain completed counts and leave unfinished shards intact.
+        entries = list_entries(
+            anchor, limit=_ROOT_LISTING_LIMIT, should_stop=lambda: not budget.allow()
+        )
         for entry in entries:
             if not _is_temporary_name(entry.name):
                 continue
@@ -1197,7 +1266,7 @@ class ArtifactStore:
         reclaimed_bytes = 0
         try:
             with open_child_directory(anchor, first) as held:
-                for entry in list_entries(held):
+                for entry in list_entries(held, should_stop=lambda: not budget.allow()):
                     if entry.kind is not AnchoredEntryKind.DIRECTORY or not _SHARD.fullmatch(
                         entry.name
                     ):
@@ -1245,7 +1314,7 @@ class ArtifactStore:
         reclaimed_bytes = 0
         try:
             with open_child_directory(parent, second) as held:
-                for entry in list_entries(held):
+                for entry in list_entries(held, should_stop=lambda: not budget.allow()):
                     size = self._removable_size(
                         entry, first, second, indexed=indexed, cutoff=cutoff
                     )

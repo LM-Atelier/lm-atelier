@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import asyncio
 import io
 import json
 import zipfile
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from httpx2 import AsyncClient
+from run_waits import wait_for_terminal_status
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -18,16 +18,12 @@ from local_lm.orchestrator import ConversationOrchestrator
 
 
 async def _wait_for_run(client: AsyncClient, run_id: str) -> dict:  # type: ignore[type-arg]
-    deadline = asyncio.get_running_loop().time() + 5
-    while asyncio.get_running_loop().time() < deadline:
+    async def read() -> dict[str, Any]:
         response = await client.get(f"/api/runs/{run_id}")
         assert response.status_code == 200
-        run: dict[str, Any] = response.json()
-        if run["status"] in {"complete", "failed", "cancelled"}:
-            assert run["status"] == "complete", run
-            return run
-        await asyncio.sleep(0.03)
-    raise AssertionError("run did not complete")
+        return cast(dict[str, Any], response.json())
+
+    return cast(dict[str, Any], await wait_for_terminal_status(read, what=f"run {run_id}"))
 
 
 def _output_artifact_id(run: dict) -> str:  # type: ignore[type-arg]

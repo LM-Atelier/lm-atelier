@@ -107,6 +107,37 @@ describe("resolveWorkflowSettings", () => {
     });
   });
 
+  it("delivers the length the server will when the request falls between two frames", () => {
+    // The server computes from the decimal the reader typed, as an exact
+    // fraction, so 0.14s at 25fps is exactly 3.5 frames - a tie, which it
+    // resolves by taking the shorter one. The browser multiplies floating
+    // point, so the same request lands a hair above 3.5 and the tie becomes a
+    // decision. Every number here was measured against the server before it was
+    // written: it answered 3, 27, 54 and 55.
+    const length = {
+      key: "duration_seconds",
+      video_length: {
+        frames_parameter: "frames",
+        fps_parameter: "fps",
+        fps_numerator: 25,
+        fps_denominator: 1,
+        frame_alignment: 1,
+        frame_offset: 0,
+        minimum_frames: 1,
+        maximum_frames: 100,
+      },
+    } as unknown as SettingField;
+
+    expect(videoLengthDelivery(length, 0.14)?.frames).toBe(3);
+    expect(videoLengthDelivery(length, 1.1)?.frames).toBe(27);
+    expect(videoLengthDelivery(length, 2.18)?.frames).toBe(54);
+    expect(videoLengthDelivery(length, 2.22)?.frames).toBe(55);
+
+    // Not a tie, and these must not move: 0.15s is 3.75 frames, nearer to four.
+    expect(videoLengthDelivery(length, 0.15)?.frames).toBe(4);
+    expect(videoLengthDelivery(length, 0.12)?.frames).toBe(3);
+  });
+
   it("fails closed for extended or unreduced video-length contracts", () => {
     const fpsField: SettingField = { ...videoField, key: "fps", type: "number", default: 16 };
     const contract: Record<string, unknown> = {

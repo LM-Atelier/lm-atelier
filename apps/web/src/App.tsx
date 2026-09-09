@@ -1,3 +1,8 @@
+import { EditedBranchCards } from "./EditedBranchCards";
+import { useEditedBranches } from "./useEditedBranches";
+import { TurnEditor } from "./TurnEditor";
+import { PriorTurnEditor } from "./PriorTurnEditor";
+import { activeBranchMessages, workflowSchemaForTurn } from "./turnEditorContext";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -6,7 +11,6 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  CircleStop,
   Download,
   Film,
   Folder,
@@ -24,28 +28,25 @@ import {
   RotateCcw,
   Search,
   Send,
-  SlidersHorizontal,
   Sparkles,
   Star,
   ThumbsDown,
   ThumbsUp,
   Upload,
-  Wand2,
   Workflow as WorkflowIcon,
   X,
 } from "lucide-react";
 import { AccessibleDialog } from "./AccessibleDialog";
-import { ActiveChatWorkflowSelector } from "./ActiveChatWorkflowSelector";
 import { CopyTextButton } from "./CopyTextButton";
 import { InstallConfirmDialog } from "./InstallConfirmDialog";
 import { api } from "./api";
+import { regenerateWithRetry } from "./regenerationRequest";
 import { formatBytes } from "./format";
+import { editReviewSummary } from "./editReview";
 import { videoLengthSummary } from "./videoLength";
 import { GlobalNotices } from "./GlobalNotices";
 import {
-  artifactSource,
   mediaOriginForPart,
-  mediaOriginLabel,
   editLineageForResult,
   editSourceUrlForResult,
   messagePartsForTranscript,
@@ -59,20 +60,15 @@ import { FirstFailure } from "./FirstFailure";
 import type { VisualTarget } from "./libraryEditTargets";
 import { EmptyState } from "./EmptyState";
 import { AtelierMark } from "./AtelierMark";
-import { EditingStudio } from "./EditingStudio";
 import { MessageTimestamp } from "./MessageTimestamp";
 import { MessageRemovalConfirmation, UserMessageControls } from "./MessageRemovalControls";
 import { PendingResponseStatus } from "./PendingResponseStatus";
 import { MarkdownText } from "./MarkdownText";
 import { MentionText } from "./MentionText";
-import { MessageField } from "./MessageField";
-import { OutputCountControl } from "./OutputCountControl";
-import { mediaOutputCountForTurn, useMediaOutputCount } from "./mediaOutputCount";
 import type { TurnReference } from "./mentionDraft";
-import { useComposerMentions } from "./useComposerMentions";
 import { useConfirm } from "./useConfirm";
 import { useTurnConfirmation } from "./useTurnConfirmation";
-import { drawerRoleView, focusMainContent, roleForMode } from "./viewHelpers";
+import { focusMainContent, roleForMode } from "./viewHelpers";
 import { ArtifactPart } from "./ArtifactPart";
 import { ImageStudioIcon } from "./ImageStudioIcon";
 import { FirstRunSetup } from "./SetupWizard";
@@ -84,21 +80,14 @@ import { SidebarFooter } from "./SidebarFooter";
 import { SetupSurface } from "./SetupSurface";
 import { ThemeToggle } from "./ThemeToggle";
 import { WorkflowConsumers } from "./WorkflowConsumers";
-import { operationForTurn, revisionForTurn, schemaForRevision } from "./turnWorkflow";
-import type { WorkflowFamily, WorkflowSelection } from "./types";
 import { PromptDialog } from "./ConfirmDialog";
-import { SettingsDrawer } from "./SettingsDrawer";
 import { ProjectManager } from "./ProjectManager";
 import { SettingsView } from "./SettingsView";
 import { MediaLibraryView } from "./MediaLibraryView";
 import { PromptLibraryView } from "./PromptLibraryView";
-import { ComposerPromptTemplatesAction } from "./ComposerPromptTemplatesAction";
-import type { ChatViewProps, ComposerProps, PendingTurn } from "./chatComposerContracts";
+import type { ChatViewProps, PendingTurn } from "./chatComposerContracts";
 import {
   EMPTY_COMPOSER_DRAFT,
-  composerDraftWithText,
-  detachedComposerDraft,
-  promptSourceForTurn,
   updatedComposerDrafts,
   withoutComposerDraft,
   type ComposerDraft, type ComposerPromptSource,
@@ -113,19 +102,13 @@ import { StudioView } from "./StudioView";
 import { RecipeCard } from "./RecipeCard";
 import { ModelUpdatesPanel } from "./ModelUpdatesPanel";
 import { useProjectMutations } from "./useProjectMutations";
-import { AttachControls } from "./AttachControls";
 import { JobsPanel } from "./JobsPanel";
 import { editVisionNote, workshopTranscript } from "./promptWorkshop";
-import { useComposerUploads } from "./useComposerUploads";
-import type { ComposerAttachment } from "./useComposerUploads";
-import { useDraftClassification } from "./useDraftClassification";
 import { useFirstRunSetup } from "./useFirstRunSetup";
 import { recoverPromptSourceSend } from "./promptSourceSendRecovery";
 import { useWorkPlanMutations } from "./useWorkPlanMutations";
-import { useGenerationModeSelection } from "./useGenerationModeSelection";
 import { useMessageActions } from "./useMessageActions";
 import {
-  normalizeSettingsForFields,
   promptPreviewSettings,
   resolveCapabilitySettings,
   resolveWorkflowSettings,
@@ -145,7 +128,6 @@ import type {
   ModelInstall,
   ModelProfile,
   Project,
-  RoutingMode,
   SetupReadinessReport,
   TurnAccepted,
   Workflow,
@@ -231,6 +213,7 @@ export function MessageBubble({
   hiddenInputArtifactIds,
   onRegenerate,
   onEdit,
+  onOpenEdit,
   onSelectRevision,
   onCancelQueued,
   onEditImage,
@@ -251,6 +234,7 @@ export function MessageBubble({
   hiddenInputArtifactIds?: ReadonlySet<string>;
   onRegenerate?: (messageId: string) => void;
   onEdit?: (messageId: string, text: string) => void;
+  onOpenEdit?: (messageId: string) => void;
   onSelectRevision?: (messageId: string, revisionId: string) => void;
   onCancelQueued?: () => void;
   onEditImage?: (part: MessagePart, origin: MediaOrigin) => void;
@@ -354,7 +338,7 @@ export function MessageBubble({
       messageId={message.id}
       createdAt={message.created_at}
       copyableText={copyableText}
-      onEdit={onEdit ? () => setEditing(true) : undefined}
+      onEdit={onOpenEdit ? () => onOpenEdit(message.id) : onEdit ? () => setEditing(true) : undefined}
       onRemoveItem={onRemoveItem}
       onDeleteExchange={onDeleteExchange}
     />
@@ -384,6 +368,7 @@ export function MessageBubble({
               </span>
             )}
             {appliedTriggerWords.length > 0 && <span>Added trigger words: {appliedTriggerWords.join(", ")}</span>}
+            {editReviewSummary(provenance) && <span>{editReviewSummary(provenance)}</span>}
             {videoLengthSummary(provenance) && <span>{videoLengthSummary(provenance)}</span>}
             {contextLimit > 0 && (
               <span>
@@ -745,445 +730,6 @@ function PromptHelperDialog({
     </AccessibleDialog>
   );
 }
-function Composer({
-  chat,
-  engines,
-  profiles,
-  stoppable,
-  settings,
-  onSettings,
-  settingsRole,
-  onSettingsRole,
-  presets,
-  presetId,
-  onPreset,
-  onMode,
-  onSend,
-  onStop,
-  onStopAndSend,
-  maxMediaOutputsPerPlan,
-  workflows,
-  project,
-  visualTarget,
-  quoteTarget,
-  draft,
-  onDraftChange,
-}: ComposerProps) {
-  const text = draft.text;
-  const setText = useCallback((next: string | ((current: string) => string)) => onDraftChange(
-    (current) => composerDraftWithText(current, typeof next === "function" ? next(current.text) : next),
-  ), [onDraftChange]);
-  const detachPromptSource = useCallback(() => onDraftChange(detachedComposerDraft), [onDraftChange]);
-  const { outputCount, setOutputCount, resetOutputCount } = useMediaOutputCount();
-  const mentions = useComposerMentions();
-  const { mode, changeMode, currentMode } = useGenerationModeSelection(chat.routing_mode, onMode);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [promptHelperDraft, setPromptHelperDraft] = useState<string | null>(null);
-  const [studioOpen, setStudioOpen] = useState(false);
-  const [templateSettings, setTemplateSettings] = useState<{ name: string; settings: Record<string, unknown> } | null>(null);
-  const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
-  const addAttachment = (attachment: ComposerAttachment) => { detachPromptSource(); setAttachments((current) => [...current, attachment]); };
-  const { uploading, uploadError, setUploadError, uploadFiles, uploadPastedImages } = useComposerUploads(addAttachment);
-  const [dropActive, setDropActive] = useState(false);
-  const fileInput = useRef<HTMLInputElement>(null);
-  const textInput = useRef<HTMLTextAreaElement>(null);
-  const consumedVisualRequest = useRef<number | null>(null);
-  useEffect(() => {
-    if (!visualTarget || consumedVisualRequest.current === visualTarget.requestId) return;
-    consumedVisualRequest.current = visualTarget.requestId;
-    detachPromptSource();
-    setAttachments((current) => {
-      const additions = [visualTarget.attachment, ...(visualTarget.extraAttachments ?? [])]
-        .filter((addition) => !current.some((item) => item.id === addition.id));
-      return additions.length ? [...current, ...additions] : current;
-    });
-    if (visualTarget.mode) changeMode(visualTarget.mode);
-    if (visualTarget.mode === "video") {
-      window.setTimeout(() => {
-        setText((current) => current.trim() ? current : "Animate this image");
-      }, 0);
-    }
-    if (visualTarget.studio) {
-      // After the attach renders, like the Animate prefill above.
-      window.setTimeout(() => setStudioOpen(true), 0);
-    }
-    textInput.current?.focus();
-  }, [visualTarget, changeMode, detachPromptSource, setText]);
-  const consumedQuoteRequest = useRef<number | null>(null);
-  useEffect(() => {
-    if (!quoteTarget || consumedQuoteRequest.current === quoteTarget.requestId) return;
-    consumedQuoteRequest.current = quoteTarget.requestId;
-    const quoted = quoteTarget.text
-      .trim()
-      .split("\n")
-      .map((line) => `> ${line}`)
-      .join("\n");
-    setText((current) => (current.trim() ? `${quoted}\n\n${current}` : `${quoted}\n\n`));
-    textInput.current?.focus();
-  }, [quoteTarget, setText]);
-  const branchMessages = activeBranchMessages(chat);
-  const priorVisual = branchMessages.some((message) =>
-    message.parts.some((part) =>
-      Boolean(part.artifact_id)
-      && (part.type === "image" || part.type === "video")
-      && part.metadata_json.preview !== true
-    )
-  );
-  const priorImage = branchMessages.some((message) =>
-    message.parts.some((part) =>
-      Boolean(part.artifact_id)
-      && part.type === "image"
-      && part.metadata_json.preview !== true
-    )
-  );
-  const usePriorVisual = useDraftClassification(chat.id, text, mode, priorVisual);
-  const editableImageAttached =
-    attachments.some((attachment) => attachment.kind === "image")
-    || (priorImage && usePriorVisual);
-  const imageEdit = mode === "image" && editableImageAttached;
-  // See drawerRoleView: the drawer follows the persisted routing mode and
-  // the picked role, not the composer's local mode.
-  const { drawerMode, drawerImageEdit } = drawerRoleView(chat.routing_mode, settingsRole, editableImageAttached);
-  const needsWorkflowSchema =
-    mode === "image" || mode === "video" || drawerMode === "image" || drawerMode === "video";
-  const families = useQuery({
-    queryKey: ["workflow-families"],
-    queryFn: () => api.workflowFamilies(),
-    enabled: needsWorkflowSchema,
-  });
-  const selections = useQuery({
-    queryKey: ["chat", chat?.id, "workflow-selections"],
-    queryFn: () => api.chatWorkflowSelections(chat!.id),
-    enabled: needsWorkflowSchema && Boolean(chat?.id),
-  });
-  const projectSelections = useQuery({ queryKey: ["project", project?.id, "workflow-selections"],
-    queryFn: () => api.projectWorkflowSelections(project!.id),
-    enabled: needsWorkflowSchema && Boolean(project?.id) });
-  const imageProfile = profiles.find((profile) => profile.id === chat.active_image_profile_id)
-    ?? profiles.find((profile) => profile.role === "image" && profile.is_default);
-  const profileValues = {
-    ...(imageProfile?.load_settings_json ?? {}),
-    ...(imageProfile?.request_settings_json ?? {}),
-  };
-  const workflowSchema = workflowSchemaForTurn(
-    workflows,
-    mode,
-    attachments.length > 0 || usePriorVisual,
-    families.data ?? [],
-    selections.data?.find((one) => one.selector_capability === mode),
-    project ? projectSelections.data?.find((one) => one.selector_capability === mode) : null,
-  );
-  const drawerWorkflowSchema = drawerMode === mode
-    ? workflowSchema
-    : workflowSchemaForTurn(
-        workflows,
-        drawerMode,
-        attachments.length > 0 || usePriorVisual,
-        families.data ?? [],
-        selections.data?.find((one) => one.selector_capability === drawerMode),
-        project ? projectSelections.data?.find((one) => one.selector_capability === drawerMode) : null,
-      );
-  const submit = (stopCurrent = false) => {
-    if (!text.trim()) return;
-    const selectedMode = currentMode();
-    const role = roleForMode(selectedMode);
-    const engine = engines.find((item) => item.roles.includes(role));
-    const fields = resolveWorkflowSettings(
-      resolveCapabilitySettings(engine, role),
-      workflowSchema,
-    );
-    const dispatch = stopCurrent ? onStopAndSend : onSend;
-    const requestedOutputCount = mediaOutputCountForTurn(selectedMode, outputCount);
-    const references = mentions.forText(text);
-    const promptSource = promptSourceForTurn(draft, selectedMode, attachments.length, references.length, requestedOutputCount);
-    dispatch(
-      text.trim(),
-      selectedMode,
-      attachments.map((item) => item.id),
-      selectedMode === "auto"
-        ? {}
-        : normalizeSettingsForFields(
-            templateSettings ? { ...settings, ...templateSettings.settings } : settings,
-            fields,
-          ),
-      references,
-      requestedOutputCount,
-      promptSource,
-    );
-    setText("");
-    mentions.clear();
-    setAttachments([]);
-    setTemplateSettings(null);
-    resetOutputCount();
-  };
-
-  return (
-    <>
-      <div
-        className={`composer-wrap${dropActive ? " drop-active" : ""}`}
-        onDragOver={(event) => {
-          if (!Array.from(event.dataTransfer.types).includes("Files")) return;
-          event.preventDefault();
-          setDropActive(true);
-        }}
-        onDragLeave={(event) => {
-          if (event.currentTarget.contains(event.relatedTarget as Node)) return;
-          setDropActive(false);
-        }}
-        onDrop={(event) => {
-          event.preventDefault();
-          setDropActive(false);
-          const dropped = Array.from(event.dataTransfer.files);
-          const files = dropped.filter(
-            (file) => file.type.startsWith("image/") || file.type.startsWith("video/"),
-          );
-          setUploadError(
-            files.length < dropped.length ? "Only images and videos can be attached." : "",
-          );
-          void uploadFiles(files);
-        }}
-      >
-        {dropActive && <div className="drop-hint">Drop images or videos to attach</div>}
-        {uploadError && <ErrorCallout message={uploadError} />}
-        {attachments.length > 0 && (
-          <div className="attachment-strip">
-            {attachments.map((attachment) => {
-              const source = attachment.artifact?.url || artifactSource(attachment.id)!;
-              const name = attachment.artifact?.original_name || attachment.id;
-              const label = mediaOriginLabel(attachment.origin, attachment.kind);
-              return (
-                <article className="attachment-card" key={attachment.id}>
-                  <a
-                    className="attachment-preview"
-                    href={source}
-                    target="_blank"
-                    rel="noreferrer"
-                    aria-label={`Preview ${name}`}
-                  >
-                    {attachment.kind === "image"
-                      ? <img src={source} alt="" />
-                      : <video src={source} muted preload="metadata" />}
-                  </a>
-                  <span className="attachment-summary">
-                    <strong>{label}</strong>
-                    <small title={name}>{name}</small>
-                  </span>
-                  <span className="attachment-actions">
-                    {attachment.kind === "image" && (
-                      <>
-                        <button
-                          className="attachment-edit"
-                          aria-label="Edit attached image"
-                          onClick={() => {
-                            onMode("image");
-                            textInput.current?.focus();
-                          }}
-                        >
-                          Edit
-                        </button>
-                        <button
-                          className="attachment-edit"
-                          aria-label="Animate attached image"
-                          onClick={() => {
-                            onMode("video");
-                            detachPromptSource();
-                            setText((current) => current.trim() ? current : "Animate this image");
-                            textInput.current?.focus();
-                          }}
-                        >
-                          Animate
-                        </button>
-                      </>
-                    )}
-                    <button
-                      aria-label={`Remove ${label}: ${name}`}
-                      onClick={() => setAttachments((items) => (
-                        items.filter((item) => item.id !== attachment.id)
-                      ))}
-                    >
-                      <X size={12} />
-                    </button>
-                  </span>
-                </article>
-              );
-            })}
-          </div>
-        )}
-        {templateSettings && (
-          <div className="template-settings-chip">
-            <span>{templateSettings.name} settings apply to this send</span>
-            <button aria-label="Remove template settings" onClick={() => setTemplateSettings(null)}><X size={12} /></button>
-          </div>
-        )}
-        {draft.promptSource && (
-          <div className="template-settings-chip prompt-source-chip">
-            <span>Prompt Library draft linked</span>
-            <button aria-label="Remove Prompt Library source" onClick={detachPromptSource}><X size={12} /></button>
-          </div>
-        )}
-        <div className="composer">
-          <MessageField field={textInput} value={text} onChange={setText} onSubmit={submit} onMention={(mention) => { mentions.add(mention); detachPromptSource(); }} onPasteFiles={(files) => { detachPromptSource(); void uploadPastedImages(files); }} />
-          <div className="composer-tools">
-            <div className="left-tools">
-              <AttachControls disabled={uploading} onPickFile={() => fileInput.current?.click()} onAttach={addAttachment} />
-              <input ref={fileInput} hidden multiple type="file" accept="image/*,video/*" onChange={(event) => { setUploadError(""); void uploadFiles(Array.from(event.target.files ?? [])); event.target.value = ""; }} />
-              <button
-                className="icon-button"
-                onClick={() => setPromptHelperDraft(text.trim())}
-                disabled={!text.trim()}
-                aria-label="Open prompt workshop"
-                title="Improve this prompt"
-              >
-                <Sparkles size={18} />
-              </button>
-              <ComposerPromptTemplatesAction chatId={chat.id} currentPrompt={text} maximum={maxMediaOutputsPerPlan} />
-              <label className={`mode-select mode-${mode}`}>
-                {mode === "auto" && <Sparkles size={15} />}
-                {mode === "text" && <MessageSquare size={15} />}
-                {mode === "image" && <ImageIcon size={15} />}
-                {mode === "video" && <Film size={15} />}
-                <select aria-label="Generation mode" value={mode} onChange={(event) => {
-                  const nextMode = event.target.value as RoutingMode;
-                  changeMode(nextMode);
-                  if (nextMode !== "image") detachPromptSource();
-                }}>
-                  <option value="auto">Auto</option><option value="text">Text</option><option value="image">Image</option><option value="video">Video</option>
-                </select>
-                <ChevronDown size={13} />
-              </label>
-              <OutputCountControl mode={mode} maximum={maxMediaOutputsPerPlan} value={outputCount} onChange={(nextCount) => { setOutputCount(nextCount); if (nextCount > 1) detachPromptSource(); }} />
-              <div className="composer-workflow-selector">
-                <WorkflowIcon aria-hidden="true" size={15} />
-                <ActiveChatWorkflowSelector chatId={chat.id} routingMode={mode} />
-              </div>
-              {imageEdit && <button className="icon-button" onClick={() => setStudioOpen(true)} aria-label="Open editing studio" title="One-click edits"><Wand2 size={18} /></button>}
-              <button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="Turn settings"><SlidersHorizontal size={18} /></button>
-            </div>
-            <span className="composer-submit-actions">
-              {stoppable && (
-                <button
-                  className="send-button stop"
-                  onClick={onStop}
-                  aria-label="Stop current response"
-                  title="Stop current response"
-                >
-                  <CircleStop size={18} />
-                </button>
-              )}
-              {stoppable && text.trim() && (
-                <button
-                  className="secondary stop-and-send"
-                  onClick={() => submit(true)}
-                  aria-label="Stop current response and send"
-                >
-                  Stop and send
-                </button>
-              )}
-              <button
-                className="send-button"
-                disabled={!text.trim()}
-                onClick={() => submit()}
-                aria-label="Send"
-              >
-                <Send size={18} />
-              </button>
-            </span>
-          </div>
-        </div>
-      </div>
-      {studioOpen && <EditingStudio currentInstruction={text} onClose={() => setStudioOpen(false)} onPick={(instruction, template) => { setText(instruction); setTemplateSettings(Object.keys(template.settings_json).length ? { name: template.name, settings: template.settings_json } : null); setStudioOpen(false); window.setTimeout(() => textInput.current?.focus(), 0); }} imageCount={attachments.filter((item) => item.kind === "image").length} onApplyToEach={(instruction, template) => {
-        const role = roleForMode("image");
-        const engine = engines.find((item) => item.roles.includes(role));
-        const fields = resolveWorkflowSettings(resolveCapabilitySettings(engine, role), workflowSchema);
-        const merged = normalizeSettingsForFields({ ...settings, ...template.settings_json }, fields);
-        // One ordinary edit turn per image: each queues, verifies, and retries
-        // alone; the pending-work bound errs clearly rather than truncating.
-        // No references: these are edits of the attached images themselves,
-        // not a mention-driven turn, and the instruction was not composed in
-        // the field that tracks mentions.
-        for (const item of attachments.filter((entry) => entry.kind === "image")) onSend(instruction, "image", [item.id], merged, []);
-        setAttachments([]); setText(""); setTemplateSettings(null); setStudioOpen(false);
-      }} />}
-
-      {promptHelperDraft !== null && (
-        <PromptHelperDialog
-          sourceChat={chat}
-          initialDraft={promptHelperDraft}
-          engines={engines}
-          workflows={workflows}
-          // Only explicit attachments ground the workshop: the helper chat has
-          // no lineage, so a prior-image reference has nothing to resolve to.
-          editSourceArtifactIds={imageEdit
-            ? attachments.filter((item) => item.kind === "image").map((item) => item.id)
-            : undefined}
-          onAccept={(nextDraft) => {
-            setText(nextDraft);
-            setPromptHelperDraft(null);
-            window.setTimeout(() => textInput.current?.focus(), 0);
-          }}
-          onClose={() => setPromptHelperDraft(null)}
-        />
-      )}
-      <SettingsDrawer
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        mode={chat.routing_mode}
-        role={settingsRole}
-        onRole={onSettingsRole}
-        engines={engines}
-        values={settings}
-        onValues={onSettings}
-        presets={presets}
-        presetId={presetId}
-        onPreset={onPreset}
-        workflowSchema={drawerWorkflowSchema}
-        inheritedValues={project?.generation_settings_json?.[settingsRole]}
-        inheritedPresetId={project?.generation_preset_ids_json?.[settingsRole]}
-        profileValues={profileValues}
-        imageEdit={drawerImageEdit}
-        imageEditPrompt={text}
-      />
-    </>
-  );
-}
-
-function activeBranchMessages(chat: ChatDetail): Message[] {
-  const visibleMessages = chat.messages.filter(
-    (message) => message.transcript_visible !== false,
-  );
-  if (!chat.active_head_message_id) return visibleMessages;
-  const byId = new Map(visibleMessages.map((message) => [message.id, message]));
-  const lineage: Message[] = [];
-  const visited = new Set<string>();
-  let current = byId.get(chat.active_head_message_id);
-  while (current && !visited.has(current.id)) {
-    visited.add(current.id);
-    lineage.unshift(current);
-    current = current.parent_id ? byId.get(current.parent_id) : undefined;
-  }
-  return lineage.length > 0 ? lineage : visibleMessages;
-}
-
-function workflowSchemaForTurn(
-  workflows: Workflow[],
-  mode: RoutingMode,
-  hasAttachments: boolean,
-  families: WorkflowFamily[] = [],
-  chatSelection: WorkflowSelection | null | undefined = null,
-  projectSelection: WorkflowSelection | null | undefined = null,
-): Record<string, unknown> | undefined {
-  if (mode !== "image" && mode !== "video") return undefined;
-  const operation = operationForTurn(mode, hasAttachments);
-  const revisionId = revisionForTurn(
-    families,
-    mode,
-    chatSelection,
-    projectSelection,
-    operation,
-  );
-  return schemaForRevision(workflows, revisionId, operation);
-}
-
 function ChatView({
   onOpenStudio,
   chat,
@@ -1205,7 +751,7 @@ function ChatView({
   onSend,
   onRegenerate,
   onSelectRevision,
-  onEdit,
+  onEditAccepted,
   onStop,
   onStopAndSend,
   maxMediaOutputsPerPlan,
@@ -1220,6 +766,8 @@ function ChatView({
   composerDraft,
   onComposerDraft,
 }: ChatViewProps) {
+  const [editMessageId, setEditMessageId] = useState<string | null>(null);
+  const edited = useEditedBranches(chat);
   const endRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const followMessages = useRef(true);
@@ -1267,6 +815,17 @@ function ChatView({
   };
   if (!chat) return <EmptyState icon={<MessageSquare />} title="Start a local conversation" body="Create a chat and choose a model. Conversations stay on this machine." />;
   const messages = activeBranchMessages(chat);
+  const previewMessages = edited.preview && chat.messages.some(
+    (message) => message.id === edited.preview?.branch_head_message_id,
+  ) ? activeBranchMessages({ ...chat, active_head_message_id: edited.preview.branch_head_message_id }) : [];
+  const branchCards = (sourceId?: string) => <EditedBranchCards
+    branches={edited.branches.filter((branch) => sourceId
+      ? branch.source_message_id === sourceId
+      : !messages.some((message) => message.id === branch.source_message_id))}
+    activeHeadId={chat.active_head_message_id} activatingPlanId={edited.activatingPlanId}
+    onView={edited.view} onContinue={edited.continueBranch}
+    onCancelPlan={onCancelPlan} onRetryPlan={onRetryPlan}
+    onCancelStep={onCancelStep} onRetryStep={onRetryStep} />;
   const priorVisibleMedia = priorVisibleMediaByMessage(messages);
   const stoppable = messages.some(
     (message) => message.status === "pending"
@@ -1304,6 +863,8 @@ function ChatView({
           <EmptyState icon={<Sparkles />} title="What should we make?" body="Ask anything or create an image or video. Auto mode picks the model." />
         ) : messages.map((message, messageIndex) => {
           const messagePlan = planByAssistantMessage.get(message.id);
+          const targetPending = message.status === "pending"
+            || (message.response_revisions ?? []).some((revision) => revision.status === "pending");
           const compareSourceUrl = message.role === "assistant"
             ? editSourceUrlForResult(messages, messageIndex)
             : null;
@@ -1338,24 +899,19 @@ function ChatView({
                   next: !part.artifact?.favorite,
                 })}
                 hiddenInputArtifactIds={priorVisibleMedia.get(message.id)}
-                onRegenerate={busy ? undefined : (messageId) => onRegenerate(
+                onRegenerate={targetPending ? undefined : (messageId) => onRegenerate(
                   messageId,
                   chat.routing_mode === "auto" ? {} : settings,
                 )}
-                onSelectRevision={busy ? undefined : onSelectRevision}
-                onEdit={busy ? undefined : (messageId, text) => onEdit(
-                  messageId,
-                  text,
-                  chat.routing_mode,
-                  chat.routing_mode === "auto" ? {} : settings,
-                )}
+                onSelectRevision={targetPending ? undefined : onSelectRevision}
+                onOpenEdit={setEditMessageId}
                 onCancelQueued={
                   messagePlan && messagePlan.steps.length <= 1 && messagePlan.status === "queued"
                     ? () => onCancelPlan(messagePlan.id)
                     : undefined
                 }
-                onOpenStudio={busy ? undefined : (part) => onOpenStudio(part.artifact_id!)}
-                onEditImage={busy ? undefined : (part, origin) => setVisualTarget({
+                onOpenStudio={(part) => onOpenStudio(part.artifact_id!)}
+                onEditImage={(part, origin) => setVisualTarget({
                   attachment: {
                     id: part.artifact_id!,
                     kind: "image",
@@ -1365,7 +921,7 @@ function ChatView({
                   mode: "image",
                   requestId: Date.now(),
                 })}
-                onAnimateImage={busy ? undefined : (part, origin) => setVisualTarget({
+                onAnimateImage={(part, origin) => setVisualTarget({
                   attachment: {
                     id: part.artifact_id!,
                     kind: "image",
@@ -1375,7 +931,7 @@ function ChatView({
                   mode: "video",
                   requestId: Date.now(),
                 })}
-                onReferenceMedia={busy ? undefined : (part, origin) => setVisualTarget({
+                onReferenceMedia={(part, origin) => setVisualTarget({
                   attachment: {
                     id: part.artifact_id!,
                     kind: part.type === "video" ? "video" : "image",
@@ -1390,9 +946,11 @@ function ChatView({
                 onRemoveItem={busy ? undefined : onRemoveItem}
                 onForkThread={busy ? undefined : onForkThread}
               />
+              {branchCards(message.id)}
             </Fragment>
           );
         })}
+        {branchCards()}
         {pendingTurns.map((pendingTurn) => (
           <Fragment key={pendingTurn.id}>
             <article className="message user optimistic">
@@ -1415,7 +973,22 @@ function ChatView({
         ))}
         <div ref={endRef} />
       </div>
-      <Composer chat={chat} engines={engines} profiles={profiles} stoppable={stoppable} settings={settings} onSettings={onSettings} settingsRole={settingsRole} onSettingsRole={onSettingsRole} presets={presets} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} onStopAndSend={onStopAndSend} maxMediaOutputsPerPlan={maxMediaOutputsPerPlan} workflows={workflows} project={project} visualTarget={visualTarget} quoteTarget={quoteTarget} draft={composerDraft} onDraftChange={onComposerDraft} />
+      {edited.failed && <p role="alert">Edited versions could not be loaded.</p>}
+      {edited.activationFailed && <p role="alert">This version could not be selected. Refresh the conversation and try again.</p>}
+      {edited.preview && <section role="dialog" aria-label="Edited branch preview">
+        <h2>Edited version</h2>
+        <button className="secondary" onClick={edited.close}>Close preview</button>
+        <button className="secondary" disabled={!edited.preview.can_continue || edited.activating}
+          onClick={() => edited.preview && edited.continueBranch(edited.preview)}>Continue from this version</button>
+        {previewMessages.length === 0 && <p>This edited version is being loaded.</p>}
+        {previewMessages.map((message) => <MessageBubble key={message.id} message={message}
+          liveText={liveText[message.id]} onOpenEdit={setEditMessageId} />)}
+      </section>}
+      {editMessageId && <PriorTurnEditor key={editMessageId} messageId={editMessageId} chat={chat}
+        engines={engines} profiles={profiles} workflows={workflows} presets={presets}
+        maxMediaOutputsPerPlan={maxMediaOutputsPerPlan} PromptHelper={PromptHelperDialog}
+        onAccepted={onEditAccepted} onClose={() => setEditMessageId(null)} />}
+      <TurnEditor PromptHelper={PromptHelperDialog} chat={chat} engines={engines} profiles={profiles} stoppable={stoppable} settings={settings} onSettings={onSettings} settingsRole={settingsRole} onSettingsRole={onSettingsRole} presets={presets} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} onStopAndSend={onStopAndSend} maxMediaOutputsPerPlan={maxMediaOutputsPerPlan} workflows={workflows} project={project} visualTarget={visualTarget} quoteTarget={quoteTarget} draft={composerDraft} onDraftChange={onComposerDraft} />
     </div>
   );
 }
@@ -2132,7 +1705,7 @@ export default function App() {
     mutationFn: api.createProject,
     onSuccess: () => void client.invalidateQueries({ queryKey: ["projects"] }),
   });
-  const applyAcceptedTurn = (chatId: string, accepted: TurnAccepted) => {
+  const applyAcceptedTurn = useCallback((chatId: string, accepted: TurnAccepted, activate = true) => {
     client.setQueryData<ChatDetail>(["chat", chatId], (current) => {
       if (!current) return current;
       const messageIds = new Set(current.messages.map((message) => message.id));
@@ -2140,7 +1713,7 @@ export default function App() {
         .filter((message) => !messageIds.has(message.id));
       return {
         ...current,
-        active_head_message_id: accepted.assistant_message.id,
+        active_head_message_id: activate ? accepted.assistant_message.id : current.active_head_message_id,
         messages: [...current.messages, ...acceptedMessages],
       };
     });
@@ -2148,7 +1721,8 @@ export default function App() {
     void client.invalidateQueries({ queryKey: ["chats"] });
     void client.invalidateQueries({ queryKey: ["jobs"] });
     void client.invalidateQueries({ queryKey: ["work-plans", chatId] });
-  };
+    void client.invalidateQueries({ queryKey: ["edited-branches", chatId] });
+  }, [client]);
   const send = useMutation({
     mutationFn: ({ chatId, id, text, mode, artifacts, settings, references, outputCount, promptSource, stopCurrent }: SendTurnVariables) => {
       if (stopCurrent) return api.stopAndSendTurn(
@@ -2186,8 +1760,8 @@ export default function App() {
   } = useWorkPlanMutations(activeChatId);
   const { deleteExchange, removeItem, forkThread } = useMessageActions(setCurrentChatId, setView);
   const regenerate = useMutation({
-    mutationFn: ({ messageId, settings }: { chatId: string; messageId: string; settings: Record<string, unknown> }) =>
-      api.regenerateMessage(messageId, settings),
+    mutationFn: ({ chatId, messageId, settings }: { chatId: string; messageId: string; settings: Record<string, unknown> }) =>
+      regenerateWithRetry(chatId, messageId, settings),
     onSuccess: (_accepted, { chatId }) => {
       void client.invalidateQueries({ queryKey: ["chat", chatId], exact: true });
       void client.invalidateQueries({ queryKey: ["jobs"] });
@@ -2199,11 +1773,6 @@ export default function App() {
     onSuccess: (_message, { chatId }) => {
       void client.invalidateQueries({ queryKey: ["chat", chatId], exact: true });
     },
-  });
-  const branch = useMutation({
-    mutationFn: ({ messageId, text, mode, settings }: { chatId: string; messageId: string; text: string; mode: RoutingMode; settings: Record<string, unknown> }) =>
-      api.branchMessage(messageId, text, mode, settings),
-    onSuccess: (accepted, { chatId }) => applyAcceptedTurn(chatId, accepted),
   });
   const stop = useMutation({
     mutationFn: (chatId: string) => api.cancelChat(chatId),
@@ -2395,14 +1964,8 @@ export default function App() {
           revisionId,
         });
       }
-    }} onEdit={(messageId, text, mode, settings) => {
-      if (displayedChat) branch.mutate({
-        chatId: displayedChat.id,
-        messageId,
-        text,
-        mode,
-        settings,
-      });
+    }} onEditAccepted={(accepted) => {
+      if (displayedChat) applyAcceptedTurn(displayedChat.id, accepted, accepted.branch_activated);
     }} onStop={() => {
       if (displayedChat) stop.mutate(displayedChat.id);
     }} onStopAndSend={(text, mode, artifacts, settings, references, outputCount, promptSource) => {
@@ -2422,7 +1985,7 @@ export default function App() {
         send.mutate({ chatId: displayedChat.id, id: crypto.randomUUID(), text, mode, artifacts, settings, references, outputCount, promptSource });
       }
     }} />;
-  }, [studioSource, view, modelLibraryRole, engines.data, profiles.data, presets.data, workflows.data, applicationInfo.data, allProjects, chat.data, chatDrafts, autoSettingsRoles, rememberSettingsRole, composerDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, removeItem, forkThread, client, openLibraryImage]);
+  }, [studioSource, view, modelLibraryRole, engines.data, profiles.data, presets.data, workflows.data, applicationInfo.data, allProjects, chat.data, chatDrafts, autoSettingsRoles, rememberSettingsRole, composerDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, removeItem, forkThread, client, openLibraryImage, applyAcceptedTurn]);
 
   if (firstRunSetup && setupReadiness.data) {
     return <FirstRunSetup report={setupReadiness.data} onExit={exitFirstRunSetup} onOpenModels={(role) => { exitFirstRunSetup(); setModelLibraryRole(role); setView("models"); }} onOpenWorkflows={() => { exitFirstRunSetup(); setView("workflows"); }} />;
@@ -2454,7 +2017,7 @@ export default function App() {
       />
       <JobsPanel />
       {turnConfirmDialog}
-      <GlobalNotices connected={eventsConnected} mutations={[send, regenerate, selectResponseRevision, branch, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, createChat, createProject, exportProject, importProject, manageChat, deleteChat, updateProject, deleteProject, deleteExchange, removeItem, forkThread]} />
+      <GlobalNotices connected={eventsConnected} mutations={[send, regenerate, selectResponseRevision, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, createChat, createProject, exportProject, importProject, manageChat, deleteChat, updateProject, deleteProject, deleteExchange, removeItem, forkThread]} />
     </div>
   );
 }

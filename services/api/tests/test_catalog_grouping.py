@@ -75,3 +75,46 @@ def test_a_card_with_no_parent_is_never_given_a_count() -> None:
     plain = _card("owner/model", None, "owner/model")
 
     assert _with_installed_counts([plain], {"4201": 2}) == [plain]
+
+
+def test_installed_count_counts_distinct_versions_not_copies() -> None:
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from local_lm.api import _installed_counts_by_parent
+    from local_lm.db import Base
+    from local_lm.models import ModelAssetInstall, ModelInstall, ModelSource
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        for index, version in enumerate(["9001", "9001", "9002"]):
+            session.add(
+                ModelAssetInstall(
+                    name=f"Copy {index}",
+                    kind="lora",
+                    local_path=f"C:/neutral-fixture/{index}",
+                    manifest_json={
+                        "metadata": {
+                            "provider": "civitai",
+                            "source_model_id": "4201",
+                            "source_version_id": version,
+                        }
+                    },
+                )
+            )
+        source = ModelSource(provider="civitai", remote_id="4201", revision="9001")
+        session.add(source)
+        session.flush()
+        session.add(
+            ModelInstall(
+                source_id=source.id,
+                name="Checkpoint copy",
+                role="image",
+                engine="comfyui",
+                local_path="C:/neutral-fixture/checkpoint",
+                manifest_json={"remote_id": "4201", "revision": "9001"},
+            )
+        )
+        session.commit()
+        assert _installed_counts_by_parent(session) == {"4201": 2}

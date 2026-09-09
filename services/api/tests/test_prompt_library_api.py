@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from httpx2 import AsyncClient
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
+from workflow_fixtures import seed_workflow_trust
 
 from local_lm import api as api_module
 from local_lm import orchestrator as orchestrator_module
@@ -250,10 +251,15 @@ async def test_selected_prompt_batch_queues_one_atomic_exact_media_plan(
                 ).all()
             )
             assert len(runs) == len(steps) == 2
-            assert {run.standalone_prompt for run in runs} == {
-                item["reviewed_prompt"] for item in selected
-            }
+            prompt_by_step_id = {step.id: step.prompt for step in steps}
+            routing_prompts = []
             for run in runs:
+                assert run.work_step_id is not None
+                expected_prompt = prompt_by_step_id[run.work_step_id]
+                assert run.standalone_prompt == expected_prompt
+                recorded_prompt = run.provenance_json["routing"]["standalone_prompt"]
+                assert recorded_prompt == expected_prompt
+                routing_prompts.append(recorded_prompt)
                 witness = run.provenance_json["prompt_source"]
                 serialized = json.dumps(witness)
                 assert witness["batch_id"] == batch["id"]
@@ -261,6 +267,8 @@ async def test_selected_prompt_batch_queues_one_atomic_exact_media_plan(
                 assert "private first subject" not in serialized
                 assert "private skipped subject" not in serialized
                 assert "private third subject" not in serialized
+            assert routing_prompts[0] != routing_prompts[1]
+            assert set(routing_prompts) == {item["reviewed_prompt"] for item in selected}
 
         replay = await client.post(
             f"/api/prompt-batches/{batch['id']}/queue",
@@ -324,10 +332,10 @@ async def test_prompt_batch_queue_allocates_lora_pool_per_item_deterministically
                 "operation": "text_to_image",
                 "engine": "mock",
                 "api_graph": {},
-                "trusted": True,
             },
         )
     ).json()
+    seed_workflow_trust(workflow["current_revision_id"])
     digests = ("a" * 64, "b" * 64)
     asset_ids: dict[str, str] = {}
     with SessionLocal() as session:
@@ -471,9 +479,9 @@ async def test_prompt_batch_queue_freezes_distinct_workflow_contexts_per_item(
                     "type": "object",
                     "properties": {"steps": {"type": "integer", "default": steps}},
                 },
-                "trusted": True,
             },
         )
+        seed_workflow_trust(response.json()["current_revision_id"])
         assert response.status_code == 201
         workflow_ids.append(response.json()["current_revision_id"])
 
@@ -597,9 +605,9 @@ async def test_prompt_batch_workflow_pool_refuses_partly_compatible_shared_setti
                 "engine": "mock",
                 "api_graph": {"node": {"class_type": f"SettingsWorkflow{index}"}},
                 "input_schema": {"type": "object", "properties": properties},
-                "trusted": True,
             },
         )
+        seed_workflow_trust(response.json()["current_revision_id"])
         assert response.status_code == 201
         workflow_ids.append(response.json()["current_revision_id"])
 
@@ -715,9 +723,9 @@ async def test_prompt_batch_workflow_pool_applies_setting_every_option_accepts(
                     "type": "object",
                     "properties": {"render_style": {"type": "string", "default": "soft"}},
                 },
-                "trusted": True,
             },
         )
+        seed_workflow_trust(response.json()["current_revision_id"])
         assert response.status_code == 201
         workflow_ids.append(response.json()["current_revision_id"])
 
@@ -798,9 +806,9 @@ async def test_prompt_batch_workflow_pool_unselected_stale_option_refuses_before
                 "operation": "text_to_image",
                 "engine": "mock",
                 "api_graph": {"node": {"class_type": f"StaleWorkflow{index}"}},
-                "trusted": True,
             },
         )
+        seed_workflow_trust(response.json()["current_revision_id"])
         assert response.status_code == 201
         workflow_ids.append(response.json()["current_revision_id"])
     resource_policy: dict[str, object] = {
@@ -1957,9 +1965,9 @@ async def test_prompt_template_fixed_resources_require_ready_workflow_and_verifi
             "operation": "text_to_image",
             "engine": "mock",
             "api_graph": {},
-            "trusted": True,
         },
     )
+    seed_workflow_trust(workflow_response.json()["current_revision_id"])
     assert workflow_response.status_code == 201
     workflow_revision_id = workflow_response.json()["current_revision_id"]
     fixed = {
@@ -2140,7 +2148,6 @@ async def test_prompt_template_fixed_resources_require_ready_workflow_and_verifi
             "operation": "text_to_image",
             "engine": "mock",
             "api_graph": {},
-            "trusted": False,
         },
     )
     assert untrusted_workflow.status_code == 201
@@ -2176,9 +2183,9 @@ async def test_prompt_template_workflow_pool_requires_every_option_and_lora(
                 "operation": "text_to_image",
                 "engine": "mock",
                 "api_graph": {},
-                "trusted": True,
             },
         )
+        seed_workflow_trust(response.json()["current_revision_id"])
         assert response.status_code == 201
         workflow_ids.append(response.json()["current_revision_id"])
 
@@ -2580,3 +2587,221 @@ async def test_a_busy_media_worker_is_not_stopped_for_a_model_slot_batch(
     assert refused.json()["code"] == "worker-busy"
     assert state["stopped"] == [], "a running job's device was taken anyway"
     assert state["loaded"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "code", "detail"),
+    [
+        (
+            "stream_values",
+            "prompt-model-values-invalid",
+            "The values for the model-guided slots do not match this request. "
+            "Try fewer prompts or simpler slot guidance, or use authored inputs and choices.",
+        ),
+        (
+            "contract_values",
+            "prompt-model-values-invalid",
+            "The values for the model-guided slots do not match this request. "
+            "Try fewer prompts or simpler slot guidance, or use authored inputs and choices.",
+        ),
+        (
+            "render",
+            "prompt-model-expansion-failed",
+            "The model values could not be combined with this template. "
+            "Shorten the template or simplify its slots, or use authored inputs and choices.",
+        ),
+    ],
+)
+async def test_model_slot_failure_names_the_stage_without_persisting_partial_work(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    code: str,
+    detail: str,
+) -> None:
+    from local_lm.adapters.base import ChatEvent
+    from local_lm.prompt_expansion import PromptExpansionError
+    from local_lm.prompt_model_values import PromptModelValuesError
+
+    _ready_chat_model(app, monkeypatch)
+    calls = 0
+
+    async def stream(_request):
+        nonlocal calls
+        calls += 1
+        values = {
+            "version": 1,
+            "batch_values": {},
+            "items": [{"ordinal": 1, "values": {"subject": "blue bird"}}],
+        }
+        if failure == "stream_values":
+            values["items"] = []
+        yield ChatEvent(
+            type="tool_delta",
+            data={
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call_1",
+                        "function": {
+                            "name": "supply_prompt_model_values",
+                            "arguments": json.dumps(values),
+                        },
+                    }
+                ]
+            },
+        )
+        yield ChatEvent(type="complete")
+
+    monkeypatch.setattr(app.state.services.engines.chat, "stream", stream)
+
+    def refuse(*_args, **_kwargs):
+        if failure == "contract_values":
+            raise PromptModelValuesError("constructed-value-detail")
+        raise PromptExpansionError("constructed-render-detail")
+
+    if failure == "contract_values":
+        monkeypatch.setattr(api_module, "prompt_model_slot_contract", refuse)
+    elif failure == "render":
+        monkeypatch.setattr(api_module, "complete_prompt_expansion_with_model_values", refuse)
+
+    chat = (await client.post("/api/chats", json={"title": "Failure categories"})).json()
+    contract = _contract()
+    contract["slots"] = [
+        {
+            "name": "subject",
+            "mode": "model",
+            "variation_scope": "item",
+            "guidance": "a simple subject",
+        }
+    ]
+    created = (
+        await client.post(
+            "/api/prompt-templates",
+            json=_create_payload(key="failure-categories", contract=contract),
+        )
+    ).json()
+    revision = created["revision"]
+    response = await client.post(
+        f"/api/chats/{chat['id']}/prompt-batches",
+        json={
+            "idempotency_key": "failure-category-batch",
+            "template_revision_id": revision["id"],
+            "contract_sha256": revision["contract_sha256"],
+            "item_count": 1,
+            "selection_seed": 3,
+            "inputs": {},
+        },
+    )
+    assert response.status_code == 503
+    assert response.json() == {"code": code, "detail": detail}
+    assert calls == {"stream_values": 2, "contract_values": 0, "render": 1}[failure]
+    with SessionLocal() as session:
+        assert session.query(PromptExpansionBatch).count() == 0
+        assert session.query(PromptExpansionItem).count() == 0
+        assert session.query(Job).count() == 0
+
+
+@pytest.mark.parametrize(
+    "case", ["inherit", "clear", "wrong_operation", "multiple_outputs", "different_workflow"]
+)
+async def test_auto_prior_edit_keeps_only_a_compatible_accepted_recipe(
+    app: FastAPI, client: AsyncClient, case: str
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Edited recipe reference"})).json()
+    resources = None
+    alternative = None
+    if case == "different_workflow":
+        revisions = []
+        for name in ("Recipe workflow", "Alternative workflow"):
+            response = await client.post(
+                "/api/workflows",
+                json={
+                    "name": name,
+                    "operation": "text_to_image",
+                    "engine": "mock",
+                    "api_graph": {},
+                },
+            )
+            assert response.status_code == 201, response.text
+            revision_id = response.json()["current_revision_id"]
+            seed_workflow_trust(revision_id)
+            revisions.append(revision_id)
+        resources = {
+            "mode": "fixed",
+            "workflow_revision_id": revisions[0],
+            "lora_policy": {"mode": "none"},
+        }
+        alternative = revisions[1]
+    created = await client.post(
+        "/api/prompt-templates",
+        json=_create_payload(name="Circle fixture", contract=_contract(resource_policy=resources)),
+    )
+    assert created.status_code == 201, created.text
+    revision = created.json()["revision"]
+    response = await client.post(
+        f"/api/chats/{chat['id']}/prompt-batches",
+        json={
+            "idempotency_key": "edit-recipe-batch",
+            "template_revision_id": revision["id"],
+            "contract_sha256": revision["contract_sha256"],
+            "item_count": 1,
+            "selection_seed": 7,
+            "inputs": {"subject": ["blue circle"]},
+        },
+    )
+    assert response.status_code == 201, response.text
+    batch = response.json()
+    async with app.state.services.scheduler.lease("primary"):
+        original = await client.post(
+            f"/api/chats/{chat['id']}/turns",
+            json={
+                "text": "Draw a blue circle",
+                "mode": "image",
+                "prompt_source": _composer_source(batch, batch["items"][0]),
+            },
+        )
+        assert original.status_code == 202, original.text
+        source = original.json()
+        witness = source["run"]["provenance_json"]["prompt_source"]
+        payload: dict[str, Any] = {
+            "text": "Summarize briefly" if case == "wrong_operation" else "Draw a green circle",
+            "mode": "auto",
+            "confirm_media": True,
+            "idempotency_key": "edit-recipe",
+        }
+        if case == "different_workflow":
+            payload["role_overrides"] = {
+                "image": {
+                    "workflow_selection": {
+                        "selector_capability": "image",
+                        "mode": "revision",
+                        "workflow_revision_id": alternative,
+                    }
+                }
+            }
+        if case == "clear":
+            payload["prompt_source"] = None
+        if case == "multiple_outputs":
+            payload["output_count"] = 2
+        edited = await client.post(
+            f"/api/messages/{source['user_message']['id']}/edits", json=payload
+        )
+        if case in {"wrong_operation", "multiple_outputs", "different_workflow"}:
+            assert edited.status_code == 422, edited.text
+            with SessionLocal() as session:
+                assert len(list(session.scalars(select(WorkPlan)))) == 1
+            return
+        assert edited.status_code == 202, edited.text
+        inherited = edited.json()["run"]["provenance_json"].get("prompt_source")
+        if case == "clear":
+            assert inherited is None
+        else:
+            assert inherited["batch_id"] == witness["batch_id"]
+            assert inherited["queued_plan_version"] == witness["queued_plan_version"]
+            assert inherited["reviewed_sha256"] == witness["reviewed_sha256"]
+            assert inherited["submitted_sha256"] != witness["submitted_sha256"]
+        current = await client.get(f"/api/prompt-batches/{batch['id']}")
+        assert current.json()["plan_version"] == witness["queued_plan_version"]

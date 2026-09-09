@@ -944,3 +944,105 @@ async def test_only_a_tool_delta_may_carry_calls() -> None:
     ]
     adapter = SequenceAdapter([list(events), list(events)])
     await _failed(adapter)
+
+
+@pytest.mark.asyncio
+async def test_invalid_values_retain_their_category_without_payload_text() -> None:
+    invalid = [_call(arguments='{"unexpected":"constructed-value"}'), ChatEvent(type="complete")]
+    adapter = SequenceAdapter([invalid, invalid])
+    error = await _failed(adapter)
+    assert error.reason == "values"
+    assert len(adapter.requests) == 2
+    assert "constructed-value" not in str(error)
+    assert "constructed-value" not in repr(error)
+
+
+@pytest.mark.asyncio
+async def test_adapter_failure_is_not_reported_as_invalid_values() -> None:
+    error = await _failed(SequenceAdapter([RuntimeError("constructed-transport-detail")]))
+    assert error.reason == "invocation"
+    assert "constructed-transport-detail" not in str(error)
+
+
+@pytest.mark.asyncio
+async def test_full_sixteen_item_call_survives_token_sized_fragments() -> None:
+    from dataclasses import replace
+
+    contract = replace(_contract(), item_count=16)
+    data = replace(
+        _data(),
+        items=tuple(PromptModelInvocationItem(ordinal=i, values=()) for i in range(1, 17)),
+    )
+    payload = _payload()
+    payload["items"] = [
+        {"ordinal": i, "values": {"lighting": "soft window light"}} for i in range(1, 17)
+    ]
+    raw = json.dumps(payload, separators=(",", ":"))
+    events = [ChatEvent(type="delta", text="Choosing values.") for _ in range(400)]
+    events.extend(
+        ChatEvent(
+            type="tool_delta",
+            data={
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        **({"id": "constructed-call"} if i == 0 else {}),
+                        "function": {
+                            **({"name": PROMPT_MODEL_VALUES_TOOL_NAME} if i == 0 else {}),
+                            "arguments": raw[i : i + 2],
+                        },
+                    }
+                ]
+            },
+        )
+        for i in range(0, len(raw), 2)
+    )
+    events.append(ChatEvent(type="complete", data={"finish_reason": "tool_calls"}))
+    adapter = SequenceAdapter([events, events])
+    result = await invoke_prompt_model_values(adapter, contract=contract, data=data)
+    assert len(result.values.items) == 16
+    assert len(result.attempts) == 1
+    assert result.attempts[0].event_count == len(events)
+    assert result.attempts[0].argument_fragment_count > 128
+
+
+@pytest.mark.asyncio
+async def test_slot_generation_schema_avoids_expanded_string_repetition() -> None:
+    adapter = SequenceAdapter([[_call(), ChatEvent(type="complete")]])
+    await invoke_prompt_model_values(adapter, contract=_contract(), data=_data())
+    request = adapter.requests[0]
+    schema = request.tools[0]["function"]["parameters"]
+    slot_schemas = [
+        *schema["properties"]["batch_values"]["properties"].values(),
+        *schema["properties"]["items"]["items"]["properties"]["values"]["properties"].values(),
+    ]
+    assert slot_schemas
+    assert all("maxLength" not in slot for slot in slot_schemas)
+    assert all(slot["type"] == "string" and slot["minLength"] == 1 for slot in slot_schemas)
+    assert request.tool_choice == "required"
+    assert request.parallel_tool_calls is False
+    assert request.persistence_scope == "ephemeral"
+
+
+@pytest.mark.parametrize("length,accepted", [(2000, True), (2001, False)])
+async def test_generation_schema_does_not_relax_local_value_limit(
+    length: int, accepted: bool
+) -> None:
+    payload = _payload()
+    payload["batch_values"] = {"style": "x" * length}
+    events = [_call(arguments=json.dumps(payload)), ChatEvent(type="complete")]
+    adapter = SequenceAdapter([events, events])
+    if accepted:
+        result = await invoke_prompt_model_values(adapter, contract=_contract(), data=_data())
+        assert len(result.values.batch_values[0][1]) == 2000
+    else:
+        await _failed(adapter)
+
+
+@pytest.mark.asyncio
+async def test_many_small_metadata_events_share_a_traversal_budget() -> None:
+    # Each event is below the per-event depth, node and string limits.
+    # Their aggregate must be refused even if a valid tool call follows.
+    metadata = ChatEvent(type="usage", data={"tokens": [0] * 3000})
+    events = [metadata] * 12 + [_call(), ChatEvent(type="complete")]
+    await _failed(SequenceAdapter([events, events]))

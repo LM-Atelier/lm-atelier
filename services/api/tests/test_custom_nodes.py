@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from httpx2 import AsyncClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
+from workflow_fixtures import seed_workflow_trust
 
 from local_lm.custom_nodes import CustomNodeManager
 from local_lm.db import Base, SessionLocal
@@ -166,9 +167,9 @@ async def test_custom_node_lifecycle_and_workflow_trust_gate(
             "api_graph": {"node": {"class_type": "ReviewedNode"}},
             "ui_graph": {"last_node_id": 1, "nodes": []},
             "dependencies": {"custom_nodes": [{"id": node["id"], "revision": revision}]},
-            "trusted": True,
         },
     )
+    seed_workflow_trust(workflow.json()["current_revision_id"])
     validation = await client.post(f"/api/workflows/{workflow.json()['id']}/validate")
     assert "not trusted" in validation.json()["errors"][0]
     open_target = await client.get(f"/api/workflows/{workflow.json()['id']}/open-target")

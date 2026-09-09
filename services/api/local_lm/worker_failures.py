@@ -185,6 +185,18 @@ _PATTERNS: tuple[tuple[WorkerFailureCode, re.Pattern[str]], ...] = (
 )
 
 
+def worker_failure(code: WorkerFailureCode) -> WorkerFailure:
+    """The failure and its remedy for a code the caller has already decided.
+
+    `classify_worker_failure` reads engine output in order to CHOOSE a code. A
+    caller that reached the same conclusion another way - a port that will not
+    bind while this application manages nothing - wants the same sentence, and
+    should not have to keep a second copy of it in step with this one.
+    """
+
+    return _failure(code)
+
+
 def classify_worker_failure(
     *,
     failure_detail: str | None,

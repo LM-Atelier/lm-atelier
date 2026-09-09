@@ -6,11 +6,12 @@ import json
 import logging
 import math
 import re
+import sys
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, TypeGuard
 from urllib.parse import urlencode, urlparse, urlunparse
 from uuid import uuid4
 
@@ -19,6 +20,16 @@ import websockets
 from websockets.exceptions import WebSocketException
 
 from ..domain import Operation
+from ..filesystem_links import (
+    AnchoredDirectory,
+    AnchoredDirectoryError,
+    AnchoredEntry,
+    AnchoredEntryKind,
+    list_entries,
+    open_child_directory,
+    remove_directory_entry,
+    remove_entry,
+)
 from ..network import shared_tls_context
 from ..schemas import EngineCapabilities
 from ..settings_registry import IMAGE_SETTINGS, VIDEO_SETTINGS
@@ -29,6 +40,12 @@ logger = logging.getLogger(__name__)
 _CANCELLED = object()
 _MAX_COMFY_JSON_BYTES = 32 * 1024 * 1024
 _MAX_COMFY_OUTPUTS = 64
+
+#: The one subfolder every conditioning upload is addressed to. The backend's
+#: temp directory also holds files this adapter did not write, so this is the
+#: only part of it that is ours to reclaim.
+_UPLOAD_SUBFOLDER = "lm-atelier"
+
 _ERROR_LABEL = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,79}\Z")
 _ERRNO = re.compile(r"\[Errno (?P<number>\d{1,5})\]")
 _NUMBERED_INPUT_IMAGE = re.compile(r"\$\{input_image_(?P<index>\d{1,2})\}\Z")
@@ -48,6 +65,23 @@ def _numbered_input_image_indices(workflow: dict[str, Any]) -> list[int]:
             if match and (index := int(match.group("index"))) < 64:
                 indices.add(index)
     return sorted(indices)
+
+
+def _usable_prompt_id(value: object) -> TypeGuard[str]:
+    """A prompt identifier this adapter is willing to carry.
+
+    The same test on both paths that produce one - the submission's own reply
+    and the queue consulted when that reply is lost - because an identifier the
+    accept path would have refused is not one to start trusting because it
+    arrived by the other route.
+    """
+
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and len(value) <= 200
+        and all(character >= " " for character in value)
+    )
 
 
 def _execution_error_message(data: dict[str, Any]) -> str:
@@ -91,6 +125,15 @@ def _preview_payload(frame: bytes) -> bytes | None:
     return payload if _is_preview_image(payload) else None
 
 
+#: Total deadline for asking the backend to drop an abandoned prompt - not a
+#: per-request timeout, which httpx measures per phase and a trickling response
+#: can satisfy indefinitely. `close_iterator` gives the whole close five
+#: seconds and the output cleanup runs after this, so the ask must not be able
+#: to spend the entire allowance on its own.
+ABANDONED_INTERRUPT_SECONDS = 2.0
+RECONCILE_SECONDS = 5.0
+
+
 class ComfyUIAdapter:
     def __init__(
         self,
@@ -115,8 +158,13 @@ class ComfyUIAdapter:
         self.managed_output_root = (
             managed_output_root.expanduser().resolve() if managed_output_root else None
         )
+        # Cleanup must inspect the supplied ancestry, before resolve can hide a
+        # linked root. Other output operations retain their existing path contract.
+        self._managed_output_sweep_root = (
+            managed_output_root.expanduser().absolute() if managed_output_root else None
+        )
         self.managed_temp_root = (
-            managed_temp_root.expanduser().resolve() if managed_temp_root else None
+            managed_temp_root.expanduser().absolute() if managed_temp_root else None
         )
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
@@ -293,7 +341,7 @@ class ComfyUIAdapter:
         label: str,
     ) -> list[str]:
         uploaded: list[str] = []
-        upload_subfolder = "lm-atelier"
+        upload_subfolder = _UPLOAD_SUBFOLDER
         for index, path in enumerate(paths):
             content = await asyncio.to_thread(path.read_bytes)
             extension, media_type = self._image_format(content)
@@ -382,6 +430,9 @@ class ComfyUIAdapter:
         self._cancel_events[request.run_id] = cancel_event
         prompt_id: str | None = None
         outputs_collected = False
+        abandoned = False
+        refused_after_acceptance = False
+        bound_after_timeout = False
         try:
             yield MediaEvent(
                 type="progress",
@@ -427,27 +478,49 @@ class ComfyUIAdapter:
                     "prompt": graph,
                     "client_id": client_id,
                 }
-                response = await self._client.post(
-                    "/prompt",
-                    json=prompt_payload,
-                    timeout=30,
-                )
+                try:
+                    response = await self._client.post(
+                        "/prompt",
+                        json=prompt_payload,
+                        timeout=30,
+                    )
+                except httpx.TimeoutException:
+                    # The request went out and no answer came back. Nothing
+                    # here knows whether the backend took it, and the one
+                    # thing that would say so is the identifier that never
+                    # arrived. Ask the backend what it is holding under this
+                    # submission's own client id before giving up, so a
+                    # generation it did take can still be stopped rather than
+                    # running on unreachable behind the caller's failure.
+                    bound = await self._prompt_id_for_client(client_id)
+                    if bound is not None:
+                        prompt_id = bound
+                        self._jobs[request.run_id] = prompt_id
+                        bound_after_timeout = True
+                    raise
                 response.raise_for_status()
                 payload = response.json()
                 if not isinstance(payload, dict):
                     raise RuntimeError("ComfyUI returned an invalid prompt response")
-                if payload.get("node_errors"):
-                    raise RuntimeError("ComfyUI rejected the selected workflow")
                 raw_prompt_id = payload.get("prompt_id")
-                if (
-                    not isinstance(raw_prompt_id, str)
-                    or not raw_prompt_id
-                    or len(raw_prompt_id) > 200
-                    or any(character < " " for character in raw_prompt_id)
-                ):
+                if _usable_prompt_id(raw_prompt_id):
+                    # Recorded BEFORE either refusal below. The post already
+                    # raised for status, so a body at all means the backend
+                    # accepted this prompt and queued it, whatever the body goes
+                    # on to say about the graph - and the repository's own
+                    # fixtures model a success response as carrying prompt_id
+                    # and node_errors together. This identifier is the only
+                    # handle that can stop it or clean up after it.
+                    prompt_id = raw_prompt_id
+                    self._jobs[request.run_id] = prompt_id
+                if payload.get("node_errors"):
+                    # Refusing a prompt the backend has ALREADY taken. The
+                    # caller is told the generation failed, so the teardown has
+                    # to stop it rather than only forget it.
+                    refused_after_acceptance = prompt_id is not None
+                    raise RuntimeError("ComfyUI rejected the selected workflow")
+                if prompt_id is None:
                     raise RuntimeError("ComfyUI returned an invalid prompt identifier")
-                prompt_id = raw_prompt_id
-                self._jobs[request.run_id] = prompt_id
                 if cancel_event.is_set():
                     await self._interrupt_prompt()
                     yield MediaEvent(type="cancelled")
@@ -567,6 +640,13 @@ class ComfyUIAdapter:
                 assets=assets,
                 engine_sourced=True,
             )
+        except GeneratorExit:
+            # The consumer closed this producer rather than finishing it: a
+            # superseded execution, dropping a stream whose result nobody will
+            # read. Recorded here and acted on in the teardown, because that is
+            # where it is known whether a prompt was ever submitted.
+            abandoned = True
+            raise
         except asyncio.CancelledError:
             raise
         except WebSocketException:
@@ -586,6 +666,46 @@ class ComfyUIAdapter:
             self._cancel_events.pop(request.run_id, None)
             self._cancelled.discard(request.run_id)
             if prompt_id and not outputs_collected:
+                if bound_after_timeout or (
+                    (abandoned or refused_after_acceptance) and not cancel_event.is_set()
+                ):
+                    # A prompt was submitted and the consumer walked away.
+                    # Popping the entries above ends this adapter's interest in
+                    # it and nothing else: the backend goes on with a result
+                    # nobody will read, holding the device against the run that
+                    # replaced this one.
+                    #
+                    # A set cancel event means `cancel` already issued the
+                    # interrupt - but ONLY where `cancel` could see the prompt.
+                    # It interrupts on `run_id in self._jobs`, and on the
+                    # recovery path below there is no entry there until the
+                    # reconciliation returns. A cancel arriving during that
+                    # await therefore sets the event and issues nothing, so
+                    # reading the set event as "already interrupted" would
+                    # leave the recovered prompt running with the caller told
+                    # it failed - the exact state this path exists to prevent.
+                    # `bound_after_timeout` is checked ahead of the event for
+                    # that reason. Repeating a stop is harmless; skipping one
+                    # is not.
+                    #
+                    # Still deliberately not extended to the generic error
+                    # exits below. A malformed or oversized event is a different
+                    # case with its own settled handling, and widening this to
+                    # cover it would change six existing controls on a question
+                    # that row did not ask.
+                    #
+                    # `refused_after_acceptance` is not that widening. It marks
+                    # the one exit where THIS code refuses a response the backend
+                    # has already accepted and queued, which is the same
+                    # situation as an abandoned stream and not an error arriving
+                    # from a prompt already being consumed.
+                    #
+                    # `bound_after_timeout` is the same situation reached the
+                    # other way: the backend took the prompt and this code never
+                    # heard so. It is only ever set when the backend's own queue
+                    # named the prompt under this submission's client id, so it
+                    # cannot mark a generation that was never accepted.
+                    await self._abandon_prompt(prompt_id)
                 await self._cleanup_prompt_outputs(prompt_id)
 
     async def _next_message(
@@ -809,41 +929,89 @@ class ComfyUIAdapter:
                 type(exc).__name__,
             )
 
+    def _managed_upload_root(self) -> Path | None:
+        """Where this adapter's uploaded conditioning input and masks land.
+
+        `managed_temp_root` is the BACKEND's whole temp directory and holds
+        files this adapter did not write, so it is not ours to sweep. Every
+        upload is addressed to one subfolder of it, and that subfolder is.
+        """
+
+        root = self.managed_temp_root
+        return root / _UPLOAD_SUBFOLDER if root is not None else None
+
     async def _sweep_stale_outputs(self) -> None:
-        root = self.managed_output_root
+        # Uploaded conditioning input is reclaimed on the same terms as output.
+        # Each upload is a distinct file under a per-run name, and nothing else
+        # removed them: the per-run cleanup covers outputs, and this sweep
+        # walked the output root alone, so they accumulated for the life of the
+        # installation.
+        roots = [
+            root
+            for root in (self._managed_output_sweep_root, self._managed_upload_root())
+            if root is not None
+        ]
         now = time.time()
-        if root is None or now - self._last_output_sweep < min(
+        if not roots or now - self._last_output_sweep < min(
             3600,
             self.stale_output_seconds,
         ):
             return
         self._last_output_sweep = now
-        await asyncio.to_thread(
-            self._sweep_stale_outputs_sync,
-            root,
-            now - self.stale_output_seconds,
-        )
+        cutoff = now - self.stale_output_seconds
+        for root in roots:
+            await asyncio.to_thread(self._sweep_stale_outputs_sync, root, cutoff)
 
     @staticmethod
     def _sweep_stale_outputs_sync(root: Path, cutoff: float) -> None:
-        if not root.is_dir():
+        """Reclaim old entries through held directories, skipping unsafe trees."""
+
+        try:
+            with AnchoredDirectory(root) as anchor:
+                # Existing cleanup directories have no entry-count ceiling.
+                # A bounded-list refusal would permanently strand a large backlog;
+                # retain the complete per-directory walk and its memory cost.
+                pending: list[tuple[AnchoredDirectory, Iterator[AnchoredEntry], str | None]] = [
+                    (anchor, iter(list_entries(anchor, limit=sys.maxsize)), None)
+                ]
+                try:
+                    while pending:
+                        current, entries, name = pending[-1]
+                        entry = next(entries, None)
+                        if entry is None:
+                            pending.pop()
+                            if name is not None:
+                                current.close()
+                                with suppress(AnchoredDirectoryError):
+                                    remove_directory_entry(pending[-1][0], name)
+                            continue
+                        if entry.kind is AnchoredEntryKind.DIRECTORY:
+                            child = None
+                            try:
+                                child = open_child_directory(current, entry.name)
+                                children = iter(list_entries(child, limit=sys.maxsize))
+                            except (AnchoredDirectoryError, OSError):
+                                if child is not None:
+                                    child.close()
+                                continue
+                            pending.append((child, children, entry.name))
+                        elif (
+                            entry.kind is AnchoredEntryKind.FILE
+                            and entry.modified_at is not None
+                            and entry.modified_at.timestamp() <= cutoff
+                        ):
+                            with suppress(AnchoredDirectoryError):
+                                remove_entry(current, entry.name)
+                finally:
+                    # Retain every ancestor through descent and release children
+                    # before their parents, including when enumeration refuses.
+                    for held, _, name in reversed(pending):
+                        if name is not None:
+                            held.close()
+        except (AnchoredDirectoryError, OSError):
+            # Missing roots, linked ancestry and refused listings are skipped.
+            # The next age-based sweep may retry; no pathname fallback deletes.
             return
-        for path in root.rglob("*"):
-            try:
-                if not path.is_file() or path.stat().st_mtime > cutoff:
-                    continue
-                resolved = path.resolve()
-                resolved.relative_to(root)
-                path.unlink(missing_ok=True)
-            except (OSError, ValueError):
-                continue
-        for directory in sorted(
-            (path for path in root.rglob("*") if path.is_dir()),
-            key=lambda path: len(path.parts),
-            reverse=True,
-        ):
-            with suppress(OSError):
-                directory.rmdir()
 
     def _managed_output_path(self, item: dict[str, Any]) -> Path | None:
         root = self.managed_output_root
@@ -906,6 +1074,98 @@ class ComfyUIAdapter:
             # Local cancellation remains authoritative even when the worker has
             # already exited or its interrupt endpoint is unavailable.
             return
+
+    async def _prompt_id_for_client(self, client_id: str) -> str | None:
+        """The queued prompt this submission's client id names, if there is one.
+
+        A submission whose reply never arrived may still have been taken. The
+        request went out; only the answer was lost, and the backend has no
+        reason to have refused it. Without an identifier nothing can stop that
+        generation: it holds the device against every generation after it while
+        the caller has already been told this one failed.
+
+        `client_id` is minted per generation, travels in the prompt's
+        `extra_data`, and is returned by `/queue`, so it names the prompt THIS
+        call created and no other. A queue entry is
+        `[number, prompt_id, prompt, extra_data, outputs_to_execute]`.
+
+        Best-effort inside a deadline, because this runs on a failure path: a
+        second failure here must not replace the first, and a backend that will
+        not answer must not hold the unwinding open.
+
+        Only the queue is consulted. A prompt that finished between the timeout
+        and this question is in history rather than the queue, and there is
+        nothing left to stop; reclaiming what it wrote is a different question
+        and is not answered here.
+        """
+
+        with suppress(Exception):
+            async with asyncio.timeout(RECONCILE_SECONDS):
+                response = await self._client.get("/queue")
+                response.raise_for_status()
+                payload = response.json()
+                if not isinstance(payload, dict):
+                    return None
+                for key in ("queue_running", "queue_pending"):
+                    entries = payload.get(key)
+                    if not isinstance(entries, list):
+                        continue
+                    for entry in entries:
+                        if not isinstance(entry, list) or len(entry) < 4:
+                            continue
+                        extra = entry[3]
+                        if not isinstance(extra, dict):
+                            continue
+                        if extra.get("client_id") != client_id:
+                            continue
+                        candidate = entry[1]
+                        if _usable_prompt_id(candidate):
+                            return candidate
+        return None
+
+    async def _abandon_prompt(self, prompt_id: str) -> None:
+        """Ask the backend to drop one prompt this adapter stopped listening to.
+
+        Scoped to the submitted identity, because the backend scopes it too.
+        ComfyUI v0.28.0's post_interrupt reads prompt_id from the body, walks
+        the currently running items, and interrupts only when one of them
+        matches; with no prompt_id it interrupts whatever is running. An
+        abandoned run sending the empty-body form could therefore stop the
+        prompt that had already replaced it.
+
+        A run that never began sampling is still PENDING rather than running,
+        and an interrupt does nothing for it, so its queue entry is deleted as
+        well - and deleted FIRST. The backend worker consumes the queue
+        independently of these handlers, so a pending prompt can start in the
+        gap between the two requests: interrupting first leaves it pending, and
+        the deletion that follows removes only pending entries, so it does
+        nothing and the abandoned prompt runs to completion. Deleting first
+        closes that. Either the entry is removed before it can start, or the
+        worker won the transition and the interrupt that follows finds it
+        running. Deleting is safe for a running prompt too, for the same reason
+        it is useless against one: post_queue only removes pending entries.
+
+        One window no client ordering can close: between the backend dequeuing
+        a prompt and listing it as running, it is in neither the pending queue
+        nor the running set, so a delete misses it and an interrupt skips it.
+        That is the backend's own bookkeeping, and this pair is a best effort
+        against it rather than a guarantee.
+
+        One TOTAL deadline covers both requests. httpx timeouts are per-phase,
+        so a response trickling a byte at a time satisfies every one of them
+        and can still consume the whole five seconds `close_iterator` allows
+        for the close - taking the output cleanup after this with it. The
+        deadline is what keeps that cleanup's turn.
+
+        Failures are suppressed for the same reason the rest of this teardown
+        suppresses them: the caller is already unwinding, and a best-effort
+        request must not become the reason it stopped.
+        """
+
+        with suppress(Exception):
+            async with asyncio.timeout(ABANDONED_INTERRUPT_SECONDS):
+                await self._client.post("/queue", json={"delete": [prompt_id]})
+                await self._client.post("/interrupt", json={"prompt_id": prompt_id})
 
     async def close(self) -> None:
         for event in self._cancel_events.values():

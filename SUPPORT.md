@@ -5,11 +5,11 @@ Support is best effort and has no response-time guarantee.
 
 1. Check [Troubleshooting](docs/TROUBLESHOOTING.md) and search existing issues.
 2. For reproducible bugs, open a
-   [bug report](https://github.com/ajccarlson/lm-atelier/issues/new?template=bug-report.yml).
+   [bug report](https://github.com/LM-Atelier/lm-atelier/issues/new?template=bug-report.yml).
 3. For a model-specific failure, open a
-   [model compatibility report](https://github.com/ajccarlson/lm-atelier/issues/new?template=model-compatibility.yml).
+   [model compatibility report](https://github.com/LM-Atelier/lm-atelier/issues/new?template=model-compatibility.yml).
 4. For an improvement, open a
-   [feature request](https://github.com/ajccarlson/lm-atelier/issues/new?template=feature-request.yml).
+   [feature request](https://github.com/LM-Atelier/lm-atelier/issues/new?template=feature-request.yml).
 
 Include the LM Atelier version, operating system, installation method, hardware,
 reproduction steps, and exact error text. Review all text before posting; never

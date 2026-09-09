@@ -60,6 +60,18 @@ function Test-MachineLeaseHandleInvalid {
     return ($Handle -eq [IntPtr]::Zero -or $Handle -eq [IntPtr]::new(-1))
 }
 
+function Read-MachineLeaseEnvironment {
+    # The one place this file reads the process environment back, so that the
+    # restoration check has a seam a control can stand in front of.
+    #
+    # Without it that branch cannot be reached at all: the real setter
+    # round-trips a value exactly, so no test can arrange for the read to
+    # differ from what was just written, and the comparison below would be
+    # asserted only by reading it.
+    param([Parameter(Mandatory = $true)][string] $Name)
+    return [Environment]::GetEnvironmentVariable($Name)
+}
+
 function Get-MachineLeaseCommonDir {
     param([Parameter(Mandatory)][string]$RepositoryRoot)
 
@@ -78,6 +90,18 @@ function Get-MachineLeaseCommonDir {
     # variable that is merely set empty still redirects. Absence is
     # therefore tested rather than requested.
     #
+    # The restoration comparison asks for the SAME BYTES, which needs an
+    # explicit ordinal comparison rather than any PowerShell operator. `-ne` is
+    # case-insensitive, so a changed case read as restored; `-cne` is
+    # case-sensitive but still cultural, so two different strings the current
+    # culture considers equal also read as restored. Measured rather than
+    # assumed: -cne calls such a pair equal and [string]::Equals with
+    # StringComparison.Ordinal does not.
+    #
+    # Every scrubbed name is path-valued, so no caller was pointed at the wrong
+    # repository by either gap - but the guard did not hold the property it is
+    # here for, which is that the environment is what it was.
+    #
     # Both halves fail closed, and the resolution is only returned when
     # both held. A removal that did not take effect would leave a variable
     # naming another repository, and git would resolve THAT repository and
@@ -88,7 +112,7 @@ function Get-MachineLeaseCommonDir {
     $Saved = @{}
     $Cleared = $true
     foreach ($Name in $Scrubbed) {
-        $Saved[$Name] = [Environment]::GetEnvironmentVariable($Name)
+        $Saved[$Name] = Read-MachineLeaseEnvironment -Name $Name
         Remove-Item -LiteralPath "Env:$Name" -ErrorAction SilentlyContinue
         if (Test-Path -LiteralPath "Env:$Name") {
             Write-Host "ERROR: $Name could not be removed from the environment; refusing to resolve the repository with git redirection in force."
@@ -113,7 +137,8 @@ function Get-MachineLeaseCommonDir {
                 }
             } else {
                 [Environment]::SetEnvironmentVariable($Name, $Saved[$Name])
-                if ([Environment]::GetEnvironmentVariable($Name) -ne $Saved[$Name]) {
+                $Current = Read-MachineLeaseEnvironment -Name $Name
+                if (-not [string]::Equals($Current, $Saved[$Name], [StringComparison]::Ordinal)) {
                     Write-Host "ERROR: $Name could not be restored to the value it had; refusing the resolution rather than leaving this process redirected."
                     $Restored = $false
                 }
@@ -333,8 +358,13 @@ function Open-MachineLeasePin {
     # refuses on that path strands this process.
     if (-not [LeaseNative.Kernel]::SetHandleInformation($Handle, 0x1, 0x1)) {
         $MarkError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        # Hand the outcome back rather than exiting here. Exiting from inside
+        # the pin opener leaves the caller's earlier pins unattempted and
+        # unreported, so the single report the design promises would name this
+        # pin and nothing else. The flag rides out with the throw; the caller
+        # closes what it holds, then exits stranded knowing about both.
         if (-not (Close-MachineLeaseAcquired -Pins @([pscustomobject]@{ Path = $Path; Role = $Role; Handle = $Handle }) -During "a refused pinning")) {
-            exit 4
+            $script:MachineLeaseStranded = $true
         }
         throw "$Role could not be held for a child's lifetime: $Path (error $MarkError)"
     }
@@ -463,6 +493,9 @@ function Open-MachineLeaseHandle {
             # a change slipped in before the pins took hold is refused and
             # nothing can change after them.
             $Pins = @()
+            # A stale $true from an earlier Enter-MachineLease in the same
+            # dot-sourced session would exit a healthy acquisition.
+            $script:MachineLeaseStranded = $false
             try {
                 foreach ($Link in Get-MachineLeaseResolutionChain -Anchor $AnchorPlain) {
                     $Pins += Open-MachineLeasePin -Path $Link.Path -Role $Link.Role
@@ -470,7 +503,12 @@ function Open-MachineLeaseHandle {
                 $Pins += Open-MachineLeasePin -Path $Plain -Role "the common git directory"
             } catch {
                 Write-Host "ERROR: the resolution chain could not be pinned. $_"
-                if (-not (Close-MachineLeaseAcquired -Pins $Pins -During "a refused pinning")) {
+                $Closed = Close-MachineLeaseAcquired -Pins $Pins -During "a refused pinning"
+                # $script:MachineLeaseStranded is set when the pin opener's own
+                # close was refused. Both halves are reported above by
+                # Close-MachineLeaseAcquired before this decides, so one exit
+                # covers every refused close rather than one per helper.
+                if (-not $Closed -or $script:MachineLeaseStranded) {
                     exit 4
                 }
                 return $null

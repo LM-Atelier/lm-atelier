@@ -41,11 +41,15 @@ command -v pwsh >/dev/null 2>&1 || {
 }
 
 run_checked "Ruff format" \
-  "$python_tools/ruff" format --check services/api
+  "$python_tools/ruff" format --check services/api scripts packaging
 run_checked "Ruff lint" \
-  "$python_tools/ruff" check services/api
+  "$python_tools/ruff" check services/api scripts packaging
+# The scripts are named here for the same reason they are named in the ruff
+# lines above: two of them decide whether verification happens at all, and until
+# they were added the tools that judge the gate were the only Python in the
+# repository the gate never judged.
 run_checked "Strict mypy" \
-  "$python_tools/mypy" --config-file services/api/pyproject.toml services/api/local_lm
+  "$python_tools/mypy" --config-file services/api/pyproject.toml services/api/local_lm scripts
 run_checked "Bandit high-severity scan" \
   "$python_tools/bandit" -q -lll -r services/api/local_lm
 run_checked "Version metadata" \

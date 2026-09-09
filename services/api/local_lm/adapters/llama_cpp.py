@@ -231,7 +231,11 @@ class LlamaCppAdapter:
         }
         if request.tools:
             payload["tools"] = request.tools
-            payload["tool_choice"] = "auto"
+            payload["tool_choice"] = request.tool_choice
+            if request.parallel_tool_calls is not None:
+                payload["parallel_tool_calls"] = request.parallel_tool_calls
+            if request.tool_choice == "required":
+                payload["parse_tool_calls"] = True
 
         seed = request.settings.get("seed")
         max_tokens = request.settings.get("max_tokens")

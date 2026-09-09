@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from httpx2 import AsyncClient
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from workflow_fixtures import seed_workflow_trust
 
 from local_lm.workflow_editor_sessions import (
     WorkflowEditorSessions,
@@ -167,9 +168,9 @@ async def _create_workflow(
             "api_graph": _api_graph() if api_graph is None else api_graph,
             "input_schema": input_schema or {},
             "dependencies": dependencies or {},
-            "trusted": True,
         },
     )
+    seed_workflow_trust(response.json()["current_revision_id"])
     assert response.status_code == 201
     payload: dict[str, Any] = response.json()
     return payload
@@ -686,9 +687,9 @@ async def test_changed_consume_reports_fork_without_creating_a_revision(
         json={
             "ui_graph": _ui_graph(),
             "api_graph": _api_graph(),
-            "trusted": True,
         },
     )
+    seed_workflow_trust(advanced.json()["id"])
     assert advanced.status_code == 201
 
     consumed = await client.post(
@@ -889,8 +890,9 @@ async def test_editor_draft_reports_fork_without_replacing_new_current_revision(
     ).json()
     advanced = await client.post(
         f"/api/workflows/{workflow['id']}/revisions",
-        json={"ui_graph": _ui_graph(), "api_graph": _api_graph(), "trusted": True},
+        json={"ui_graph": _ui_graph(), "api_graph": _api_graph()},
     )
+    seed_workflow_trust(advanced.json()["id"])
     assert advanced.status_code == 201
 
     created = await client.post(

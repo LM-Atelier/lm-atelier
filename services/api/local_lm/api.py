@@ -10,6 +10,7 @@ import math
 import os
 import re
 import shutil
+import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -45,6 +46,11 @@ from .artifact_library import (
     ensure_library_entry,
     list_library_entries,
     set_library_favorite,
+)
+from .artifacts import (
+    RETENTION_BATCH_DELETIONS,
+    RETENTION_BATCH_SECONDS,
+    RetentionCleanupSummary,
 )
 from .auxiliary_assets import AUXILIARY_ASSET_KINDS, validate_lora_workflow_contract
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
@@ -125,6 +131,7 @@ from .domain import (
 )
 from .downloads import DownloadManager
 from .edit_recipes import capture_recipe
+from .edited_branches import activate_edited_branch, list_edited_branches
 from .engines import (
     EngineNotConfiguredError,
     EngineRegistry,
@@ -152,7 +159,11 @@ from .model_planner import (
     resolve_install_plan,
     workflow_artifact_contract,
 )
-from .model_updates import installed_civitai_identities, newer_version
+from .model_updates import (
+    ModelUpdateBaselineUnavailable,
+    installed_civitai_identities,
+    newer_version,
+)
 from .models import (
     AdapterPromptGrammar,
     AppSetting,
@@ -189,6 +200,7 @@ from .models import (
     WorkflowPreference,
     WorkflowProfileCompatibility,
     WorkflowRevision,
+    WorkflowRevisionReview,
     WorkPlan,
     WorkStep,
 )
@@ -205,6 +217,12 @@ from .preflight import (
     catalog_file_index,
     safe_civitai_file_variants,
     selected_catalog_file_metadata,
+)
+from .prior_turn_edits import (
+    EditRequestConflict,
+    classify_prior_turn_edit,
+    prior_turn_edit_source,
+    queue_prior_turn_edit,
 )
 from .profile_service import (
     AUTO_PROFILE_ID,
@@ -282,6 +300,7 @@ from .reference_review import ReviewOutcome, ReviewRefusal, ReviewRefused, revie
 from .references import ReferenceError, ReferenceNotFoundError
 from .routing import RouteConfirmationRequired
 from .runtime_config import persist_runtime_values
+from .saved_settings import normalize_saved_settings
 from .schemas import (
     AdapterPromptGrammarOut,
     AdapterPromptGrammarReview,
@@ -323,6 +342,9 @@ from .schemas import (
     DownloadRequest,
     DraftClassification,
     DraftClassificationRequest,
+    EditedBranchActivationOut,
+    EditedBranchActivationRequest,
+    EditedBranchPage,
     EditTemplateCreate,
     EditTemplateOut,
     EngineCapabilities,
@@ -349,6 +371,9 @@ from .schemas import (
     PresetCreate,
     PresetOut,
     PresetUpdate,
+    PriorTurnEditAccepted,
+    PriorTurnEditRequest,
+    PriorTurnEditSource,
     ProjectCreate,
     ProjectOut,
     ProjectUpdate,
@@ -443,6 +468,8 @@ from .schemas import (
     WorkflowMissingNodeOut,
     WorkflowOpenTarget,
     WorkflowOut,
+    WorkflowOutputGeometryCapabilityOut,
+    WorkflowOutputGeometryResolutionOut,
     WorkflowPackageAnalysisOut,
     WorkflowPackageAnalyzeRequest,
     WorkflowPackageDraftRequest,
@@ -454,6 +481,7 @@ from .schemas import (
     WorkflowResourceConsumersOut,
     WorkflowRevisionCreate,
     WorkflowRevisionOut,
+    WorkflowRevisionReviewRequest,
     WorkflowSelectionOut,
     WorkflowSelectionResponseMode,
     WorkflowSelectorCapability,
@@ -540,6 +568,13 @@ from .workflow_library import (
     workflow_resource_name,
 )
 from .workflow_node_dependencies import node_dependency_errors
+from .workflow_output_geometry import (
+    WorkflowOutputGeometryResult,
+    prove_workflow_output_geometry,
+    resolve_workflow_output_geometry,
+    workflow_output_geometry_payload,
+    workflow_output_geometry_resolution_payload,
+)
 from .workflow_ownership import ensure_workflow_family_ownership
 from .workflow_package_drafts import (
     is_workflow_package_draft,
@@ -554,6 +589,25 @@ from .workflow_package_preparation import (
     PreparationContext,
     WorkflowPackagePreparationError,
     prepare_workflow_package,
+)
+from .workflow_review_runtime import review_runtime_object_info, verify_reviewed_packages
+from .workflow_revision_reviews import (
+    ReviewSnapshot as WorkflowReviewSnapshot,
+)
+from .workflow_revision_reviews import (
+    WorkflowReviewError,
+)
+from .workflow_revision_reviews import (
+    build_review_snapshot as build_workflow_review_snapshot,
+)
+from .workflow_revision_reviews import (
+    inherit_review as inherit_workflow_review,
+)
+from .workflow_revision_reviews import (
+    record_review as record_workflow_review,
+)
+from .workflow_revision_reviews import (
+    review_is_current as workflow_review_is_current,
 )
 from .workflow_source_candidates import collect_source_candidates
 from .workflow_trust import (
@@ -2740,12 +2794,29 @@ async def _create_prompt_batch_locked(
                 PromptModelValuesError,
                 PromptModelInvocationError,
             ) as exc:
-                raise api_error(
-                    503,
-                    "prompt-model-invocation-failed",
-                    "The chat model could not fill the template slots. Retry, or use authored "
-                    "inputs and choices instead.",
-                ) from exc
+                if isinstance(exc, PromptModelValuesError) or (
+                    isinstance(exc, PromptModelInvocationError) and exc.reason == "values"
+                ):
+                    code = "prompt-model-values-invalid"
+                    message = (
+                        "The values for the model-guided slots do not match this request. "
+                        "Try fewer prompts or simpler slot guidance, or use authored inputs "
+                        "and choices."
+                    )
+                elif isinstance(exc, PromptExpansionError):
+                    code = "prompt-model-expansion-failed"
+                    message = (
+                        "The model values could not be combined with this template. "
+                        "Shorten the template or simplify its slots, or use authored inputs "
+                        "and choices."
+                    )
+                else:
+                    code = "prompt-model-invocation-failed"
+                    message = (
+                        "The chat model could not fill the template slots. Retry, or use authored "
+                        "inputs and choices instead."
+                    )
+                raise api_error(503, code, message) from exc
             snapshot = PromptExpansionModelSnapshot(
                 version=1,
                 kind="model",
@@ -3097,9 +3168,21 @@ async def _accept_turn(
     inherited_image_edit_strength: dict[str, Any] | None = None,
     inherited_prompt_source: object | None = None,
     reference_source_message_id: str | None = None,
+    edit_source_message_id: str | None = None,
+    chat_guard_held: bool = False,
+    before_commit: Callable[[Session, Run], None] | None = None,
 ) -> TurnAccepted:
     try:
-        return await orchestrator.create_turn(
+        if edit_source_message_id is not None and isinstance(payload, PriorTurnEditRequest):
+            return await queue_prior_turn_edit(
+                orchestrator, session, edit_source_message_id, payload
+            )
+        if not orchestrator._admission_open:
+            raise RuntimeError(
+                "This conversation service is shutting down and cannot accept new work."
+            )
+        create = orchestrator._create_turn if chat_guard_held else orchestrator.create_turn
+        return await create(
             session,
             chat_id,
             payload,
@@ -3109,7 +3192,10 @@ async def _accept_turn(
             inherited_image_edit_strength=inherited_image_edit_strength,
             inherited_prompt_source=inherited_prompt_source,
             reference_source_message_id=reference_source_message_id,
+            before_commit=before_commit,
         )
+    except EditRequestConflict as exc:
+        raise api_error(409, "edit-request-conflict", str(exc)) from exc
     except LookupError as exc:
         raise api_error(404, "turn-subject-not-found", str(exc)) from exc
     except RouteConfirmationRequired as exc:
@@ -3367,6 +3453,23 @@ async def regenerate_message(
     session: ConversationSessionDep,
 ) -> TurnAccepted:
     orchestrator: ConversationOrchestrator = _services(request).orchestrator
+    source = session.get(Message, message_id)
+    if source is None:
+        raise api_error(
+            409, "response-not-regenerable", "only a completed visible response can be regenerated"
+        )
+    async with orchestrator.chat_guard(source.chat_id):
+        session.expire_all()
+        return await _regenerate_message_locked(message_id, payload, request, session)
+
+
+async def _regenerate_message_locked(
+    message_id: str,
+    payload: RegenerateRequest,
+    request: Request,
+    session: Session,
+) -> TurnAccepted:
+    orchestrator: ConversationOrchestrator = _services(request).orchestrator
     source_assistant = session.get(Message, message_id)
     if (
         not source_assistant
@@ -3376,6 +3479,31 @@ async def regenerate_message(
         raise api_error(
             409, "response-not-regenerable", "only a completed visible response can be regenerated"
         )
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            {"message_id": message_id, "settings": payload.settings},
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+    def require_request_binding(provenance: dict[str, Any]) -> None:
+        if provenance.get("regeneration_request_sha256") != fingerprint:
+            raise api_error(
+                409,
+                "regeneration-request-conflict",
+                "This request ID already belongs to a different response or regeneration.",
+            )
+
+    if payload.idempotency_key is not None:
+        existing = orchestrator._idempotent_run(
+            session, source_assistant.chat_id, payload.idempotency_key
+        )
+        if existing is not None:
+            require_request_binding(existing.provenance_json)
+            _require_run_replay_sources(session, existing)
+            return orchestrator._accepted_for_run(session, existing)
     pending_revision = session.scalar(
         select(ResponseRevision.id).where(
             ResponseRevision.message_id == message_id,
@@ -3444,6 +3572,7 @@ async def regenerate_message(
         parent_message_id=user_message.parent_id,
         input_artifact_ids=orchestrator.input_artifact_ids_for_run(session, prior_run),
         settings={**prior_settings, **payload.settings},
+        idempotency_key=payload.idempotency_key,
     )
     prior_strength = _inherited_auto_image_edit_strength(prior_run)
     inherited_parameter = (
@@ -3457,7 +3586,15 @@ async def regenerate_message(
     inherited_prompt_source = run_prompt_source
     if inherited_prompt_source is None:
         inherited_prompt_source = _message_prompt_source(user_message)
-    return await _accept_turn(
+
+    def bind_request(_transaction: Session, run: Run) -> None:
+        if payload.idempotency_key is not None:
+            run.provenance_json = {
+                **run.provenance_json,
+                "regeneration_request_sha256": fingerprint,
+            }
+
+    accepted = await _accept_turn(
         orchestrator,
         session,
         prior_run.chat_id,
@@ -3468,7 +3605,13 @@ async def regenerate_message(
         inherited_image_edit_strength=inherited_image_edit_strength,
         inherited_prompt_source=inherited_prompt_source,
         reference_source_message_id=user_message.id,
+        chat_guard_held=True,
+        before_commit=bind_request,
     )
+
+    if payload.idempotency_key is not None:
+        require_request_binding(accepted.run.provenance_json)
+    return accepted
 
 
 @router.post(
@@ -3491,6 +3634,48 @@ async def select_response_revision(
         raise api_error(404, "response-revision-not-found", str(exc)) from exc
     except ValueError as exc:
         raise api_error(409, "response-revision-not-selectable", str(exc)) from exc
+
+
+@router.get("/messages/{message_id}/edit-source", response_model=PriorTurnEditSource)
+async def get_prior_turn_edit_source(
+    message_id: str,
+    request: Request,
+    session: ConversationSessionDep,
+    source_run_id: str | None = Query(default=None, min_length=1, max_length=40),
+) -> PriorTurnEditSource:
+    try:
+        return await prior_turn_edit_source(
+            _services(request).orchestrator, session, message_id, source_run_id
+        )
+    except EditRequestConflict as exc:
+        raise api_error(409, "edit-source-unavailable", str(exc)) from exc
+    except LookupError as exc:
+        raise api_error(404, "edit-source-not-found", str(exc)) from exc
+    except EngineNotConfiguredError as exc:
+        raise api_error(409, "engine-not-configured", str(exc)) from exc
+    except EngineSchemaUnavailableError as exc:
+        raise api_error(503, "engine-schema-unavailable", str(exc)) from exc
+    except ValueError as exc:
+        raise api_error(422, "edit-source-invalid", str(exc)) from exc
+
+
+@router.post("/messages/{message_id}/edits", response_model=PriorTurnEditAccepted, status_code=202)
+async def queue_edited_message(
+    message_id: str,
+    payload: PriorTurnEditRequest,
+    request: Request,
+    session: ConversationSessionDep,
+) -> TurnAccepted:
+    source = session.get(Message, message_id)
+    if source is None:
+        raise api_error(404, "user-message-not-found", "user message not found")
+    return await _accept_turn(
+        _services(request).orchestrator,
+        session,
+        source.chat_id,
+        payload,
+        edit_source_message_id=message_id,
+    )
 
 
 @router.post("/messages/{message_id}/branch", response_model=TurnAccepted, status_code=202)
@@ -3591,6 +3776,48 @@ async def get_run(run_id: str, session: ConversationSessionDep) -> Run:
     if not run:
         raise api_error(404, "run-not-found", "run not found")
     return run
+
+
+@router.get("/chats/{chat_id}/edited-branches", response_model=EditedBranchPage)
+async def get_edited_branches(
+    chat_id: str,
+    session: ConversationSessionDep,
+    limit: int = Query(default=50, ge=1, le=100),
+    cursor: str | None = None,
+) -> EditedBranchPage:
+    try:
+        return list_edited_branches(session, chat_id, limit=limit, cursor=cursor)
+    except LookupError as exc:
+        raise api_error(404, "edited-branch-not-found", str(exc)) from exc
+
+
+@router.post(
+    "/chats/{chat_id}/edited-branches/{plan_id}/activate",
+    response_model=EditedBranchActivationOut,
+)
+async def continue_edited_branch(
+    chat_id: str,
+    plan_id: str,
+    payload: EditedBranchActivationRequest,
+    request: Request,
+    session: ConversationSessionDep,
+) -> EditedBranchActivationOut:
+    services = _services(request)
+    # Release any dependency-opened snapshot before waiting for graph ownership.
+    session.rollback()
+    async with services.orchestrator.chat_guard(chat_id):
+        session.expire_all()
+        try:
+            head_id = activate_edited_branch(
+                session, chat_id, plan_id, payload.expected_active_head_message_id
+            )
+        except LookupError as exc:
+            raise api_error(404, "edited-branch-not-found", str(exc)) from exc
+        except EditRequestConflict as exc:
+            raise api_error(409, "edited-branch-unavailable", str(exc)) from exc
+        session.commit()
+    await services.events.publish("chat.updated", chat_id, {"active_head_message_id": head_id})
+    return EditedBranchActivationOut(chat_id=chat_id, active_head_message_id=head_id)
 
 
 @router.get("/work-plans", response_model=list[WorkPlanOut])
@@ -3809,6 +4036,26 @@ async def classify_chat_draft(
     chat = session.get(Chat, chat_id)
     if not chat:
         raise api_error(404, "chat-not-found", "chat not found")
+    if payload.edit_source is not None:
+        if payload.parent_message_id is not None:
+            raise api_error(422, "edit-source-invalid", "Choose either a source turn or a parent.")
+        try:
+            return DraftClassification(
+                references_prior_visual=classify_prior_turn_edit(
+                    _services(request).orchestrator,
+                    session,
+                    chat_id,
+                    payload.edit_source,
+                    text=payload.text,
+                    mode=payload.mode,
+                )
+            )
+        except EditRequestConflict as exc:
+            raise api_error(409, "edit-source-unavailable", str(exc)) from exc
+        except LookupError as exc:
+            raise api_error(404, "edit-source-not-found", str(exc)) from exc
+        except ValueError as exc:
+            raise api_error(422, "edit-source-invalid", str(exc)) from exc
     return DraftClassification(
         references_prior_visual=_services(request).orchestrator.classify_draft(
             session,
@@ -4169,16 +4416,9 @@ async def list_artifacts(
     project_id: str | None = None,
     favorites: bool = False,
     query: str = Query(default="", max_length=200),
+    limit: Annotated[int | None, Query(ge=1, le=200)] = None,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[ArtifactLibraryItem]:
-    reference_rows = session.execute(
-        select(MessagePart.artifact_id, Message.chat_id, Chat.project_id)
-        .join(Message, Message.id == MessagePart.message_id)
-        .join(Chat, Chat.id == Message.chat_id)
-        .where(MessagePart.artifact_id.is_not(None))
-    ).all()
-    references: dict[str, list[tuple[str, str | None]]] = {}
-    for artifact_id, referenced_chat_id, referenced_project_id in reference_rows:
-        references.setdefault(artifact_id, []).append((referenced_chat_id, referenced_project_id))
     statement = select(Artifact).where(
         Artifact.kind.in_([ArtifactKind.IMAGE.value, ArtifactKind.VIDEO.value])
     )
@@ -4193,7 +4433,40 @@ async def list_artifacts(
                 normalized_query
             )
         )
-    artifacts = session.scalars(statement.order_by(Artifact.created_at.desc())).all()
+    membership = (
+        select(MessagePart.id)
+        .join(Message, Message.id == MessagePart.message_id)
+        .join(Chat, Chat.id == Message.chat_id)
+        .where(MessagePart.artifact_id == Artifact.id)
+    )
+    # Each filter describes membership of the artifact, not necessarily one reference.
+    if chat_id:
+        statement = statement.where(membership.where(Message.chat_id == chat_id).exists())
+    if project_id:
+        statement = statement.where(membership.where(Chat.project_id == project_id).exists())
+    if limit is not None or offset:
+        statement = statement.order_by(Artifact.created_at.desc(), Artifact.id.desc()).offset(
+            offset
+        )
+        if limit is not None:
+            statement = statement.limit(limit)
+    else:
+        statement = statement.order_by(Artifact.created_at.desc())
+    artifacts = session.scalars(statement).all()
+    references: dict[str, list[tuple[str, str | None]]] = {}
+    artifact_ids = [artifact.id for artifact in artifacts]
+    for batch_offset in range(0, len(artifact_ids), 400):
+        batch = artifact_ids[batch_offset : batch_offset + 400]
+        reference_rows = session.execute(
+            select(MessagePart.artifact_id, Message.chat_id, Chat.project_id)
+            .join(Message, Message.id == MessagePart.message_id)
+            .join(Chat, Chat.id == Message.chat_id)
+            .where(MessagePart.artifact_id.in_(batch))
+        ).all()
+        for artifact_id, referenced_chat_id, referenced_project_id in reference_rows:
+            references.setdefault(artifact_id, []).append(
+                (referenced_chat_id, referenced_project_id)
+            )
     run_ids = {
         run_id
         for artifact in artifacts
@@ -4211,10 +4484,6 @@ async def list_artifacts(
         artifact_references = references.get(artifact.id, [])
         chat_ids = sorted({item[0] for item in artifact_references})
         project_ids = sorted({item[1] for item in artifact_references if item[1]})
-        if chat_id and chat_id not in chat_ids:
-            continue
-        if project_id and project_id not in project_ids:
-            continue
         result = ArtifactLibraryItem.model_validate(artifact)
         result.reference_count = len(artifact_references)
         result.chat_ids = chat_ids
@@ -4302,23 +4571,72 @@ async def artifact_storage(
 async def cleanup_artifacts(
     payload: ArtifactCleanupRequest,
     request: Request,
-    session: ConversationSessionDep,
 ) -> ArtifactCleanupResult:
+    """Run one budgeted retention batch, off the event loop.
+
+    A real run takes one required reference snapshot, then bounds the deletion
+    phase by elapsed time and count under the same writer reservation. It allows
+    at least one deletion even with a zero deletion budget. A truncated result
+    lets the next call continue. A dry run deletes nothing and reports the whole
+    eligible set.
+    """
+
     services = _services(request)
-    cleanup = services.artifacts.cleanup_retention(
-        session,
-        retention_days=services.settings.artifact_retention_days,
-        temporary_hours=services.settings.temporary_retention_hours,
-        dry_run=payload.dry_run,
-    )
-    if not payload.dry_run:
-        session.commit()
+    settings = services.settings
+
+    def run() -> RetentionCleanupSummary:
+        deadline: float | None = None
+        max_deletions: int | None = None
+        if not payload.dry_run:
+            max_deletions = RETENTION_BATCH_DELETIONS
+
+        def report_phase(name: str) -> None:
+            nonlocal deadline
+            if (
+                not payload.dry_run
+                and deadline is None
+                and name
+                in {
+                    "delete-artifact",
+                    "orphan-file-removed",
+                }
+            ):
+                # Arm on deletion progress, not on a stop query: listing may
+                # poll many times before finding any work, or find none at all.
+                deadline = time.monotonic() + RETENTION_BATCH_SECONDS
+
+        def should_stop() -> bool:
+            return deadline is not None and time.monotonic() >= deadline
+
+        with SessionLocal() as session:
+            try:
+                summary = services.artifacts.cleanup_retention(
+                    session,
+                    retention_days=settings.artifact_retention_days,
+                    temporary_hours=settings.temporary_retention_hours,
+                    dry_run=payload.dry_run,
+                    max_deletions=max_deletions,
+                    should_stop=should_stop,
+                    report_phase=report_phase,
+                )
+                if not payload.dry_run:
+                    session.commit()
+            except BaseException:
+                # Roll back here, not implicitly at close, so the rollback
+                # listeners that restore staged files run before anything else
+                # observes the store.
+                session.rollback()
+                raise
+            return summary
+
+    cleanup = await asyncio.to_thread(run)
     return ArtifactCleanupResult(
         dry_run=payload.dry_run,
         marked_count=cleanup.marked_count,
         retention_pending_count=cleanup.pending_count,
         removed_count=cleanup.removed_count,
         reclaimed_bytes=cleanup.reclaimed_bytes,
+        truncated=cleanup.truncated,
     )
 
 
@@ -4415,10 +4733,10 @@ def _installed_counts_by_parent(session: Session) -> dict[str, int]:
     this map has no recorded identity at all, which is not the same as having
     none installed - see `_grouped_by_parent`.
     """
-    counts: dict[str, int] = {}
+    versions: dict[str, set[str]] = {}
     for identity in installed_civitai_identities(session):
-        counts[identity.model_id] = counts.get(identity.model_id, 0) + 1
-    return counts
+        versions.setdefault(identity.model_id, set()).add(identity.version_id)
+    return {model_id: len(installed) for model_id, installed in versions.items()}
 
 
 def _grouped_by_parent(items: list[CatalogModel]) -> list[CatalogModel]:
@@ -4511,9 +4829,14 @@ async def catalog_search(
                 }
             )
         registry = ComfyTemplateRegistry(services.settings)
+        available_ids = (
+            {template.remote_id.casefold() for template in registry.available(role)}
+            if page.items
+            else set()
+        )
         items = []
         for item in page.items:
-            ready = bool(registry.matches(item.remote_id, role))
+            ready = item.remote_id.casefold() in available_ids
             adaptive_candidate = role == "image" and "safetensors" in {
                 item_format.casefold() for item_format in item.formats
             }
@@ -6339,10 +6662,10 @@ async def catalog_model_versions(
     from; picking a row goes back through the ordinary preflight and install
     for that exact version, and nothing about the verified path changes.
 
-    Installed state is read from the same manifest field update checks use.
-    Where a kind does not record a provider version - checkpoints today - the
-    answer is `null` rather than `false`: saying "not installed" about
-    something we cannot see is how a person ends up with a second copy.
+    Installed state uses the same exact checkpoint and auxiliary identities
+    as update checks. A matching version is true. An unmatched version is
+    false only if this model has at least one recorded identity; otherwise
+    it is null.
     """
 
     services = _services(request)
@@ -6416,7 +6739,11 @@ async def check_model_updates(request: Request, session: SessionDep) -> list[Mod
     report: list[ModelUpdateOut] = []
     for identity in identities:
         summary = summaries.get(identity.model_id)
-        candidate = newer_version(identity, summary) if summary is not None else None
+        try:
+            candidate = newer_version(identity, summary) if summary is not None else None
+        except ModelUpdateBaselineUnavailable:
+            summary = None
+            candidate = None
         state: Literal["update_available", "current", "unknown"] = (
             "unknown" if summary is None else "current" if candidate is None else "update_available"
         )
@@ -7109,6 +7436,16 @@ async def create_profile(
     request: Request,
     session: SessionDep,
 ) -> ModelProfile:
+    return await _create_profile(payload, request, session, use_case_derived=False)
+
+
+async def _create_profile(
+    payload: ModelProfileCreate,
+    request: Request,
+    session: SessionDep,
+    *,
+    use_case_derived: bool,
+) -> ModelProfile:
     _validated_profile_install(
         session,
         model_install_id=payload.model_install_id,
@@ -7138,6 +7475,7 @@ async def create_profile(
     profile = ModelProfile(
         name=payload.name,
         use_case=payload.use_case,
+        use_case_derived=bool(payload.use_case and use_case_derived),
         role=payload.role,
         engine=payload.engine,
         model_install_id=payload.model_install_id,
@@ -7199,11 +7537,13 @@ async def update_profile(
     if "request_settings" in values:
         try:
             profile.request_settings_json = validate_settings(
-                values.pop("request_settings") or {},
+                normalize_saved_settings(values.pop("request_settings") or {}, profile.role),
                 [field for field in fields if field.scope != "load"],
             )
         except ValueError as exc:
             raise api_error(422, "profile-request-settings-invalid", str(exc)) from exc
+    if "use_case" in values:
+        profile.use_case_derived = False
     for key, value in values.items():
         setattr(profile, key, value)
     reconcile_legacy_workflow_compatibility(session)
@@ -7248,7 +7588,7 @@ async def clone_profile(
     source = session.get(ModelProfile, profile_id)
     if not source:
         raise api_error(404, "profile-not-found", "profile not found")
-    return await create_profile(
+    return await _create_profile(
         ModelProfileCreate(
             name=payload.name or f"{source.name} copy",
             use_case=source.use_case,
@@ -7260,6 +7600,7 @@ async def clone_profile(
         ),
         request,
         session,
+        use_case_derived=source.use_case_derived,
     )
 
 
@@ -7290,6 +7631,7 @@ async def export_profile(profile_id: str, session: SessionDep) -> ModelProfileBu
     return ModelProfileBundle(
         name=profile.name,
         use_case=profile.use_case,
+        use_case_derived=profile.use_case_derived,
         role=cast(Literal["chat", "image", "video"], profile.role),
         engine=profile.engine,
         model_install_id=profile.model_install_id,
@@ -7304,7 +7646,7 @@ async def import_profile(
     request: Request,
     session: SessionDep,
 ) -> ModelProfile:
-    return await create_profile(
+    return await _create_profile(
         ModelProfileCreate(
             name=payload.name,
             use_case=payload.use_case,
@@ -7316,6 +7658,7 @@ async def import_profile(
         ),
         request,
         session,
+        use_case_derived=payload.use_case_derived,
     )
 
 
@@ -7373,7 +7716,7 @@ async def update_preset(
         fields = await _engine_role_fields(request, preset.role)
         try:
             preset.settings_json = validate_settings(
-                values.pop("settings") or {},
+                normalize_saved_settings(values.pop("settings") or {}, preset.role),
                 [field for field in fields if field.scope != "load"],
             )
         except ValueError as exc:
@@ -7417,8 +7760,8 @@ async def delete_preset(preset_id: str, session: SessionDep) -> Response:
         )
         direct = scoped.get(preset.role)
         scoped[preset.role] = {
-            **preset.settings_json,
-            **(direct if isinstance(direct, dict) else {}),
+            **normalize_saved_settings(preset.settings_json, preset.role),
+            **normalize_saved_settings(direct if isinstance(direct, dict) else {}, preset.role),
         }
         owner.generation_preset_ids_json = bindings
         owner.generation_settings_json = scoped
@@ -7903,11 +8246,15 @@ def _workflow_family_out(
             WorkflowProfileCompatibility.workflow_family_id == family.id
         )
     )
+    profile = session.get(ModelProfile, compatibility.model_profile_id) if compatibility else None
     return WorkflowFamilyOut(
         id=family.id,
         name=family.name,
         description=family.description,
         use_case=family.use_case,
+        use_case_derived=bool(
+            profile and profile.use_case_derived and family.use_case == profile.use_case
+        ),
         tags=[item for item in family.tags_json if isinstance(item, str)],
         enabled=family.enabled,
         archived=family.archived,
@@ -8078,6 +8425,7 @@ async def update_workflow_family(
         family.use_case = values["use_case"].strip()
         if compatibility_profile is not None:
             compatibility_profile.use_case = family.use_case
+            compatibility_profile.use_case_derived = False
     if values.get("tags") is not None:
         family.tags_json = _normalized_workflow_family_tags(values["tags"])
     if archiving:
@@ -8444,6 +8792,12 @@ async def list_workflows(session: SessionDep) -> list[WorkflowDefinition]:
 
 @router.post("/workflows", response_model=WorkflowOut, status_code=201)
 async def create_workflow(payload: WorkflowCreate, session: SessionDep) -> WorkflowDefinition:
+    return await _persist_workflow(payload, session, trusted=False)
+
+
+async def _persist_workflow(
+    payload: WorkflowCreate, session: Session, *, trusted: bool
+) -> WorkflowDefinition:
     try:
         validate_lora_workflow_contract(
             payload.api_graph,
@@ -8470,7 +8824,7 @@ async def create_workflow(payload: WorkflowCreate, session: SessionDep) -> Workf
         api_graph_json=payload.api_graph,
         input_schema_json=payload.input_schema,
         dependencies_json=payload.dependencies,
-        trusted=payload.trusted,
+        trusted=trusted,
         # Every revision carries its artifact identity, not only compiled ones -
         # otherwise a hand-authored or imported workflow cannot take part in
         # capability evidence or in pin migration across recompiles.
@@ -10888,7 +11242,6 @@ async def import_workflow_package(
                 ui_graph=payload.ui_graph,
                 api_graph=compiled_api_graph,
                 input_schema=input_schema,
-                trusted=False,
             ),
             session,
         )
@@ -10902,7 +11255,6 @@ async def import_workflow_package(
             ui_graph=payload.ui_graph,
             api_graph=compiled_api_graph,
             input_schema=input_schema,
-            trusted=False,
         ),
         session,
     )
@@ -11039,7 +11391,6 @@ async def import_workflow(payload: WorkflowBundle, session: SessionDep) -> Workf
             api_graph=payload.api_graph,
             input_schema=payload.input_schema,
             dependencies=payload.dependencies,
-            trusted=False,
         ),
         session,
     )
@@ -11050,7 +11401,7 @@ async def clone_workflow(
     workflow_id: str, payload: WorkflowClone, session: SessionDep
 ) -> WorkflowDefinition:
     definition, revision = _workflow_and_revision(session, workflow_id)
-    return await create_workflow(
+    cloned = await _persist_workflow(
         WorkflowCreate(
             name=payload.name or f"{definition.name} copy",
             operation=Operation(definition.operation),
@@ -11061,10 +11412,18 @@ async def clone_workflow(
             api_graph=revision.api_graph_json,
             input_schema=revision.input_schema_json,
             dependencies=revision.dependencies_json,
-            trusted=revision.trusted,
         ),
         session,
+        trusted=False,
     )
+
+    target = session.get(WorkflowRevision, cloned.current_revision_id)
+    if target is None:
+        raise api_error(409, "workflow-review-unavailable", "The cloned revision is unavailable.")
+    inherit_workflow_review(session, definition, revision, cloned, target)
+    session.commit()
+    session.refresh(cloned)
+    return cloned
 
 
 @router.post(
@@ -11074,6 +11433,12 @@ async def clone_workflow(
 )
 async def create_workflow_revision(
     workflow_id: str, payload: WorkflowRevisionCreate, session: SessionDep
+) -> WorkflowRevision:
+    return await _persist_workflow_revision(workflow_id, payload, session, trusted=False)
+
+
+async def _persist_workflow_revision(
+    workflow_id: str, payload: WorkflowRevisionCreate, session: Session, *, trusted: bool
 ) -> WorkflowRevision:
     definition = session.get(WorkflowDefinition, workflow_id)
     if not definition:
@@ -11107,7 +11472,7 @@ async def create_workflow_revision(
         api_graph_json=payload.api_graph,
         input_schema_json=payload.input_schema,
         dependencies_json=payload.dependencies,
-        trusted=payload.trusted,
+        trusted=trusted,
         artifact_sha256=workflow_artifact_contract(
             operation=definition.operation,
             engine=engine,
@@ -11125,6 +11490,69 @@ async def create_workflow_revision(
     return revision
 
 
+def _prove_stored_revision_geometry(
+    revision_id: str, session: Session
+) -> WorkflowOutputGeometryResult:
+    """Re-load and re-prove one stored revision, from the stored bytes only."""
+
+    revision = session.get(WorkflowRevision, revision_id)
+    if revision is None:
+        raise api_error(404, "workflow-revision-not-found", "workflow revision not found")
+    definition = session.get(WorkflowDefinition, revision.workflow_id)
+    if definition is None:
+        raise api_error(404, "workflow-not-found", "workflow not found")
+    return prove_workflow_output_geometry(
+        workflow_id=definition.id,
+        revision_id=revision.id,
+        operation=definition.operation,
+        engine=revision.engine,
+        api_graph=revision.api_graph_json,
+        input_schema=revision.input_schema_json,
+        dependencies=revision.dependencies_json,
+        artifact_sha256=revision.artifact_sha256,
+        trusted=revision.trusted,
+    )
+
+
+@router.get(
+    "/workflow-revisions/{revision_id}/output-geometry",
+    response_model=WorkflowOutputGeometryCapabilityOut,
+)
+async def get_workflow_revision_output_geometry(
+    revision_id: str,
+    session: SessionDep,
+) -> dict[str, object]:
+    return workflow_output_geometry_payload(_prove_stored_revision_geometry(revision_id, session))
+
+
+@router.post(
+    "/workflow-revisions/{revision_id}/output-geometry/resolve",
+    response_model=WorkflowOutputGeometryResolutionOut,
+)
+async def resolve_workflow_revision_output_geometry(
+    revision_id: str,
+    payload: dict[str, Any],
+    session: SessionDep,
+) -> dict[str, object]:
+    """Preview the geometry one request resolves to for a stored revision.
+
+    Read-only, and re-proves the stored revision on every call, so the answer
+    is bound to the revision as it is now rather than to anything a caller
+    remembers. Resolving grants no admission, queueing or generation.
+    """
+
+    resolution = resolve_workflow_output_geometry(
+        _prove_stored_revision_geometry(revision_id, session), payload
+    )
+    if resolution is None:
+        raise api_error(
+            422,
+            "workflow-geometry-request-invalid",
+            "Output geometry request is invalid or unsupported for this workflow revision",
+        )
+    return workflow_output_geometry_resolution_payload(resolution)
+
+
 @router.post(
     "/workflows/{workflow_id}/revisions/{revision_id}/restore",
     response_model=WorkflowRevisionOut,
@@ -11136,7 +11564,7 @@ async def restore_workflow_revision(
     source = session.get(WorkflowRevision, revision_id)
     if not source or source.workflow_id != workflow_id:
         raise api_error(404, "workflow-revision-not-found", "workflow revision not found")
-    return await create_workflow_revision(
+    restored = await _persist_workflow_revision(
         workflow_id,
         WorkflowRevisionCreate(
             engine_version=source.engine_version,
@@ -11144,10 +11572,18 @@ async def restore_workflow_revision(
             api_graph=source.api_graph_json,
             input_schema=source.input_schema_json,
             dependencies=source.dependencies_json,
-            trusted=source.trusted,
         ),
         session,
+        trusted=False,
     )
+
+    definition = session.get(WorkflowDefinition, workflow_id)
+    if definition is None:
+        raise api_error(404, "workflow-not-found", "workflow not found")
+    inherit_workflow_review(session, definition, source, definition, restored)
+    session.commit()
+    session.refresh(restored)
+    return restored
 
 
 @router.post("/workflows/{workflow_id}/validate")
@@ -11162,10 +11598,12 @@ async def validate_workflow(
         raise api_error(404, "workflow-revision-not-found", "workflow revision not found")
     errors = await _services(request).engines.media.validate_workflow(revision.api_graph_json)
     warnings: list[str] = []
-    if revision.engine == "comfyui" and not revision.trusted:
+    if revision.engine == "comfyui" and not workflow_review_is_current(
+        session, definition, revision
+    ):
         errors.append(
-            "workflow revision is not trusted; review it and create a trusted revision "
-            "before execution"
+            "The selected workflow needs review. Open Workflows, choose this revision, "
+            "and use Review exact revision."
         )
     # Asking the engine what a role offers is I/O and can fail for reasons that
     # have nothing to do with this schema. It stays outside the block below so
@@ -11268,3 +11706,119 @@ def _workflow_bundle(definition: WorkflowDefinition, revision: WorkflowRevision)
         trusted=revision.trusted,
         source_revision=revision.version,
     )
+
+
+async def _workflow_review_object_info(services: Services) -> dict[str, Any] | None:
+    return await review_runtime_object_info(services.processes, services.engines.media)
+
+
+def _reviewed_revision(
+    session: Session, workflow_id: str, revision_id: str
+) -> tuple[WorkflowDefinition, WorkflowRevision]:
+    definition = session.get(WorkflowDefinition, workflow_id)
+    revision = session.get(WorkflowRevision, revision_id)
+    if definition is None or revision is None or revision.workflow_id != definition.id:
+        raise api_error(404, "workflow-revision-not-found", "workflow revision not found")
+    return definition, revision
+
+
+def _workflow_review_out(
+    session: Session,
+    definition: WorkflowDefinition,
+    revision: WorkflowRevision,
+    snapshot: WorkflowReviewSnapshot,
+) -> dict[str, Any]:
+    review = session.get(WorkflowRevisionReview, revision.id)
+    current = workflow_review_is_current(session, definition, revision)
+    if review is not None:
+        current = current and review.subject_sha256 == snapshot.subject_sha256
+    return {
+        "revision_id": revision.id,
+        "subject_sha256": snapshot.subject_sha256,
+        "trusted": current,
+        "can_approve": not snapshot.reasons,
+        "reasons": list(snapshot.reasons),
+        "state": review.state if review is not None else "unreviewed",
+        "reviewed_at": review.reviewed_at if review is not None else None,
+        "node_types": sorted({node["class_type"] for node in revision.api_graph_json.values()}),
+        "packages": list(
+            {
+                binding["pin"]["id"]: binding["pin"]
+                for binding in snapshot.node_bindings.values()
+                if isinstance(binding.get("pin"), dict)
+            }.values()
+        ),
+        "api_graph": revision.api_graph_json,
+        "input_schema": revision.input_schema_json,
+        "dependencies": revision.dependencies_json,
+    }
+
+
+@router.get("/workflows/{workflow_id}/revisions/{revision_id}/review")
+async def preview_workflow_revision_review(
+    workflow_id: str, revision_id: str, request: Request, session: SessionDep
+) -> dict[str, Any]:
+    definition, revision = _reviewed_revision(session, workflow_id, revision_id)
+    info = await _workflow_review_object_info(_services(request))
+    session.expire_all()
+    try:
+        snapshot = build_workflow_review_snapshot(session, definition, revision, object_info=info)
+    except WorkflowReviewError as exc:
+        raise api_error(422, "workflow-review-invalid", str(exc)) from exc
+    return _workflow_review_out(session, definition, revision, snapshot)
+
+
+@router.post("/workflows/{workflow_id}/revisions/{revision_id}/review")
+async def decide_workflow_revision_review(
+    workflow_id: str,
+    revision_id: str,
+    payload: WorkflowRevisionReviewRequest,
+    request: Request,
+    session: SessionDep,
+) -> dict[str, Any]:
+    services = _services(request)
+    async with services.scheduler.lease("primary"):
+        definition, revision = _reviewed_revision(session, workflow_id, revision_id)
+        info = await _workflow_review_object_info(services)
+        session.expire_all()
+        try:
+            snapshot = build_workflow_review_snapshot(
+                session, definition, revision, object_info=info
+            )
+            if snapshot.subject_sha256 != payload.subject_sha256:
+                raise api_error(
+                    409, "workflow-review-changed", "The workflow review changed. Review it again."
+                )
+            approved = payload.action == "approve"
+            if approved:
+                if snapshot.reasons:
+                    raise WorkflowReviewError("workflow_review_node_unavailable")
+                await verify_reviewed_packages(
+                    services.settings, session, snapshot, custom_nodes=services.custom_nodes
+                )
+                refreshed_info = await _workflow_review_object_info(services)
+                if refreshed_info is None:
+                    raise WorkflowReviewError("workflow_review_runtime_unavailable")
+                info = refreshed_info
+            # No writer spans worker I/O or code verification. Take the writer
+            # before the final durable-state read and compare the full subject.
+            session.connection().exec_driver_sql(
+                "UPDATE workflow_revision_reviews SET state=state WHERE 0"
+            )
+            session.expire_all()
+            definition, revision = _reviewed_revision(session, workflow_id, revision_id)
+            fresh = build_workflow_review_snapshot(session, definition, revision, object_info=info)
+            if fresh.subject_sha256 != payload.subject_sha256:
+                raise api_error(
+                    409, "workflow-review-changed", "The workflow review changed. Review it again."
+                )
+            record_workflow_review(session, revision, fresh, approved=approved)
+            session.commit()
+        except (WorkflowReviewError, ValueError, OSError, RuntimeError, TimeoutError) as exc:
+            session.rollback()
+            raise api_error(
+                409,
+                "workflow-review-unavailable",
+                "The exact workflow or its node code could not be verified.",
+            ) from exc
+        return _workflow_review_out(session, definition, revision, fresh)

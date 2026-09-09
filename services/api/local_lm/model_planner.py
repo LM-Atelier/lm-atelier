@@ -14,8 +14,10 @@ from .adapters.contracts import ADAPTER_CONTRACT_VERSION
 from .auxiliary_assets import AUXILIARY_ASSET_KINDS
 from .comfy_templates import COMFY_TEMPLATE_COMPILER_VERSION
 from .domain import new_id
+from .install_plan_types import InstallPlanFailureCode
 from .model_manifests import ModelManifestInspection, comfy_folder_for_kind
 from .models import InstallPlan, ModelComponentManifest
+from .profile_use_cases import merge_provider_use_case_metadata
 
 INSTALL_RESOLVER_VERSION = "install-resolver-v9"
 ACTIVATION_PROBE_VERSION = "activation-probe-v2"
@@ -300,10 +302,10 @@ class ResolvedInstallPlan:
     artifacts: tuple[PlannedArtifact, ...]
     runtime_contract: dict[str, Any]
     activation_probe: dict[str, Any]
-    failure_code: str | None = None
+    failure_code: InstallPlanFailureCode | None = None
     failure_reason: str | None = None
 
-    def blocked(self, code: str, reason: str) -> ResolvedInstallPlan:
+    def blocked(self, code: InstallPlanFailureCode, reason: str) -> ResolvedInstallPlan:
         """Return the same immutable artifact plan with activation disabled."""
 
         return ResolvedInstallPlan(
@@ -454,7 +456,7 @@ def resolve_install_plan(
         for item in selected_files
     )
     compatibility: InstallCompatibility = "supported"
-    failure_code = None
+    failure_code: InstallPlanFailureCode | None = None
     failure_reason = None
     if auxiliary_kind and workflow_reference_kind:
         compatibility = "unsupported"
@@ -552,6 +554,11 @@ def resolve_install_plan(
         "quantization": "modelopt" if engine == "vllm" else None,
         "model_layout": "transformers_snapshot" if engine == "vllm" else None,
     }
+    use_case_metadata = merge_provider_use_case_metadata(
+        item.get("metadata") for item in selected_files
+    )
+    if use_case_metadata:
+        runtime_contract["use_case_metadata"] = use_case_metadata
     if workflow_reference_kind:
         runtime_contract["workflow_reference_kind"] = workflow_reference_kind
         if len(artifacts) == 1:
@@ -606,7 +613,7 @@ def _workflow_asset_failure(
     role: str,
     engine: str,
     workflow_template_id: str | None,
-) -> tuple[str, str] | None:
+) -> tuple[InstallPlanFailureCode, str] | None:
     """Validate one exact provider component as an inert workflow dependency."""
 
     if engine != "comfyui" or role not in {"image", "video"}:

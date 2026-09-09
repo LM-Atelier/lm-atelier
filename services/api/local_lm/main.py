@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import logging
 import sys
 import threading
@@ -30,7 +31,12 @@ from .api import (
     shutdown_registry_preparations,
 )
 from .api_errors import register_api_error_handler
-from .artifacts import ArtifactStore, RetentionCleanupSummary
+from .artifacts import (
+    RETENTION_BATCH_DELETIONS,
+    RETENTION_BATCH_SECONDS,
+    ArtifactStore,
+    RetentionCleanupSummary,
+)
 from .backups import BackupManager
 from .catalog import HuggingFaceCatalog
 from .catalog_sources import CatalogSources
@@ -46,6 +52,7 @@ from .engines import EngineRegistry
 from .events import EventBroker
 from .exports import ProjectExporter
 from .instance_identity import INSTANCE_ID_HEADER, load_or_create_instance_identity
+from .instance_lock import DataDirectoryLock
 from .orchestrator import ConversationOrchestrator
 from .processes import ProcessSupervisor
 from .runtime_provisioning import RuntimeProvisioner
@@ -363,20 +370,77 @@ async def maintain_automatic_recovery_backups(
         await asyncio.sleep(interval_seconds)
 
 
-RETENTION_BATCH_DELETIONS = 10
 RETENTION_BATCH_PAUSE_SECONDS = 1.0
-# A batch holds SQLite's writer reservation for its whole duration, and every
-# other writer in the process waits on the event-loop thread for at most
-# busy_timeout (5 s) before failing. The batch is therefore bounded by time
-# held, not by a count: at ~3 s per deletion a 2 s budget means one deletion
-# per batch on a heavy install and several on a light one.
-RETENTION_BATCH_SECONDS = 2.0
 # Contention with a user transaction is waited out, a bounded number of times
 # in a row; a whole store is drained in successive passes, since a poster is
 # freed only by the pass that removes the artifact naming it, up to a bound
 # that keeps a pathological store from sweeping forever.
 RETENTION_LOCK_RETRIES = 5
 RETENTION_MAX_PASSES = 20
+
+
+RETENTION_PROGRESS_WARN_SECONDS = 30.0
+
+
+class _RetentionBatchProgress:
+    """Observe a batch without changing its deletion clock or transaction."""
+
+    def __init__(self) -> None:
+        self.started = time.monotonic()
+        self.phase_started = self.started
+        self.current_phase = "starting"
+        self.writer_started: float | None = None
+        self.writer_seconds = 0.0
+        self.finished = threading.Event()
+        self.speaking = threading.Lock()
+
+    def phase(self, name: str) -> None:
+        with self.speaking:
+            now = time.monotonic()
+            if name == "writer-acquired":
+                self.writer_started = now
+            self.current_phase = name
+            self.phase_started = now
+
+    def transaction_finished(self) -> None:
+        with self.speaking:
+            if self.writer_started is not None:
+                self.writer_seconds = time.monotonic() - self.writer_started
+                self.writer_started = None
+
+    def watch(self) -> None:
+        while not self.finished.wait(RETENTION_PROGRESS_WARN_SECONDS):
+            with self.speaking:
+                if self.finished.is_set():
+                    return
+                now = time.monotonic()
+                held = self.writer_seconds
+                if self.writer_started is not None:
+                    held = now - self.writer_started
+                logger.warning(
+                    "Artifact retention batch still running: phase %s for %.3fs; "
+                    "elapsed %.3fs; writer reservation %.3fs",
+                    self.current_phase,
+                    now - self.phase_started,
+                    now - self.started,
+                    held,
+                )
+
+
+@contextmanager
+def _retention_batch_progress() -> Iterator[_RetentionBatchProgress]:
+    progress = _RetentionBatchProgress()
+    watcher = threading.Thread(
+        target=progress.watch, name="artifact-retention-progress", daemon=True
+    )
+    watcher.start()
+    try:
+        yield progress
+    finally:
+        progress.finished.set()
+        # Serialize completion with an in-flight notice. No notice may appear
+        # after the final summary for the batch it describes.
+        watcher.join()
 
 
 async def sweep_artifact_retention(
@@ -387,20 +451,14 @@ async def sweep_artifact_retention(
     pause_seconds: float | None = None,
     batch_seconds: float | None = None,
 ) -> None:
-    """Run the artifact retention sweep after the port is open, in committed batches.
+    """Run retention after the port opens, committing one bounded batch at a time.
 
-    The sweep used to be a startup stage before the lifespan yield, inside the
-    session that commits only at session-commit. Every deletion pays for the
-    JSON reference trigger's scan of the referring tables, so an install with
-    thousands of aged previews kept the port closed for hours, and killing the
-    process rolled every deletion back, so the next start began from zero.
-
-    Each batch here is its own session and its own commit: the port is open
-    before the first batch runs, the write fence is held only for a batch's
-    own deletions, committed progress survives a kill, and a stop request
-    ends the sweep at the next deletion boundary rather than mid-transaction.
-    A failure inside the sweep is logged and leaves the application running;
-    the sweep runs again at the next start.
+    Each batch holds its writer reservation through one complete reference
+    snapshot and a deletion phase bounded by time and count. Snapshot cost is
+    fixed work before the deletion clock starts. A stop request still ends the
+    batch at the next deletion boundary, and completed deletions are committed
+    before the next batch. Failures are logged while the application keeps
+    running; the next start resumes the sweep.
     """
 
     # Resolved at call time, not at definition time, so the module constants
@@ -423,13 +481,22 @@ async def sweep_artifact_retention(
     # rebinding cannot redirect a batch mid-sweep.
     bind = SessionLocal.kw.get("bind")
 
-    def run_batch(*, deletions: int, deadline: float | None) -> RetentionCleanupSummary:
+    def run_batch(*, deletions: int, seconds: float | None) -> RetentionCleanupSummary:
+        deadline: float | None = None
+
         def should_stop() -> bool:
+            nonlocal deadline
             if stop.is_set():
                 return True
-            return deadline is not None and time.monotonic() >= deadline
+            if seconds is None:
+                return False
+            if deadline is None:
+                # The complete graph and validity scan are fixed work. Charge
+                # the budget from the first deletion boundary after that mint.
+                deadline = time.monotonic() + seconds
+            return time.monotonic() >= deadline
 
-        with SessionLocal(bind=bind) as session:
+        with _retention_batch_progress() as progress, SessionLocal(bind=bind) as session:
             try:
                 summary = artifacts.cleanup_retention(
                     session,
@@ -438,17 +505,32 @@ async def sweep_artifact_retention(
                     dry_run=False,
                     max_deletions=deletions,
                     should_stop=should_stop,
+                    report_phase=progress.phase,
                 )
+                progress.phase("commit")
                 session.commit()
+                progress.transaction_finished()
             except BaseException:
                 # Roll back here, not implicitly at close, so the rollback
-                # listeners that restore staged files run before anything else
-                # observes the store.
+                # listeners restore staged files before the store is observed.
+                progress.phase("rollback")
                 session.rollback()
+                progress.transaction_finished()
                 raise
-            return summary
+        logger.info(
+            "Artifact retention batch committed: %s row(s) examined, %s item(s) removed; "
+            "elapsed %.3fs; writer reservation %.3fs",
+            summary.examined_count,
+            summary.removed_count,
+            time.monotonic() - progress.started,
+            progress.writer_seconds,
+        )
+        return summary
 
+    started = time.monotonic()
+    logger.info("Artifact retention sweep started")
     batches = 0
+    examined = 0
     removed = 0
     passes = 0
     locked_out = 0
@@ -456,15 +538,14 @@ async def sweep_artifact_retention(
     try:
         while True:
             deletions = batch_deletions
-            deadline: float | None = time.monotonic() + batch_seconds
+            seconds: float | None = batch_seconds
             if single:
-                # The fixed work of a pass alone exhausted the budget once, so
-                # the budget can no longer guarantee progress. One deletion per
-                # batch does, and it is the smallest hold there is.
+                # A zero or exhausted deletion budget cannot make progress.
+                # Fall back to one deletion while still honoring shutdown.
                 deletions = 1
-                deadline = None
+                seconds = None
             operation = asyncio.create_task(
-                asyncio.to_thread(run_batch, deletions=deletions, deadline=deadline),
+                asyncio.to_thread(run_batch, deletions=deletions, seconds=seconds),
                 name="artifact-retention-batch",
             )
             try:
@@ -475,7 +556,10 @@ async def sweep_artifact_retention(
                 # it has; wait for that rather than tearing the session down.
                 stop.set()
                 with suppress(Exception):
-                    await operation
+                    summary = await operation
+                    batches += 1
+                    examined += summary.examined_count
+                    removed += summary.removed_count
                 raise
             except OperationalError as exc:
                 # A user transaction held the writer for longer than
@@ -498,6 +582,7 @@ async def sweep_artifact_retention(
                 continue
             locked_out = 0
             batches += 1
+            examined += summary.examined_count
             removed += summary.removed_count
             if summary.truncated:
                 if summary.removed_count == 0 and not single:
@@ -526,21 +611,27 @@ async def sweep_artifact_retention(
     except asyncio.CancelledError:
         logger.info(
             "Artifact retention sweep stopped after %s batch(es), %s removed; "
-            "it resumes at the next start",
+            "elapsed %.3fs; it resumes at the next start",
             batches,
             removed,
+            time.monotonic() - started,
         )
         raise
     except Exception:
         logger.exception(
-            "Artifact retention sweep failed after %s batch(es); it runs again at the next start",
+            "Artifact retention sweep failed after %s batch(es); elapsed %.3fs; "
+            "it runs again at the next start",
             batches,
+            time.monotonic() - started,
         )
         return
     logger.info(
-        "Artifact retention sweep complete: %s batch(es), %s artifact(s) removed",
+        "Artifact retention sweep complete: %s batch(es), %s artifact(s) removed; "
+        "%s row examination(s); elapsed %.3fs",
         batches,
         removed,
+        examined,
+        time.monotonic() - started,
     )
 
 
@@ -715,11 +806,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     return app
 
 
-app = create_app()
+def _create_default_app() -> tuple[FastAPI, DataDirectoryLock]:
+    settings = get_settings()
+    ownership = DataDirectoryLock(settings.data_dir)
+    try:
+        application = create_app(settings)
+    except BaseException:
+        ownership.close()
+        raise
+    atexit.register(ownership.close)
+    return application, ownership
+
+
+app, _default_instance_lock = _create_default_app()
 
 
 def run() -> None:
     settings = get_settings()
+    if settings.dev:
+        # The reload supervisor does not serve this app. Its spawned child
+        # imports the module and takes its own lock before touching the data.
+        _default_instance_lock.close()
     uvicorn.run(
         "local_lm.main:app" if settings.dev else app,
         host=settings.host,

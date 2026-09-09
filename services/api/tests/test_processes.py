@@ -614,6 +614,68 @@ async def test_worker_port_preflight_distinguishes_free_and_bound_ports(
             )
 
 
+async def test_port_refusal_names_the_process_holding_the_port(
+    settings,
+) -> None:  # type: ignore[no-untyped-def]
+    """A user who hits this must learn what to close.
+
+    The listener here is the test process itself, so the expected name and pid
+    are known exactly rather than matched loosely.
+    """
+
+    settings.prepare()
+    supervisor = ProcessSupervisor(settings)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        occupied_port = listener.getsockname()[1]
+        with pytest.raises(OSError) as refused:
+            await supervisor._ensure_port_available(
+                "media",
+                f"http://127.0.0.1:{occupied_port}/health",
+            )
+
+    message = str(refused.value)
+    assert "already in use by " in message, message
+    assert f"pid {os.getpid()}" in message, message
+    assert psutil.Process(os.getpid()).name() in message, message
+
+
+async def test_port_refusal_keeps_its_original_wording_when_the_holder_is_unknown(
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """Enumerating sockets is privileged on some systems.
+
+    Degradation guard rather than a regression: this passes on the parent too,
+    because the parent only ever produces the unnamed message. It is here so a
+    later change cannot turn an unidentifiable occupant into a wrong name or a
+    lost error.
+    """
+
+    settings.prepare()
+    supervisor = ProcessSupervisor(settings)
+
+    def refuse_enumeration(*_args: object, **_kwargs: object) -> list[object]:
+        raise psutil.AccessDenied(pid=None, name="net_connections")
+
+    monkeypatch.setattr(processes_module.psutil, "net_connections", refuse_enumeration)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        occupied_port = listener.getsockname()[1]
+        with pytest.raises(OSError) as refused:
+            await supervisor._ensure_port_available(
+                "media",
+                f"http://127.0.0.1:{occupied_port}/health",
+            )
+
+    assert (
+        str(refused.value)
+        == f"media worker cannot start because 127.0.0.1:{occupied_port} is already in use"
+    )
+
+
 async def test_cancelled_worker_start_terminates_and_forgets_starting_process(
     settings,
     monkeypatch: pytest.MonkeyPatch,
@@ -1292,10 +1354,12 @@ async def test_teardown_suppression_is_bounded_when_the_block_never_ends(
     assert tail.count("frame line") <= WORKER_STDERR_DISPLAY_LINES
 
 
+@pytest.mark.parametrize("scope", [None, "a" * 64])
 async def test_chat_first_use_provisions_missing_runtime(
     settings,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    scope: str | None,
 ) -> None:  # type: ignore[no-untyped-def]
     model_path = tmp_path / "model.gguf"
     model_path.write_bytes(b"GGUF")
@@ -1317,7 +1381,9 @@ async def test_chat_first_use_provisions_missing_runtime(
         _profile_id: str | None = None,
         *,
         estimated_memory_bytes: int | None = None,
+        launch_scope_sha256: str | None = None,
     ) -> None:
+        assert launch_scope_sha256 == scope
         assert name == "chat"
         assert estimated_memory_bytes is not None
         captured["command"] = command
@@ -1340,10 +1406,128 @@ async def test_chat_first_use_provisions_missing_runtime(
         active=True,
     )
 
-    await supervisor.load_chat(profile, install)
+    if scope is None:
+        await supervisor.load_chat(profile, install)
+    else:
+        await supervisor.load_chat(profile, install, launch_scope_sha256=scope)
 
     runtimes.ensure.assert_awaited_once_with("llama.cpp")
     assert captured["command"][0] == str(executable.resolve())
+
+
+def _pretend_orphan(
+    supervisor: ProcessSupervisor,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    name: str,
+    listening: bool,
+    process_name: str = "llama-server.exe",
+    pid: int = 4242,
+) -> None:
+    """Stand in for a worker we started earlier that outlived its record.
+
+    Both halves are stubbed on purpose. The real ones - a persisted identity
+    whose pid AND creation time still match, and a live listening socket owned
+    by that process tree - cannot be produced from a test without launching a
+    real worker, and each is already covered where it lives.
+    """
+
+    monkeypatch.setattr(
+        supervisor,
+        "_matching_worker_processes",
+        lambda asked: (
+            [SimpleNamespace(pid=pid, name=lambda: process_name)] if asked == name else []
+        ),
+    )
+    monkeypatch.setattr(
+        ProcessSupervisor, "_listener_owned_by_worker", staticmethod(lambda _pid, _url: listening)
+    )
+
+
+def test_a_worker_that_outlived_its_record_is_named(
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """ "Stopped" is true of this process and not of the machine.
+
+    A child this application started in an earlier session goes on serving, so
+    the card reads stopped while generation works - or stopped while a start
+    refuses - and neither is something a person can act on. Since the reclaim
+    landed the user is not blocked, so what is wrong is only what the report
+    SAYS, which is exactly why it is worth saying.
+    """
+
+    supervisor = ProcessSupervisor(settings)
+    _pretend_orphan(supervisor, monkeypatch, name="chat", listening=True)
+
+    chat = next(item for item in supervisor.statuses() if item.name == "chat")
+
+    # The contract the web application reads is unchanged: nothing is managed
+    # and no worker is running, because neither is true of this process.
+    assert chat.state == "stopped"
+    assert chat.managed is False
+    assert chat.running is False
+    # What changed is that it now says so.
+    assert chat.failure_code == "port_in_use"
+    assert chat.failure_detail is not None
+    assert "llama-server.exe (pid 4242)" in chat.failure_detail
+    assert chat.failure_remedy
+
+
+def test_an_orphan_that_is_not_listening_is_not_reported(
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """The state the user sees is stopped-but-working, and that needs a listener.
+
+    A matched process that holds nothing is not what the card is wrong about,
+    and reporting it would put a fault where the user has nothing to do.
+    """
+
+    supervisor = ProcessSupervisor(settings)
+    _pretend_orphan(supervisor, monkeypatch, name="chat", listening=False)
+
+    chat = next(item for item in supervisor.statuses() if item.name == "chat")
+
+    assert chat.failure_code is None
+    assert chat.failure_detail is None
+
+
+def test_an_ordinary_stopped_worker_reports_no_fault(settings) -> None:  # type: ignore[no-untyped-def]
+    """The half that must not change, and the one that caught the first design.
+
+    An earlier version probed the configured port itself, so a status read
+    depended on unrelated programs: on a machine running the real application
+    beside its own tests, both worker ports are held and every card reported a
+    fault. test_worker_management_reports_missing_local_binaries failed for
+    exactly that, and it was right to.
+    """
+
+    supervisor = ProcessSupervisor(settings)
+
+    for worker in supervisor.statuses():
+        assert worker.state == "stopped"
+        assert worker.failure_code is None
+        assert worker.failure_detail is None
+        assert worker.failure_remedy is None
+
+
+def test_the_report_and_the_start_read_one_endpoint(settings) -> None:  # type: ignore[no-untyped-def]
+    """Both sides derive the endpoint from the same place.
+
+    The start paths each built this string themselves, which is why nothing
+    that was not starting a worker could say where one would listen. Two
+    derivations of one fact drift; this is the check that there is only one.
+    """
+
+    settings.llama_url = "http://127.0.0.1:12399"
+    settings.comfy_url = "http://127.0.0.1:8199"
+    supervisor = ProcessSupervisor(settings)
+
+    assert supervisor.worker_health_url("chat") == "http://127.0.0.1:12399/health"
+    assert supervisor.worker_health_url("media") == "http://127.0.0.1:8199/system_stats"
+    with pytest.raises(ValueError, match="no worker is named"):
+        supervisor.worker_health_url("embeddings")
 
 
 async def test_media_first_use_provisions_missing_runtime(
@@ -1408,10 +1592,136 @@ async def test_media_first_use_provisions_missing_runtime(
     assert captured["health_url"] == settings.comfy_url + "/system_stats"
 
 
+@pytest.mark.parametrize(
+    ("refused_phase", "effects_before_it"),
+    [
+        ("Provisioning media runtime", []),
+        ("Validating media dependencies", ["provisioned"]),
+        ("Starting media runtime", ["provisioned", "inspected nodes", "staged model paths"]),
+    ],
+)
+async def test_a_refused_media_phase_stops_before_the_next_process_effect(
+    settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    refused_phase: str,
+    effects_before_it: list[str],
+) -> None:  # type: ignore[no-untyped-def]
+    """A refusing callback stops the start at the phase it refused.
+
+    The sibling above shows the ordinary run: three phases, each followed by
+    the effect it announces. This is the same start with the announcement
+    refused, and the sentinel is the effect list: it must end where the
+    refusal was raised, whichever phase that is.
+
+    The distinction is the point. A callback that raises because it is broken
+    is still swallowed and the start still completes, because a worker must
+    not be lost to a failing progress report. A callback that raises
+    `WorkerStartRefused` is saying the row has moved on, and every effect
+    after it - provisioning the runtime, reading the trusted node set, staging
+    the model paths, launching the process - would be done on another
+    attempt's behalf.
+    """
+
+    runtime = tmp_path / "ComfyUI"
+    executable = tmp_path / "python.exe"
+    effects: list[str] = []
+
+    async def provision(engine: str) -> None:
+        assert engine == "comfyui"
+        effects.append("provisioned")
+        runtime.mkdir()
+        (runtime / "main.py").write_bytes(b"")
+        executable.write_bytes(b"runtime")
+        settings.comfy_directory = runtime
+        settings.comfy_executable = executable
+
+    runtimes = SimpleNamespace(ensure=AsyncMock(side_effect=provision))
+    supervisor = ProcessSupervisor(settings, runtimes)
+    model_paths = tmp_path / "extra-model-paths.yaml"
+    model_paths.write_text("{}", encoding="utf-8")
+    phases: list[str] = []
+
+    async def refuse_at(phase: str) -> None:
+        phases.append(phase)
+        if phase == refused_phase:
+            raise processes_module.WorkerStartRefused(phase)
+
+    async def trusted_nodes() -> list[str]:
+        effects.append("inspected nodes")
+        return []
+
+    def write_model_paths(*_args: object) -> Path:
+        effects.append("staged model paths")
+        return model_paths
+
+    async def replace(*_args: object, **_kwargs: object) -> None:
+        effects.append("launched")
+
+    monkeypatch.setattr(supervisor, "_trusted_comfy_node_folders", trusted_nodes)
+    monkeypatch.setattr(supervisor, "_write_comfy_model_paths", write_model_paths)
+    monkeypatch.setattr(supervisor, "_replace", replace)
+
+    with pytest.raises(processes_module.WorkerStartRefused, match=refused_phase):
+        await supervisor.start_media(phase_callback=refuse_at)
+
+    assert phases[-1] == refused_phase, "the start announced a phase past the refusal"
+    assert effects == effects_before_it
+
+
+async def test_a_broken_media_phase_report_does_not_stop_the_start(
+    settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """The other half of the distinction, held in place.
+
+    A callback that raises anything else is a reporting bug, and a reporting
+    bug must not cost the caller a worker. Every phase is still attempted and
+    the launch still happens.
+    """
+
+    runtime = tmp_path / "ComfyUI"
+    runtime.mkdir()
+    (runtime / "main.py").write_bytes(b"")
+    executable = tmp_path / "python.exe"
+    executable.write_bytes(b"runtime")
+    settings.comfy_directory = runtime
+    settings.comfy_executable = executable
+    supervisor = ProcessSupervisor(settings)
+    model_paths = tmp_path / "extra-model-paths.yaml"
+    model_paths.write_text("{}", encoding="utf-8")
+    launched: list[str] = []
+    phases: list[str] = []
+
+    async def broken_report(phase: str) -> None:
+        phases.append(phase)
+        raise RuntimeError("the progress channel is down")
+
+    async def trusted_nodes() -> list[str]:
+        return []
+
+    async def replace(*_args: object, **_kwargs: object) -> None:
+        launched.append("media")
+
+    monkeypatch.setattr(supervisor, "_trusted_comfy_node_folders", trusted_nodes)
+    monkeypatch.setattr(supervisor, "_write_comfy_model_paths", lambda *_args: model_paths)
+    monkeypatch.setattr(supervisor, "_replace", replace)
+
+    await supervisor.start_media(phase_callback=broken_report)
+
+    assert phases == ["Validating media dependencies", "Starting media runtime"]
+    assert launched == ["media"]
+
+
+@pytest.mark.parametrize("scope", [None, "a" * 64])
+@pytest.mark.parametrize("frozen_image_limit", [None, 2, 8])
 async def test_vllm_chat_launches_complete_modelopt_snapshot(
     settings,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    scope: str | None,
+    frozen_image_limit: int | None,
 ) -> None:  # type: ignore[no-untyped-def]
     model_dir = tmp_path / "modelopt-snapshot"
     model_dir.mkdir()
@@ -1425,6 +1735,7 @@ async def test_vllm_chat_launches_complete_modelopt_snapshot(
     executable = tmp_path / "python.exe"
     executable.write_bytes(b"runtime")
     settings.vllm_executable = executable
+    settings.vision_max_images = 4
     supervisor = ProcessSupervisor(settings)
     captured: dict[str, object] = {}
 
@@ -1435,7 +1746,9 @@ async def test_vllm_chat_launches_complete_modelopt_snapshot(
         profile_id: str | None = None,
         *,
         estimated_memory_bytes: int | None = None,
+        launch_scope_sha256: str | None = None,
     ) -> None:
+        assert launch_scope_sha256 == scope
         captured.update(
             name=name,
             command=command,
@@ -1472,7 +1785,21 @@ async def test_vllm_chat_launches_complete_modelopt_snapshot(
         active=True,
     )
 
-    await supervisor.load_chat(profile, install)
+    if frozen_image_limit is not None and frozen_image_limit > 4:
+        with pytest.raises(RuntimeError, match="Accepted visual input limit"):
+            await supervisor.load_chat(
+                profile, install, launch_scope_sha256=scope, vision_max_images=frozen_image_limit
+            )
+        assert captured == {}
+        return
+    if frozen_image_limit is not None:
+        await supervisor.load_chat(
+            profile, install, launch_scope_sha256=scope, vision_max_images=frozen_image_limit
+        )
+    elif scope is None:
+        await supervisor.load_chat(profile, install)
+    else:
+        await supervisor.load_chat(profile, install, launch_scope_sha256=scope)
 
     command = captured["command"]
     assert isinstance(command, list)
@@ -1482,6 +1809,10 @@ async def test_vllm_chat_launches_complete_modelopt_snapshot(
         "vllm.entrypoints.openai.api_server",
     ]
     assert command[command.index("--model") + 1] == str(model_dir.resolve())
+    assert json.loads(command[command.index("--limit-mm-per-prompt") + 1]) == {
+        "image": frozen_image_limit if frozen_image_limit is not None else 4,
+        "video": 1,
+    }
     assert command[command.index("--quantization") + 1] == "modelopt"
     assert command[command.index("--max-model-len") + 1] == "4096"
     assert command[command.index("--cpu-offload-gb") + 1] == "2.0"
@@ -1552,6 +1883,7 @@ async def test_chat_launches_split_gguf_from_first_shard(
         _profile_id: str | None = None,
         *,
         estimated_memory_bytes: int | None = None,
+        launch_scope_sha256: str | None = None,
     ) -> None:
         captured["command"] = command
         captured["estimated_memory_bytes"] = estimated_memory_bytes
@@ -1610,6 +1942,7 @@ async def test_chat_launches_multimodal_projector_and_includes_its_memory(
         _profile_id: str | None = None,
         *,
         estimated_memory_bytes: int | None = None,
+        launch_scope_sha256: str | None = None,
     ) -> None:
         captured["command"] = command
         captured["estimated_memory_bytes"] = estimated_memory_bytes

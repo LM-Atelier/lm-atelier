@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import io
 import json
 from collections.abc import AsyncIterator
@@ -10,6 +9,7 @@ import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
 from PIL import Image
+from run_waits import wait_for_terminal_status
 from sqlalchemy import select
 
 from local_lm.adapters.base import ChatEvent, ChatRequest, GeneratedAsset, MediaEvent, MediaRequest
@@ -30,6 +30,18 @@ from local_lm.models import (
 )
 from local_lm.schemas import EngineCapabilities, JobOut
 
+# A job can also end as INTERRUPTED, which the generic set does not carry: these
+# two modules exercise interruption deliberately, so it is an ending here rather
+# than a state still worth waiting on.
+_JOB_TERMINAL = frozenset(
+    {
+        JobStatus.COMPLETE.value,
+        JobStatus.FAILED.value,
+        JobStatus.CANCELLED.value,
+        JobStatus.INTERRUPTED.value,
+    }
+)
+
 
 def _png(color: tuple[int, int, int]) -> bytes:
     content = io.BytesIO()
@@ -39,21 +51,25 @@ def _png(color: tuple[int, int, int]) -> bytes:
 
 async def _wait_for_job(client: AsyncClient, kind: str) -> dict:  # type: ignore[type-arg]
     del client
-    deadline = asyncio.get_running_loop().time() + 5
-    while asyncio.get_running_loop().time() < deadline:
+
+    async def read() -> dict[str, Any] | None:
         with SessionLocal() as session:
             matching = session.scalar(
                 select(Job).where(Job.kind == kind).order_by(Job.created_at.desc())
             )
-            if matching and matching.status in {
-                JobStatus.COMPLETE.value,
-                JobStatus.FAILED.value,
-                JobStatus.CANCELLED.value,
-                JobStatus.INTERRUPTED.value,
-            }:
-                return JobOut.model_validate(matching).model_dump(mode="json")
-        await asyncio.sleep(0.03)
-    raise AssertionError(f"{kind} job did not finish")
+            if matching is None:
+                return None
+            return cast(dict[str, Any], JobOut.model_validate(matching).model_dump(mode="json"))
+
+    return cast(
+        dict,
+        await wait_for_terminal_status(
+            read,
+            what=f"the {kind} job",
+            terminal=_JOB_TERMINAL,
+            expected=None,
+        ),
+    )
 
 
 _RETRY_ASSESSMENT = json.dumps(
@@ -68,19 +84,18 @@ _RETRY_ASSESSMENT = json.dumps(
 
 
 async def _wait_for_run(client: AsyncClient, run_id: str) -> dict[str, Any]:
-    deadline = asyncio.get_running_loop().time() + 5
-    while asyncio.get_running_loop().time() < deadline:
-        run = (await client.get(f"/api/runs/{run_id}")).json()
-        if run["status"] in {
-            JobStatus.COMPLETE.value,
-            JobStatus.FAILED.value,
-            JobStatus.CANCELLED.value,
-            JobStatus.INTERRUPTED.value,
-        }:
-            assert run["status"] == JobStatus.COMPLETE.value
-            return cast(dict[str, Any], run)
-        await asyncio.sleep(0.03)
-    raise AssertionError(f"run {run_id} did not finish")
+    async def read() -> dict[str, Any]:
+        return cast(dict[str, Any], (await client.get(f"/api/runs/{run_id}")).json())
+
+    return cast(
+        dict[str, Any],
+        await wait_for_terminal_status(
+            read,
+            what=f"run {run_id}",
+            terminal=_JOB_TERMINAL,
+            expected=JobStatus.COMPLETE.value,
+        ),
+    )
 
 
 @pytest.mark.parametrize(
@@ -91,9 +106,10 @@ async def _wait_for_run(client: AsyncClient, run_id: str) -> dict[str, Any]:
         "expected_reason",
         "expected_retry",
         "expected_execution_reason",
+        "announcement_fails",
     ),
     [
-        (_RETRY_ASSESSMENT, {}, "complete", "eligible", True, None),
+        (_RETRY_ASSESSMENT, {}, "complete", "eligible", True, None, False),
         (
             _RETRY_ASSESSMENT,
             {"denoise": 0.5},
@@ -101,8 +117,23 @@ async def _wait_for_run(client: AsyncClient, run_id: str) -> dict[str, Any]:
             "eligible",
             False,
             "manual_strength_preserved",
+            False,
         ),
-        ("not-json", {}, "skipped", "invalid_assessment", False, None),
+        ("not-json", {}, "skipped", "invalid_assessment", False, None, False),
+        # The retry is created and durable, and every attempt to announce and
+        # start it fails - the first during creation, the second during the
+        # convergence that recovers from it. The record must not say the retry
+        # ran, and must not say it was unavailable either: it is bound, and a
+        # later convergence can still reach the start.
+        (
+            _RETRY_ASSESSMENT,
+            {},
+            "complete",
+            "eligible",
+            False,
+            "bound_not_started",
+            True,
+        ),
     ],
 )
 async def test_image_edit_verification_is_dependent_at_most_once_and_non_destructive(
@@ -115,8 +146,10 @@ async def test_image_edit_verification_is_dependent_at_most_once_and_non_destruc
     expected_reason: str,
     expected_retry: bool,
     expected_execution_reason: str | None,
+    announcement_fails: bool,
 ) -> None:
     original_capabilities = MockChatAdapter.capabilities
+    refuse_announcements = {"armed": False}
     captured: list[ChatRequest] = []
     source_complete_when_streamed: list[bool] = []
     result_png = _png((20, 180, 80))
@@ -147,6 +180,10 @@ async def test_image_edit_verification_is_dependent_at_most_once_and_non_destruc
                     and source_step.status == JobStatus.COMPLETE.value
                 )
             )
+        # From here on the source turn is finished and anything announcing a
+        # plan is the retry. Arming the refusal earlier would refuse the
+        # source's own announcement and no verification would run at all.
+        refuse_announcements["armed"] = announcement_fails
         yield ChatEvent(type="delta", text=assessment_raw)
         yield ChatEvent(type="complete", data={"finish_reason": "stop"})
 
@@ -178,6 +215,20 @@ async def test_image_edit_verification_is_dependent_at_most_once_and_non_destruc
         "_profile_has_verified_vision",
         lambda _session, _profile: True,
     )
+    if announcement_fails:
+        # Every announcement of the RETRY's plan fails, so its start is never
+        # reached - not on creation and not on the convergence that recovers
+        # from creation. Armed by the assessment stream, so the source turn's
+        # own plan announcement still succeeds and there is a verification to
+        # run. Only the plan event is refused; nothing else is disturbed.
+        real_publish = orchestrator.events.publish
+
+        async def refuse_plan_announcements(name: str, *args: object, **kwargs: object) -> None:
+            if name == "work_plan.created" and refuse_announcements["armed"]:
+                raise RuntimeError("the event broker was unavailable")
+            await real_publish(name, *args, **kwargs)
+
+        monkeypatch.setattr(orchestrator.events, "publish", refuse_plan_announcements)
 
     upload = await client.post(
         "/api/artifacts",
@@ -243,6 +294,11 @@ async def test_image_edit_verification_is_dependent_at_most_once_and_non_destruc
     if expected_retry:
         assert isinstance(retry_run_id, str)
         await _wait_for_run(client, retry_run_id)
+    elif expected_execution_reason == "bound_not_started":
+        # The retry is durable and the record keeps its identity, which is what
+        # lets a later convergence find and start the same one. It has not run,
+        # so it is not waited for.
+        assert isinstance(retry_run_id, str)
     else:
         assert retry_run_id is None
     assert source_complete_when_streamed == [True]

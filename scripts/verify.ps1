@@ -57,6 +57,7 @@ try {
     # holder dies - there is nothing to renew and nothing to recover.
     Write-Host "==> Machine-exclusive lease"
     . (Join-Path $RepositoryRoot "scripts\machine-lease.ps1")
+    . (Join-Path $RepositoryRoot "scripts\held-pytest-scratch.ps1")
     $MachineLease = Enter-MachineLease -RepositoryRoot $RepositoryRoot -Purpose "verify.ps1"
     if (-not $MachineLease) {
         # The refusal above says WHY (a live holder, an unreadable record, a
@@ -98,26 +99,36 @@ try {
         )
     }
 
-    Invoke-Checked "Ruff format" $Ruff @("format", "--check", "services/api")
-    Invoke-Checked "Ruff lint" $Ruff @("check", "services/api")
+    # scripts/ and packaging/ are checked here too. They were not checked at
+    # all before: this stage passed ruff only services/api. Ruff resolves
+    # settings per file from the nearest ancestor and those paths had none, so
+    # naming them here without the repository-root ruff.toml would have checked
+    # them at ruff's defaults - a narrower rule set, and a formatter width of 88
+    # rather than the 100 the rest of the repository uses. The root file is what
+    # makes naming them here mean the same standard.
+    Invoke-Checked "Ruff format" $Ruff @("format", "--check", "services/api", "scripts", "packaging")
+    Invoke-Checked "Ruff lint" $Ruff @("check", "services/api", "scripts", "packaging")
     # Without the explicit config mypy does not discover the nested API
     # pyproject from the repository root, so this ran with default settings
     # while being labelled strict. The label is the promise; the flag is
     # what keeps it.
+    # The scripts are named here for the same reason they are named in the ruff
+    # lines above: two of them decide whether verification happens at all, and
+    # until they were added the tools that judge the gate were the only Python
+    # in the repository the gate never judged.
     Invoke-Checked "Strict mypy" $Mypy @(
-        "--config-file", "services/api/pyproject.toml", "services/api/local_lm"
+        "--config-file", "services/api/pyproject.toml", "services/api/local_lm", "scripts"
     )
     Invoke-Checked "Strict mypy (Linux platform)" $Mypy @(
         "--platform", "linux",
-        "--config-file", "services/api/pyproject.toml", "services/api/local_lm"
+        "--config-file", "services/api/pyproject.toml", "services/api/local_lm", "scripts"
     )
     Invoke-Checked "Bandit high-severity scan" $Bandit @(
         "-q", "-lll", "-r", "services/api/local_lm"
     )
     Invoke-Checked "Version metadata" $Python @("scripts/sync-version.py")
-    $VerificationTemp = Join-Path $RepositoryRoot "temp"
-    New-Item -ItemType Directory -Force -Path $VerificationTemp | Out-Null
-    $PytestTemp = Join-Path $VerificationTemp "verify-pytest-$PID"
+    $PytestTemp = New-HeldPytestScratch `
+        -RepositoryRoot $RepositoryRoot -Lease $MachineLease
     Invoke-Checked "API tests" $Pytest @(
         "services/api/tests",
         "-q",

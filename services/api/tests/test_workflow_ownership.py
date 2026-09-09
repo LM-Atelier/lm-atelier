@@ -6,6 +6,7 @@ import pytest
 from httpx2 import AsyncClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
+from workflow_fixtures import seed_workflow_trust
 
 from local_lm.db import Base
 from local_lm.models import (
@@ -374,9 +375,9 @@ async def test_authored_cloned_and_imported_workflows_are_selectable(
             "operation": "text_to_image",
             "engine": "mock",
             "api_graph": {"node": {"class_type": "Mock"}},
-            "trusted": True,
         },
     )
+    seed_workflow_trust(created_response.json()["current_revision_id"])
     assert created_response.status_code == 201
     created = created_response.json()
     bundle = (await client.get(f"/api/workflows/{created['id']}/export")).json()

@@ -53,9 +53,7 @@ def decide(report: Mapping[str, Any], log: list[str]) -> int:
         # the audit ran and told us nothing, which is the state this whole
         # script exists to stop treating as success.
         log.append("The audit report lists no dependencies at all.")
-        log.append(
-            "Refusing: a report that says nothing is not a report that says clean."
-        )
+        log.append("Refusing: a report that says nothing is not a report that says clean.")
         return 1
 
     vulnerable: list[str] = []
@@ -82,11 +80,7 @@ def decide(report: Mapping[str, Any], log: list[str]) -> int:
         # refuse, one level further in than the skip it was written to catch.
         version = entry.get("version")
         findings = entry.get("vulns")
-        if (
-            not isinstance(version, str)
-            or not version
-            or not isinstance(findings, list)
-        ):
+        if not isinstance(version, str) or not version or not isinstance(findings, list):
             incomplete.append(name)
             continue
         audited += 1

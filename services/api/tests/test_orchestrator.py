@@ -10,6 +10,7 @@ import pytest
 from local_lm.adapters.base import ChatEvent, MediaEvent, estimate_chat_tokens
 from local_lm.comfy_registry_paths import registry_wheel_environment_root
 from local_lm.comfy_templates import COMFY_TEMPLATE_COMPILER_VERSION
+from local_lm.domain import JobKind
 from local_lm.models import (
     Job,
     Message,
@@ -18,10 +19,11 @@ from local_lm.models import (
     ModelProfile,
     Run,
     WorkflowActivation,
+    WorkflowDefinition,
     WorkflowRevision,
     WorkStep,
 )
-from local_lm.orchestrator import ConversationOrchestrator, _queued_workflow_activation
+from local_lm.orchestrator import ClaimLost, ConversationOrchestrator, _queued_workflow_activation
 from local_lm.scheduler import JobClaim
 from local_lm.schemas import EngineCapabilities, WorkerStatus
 from local_lm.workflow_activations import WorkflowActivationLaunchScope
@@ -96,6 +98,7 @@ def test_successful_media_evidence_requires_an_exact_official_contract(monkeypat
     performance = {"version": 1, "signals": [{"kind": "model-cache"}]}
     revision = SimpleNamespace(
         id="revision-image",
+        workflow_id="workflow-image",
         trusted=True,
         engine="comfyui",
         artifact_sha256="d" * 64,
@@ -108,6 +111,8 @@ def test_successful_media_evidence_requires_an_exact_official_contract(monkeypat
         },
     )
     run = SimpleNamespace(
+        id="run-image",
+        provenance_json={},
         operation="image_to_image",
         profile_id=profile.id,
         workflow_revision_id=revision.id,
@@ -119,6 +124,9 @@ def test_successful_media_evidence_requires_an_exact_official_contract(monkeypat
                 (ModelProfile, profile.id): profile,
                 (ModelInstall, install.id): install,
                 (WorkflowRevision, revision.id): revision,
+                (WorkflowDefinition, revision.workflow_id): SimpleNamespace(
+                    id=revision.workflow_id
+                ),
             }.get((model, identity))
 
     recorder = Mock(return_value=SimpleNamespace(evidence_key="evidence-key"))
@@ -238,7 +246,7 @@ async def test_context_folding_preserves_system_and_current_messages() -> None:
 
 
 async def test_managed_chat_worker_is_aligned_to_the_run_profile() -> None:
-    run = SimpleNamespace(profile_id="profile-selected")
+    run = SimpleNamespace(id="run-1", profile_id="profile-selected", provenance_json={})
     profile = SimpleNamespace(id="profile-selected", model_install_id="install-selected")
     install = SimpleNamespace(id="install-selected")
 
@@ -289,7 +297,9 @@ async def test_managed_chat_worker_is_aligned_to_the_run_profile() -> None:
 
 
 async def test_engine_cancel_runs_after_the_database_session_closes() -> None:
-    job = SimpleNamespace(id="job-cancel", status="running", run_id="run-cancel")
+    # `attempt` is part of a Job and the cancel now reads it, so the stand-in
+    # carries it too rather than the production code learning to do without.
+    job = SimpleNamespace(id="job-cancel", status="running", run_id="run-cancel", attempt=0)
     run = SimpleNamespace(id="run-cancel", operation="text")
     session_closed = False
 
@@ -501,6 +511,55 @@ async def test_cancelled_chat_release_restores_planner_readiness() -> None:
         await orchestrator._prepare_device_handoff("text_to_image", claim=_TEST_CLAIM)
 
     assert orchestrator._chat_planner_ready.is_set()
+
+
+async def test_a_refused_chat_release_restores_planner_readiness() -> None:
+    """A refused phase must leave the planner usable, as a cancelled stop does.
+
+    The release clears the planner latch and then announces itself, and that
+    announcement is a claim-bound write that RAISES when the row belongs to a
+    later attempt. It needs no cancellation and no scheduling window. Left
+    unrestored the latch stays cleared for the life of the process, because the
+    only other place that sets it is the resume the caller runs after this
+    method returns - and this method never returned.
+    """
+    chat = WorkerStatus(
+        name="chat",
+        state="ready",
+        managed=True,
+        running=True,
+        pid=21,
+        profile_id="profile-chat",
+    )
+    stop = AsyncMock()
+    processes = SimpleNamespace(
+        settings=SimpleNamespace(auto_unload_chat_for_media=True),
+        statuses=Mock(return_value=[chat]),
+        stop=stop,
+    )
+    orchestrator = ConversationOrchestrator(
+        engines=SimpleNamespace(settings=SimpleNamespace()),
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=Mock(),
+        processes=processes,
+    )
+    # The phase writer answers False exactly as it does for a row a later
+    # attempt now owns, which is what `_require_phase` turns into a stop.
+    orchestrator._set_media_phase = AsyncMock(return_value=False)  # type: ignore[method-assign]
+
+    with pytest.raises(ClaimLost, match="Releasing chat model"):
+        await orchestrator._prepare_device_handoff(
+            "text_to_image",
+            claim=_TEST_CLAIM,
+            job_id="job-release",
+            run_id="run-release",
+        )
+
+    assert orchestrator._chat_planner_ready.is_set(), (
+        "a refused release left the chat planner unavailable for the rest of the process"
+    )
+    stop.assert_not_awaited()
 
 
 async def test_media_worker_startup_forwards_truthful_phases() -> None:
@@ -919,6 +978,172 @@ async def test_unsuccessful_step_stops_the_inflight_prewarm(job_status: str) -> 
     assert orchestrator._media_restart_task is None
 
 
+async def test_a_failing_step_leaves_the_give_back_released_beside_the_prewarm() -> None:
+    """The prewarm owns only the restart it started, so a failed step stops only that.
+
+    The two calls here are the two statements the first delta runs, in order.
+    When a handoff owed the media worker back, the release schedules that
+    give-back and the prewarm then finds a restart already in flight. Owning it
+    would mean cancelling somebody else's obligation on the way out - and the
+    release has already cleared the flag that would re-arm it, so nothing would
+    bring the media worker back at all.
+    """
+    start_entered = asyncio.Event()
+    start_release = asyncio.Event()
+    start_finished = False
+
+    async def start_media() -> None:
+        nonlocal start_finished
+        start_entered.set()
+        await start_release.wait()
+        start_finished = True
+
+    next_step = SimpleNamespace(operation="text_to_image", status="queued")
+    job = SimpleNamespace(status="failed")
+    orchestrator, _processes, session_factory = _plan_prewarm_orchestrator(
+        next_step, start_media=start_media, job=job
+    )
+
+    # A completed media handoff owed the worker back and deferred it until chat
+    # went quiet, which is the state the first delta arrives in.
+    orchestrator._media_restart_after_chat_activity = True
+    with session_factory() as session:
+        orchestrator._arm_step_prewarm(session, _ordered_text_run())
+
+    orchestrator._release_deferred_media_restart()
+    give_back = orchestrator._media_restart_task
+    assert give_back is not None, "the deferred give-back was never released"
+    orchestrator._begin_step_prewarm()
+    await start_entered.wait()
+
+    assert orchestrator._step_prewarm_task is None, (
+        "the prewarm adopted the give-back it did not create"
+    )
+
+    await orchestrator._settle_step_prewarm("job-current")
+
+    assert not give_back.cancelled(), "a failing step cancelled the give-back"
+    assert orchestrator._media_restart_task is give_back
+    assert orchestrator._media_restart_after_chat_activity is False
+
+    start_release.set()
+    await give_back
+    assert start_finished is True, "the media worker was never brought back"
+
+
+async def test_a_handoff_that_loads_another_profile_still_owes_the_displaced_one() -> None:
+    """Loading the vision model is not paying back the chat model.
+
+    When an edit verification is already queued, `_handoff_chat_target` returns
+    the VISION profile named by that job rather than the profile this handoff
+    displaced. Loading it restores nothing that was owed, and the displaced
+    record is the only place the chat profile is remembered - so clearing it
+    there left the chat worker running a vision model with nothing knowing a
+    swap was still due.
+    """
+    displaced = "profile-chat"
+    verification_vision = "profile-vision"
+    verification = SimpleNamespace(
+        kind=JobKind.EDIT_VERIFY.value,
+        payload_json={"vision_profile_id": verification_vision},
+    )
+
+    class FakeSession:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_args):  # type: ignore[no-untyped-def]
+            return None
+
+        def get(self, model, identity):  # type: ignore[no-untyped-def]
+            if model is Job and identity == "job-verify":
+                return verification
+            return None
+
+    # Unmanaged media, so nothing is holding the device and the handoff takes
+    # the direct restore path rather than the recycle.
+    media = WorkerStatus(name="media", state="ready", managed=False, running=True, pid=22)
+    processes = SimpleNamespace(
+        statuses=Mock(return_value=[media]),
+        stop=AsyncMock(),
+        start_media=AsyncMock(),
+    )
+    orchestrator = ConversationOrchestrator(
+        engines=SimpleNamespace(settings=SimpleNamespace(media_engine="comfyui")),
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=SimpleNamespace(peek_next_eligible_job=Mock(return_value=("job-verify", None))),
+        processes=processes,
+        session_factory=FakeSession,
+    )
+    resumed: list[str] = []
+
+    async def resume(profile_id: str) -> None:
+        resumed.append(profile_id)
+
+    orchestrator._resume_chat_worker = resume  # type: ignore[method-assign]
+
+    await orchestrator._complete_media_handoff(displaced)
+
+    assert resumed == [verification_vision], (
+        "the handoff did not take the queued verification's vision profile"
+    )
+    assert orchestrator._displaced_chat_profile_id == displaced, (
+        "loading a different profile discharged the debt for the displaced chat model"
+    )
+
+
+async def test_a_handoff_that_restores_the_displaced_profile_clears_the_debt() -> None:
+    """The ordinary case still settles, including when the restore itself fails.
+
+    The record is discharged on the ATTEMPT, not on success - `_resume_chat_worker`
+    swallows load failures by design - so this pins that the guard added for the
+    wrong-profile case did not quietly make discharge conditional on the load
+    working.
+    """
+    displaced = "profile-chat"
+
+    class FakeSession:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_args):  # type: ignore[no-untyped-def]
+            return None
+
+        def get(self, _model, _identity):  # type: ignore[no-untyped-def]
+            return None
+
+    media = WorkerStatus(name="media", state="ready", managed=False, running=True, pid=22)
+    processes = SimpleNamespace(
+        statuses=Mock(return_value=[media]),
+        stop=AsyncMock(),
+        start_media=AsyncMock(),
+    )
+    orchestrator = ConversationOrchestrator(
+        engines=SimpleNamespace(settings=SimpleNamespace(media_engine="comfyui")),
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=SimpleNamespace(peek_next_eligible_job=Mock(return_value=None)),
+        processes=processes,
+        session_factory=FakeSession,
+    )
+    resumed: list[str] = []
+
+    async def resume_that_fails_inside(profile_id: str) -> None:
+        # Exactly what the real one does with a missing profile: it gives up and
+        # returns, without raising.
+        resumed.append(profile_id)
+
+    orchestrator._resume_chat_worker = resume_that_fails_inside  # type: ignore[method-assign]
+
+    await orchestrator._complete_media_handoff(displaced)
+
+    assert resumed == [displaced]
+    assert orchestrator._displaced_chat_profile_id is None, (
+        "restoring the displaced profile no longer discharges the debt"
+    )
+
+
 async def test_external_media_handoff_only_resumes_chat() -> None:
     media = WorkerStatus(
         name="media",
@@ -945,35 +1170,6 @@ async def test_external_media_handoff_only_resumes_chat() -> None:
     await orchestrator._complete_media_handoff("profile-chat")
 
     processes.stop.assert_not_awaited()
-    processes.start_media.assert_not_awaited()
-    resume.assert_awaited_once_with("profile-chat")
-
-
-async def test_media_recycle_failure_still_restores_chat() -> None:
-    media = WorkerStatus(
-        name="media",
-        state="ready",
-        managed=True,
-        running=True,
-        pid=22,
-    )
-    processes = SimpleNamespace(
-        statuses=Mock(return_value=[media]),
-        stop=AsyncMock(side_effect=RuntimeError("recycle failed")),
-        start_media=AsyncMock(),
-    )
-    orchestrator = ConversationOrchestrator(
-        engines=SimpleNamespace(settings=SimpleNamespace(media_engine="comfyui")),
-        artifacts=Mock(),
-        events=Mock(),
-        scheduler=Mock(),
-        processes=processes,
-    )
-    resume = AsyncMock()
-    orchestrator._resume_chat_worker = resume  # type: ignore[method-assign]
-
-    await orchestrator._complete_media_handoff("profile-chat")
-
     processes.start_media.assert_not_awaited()
     resume.assert_awaited_once_with("profile-chat")
 
@@ -1019,6 +1215,7 @@ async def test_vision_bridge_restores_the_text_profile_after_completion_or_cance
         profile_id="profile-text",
         vision_profile_id="profile-vision",
         standalone_prompt="What is visible?",
+        provenance_json={},
     )
     text_profile = SimpleNamespace(id="profile-text", model_install_id="install-text")
     vision_profile = SimpleNamespace(id="profile-vision", model_install_id="install-vision")
@@ -1069,7 +1266,15 @@ async def test_vision_bridge_restores_the_text_profile_after_completion_or_cance
         scheduler=Mock(),
         processes=processes,
     )
-    orchestrator._set_chat_phase = AsyncMock()  # type: ignore[method-assign]
+    orchestrator._set_chat_phase = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    # This case is about WHICH profiles the bridge loads and in what order, not
+    # about ownership; its world has no jobs table for the per-event fence or
+    # the teardown's ownership read to consult. A bridge that keeps its claim is
+    # what production has whenever nothing reclaims the row, so that is what the
+    # fakes answer. The reclaimed side is covered by
+    # test_vision_bridge_stops_and_moves_no_worker_once_reclaimed.
+    orchestrator._claim_still_owns = Mock(return_value=True)  # type: ignore[method-assign]
+    orchestrator._attempt_current = Mock(return_value=True)  # type: ignore[method-assign]
     orchestrator._attach_visual_context = AsyncMock(  # type: ignore[method-assign]
         return_value=(
             [{"role": "user", "content": [{"type": "text", "text": "Question"}]}],
@@ -1104,6 +1309,126 @@ async def test_vision_bridge_restores_the_text_profile_after_completion_or_cance
         "profile-vision",
         "profile-text",
     ]
+
+
+async def test_vision_bridge_stops_and_moves_no_worker_once_reclaimed() -> None:
+    """A reclaimed attempt stops reading and leaves the successor's worker alone.
+
+    Both halves matter and they fail separately. Without the per-event fence the
+    obsolete attempt reads the whole observation out of a model the successor is
+    using; without a teardown that respects the refused phase it then puts the
+    text model back over the top of whatever the successor loaded.
+    """
+    run = SimpleNamespace(
+        provenance_json={},
+        id="run-vision",
+        chat_id="chat-vision",
+        user_message_id="message-vision",
+        profile_id="profile-text",
+        vision_profile_id="profile-vision",
+        standalone_prompt="What is visible?",
+    )
+    text_profile = SimpleNamespace(id="profile-text", model_install_id="install-text")
+    vision_profile = SimpleNamespace(id="profile-vision", model_install_id="install-vision")
+    text_install = SimpleNamespace(id="install-text")
+    vision_install = SimpleNamespace(id="install-vision")
+
+    class FakeSession:
+        def get(self, model, identity):  # type: ignore[no-untyped-def]
+            return {
+                (ModelProfile, "profile-text"): text_profile,
+                (ModelProfile, "profile-vision"): vision_profile,
+                (ModelInstall, "install-text"): text_install,
+                (ModelInstall, "install-vision"): vision_install,
+            }.get((model, identity))
+
+        def expunge(self, _value) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+        def scalar(self, _statement):  # type: ignore[no-untyped-def]
+            return "job-vision"
+
+        def in_transaction(self) -> bool:
+            return False
+
+    owned = {"value": True}
+    consumed: list[str] = []
+    resumed_after_reclaim = {"value": False}
+
+    async def stream(_request):  # type: ignore[no-untyped-def]
+        yield ChatEvent(type="delta", text="A green ")
+        # The row is taken over between one event and the next, exactly as a
+        # reclaim reaches a stream that is already running.
+        owned["value"] = False
+        yield ChatEvent(type="delta", text="apple.")
+        # Only reached if the consumer came back for a third event, which a
+        # fenced consumer does not: it has already stopped reading.
+        resumed_after_reclaim["value"] = True
+        yield ChatEvent(type="complete", data={"finish_reason": "stop"})
+
+    processes = SimpleNamespace(
+        settings=SimpleNamespace(),
+        runtimes=None,
+        load_chat=AsyncMock(),
+        stop=AsyncMock(),
+    )
+    engines = SimpleNamespace(
+        settings=SimpleNamespace(vision_bridge_max_tokens=128),
+        chat_capabilities=AsyncMock(
+            return_value=SimpleNamespace(input_modalities=["text", "image"])
+        ),
+        chat=SimpleNamespace(stream=stream),
+    )
+    orchestrator = ConversationOrchestrator(
+        engines=engines,
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=Mock(),
+        processes=processes,
+    )
+
+    # The real predicates, answered from one flag: the fence probes ownership,
+    # the phase refuses to speak for a row that is not this execution's, and the
+    # teardown reads the attempt again before it moves anything.
+    orchestrator._claim_still_owns = lambda _job_id, _claim: owned["value"]  # type: ignore[method-assign]
+    orchestrator._attempt_current = lambda _job_id, _claim: owned["value"]  # type: ignore[method-assign]
+
+    async def phase(_job_id, _run_id, label, _claim):  # type: ignore[no-untyped-def]
+        consumed.append(label)
+        return owned["value"]
+
+    orchestrator._set_chat_phase = phase  # type: ignore[method-assign]
+    orchestrator._require_phase = AsyncMock()  # type: ignore[method-assign]
+    orchestrator._commit_owned = Mock()  # type: ignore[method-assign]
+    orchestrator._commit_before_await = Mock()  # type: ignore[method-assign]
+    orchestrator._attach_visual_context = AsyncMock(  # type: ignore[method-assign]
+        return_value=(
+            [{"role": "user", "content": [{"type": "text", "text": "Question"}]}],
+            {
+                "available": True,
+                "images_included": 1,
+                "artifact_ids": ["sha256:image"],
+                "visual_contents_inspected": True,
+            },
+        )
+    )
+
+    with pytest.raises(ClaimLost, match="mid-vision-bridge"):
+        await orchestrator._bridge_visual_context(
+            _TEST_CLAIM,
+            FakeSession(),  # type: ignore[arg-type]
+            run,  # type: ignore[arg-type]
+            [SimpleNamespace(id="sha256:image")],  # type: ignore[list-item]
+        )
+
+    assert resumed_after_reclaim["value"] is False, (
+        "the obsolete attempt kept reading the successor's model"
+    )
+    assert consumed == ["Restoring chat model"], "the teardown never asked to speak"
+    assert [call.args[0].id for call in processes.load_chat.await_args_list] == [
+        "profile-vision"
+    ], "the reclaimed attempt moved the chat worker the successor owns"
+    processes.stop.assert_not_awaited()
 
 
 def test_media_progress_preserves_the_latest_preview() -> None:
@@ -1258,3 +1583,605 @@ async def test_chat_phase_advances_when_the_first_token_arrives() -> None:
     assert labels.index("Writing the response") > labels.index("Waiting for first token")
     # Announced once, not per token: each phase change commits.
     assert labels.count("Writing the response") == 1
+
+
+def _queued_media_orchestrator(
+    peeks: list[object],
+    next_run: object,
+) -> tuple[ConversationOrchestrator, SimpleNamespace]:
+    """A handoff whose scheduler is about to hand back another job.
+
+    `peeks` is consumed one entry per handoff, so a test can express a run of
+    consecutive jobs without reaching back into the scheduler between them.
+    """
+
+    media = WorkerStatus(name="media", state="ready", managed=True, running=True, pid=22)
+
+    class FakeSession:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_args):  # type: ignore[no-untyped-def]
+            return None
+
+        def get(self, model, identity):  # type: ignore[no-untyped-def]
+            if model is Run and identity == "run-next":
+                return next_run
+            return None
+
+    processes = SimpleNamespace(
+        statuses=Mock(return_value=[media]),
+        stop=AsyncMock(),
+        start_media=AsyncMock(),
+    )
+    orchestrator = ConversationOrchestrator(
+        engines=SimpleNamespace(settings=SimpleNamespace(media_engine="comfyui")),
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=SimpleNamespace(peek_next_eligible_job=Mock(side_effect=list(peeks))),
+        processes=processes,
+        session_factory=FakeSession,
+    )
+    return orchestrator, processes
+
+
+async def test_shutdown_starts_no_worker_from_a_cancelled_media_handoff() -> None:
+    """Closing must not run the handoff a cancelled media job owes on its way out.
+
+    `close` cancels each dispatch task and then waits for it. A cancel raises at
+    the task's suspension point but does not stop its `finally` from awaiting, so
+    the handoff runs to completion inside that wait - stopping media, loading a
+    chat model and waiting on its health check - and the supervisor destroys all
+    of it moments later.
+    """
+    orchestrator, processes = _queued_media_orchestrator([None], None)
+    running = asyncio.Event()
+    observed: dict[str, object] = {}
+
+    async def dispatch() -> None:
+        running.set()
+        try:
+            await asyncio.sleep(3600)
+        finally:
+            await orchestrator._complete_media_handoff("profile-chat")
+            observed["restart"] = orchestrator._media_restart_task
+
+    task = asyncio.create_task(dispatch())
+    orchestrator._tasks["job-media"] = task
+    await running.wait()
+
+    await orchestrator.close()
+
+    processes.stop.assert_not_awaited()
+    assert observed["restart"] is None, "shutdown scheduled a media restart on its way out"
+
+
+async def test_shutdown_releases_no_deferred_media_restart() -> None:
+    """The other route out: a text step releases its deferred give-back.
+
+    `close` does cancel the restart task, but only after it has been launched,
+    so the worker is started and then killed for nothing.
+    """
+    orchestrator, processes = _queued_media_orchestrator([None], None)
+    orchestrator._media_restart_after_chat_activity = True
+    running = asyncio.Event()
+    observed: dict[str, object] = {}
+
+    async def dispatch() -> None:
+        running.set()
+        try:
+            await asyncio.sleep(3600)
+        finally:
+            orchestrator._release_deferred_media_restart()
+            observed["restart"] = orchestrator._media_restart_task
+
+    task = asyncio.create_task(dispatch())
+    orchestrator._tasks["job-text"] = task
+    await running.wait()
+
+    await orchestrator.close()
+
+    assert observed["restart"] is None, "shutdown launched the deferred media restart"
+    processes.start_media.assert_not_awaited()
+
+
+async def test_a_queued_image_keeps_the_media_worker_and_leaves_chat_down() -> None:
+    """The recycle is skipped when the worker is about to be needed again.
+
+    A queue of images otherwise pays a full cold start of BOTH workers per
+    image: this handoff stops the media worker that the next job needs, and
+    reloads a chat model that the next job's own handoff immediately unloads.
+    """
+
+    orchestrator, processes = _queued_media_orchestrator(
+        [("job-next", "run-next")],
+        SimpleNamespace(operation="text_to_image", profile_id=None),
+    )
+    resume = AsyncMock()
+    orchestrator._resume_chat_worker = resume  # type: ignore[method-assign]
+
+    await orchestrator._complete_media_handoff("profile-chat")
+
+    processes.stop.assert_not_awaited()
+    resume.assert_not_awaited()
+    assert orchestrator._media_restart_task is None
+    assert orchestrator._media_restart_after_chat_activity is False
+
+
+async def test_skipping_the_resume_releases_the_chat_readiness_latch() -> None:
+    """The latch marks a handoff in flight, and this handoff is over.
+
+    Leaving it held would outlast the media run: `_ensure_chat_worker` loads the
+    model for a later text job without touching the latch, so the planner would
+    report itself unavailable against a chat worker that is ready.
+    """
+
+    orchestrator, _ = _queued_media_orchestrator(
+        [("job-next", "run-next")],
+        SimpleNamespace(operation="image_to_video", profile_id=None),
+    )
+    orchestrator._resume_chat_worker = AsyncMock()  # type: ignore[method-assign]
+    orchestrator._chat_planner_ready.clear()
+
+    await orchestrator._complete_media_handoff("profile-chat")
+
+    assert orchestrator._chat_planner_ready.is_set()
+
+
+async def test_a_recycle_whose_stop_fails_leaves_chat_down_and_the_profile_owed() -> None:
+    """The stop is what makes the room, so a failed stop must not be followed
+    by the load it was making room for.
+
+    A false `recycle_managed_media` meant two unrelated things - there was
+    nothing to recycle, and the recycle failed - and both were answered by
+    resuming chat. Only the first wants that. On the second the worker may
+    still hold the allocations the chat model would be loaded beside, which is
+    the contention the recycle exists to prevent.
+
+    The profile stays on the books so a later handoff still owes the restore,
+    and the readiness latch is released for the reason the queued-media skip
+    records: this handoff is over either way.
+    """
+
+    orchestrator, processes = _queued_media_orchestrator(
+        [None],
+        SimpleNamespace(operation="text", profile_id=None),
+    )
+    processes.stop = AsyncMock(side_effect=RuntimeError("the media worker would not stop"))
+    resume = AsyncMock()
+    orchestrator._resume_chat_worker = resume  # type: ignore[method-assign]
+    orchestrator._chat_planner_ready.clear()
+
+    await orchestrator._complete_media_handoff("profile-chat")
+
+    processes.stop.assert_awaited_once_with("media")
+    resume.assert_not_awaited()
+    processes.start_media.assert_not_awaited()
+    assert orchestrator._displaced_chat_profile_id == "profile-chat"
+    assert orchestrator._chat_planner_ready.is_set()
+    assert orchestrator._media_restart_task is None
+    assert orchestrator._media_restart_after_chat_activity is False
+
+
+async def test_nothing_to_recycle_still_restores_the_chat_model() -> None:
+    """The other half of the split, held in place.
+
+    Separating a failed recycle from an absent one must not make an absent one
+    behave like a failure. An unmanaged media worker holds nothing this handoff
+    needs to release, so chat comes back and nothing is owed.
+    """
+
+    orchestrator, processes = _queued_media_orchestrator(
+        [None],
+        SimpleNamespace(operation="text", profile_id=None),
+    )
+    processes.statuses = Mock(
+        return_value=[
+            WorkerStatus(name="media", state="ready", managed=False, running=True, pid=22)
+        ]
+    )
+    resume = AsyncMock()
+    orchestrator._resume_chat_worker = resume  # type: ignore[method-assign]
+
+    await orchestrator._complete_media_handoff("profile-chat")
+
+    processes.stop.assert_not_awaited()
+    resume.assert_awaited_once_with("profile-chat")
+    assert orchestrator._displaced_chat_profile_id is None
+
+
+async def test_a_failure_choosing_the_target_still_leaves_the_profile_owed() -> None:
+    """The obligation has to outlive the method that discovers it.
+
+    `_prepare_device_handoff` hands the displaced profile back as a return
+    value, so until this method writes it down the only record of it is a local
+    in the caller's frame. `_handoff_chat_target` guards its scheduler peek and
+    then opens a session and reads two rows unguarded, so a database failure
+    there ends this method - and used to end it before the books were touched,
+    leaving the chat model down with nothing that knows it is owed.
+
+    The failure is put in that exact window: after the peek, inside the read.
+    """
+
+    orchestrator, processes = _queued_media_orchestrator(
+        [("job-next", "run-next")],
+        SimpleNamespace(operation="text", profile_id=None),
+    )
+
+    def unreadable_session() -> object:
+        raise RuntimeError("the database would not answer during the handoff")
+
+    orchestrator.session_factory = unreadable_session  # type: ignore[method-assign]
+    resume = AsyncMock()
+    orchestrator._resume_chat_worker = resume  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="would not answer"):
+        await orchestrator._complete_media_handoff("profile-chat")
+
+    assert orchestrator._displaced_chat_profile_id == "profile-chat", (
+        "the displaced chat model was left with no owner"
+    )
+    processes.stop.assert_not_awaited()
+    resume.assert_not_awaited()
+
+
+async def test_a_handoff_that_restores_chat_owes_nothing_afterwards() -> None:
+    """The other half: an obligation recorded up front must still be paid off.
+
+    Making the debt the default is only safe if every path that restores chat
+    clears it. A handoff that leaves it standing would send a later one to
+    reload a model that is already up.
+    """
+
+    orchestrator, processes = _queued_media_orchestrator(
+        [None],
+        SimpleNamespace(operation="text", profile_id=None),
+    )
+    resume = AsyncMock()
+    orchestrator._resume_chat_worker = resume  # type: ignore[method-assign]
+
+    await orchestrator._complete_media_handoff("profile-chat")
+
+    processes.stop.assert_awaited_once_with("media")
+    resume.assert_awaited_once_with("profile-chat")
+    assert orchestrator._displaced_chat_profile_id is None
+
+
+async def test_a_later_image_in_the_run_still_reaches_the_terminal_handoff() -> None:
+    """Only the first image of a run is handed a profile to restore.
+
+    `_prepare_device_handoff` returns None as soon as chat is down, so every
+    image after the first - the last one included - passes nothing to the
+    handoff. If the run did not remember what it displaced, the final image
+    would skip the handoff entirely and chat would stay unloaded until some
+    later text execution happened to load it.
+    """
+
+    orchestrator, processes = _queued_media_orchestrator(
+        [("job-next", "run-next"), None],
+        SimpleNamespace(operation="text_to_image", profile_id=None),
+    )
+    resume = AsyncMock()
+    orchestrator._resume_chat_worker = resume  # type: ignore[method-assign]
+
+    first = orchestrator._pending_chat_restore("profile-chat")
+    assert first == "profile-chat"
+    await orchestrator._complete_media_handoff(first)
+    processes.stop.assert_not_awaited()
+
+    # What the dispatch computes for every later image in the run.
+    last = orchestrator._pending_chat_restore(None)
+    assert last == "profile-chat"
+    await orchestrator._complete_media_handoff(last)
+    if orchestrator._media_restart_task:
+        await orchestrator._media_restart_task
+
+    processes.stop.assert_awaited_once_with("media")
+    resume.assert_awaited_once_with("profile-chat")
+    assert orchestrator._pending_chat_restore(None) is None
+
+
+async def test_a_run_that_displaced_nothing_owes_nothing() -> None:
+    """The remembered profile is an obligation, so it must not be invented."""
+
+    orchestrator, processes = _queued_media_orchestrator(
+        [None],
+        SimpleNamespace(operation="text_to_image", profile_id=None),
+    )
+
+    assert orchestrator._pending_chat_restore(None) is None
+    processes.stop.assert_not_awaited()
+
+
+async def test_a_queued_text_job_still_recycles_before_its_model_loads() -> None:
+    """Only another media job keeps the worker; text is why the recycle exists."""
+
+    orchestrator, processes = _queued_media_orchestrator(
+        [("job-next", "run-next")],
+        SimpleNamespace(operation="text", profile_id="profile-next"),
+    )
+    resume = AsyncMock()
+    orchestrator._resume_chat_worker = resume  # type: ignore[method-assign]
+
+    await orchestrator._complete_media_handoff("profile-previous")
+
+    processes.stop.assert_awaited_once_with("media")
+    resume.assert_awaited_once_with("profile-next")
+
+
+async def test_shutdown_does_not_restore_chat_from_active_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = SimpleNamespace(
+        id="run-vision",
+        chat_id="chat-vision",
+        user_message_id="message-vision",
+        profile_id="profile-text",
+        vision_profile_id="profile-vision",
+        standalone_prompt="What is visible?",
+        provenance_json={},
+    )
+    text_profile = SimpleNamespace(id="profile-text", model_install_id="install-text")
+    vision_profile = SimpleNamespace(id="profile-vision", model_install_id="install-vision")
+    text_install = SimpleNamespace(id="install-text")
+    vision_install = SimpleNamespace(id="install-vision")
+
+    class FakeSession:
+        def get(self, model, identity):  # type: ignore[no-untyped-def]
+            return {
+                (ModelProfile, "profile-text"): text_profile,
+                (ModelProfile, "profile-vision"): vision_profile,
+                (ModelInstall, "install-text"): text_install,
+                (ModelInstall, "install-vision"): vision_install,
+            }.get((model, identity))
+
+        def expunge(self, _value) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+        def scalar(self, _statement):  # type: ignore[no-untyped-def]
+            return "job-vision"
+
+        def in_transaction(self) -> bool:
+            return False
+
+    entered = asyncio.Event()
+
+    async def stream(_request):  # type: ignore[no-untyped-def]
+        entered.set()
+        await asyncio.Event().wait()
+        yield ChatEvent(type="complete", data={"finish_reason": "stop"})
+
+    processes = SimpleNamespace(
+        settings=SimpleNamespace(),
+        runtimes=None,
+        load_chat=AsyncMock(),
+        stop=AsyncMock(),
+    )
+    engines = SimpleNamespace(
+        settings=SimpleNamespace(vision_bridge_max_tokens=128),
+        chat_capabilities=AsyncMock(
+            return_value=SimpleNamespace(input_modalities=["text", "image"])
+        ),
+        chat=SimpleNamespace(stream=stream),
+    )
+    orchestrator = ConversationOrchestrator(
+        engines=engines,
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=Mock(),
+        processes=processes,
+    )
+    orchestrator._set_chat_phase = AsyncMock()  # type: ignore[method-assign]
+    # Ownership answers yes so that `_closing` is the ONLY thing that can stop
+    # the restore. Without this the teardown's ownership read reaches a database
+    # this world does not have, raises inside the `finally`, and `close` swallows
+    # it - the restore is then skipped for a reason that has nothing to do with
+    # shutting down, and the case passes with the shutdown guard removed.
+    monkeypatch.setattr(orchestrator, "_attempt_current", Mock(return_value=True))
+    orchestrator._attach_visual_context = AsyncMock(  # type: ignore[method-assign]
+        return_value=(
+            [{"role": "user", "content": [{"type": "text", "text": "Question"}]}],
+            {
+                "available": True,
+                "images_included": 1,
+                "artifact_ids": ["sha256:image"],
+                "visual_contents_inspected": True,
+            },
+        )
+    )
+
+    task = asyncio.create_task(
+        orchestrator._bridge_visual_context(
+            _TEST_CLAIM,
+            FakeSession(),  # type: ignore[arg-type]
+            run,  # type: ignore[arg-type]
+            [SimpleNamespace(id="sha256:image")],  # type: ignore[list-item]
+        )
+    )
+    orchestrator._tasks["job-vision"] = task
+    await entered.wait()
+    assert [call.args[0].id for call in processes.load_chat.await_args_list] == ["profile-vision"]
+
+    await orchestrator.close()
+
+    assert [call.args[0].id for call in processes.load_chat.await_args_list] == [
+        "profile-vision"
+    ], "shutdown restored chat from the vision bridge only to destroy it next"
+
+
+@pytest.mark.parametrize(
+    ("announced", "still_ours", "why"),
+    [
+        (True, False, "a successor had already replaced this attempt"),
+        (False, True, "the phase write was refused, so the row was not ours"),
+    ],
+)
+async def test_a_replaced_bridge_leaves_the_chat_worker_where_it_is(
+    announced: bool, still_ours: bool, why: str
+) -> None:
+    """Finishing is not the same as still being the attempt that may act.
+
+    The teardown puts the text model back, and that moves the GLOBAL chat
+    worker. An attempt a successor has already replaced must not do that: the
+    successor is using the worker it would take. Both halves of the guard are
+    here because either alone leaves the other unasked - the phase refusal says
+    the row stopped being ours during the write, and the ownership read says so
+    again afterwards, because the phase write is an await and its answer
+    describes what was true before it.
+
+    Neither was pinned by anything until this case: removing `announced` or the
+    ownership read from the teardown left all fifty tests in this file passing.
+    """
+
+    run = SimpleNamespace(
+        provenance_json={},
+        id="run-vision",
+        chat_id="chat-vision",
+        user_message_id="message-vision",
+        profile_id="profile-text",
+        vision_profile_id="profile-vision",
+        standalone_prompt="What is visible?",
+    )
+    text_profile = SimpleNamespace(id="profile-text", model_install_id="install-text")
+    vision_profile = SimpleNamespace(id="profile-vision", model_install_id="install-vision")
+    text_install = SimpleNamespace(id="install-text")
+    vision_install = SimpleNamespace(id="install-vision")
+
+    class FakeSession:
+        def get(self, model, identity):  # type: ignore[no-untyped-def]
+            return {
+                (ModelProfile, "profile-text"): text_profile,
+                (ModelProfile, "profile-vision"): vision_profile,
+                (ModelInstall, "install-text"): text_install,
+                (ModelInstall, "install-vision"): vision_install,
+            }.get((model, identity))
+
+        def expunge(self, _value) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+        def scalar(self, _statement):  # type: ignore[no-untyped-def]
+            return "job-vision"
+
+        def in_transaction(self) -> bool:
+            return False
+
+    async def stream(_request):  # type: ignore[no-untyped-def]
+        yield ChatEvent(type="delta", text="a lamp")
+        yield ChatEvent(type="complete", data={"finish_reason": "stop"})
+
+    processes = SimpleNamespace(
+        settings=SimpleNamespace(),
+        runtimes=None,
+        load_chat=AsyncMock(),
+        stop=AsyncMock(),
+    )
+    engines = SimpleNamespace(
+        settings=SimpleNamespace(vision_bridge_max_tokens=128),
+        chat_capabilities=AsyncMock(
+            return_value=SimpleNamespace(input_modalities=["text", "image"])
+        ),
+        chat=SimpleNamespace(stream=stream),
+    )
+    orchestrator = ConversationOrchestrator(
+        engines=engines,
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=Mock(),
+        processes=processes,
+    )
+
+    # Only the teardown's own phase write is refused. The earlier ones are
+    # asserted rather than captured, so refusing those raises ClaimLost long
+    # before the teardown and would test a different guard entirely.
+    async def phase(_job_id, _run_id, label, _claim):  # type: ignore[no-untyped-def]
+        return announced if label == "Restoring chat model" else True
+
+    orchestrator._set_chat_phase = AsyncMock(side_effect=phase)  # type: ignore[method-assign]
+    orchestrator._attempt_current = Mock(return_value=still_ours)  # type: ignore[method-assign]
+    # The per-event fence is a different guard with its own case; stubbing it
+    # keeps this one about the teardown rather than about a database this world
+    # does not have.
+    orchestrator._require_ownership = Mock()  # type: ignore[method-assign]
+    orchestrator._attach_visual_context = AsyncMock(  # type: ignore[method-assign]
+        return_value=(
+            [{"role": "user", "content": [{"type": "text", "text": "Question"}]}],
+            {
+                "available": True,
+                "images_included": 1,
+                "artifact_ids": ["sha256:image"],
+                "visual_contents_inspected": True,
+            },
+        )
+    )
+
+    await orchestrator._bridge_visual_context(
+        _TEST_CLAIM,
+        FakeSession(),  # type: ignore[arg-type]
+        run,  # type: ignore[arg-type]
+        [SimpleNamespace(id="sha256:image")],  # type: ignore[list-item]
+    )
+
+    assert [call.args[0].id for call in processes.load_chat.await_args_list] == [
+        "profile-vision"
+    ], f"the teardown moved the chat worker although {why}"
+
+
+@pytest.mark.parametrize("managed_media", [False, True])
+async def test_later_media_preserves_the_chat_profile_owed_before_verification(managed_media):
+    displaced = "profile-chat"
+    vision = "profile-vision"
+    verification = SimpleNamespace(
+        kind=JobKind.EDIT_VERIFY.value, payload_json={"vision_profile_id": vision}
+    )
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def get(self, model, identity):
+            return verification if model is Job and identity == "job-verify" else None
+
+    media = WorkerStatus(name="media", state="ready", managed=managed_media, running=True, pid=22)
+    chat = WorkerStatus(
+        name="chat", state="ready", managed=True, running=True, pid=23, profile_id=vision
+    )
+    processes = SimpleNamespace(
+        settings=SimpleNamespace(auto_unload_chat_for_media=True),
+        statuses=Mock(return_value=[media, chat]),
+        stop=AsyncMock(),
+        start_media=AsyncMock(),
+    )
+    scheduler = SimpleNamespace(peek_next_eligible_job=Mock(return_value=("job-verify", None)))
+    orchestrator = ConversationOrchestrator(
+        engines=SimpleNamespace(settings=SimpleNamespace(media_engine="comfyui")),
+        artifacts=Mock(),
+        events=Mock(),
+        scheduler=scheduler,
+        processes=processes,
+        session_factory=FakeSession,
+    )
+    resumed = []
+
+    async def resume(profile_id):
+        resumed.append(profile_id)
+
+    orchestrator._resume_chat_worker = resume
+    orchestrator._schedule_media_restart = Mock()
+    await orchestrator._complete_media_handoff(displaced)
+    assert resumed == [vision]
+    # The verification used the preloaded vision profile. A following image now
+    # displaces that running profile; it must not erase the earlier chat restore.
+    next_displaced = await orchestrator._prepare_device_handoff("text_to_image", claim=_TEST_CLAIM)
+    assert next_displaced == vision
+    scheduler.peek_next_eligible_job.return_value = None
+    pending = orchestrator._pending_chat_restore(next_displaced)
+    assert pending is not None
+    await orchestrator._complete_media_handoff(pending)
+    assert resumed[-1] == displaced or orchestrator._displaced_chat_profile_id == displaced, (
+        "the next image forgot the original chat model after verification loaded another profile",
+        resumed,
+        orchestrator._displaced_chat_profile_id,
+    )

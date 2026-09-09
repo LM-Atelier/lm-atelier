@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import type { QueryClient } from "@tanstack/react-query";
 import { connectEvents } from "./api";
-import type { AppEvent, Job, WorkPlan } from "./types";
+import type { AppEvent, Job, WorkPlan, WorkPlanStatus, WorkStepStatus } from "./types";
 
 const AUTHORITATIVE_QUERY_ROOTS = new Set([
   "about",
@@ -15,6 +15,7 @@ const AUTHORITATIVE_QUERY_ROOTS = new Set([
   "credential",
   "custom-nodes",
   "engines",
+  "edited-branches",
   "jobs",
   "models",
   "model-storage",
@@ -30,10 +31,10 @@ const AUTHORITATIVE_QUERY_ROOTS = new Set([
   "workflows",
 ]);
 
-function aggregateWorkPlanStatus(steps: WorkPlan["steps"]): string {
+function aggregateWorkPlanStatus(steps: WorkPlan["steps"]): WorkPlanStatus {
   const statuses = steps.map((step) => step.status);
   if (statuses.length === 0) return "queued";
-  for (const active of ["running", "queued", "paused", "blocked"]) {
+  for (const active of ["running", "queued", "paused", "blocked"] as const) {
     if (statuses.includes(active)) return active;
   }
   if (statuses.every((status) => status === "complete")) return "complete";
@@ -64,6 +65,18 @@ export function useLiveEvents(
     // per-message map remembers which attempt last wrote a message's
     // live text, so a newer attempt's first delta starts it over.
     const latestAttemptByJob = new Map<string, number>();
+    // Seeded from the cache, because this map is rebuilt on every connect and
+    // only `job.progress` used to fill it. Between a reconnect and the first
+    // progress event it was empty, so an earlier attempt's delta had nothing
+    // to be measured against and was accepted - overwriting live text the
+    // newer attempt had already produced. The job list carries each job's
+    // attempt and is already here, so the answer does not have to be waited
+    // for.
+    for (const job of client.getQueryData<Job[]>(["jobs"]) ?? []) {
+      if (job.id && typeof job.attempt === "number") {
+        latestAttemptByJob.set(job.id, job.attempt);
+      }
+    }
     const latestAttempt = new Map<string, number>();
     let mediaRefresh: number | undefined;
     let authoritativeRefresh: number | undefined;
@@ -131,7 +144,7 @@ export function useLiveEvents(
                 { queryKey: ["work-plans"] },
                 (current) => current?.map((plan) => {
                   if (plan.id !== snapshot.work_plan_id) return plan;
-                  const stepStatus = snapshot.progress_json?.stage
+                  const stepStatus: WorkStepStatus = snapshot.progress_json?.stage
                     ?.startsWith("blocked by")
                     ? "blocked"
                     : snapshot.status;
@@ -174,6 +187,10 @@ export function useLiveEvents(
         if (event.type.includes("progress") || event.type.startsWith("download.")) void client.invalidateQueries({ queryKey: ["jobs"] });
         if (event.type.startsWith("download.") || event.type.startsWith("worker.") || event.type.startsWith("runtime.") || event.type.startsWith("setup.verification")) void client.invalidateQueries({ queryKey: ["setup-readiness"] });
         if (event.type === "run.progress") void client.invalidateQueries({ queryKey: ["chat"] });
+        if (event.type === "chat.updated") {
+          void client.invalidateQueries({ queryKey: ["chat"] });
+          void client.invalidateQueries({ queryKey: ["chats"] });
+        }
         if (event.type === "message.updated") {
           void client.invalidateQueries({ queryKey: ["chat"] });
           void client.invalidateQueries({ queryKey: ["artifacts"] });

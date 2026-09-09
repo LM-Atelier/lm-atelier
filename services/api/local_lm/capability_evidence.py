@@ -107,10 +107,7 @@ def current_capability_evidence(
     current_envelope = hardware_envelope(settings)
     for evidence in session.scalars(
         select(ModelCapabilityEvidence)
-        .where(
-            ModelCapabilityEvidence.model_install_id == install.id,
-            ModelCapabilityEvidence.result == "ready",
-        )
+        .where(ModelCapabilityEvidence.model_install_id == install.id)
         .order_by(ModelCapabilityEvidence.probed_at.desc())
     ).all():
         runtime_release = evidence.details_json.get("runtime_release")
@@ -207,7 +204,6 @@ def record_capability_evidence(
     evidence = ModelCapabilityEvidence(
         model_install_id=install.id,
         evidence_key=evidence_key,
-        result="ready",
         component_hashes_json=component_hashes,
         runtime_build=runtime_build[:200],
         adapter_contract_version=ADAPTER_CONTRACT_VERSION,

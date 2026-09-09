@@ -38,6 +38,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 POWER_LORA_LOADER = "Power Lora Loader (rgthree)"
 VIDEO_COMBINE = "VHS_VideoCombine"
@@ -64,10 +65,17 @@ class PackageClaim:
         return self.registry_id or self.repository_id or "its package"
 
 
+PackageWidgetErrorCode = Literal[
+    "conflicting_package_claim",
+    "package_widget_layout",
+    "package_widget_revision",
+]
+
+
 class PackageWidgetError(ValueError):
     """A package-drawn layout is not the one this transcription describes."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: PackageWidgetErrorCode, message: str) -> None:
         super().__init__(message)
         self.code = code
 

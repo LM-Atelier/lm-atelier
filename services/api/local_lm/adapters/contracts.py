@@ -581,6 +581,24 @@ class GuardedMediaAdapter:
         )
 
 
+#: How long a producer's close may take before it is abandoned.
+CLOSE_SECONDS = 5.0
+
+
+def _consume_abandoned_close(task: asyncio.Task[Any]) -> None:
+    """Read the outcome of a close nobody is waiting for any more.
+
+    Only so the event loop does not report it as never retrieved. There is
+    nothing to do with it: the caller stopped consuming for its own reason and
+    has long since acted on it.
+    """
+
+    if task.cancelled():
+        return
+    with suppress(BaseException):
+        task.exception()
+
+
 async def close_iterator(events: AsyncIterator[Any]) -> None:
     """Close a producer this process is done with, without letting the close
     itself become the failure.
@@ -588,12 +606,45 @@ async def close_iterator(events: AsyncIterator[Any]) -> None:
     The adapter contract types a producer as an iterator, so a close is only
     attempted when the object offers one. A close that raises or hangs must
     not replace the reason the caller stopped consuming - a refused write, a
-    lost claim, a contract violation - so the attempt is bounded and its
-    failure suppressed."""
+    lost claim, a contract violation.
+
+    The close runs in ITS OWN task, and that is what makes both halves of that
+    promise true.
+
+    `asyncio.timeout` bounds by cancelling the task that awaits it. Awaited
+    here, the cancellation would land on the caller, and a close that catches
+    it and keeps waiting would defeat the bound entirely - so the bound held
+    only for a producer that cooperates, which is the producer that never
+    needed bounding. Aimed at a separate task, an uncooperative close is
+    ABANDONED when its time is up: it may go on running, but it can no longer
+    hold the dispatch.
+
+    And `suppress(Exception)` never caught `CancelledError`, which is a
+    `BaseException`. A close raising it directly replaced the refusal already
+    in flight, so the caller saw a cancellation instead of the lost claim it
+    actually had. Everything the close raises now settles inside its own task
+    and is read there.
+
+    A cancellation of the CALLER still propagates, and must: that one is real,
+    and this function is not the place to swallow it."""
 
     close = getattr(events, "aclose", None)
     if not callable(close):
         return
-    with suppress(Exception):
-        async with asyncio.timeout(5):
-            await close()
+    closing = asyncio.ensure_future(close())
+    try:
+        done, _pending = await asyncio.wait({closing}, timeout=CLOSE_SECONDS)
+    finally:
+        # Every way out of the wait leaves an unfinished close abandoned the
+        # same way: the bound expiring, and a cancellation of THIS function.
+        # `asyncio.wait` does not cancel what it waits on when the waiter is
+        # cancelled, and awaiting the close in the caller's own task did - so
+        # without this, a cancelled generation would leave the producer
+        # running and its task unretrieved.
+        if not closing.done():
+            closing.cancel()
+            closing.add_done_callback(_consume_abandoned_close)
+    if closing in done:
+        # Read the outcome so it is not reported as never retrieved, and drop
+        # it: a failed close is not the reason the caller stopped consuming.
+        _consume_abandoned_close(closing)

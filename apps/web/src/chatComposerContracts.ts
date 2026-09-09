@@ -12,6 +12,7 @@ import type {
   GenerationPreset,
   ModelProfile,
   Project,
+  PriorTurnEditAccepted,
   RoutingMode,
   Workflow,
   WorkPlan,
@@ -35,7 +36,7 @@ export interface ComposerProps {
   profiles: ModelProfile[];
   stoppable: boolean;
   settings: Record<string, unknown>;
-  onSettings: (settings: Record<string, unknown>) => void;
+  onSettings: (settings: Record<string, unknown>, changedKeys?: string[]) => void;
   settingsRole: EngineRole;
   onSettingsRole: (role: EngineRole) => void;
   presets: GenerationPreset[];
@@ -69,18 +70,13 @@ export interface ChatViewProps {
   onSettingsRole: (role: EngineRole) => void;
   presets: GenerationPreset[];
   presetId: string | null;
-  onSettings: (settings: Record<string, unknown>) => void;
+  onSettings: (settings: Record<string, unknown>, changedKeys?: string[]) => void;
   onPreset: (presetId: string | null) => void;
   onMode: (mode: RoutingMode) => void;
   onSend: SendFromComposer;
   onRegenerate: (messageId: string, settings: Record<string, unknown>) => void;
   onSelectRevision: (messageId: string, revisionId: string) => void;
-  onEdit: (
-    messageId: string,
-    text: string,
-    mode: RoutingMode,
-    settings: Record<string, unknown>,
-  ) => void;
+  onEditAccepted: (accepted: PriorTurnEditAccepted) => void;
   onStop: () => void;
   onStopAndSend: SendFromComposer;
   maxMediaOutputsPerPlan: number;

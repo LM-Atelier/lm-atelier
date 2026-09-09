@@ -48,7 +48,12 @@ from .network import shared_tls_context
 from .schemas import WorkerStatus
 from .security import trusted_browser_origins
 from .subprocess_env import python_subprocess_environment
-from .worker_failures import WorkerFailure, WorkerFailureCode, classify_worker_failure
+from .worker_failures import (
+    WorkerFailure,
+    WorkerFailureCode,
+    classify_worker_failure,
+    worker_failure,
+)
 
 if TYPE_CHECKING:
     from .comfy_registry_installs import ComfyRegistryLaunchContract
@@ -57,6 +62,17 @@ if TYPE_CHECKING:
 
 
 STATE_REFUSED = "LM Atelier's state folder may not be a filesystem link"
+
+
+class WorkerStartRefused(RuntimeError):
+    """A phase callback refused the start; the caller no longer owns the work.
+
+    Distinct from every other callback failure on purpose. `start_media` treats
+    a raising callback as a reporting bug and continues, because a worker start
+    must not be lost to a broken progress report. A refusal is the opposite: the
+    row has moved to another attempt, and every effect after it - provisioning,
+    validation, verification, the launch - is done on that attempt's behalf.
+    """
 
 
 class ProcessStateError(RuntimeError):
@@ -410,6 +426,14 @@ class ProcessSupervisor:
             stderr_tail = self._stderr_tail(record) if record and not running else None
             failure_detail = None
             failure = WorkerFailure(WorkerFailureCode.UNKNOWN, None)
+            if record is None:
+                orphan = self._orphaned_worker_description(name)
+                if orphan is not None:
+                    failure_detail = (
+                        f"A {name} worker this application started earlier is still "
+                        f"running and holding its port: {orphan}."
+                    )
+                    failure = worker_failure(WorkerFailureCode.PORT_IN_USE)
             if record and not running:
                 exit_code = (
                     record.process.returncode
@@ -487,9 +511,21 @@ class ProcessSupervisor:
             return None
         return support
 
-    async def load_chat(self, profile: ModelProfile, install: ModelInstall) -> WorkerStatus:
+    async def load_chat(
+        self,
+        profile: ModelProfile,
+        install: ModelInstall,
+        *,
+        launch_scope_sha256: str | None = None,
+        vision_max_images: int | None = None,
+    ) -> WorkerStatus:
         if profile.engine == "vllm":
-            return await self._load_vllm_chat(profile, install)
+            return await self._load_vllm_chat(
+                profile,
+                install,
+                launch_scope_sha256=launch_scope_sha256,
+                vision_max_images=vision_max_images,
+            )
         if profile.engine != "llama.cpp":
             raise ValueError("the selected profile is not a managed chat profile")
         if (
@@ -530,9 +566,10 @@ class ProcessSupervisor:
             await self._replace(
                 "chat",
                 command,
-                self.settings.llama_url + "/health",
+                self.worker_health_url("chat"),
                 profile.id,
                 estimated_memory_bytes=estimate,
+                launch_scope_sha256=launch_scope_sha256,
             )
         except (Exception, asyncio.CancelledError):
             self.settings.chat_engine = previous_engine
@@ -543,7 +580,15 @@ class ProcessSupervisor:
         self,
         profile: ModelProfile,
         install: ModelInstall,
+        *,
+        launch_scope_sha256: str | None = None,
+        vision_max_images: int | None = None,
     ) -> WorkerStatus:
+        if (
+            vision_max_images is not None
+            and not 1 <= vision_max_images <= self.settings.vision_max_images
+        ):
+            raise RuntimeError("Accepted visual input limit is unavailable.")
         if (
             not self.settings.vllm_executable or not self.settings.vllm_executable.is_file()
         ) and self.runtimes:
@@ -584,7 +629,14 @@ class ProcessSupervisor:
             "--gpu-memory-utilization",
             "0.9",
             "--limit-mm-per-prompt",
-            json.dumps({"image": self.settings.vision_max_images, "video": 1}),
+            json.dumps(
+                {
+                    "image": vision_max_images
+                    if vision_max_images is not None
+                    else self.settings.vision_max_images,
+                    "video": 1,
+                }
+            ),
         ]
         raw_offload = profile.load_settings_json.get("cpu_offload_gb")
         if (
@@ -603,9 +655,10 @@ class ProcessSupervisor:
             await self._replace(
                 "chat",
                 command,
-                self.settings.llama_url + "/health",
+                self.worker_health_url("chat"),
                 profile.id,
                 estimated_memory_bytes=estimate,
+                launch_scope_sha256=launch_scope_sha256,
             )
         except (Exception, asyncio.CancelledError):
             self.settings.chat_engine = previous_engine
@@ -624,7 +677,10 @@ class ProcessSupervisor:
                 return
             try:
                 await phase_callback(phase)
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, WorkerStartRefused):
+                # A refusal is authority, not a reporting failure: it stops the
+                # start here, before the next process effect, rather than being
+                # reported after every effect has already happened.
                 raise
             except Exception:
                 logger.warning("Could not publish media startup phase", exc_info=True)
@@ -758,7 +814,7 @@ class ProcessSupervisor:
             await self._replace(
                 "media",
                 command,
-                self.settings.comfy_url + "/system_stats",
+                self.worker_health_url("media"),
                 environment_overrides=environment_overrides,
                 ready_check=(
                     (lambda: self._verify_comfy_node_types(expected_node_types))
@@ -772,7 +828,7 @@ class ProcessSupervisor:
             await self._replace(
                 "media",
                 command,
-                self.settings.comfy_url + "/system_stats",
+                self.worker_health_url("media"),
                 environment_overrides=environment_overrides,
                 ready_check=lambda: self._verify_comfy_node_types(registry_contract.node_types),
                 editor_bridge_support=editor_bridge_support,
@@ -781,7 +837,7 @@ class ProcessSupervisor:
             await self._replace(
                 "media",
                 command,
-                self.settings.comfy_url + "/system_stats",
+                self.worker_health_url("media"),
                 editor_bridge_support=editor_bridge_support,
             )
         return self.statuses()[1]
@@ -1766,6 +1822,63 @@ class ProcessSupervisor:
             return False
         return True
 
+    def worker_health_url(self, name: str) -> str:
+        """Where a worker of this name serves, whether or not one is running.
+
+        The start paths each built this string themselves, so nothing that was
+        not starting a worker could say where it would listen - which is why
+        `statuses` could only report "stopped" for a name it had no record of,
+        however loudly something else was answering there. One derivation, used
+        by both, is what keeps the report and the start talking about the same
+        endpoint.
+        """
+
+        if name == "chat":
+            return self.settings.llama_url + "/health"
+        if name == "media":
+            return self.settings.comfy_url + "/system_stats"
+        raise ValueError(f"no worker is named {name!r}")
+
+    def _orphaned_worker_description(self, name: str) -> str | None:
+        """A worker THIS application started that outlived the record of it.
+
+        `stopped` is true of this process and not of the machine: a child left
+        behind by an earlier session goes on serving, so the card reads stopped
+        while generation works - or stopped while a start refuses - and neither
+        of those reads as something a person can act on.
+
+        Deliberately NOT "whatever holds the port". A status read must not
+        depend on unrelated programs. Another application's use of 8188 is not
+        this application's business to report, and a check that did would put a
+        fault on a card because of something the user installed elsewhere - it
+        failed test_worker_management_reports_missing_local_binaries on a
+        machine where the real app was running beside its own tests, which is
+        the ordinary case for whoever is working on this.
+
+        So the match is our own persisted identity: pid plus creation time, the
+        same pairing `_terminate_persisted_worker` relies on, which is why a
+        reused pid cannot be mistaken for our process. And it is reported only
+        when that process is actually listening on the worker's endpoint,
+        because that is the state the user sees as stopped-but-working.
+        """
+
+        url = self.worker_health_url(name)
+        try:
+            candidates = self._matching_worker_processes(name)
+        except Exception:
+            # Reporting must not be able to fail: an unanswerable lookup leaves
+            # the status exactly as it was.
+            return None
+        for process in candidates:
+            pid = process.pid
+            if not self._listener_owned_by_worker(pid, url):
+                continue
+            try:
+                return self._sanitize_diagnostic(f"{process.name()} (pid {pid})")
+            except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+                return f"pid {pid}"
+        return None
+
     async def _ensure_port_available(self, name: str, url: str) -> None:
         parsed = urlparse(url)
         host = parsed.hostname
@@ -1783,9 +1896,49 @@ class ProcessSupervisor:
                     probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 probe.bind(address)
         except OSError as exc:
-            raise OSError(
-                f"{name} worker cannot start because {host}:{port} is already in use"
-            ) from exc
+            occupant = self._port_listener_description(host, port)
+            detail = f"{name} worker cannot start because {host}:{port} is already in use"
+            raise OSError(f"{detail} by {occupant}" if occupant else detail) from exc
+
+    def _port_listener_description(self, host: str, port: int) -> str | None:
+        """Name the process listening on this endpoint, when the platform will say.
+
+        Only ever called after a bind has already failed, so the ordinary start
+        path pays nothing for it. Returns None rather than guessing: an
+        unidentifiable occupant leaves the original message exactly as it was,
+        because a wrong name in a diagnostic is worse than no name.
+
+        Reports the process name and pid only. A command line can carry a data
+        folder or a home directory, and this text reaches the user.
+        """
+
+        try:
+            wildcards = {"0.0.0.0", "::", ""}
+            for connection in psutil.net_connections(kind="tcp"):
+                if connection.status != psutil.CONN_LISTEN or connection.pid is None:
+                    continue
+                address = connection.laddr
+                listening_host = getattr(address, "ip", None)
+                listening_port = getattr(address, "port", None)
+                if listening_port is None and len(address) > 1:
+                    listening_host, listening_port = address[0], address[1]
+                if listening_port != port:
+                    continue
+                if listening_host not in wildcards and listening_host != host:
+                    # A listener on another interface does not block this bind,
+                    # and naming it would send the reader after the wrong process.
+                    continue
+                try:
+                    return self._sanitize_diagnostic(
+                        f"{psutil.Process(connection.pid).name()} (pid {connection.pid})"
+                    )
+                except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+                    return f"pid {connection.pid}"
+        except (psutil.AccessDenied, psutil.Error, OSError, RuntimeError):
+            # Enumerating sockets is a privileged operation on some systems.
+            # Failing to identify the occupant must not replace the real error.
+            return None
+        return None
 
     @staticmethod
     def _listener_owned_by_worker(pid: int, url: str) -> bool:

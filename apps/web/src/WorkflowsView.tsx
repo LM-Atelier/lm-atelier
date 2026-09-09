@@ -7,8 +7,14 @@ import { CustomNodesPanel } from "./CustomNodesPanel";
 import { EmptyState } from "./EmptyState";
 import { ErrorCallout } from "./ErrorCallout";
 import { RegistryInstallsPanel } from "./RegistryInstallsPanel";
+import { WorkflowFamilyArchive } from "./WorkflowFamilyArchive";
+import { WorkflowFamilyList } from "./WorkflowFamilyList";
+import { WorkflowFamilyUsage } from "./WorkflowFamilyUsage";
+import { WorkflowFamilyVariants } from "./WorkflowFamilyVariants";
 import { WorkflowFamilyPreferences } from "./WorkflowFamilyPreferences";
+import { WorkflowFamilyDependencies } from "./WorkflowFamilyDependencies";
 import { WorkflowPackageReview } from "./WorkflowPackageReview";
+import { WorkflowRevisionReviewPanel } from "./WorkflowRevisionReviewPanel";
 import { useWorkflowPackageImport } from "./useWorkflowPackageImport";
 import { downloadJson } from "./format";
 import {
@@ -17,7 +23,7 @@ import {
   type WorkflowEditorPhase,
   type WorkflowEditorSubmission,
 } from "./workflowEditorBridge";
-import type { WorkflowEditorReturn } from "./types";
+import type { WorkflowEditorReturn, WorkflowFamily } from "./types";
 
 const editorPhaseLabel: Record<WorkflowEditorPhase, string> = {
   preparing: "Preparing the native editor…",
@@ -81,9 +87,15 @@ export function WorkflowControls({ schema }: { schema: Record<string, unknown> }
 }
 export function WorkflowsView() {
   const client = useQueryClient();
-  const workflows = useQuery({ queryKey: ["workflows"], queryFn: api.workflows }); const families = useQuery({ queryKey: ["workflow-families"], queryFn: () => api.workflowFamilies() });
+  const [includeArchived, setIncludeArchived] = useState(false);
+  const workflows = useQuery({ queryKey: ["workflows"], queryFn: api.workflows });
+  const families = useQuery({
+    queryKey: ["workflow-families", "library", includeArchived],
+    queryFn: () => api.workflowFamilies(undefined, includeArchived),
+  });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selected = workflows.data?.find((workflow) => workflow.id === selectedId) ?? null; const selectedFamily = families.data?.find((family) => family.variants.some((variant) => variant.id === selectedId));
+  const [archiveFamily, setArchiveFamily] = useState<WorkflowFamily | null>(null);
   const [selectedRevisionId, setSelectedRevisionId] = useState<string | null>(null);
   const [newOpen, setNewOpen] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -94,7 +106,6 @@ export function WorkflowsView() {
   const [uiGraph, setUiGraph] = useState("{}");
   const [inputSchema, setInputSchema] = useState("{}");
   const [dependencies, setDependencies] = useState("{}");
-  const [trusted, setTrusted] = useState(false);
   const importInput = useRef<HTMLInputElement>(null);
   const editorAbort = useRef<AbortController | null>(null);
   const editorStarting = useRef(false);
@@ -123,7 +134,7 @@ export function WorkflowsView() {
   };
   const save = useMutation({
     mutationFn: async () => {
-      const revision = { engine_version: null, api_graph: JSON.parse(graph), ui_graph: JSON.parse(uiGraph), input_schema: JSON.parse(inputSchema), dependencies: JSON.parse(dependencies), trusted };
+      const revision = { engine_version: null, api_graph: JSON.parse(graph), ui_graph: JSON.parse(uiGraph), input_schema: JSON.parse(inputSchema), dependencies: JSON.parse(dependencies) };
       if (editing && selected) {
         // Two writes, and the second is the one that validates: a rejected
         // schema or dependency block used to leave a committed rename behind
@@ -282,8 +293,8 @@ export function WorkflowsView() {
     packageReview,
     closePackageReview,
   } = useWorkflowPackageImport(refresh);
-  const openCreate = () => { setEditing(false); setName("Custom image workflow"); setDescription(""); setOperation("text_to_image"); setGraph("{}"); setUiGraph("{}"); setInputSchema("{}"); setDependencies("{}"); setTrusted(false); setNewOpen(true); };
-  const openEdit = () => { if (!selected) return; const revision = selected.revisions.find((item) => item.id === selected.current_revision_id) ?? selected.revisions.at(-1); if (!revision) return; setEditing(true); setName(selected.name); setDescription(selected.description); setOperation(selected.operation); setGraph(JSON.stringify(revision.api_graph_json, null, 2)); setUiGraph(JSON.stringify(revision.ui_graph_json, null, 2)); setInputSchema(JSON.stringify(revision.input_schema_json, null, 2)); setDependencies(JSON.stringify(revision.dependencies_json, null, 2)); setTrusted(revision.trusted); setNewOpen(true); };
+  const openCreate = () => { setEditing(false); setName("Custom image workflow"); setDescription(""); setOperation("text_to_image"); setGraph("{}"); setUiGraph("{}"); setInputSchema("{}"); setDependencies("{}"); setNewOpen(true); };
+  const openEdit = () => { if (!selected) return; const revision = selected.revisions.find((item) => item.id === selected.current_revision_id) ?? selected.revisions.at(-1); if (!revision) return; setEditing(true); setName(selected.name); setDescription(selected.description); setOperation(selected.operation); setGraph(JSON.stringify(revision.api_graph_json, null, 2)); setUiGraph(JSON.stringify(revision.ui_graph_json, null, 2)); setInputSchema(JSON.stringify(revision.input_schema_json, null, 2)); setDependencies(JSON.stringify(revision.dependencies_json, null, 2)); setNewOpen(true); };
   // A verdict is about the workflow that was validated. Held globally by
   // the mutation it stayed on screen when the selection moved, reading as
   // the new workflow's result - the right answer under the wrong name.
@@ -361,10 +372,44 @@ export function WorkflowsView() {
           {editorNotice && <span role="status" className="muted">{editorNotice}</span>}
         </div>
       )}
+      {selectedFamily && <WorkflowFamilyVariants key={`variants-${selectedFamily.id}`} family={selectedFamily} />}
+      {selectedFamily && <WorkflowFamilyDependencies key={`dependencies-${selectedFamily.id}`} familyId={selectedFamily.id} />}
       {selectedFamily && <WorkflowFamilyPreferences family={selectedFamily} />}
+      {selectedFamily && <WorkflowFamilyUsage key={`usage-${selectedFamily.id}`} familyId={selectedFamily.id} />}
+      {selectedFamily && !selectedFamily.archived && (
+        <div className="storage-actions">
+          <button className="secondary" onClick={() => setArchiveFamily(selectedFamily)}>
+            Archive family
+          </button>
+        </div>
+      )}
+      {archiveFamily && (
+        <WorkflowFamilyArchive
+          family={archiveFamily}
+          onArchived={refresh}
+          onClose={() => setArchiveFamily(null)}
+        />
+      )}
       <div className="workflow-layout">
-        <div className="workflow-list">{workflows.data?.map((workflow) => <button key={workflow.id} className={selected?.id === workflow.id ? "selected" : ""} onClick={() => { setSelectedId(workflow.id); setSelectedRevisionId(workflow.current_revision_id); }}><span><strong>{workflow.name}</strong><small>{workflow.operation} · {workflow.revisions.length} revision{workflow.revisions.length === 1 ? "" : "s"}</small></span></button>)}</div>
-        <div className="workflow-detail">{selected && selectedRevision ? <><div className="detail-title"><div><small>{selected.operation}</small><h2>{selected.name}</h2><p>{selected.description}</p></div><div className="row-actions"><button className="secondary compact-button" onClick={openEdit}>New revision</button><button className="secondary compact-button" onClick={() => clone.mutate(selected.id)}>Duplicate</button><button className="secondary compact-button" onClick={() => exportBundle.mutate(selected.id)}>Export</button><button className="secondary compact-button" onClick={() => validate.mutate(selected.id)}>Validate</button></div></div><div className="workflow-revision-bar"><label>Revision<select value={selectedRevision.id} onChange={(event) => setSelectedRevisionId(event.target.value)}>{[...selected.revisions].sort((a, b) => b.version - a.version).map((revision) => <option key={revision.id} value={revision.id}>v{revision.version}{revision.id === selected.current_revision_id ? " · current" : ""}</option>)}</select></label>{selectedRevision.id !== selected.current_revision_id && <button className="secondary compact-button" onClick={() => restore.mutate({ id: selected.id, revisionId: selectedRevision.id })}>Restore as new revision</button>}<span className={`badge ${selectedRevision.trusted ? "likely" : "advanced_import"}`}>{selectedRevision.trusted ? "Trusted" : "Untrusted"}</span></div><section className="workflow-input-section"><h3>Declared controls</h3><WorkflowControls schema={selectedRevision.input_schema_json} /></section><details open><summary>Executable graph</summary><pre>{JSON.stringify(selectedRevision.api_graph_json, null, 2)}</pre></details><details><summary>Dependencies</summary><pre>{JSON.stringify(selectedRevision.dependencies_json, null, 2)}</pre></details>{currentRevision && currentRevision.id !== selectedRevision.id && <details><summary>Compare with current revision</summary><div className="workflow-compare"><pre>{JSON.stringify(selectedRevision.api_graph_json, null, 2)}</pre><pre>{JSON.stringify(currentRevision.api_graph_json, null, 2)}</pre></div></details>}{verdict && <div className={`callout ${verdict.valid ? "success" : "error"}`} role={verdict.valid ? "status" : "alert"}>{verdict.valid ? "Workflow and declared dependencies are valid for the active media engine." : verdict.errors.join("\n")}{verdict.warnings.map((warning) => `\nWarning: ${warning}`)}</div>}</> : <EmptyState icon={<WorkflowIcon />} title="Select a workflow" body="Review its revision, inputs, dependencies, and validation." />}</div>
+        <WorkflowFamilyList
+          families={families.data ?? []}
+          workflows={workflows.data ?? []}
+          selectedId={selectedId}
+          onSelect={(workflow) => {
+            setSelectedId(workflow.id);
+            setSelectedRevisionId(workflow.current_revision_id);
+          }}
+          includeArchived={includeArchived}
+          onIncludeArchivedChange={setIncludeArchived}
+          loading={families.isPending || workflows.isPending}
+        />
+        <div className="workflow-detail">{selected && selectedRevision ? <><div className="detail-title"><div><small>{selected.operation}</small><h2>{selected.name}</h2><p>{selected.description}</p></div><div className="row-actions"><button className="secondary compact-button" onClick={openEdit}>New revision</button><button className="secondary compact-button" onClick={() => clone.mutate(selected.id)}>Duplicate</button><button className="secondary compact-button" onClick={() => exportBundle.mutate(selected.id)}>Export</button><button className="secondary compact-button" onClick={() => validate.mutate(selected.id)}>Validate</button></div></div><div className="workflow-revision-bar"><label>Revision<select value={selectedRevision.id} onChange={(event) => setSelectedRevisionId(event.target.value)}>{[...selected.revisions].sort((a, b) => b.version - a.version).map((revision) => <option key={revision.id} value={revision.id}>v{revision.version}{revision.id === selected.current_revision_id ? " · current" : ""}</option>)}</select></label>{selectedRevision.id !== selected.current_revision_id && <button className="secondary compact-button" onClick={() => restore.mutate({ id: selected.id, revisionId: selectedRevision.id })}>Restore as new revision</button>}<span className={`badge ${selectedRevision.trusted ? "likely" : "advanced_import"}`}>{selectedRevision.trusted ? "Trusted" : "Untrusted"}</span></div>
+          <WorkflowRevisionReviewPanel
+            key={`${selected.id}:${selectedRevision.id}`}
+            workflowId={selected.id}
+            revisionId={selectedRevision.id}
+          />
+          <section className="workflow-input-section"><h3>Declared controls</h3><WorkflowControls schema={selectedRevision.input_schema_json} /></section><details open><summary>Executable graph</summary><pre>{JSON.stringify(selectedRevision.api_graph_json, null, 2)}</pre></details><details><summary>Dependencies</summary><pre>{JSON.stringify(selectedRevision.dependencies_json, null, 2)}</pre></details>{currentRevision && currentRevision.id !== selectedRevision.id && <details><summary>Compare with current revision</summary><div className="workflow-compare"><pre>{JSON.stringify(selectedRevision.api_graph_json, null, 2)}</pre><pre>{JSON.stringify(currentRevision.api_graph_json, null, 2)}</pre></div></details>}{verdict && <div className={`callout ${verdict.valid ? "success" : "error"}`} role={verdict.valid ? "status" : "alert"}>{verdict.valid ? "Workflow and declared dependencies are valid for the active media engine." : verdict.errors.join("\n")}{verdict.warnings.map((warning) => `\nWarning: ${warning}`)}</div>}</> : <EmptyState icon={<WorkflowIcon />} title="Select a workflow" body="Review its revision, inputs, dependencies, and validation." />}</div>
       </div>
       <RegistryInstallsPanel />
       <CustomNodesPanel />
@@ -383,7 +428,6 @@ export function WorkflowsView() {
           <label>UI workflow JSON<textarea rows={5} value={uiGraph} onChange={(event) => setUiGraph(event.target.value)} /></label>
           <label>Declared input schema JSON<textarea rows={6} value={inputSchema} onChange={(event) => setInputSchema(event.target.value)} /></label>
           <label>Dependencies JSON<textarea rows={5} value={dependencies} onChange={(event) => setDependencies(event.target.value)} /></label>
-          <label className="toggle-row"><span><strong>Trust this workflow</strong><small>Only enable after reviewing every node and dependency.</small></span><input type="checkbox" checked={trusted} onChange={(event) => setTrusted(event.target.checked)} /></label>
           {save.error && <ErrorCallout message={save.error.message} />}
           <footer><button className="secondary" onClick={() => setNewOpen(false)}>Cancel</button><button className="primary" disabled={!name.trim() || save.isPending} onClick={() => save.mutate()}>{save.isPending ? "Saving…" : editing ? "Create revision" : "Save workflow"}</button></footer>
         </AccessibleDialog>

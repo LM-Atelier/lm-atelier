@@ -34,11 +34,14 @@ describe("estimateImageEditStrength", () => {
 });
 
 describe("image edit strength mode", () => {
+  const whole = { minimum: 0, maximum: 1 };
+
   it("keeps profile and default-preset numeric defaults on Auto", () => {
     expect(resolveImageEditStrengthMode(
       "denoise",
       [{ denoise: 0.41 }, { denoise: 0.55 }, undefined, {}, undefined, {}],
       [false, false, true, true, true, true],
+      whole,
     )).toBe("auto");
   });
 
@@ -48,12 +51,46 @@ describe("image edit strength mode", () => {
       "denoise",
       [{ _image_edit_strength_mode: "auto" }, {}, undefined, { denoise: 0.62 }, undefined, {}],
       numericManualLayers,
+      whole,
     )).toBe("manual");
     expect(resolveImageEditStrengthMode(
       "denoise",
       [{ denoise: 0.41 }, {}, undefined, { denoise: 0.62 }, undefined, { _image_edit_strength_mode: "auto" }],
       numericManualLayers,
+      whole,
     )).toBe("auto");
+  });
+
+  it("does not call a stored strength manual when the workflow cannot accept it", () => {
+    // Measured against the server for exactly these layers: with 0.7 stored it
+    // resolves manual, and with 5 stored it ignores the value and decides
+    // automatically. The panel said manual for both, so it offered a strength
+    // control holding a number the run was never going to use.
+    const numericManualLayers = [false, false, true, true, true, true];
+
+    expect(resolveImageEditStrengthMode(
+      "denoise",
+      [undefined, undefined, undefined, undefined, { denoise: 0.7 }, undefined],
+      numericManualLayers,
+      whole,
+    )).toBe("manual");
+
+    expect(resolveImageEditStrengthMode(
+      "denoise",
+      [undefined, undefined, undefined, undefined, { denoise: 5 }, undefined],
+      numericManualLayers,
+      whole,
+    )).toBe("auto");
+
+    // An explicit choice still wins, in range or not: the server keeps that too,
+    // because the reader said so rather than a stale number implying it.
+    expect(resolveImageEditStrengthMode(
+      "denoise",
+      [undefined, undefined, undefined, undefined,
+       { denoise: 5, _image_edit_strength_mode: "manual" }, undefined],
+      numericManualLayers,
+      whole,
+    )).toBe("manual");
   });
 });
 

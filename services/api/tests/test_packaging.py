@@ -917,10 +917,218 @@ def test_ci_plan_is_fail_closed_and_audits_dependency_changes() -> None:
     assert requires_windows(["packaging/windows/LMAtelier.iss"])
     assert requires_windows(["packaging/LMAtelier.spec"])
     assert requires_windows(["scripts/verify.ps1"])
+    assert requires_windows(["scripts/machine_lock.py"])
+    assert requires_windows(["scripts/machine-lease.ps1"])
+    assert requires_windows(["scripts/held-pytest-scratch.ps1"])
+    assert requires_windows(["scripts/verify.sh"])
+    assert requires_windows([r".\Scripts\new-helper.py"])
     assert requires_windows([".github/workflows/ci.yml"])
     assert not requires_windows(["apps/web/src/App.tsx"])
     assert not requires_windows(["packaging/linux/frozen-uninstall.sh"])
     assert not requires_windows(["docs/ARCHITECTURE.md"])
+
+
+def _tracked_documents(root: Path) -> set[str]:
+    """Every tracked document under `root`, one entry per file.
+
+    `git ls-files` writes one display line per path and quotes anything
+    unusual, so its output cannot be split on whitespace: a perfectly ordinary
+    `docs/Two words.md` becomes two paths, neither of which is a document, and
+    a check built on that reports a correctly classified file as unclassified.
+    `-z` writes each name's bytes followed by a NUL and quotes nothing, so the
+    record boundary is a byte that cannot occur inside a filename.
+
+    The bytes are decoded rather than read through `text=True` so that a name
+    outside UTF-8 round-trips instead of failing the run.
+    """
+
+    records = subprocess.run(
+        ["git", "ls-files", "-z", "*.md"],
+        check=True,
+        capture_output=True,
+        cwd=root,
+    ).stdout
+    return {path for path in records.decode("utf-8", "surrogateescape").split("\0") if path}
+
+
+def test_the_document_inventory_keeps_a_filename_with_spaces_whole(
+    tmp_path: Path,
+) -> None:
+    """A classified document whose name contains a space stays one document.
+
+    Splitting `git ls-files` output on whitespace turns `docs/Two words.md`
+    into `docs/Two` and `words.md`. Neither is tracked, so the totality check
+    reports two unclassified documents and fails the whole gate on a file that
+    was classified correctly. Nothing in this repository is named that way
+    today, which is exactly why the guard has to be a test rather than a habit.
+    """
+
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "Two words.md").write_text("spaced", encoding="utf-8")
+    (tmp_path / "README.md").write_text("plain", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], check=True, cwd=tmp_path)
+
+    assert _tracked_documents(tmp_path) == {"docs/Two words.md", "README.md"}
+
+
+def test_an_unclassified_document_is_not_lightweight() -> None:
+    """A document nobody has classified takes the full plan, not the empty one.
+
+    The documentation plan runs repository hygiene and a whitespace check and no
+    suite at all, so classifying a document wrongly does not weaken the run - it
+    removes it. Suffix alone cannot tell inert prose from a page a test reads,
+    which is why the answer is membership and why the unknown case goes up.
+    """
+
+    namespace = runpy.run_path(str(ROOT / "scripts/ci-plan.py"))
+    classify = namespace["classify_develop_changes"]
+    lightweight = namespace["is_lightweight_documentation"]
+
+    assert classify(["docs/UNCLASSIFIED-DOCUMENT.md"]) == ("full", False)
+    assert not lightweight("docs/UNCLASSIFIED-DOCUMENT.md")
+    # One unclassified document among inert ones still lifts the whole change.
+    assert classify(["docs/ARCHITECTURE.md", "docs/UNCLASSIFIED-DOCUMENT.md"]) == (
+        "full",
+        False,
+    )
+    # A document a test reads stays out of the lightweight set.
+    for contract in namespace["CONTRACT_DOCUMENTS"]:
+        assert not lightweight(contract), contract
+
+
+def test_every_tracked_document_is_classified() -> None:
+    """Adding a document forces the decision instead of defaulting to inert.
+
+    Without this the fail-closed default above is only as good as whoever
+    remembers it: a new document simply takes the full plan forever and nobody
+    learns that it was never classified. This makes the omission itself the
+    failure, at the moment the document is added.
+    """
+
+    namespace = runpy.run_path(str(ROOT / "scripts/ci-plan.py"))
+    normalize = namespace["normalized_path"]
+    contract = set(namespace["CONTRACT_DOCUMENTS"])
+    inert = set(namespace["INERT_DOCUMENTS"])
+
+    assert not contract & inert, contract & inert
+
+    tracked = {normalize(path) for path in _tracked_documents(ROOT)}
+    assert tracked, "no tracked documents were found"
+
+    assert tracked - (contract | inert) == set(), (
+        "these tracked documents are classified in neither set; add each to "
+        "CONTRACT_DOCUMENTS if any test reads it, otherwise to INERT_DOCUMENTS"
+    )
+    assert (contract | inert) - tracked == set(), (
+        "these entries name documents that are no longer tracked"
+    )
+
+
+# The two audits the scheduled job runs, and the manifests each one reads:
+# `npm audit` reads package.json and its lockfile, and audit-dependencies.py
+# runs pip-audit over the Python project and its lockfile. A file with one of
+# these names is a dependency input by definition, wherever it sits.
+DEPENDENCY_MANIFEST_NAMES = frozenset(
+    {"package.json", "package-lock.json", "pyproject.toml", "uv.lock"}
+)
+
+
+def _tracked_paths(root: Path) -> set[str]:
+    """Every path in `root`'s index, exactly as git spells it.
+
+    Records are NUL-separated and decoded rather than read through `text=True`
+    for the same reasons the document inventory above gives: a path may contain
+    a space, and a name outside UTF-8 must round-trip rather than fail the run.
+    """
+
+    records = subprocess.run(
+        ["git", "ls-files", "-z"],
+        check=True,
+        capture_output=True,
+        cwd=root,
+    ).stdout
+    decoded = records.decode("utf-8", "surrogateescape")
+    return {path for path in decoded.split("\0") if path}
+
+
+def _tracked_dependency_manifests(root: Path) -> set[str]:
+    """Every tracked file under `root` whose name is a dependency manifest.
+
+    Filtered on the final path segment rather than matched with a glob, because
+    `*package.json` also matches a file named `old-package.json`, which is not
+    one.
+    """
+
+    return {
+        path
+        for path in _tracked_paths(root)
+        if path.rsplit("/", 1)[-1] in DEPENDENCY_MANIFEST_NAMES
+    }
+
+
+def test_every_tracked_dependency_manifest_asks_for_the_audit() -> None:
+    """A manifest added later must not land with the audit quietly skipped.
+
+    `DEPENDENCY_FILES` is a closed list of five paths, and a change is audited
+    only if it touches one of them. Add a second web workspace, or a second
+    Python project, and its manifest is not in the list: the dependency change
+    lands with the audit reported as skipped rather than failed, which reads
+    exactly like a change that had no dependencies in it. The failure has to be
+    the omission itself, at the moment the manifest is added, because by the
+    time it matters the evidence is a green run that checked nothing.
+    """
+
+    namespace = runpy.run_path(str(ROOT / "scripts/ci-plan.py"))
+    normalize = namespace["normalized_path"]
+    audited = {normalize(path) for path in namespace["DEPENDENCY_FILES"]}
+
+    tracked = {normalize(path) for path in _tracked_dependency_manifests(ROOT)}
+    assert tracked, "no tracked dependency manifests were found"
+
+    assert tracked - audited == set(), (
+        "these tracked dependency manifests are not in DEPENDENCY_FILES, so "
+        "changing one skips the audit instead of running it"
+    )
+    assert audited - tracked == set(), (
+        "these entries name dependency manifests that are no longer tracked"
+    )
+
+
+# A file with one of these suffixes only ever runs on Windows: PowerShell and
+# batch scripts, the Inno Setup installer definition, and the PyInstaller spec
+# the Windows build reads. Whether an explicit path or a directory prefix is
+# what reaches one does not matter; being reached does.
+WINDOWS_ONLY_SUFFIXES = (".ps1", ".psm1", ".bat", ".cmd", ".iss", ".spec")
+
+
+def test_every_windows_only_file_asks_for_windows_verification() -> None:
+    """A Windows script somewhere new must not land with Windows skipped.
+
+    `requires_windows_verification` answers from an explicit path set plus three
+    directory prefixes - scripts/, packaging/windows/ and services/api/. Every
+    Windows-only file lives under one of them today. Put one anywhere else - a
+    tools/ or ops/ directory, a second packaging tree - and the answer is no:
+    the change lands with Windows compatibility reported as skipped, which on
+    the run page is indistinguishable from a change that did not need it.
+
+    This does not claim the prefixes are a closed list, which they are not. It
+    claims the coverage they exist to provide, which is checkable.
+    """
+
+    namespace = runpy.run_path(str(ROOT / "scripts/ci-plan.py"))
+    requires_windows = namespace["requires_windows_verification"]
+
+    windows_only = sorted(
+        path for path in _tracked_paths(ROOT) if path.lower().endswith(WINDOWS_ONLY_SUFFIXES)
+    )
+    assert windows_only, "no tracked Windows-only files were found"
+
+    assert [path for path in windows_only if not requires_windows([path])] == [], (
+        "these tracked Windows-only files are not reached by WINDOWS_PATHS or "
+        "WINDOWS_PATH_PREFIXES, so changing one skips Windows verification "
+        "instead of running it"
+    )
 
 
 def test_ci_plan_rejects_malformed_event_shas() -> None:
@@ -964,6 +1172,143 @@ def test_ci_plan_requires_exact_protected_develop_promotion(monkeypatch) -> None
     monkeypatch.setitem(validate.__globals__, "git", divergent_git)
     with pytest.raises(ValueError, match="not present in the develop lineage"):
         validate(base_ref="main", head_ref="develop", base_sha=base, head_sha=head)
+
+
+@pytest.mark.parametrize(
+    ("paths", "mode", "audit", "windows"),
+    [
+        (["docs/ARCHITECTURE.md"], "documentation", "false", "false"),
+        (["apps/web/src/App.tsx"], "full", "false", "false"),
+        (["scripts/machine_lock.py"], "full", "false", "true"),
+        (["scripts/machine-lease.ps1"], "full", "false", "true"),
+        (["scripts/held-pytest-scratch.ps1"], "full", "false", "true"),
+        (["scripts/verify.sh"], "full", "false", "true"),
+        (["scripts/new-helper.py"], "full", "false", "true"),
+        # scripts/README.md is not a tracked document. It stands for one nobody
+        # has classified, so it lifts to the full plan rather than skipping the
+        # suite - and because it sits under a Windows-sensitive prefix, that
+        # plan wants Windows too. A real document under scripts/ would be
+        # classified in ci-plan.py and would not reach here.
+        (["scripts/README.md"], "full", "false", "true"),
+        (["services/api/local_lm/api.py"], "full", "false", "true"),
+        (["services/api/uv.lock", "docs/ARCHITECTURE.md"], "full", "true", "true"),
+    ],
+    ids=[
+        "documentation",
+        "web",
+        "machine-lock",
+        "machine-lease",
+        "pytest-scratch",
+        "shell-script",
+        "new-script",
+        "unclassified-document-under-a-windows-prefix",
+        "api",
+        "combined-dependency",
+    ],
+)
+def test_ci_plan_verifies_generated_merge_group_changes(
+    tmp_path: Path, monkeypatch, paths: list[str], mode: str, audit: str, windows: str
+) -> None:
+    """Plan the combined queue diff, whose event has no pull-request fields."""
+    namespace = runpy.run_path(str(ROOT / "scripts/ci-plan.py"))
+    main = namespace["main"]
+    base, head = "a" * 40, "b" * 40
+    output = tmp_path / "outputs"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "ci-plan.py",
+            "--event",
+            "merge_group",
+            "--base-ref",
+            "refs/heads/develop",
+            "--head-ref",
+            "refs/heads/gh-readonly-queue/develop/pr-1-" + head,
+            "--base-sha",
+            base,
+            "--head-sha",
+            head,
+            "--github-output",
+            str(output),
+        ],
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def event_git(*arguments: str) -> str:
+        calls.append(arguments)
+        queries = {
+            ("rev-parse", "--verify", f"{base}^{{commit}}"): base,
+            ("rev-parse", "--verify", f"{head}^{{commit}}"): head,
+            ("rev-parse", "HEAD"): head,
+            ("merge-base", base, head): base,
+            ("diff", "--name-only", "--diff-filter=ACDMRTUXB", base, head): "\n".join(paths),
+        }
+        return queries[arguments]
+
+    monkeypatch.setitem(main.__globals__, "git", event_git)
+    main()
+    assert output.read_text() == f"mode={mode}\ndependency_audit={audit}\nwindows={windows}\n"
+    assert ("rev-parse", "HEAD") in calls
+    assert ("merge-base", base, head) in calls
+
+
+@pytest.mark.parametrize(
+    "defect", ["main-target", "pr-head-ref", "checkout", "unrelated-base", "missing-sha"]
+)
+def test_ci_plan_refuses_unbound_merge_groups(monkeypatch, defect: str) -> None:
+    namespace = runpy.run_path(str(ROOT / "scripts/ci-plan.py"))
+    validate = namespace["validate_merge_group"]
+    base, head = "a" * 40, "b" * 40
+    inputs = {
+        "base_ref": "refs/heads/develop",
+        "head_ref": "refs/heads/gh-readonly-queue/develop/pr-1-" + head,
+        "base_sha": base,
+        "head_sha": head,
+    }
+    if defect == "main-target":
+        inputs["base_ref"] = "refs/heads/main"
+    elif defect == "pr-head-ref":
+        inputs["head_ref"] = "refs/pull/1/head"
+    elif defect == "missing-sha":
+        inputs["head_sha"] = ""
+
+    def event_git(*arguments: str) -> str:
+        if arguments == ("rev-parse", "HEAD"):
+            return "c" * 40 if defect == "checkout" else head
+        if arguments == ("merge-base", base, head):
+            return "c" * 40 if defect == "unrelated-base" else base
+        return arguments[-1].split("^")[0]
+
+    monkeypatch.setitem(validate.__globals__, "git", event_git)
+    with pytest.raises(ValueError):
+        validate(**inputs)
+
+
+@pytest.mark.parametrize("pr_fields", [{}, {"DRAFT": "", "BASE_CHANGED": "false"}])
+def test_merge_gate_accepts_verified_merge_group_without_pull_request_fields(pr_fields) -> None:
+    namespace = runpy.run_path(str(ROOT / "scripts/ci-merge-gate.py"))
+    environment = {
+        "EVENT_NAME": "merge_group",
+        "REPOSITORY_PRIVATE": "false",
+        "ACTION": "checks_requested",
+        "BASE_REF": "refs/heads/develop",
+        "BASE_SHA": "a" * 40,
+        "HEAD_REF": "refs/heads/gh-readonly-queue/develop/pr-1-" + "b" * 40,
+        "HEAD_SHA": "b" * 40,
+        "RUN_SHA": "b" * 40,
+        "PLAN": "success",
+        "UBUNTU": "success",
+        "WINDOWS": "skipped",
+        "WINDOWS_REQUIRED": "false",
+        **pr_fields,
+    }
+    log: list[str] = []
+    assert namespace["decide"](environment, log) == 0, log
+    for result in ("skipped", "cancelled", "failure"):
+        for job in ("PLAN", "UBUNTU", "WINDOWS"):
+            refused = {**environment, job: result, "WINDOWS_REQUIRED": "true"}
+            assert namespace["decide"](refused, []) == 1, (job, result)
 
 
 def test_ci_workflow_retains_required_check_for_every_pr_scope() -> None:
@@ -1085,7 +1430,9 @@ def test_each_production_shape_reaches_the_branch_that_names_it(
     namespace = runpy.run_path(str(ROOT / "scripts/ci-merge-gate.py"))
     log: list[str] = []
 
-    status = namespace["decide"]({"HEAD_SHA": "0" * 40, **environment}, log)
+    status = namespace["decide"](
+        {"EVENT_NAME": "pull_request", "HEAD_SHA": "0" * 40, **environment}, log
+    )
 
     assert status == 1, label
     assert any(expected_reason in line for line in log), log
@@ -1839,6 +2186,118 @@ def _content_mutations() -> list[tuple[str, str, str]]:
     ]
 
 
+def _queue_binding_mutations() -> list[tuple[str, object]]:
+    def job(name, key, apply):
+        return name, lambda content, workflow: apply(workflow["jobs"][key])
+
+    def checkout_ref(ref):
+        def apply(candidate):
+            for step in candidate["steps"]:
+                if str(step.get("uses", "")).startswith("actions/checkout@"):
+                    step["with"]["ref"] = ref
+
+        return apply
+
+    mutations = [
+        (
+            "missing merge group trigger",
+            lambda content, workflow: _triggers(workflow).pop("merge_group", None),
+        ),
+        (
+            "unexpected merge group action",
+            lambda content, workflow: _triggers(workflow).update(
+                {"merge_group": {"types": ["checks_requested", "destroyed"]}}
+            ),
+        ),
+        job(
+            "planner PR-only base SHA",
+            "verification-plan",
+            lambda j: j["steps"][1]["env"].update(
+                {"BASE_SHA": "${{ github.event.pull_request.base.sha }}"}
+            ),
+        ),
+        job(
+            "planner PR-only head SHA",
+            "verification-plan",
+            lambda j: j["steps"][1]["env"].update(
+                {"HEAD_SHA": "${{ github.event.pull_request.head.sha }}"}
+            ),
+        ),
+        job(
+            "planner PR-only base ref",
+            "verification-plan",
+            lambda j: j["steps"][1]["env"].update({"BASE_REF": "${{ github.base_ref }}"}),
+        ),
+        job(
+            "planner loses Windows output",
+            "verification-plan",
+            lambda j: j["outputs"].update({"windows": "false"}),
+        ),
+        job(
+            "Ubuntu accepts skipped planner",
+            "compatibility",
+            lambda j: j["steps"][0].update({"run": "exit 0"}),
+        ),
+        job(
+            "documentation checks PR head",
+            "compatibility",
+            lambda j: next(
+                step
+                for step in j["steps"]
+                if step.get("name") == "Validate documentation-only change"
+            )["env"].update({"HEAD_SHA": "${{ github.event.pull_request.head.sha }}"}),
+        ),
+    ]
+    for key in ("verification-plan", "compatibility", "windows-compatibility"):
+        mutations.extend(
+            [
+                job(
+                    f"{key} checks PR head",
+                    key,
+                    checkout_ref("${{ github.event.pull_request.head.sha }}"),
+                ),
+                job(
+                    f"{key} skipped for merge group",
+                    key,
+                    lambda j: j.update({"if": "github.event_name == 'pull_request'"}),
+                ),
+                job(
+                    f"{key} tolerates failures",
+                    key,
+                    lambda j: j.update({"continue-on-error": True}),
+                ),
+            ]
+        )
+    return mutations
+
+
+@pytest.mark.parametrize("job_key", ["verification-plan", "compatibility", "windows-compatibility"])
+def test_workflow_policy_rejects_pull_request_merge_ref(job_key: str) -> None:
+    namespace = _workflow_namespace()
+    path, content, workflow = _shipped_ci()
+    for step in workflow["jobs"][job_key]["steps"]:
+        if str(step.get("uses", "")).startswith("actions/checkout@"):
+            step["with"]["ref"] = (
+                "${{ github.event_name == 'merge_group' && "
+                "github.event.merge_group.head_sha || github.sha }}"
+            )
+    assert namespace["validate_workflow_document"](path, content, workflow)
+
+
+def test_workflow_policy_rejects_merge_group_binding_drift() -> None:
+    namespace = _workflow_namespace()
+    validate = namespace["validate_workflow_document"]
+    path, content, shipped = _shipped_ci()
+    assert validate(path, content, shipped) == []
+    accepted = []
+    for label, mutate in _queue_binding_mutations():
+        workflow = yaml.safe_load(content)
+        mutate(content, workflow)
+        if not validate(path, content, workflow):
+            accepted.append(label)
+    assert not accepted, accepted
+
+
 def _all_workflow_mutations() -> list[tuple[str, object]]:
     return _job_mutations() + _trigger_mutations() + _policy_mutations()
 
@@ -1924,6 +2383,39 @@ def test_exact_comparator_refuses_every_equal_but_differently_typed_value() -> N
     assert exactly_equal([1, "a", True], [1, "a", True])
 
 
+@pytest.mark.parametrize("surface", ["verification", "merge-gate"])
+def test_invalid_workflow_does_not_execute_the_merge_decision(monkeypatch, surface: str) -> None:
+    namespace = _workflow_namespace()
+    path, content, workflow = _shipped_ci()
+    if surface == "verification":
+        workflow["jobs"]["windows-compatibility"]["continue-on-error"] = True
+    else:
+        workflow["jobs"]["merge-gate"]["continue-on-error"] = True
+
+    def unexpected_execution(*args, **kwargs):
+        raise AssertionError("An invalid workflow executed the merge decision")
+
+    monkeypatch.setattr(namespace["subprocess"], "run", unexpected_execution)
+    assert namespace["validate_workflow_document"](path, content, workflow)
+
+
+def test_valid_workflow_still_executes_every_merge_decision_case(monkeypatch) -> None:
+    namespace = _workflow_namespace()
+    path, content, workflow = _shipped_ci()
+    original_run = namespace["subprocess"].run
+    executed = []
+
+    def record_execution(command, **kwargs):
+        executed.append(command)
+        return original_run(command, **kwargs)
+
+    monkeypatch.setattr(namespace["subprocess"], "run", record_execution)
+    assert namespace["validate_workflow_document"](path, content, workflow) == []
+    assert len(executed) == len(namespace["MERGE_GATE_MATRIX"])
+    expected_command = [sys.executable, str(Path("scripts") / "ci-merge-gate.py")]
+    assert all(command == expected_command for command in executed)
+
+
 def test_workflow_validator_wiring_is_intact() -> None:
     """The coordinator must actually call each rule, and main must call it.
 
@@ -1950,6 +2442,7 @@ def test_workflow_validator_wiring_is_intact() -> None:
             "validate_untrusted_triggers",
             "validate_pull_request_triggers",
             "validate_merge_gate",
+            "validate_verification_bindings",
         )
     )
     # 4. The coordinator wires in every rule.
@@ -1964,6 +2457,7 @@ def test_workflow_validator_wiring_is_intact() -> None:
         "validate_untrusted_triggers",
         "validate_pull_request_triggers",
         "validate_merge_gate",
+        "validate_verification_bindings",
     ):
         assert f"errors.extend({rule}(" in coordinator, rule
     # 5. The merge gate wrapper reaches both of its halves.

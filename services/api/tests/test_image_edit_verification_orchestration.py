@@ -33,6 +33,7 @@ from local_lm.models import (
 from local_lm.orchestrator import ConversationOrchestrator
 from local_lm.scheduler import JobClaim
 from local_lm.schemas import WorkerStatus
+from local_lm.vision import VisionInputError
 
 
 def _orchestrator(*, session_factory=None) -> ConversationOrchestrator:  # type: ignore[no-untyped-def]
@@ -717,6 +718,7 @@ async def test_automatic_retry_reuses_source_turn_as_a_response_revision() -> No
     assert request.input_artifact_ids == ["artifact-original"]
     assert request.settings == {"steps": 8, "denoise": 0.62}
     assert {k: v for k, v in call.kwargs.items() if k != "before_commit"} == {
+        "resolve_source": None,
         "use_explicit_parent": True,
         "replacement_message_id": source_assistant.id,
         "source_action": "image_edit_verification_retry",
@@ -732,6 +734,7 @@ async def test_automatic_retry_reuses_source_turn_as_a_response_revision() -> No
     assert retry_run.provenance_json["image_edit_verification_retry"] == {
         "version": "image-edit-verification-v1",
         "source_run_id": source_run.id,
+        "source_message_id": source_user.id,
         "source_job_id": payload.source_job_id,
         "source_verification_job_id": image_edit_verification_job_id(source_run.id),
         "attempt": 1,
@@ -745,8 +748,8 @@ def _verification_world(*, lose_at: str):  # type: ignore[no-untyped-def]
     """A verification job with a complete source, a verifying chat, both
     artifacts and a verified vision profile, over a fake session whose
     ownership probe stops answering for the test claim once ``lose_at`` is
-    reached: "preparation" or "assessment". Returns (job, orchestrator,
-    world)."""
+    reached: "preparation", "stop", "workers", "assessment" or "restore".
+    Returns (job, orchestrator, world)."""
 
     job = Job(
         id="job-verify-owned",
@@ -773,6 +776,7 @@ def _verification_world(*, lose_at: str):  # type: ignore[no-untyped-def]
         status=RunStatus.COMPLETE.value,
         chat_id="chat-v",
         standalone_prompt="make the mug green",
+        provenance_json={},
     )
     chat = SimpleNamespace(id="chat-v", vision_settings_json={"verify_image_edits": True})
     source = SimpleNamespace(id="artifact-source")
@@ -832,10 +836,26 @@ def _verification_world(*, lose_at: str):  # type: ignore[no-untyped-def]
         media=SimpleNamespace(cancel=AsyncMock()),
     )
 
-    async def load_chat(*_args: object, **_kwargs: object) -> None:
+    loads: list[object] = []
+
+    async def load_chat(profile_argument: object = None, *_args: object, **_kwargs: object) -> None:
+        loads.append(profile_argument)
         if lose_at == "workers":
             world["owned"] = False
             world["lost_at"] = "workers"
+        # "restore" is the teardown's own load, which is the second one: the
+        # verification loads its vision profile first and puts the previous
+        # chat profile back afterwards.
+        if lose_at == "restore" and len(loads) == 2:
+            world["owned"] = False
+            world["lost_at"] = "restore"
+
+    async def stop_worker(*_args: object, **_kwargs: object) -> None:
+        if lose_at == "stop":
+            world["owned"] = False
+            world["lost_at"] = "stop"
+
+    world["loads"] = loads
 
     orchestrator.processes = SimpleNamespace(
         statuses=Mock(
@@ -846,7 +866,7 @@ def _verification_world(*, lose_at: str):  # type: ignore[no-untyped-def]
                 WorkerStatus(name="media", state="ready", managed=True, running=True),
             ]
         ),
-        stop=AsyncMock(),
+        stop=AsyncMock(side_effect=stop_worker),
         load_chat=AsyncMock(side_effect=load_chat),
     )
     orchestrator._profile_has_verified_vision = Mock(return_value=True)  # type: ignore[method-assign]
@@ -887,6 +907,30 @@ def _verification_world(*, lose_at: str):  # type: ignore[no-untyped-def]
     orchestrator.engines.chat.stream = stream  # type: ignore[attr-defined]
     world["consumed"] = consumed
     return job, orchestrator, world
+
+
+async def test_a_verification_that_never_loaded_chat_restores_nothing() -> None:
+    """A verification that returns before loading chat must not put chat back.
+
+    The profile to restore is chosen from a reading taken at entry, long before
+    the load, so it says who WOULD be put back rather than that anything was
+    displaced. When the vision preparation refuses the images the execution
+    returns early, having moved nothing - and the teardown would still stop the
+    chat worker and cold-start it with the profile it is already running.
+    """
+    job, orchestrator, world = _verification_world(lose_at="never")
+
+    async def refuse(*_args: object, **_kwargs: object) -> object:
+        raise VisionInputError("the source and result could not be read together")
+
+    orchestrator.vision.prepare = AsyncMock(side_effect=refuse)  # type: ignore[attr-defined]
+
+    await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
+
+    assert world["loads"] == [], (
+        "a verification that moved no worker cold-reloaded the running chat profile"
+    )
+    orchestrator.processes.stop.assert_not_awaited()
 
 
 async def test_a_verification_that_loses_its_claim_after_preparation_moves_no_worker() -> None:
@@ -964,3 +1008,101 @@ async def test_a_verification_that_loses_its_claim_after_its_workers_streams_not
     assert world["consumed"] == []
     orchestrator._schedule_media_restart.assert_not_called()
     orchestrator._persist_image_edit_verification.assert_not_called()
+
+
+async def test_a_verification_that_loses_its_claim_stopping_media_loads_no_chat() -> None:
+    """The claim is lost inside the awaited media stop.
+
+    Stopping media and loading chat are two effects with an await between
+    them. A successor that claims the row during that await is already using
+    the global chat worker, so the losing execution must not load over it.
+    The media worker it stopped is the successor's to bring back, so this
+    execution schedules no restart either.
+    """
+
+    from local_lm.orchestrator import ClaimLost
+
+    job, orchestrator, world = _verification_world(lose_at="stop")
+
+    with pytest.raises(ClaimLost, match="after stopping media"):
+        await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
+
+    orchestrator.processes.stop.assert_awaited_once()
+    orchestrator.processes.load_chat.assert_not_awaited()
+    assert world["lost_at"] == "stop"
+    assert world["consumed"] == []
+    orchestrator._schedule_media_restart.assert_not_called()
+    orchestrator._release_deferred_media_restart.assert_not_called()
+    orchestrator._persist_image_edit_verification.assert_not_called()
+    assert job.status == JobStatus.RUNNING.value, "a lost claim settled the row"
+
+
+async def test_a_verification_that_loses_its_claim_restoring_chat_schedules_no_restart() -> None:
+    """The claim is lost inside the awaited teardown restore.
+
+    The teardown reads ownership, then awaits the chat restore, then decides
+    the media restart. A single reading taken before that await decides the
+    restart on what was true beforehand; the restart must be bound to
+    ownership at the moment it is scheduled, not to a stale answer.
+    """
+
+    job, orchestrator, world = _verification_world(lose_at="restore")
+
+    await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
+
+    assert world["lost_at"] == "restore"
+    assert len(world["loads"]) == 2, "the teardown restore did not run"
+    orchestrator._schedule_media_restart.assert_not_called()
+    orchestrator._release_deferred_media_restart.assert_not_called()
+
+
+async def test_failed_verification_load_restores_displaced_chat() -> None:
+    """A startup failure can follow stopping the previous chat worker."""
+    job, orchestrator, world = _verification_world(lose_at="never")
+    running_profile = "profile-chat"
+
+    async def load(profile, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+        nonlocal running_profile
+        world["loads"].append(profile)
+        running_profile = None
+        if profile.id == "profile-vision":
+            raise RuntimeError("neutral synthetic worker startup failure")
+        running_profile = profile.id
+
+    orchestrator.processes.load_chat = AsyncMock(side_effect=load)
+    await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
+
+    assert running_profile == "profile-chat", "failed verification left the previous chat down"
+    assert [profile.id for profile in world["loads"]] == ["profile-vision", "profile-chat"]
+
+
+async def test_verification_artifact_mismatch_leaves_chat_untouched() -> None:
+    job, orchestrator, world = _verification_world(lose_at="never")
+    orchestrator.vision.prepare = AsyncMock(
+        return_value=SimpleNamespace(inspected_artifact_ids=["artifact-source"])
+    )
+    await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
+    assert world["loads"] == []
+    orchestrator.processes.stop.assert_not_awaited()
+
+
+async def test_shutdown_does_not_restore_chat_from_active_verification() -> None:
+    job, orchestrator, world = _verification_world(lose_at="never")
+    entered = asyncio.Event()
+
+    async def stream(_request):  # type: ignore[no-untyped-def]
+        entered.set()
+        await asyncio.Event().wait()
+        yield
+
+    orchestrator.engines.chat.stream = stream
+    task = asyncio.create_task(orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM))
+    orchestrator._tasks[job.id] = task
+    await entered.wait()
+    assert [profile.id for profile in world["loads"]] == ["profile-vision"]
+
+    await orchestrator.close()
+
+    assert [profile.id for profile in world["loads"]] == ["profile-vision"], (
+        "shutdown restored chat from verification only to destroy it next"
+    )

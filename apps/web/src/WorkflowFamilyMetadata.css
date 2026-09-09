@@ -1,0 +1,8 @@
+.workflow-family-metadata { margin-bottom: 16px; }
+.workflow-family-metadata-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.family-preferences .workflow-family-metadata h3 { margin: 0; font-size: 16px; color: var(--ink-primary); text-transform: none; letter-spacing: normal; overflow-wrap: anywhere; }
+.workflow-family-metadata p { font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.workflow-family-metadata form { display: grid; gap: 10px; max-width: 640px; }
+.workflow-family-metadata label { display: grid; gap: 5px; color: var(--ink-secondary); font-size: 12px; }
+.workflow-family-metadata input, .workflow-family-metadata textarea { width: 100%; min-width: 0; padding: 8px; color: var(--ink-primary); background: var(--panel-2); border: 1px solid var(--line-control); border-radius: 8px; }
+.workflow-family-metadata textarea { resize: vertical; }

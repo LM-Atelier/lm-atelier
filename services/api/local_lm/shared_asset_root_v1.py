@@ -1,13 +1,13 @@
-"""Pure Shared Asset Library root resolution.
+"""Explicit Shared Asset Library location selection, without filesystem access.
 
-Desktop launches that use the default application data directory share one
-library folder inside that directory. An explicit per-app root isolates that
-app. Isolated profile data dirs never discover the real desktop library.
-No publish, claim, lease, or runtime rewrite lives here.
+The recommendation sits outside desktop profile data. Selecting a path never
+attaches a library: ownership, filesystem identity and compatibility probes
+must still pass before any shared-store operation.
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Final, NoReturn
 
@@ -16,7 +16,7 @@ from .desktop import default_data_dir
 SCHEMA_ID: Final = "lm-atelier-shared-asset-root-v1"
 SCHEMA_VERSION: Final = 1
 INVALID_SHARED_ROOT: Final = "shared asset library root is invalid"
-STORE_LEAF: Final = "packages"
+STORE_LEAF: Final = "shared-assets-v1"
 
 
 class SharedAssetRootError(ValueError):
@@ -28,18 +28,34 @@ def _invalid() -> NoReturn:
 
 
 def default_shared_asset_root() -> Path:
-    """Return the library folder inside the desktop application data directory."""
+    """Recommend an external per-user location; do not discover or create it."""
 
-    return default_data_dir() / STORE_LEAF
-
-
-def _is_unc(path: Path) -> bool:
-    text = str(path)
-    return text.startswith("\\\\") or text.startswith("//") or path.as_posix().startswith("//")
+    leaf = STORE_LEAF if sys.platform == "win32" else f"lm-atelier-{STORE_LEAF}"
+    return default_data_dir().parent / leaf
 
 
-def _refuse_covering_profile(profile: Path, chosen: Path) -> None:
-    if chosen == profile or chosen in profile.parents:
+def _absolute_local_path(value: Path) -> Path:
+    if not isinstance(value, Path):
+        _invalid()
+    try:
+        chosen = value.expanduser()
+    except (OSError, RuntimeError, ValueError):
+        _invalid()
+    text = str(chosen)
+    if (
+        not text
+        or "\x00" in text
+        or not chosen.is_absolute()
+        or text.startswith("\\\\")
+        or chosen.as_posix().startswith("//")
+        or ".." in chosen.parts
+    ):
+        _invalid()
+    return chosen
+
+
+def _refuse_overlap(protected: Path, chosen: Path) -> None:
+    if chosen == protected or chosen in protected.parents or protected in chosen.parents:
         _invalid()
 
 
@@ -47,39 +63,20 @@ def resolve_shared_asset_root(
     *,
     profile_data_dir: Path,
     explicit: Path | None = None,
+    protected_roots: tuple[Path, ...] = (),
 ) -> Path | None:
-    """Resolve the library root for one profile, or None when sharing is off.
+    """Select an explicitly configured location, or None when sharing is off.
 
-    Explicit overrides isolate that application. Isolated data dirs (tests,
-    source `data/` cwd) stay None unless an explicit root is supplied.
+    Callers supply every other known profile, install and uninstall-purge root.
+    This lexical check does not follow links or inspect the selected volume;
+    attachment must separately verify stable directory identity and suitability.
     """
 
-    if not isinstance(profile_data_dir, Path):
-        _invalid()
-    try:
-        profile = profile_data_dir.expanduser()
-    except (OSError, RuntimeError, ValueError):
-        _invalid()
-    if not str(profile) or _is_unc(profile):
-        _invalid()
-
-    if explicit is not None:
-        if not isinstance(explicit, Path):
-            _invalid()
-        try:
-            chosen = explicit.expanduser()
-        except (OSError, RuntimeError, ValueError):
-            _invalid()
-        if not str(chosen) or _is_unc(chosen) or not chosen.is_absolute():
-            _invalid()
-        _refuse_covering_profile(profile, chosen)
-        return chosen
-
-    desktop = default_data_dir()
-    if profile.resolve() != desktop.resolve():
+    if explicit is None:
         return None
-    shared = default_shared_asset_root()
-    _refuse_covering_profile(desktop, shared)
-    if _is_unc(shared):
-        _invalid()
-    return shared
+    chosen = _absolute_local_path(explicit)
+    profile = _absolute_local_path(profile_data_dir)
+    desktop = _absolute_local_path(default_data_dir())
+    for protected in (profile, desktop, *protected_roots):
+        _refuse_overlap(_absolute_local_path(protected), chosen)
+    return chosen

@@ -9,7 +9,9 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from .comfy_workflow_packages import WorkflowAssetReference
+from .model_asset_types import BoundWorkflowAssetKind, InstalledAssetKind
 from .models import InstallPlan
+from .workflow_dependency_error_types import WorkflowAssetBindingErrorCode
 
 WORKFLOW_ASSET_BINDING_VERSION = 1
 MAX_WORKFLOW_ASSET_BINDINGS = 512
@@ -18,7 +20,7 @@ _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _IMMUTABLE_REVISION = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64}|[1-9][0-9]{0,19})$")
 _PLAN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")
 
-_REFERENCE_ARTIFACT_KINDS: dict[str, frozenset[str]] = {
+_REFERENCE_ARTIFACT_KINDS: dict[str, frozenset[InstalledAssetKind]] = {
     "checkpoint": frozenset(
         {
             "checkpoint",
@@ -36,7 +38,7 @@ _REFERENCE_ARTIFACT_KINDS: dict[str, frozenset[str]] = {
     "vae": frozenset({"vae"}),
 }
 
-_ARTIFACT_TARGET_FOLDERS: dict[str, frozenset[str]] = {
+_ARTIFACT_TARGET_FOLDERS: dict[InstalledAssetKind, frozenset[str]] = {
     "checkpoint": frozenset({"checkpoints"}),
     "clip_vision": frozenset({"clip_vision"}),
     "controlnet": frozenset({"controlnet"}),
@@ -54,7 +56,7 @@ _ARTIFACT_TARGET_FOLDERS: dict[str, frozenset[str]] = {
 
 
 class WorkflowAssetBindingError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: WorkflowAssetBindingErrorCode, message: str) -> None:
         super().__init__(message)
         self.code = code
 
@@ -69,14 +71,14 @@ class WorkflowAssetPlanSelection:
 @dataclass(frozen=True)
 class BoundWorkflowAsset:
     reference_filename: str
-    kind: str
+    kind: BoundWorkflowAssetKind
     install_plan_id: str
     install_plan_hash: str
     provider: str
     remote_id: str
     revision: str
     artifact_path: str
-    artifact_kind: str
+    artifact_kind: InstalledAssetKind
     target_folder: str
     size_bytes: int
     sha256: str
@@ -229,7 +231,9 @@ def validate_workflow_asset_candidate(
         if isinstance(artifact, Mapping) and artifact.get("path") == normalized_path
     ]
     if len(matches) != 1:
-        code = "artifact_not_found" if not matches else "ambiguous_plan_artifact"
+        code: WorkflowAssetBindingErrorCode = (
+            "artifact_not_found" if not matches else "ambiguous_plan_artifact"
+        )
         raise WorkflowAssetBindingError(code, "install plan does not name one exact artifact")
     artifact = matches[0]
     _bound_asset(reference, plan, artifact)
@@ -284,7 +288,8 @@ def _bound_asset(
     target_folder = artifact.get("target_folder")
     expected_kinds = _REFERENCE_ARTIFACT_KINDS.get(reference.kind)
     if (
-        expected_kinds is None
+        reference.kind == "configuration"
+        or expected_kinds is None
         or not isinstance(artifact_kind, str)
         or artifact_kind not in expected_kinds
     ):
@@ -325,7 +330,7 @@ def _bound_asset(
     )
 
 
-def _validated_path(value: object, *, code: str) -> str:
+def _validated_path(value: object, *, code: WorkflowAssetBindingErrorCode) -> str:
     if (
         not isinstance(value, str)
         or not value

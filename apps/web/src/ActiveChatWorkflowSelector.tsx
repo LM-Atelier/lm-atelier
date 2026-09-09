@@ -11,9 +11,11 @@ const REVISION_VALUE = "compatibility:revision";
 export function ActiveChatWorkflowSelector({
   chatId,
   routingMode,
+  label = "Workflow for this request type",
 }: {
   chatId: string;
   routingMode: RoutingMode;
+  label?: string;
 }) {
   const selectorId = useId();
   const state = useActiveChatWorkflowSelection(chatId, routingMode);
@@ -28,7 +30,7 @@ export function ActiveChatWorkflowSelector({
   if (state.kind === "loading") {
     return (
       <div className="workflow-selector">
-        <label htmlFor={selectorId}>Workflow for this request type</label>
+        <label htmlFor={selectorId}>{label}</label>
         <select id={selectorId} disabled value="">
           <option value="">Loading current choice…</option>
         </select>
@@ -38,7 +40,7 @@ export function ActiveChatWorkflowSelector({
   if (state.kind === "read-error") {
     return (
       <div className="workflow-selector">
-        <label htmlFor={selectorId}>Workflow for this request type</label>
+        <label htmlFor={selectorId}>{label}</label>
         <select id={selectorId} disabled value="">
           <option value="">Cannot read the current choice</option>
         </select>
@@ -78,7 +80,7 @@ export function ActiveChatWorkflowSelector({
 
   return (
     <div className="workflow-selector">
-      <label htmlFor={selectorId}>Workflow for this request type</label>
+      <label htmlFor={selectorId}>{label}</label>
       <select
         id={selectorId}
         value={currentValue}

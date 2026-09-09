@@ -8,6 +8,7 @@ import pytest
 from local_lm.search_document_v1 import (
     INVALID_DOCUMENT,
     MAX_BODY,
+    MAX_ID,
     SearchDocumentError,
     SearchDocumentV1,
     build_search_document,
@@ -157,6 +158,73 @@ def test_invalid_and_hostile() -> None:
     assert "private attacker detail" not in str(caught.value)
 
 
+def test_refuses_a_negative_created_at_unix() -> None:
+    """A document timestamp is a non-negative unix instant, or omitted.
+
+    A non-integer timestamp is already pinned. Zero is a valid instant. A
+    negative integer is still an int, so only the lower bound refuses it.
+    Mutating that bound left created_at_unix=-1 accepted.
+    """
+    with pytest.raises(SearchDocumentError, match=INVALID_DOCUMENT):
+        build_search_document(
+            message_id="m",
+            chat_id="c",
+            role="user",
+            body="x",
+            has_media=False,
+            transcript_visible=True,
+            content_removed=False,
+            private_session=False,
+            helper_session=False,
+            secret_payload=False,
+            created_at_unix=-1,
+        )
+
+
+def test_refuses_empty_non_string_and_oversize_ids() -> None:
+    common = {
+        "role": "user",
+        "body": "x",
+        "has_media": False,
+        "transcript_visible": True,
+        "content_removed": False,
+        "private_session": False,
+        "helper_session": False,
+        "secret_payload": False,
+    }
+    with pytest.raises(SearchDocumentError, match=INVALID_DOCUMENT):
+        build_search_document(message_id="", chat_id="c1", **common)
+    with pytest.raises(SearchDocumentError, match=INVALID_DOCUMENT):
+        build_search_document(message_id="m1", chat_id="", **common)
+    with pytest.raises(SearchDocumentError, match=INVALID_DOCUMENT):
+        build_search_document(message_id=1, chat_id="c1", **common)
+    with pytest.raises(SearchDocumentError, match=INVALID_DOCUMENT):
+        build_search_document(message_id="x" * (MAX_ID + 1), chat_id="c1", **common)
+
+
+def test_refuses_a_chat_id_with_whitespace() -> None:
+    """A document chat id cannot contain spaces. Message ids are pinned elsewhere.
+
+    message_id="bad id" is refused by visibility even if this module's
+    whitespace check is removed. chat_id is not passed to visibility, so
+    only _require_id refuses a spaced chat id. Mutating that check left
+    chat_id="bad id" accepted.
+    """
+    with pytest.raises(SearchDocumentError, match=INVALID_DOCUMENT):
+        build_search_document(
+            message_id="m",
+            chat_id="bad id",
+            role="user",
+            body="x",
+            has_media=False,
+            transcript_visible=True,
+            content_removed=False,
+            private_session=False,
+            helper_session=False,
+            secret_payload=False,
+        )
+
+
 def test_public_constructor_cannot_mint_eligible_document() -> None:
     with pytest.raises(SearchDocumentError, match=INVALID_DOCUMENT):
         SearchDocumentV1()
@@ -252,3 +320,23 @@ def test_a_document_cannot_be_minted_without_the_evaluator_witness() -> None:
     assert document is not None
     assert document.eligible is True
     assert document.fts_write_authorized is False
+
+
+def test_refuses_a_non_string_body_and_a_malformed_revision_id() -> None:
+    common = {
+        "message_id": "m1",
+        "chat_id": "c1",
+        "role": "user",
+        "has_media": False,
+        "transcript_visible": True,
+        "content_removed": False,
+        "private_session": False,
+        "helper_session": False,
+        "secret_payload": False,
+    }
+    with pytest.raises(SearchDocumentError, match=INVALID_DOCUMENT):
+        build_search_document(body=1, **common)
+    with pytest.raises(SearchDocumentError, match=INVALID_DOCUMENT):
+        build_search_document(body="x", selected_response_revision_id="", **common)
+    with pytest.raises(SearchDocumentError, match=INVALID_DOCUMENT):
+        build_search_document(body="x", selected_response_revision_id=1, **common)

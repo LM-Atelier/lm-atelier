@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "./api";
-import type { RoutingMode } from "./types";
+import type { PriorTurnEditBinding, RoutingMode } from "./types";
 
 /** How long the draft must stop changing before it is classified. */
 export const DRAFT_SETTLE_MS = 200;
@@ -24,6 +24,7 @@ export function useDraftClassification(
   text: string,
   mode: RoutingMode,
   hasPriorVisual: boolean,
+  editSource?: PriorTurnEditBinding,
 ): boolean {
   const [settled, setSettled] = useState(text);
   useEffect(() => {
@@ -33,13 +34,13 @@ export function useDraftClassification(
 
   const enabled = hasPriorVisual && settled.trim().length > 0;
   const classification = useQuery({
-    queryKey: ["classify-draft", chatId, mode, settled],
-    queryFn: () => api.classifyDraft(chatId, settled, mode),
+    queryKey: ["classify-draft", chatId, mode, settled, editSource ?? null],
+    queryFn: () => editSource ? api.classifyDraft(chatId, settled, mode, editSource) : api.classifyDraft(chatId, settled, mode),
     enabled,
     staleTime: 5 * 60 * 1000,
     // Hold the previous answer while the next is in flight, so the
     // edit-strength control does not flicker as the user types.
-    placeholderData: (previous) => previous,
+    placeholderData: editSource ? undefined : (previous) => previous,
   });
 
   return enabled && (classification.data?.references_prior_visual ?? false);

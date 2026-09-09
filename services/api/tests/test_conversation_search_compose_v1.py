@@ -12,6 +12,7 @@ from local_lm.conversation_search_compose_v1 import (
     MAX_COMPOSE_WORK,
     SearchComposeError,
     SearchComposeResultV1,
+    _bound_id,
     _owned_compose_row,
     _RowTooWide,
     compose_conversation_search,
@@ -72,6 +73,48 @@ def test_compose_requires_chat_id() -> None:
     del row["chat_id"]
     _refuse([row])
     _refuse([_row("m1", "hello", chat_id="bad id")])
+
+
+def test_bound_id_refuses_empty_and_non_string_values() -> None:
+    with pytest.raises(SearchComposeError, match=INVALID_COMPOSE) as empty:
+        _bound_id("")
+    assert str(empty.value) == INVALID_COMPOSE
+    with pytest.raises(SearchComposeError, match=INVALID_COMPOSE) as numbered:
+        _bound_id(1)
+    assert str(numbered.value) == INVALID_COMPOSE
+
+
+def test_bound_id_refuses_whitespace_and_oversize_values() -> None:
+    """Public compose still wraps the query id check, so these must be direct.
+
+    `compose_conversation_search(..., chat_id="bad id")` and an oversize chat
+    id stay INVALID_COMPOSE even if `_bound_id`'s whitespace or length `if` is
+    deleted, because rank_identity_bodies refuses the same strings. Calling
+    `_bound_id` is the probe that fails when those two checks go.
+    """
+    with pytest.raises(SearchComposeError, match=INVALID_COMPOSE) as spaced:
+        _bound_id("bad id")
+    assert str(spaced.value) == INVALID_COMPOSE
+    with pytest.raises(SearchComposeError, match=INVALID_COMPOSE) as padded:
+        _bound_id(" m1")
+    assert str(padded.value) == INVALID_COMPOSE
+    with pytest.raises(SearchComposeError, match=INVALID_COMPOSE) as oversize:
+        _bound_id("x" * (MAX_ID_CHARS + 1))
+    assert str(oversize.value) == INVALID_COMPOSE
+
+
+def test_compose_refuses_empty_ids() -> None:
+    _refuse([_row("m1", "hello", chat_id="")])
+    _refuse([_row("", "hello")])
+
+
+def test_compose_refuses_non_string_ids() -> None:
+    numbered_chat = _row("m1", "hello")
+    numbered_chat["chat_id"] = 1
+    _refuse([numbered_chat])
+    numbered_message = _row("m1", "hello")
+    numbered_message["message_id"] = 1
+    _refuse([numbered_message])
 
 
 def test_compose_refuses_duplicate_message_ids_across_chats() -> None:
@@ -251,3 +294,21 @@ def test_the_ceiling_refusal_stays_invisible_to_a_caller() -> None:
     # the cause is what let that through.
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
+
+
+def test_compose_refuses_a_non_string_body() -> None:
+    numbered = _row("m1", "hello")
+    numbered["body"] = 1
+    _refuse([numbered])
+
+
+def test_compose_refuses_an_oversize_body_on_an_ineligible_row() -> None:
+    """The per-row body ceiling is not just the ranking helper's body cap.
+
+    `test_compose_refuses_over_body_cap` uses an eligible row, so deleting the
+    compose length check still fails: query MAX_BODY_CHARS is also 8192. A
+    tombstone never ranks, so only compose's own ceiling refuses a body that
+    large. Mutating that check lets this row compose as ineligible instead of
+    raising INVALID_COMPOSE.
+    """
+    _refuse([_row("m1", "x" * (MAX_COMPOSE_BODY_CHARS + 1), content_removed=True)])

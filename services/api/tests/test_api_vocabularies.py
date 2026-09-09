@@ -15,6 +15,7 @@ quietly return.
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import get_args
 
 import pytest
 from pydantic import BaseModel
@@ -28,13 +29,23 @@ from local_lm.domain import (
     RoutingMode,
     RunStatus,
 )
+from local_lm.references import ReferenceKind
 from local_lm.schemas import (
     ArtifactOut,
+    AuxiliaryAssetKind,
+    CatalogPreflight,
     ChatDetail,
+    ChatItemRemovalReferenceOut,
     ChatOut,
+    DownloadRequest,
     JobOut,
     MessageOut,
     MessagePartOut,
+    MessageReferenceOut,
+    ModelAssetOut,
+    ModelUpdateOut,
+    ReferenceSubjectOut,
+    ResponseRevisionOut,
     RunOut,
 )
 
@@ -50,6 +61,10 @@ CLOSED: list[tuple[type[BaseModel], str, type[StrEnum]]] = [
     # too. Pinned because it is easy to undo by accident: redeclaring
     # routing_mode on the subclass as a str would silently reopen it.
     (ChatDetail, "routing_mode", RoutingMode),
+    (ResponseRevisionOut, "status", MessageStatus),
+    (ReferenceSubjectOut, "kind", ReferenceKind),
+    (MessageReferenceOut, "subject_kind", ReferenceKind),
+    (ChatItemRemovalReferenceOut, "subject_kind", ReferenceKind),
 ]
 
 
@@ -103,3 +118,18 @@ def test_the_wire_form_is_still_a_plain_string() -> None:
 
     assert json.dumps(JobStatus.QUEUED) == json.dumps(JobStatus.QUEUED.value)
     assert isinstance(JobStatus.QUEUED.value, str)
+
+
+def test_catalog_preflight_publishes_the_request_auxiliary_vocabulary() -> None:
+    assert _schema_values(CatalogPreflight, "auxiliary_kind") == set(get_args(AuxiliaryAssetKind))
+
+
+@pytest.mark.parametrize("model", [ModelAssetOut, ModelUpdateOut])
+def test_installed_asset_kinds_match_the_validated_download_inputs(
+    model: type[BaseModel],
+) -> None:
+    accepted = _schema_values(DownloadRequest, "workflow_asset_kind") | _schema_values(
+        DownloadRequest, "auxiliary_kind"
+    )
+    assert accepted
+    assert _schema_values(model, "kind") == accepted

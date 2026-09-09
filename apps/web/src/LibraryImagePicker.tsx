@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery } from "@tanstack/react-query";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { ErrorCallout } from "./ErrorCallout";
 import { api } from "./api";
@@ -27,14 +27,21 @@ export function LibraryImagePicker({
   children?: ReactNode;
 }) {
   const [chosen, setChosen] = useState<string[]>([]);
-  const library = useQuery({
-    queryKey: ["artifacts", "image-picker"],
-    queryFn: () => api.artifacts("image", "", false),
+  const library = useInfiniteQuery({
+    queryKey: ["artifacts", "image-picker", { pageSize: 50 }],
+    initialPageParam: 0,
+    queryFn: ({ pageParam, signal }) =>
+      api.artifacts("image", "", false, { limit: 50, offset: pageParam }, signal),
+    getNextPageParam: (lastPage, _pages, lastOffset) =>
+      lastPage.length === 50 ? lastOffset + 50 : undefined,
   });
 
-  const usable = (library.data ?? []).filter(
-    (item): item is ArtifactLibraryItem => item.kind === "image",
-  );
+  // Offset pages may overlap if images arrive while the picker is open.
+  const usable = Array.from(new Map(
+    (library.data?.pages.flat() ?? [])
+      .filter((item) => item.kind === "image")
+      .map((item) => [item.id, item] as const),
+  ).values());
 
   return (
     <AccessibleDialog
@@ -45,7 +52,7 @@ export function LibraryImagePicker({
     >
       {library.error && <ErrorCallout message={(library.error as Error).message} />}
       {library.isPending && <p>Reading the library…</p>}
-      {!library.isPending && usable.length === 0 && (
+      {!library.isPending && !library.error && usable.length === 0 && (
         <p>Nothing in the library yet. Anything generated or uploaded appears here.</p>
       )}
       {children}
@@ -71,6 +78,20 @@ export function LibraryImagePicker({
           );
         })}
       </ul>
+      {(library.hasNextPage || library.isError) && (
+        <button
+          type="button"
+          className="secondary"
+          disabled={library.isFetching}
+          onClick={() => {
+            if (library.hasNextPage) void library.fetchNextPage();
+            else void library.refetch();
+          }}
+        >
+          {library.isFetching ? "Loading images…" : library.isError
+            ? "Retry loading images" : "Load more images"}
+        </button>
+      )}
       <footer>
         <button className="secondary" onClick={onClose}>
           Cancel

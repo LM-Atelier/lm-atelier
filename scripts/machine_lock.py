@@ -110,7 +110,11 @@ class LeaseStranded(RuntimeError):
     ``strands`` lists every close the cleanup attempted and the kernel
     refused, the first of them being ``kind``/``number``/``error``: a
     boundary closes each acquired object exactly once and reports all of
-    them, so a refused pin behind a refused descriptor is named too.
+    them, so a refused pin behind a refused descriptor is named too. A
+    boundary nested inside another - the pin opener letting go of the pin it
+    just took, inside the chain opener letting go of the earlier ones -
+    contributes its refusals to the outer list rather than to ``__cause__``,
+    so one report names every object whose close was refused.
     """
 
     def __init__(
@@ -133,8 +137,7 @@ class LeaseStranded(RuntimeError):
             )
         super().__init__(
             f"the lease {kind} {number} could not be closed after {during} "
-            f"(error {error}); this process may still hold the machine until it exits"
-            + detail
+            f"(error {error}); this process may still hold the machine until it exits" + detail
         )
 
 
@@ -281,9 +284,7 @@ def _final_path(handle: int) -> str:
     """The held object's current name, from the handle, never from a lookup."""
 
     buffer = ctypes.create_unicode_buffer(32768)
-    length = _kernel32().GetFinalPathNameByHandleW(
-        ctypes.c_void_p(handle), buffer, len(buffer), 0
-    )
+    length = _kernel32().GetFinalPathNameByHandleW(ctypes.c_void_p(handle), buffer, len(buffer), 0)
     if length == 0 or length >= len(buffer):
         raise LeaseRefused(
             f"the held directory's name could not be read (error {ctypes.get_last_error()})"
@@ -340,22 +341,50 @@ class _Pin:
     handle: int
 
 
+def _merge_strand(
+    refusal: BaseException,
+) -> tuple[LeaseStranded | None, BaseException]:
+    """The nested boundary to fold in, and the failure to raise from.
+
+    A strand that reaches an outer boundary is a REPORT of refused closes, not
+    the failure that caused them. Raising the outer report from it would bury
+    the refusal that actually aborted the acquisition one level deeper for
+    every boundary the failure passes through, and that refusal is what says
+    WHY any of this is being let go.
+    """
+
+    if isinstance(refusal, LeaseStranded):
+        return refusal, refusal.__cause__ or refusal
+    return None, refusal
+
+
 def _abandon(
     *,
     during: str,
     descriptor: int = -1,
     handles: tuple[tuple[str, int], ...] = (),
     pins: tuple[_Pin, ...] = (),
+    stranded: LeaseStranded | None = None,
 ) -> LeaseStranded | None:
     """Close everything a boundary acquired, each exactly once: the C
     runtime descriptor first (it owns its handle), then every raw handle,
     then every pin. Nothing is skipped because an earlier close refused;
     the result names every close the kernel refused, or is None when all
     of them closed. The caller raises it from the failure that reached the
-    boundary, so the primary failure and each cleanup failure survive."""
+    boundary, so the primary failure and each cleanup failure survive.
+
+    ``stranded`` is a boundary that already ran INSIDE this one - the pin
+    opener letting go of the pin it had just taken - and its refused closes
+    JOIN this report instead of surviving only as the cause of the exception
+    this one is raised from. They come first, because they happened first. A
+    cause is not a report: nothing on the command line prints it, so a handle
+    named only there is a handle nobody is told about."""
 
     strands: list[tuple[str, int, int]] = []
     cause: BaseException | None = None
+    if stranded is not None:
+        strands.extend(stranded.strands)
+        cause = stranded.__cause__
     if descriptor != -1:
         try:
             os.close(descriptor)
@@ -407,9 +436,7 @@ def _attributes(path: Path) -> int:
     return int(attributes)
 
 
-def _reparse_links(
-    path: Path, role: str, *, itself: bool = False
-) -> list[tuple[Path, str]]:
+def _reparse_links(path: Path, role: str, *, itself: bool = False) -> list[tuple[Path, str]]:
     """Every reparse point among the components of a textual path, root
     first - and the path itself when ``itself`` is set and it is one. Git
     resolves the text at each invocation, so retargeting one of these
@@ -535,9 +562,10 @@ def _open_pins(anchor: Path) -> tuple[_Pin, ...]:
         for path, role in _resolution_chain(anchor):
             pins.append(_open_pin(path, role))
     except BaseException as refusal:
-        strand = _abandon(during="a refused pinning", pins=tuple(pins))
+        nested, primary = _merge_strand(refusal)
+        strand = _abandon(during="a refused pinning", pins=tuple(pins), stranded=nested)
         if strand is not None:
-            raise strand from refusal
+            raise strand from primary
         raise
     return tuple(pins)
 
@@ -566,13 +594,8 @@ def _hold_common_dir(repo: Path | None) -> tuple[int, _Binding]:
         try:
             identity = _identity(directory)
             name = _final_path(directory)
-            if (
-                _final_path(anchor) != anchor_name
-                or _identity(anchor) != anchor_identity
-            ):
-                raise LeaseRefused(
-                    "the repository directory moved while it was being resolved"
-                )
+            if _final_path(anchor) != anchor_name or _identity(anchor) != anchor_identity:
+                raise LeaseRefused("the repository directory moved while it was being resolved")
             if _directory_identity(_common_dir(Path(_plain(anchor_name)))) != identity:
                 raise LeaseRefused(
                     "the repository's common git directory changed while it was being held"
@@ -593,9 +616,10 @@ def _hold_common_dir(repo: Path | None) -> tuple[int, _Binding]:
                         "the repository's common git directory changed while it was being pinned"
                     )
             except BaseException as refusal:
-                strand = _abandon(during="a refused acquisition", pins=pins)
+                nested, primary = _merge_strand(refusal)
+                strand = _abandon(during="a refused acquisition", pins=pins, stranded=nested)
                 if strand is not None:
-                    raise strand from refusal
+                    raise strand from primary
                 raise
         except BaseException:
             _close(directory)
@@ -644,21 +668,21 @@ def _open_lease_handle(
         if opened is None or opened == _INVALID_HANDLE:
             error = ctypes.get_last_error()
             if error == _ERROR_SHARING_VIOLATION:
-                raise LeaseRefused(
-                    f"contended: {_holder_line(Path(plain, LEASE_BASENAME))}"
-                )
+                raise LeaseRefused(f"contended: {_holder_line(Path(plain, LEASE_BASENAME))}")
             raise LeaseRefused(f"the lease file could not be opened (error {error})")
         handle = int(opened)
         _assert_binding(binding)
         return handle, Path(plain, LEASE_BASENAME), binding
     except BaseException as refusal:
+        nested, primary = _merge_strand(refusal)
         strand = _abandon(
             during="a refused acquisition",
             handles=(("handle", handle),) if handle != -1 else (),
             pins=binding.pins,
+            stranded=nested,
         )
         if strand is not None:
-            raise strand from refusal
+            raise strand from primary
         raise
     finally:
         _close(directory)
@@ -821,18 +845,18 @@ def acquire(
         # it: the caller must know both that the acquisition failed and
         # that this process may still hold the machine, or the checkout
         # binding, through what would not close.
+        nested, primary = _merge_strand(failure)
         strand = _abandon(
             during="a failed acquisition",
             descriptor=descriptor,
             handles=(("handle", handle),) if descriptor == -1 else (),
             pins=binding.pins,
+            stranded=nested,
         )
         if strand is not None:
-            raise strand from failure
+            raise strand from primary
         raise
-    return AcquiredLease(
-        descriptor=descriptor, path=path, purpose=purpose, binding=binding
-    )
+    return AcquiredLease(descriptor=descriptor, path=path, purpose=purpose, binding=binding)
 
 
 def release(lease: AcquiredLease) -> None:
@@ -883,9 +907,7 @@ def status(repo: Path | None = None) -> str:
     # probe is closed first and every pin after it, each exactly once. If
     # any of them will not close, this process is now a holder and "free"
     # would be the one wrong answer.
-    strand = _abandon(
-        during="a status probe", handles=(("probe", probe),), pins=probe_binding.pins
-    )
+    strand = _abandon(during="a status probe", handles=(("probe", probe),), pins=probe_binding.pins)
     if strand is not None:
         raise strand
     return f"free (stale record left behind: {_holder_line(path)})"

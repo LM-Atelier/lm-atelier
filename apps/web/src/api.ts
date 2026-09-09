@@ -16,6 +16,8 @@ import type {
   BackupInfo,
   ReferenceAsset,
   ReferenceAssetAttached,
+  ReferenceAssetReview,
+  ReferenceAssetReviewed,
   ReferenceDeletionImpact,
   ReferenceSubject,
   ReferenceSubjectPage,
@@ -31,6 +33,7 @@ import type {
   ExchangeDeletion,
   ChatDetail,
   DraftClassification,
+  PriorTurnEditBinding,
   CustomNodeInstall,
   CredentialProvider,
   CredentialStatus,
@@ -66,12 +69,16 @@ import type {
   SystemInfo,
   ToolCapabilityProbe,
   TurnAccepted,
+  PriorTurnEditRequest,
+  PriorTurnEditAccepted,
+  PriorTurnEditSource,
   EditTemplate,
   Workflow,
   WorkflowBundle,
   WorkflowAssetReview,
   WorkflowPackageAnalysis,
   WorkflowRevision,
+  WorkflowRevisionReview,
   WorkflowEditorDraft,
   WorkflowEditorReturn,
   WorkflowEditorSession,
@@ -80,6 +87,8 @@ import type {
   WorkerResetResult,
   WorkerSettings,
   WorkerStatus,
+  EditedBranchPage,
+  EditedBranchActivation,
   WorkPlan,
   WorkStep,
   WorkflowDependencyResourceKind,
@@ -120,6 +129,46 @@ export type TurnConfirmationRequest = {
 export type TurnConfirmationHandler = (
   request: TurnConfirmationRequest,
 ) => Promise<boolean>;
+
+/** Decode only the server's supported confirmation responses. */
+export function turnConfirmationForError(error: unknown): { confirmation: TurnConfirmationRequest; mode: RoutingMode } | null {
+  if (!(error instanceof ApiError) || error.status !== 409) return null;
+  const detail = error.detail && typeof error.detail === "object" ? error.detail as Record<string, unknown> : null;
+  const plan = detail?.plan && typeof detail.plan === "object" ? detail.plan as Record<string, unknown> : null;
+  const estimate = detail?.estimate && typeof detail.estimate === "object" ? detail.estimate as Record<string, unknown> : null;
+  const orderedSteps = Array.isArray(plan?.steps) ? plan.steps.filter((step): step is Record<string, unknown> => (
+    Boolean(step) && typeof step === "object"
+  )) : [];
+  if (detail?.code === "ordered_plan_confirmation_required" && orderedSteps.length >= 2) {
+    return { mode: "auto", confirmation: {
+      kind: "ordered_plan", title: "Start ordered plan?",
+      question: `This request will run ${orderedSteps.length} steps in sequence.`, confirmLabel: "Start plan",
+      details: {
+        sequence: orderedSteps.map((step) => typeof step.mode === "string" ? step.mode : "work"),
+        ...(typeof estimate?.video_duration_seconds === "number" && estimate.video_duration_seconds > 0
+          ? { videoDurationSeconds: estimate.video_duration_seconds } : {}),
+        ...(typeof estimate?.estimated_bytes === "number" && estimate.estimated_bytes > 0
+          ? { estimatedWorkingBytes: estimate.estimated_bytes } : {}),
+      },
+    } };
+  }
+  const operation = typeof plan?.operation === "string" ? plan.operation : "";
+  if (detail?.code === "route_confirmation_required" && (operation.includes("image") || operation.includes("video"))) {
+    const selectedOperation = operation.includes("video") ? "video" : "image";
+    return { mode: selectedOperation, confirmation: {
+      kind: "media_route", title: `Start ${selectedOperation} generation?`,
+      question: `Auto mode suggests ${selectedOperation === "image" ? "an" : "a"} ${selectedOperation} generation.`,
+      confirmLabel: `Start ${selectedOperation}`,
+      details: {
+        operation: selectedOperation,
+        ...(typeof estimate?.duration_seconds === "number" ? { durationSeconds: estimate.duration_seconds } : {}),
+        ...(typeof estimate?.estimated_intermediate_bytes === "number"
+          ? { estimatedIntermediateBytes: estimate.estimated_intermediate_bytes } : {}),
+      },
+    } };
+  }
+  return null;
+}
 
 let csrfToken = "";
 let eventEpoch = "";
@@ -236,6 +285,16 @@ async function request<T>(
   return (await response.json()) as T;
 }
 
+type WorkflowRevisionInput = Pick<
+  WorkflowBundle,
+  "engine_version" | "api_graph" | "ui_graph" | "input_schema" | "dependencies"
+> & { trusted?: never };
+
+type WorkflowCreateInput = WorkflowRevisionInput & Pick<
+  WorkflowBundle,
+  "name" | "description" | "operation" | "engine"
+>;
+
 export const api = {
   initialize: ensureSession,
   setupReadiness: () => request<SetupReadinessReport>("/api/setup/readiness"),
@@ -254,10 +313,10 @@ export const api = {
     return request<Chat[]>(`/api/chats?${parameters}`);
   },
   chat: (id: string) => request<ChatDetail>(`/api/chats/${id}`),
-  classifyDraft: (chatId: string, text: string, mode: RoutingMode) =>
+  classifyDraft: (chatId: string, text: string, mode: RoutingMode, editSource?: PriorTurnEditBinding) =>
     request<DraftClassification>(`/api/chats/${chatId}/classify-draft`, {
       method: "POST",
-      body: JSON.stringify({ text, mode }),
+      body: JSON.stringify({ text, mode, ...(editSource ? { edit_source: editSource } : {}) }),
     }),
   createChat: (projectId?: string | null) =>
     request<Chat>("/api/chats", {
@@ -412,76 +471,9 @@ export const api = {
     try {
       return await submit(mode);
     } catch (error) {
-      const detail = error instanceof ApiError && error.detail && typeof error.detail === "object" ? error.detail as Record<string, unknown> : null;
-      const plan = detail?.plan && typeof detail.plan === "object" ? detail.plan as Record<string, unknown> : null;
-      const operation = typeof plan?.operation === "string" ? plan.operation : "";
-      const estimate = detail?.estimate && typeof detail.estimate === "object" ? detail.estimate as Record<string, unknown> : null;
-      const orderedSteps = Array.isArray(plan?.steps)
-        ? plan.steps.filter((step): step is Record<string, unknown> => (
-          Boolean(step) && typeof step === "object"
-        ))
-        : [];
-      if (
-        error instanceof ApiError
-        && error.status === 409
-        && detail?.code === "ordered_plan_confirmation_required"
-        && orderedSteps.length >= 2
-      ) {
-        const orderedEstimate = detail.estimate && typeof detail.estimate === "object"
-          ? detail.estimate as Record<string, unknown>
-          : null;
-        if (!confirmTurn) throw error;
-        const confirmed = await confirmTurn({
-          kind: "ordered_plan",
-          title: "Start ordered plan?",
-          question: `This request will run ${orderedSteps.length} steps in sequence.`,
-          confirmLabel: "Start plan",
-          details: {
-            sequence: orderedSteps.map((step) => (
-              typeof step.mode === "string" ? step.mode : "work"
-            )),
-            ...(typeof orderedEstimate?.video_duration_seconds === "number"
-              && orderedEstimate.video_duration_seconds > 0
-              ? { videoDurationSeconds: orderedEstimate.video_duration_seconds }
-              : {}),
-            ...(typeof orderedEstimate?.estimated_bytes === "number"
-              && orderedEstimate.estimated_bytes > 0
-              ? { estimatedWorkingBytes: orderedEstimate.estimated_bytes }
-              : {}),
-          },
-        });
-        if (confirmed) {
-          return submit("auto", true);
-        }
-        throw error;
-      }
-      if (
-        error instanceof ApiError
-        && error.status === 409
-        && detail?.code === "route_confirmation_required"
-        && (operation.includes("image") || operation.includes("video"))
-      ) {
-        if (!confirmTurn) throw error;
-        const selectedOperation = operation.includes("video") ? "video" : "image";
-        const confirmed = await confirmTurn({
-          kind: "media_route",
-          title: `Start ${selectedOperation} generation?`,
-          question: `Auto mode suggests ${selectedOperation === "image" ? "an" : "a"} ${selectedOperation} generation.`,
-          confirmLabel: `Start ${selectedOperation}`,
-          details: {
-            operation: selectedOperation,
-            ...(typeof estimate?.duration_seconds === "number"
-              ? { durationSeconds: estimate.duration_seconds }
-              : {}),
-            ...(typeof estimate?.estimated_intermediate_bytes === "number"
-              ? { estimatedIntermediateBytes: estimate.estimated_intermediate_bytes }
-              : {}),
-          },
-        });
-        if (confirmed) return submit(selectedOperation, true);
-        throw error;
-      }
-      throw error;
+      const requested = turnConfirmationForError(error);
+      if (!requested || !confirmTurn || !await confirmTurn(requested.confirmation)) throw error;
+      return submit(requested.mode, true);
     }
   },
   stopAndSendTurn: (
@@ -509,10 +501,10 @@ export const api = {
     promptSource,
     confirmTurn,
   ),
-  regenerateMessage: (messageId: string, settings: Record<string, unknown>) =>
+  regenerateMessage: (messageId: string, settings: Record<string, unknown>, idempotencyKey?: string) =>
     request<TurnAccepted>(`/api/messages/${messageId}/regenerate`, {
       method: "POST",
-      body: JSON.stringify({ settings }),
+      body: JSON.stringify({ settings, idempotency_key: idempotencyKey }),
     }),
   forkThread: (messageId: string) =>
     request<Chat>(`/api/messages/${messageId}/fork`, { method: "POST" }),
@@ -536,6 +528,19 @@ export const api = {
     request<Message>(`/api/messages/${messageId}/revisions/${revisionId}/select`, {
       method: "POST",
     }),
+  getPriorTurnEditSource: (messageId: string, sourceRunId?: string) => {
+    const query = sourceRunId === undefined
+      ? ""
+      : `?${new URLSearchParams({ source_run_id: sourceRunId })}`;
+    return request<PriorTurnEditSource>(
+      `/api/messages/${encodeURIComponent(messageId)}/edit-source${query}`,
+    );
+  },
+  queueEditedMessage: (messageId: string, payload: PriorTurnEditRequest) =>
+    request<PriorTurnEditAccepted>(`/api/messages/${encodeURIComponent(messageId)}/edits`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   branchMessage: (
     messageId: string,
     text: string,
@@ -558,6 +563,18 @@ export const api = {
   workPlans: (chatId?: string) =>
     request<WorkPlan[]>(
       `/api/work-plans${chatId ? `?chat_id=${encodeURIComponent(chatId)}` : ""}`,
+    ),
+  editedBranches: (chatId: string, cursor: string | null = null, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ limit: "50" });
+    if (cursor !== null) query.set("cursor", cursor);
+    return request<EditedBranchPage>(
+      `/api/chats/${encodeURIComponent(chatId)}/edited-branches?${query}`, { signal },
+    );
+  },
+  activateEditedBranch: (chatId: string, planId: string, expectedHead: string | null) =>
+    request<EditedBranchActivation>(
+      `/api/chats/${encodeURIComponent(chatId)}/edited-branches/${encodeURIComponent(planId)}/activate`,
+      { method: "POST", body: JSON.stringify({ expected_active_head_message_id: expectedHead }) },
     ),
   workPlan: (id: string) => request<WorkPlan>(`/api/work-plans/${id}`),
   workStep: (id: string) => request<WorkStep>(`/api/work-steps/${id}`),
@@ -752,6 +769,11 @@ export const api = {
     ),
   referenceAssets: (id: string) =>
     request<ReferenceAsset[]>(`/api/references/${encodeURIComponent(id)}/assets`),
+  reviewReferenceAsset: (id: string, assetId: string, body: ReferenceAssetReview) =>
+    request<ReferenceAssetReviewed>(
+      `/api/references/${encodeURIComponent(id)}/assets/${encodeURIComponent(assetId)}/review`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
   attachReferenceAsset: (id: string, body: { artifact_id: string; purpose?: string }) =>
     request<ReferenceAssetAttached>(`/api/references/${encodeURIComponent(id)}/assets`, {
       method: "POST",
@@ -773,11 +795,18 @@ export const api = {
     request<ReferenceSubject>(`/api/references/${encodeURIComponent(id)}/cover`, {
       method: "DELETE",
     }),
-  artifacts: (kind = "", query = "", favorites = false) => {
+  artifacts: (
+    kind = "", query = "", favorites = false,
+    page?: { limit: number; offset: number }, signal?: AbortSignal,
+  ) => {
     const parameters = new URLSearchParams({ query });
     if (kind) parameters.set("kind", kind);
     if (favorites) parameters.set("favorites", "true");
-    return request<ArtifactLibraryItem[]>(`/api/artifacts?${parameters}`);
+    if (page) {
+      parameters.set("limit", String(page.limit));
+      parameters.set("offset", String(page.offset));
+    }
+    return request<ArtifactLibraryItem[]>(`/api/artifacts?${parameters}`, { signal });
   },
   artifactLibrary: async (
     filters: ArtifactLibraryFilters,
@@ -989,14 +1018,18 @@ export const api = {
       `/api/projects/${encodeURIComponent(projectId)}/workflow-selections/${capability}`,
       { method: "PUT", body: JSON.stringify(selection) },
     ),
-  createWorkflow: (payload: Record<string, unknown>) =>
+  createWorkflow: (payload: WorkflowCreateInput) =>
     request<Workflow>("/api/workflows", { method: "POST", body: JSON.stringify(payload) }),
   updateWorkflow: (id: string, payload: Record<string, unknown>) =>
     request<Workflow>(`/api/workflows/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
-  createWorkflowRevision: (id: string, payload: Record<string, unknown>) =>
+  createWorkflowRevision: (id: string, payload: WorkflowRevisionInput) =>
     request<WorkflowRevision>(`/api/workflows/${id}/revisions`, { method: "POST", body: JSON.stringify(payload) }),
   restoreWorkflowRevision: (id: string, revisionId: string) =>
     request<WorkflowRevision>(`/api/workflows/${id}/revisions/${revisionId}/restore`, { method: "POST" }),
+  previewWorkflowRevisionReview: (id: string, revisionId: string) =>
+    request<WorkflowRevisionReview>(`/api/workflows/${encodeURIComponent(id)}/revisions/${encodeURIComponent(revisionId)}/review`),
+  decideWorkflowRevisionReview: (id: string, revisionId: string, payload: { action: "approve" | "revoke"; subject_sha256: string }) =>
+    request<WorkflowRevisionReview>(`/api/workflows/${encodeURIComponent(id)}/revisions/${encodeURIComponent(revisionId)}/review`, { method: "POST", body: JSON.stringify(payload) }),
   cloneWorkflow: (id: string, name?: string) =>
     request<Workflow>(`/api/workflows/${id}/clone`, { method: "POST", body: JSON.stringify({ name }) }),
   exportWorkflow: (id: string) => request<WorkflowBundle>(`/api/workflows/${id}/export`),

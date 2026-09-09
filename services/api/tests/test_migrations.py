@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event
@@ -271,6 +272,20 @@ def test_chat_item_removal_receipt_migration_preserves_replay_authority(
         )
 
 
+@contextmanager
+def _application_sqlite(database: Path) -> Iterator[sqlite3.Connection]:
+    """Use the application's default-closed SQLite functions, without its ORM guard."""
+    engine = create_engine(f"sqlite:///{database}")
+    try:
+        with engine.connect() as connection:
+            driver = connection.connection.driver_connection
+            assert isinstance(driver, sqlite3.Connection)
+            with driver:
+                yield driver
+    finally:
+        engine.dispose()
+
+
 def test_artifact_library_entry_migration_backfills_once_and_seals_membership(
     tmp_path: Path,
 ) -> None:
@@ -300,7 +315,7 @@ def test_artifact_library_entry_migration_backfills_once_and_seals_membership(
         )
     command.upgrade(config, "head")
 
-    with sqlite3.connect(database) as connection:
+    with _application_sqlite(database) as connection:
         connection.execute("PRAGMA foreign_keys=ON")
         entries = connection.execute(
             """
@@ -1081,6 +1096,97 @@ def test_workflow_family_migration_refuses_lossy_downgrade(tmp_path: Path) -> No
         assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
 
 
+def test_dropping_the_capability_outcomes_refuses_an_unexpected_one(
+    tmp_path: Path,
+) -> None:
+    """A recorded outcome this application cannot write stops the upgrade.
+
+    Dropping the discriminator turns every surviving row into a pass, because
+    the readers that distinguished them go with it. That is right for the rows
+    this application writes - it only ever writes "ready" - and wrong for a row
+    that came from somewhere else: a restored database, a hand edit, a version
+    that had the writer this one lacks. There is nothing here that can tell
+    whether such a row should become a pass, so it refuses and leaves both the
+    row and the columns for someone who can.
+    """
+
+    settings = Settings(data_dir=tmp_path / "capability-outcome-refusal")
+    settings.prepare()
+    config = alembic_config(settings)
+    command.upgrade(config, "b8f31d0a6c42")
+    database = settings.state_dir / "local-lm.sqlite3"
+    timestamp = "2026-09-01 00:00:00"
+    model_id = f"model_{'a' * 32}"
+    # The evidence row stands alone: the refusal counts rows and reads no
+    # install, so the install it names need not exist for the guard to answer.
+    _run(
+        database,
+        (
+            """
+            INSERT INTO model_capability_evidence (
+                id, model_install_id, evidence_key, result,
+                component_hashes_json, runtime_build, adapter_contract_version,
+                launch_contract_version, hardware_class, probe_version,
+                details_json, probed_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, '{}', ?, 1, ?, ?, ?, '{}', ?, ?, ?)
+            """,
+            (
+                f"evidence_{'b' * 32}",
+                model_id,
+                "an-outcome-from-elsewhere",
+                "failed",
+                "build",
+                "launch",
+                "class",
+                "probe",
+                timestamp,
+                timestamp,
+                timestamp,
+            ),
+        ),
+    )
+
+    with pytest.raises(Exception, match="other than 'ready'"):
+        command.upgrade(config, "head")
+
+    surviving = _query(database, "SELECT result FROM model_capability_evidence")
+    assert surviving == [("failed",)], "the refusal did not leave the row alone"
+
+
+def test_restoring_the_capability_outcomes_leaves_no_default_behind(
+    tmp_path: Path,
+) -> None:
+    """The downgrade puts the column back as it was, defaults included.
+
+    Restoring a NOT NULL column to a table that already has rows needs a
+    default for those rows, and alembic leaves it on the column unless it is
+    dropped again. Leaving it would mean a later insert that omits the outcome
+    silently records a pass - the one thing the upgrade refuses to do on the
+    way out, arriving through the back door on the way in.
+    """
+
+    settings = Settings(data_dir=tmp_path / "capability-outcome-downgrade")
+    settings.prepare()
+    config = alembic_config(settings)
+    command.upgrade(config, "head")
+    command.downgrade(config, "b8f31d0a6c42")
+    database = settings.state_dir / "local-lm.sqlite3"
+
+    columns = {
+        str(row[1]): row
+        for row in _query(database, "PRAGMA table_info('model_capability_evidence')")
+    }
+    assert {"result", "failure_code", "failure_reason"} <= set(columns)
+    result_column = columns["result"]
+    assert result_column[3] == 1, "the restored result column should still be NOT NULL"
+    assert result_column[4] is None, (
+        f"the restored result column kept a default of {result_column[4]!r}; "
+        "an insert that omits the outcome would record a pass"
+    )
+    assert columns["failure_code"][3] == 0
+    assert columns["failure_reason"][3] == 0
+
+
 def test_generated_identifier_width_migration_preserves_existing_rows(
     tmp_path: Path,
 ) -> None:
@@ -1150,7 +1256,11 @@ def test_generated_identifier_width_migration_preserves_existing_rows(
                 evidence_id,
                 model_id,
                 "existing-evidence",
-                "passed",
+                # "ready" rather than arbitrary filler: the outcome columns are
+                # dropped further along this chain, and that migration REFUSES
+                # to run against a row recording anything else rather than
+                # promoting it to a pass. This row is here for its id width.
+                "ready",
                 "{}",
                 "test-runtime",
                 1,
@@ -2141,7 +2251,7 @@ def _setup_verification_migrated_to(tmp_path: Path, name: str, revision: str) ->
 def test_deleting_an_artifact_nulls_the_setup_verification_that_named_it(
     tmp_path: Path,
 ) -> None:
-    """The database clears the reference, with no application code involved.
+    """The database clears the reference, with no ORM deletion guard involved.
 
     A delete that reaches the database directly must leave the column null
     rather than a dangling identifier, and must leave the verification row
@@ -2154,7 +2264,7 @@ def test_deleting_an_artifact_nulls_the_setup_verification_that_named_it(
     """
 
     database = _setup_verification_migrated_to(tmp_path, "fk-nulls", "head")
-    with closing(sqlite3.connect(database)) as connection:
+    with _application_sqlite(database) as connection:
         connection.execute(_INSERT_ARTIFACT, ("art-1", "a" * 64, "one.png", _STAMP, _STAMP))
         connection.execute(
             _INSERT_VERIFICATION, ("verify-1", "key-1", "running", "art-1", _STAMP, _STAMP)
@@ -2438,3 +2548,32 @@ def test_the_enforcement_downgrade_preserves_a_differently_shaped_namesake(
         "revision did not create and has no authority to remove"
     )
     assert "artifacts" not in targets, "the downgrade left the foreign key in place"
+
+
+def test_artifact_deletion_authority_migration_round_trips(tmp_path: Path) -> None:
+    settings = Settings(data_dir=tmp_path / "deletion-authority")
+    settings.prepare()
+    config = alembic_config(settings)
+    database = settings.state_dir / "local-lm.sqlite3"
+    trigger_query = "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name"
+    command.upgrade(config, "e4b7d1c5a960")
+    with sqlite3.connect(database) as connection:
+        before = dict(connection.execute(trigger_query).fetchall())
+    original = before["artifact_json_reference_delete_guard"]
+    assert "artifact_deletion_authorized" not in original
+
+    command.upgrade(config, "f5c2a8d91e40")
+    with sqlite3.connect(database) as connection:
+        after = dict(connection.execute(trigger_query).fetchall())
+    assert set(after) == set(before)
+    assert "artifact_deletion_authorized" in after["artifact_json_reference_delete_guard"]
+    assert {k: v for k, v in after.items() if k != "artifact_json_reference_delete_guard"} == {
+        k: v for k, v in before.items() if k != "artifact_json_reference_delete_guard"
+    }
+
+    command.downgrade(config, "e4b7d1c5a960")
+    with sqlite3.connect(database) as connection:
+        assert dict(connection.execute(trigger_query).fetchall()) == before
+    command.upgrade(config, "f5c2a8d91e40")
+    with sqlite3.connect(database) as connection:
+        assert dict(connection.execute(trigger_query).fetchall()) == after

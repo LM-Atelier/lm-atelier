@@ -9,6 +9,7 @@ picture - most of the reason to open the studio at all.
 from __future__ import annotations
 
 import io
+from typing import Any
 
 import pytest
 from httpx2 import AsyncClient
@@ -23,13 +24,16 @@ _PNG = bytes.fromhex(
 )
 
 
-async def _upload(client: AsyncClient, name: str, media_type: str, payload: bytes) -> dict:
+async def _upload(
+    client: AsyncClient, name: str, media_type: str, payload: bytes
+) -> dict[str, Any]:
     response = await client.post(
         "/api/artifacts",
         files={"file": (name, io.BytesIO(payload), media_type)},
     )
     assert response.status_code == 201, response.text
-    return response.json()
+    uploaded: dict[str, Any] = response.json()
+    return uploaded
 
 
 async def test_the_studio_opens_on_an_uploaded_image(client: AsyncClient) -> None:

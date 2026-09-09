@@ -42,7 +42,9 @@ export function ModelCard({
   // version identity is that the person picked it, so the action becomes the
   // chooser and the count says why.
   const versions = model.version_count ?? 1;
-  const choosing = versions > 1 && status === "idle" && Boolean(onChooseVersion);
+  const choosing = versions > 1
+    && (status === "idle" || status === "installed")
+    && Boolean(onChooseVersion);
   // How many are already here, when that is knowable at all. `null` is not
   // zero: it means this kind records no provider version, so nothing on disk
   // can be matched against these. Saying "0 of 12" there would be a claim the
@@ -70,7 +72,7 @@ export function ModelCard({
         )}
         <small>{model.total_size_bytes != null ? `${formatBytes(model.total_size_bytes)} · ` : ""}{formatDate(model.last_modified)}{model.compatibility_reasons.length ? ` · ${model.compatibility_reasons.join(" · ")}` : ""}</small>
       </div>
-      <div className="model-stats">{model.trending_score != null && <span title="Hugging Face trending score"><Sparkles size={14} />{model.trending_score.toLocaleString()}</span>}<span><Download size={14} />{model.downloads?.toLocaleString() ?? "—"}</span><button className="primary compact-button" title={model.compatibility === "unsupported" || runtimeUnavailable ? model.compatibility_reasons.join(" ") : undefined} onClick={choosing ? onChooseVersion : onDownload} disabled={status !== "idle" || model.compatibility === "unsupported" || runtimeUnavailable}>{actionLabel}</button></div>
+      <div className="model-stats">{model.trending_score != null && <span title="Hugging Face trending score"><Sparkles size={14} />{model.trending_score.toLocaleString()}</span>}<span><Download size={14} />{model.downloads?.toLocaleString() ?? "—"}</span><button className="primary compact-button" title={model.compatibility === "unsupported" || runtimeUnavailable ? model.compatibility_reasons.join(" ") : undefined} onClick={choosing ? onChooseVersion : onDownload} disabled={(!choosing && (status !== "idle" || model.compatibility === "unsupported")) || runtimeUnavailable}>{actionLabel}</button></div>
     </article>
   );
 }

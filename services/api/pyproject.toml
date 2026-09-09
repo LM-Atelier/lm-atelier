@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling==1.31.0"]
+requires = ["hatchling==1.32.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -23,7 +23,7 @@ dependencies = [
   "psutil>=7,<8",
   "sqlalchemy>=2.0,<3",
   "uvicorn[standard]>=0.52.0,<1",
-  "websockets>=16.1.1,<17"
+  "websockets>=17.1,<18"
 ]
 
 [project.optional-dependencies]
@@ -38,16 +38,17 @@ dev = [
   "pytest-asyncio>=1.0,<2",
   "pytest-cov>=7.1.0,<8",
   "ruff>=0.12,<1",
-  "types-psutil>=7.0,<8"
+  "types-psutil>=7.0,<8",
+  "types-PyYAML>=6.0,<7"
 ]
 package = [
   "pyinstaller>=6.21,<7"
 ]
 
 [project.urls]
-Homepage = "https://github.com/ajccarlson/lm-atelier"
-Issues = "https://github.com/ajccarlson/lm-atelier/issues"
-Repository = "https://github.com/ajccarlson/lm-atelier.git"
+Homepage = "https://github.com/LM-Atelier/lm-atelier"
+Issues = "https://github.com/LM-Atelier/lm-atelier/issues"
+Repository = "https://github.com/LM-Atelier/lm-atelier.git"
 
 [project.scripts]
 lm-atelier = "local_lm.desktop:main"
@@ -86,4 +87,10 @@ max-statements = 326
 python_version = "3.12"
 strict = true
 plugins = ["pydantic.mypy"]
-exclude = ["alembic"]
+# machine_lock.py is a Windows-only module: it reads GetLastError and turns a
+# kernel handle into a descriptor through msvcrt, neither of which typeshed
+# declares off Windows. The gate type-checks for the Linux platform as well as
+# this one, so including it would mean either restructuring the module around
+# platform guards or suppressing a dozen errors that are correct. Excluded here
+# rather than silently, so what is not checked is visible.
+exclude = ["alembic", 'scripts/machine_lock\.py$']

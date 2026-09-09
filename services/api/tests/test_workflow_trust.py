@@ -144,7 +144,6 @@ async def test_verification_vouches_for_a_rebuildable_workflow_first(
                 "operation": "text_to_image",
                 "engine": "mock",
                 "api_graph": {"1": {"class_type": "SaveImage", "inputs": {}}},
-                "trusted": False,
             },
         )
     ).json()
@@ -184,7 +183,6 @@ async def test_verification_leaves_an_unrebuildable_workflow_untrusted(
                 "operation": "text_to_image",
                 "engine": "mock",
                 "api_graph": {"1": {"class_type": "SaveImage", "inputs": {}}},
-                "trusted": False,
             },
         )
     ).json()

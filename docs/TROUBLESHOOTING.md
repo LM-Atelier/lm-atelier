@@ -110,12 +110,16 @@ The same problem in main memory rather than on the card. Close other programs an
 try again, or choose a smaller model. On Windows the paging file is used while a
 model loads, so increasing its size can be enough on its own.
 
-### "could not start because its port is already in use"
+### "port is already in use"
 
 Almost always a copy of the engine left running from an earlier session, holding
 the port the new one needs. Restarting LM Atelier clears it. If it persists,
 something else on the machine is using that port and ending that program is the
 fix.
+
+You can see this before you try to start anything. A worker card that reads
+stopped while something else holds its port names what is listening, so the
+program to end is the one shown there.
 
 ### "could not read the selected model"
 

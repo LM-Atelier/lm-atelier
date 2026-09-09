@@ -1,8 +1,8 @@
 """Staleness detection for installed models with first-class version identity.
 
 An installed row is comparable only when its manifest records which provider
-version it is - today that is CivitAI auxiliary assets, whose file metadata
-carries `source_model_id` and `source_version_id`. Rows without that identity
+version it is. Auxiliary assets carry it in file metadata; checkpoint installs
+must agree with their linked provider source. Rows without that identity
 are absent from the report rather than guessed at: a wrong "up to date" would
 teach the user to stop checking, and a wrong "update available" would teach
 them to stop believing it.
@@ -15,6 +15,7 @@ difference - a provider re-ordering its list must not read as an update.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -22,7 +23,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import ModelAssetInstall
+from .models import ModelAssetInstall, ModelInstall, ModelSource
 
 
 @dataclass(frozen=True)
@@ -51,7 +52,7 @@ class ModelUpdateCandidate:
 
 
 def installed_civitai_identities(session: Session) -> tuple[InstalledCivitaiIdentity, ...]:
-    """Installed assets whose manifests name an exact CivitAI version."""
+    """Installed assets and checkpoints with an exact CivitAI version."""
     identities: list[InstalledCivitaiIdentity] = []
     assets = session.scalars(select(ModelAssetInstall).order_by(ModelAssetInstall.name)).all()
     for asset in assets:
@@ -77,7 +78,37 @@ def installed_civitai_identities(session: Session) -> tuple[InstalledCivitaiIden
                 published_at=published_at if isinstance(published_at, str) else None,
             )
         )
+    checkpoints = session.execute(
+        select(ModelInstall, ModelSource)
+        .join(ModelSource, ModelInstall.source_id == ModelSource.id)
+        .where(ModelSource.provider == "civitai")
+        .order_by(ModelInstall.name, ModelInstall.id)
+    ).all()
+    for install, source in checkpoints:
+        model_id = install.manifest_json.get("remote_id")
+        version_id = install.manifest_json.get("revision")
+        if not isinstance(model_id, str) or not re.fullmatch(r"[1-9][0-9]*", model_id):
+            continue
+        if not isinstance(version_id, str) or not re.fullmatch(r"[1-9][0-9]*", version_id):
+            continue
+        if model_id != source.remote_id or version_id != source.revision:
+            continue
+        identities.append(
+            InstalledCivitaiIdentity(
+                install_id=install.id,
+                name=install.name,
+                kind="checkpoint",
+                model_id=model_id,
+                version_id=version_id,
+                version_name=None,
+                published_at=None,
+            )
+        )
     return tuple(identities)
+
+
+class ModelUpdateBaselineUnavailable(ValueError):
+    """No provider or recorded publication date can order the installed version."""
 
 
 def newer_version(
@@ -92,11 +123,12 @@ def newer_version(
     from the install manifest otherwise. An installed version the provider no
     longer lists (deleted, or no longer general-audience) compares by the
     manifest timestamp alone; without any timestamp there is no honest order,
-    so there is no update.
+    so the comparison raises ModelUpdateBaselineUnavailable rather than claiming
+    the installation is current.
     """
     entries = provider_versions.get("versions") if isinstance(provider_versions, dict) else None
     if not isinstance(entries, list):
-        return None
+        raise ModelUpdateBaselineUnavailable
     listed = {
         str(entry.get("version_id")): entry
         for entry in entries
@@ -107,7 +139,7 @@ def newer_version(
         current.get("published_at") if isinstance(current, dict) else installed.published_at
     )
     if baseline is None:
-        return None
+        raise ModelUpdateBaselineUnavailable
     best: ModelUpdateCandidate | None = None
     best_at: datetime | None = None
     for entry in listed.values():

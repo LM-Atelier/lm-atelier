@@ -11,6 +11,7 @@ from urllib.parse import parse_qsl, urlsplit
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .domain import ResourceKind
+from .workflow_dependency_error_types import WorkflowDependencyErrorCode
 
 WORKFLOW_DEPENDENCY_CONTRACT_VERSION = 1
 MAX_WORKFLOW_DEPENDENCY_SLOTS = 64
@@ -80,7 +81,7 @@ _FORBIDDEN_PORTABLE_KEYS = frozenset(
 
 
 class WorkflowDependencyError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: WorkflowDependencyErrorCode, message: str) -> None:
         super().__init__(message)
         self.code = code
 

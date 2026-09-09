@@ -11,15 +11,18 @@ from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import FastAPI
 from httpx2 import ASGITransport, AsyncClient
 from PIL import Image
+from run_waits import wait_for_terminal_status
 from sqlalchemy import func, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
+from workflow_fixtures import seed_workflow_trust
 
 import local_lm.api as api_module
 from local_lm import __version__
@@ -78,36 +81,32 @@ ONE_PIXEL_PNG = base64.b64decode(
 
 
 async def wait_for_assistant(client: AsyncClient, chat_id: str, expected_type: str) -> dict:  # type: ignore[type-arg]
-    deadline = asyncio.get_running_loop().time() + 5
-    while asyncio.get_running_loop().time() < deadline:
+    async def read() -> dict[str, Any] | None:
         response = await client.get(f"/api/chats/{chat_id}")
         assert response.status_code == 200
-        chat = response.json()
-        assistant = [message for message in chat["messages"] if message["role"] == "assistant"][-1]
-        if assistant["status"] in {"complete", "failed", "cancelled"}:
-            assert assistant["status"] == "complete", assistant
-            assert any(part["type"] == expected_type for part in assistant["parts"])
-            return assistant
-        await asyncio.sleep(0.03)
-    raise AssertionError("assistant run did not complete")
+        assistants = [
+            message for message in response.json()["messages"] if message["role"] == "assistant"
+        ]
+        return cast(dict[str, Any], assistants[-1]) if assistants else None
+
+    assistant = await wait_for_terminal_status(read, what=f"the assistant run in chat {chat_id}")
+    assert any(part["type"] == expected_type for part in assistant["parts"])
+    return cast(dict, assistant)
 
 
 async def wait_for_run(client: AsyncClient, run_id: str) -> dict:  # type: ignore[type-arg]
-    deadline = asyncio.get_running_loop().time() + 5
-    while asyncio.get_running_loop().time() < deadline:
+    async def read() -> dict[str, Any]:
         response = await client.get(f"/api/runs/{run_id}")
         assert response.status_code == 200
-        run = response.json()
-        if run["status"] in {"complete", "failed", "cancelled"}:
-            assert run["status"] == "complete", run
-            assert run["started_at"] is not None
-            assert run["completed_at"] is not None
-            assert isinstance(run["duration_ms"], int)
-            assert run["duration_ms"] >= 0
-            assert run["provenance_json"]["timings"]["duration_ms"] == run["duration_ms"]
-            return run
-        await asyncio.sleep(0.03)
-    raise AssertionError("run did not complete")
+        return cast(dict[str, Any], response.json())
+
+    run = await wait_for_terminal_status(read, what=f"run {run_id}")
+    assert run["started_at"] is not None
+    assert run["completed_at"] is not None
+    assert isinstance(run["duration_ms"], int)
+    assert run["duration_ms"] >= 0
+    assert run["provenance_json"]["timings"]["duration_ms"] == run["duration_ms"]
+    return cast(dict, run)
 
 
 def extend_capability_role(
@@ -242,7 +241,6 @@ async def test_model_readiness_requires_matching_capability_evidence(
             ModelCapabilityEvidence(
                 model_install_id=verified.id,
                 evidence_key="a" * 64,
-                result="ready",
                 component_hashes_json={"verified.gguf": "b" * 64},
                 runtime_build="llama-test",
                 adapter_contract_version=1,
@@ -732,7 +730,7 @@ async def test_inline_video_and_project_export(client: AsyncClient) -> None:
         assert "manifest.json" in bundle.namelist()
         assert any(name.startswith("artifacts/") for name in bundle.namelist())
         manifest = json.loads(bundle.read("manifest.json"))
-        assert manifest["version"] == 6
+        assert manifest["version"] == 7
         assert set(manifest["dependencies"]) == {"profiles", "presets", "workflows"}
 
     imported = await client.post(
@@ -823,7 +821,7 @@ async def test_project_archive_uses_immutable_auxiliary_requirements_without_wei
         assert all(not name.endswith(".safetensors") for name in archive.namelist())
         manifest = json.loads(archive.read("manifest.json"))
     reference = f"auxiliary:lora:sha256:{digest}"
-    assert manifest["version"] == 6
+    assert manifest["version"] == 7
     assert manifest["auxiliary_requirements"] == [
         {
             "id": reference,
@@ -1139,9 +1137,9 @@ async def test_project_v3_round_trip_remaps_portable_dependencies_in_a_fresh_dat
                 "properties": {"steps": {"type": "integer", "default": 12}},
             },
             "dependencies": {"models": ["portable-model"]},
-            "trusted": True,
         },
     )
+    seed_workflow_trust(workflow_response.json()["current_revision_id"])
     assert workflow_response.status_code == 201
     workflow = workflow_response.json()
     revision_one = workflow["revisions"][0]
@@ -1154,9 +1152,9 @@ async def test_project_v3_round_trip_remaps_portable_dependencies_in_a_fresh_dat
                 "properties": {"steps": {"type": "integer", "default": 16}},
             },
             "dependencies": {"models": ["portable-model-v2"]},
-            "trusted": True,
         },
     )
+    seed_workflow_trust(revision_two_response.json()["id"])
     assert revision_two_response.status_code == 201
     revision_two = revision_two_response.json()
 
@@ -1213,7 +1211,7 @@ async def test_project_v3_round_trip_remaps_portable_dependencies_in_a_fresh_dat
     ).json()
     archive = await client.get(exported["url"])
     manifest = project_manifest(archive.content)
-    assert manifest["version"] == 6
+    assert manifest["version"] == 7
     assert {item["source_id"] for item in manifest["dependencies"]["profiles"]} == {
         chat_profile["id"],
         image_profile["id"],
@@ -1720,7 +1718,7 @@ async def test_engine_api_isolates_media_settings_by_role(client: AsyncClient) -
         "frames",
         "fps",
         "steps",
-        "guidance",
+        "cfg",
         "motion_strength",
         "codec",
     ]
@@ -4396,15 +4394,16 @@ async def test_workflow_revisions_and_validation(client: AsyncClient) -> None:
                 "type": "object",
                 "properties": {"steps": {"type": "integer", "default": 20}},
             },
-            "trusted": True,
         },
     )
+    seed_workflow_trust(created.json()["current_revision_id"])
     assert created.status_code == 201
     workflow = created.json()
     revision = await client.post(
         f"/api/workflows/{workflow['id']}/revisions",
-        json={"api_graph": {"node": {"class_type": "MockV2"}}, "trusted": True},
+        json={"api_graph": {"node": {"class_type": "MockV2"}}},
     )
+    seed_workflow_trust(revision.json()["id"])
     assert revision.status_code == 201
     assert revision.json()["version"] == 2
     validation = await client.post(f"/api/workflows/{workflow['id']}/validate")
@@ -4443,9 +4442,9 @@ async def test_workflow_revisions_and_validation(client: AsyncClient) -> None:
         json={
             "api_graph": {"node": {"class_type": "Mock"}},
             "dependencies": {"models": ["not-installed"]},
-            "trusted": True,
         },
     )
+    seed_workflow_trust(missing_dependency.json()["id"])
     assert missing_dependency.status_code == 201
     validation = await client.post(f"/api/workflows/{workflow['id']}/validate")
     assert validation.json()["valid"] is False
@@ -4481,10 +4480,10 @@ async def test_workflow_vram_requirement_uses_device_capacity(
                 "engine": "mock",
                 "api_graph": {"node": {"class_type": "Mock"}},
                 "dependencies": {"minimum_vram_bytes": 12 * 1024**3},
-                "trusted": True,
             },
         )
     ).json()
+    seed_workflow_trust(workflow["current_revision_id"])
 
     under_pressure = await client.post(f"/api/workflows/{workflow['id']}/validate")
     assert under_pressure.status_code == 200
@@ -4534,7 +4533,6 @@ async def test_workflow_validation_requires_trust_and_active_model_dependencies(
                 "engine": "comfyui",
                 "api_graph": {"1": {"class_type": "SaveImage", "inputs": {}}},
                 "dependencies": {"models": [{"id": "model_inactive_workflow_dependency"}]},
-                "trusted": False,
             },
         )
     ).json()
@@ -4543,7 +4541,7 @@ async def test_workflow_validation_requires_trust_and_active_model_dependencies(
 
     assert validation.status_code == 200
     assert validation.json()["valid"] is False
-    assert any("not trusted" in error for error in validation.json()["errors"])
+    assert any("Review exact revision" in error for error in validation.json()["errors"])
     assert any("missing model dependency" in error for error in validation.json()["errors"])
 
 
@@ -4558,10 +4556,10 @@ async def test_project_pins_an_immutable_media_workflow_revision(client: AsyncCl
                 # workflow that cannot run here, which is a different test.
                 "engine": "mock",
                 "api_graph": {"1": {"class_type": "SaveImage", "inputs": {}}},
-                "trusted": True,
             },
         )
     ).json()
+    seed_workflow_trust(workflow["current_revision_id"])
     revision_id = workflow["current_revision_id"]
     project_response = await client.post(
         "/api/projects",
@@ -4605,10 +4603,10 @@ async def test_a_project_pin_that_cannot_run_is_named_rather_than_replaced(
                 "operation": "text_to_image",
                 "engine": "comfyui",
                 "api_graph": {"1": {"class_type": "SaveImage", "inputs": {}}},
-                "trusted": True,
             },
         )
     ).json()
+    seed_workflow_trust(other_engine["current_revision_id"])
     usable = (
         await client.post(
             "/api/workflows",
@@ -4617,10 +4615,10 @@ async def test_a_project_pin_that_cannot_run_is_named_rather_than_replaced(
                 "operation": "text_to_image",
                 "engine": "mock",
                 "api_graph": {"1": {"class_type": "SaveImage", "inputs": {}}},
-                "trusted": True,
             },
         )
     ).json()
+    seed_workflow_trust(usable["current_revision_id"])
     assert usable["current_revision_id"]
 
     project = (
@@ -4666,7 +4664,6 @@ async def test_an_untrusted_project_pin_is_refused_at_selection(client: AsyncCli
                 "operation": "text_to_image",
                 "engine": "mock",
                 "api_graph": {"1": {"class_type": "SaveImage", "inputs": {}}},
-                "trusted": False,
             },
         )
     ).json()
@@ -4726,10 +4723,10 @@ async def test_a_pin_follows_only_an_artifact_identical_recompile(client: AsyncC
                 "operation": "text_to_image",
                 "engine": "mock",
                 "api_graph": graph,
-                "trusted": True,
             },
         )
     ).json()
+    seed_workflow_trust(workflow["current_revision_id"])
     pinned_revision_id = workflow["current_revision_id"]
     project = (
         await client.post(
@@ -4746,9 +4743,10 @@ async def test_a_pin_follows_only_an_artifact_identical_recompile(client: AsyncC
     identical = (
         await client.post(
             f"/api/workflows/{workflow['id']}/revisions",
-            json={"api_graph": graph, "trusted": True},
+            json={"api_graph": graph},
         )
     ).json()
+    seed_workflow_trust(identical["id"])
     assert identical["id"] != pinned_revision_id
 
     turn = await client.post(
@@ -4765,10 +4763,10 @@ async def test_a_pin_follows_only_an_artifact_identical_recompile(client: AsyncC
             f"/api/workflows/{workflow['id']}/revisions",
             json={
                 "api_graph": {"1": {"class_type": "SaveImage", "inputs": {"quality": 95}}},
-                "trusted": True,
             },
         )
     ).json()
+    seed_workflow_trust(changed["id"])
 
     second = await client.post(
         f"/api/chats/{chat['id']}/turns",
@@ -4816,10 +4814,10 @@ async def test_media_workflow_follows_the_selected_model_dependency(
                     "engine": "mock",
                     "api_graph": {"node": {"class_type": f"MockImage{index}"}},
                     "dependencies": {"model_install_ids": [install["id"]]},
-                    "trusted": True,
                 },
             )
         ).json()
+        seed_workflow_trust(workflow["current_revision_id"])
         revisions.append(workflow["current_revision_id"])
 
     chat = (await client.post("/api/chats", json={"title": "Dependency routing"})).json()
@@ -4892,10 +4890,10 @@ async def test_auto_media_selection_falls_back_to_operation_compatible_profile(
                 "engine": "mock",
                 "api_graph": {"node": {"class_type": "MockTextImage"}},
                 "dependencies": {"model_install_ids": [installs[0]["id"]]},
-                "trusted": True,
             },
         )
     ).json()
+    seed_workflow_trust(text_workflow["current_revision_id"])
     edit_workflow = await client.post(
         "/api/workflows",
         json={
@@ -4904,9 +4902,9 @@ async def test_auto_media_selection_falls_back_to_operation_compatible_profile(
             "engine": "mock",
             "api_graph": {"node": {"class_type": "MockEditImage"}},
             "dependencies": {"model_install_ids": [installs[1]["id"]]},
-            "trusted": True,
         },
     )
+    seed_workflow_trust(edit_workflow.json()["current_revision_id"])
     assert edit_workflow.status_code == 201
 
     chat = (await client.post("/api/chats", json={"title": "Auto fallback"})).json()
@@ -4989,10 +4987,10 @@ async def test_pinned_workflow_schema_drives_generation_settings(client: AsyncCl
                         },
                     },
                 },
-                "trusted": True,
             },
         )
     ).json()
+    seed_workflow_trust(workflow["current_revision_id"])
     project = (
         await client.post(
             "/api/projects",
@@ -5129,9 +5127,9 @@ async def test_workflow_seconds_resolve_before_video_dispatch(
                     "frame_offset": 1,
                 },
             },
-            "trusted": True,
         },
     )
+    seed_workflow_trust(workflow_response.json()["current_revision_id"])
     assert workflow_response.status_code == 201, workflow_response.json()
     workflow = workflow_response.json()
     project = (
@@ -5429,10 +5427,10 @@ async def test_pinned_workflow_revision_keeps_dynamic_capability_constraints(
                         }
                     }
                 },
-                "trusted": True,
             },
         )
     ).json()
+    seed_workflow_trust(workflow["current_revision_id"])
     pinned_revision = workflow["current_revision_id"]
     project = (
         await client.post(
@@ -5458,9 +5456,9 @@ async def test_pinned_workflow_revision_keeps_dynamic_capability_constraints(
                     }
                 }
             },
-            "trusted": True,
         },
     )
+    seed_workflow_trust(replacement.json()["id"])
     assert replacement.status_code == 201
     chat = (
         await client.post(
@@ -6266,7 +6264,7 @@ async def test_project_export_snapshots_local_preset_bindings(
     archive = await client.get(exported["url"])
     with zipfile.ZipFile(io.BytesIO(archive.content)) as bundle:
         manifest = json.loads(bundle.read("manifest.json"))
-    assert manifest["version"] == 6
+    assert manifest["version"] == 7
     assert manifest["project"]["generation_preset_ids_json"] == {"chat": preset["id"]}
     assert manifest["project"]["generation_settings_json"]["chat"] == {
         "temperature": 0.1,
@@ -7786,9 +7784,9 @@ async def test_workflow_edit_calibration_is_validated_and_portable(
             "engine": "mock",
             "api_graph": {"node": {"class_type": "Mock"}},
             "input_schema": input_schema,
-            "trusted": True,
         },
     )
+    seed_workflow_trust(created.json()["current_revision_id"])
     assert created.status_code == 201, created.text
     workflow = created.json()
 
@@ -7821,7 +7819,6 @@ async def test_workflow_edit_calibration_is_validated_and_portable(
         json={
             "api_graph": {"node": {"class_type": "MockV2"}},
             "input_schema": invalid_schema,
-            "trusted": True,
         },
     )
     assert rejected_revision.status_code == 422
@@ -7905,10 +7902,10 @@ async def test_derive_trust_reports_an_already_trusted_workflow(client: AsyncCli
                 "operation": "text_to_image",
                 "engine": "mock",
                 "api_graph": {"1": {"class_type": "SaveImage", "inputs": {}}},
-                "trusted": True,
             },
         )
     ).json()
+    seed_workflow_trust(workflow["current_revision_id"])
 
     derived = await client.post(f"/api/workflows/{workflow['id']}/derive-trust")
 
@@ -10707,10 +10704,14 @@ async def test_a_refused_start_phase_enters_no_worker_and_no_engine(
 async def test_a_refused_phase_during_the_start_ends_the_execution_before_inference(
     client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A phase the row refuses while the worker is starting is carried out
-    of the start - the supervisor swallows what its callback raises - and
-    the execution ends before any inference; the started worker stays for
-    the attempt that owns the row now."""
+    """A phase the row refuses while the worker is starting stops the start
+    and ends the execution before any inference; the worker that was already
+    started stays for the attempt that owns the row now.
+
+    The supervisor here is a stand-in, so this covers the orchestrator's half
+    of the refusal only. That the real supervisor stops rather than swallowing
+    is held by the sentinel controls in test_processes.py.
+    """
 
     from local_lm.orchestrator import ClaimLost
 
@@ -10858,6 +10859,189 @@ async def test_setup_finalization_skips_a_requeued_attempt(
         assert session.get(Job, job_id) is not None, "the successor's job was finalized away"
 
 
+async def test_setup_finalization_refuses_a_requeue_that_lands_after_its_check(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The requeue arrives AFTER the finalizer has already checked the row.
+
+    The sibling test above establishes the successor before entering the helper,
+    so the in-memory check catches it and the deletion is never reached. That
+    leaves the actual window untested: the read holds no writer lock, so a
+    requeue can land between the check and the mutation, and an execution that
+    checked a row it did own can still delete a row it no longer owns.
+
+    The interleave is placed exactly there. `setup_verification_for_chat` is
+    called after the check and before `finalize_setup_verification`, so a
+    requeue performed inside it, from a separate session that commits, is what
+    production would produce at the worst moment.
+    """
+
+    orch = app.state.services.orchestrator
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: None)
+    _chat_id, job_id, claim = await _claimed_text_job(client, monkeypatch)
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        run_id = job.run_id
+        assert job.attempt == claim.attempt, "the fixture job is not this claim's attempt"
+
+    published: list[str] = []
+
+    async def recording_publish(name: str, *args: object, **kwargs: object) -> None:
+        published.append(name)
+
+    monkeypatch.setattr(orch.events, "publish", recording_publish)
+    finalized = Mock(return_value=True)
+    monkeypatch.setitem(
+        orch._finalize_setup_verification_run.__globals__, "finalize_setup_verification", finalized
+    )
+
+    def requeue_then_answer(_session: object, _chat_id: str) -> object:
+        # A successor reclaims the row while the finalizer holds only its read.
+        with SessionLocal() as other:
+            requeued = other.get(Job, job_id)
+            assert requeued is not None
+            requeued.attempt = claim.attempt + 1
+            requeued.claim_owner = "a-later-attempt"
+            other.commit()
+        return SimpleNamespace(role="setup", state="running")
+
+    monkeypatch.setitem(
+        orch._finalize_setup_verification_run.__globals__,
+        "setup_verification_for_chat",
+        requeue_then_answer,
+    )
+
+    assert run_id is not None
+    await orch._finalize_setup_verification_run(job_id, run_id, claim)
+
+    finalized.assert_not_called()
+    assert published == []
+    with SessionLocal() as session:
+        survivor = session.get(Job, job_id)
+        assert survivor is not None, "the successor's job was deleted by a replaced attempt"
+        # The successor's reclaim is intact: the replaced execution wrote nothing
+        # over it on its way out.
+        assert survivor.attempt == claim.attempt + 1
+        assert survivor.claim_owner == "a-later-attempt"
+
+
+async def test_a_cancel_teardown_does_not_finalize_the_retry_that_replaced_it(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`cancel` holds no claim, so the claim guard above never applied to it.
+
+    The window is wide and every step of it ships. `cancel` marks the job
+    cancelled and commits; the retry endpoint accepts a cancelled job, puts it
+    back to queued under the SAME id and starts it; the scheduler's claim writes
+    attempt + 1. Meanwhile the cancel has not finished - between its commit and
+    its finalizer it awaits the engine cancellation, which for media is an HTTP
+    interrupt, then gathers the cancelled task and publishes twice. Its teardown
+    then deleted the retry's records.
+
+    The interleave is placed where the check has already passed, for the same
+    reason as the sibling above: the read holds no writer lock, so this is the
+    moment the in-memory answer can go stale.
+    """
+
+    orch = app.state.services.orchestrator
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: None)
+    _chat_id, job_id, claim = await _claimed_text_job(client, monkeypatch)
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        run_id = job.run_id
+        cancelled_attempt = job.attempt
+        job.status = "cancelled"
+        session.commit()
+
+    published: list[str] = []
+
+    async def recording_publish(name: str, *args: object, **kwargs: object) -> None:
+        published.append(name)
+
+    monkeypatch.setattr(orch.events, "publish", recording_publish)
+    finalized = Mock(return_value=True)
+    monkeypatch.setitem(
+        orch._finalize_setup_verification_run.__globals__, "finalize_setup_verification", finalized
+    )
+
+    def retry_then_answer(_session: object, _chat_id: str) -> object:
+        # What the retry endpoint does, from a separate session that commits:
+        # a cancelled job goes back to queued under the same id, and the
+        # scheduler's claim then advances the attempt.
+        with SessionLocal() as other:
+            revived = other.get(Job, job_id)
+            assert revived is not None
+            revived.status = "running"
+            revived.attempt = cancelled_attempt + 1
+            revived.claim_owner = "the-retry"
+            other.commit()
+        return SimpleNamespace(role="setup", state="running")
+
+    monkeypatch.setitem(
+        orch._finalize_setup_verification_run.__globals__,
+        "setup_verification_for_chat",
+        retry_then_answer,
+    )
+
+    assert run_id is not None
+    await orch._finalize_setup_verification_run(job_id, run_id, cancelled_attempt=cancelled_attempt)
+
+    finalized.assert_not_called()
+    assert published == []
+    with SessionLocal() as session:
+        survivor = session.get(Job, job_id)
+        assert survivor is not None, "the retry's job was deleted by the cancel it replaced"
+        assert survivor.attempt == cancelled_attempt + 1
+        assert survivor.claim_owner == "the-retry"
+        assert survivor.status == "running"
+
+
+async def test_a_cancel_teardown_still_finalizes_the_run_it_cancelled(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The half that must not change.
+
+    Binding the teardown to the attempt it observed must not stop an ordinary
+    cancel from tidying up after itself. Nothing revives the job here, so the
+    finalizer runs exactly as before.
+    """
+
+    orch = app.state.services.orchestrator
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: None)
+    _chat_id, job_id, _claim = await _claimed_text_job(client, monkeypatch)
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        run_id = job.run_id
+        cancelled_attempt = job.attempt
+        job.status = "cancelled"
+        session.commit()
+
+    published: list[str] = []
+
+    async def recording_publish(name: str, *args: object, **kwargs: object) -> None:
+        published.append(name)
+
+    monkeypatch.setattr(orch.events, "publish", recording_publish)
+    finalized = Mock(return_value=True)
+    monkeypatch.setitem(
+        orch._finalize_setup_verification_run.__globals__, "finalize_setup_verification", finalized
+    )
+    monkeypatch.setitem(
+        orch._finalize_setup_verification_run.__globals__,
+        "setup_verification_for_chat",
+        lambda _session, _chat_id: SimpleNamespace(role="setup", state="running"),
+    )
+
+    assert run_id is not None
+    await orch._finalize_setup_verification_run(job_id, run_id, cancelled_attempt=cancelled_attempt)
+
+    finalized.assert_called_once()
+    assert published == ["setup.verification.completed"]
+
+
 async def test_a_publication_failure_after_the_retry_commit_converges(
     client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -10909,8 +11093,9 @@ async def test_a_publication_failure_after_the_retry_commit_converges(
         assert session.scalar(select(func.count()).select_from(Run)) == runs_before + 1
     assert started == [], "the failed announcement started the retry anyway"
 
-    converged = await orch._converge_on_bound_retry(payload)  # type: ignore[arg-type]
+    converged, converged_started = await orch._converge_on_bound_retry(payload)  # type: ignore[arg-type]
     assert converged is not None and converged.run.id == bound_run_id
+    assert converged_started, "the convergence reported no start it had made"
     assert started, "the bound retry was not started on convergence"
     with SessionLocal() as session:
         again = await orch._create_image_edit_verification_retry(
@@ -10921,6 +11106,54 @@ async def test_a_publication_failure_after_the_retry_commit_converges(
         )
         assert again.run.id == bound_run_id, "a second retry was created for the same source"
         assert session.scalar(select(func.count()).select_from(Run)) == runs_before + 1
+
+
+async def test_a_convergence_that_cannot_announce_reports_no_start(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding the bound retry and starting it are two different answers.
+
+    This recovery is best-effort at every step, so it can find a durable retry
+    and still fail to announce it - and `_announce_bound_retry` publishes
+    before it starts anything, so a refused publication means no job was
+    started. Returning only the retry made "we found it" indistinguishable
+    from "it is running", and the caller recorded the second.
+    """
+
+    orch = app.state.services.orchestrator
+    started: list[object] = []
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: started.append(args))
+    chat_id, source_run_id, _verification_id, claim = await _image_edit_source_under_verification(
+        client, monkeypatch
+    )
+    monkeypatch.setattr(type(orch), "start", lambda self, *args: started.append(args))
+    started.clear()
+    payload, decision = _retry_inputs(chat_id, source_run_id)
+    real_publish = orch.events.publish
+
+    async def refuse_plan_announcements(name: str, *args: object, **kwargs: object) -> None:
+        if name == "work_plan.created":
+            raise RuntimeError("the event broker was unavailable")
+        await real_publish(name, *args, **kwargs)
+
+    monkeypatch.setattr(orch.events, "publish", refuse_plan_announcements)
+    with SessionLocal() as session:
+        with pytest.raises(RuntimeError):
+            await orch._create_image_edit_verification_retry(
+                session,
+                payload,  # type: ignore[arg-type]
+                decision,  # type: ignore[arg-type]
+                claim=claim,  # type: ignore[arg-type]
+                source_record={"status": "complete"},
+            )
+        session.rollback()
+    assert started == [], "the failed announcement started the retry anyway"
+
+    converged, converged_started = await orch._converge_on_bound_retry(payload)  # type: ignore[arg-type]
+
+    assert converged is not None, "the durable binding was lost"
+    assert converged_started is False, "the convergence reported a start it never made"
+    assert started == [], "nothing was started, and something says otherwise"
 
 
 async def test_retry_convergence_keeps_a_durable_binding_when_materialization_fails_once(
@@ -10987,7 +11220,7 @@ async def test_retry_convergence_keeps_a_durable_binding_when_materialization_fa
     # Patched for the rest of the control: only the first read fails, and an
     # undo here would also remove the start recorder above.
     monkeypatch.setattr(Session, "scalars", failing_first_materialization)
-    converged = await orch._converge_on_bound_retry(payload)  # type: ignore[arg-type]
+    converged, _converged_started = await orch._converge_on_bound_retry(payload)  # type: ignore[arg-type]
 
     assert reads["n"] == 1, "the second-stage read was never reached"
     assert converged is not None and converged.run.id == bound_run_id, (
@@ -11003,7 +11236,7 @@ async def test_retry_convergence_keeps_a_durable_binding_when_materialization_fa
 
     # The next pass, with the read healthy, still converges on the same retry.
     started.clear()
-    again = await orch._converge_on_bound_retry(payload)  # type: ignore[arg-type]
+    again, _again_started = await orch._converge_on_bound_retry(payload)  # type: ignore[arg-type]
     assert again is not None and again.run.id == bound_run_id
     assert started, "the bound retry was not started on the later pass"
 
@@ -11090,3 +11323,270 @@ async def test_a_claim_lost_after_the_completion_stamp_persists_no_asset(
         )
         row = session.get(Job, job_id)
         assert row is not None and row.status == "running" and row.attempt == claim.attempt + 1
+
+
+async def test_a_queue_of_images_restores_the_chat_model_once_at_the_end(
+    client: AsyncClient, app: FastAPI, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    """The run's last image must still reach the handoff that puts chat back.
+
+    Only the FIRST image of a run displaces chat, because every later one finds
+    it already stopped and `_prepare_device_handoff` answers None. The dispatch
+    therefore has to remember what the run displaced, or the final image skips
+    the handoff entirely and the chat model stays unloaded for the rest of the
+    session. This drives the real dispatch rather than calling the handoff by
+    hand: the first job is held inside generation until the second is queued, so
+    the sequence is the one production produces.
+    """
+
+    services = app.state.services
+    orchestrator = services.orchestrator
+    chat_running = {"value": True}
+
+    def statuses() -> list[WorkerStatus]:
+        running = chat_running["value"]
+        return [
+            WorkerStatus(
+                name="chat",
+                state="ready" if running else "stopped",
+                managed=True,
+                running=running,
+                pid=11 if running else None,
+                profile_id="profile-chat" if running else None,
+            ),
+            WorkerStatus(name="media", state="ready", managed=True, running=True, pid=22),
+        ]
+
+    stopped: list[str] = []
+    restored: list[str] = []
+    handoffs: list[str] = []
+
+    async def stop(name: str) -> None:
+        stopped.append(name)
+        if name == "chat":
+            chat_running["value"] = False
+
+    async def resume(profile_id: str) -> None:
+        restored.append(profile_id)
+        chat_running["value"] = True
+
+    async def start_media(**_kwargs: object) -> None:
+        return None
+
+    real_handoff = orchestrator._complete_media_handoff
+
+    async def watched_handoff(profile_id: str) -> None:
+        handoffs.append(profile_id)
+        await real_handoff(profile_id)
+
+    monkeypatch.setattr(services.processes, "statuses", statuses)
+    monkeypatch.setattr(services.processes, "stop", stop)
+    monkeypatch.setattr(services.processes, "start_media", start_media)
+    monkeypatch.setattr(orchestrator, "_resume_chat_worker", resume)
+    monkeypatch.setattr(orchestrator, "_complete_media_handoff", watched_handoff)
+
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    generated = 0
+    real_generate = MockMediaAdapter.generate
+
+    async def staged_generate(
+        self: MockMediaAdapter, request: MediaRequest
+    ) -> AsyncIterator[MediaEvent]:
+        nonlocal generated
+        generated += 1
+        if generated == 1:
+            first_started.set()
+            await release_first.wait()
+        async for event in real_generate(self, request):
+            yield event
+
+    monkeypatch.setattr(MockMediaAdapter, "generate", staged_generate)
+
+    chat = (await client.post("/api/chats", json={"title": "Queued images"})).json()
+    first = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "A grey mug on a table", "mode": "image"},
+    )
+    assert first.status_code == 202
+    await asyncio.wait_for(first_started.wait(), timeout=5)
+    second = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "A blue mug on a table", "mode": "image"},
+    )
+    assert second.status_code == 202
+    release_first.set()
+
+    deadline = asyncio.get_running_loop().time() + 10
+    while asyncio.get_running_loop().time() < deadline:
+        messages = (await client.get(f"/api/chats/{chat['id']}")).json()["messages"]
+        done = [
+            message
+            for message in messages
+            if message["role"] == "assistant" and message["status"] == "complete"
+        ]
+        if len(done) == 2:
+            break
+        await asyncio.sleep(0.03)
+    else:  # pragma: no cover - the queue did not drain
+        raise AssertionError("both queued images did not complete")
+
+    # The second entry is the whole point: it exists only because the dispatch
+    # asked what the run still owed rather than what this job displaced.
+    assert handoffs == ["profile-chat", "profile-chat"], handoffs
+    assert restored == ["profile-chat"], restored
+    # One chat stop for the whole run rather than one per image, which is the
+    # thrash this removes. The media worker is not recycled here at all: that
+    # branch is ComfyUI-only and this suite runs the mock media engine, so the
+    # unit tests pin the media half and this pins the chat half end to end.
+    assert stopped == ["chat"], stopped
+
+
+async def test_a_media_run_that_loses_its_claim_moves_no_worker_on_the_way_out(
+    client: AsyncClient, app: FastAPI, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    """A replaced attempt must not complete the handoff on a successor's behalf.
+
+    The dispatch's outer finally runs even when the media execution raises
+    ClaimLost, and completing the handoff stops media, resumes chat or schedules
+    a restart. Entering through the real dispatch is the whole point: the existing
+    controls for this call the handoff by hand and so never exercise the wrapper
+    that actually runs it.
+
+    The claim is taken away mid-generation by bumping the job's attempt, which is
+    what a successor reclaiming the row does. Chat is displaced FIRST, so the run
+    genuinely owes a restore when the claim is lost - otherwise the assertion
+    would hold for the trivial reason that nothing was owed at all.
+    """
+
+    services = app.state.services
+    orchestrator = services.orchestrator
+    chat_running = {"value": True}
+
+    def statuses() -> list[WorkerStatus]:
+        running = chat_running["value"]
+        return [
+            WorkerStatus(
+                name="chat",
+                state="ready" if running else "stopped",
+                managed=True,
+                running=running,
+                pid=11 if running else None,
+                profile_id="profile-chat" if running else None,
+            ),
+            WorkerStatus(name="media", state="ready", managed=True, running=True, pid=22),
+        ]
+
+    stopped: list[str] = []
+    restored: list[str] = []
+    handoffs: list[str] = []
+    restarts: list[str] = []
+
+    async def stop(name: str) -> None:
+        stopped.append(name)
+        if name == "chat":
+            chat_running["value"] = False
+
+    async def resume(profile_id: str) -> None:
+        restored.append(profile_id)
+        chat_running["value"] = True
+
+    async def start_media(**_kwargs: object) -> None:
+        return None
+
+    real_handoff = orchestrator._complete_media_handoff
+
+    async def watched_handoff(profile_id: str) -> None:
+        handoffs.append(profile_id)
+        await real_handoff(profile_id)
+
+    monkeypatch.setattr(services.processes, "statuses", statuses)
+    monkeypatch.setattr(services.processes, "stop", stop)
+    monkeypatch.setattr(services.processes, "start_media", start_media)
+    monkeypatch.setattr(orchestrator, "_resume_chat_worker", resume)
+    monkeypatch.setattr(orchestrator, "_complete_media_handoff", watched_handoff)
+    monkeypatch.setattr(orchestrator, "_schedule_media_restart", lambda: restarts.append("media"))
+
+    # The finally asks what the run still owes immediately before deciding, so
+    # observing that call is an exact signal that the decision point was reached.
+    # Waiting on the job leaving RUNNING would hang: a reclaimed row is the
+    # successor's to settle, and this test has no successor.
+    decided = asyncio.Event()
+    real_pending = orchestrator._pending_chat_restore
+
+    def watched_pending(resume_chat_profile: str | None) -> str | None:
+        answer = real_pending(resume_chat_profile)
+        decided.set()
+        return answer
+
+    monkeypatch.setattr(orchestrator, "_pending_chat_restore", watched_pending)
+
+    reclaimed = asyncio.Event()
+    real_generate = MockMediaAdapter.generate
+
+    async def reclaiming_generate(
+        self: MockMediaAdapter, request: MediaRequest
+    ) -> AsyncIterator[MediaEvent]:
+        # A successor takes the row while this attempt is generating.
+        if not reclaimed.is_set():
+            with orchestrator.session_factory() as session:
+                running = session.scalars(
+                    select(Job).where(Job.status == JobStatus.RUNNING.value)
+                ).all()
+                for job in running:
+                    job.attempt = job.attempt + 1
+                    job.claim_owner = "a-later-attempt"
+                session.commit()
+            reclaimed.set()
+        async for event in real_generate(self, request):
+            yield event
+
+    monkeypatch.setattr(MockMediaAdapter, "generate", reclaiming_generate)
+
+    chat = (await client.post("/api/chats", json={"title": "Reclaimed run"})).json()
+    accepted = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "A grey mug on a table", "mode": "image"},
+    )
+    assert accepted.status_code == 202
+    await asyncio.wait_for(reclaimed.wait(), timeout=5)
+
+    await asyncio.wait_for(decided.wait(), timeout=10)
+    # Let the handoff run if the dispatch is going to run it, so an assertion of
+    # absence is not just winning a race with it.
+    await asyncio.sleep(0.2)
+
+    # Not vacuous: chat really was displaced, so this run owed a restore. The
+    # handoff is skipped because the attempt no longer owns the row, not because
+    # there was nothing to hand back.
+    assert stopped == ["chat"], stopped
+    assert handoffs == [], handoffs
+    assert restored == [], restored
+    assert restarts == [], restarts
+
+
+async def test_a_text_turn_clears_what_a_media_run_still_owed(
+    client: AsyncClient, app: FastAPI
+) -> None:
+    """A text execution settles the debt itself, so the dispatch must drop it.
+
+    `_ensure_chat_worker` loads whatever profile a text execution needs before
+    it runs, so once one has happened the run owes nothing. Leaving the record
+    set would make a later media job restore a profile nobody displaced. The
+    state is reachable in production when a run's remaining images never
+    dispatch, which is the cancelled-image case; it is set here directly
+    because engineering that race would be flaky rather than more truthful.
+    """
+
+    orchestrator = app.state.services.orchestrator
+    orchestrator._displaced_chat_profile_id = "profile-chat"
+
+    chat = (await client.post("/api/chats", json={"title": "Text after images"})).json()
+    turn = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={"text": "Explain local inference", "mode": "text"},
+    )
+    assert turn.status_code == 202
+    await wait_for_assistant(client, chat["id"], "text")
+
+    assert orchestrator._displaced_chat_profile_id is None

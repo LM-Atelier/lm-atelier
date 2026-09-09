@@ -26,13 +26,21 @@ function delta(messageId: string, text: string, attempt?: number): AppEvent {
   };
 }
 
-async function liveTextAfter(events: AppEvent[]): Promise<Record<string, string>> {
+async function liveTextAfter(
+  events: AppEvent[],
+  cachedJobs?: Array<{ id: string; attempt: number }>,
+): Promise<Record<string, string>> {
   handlers.length = 0;
   let liveText: Record<string, string> = {};
   const setLiveText = (update: Record<string, string> | ((current: Record<string, string>) => Record<string, string>)) => {
     liveText = typeof update === "function" ? update(liveText) : update;
   };
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  if (cachedJobs) {
+    // What a reconnect actually starts from: the job list is already in the
+    // cache, and it names the attempt each job is on.
+    client.setQueryData(["jobs"], cachedJobs);
+  }
   renderHook(() => useLiveEvents(client, setLiveText));
   await act(async () => { await Promise.resolve(); });
   expect(handlers.length).toBe(1);
@@ -80,6 +88,31 @@ describe("useLiveEvents attempt fence", () => {
       delta("m1", "late from attempt one", 1),
     ]);
     expect(text.m1).toBe("attempt one ");
+  });
+
+  it("fences an older delta after a reconnect, before any progress event arrives", async () => {
+    // The fence is rebuilt on every connect. Seeded only by `job.progress`, it
+    // was empty for the whole window between reconnecting and the first
+    // progress event - and an in-flight retry's predecessor can still be
+    // speaking in that window. Its delta was accepted with nothing to measure
+    // it against, and overwrote text the newer attempt had already written.
+    const liveText = await liveTextAfter(
+      [delta("m1", "from the attempt that was replaced", 1)],
+      [{ id: "job-1", attempt: 2 }],
+    );
+
+    expect(liveText.m1).toBeUndefined();
+  });
+
+  it("still accepts the current attempt's delta after a reconnect", async () => {
+    // Seeding must fence what is older and nothing else: a fence that dropped
+    // the live attempt's own text would be worse than the gap it closes.
+    const liveText = await liveTextAfter(
+      [delta("m1", "from the attempt that is running", 2)],
+      [{ id: "job-1", attempt: 2 }],
+    );
+
+    expect(liveText.m1).toBe("from the attempt that is running");
   });
 
   it("keeps appending under a job snapshot of the same attempt", async () => {

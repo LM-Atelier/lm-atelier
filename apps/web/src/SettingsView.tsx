@@ -85,15 +85,22 @@ function ProfileEditor({
   const client = useQueryClient();
   const [name, setName] = useState(profile.name);
   const [useCase, setUseCase] = useState(profile.use_case);
+  const [useCaseEdited, setUseCaseEdited] = useState(false);
   const [isDefault, setIsDefault] = useState(profile.is_default);
   const [loadSettings, setLoadSettings] = useState(profile.load_settings_json);
   const [requestSettings, setRequestSettings] = useState(profile.request_settings_json);
   const [visibility, setVisibility] = useState<Visibility>("basic");
-  const refresh = () => void client.invalidateQueries({ queryKey: ["profiles"] });
+  const refresh = () => {
+    void client.invalidateQueries({ queryKey: ["profiles"] });
+    void client.invalidateQueries({ queryKey: ["workflow-families"] });
+    void client.invalidateQueries({ queryKey: ["workflow-family"] });
+    void client.invalidateQueries({ queryKey: ["workflows"] });
+    void client.invalidateQueries({ queryKey: ["studio-capabilities"] });
+  };
   const save = useMutation({
     mutationFn: () => api.updateProfile(profile.id, {
       name,
-      use_case: useCase,
+      ...(useCaseEdited ? { use_case: useCase } : {}),
       is_default: isDefault,
       load_settings: loadSettings,
       request_settings: requestSettings,
@@ -135,15 +142,16 @@ function ProfileEditor({
       className="settings-editor"
     >
       <label>Profile name<input value={name} onChange={(event) => setName(event.target.value)} /></label>
-      <label>Best used for<textarea rows={3} value={useCase} onChange={(event) => setUseCase(event.target.value)} placeholder="Programming, code review, technical explanations" /></label>
-      <label className="toggle-row"><span><strong>Default {profile.role} model</strong><small>Used by chats set to Default. Auto uses it when no use case matches.</small></span><input type="checkbox" checked={isDefault} onChange={(event) => setIsDefault(event.target.checked)} /></label>
+      <label>Best used for<textarea rows={3} value={useCase} onChange={(event) => { setUseCase(event.target.value); setUseCaseEdited(true); }} placeholder="Programming, code review, technical explanations" /></label>
+      {profile.use_case_derived && !useCaseEdited && <p className="muted">Derived from model metadata</p>}
+      <label className="setting-row toggle-row"><span><strong>Default {profile.role} model</strong><small>Used by chats set to Default. Auto uses it when no use case matches.</small></span><input type="checkbox" checked={isDefault} onChange={(event) => setIsDefault(event.target.checked)} /></label>
       <div className="segmented compact" role="group" aria-label="Profile setting detail">
         {(["basic", "advanced", "expert"] as Visibility[]).map((level) => <button type="button" key={level} className={visibility === level ? "active" : ""} aria-pressed={visibility === level} onClick={() => setVisibility(level)}>{level}</button>)}
       </div>
       <div className="settings-list embedded">
         {fields.map((field) => {
           const target = field.scope === "load" ? loadSettings : requestSettings;
-          return <div className="scoped-setting" key={`${field.scope}:${field.key}:${JSON.stringify(target[field.key])}`}><span className="scope-label">{field.scope}{field.restart_required ? " · restart required" : ""}</span><SettingControl field={field} value={target[field.key] ?? field.default} onChange={(value) => field.scope === "load" ? setLoadSettings({ ...loadSettings, [field.key]: value }) : setRequestSettings({ ...requestSettings, [field.key]: value })} /></div>;
+          return <div className="scoped-setting" key={`${field.scope}:${field.key}`}><span className="scope-label">{field.scope}{field.restart_required ? " · restart required" : ""}</span><SettingControl field={field} value={target[field.key] ?? field.default} onChange={(value) => field.scope === "load" ? setLoadSettings({ ...loadSettings, [field.key]: value }) : setRequestSettings({ ...requestSettings, [field.key]: value })} /></div>;
         })}
         {!engine && <p className="muted">No capability schema is available for this profile engine.</p>}
       </div>
@@ -187,7 +195,7 @@ function PresetEditor({
       <label>Preset name<input value={name} onChange={(event) => setName(event.target.value)} /></label>
       <label className="toggle-row"><span><strong>Default {preset.role} preset</strong></span><input type="checkbox" checked={isDefault} onChange={(event) => setIsDefault(event.target.checked)} /></label>
       <div className="segmented compact" role="group" aria-label="Preset setting detail">{(["basic", "advanced", "expert"] as Visibility[]).map((level) => <button type="button" key={level} className={visibility === level ? "active" : ""} aria-pressed={visibility === level} onClick={() => setVisibility(level)}>{level}</button>)}</div>
-      <div className="settings-list embedded">{fields.map((field) => <div className="scoped-setting" key={`${field.scope}:${field.key}:${JSON.stringify(settings[field.key])}`}><span className="scope-label">{field.scope}</span><SettingControl field={field} value={settings[field.key] ?? field.default} onChange={(value) => setSettings({ ...settings, [field.key]: value })} /></div>)}</div>
+      <div className="settings-list embedded">{fields.map((field) => <div className="scoped-setting" key={`${field.scope}:${field.key}`}><span className="scope-label">{field.scope}</span><SettingControl field={field} value={settings[field.key] ?? field.default} onChange={(value) => setSettings({ ...settings, [field.key]: value })} /></div>)}</div>
       {error && <ErrorCallout message={error.message} />}
       <footer className="editor-actions"><button className="secondary danger" onClick={() => remove.mutate()}>Delete</button><button className="secondary" onClick={() => reset.mutate()}>Reset</button><button className="secondary" onClick={() => exportBundle.mutate()}>Export</button><button className="secondary" onClick={() => clone.mutate()}>Clone</button><button className="primary" onClick={() => save.mutate()} disabled={!name.trim() || save.isPending}>Save preset</button></footer>
     </AccessibleDialog>
@@ -348,7 +356,7 @@ export function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
       <section>
         <div className="detail-title"><div><h2>Model profiles</h2></div><button className="secondary" onClick={() => profileImport.current?.click()}>Import profile</button></div>
         <input ref={profileImport} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0], "profile"); event.target.value = ""; }} />
-        <div className="profile-table interactive">{profiles.data?.map((profile: ModelProfile) => <div key={profile.id}><span className="badge">{profile.role}</span><strong>{profile.name}{profile.is_default ? " · default" : ""}</strong><span title={profile.use_case}>{profile.use_case || "No Auto use case yet"}</span><span className="row-actions">{!profile.is_default && <button className="secondary compact-button" aria-label={`Set ${profile.name} as default ${profile.role} model`} disabled={setDefaultProfile.isPending} onClick={() => setDefaultProfile.mutate(profile)}>Set default</button>}{profile.role === "chat" && profile.model_install_id && <button className="secondary compact-button" aria-label={`Load profile: ${profile.name}`} disabled={chatWorkerBusy || loadChat.isPending} title={chatWorkerBusy ? "Wait for active and queued jobs before changing the worker" : "Load this chat profile"} onClick={() => loadChat.mutate(profile.id)}>Load</button>}<button className="secondary compact-button" aria-label={`Edit profile: ${profile.name}`} onClick={() => setSelectedProfile(profile)}>Edit</button></span></div>)}</div>
+        <div className="profile-table interactive">{profiles.data?.map((profile: ModelProfile) => <div key={profile.id}><span className="badge">{profile.role}</span><span className="model-install-copy"><strong>{profile.name}{profile.is_default ? " · default" : ""}</strong>{profile.use_case_derived && <small title="Derived from model metadata">Derived</small>}</span><span title={profile.use_case}>{profile.use_case || "No Auto use case yet"}</span><span className="row-actions">{!profile.is_default && <button className="secondary compact-button" aria-label={`Set ${profile.name} as default ${profile.role} model`} disabled={setDefaultProfile.isPending} onClick={() => setDefaultProfile.mutate(profile)}>Set default</button>}{profile.role === "chat" && profile.model_install_id && <button className="secondary compact-button" aria-label={`Load profile: ${profile.name}`} disabled={chatWorkerBusy || loadChat.isPending} title={chatWorkerBusy ? "Wait for active and queued jobs before changing the worker" : "Load this chat profile"} onClick={() => loadChat.mutate(profile.id)}>Load</button>}<button className="secondary compact-button" aria-label={`Edit profile: ${profile.name}`} onClick={() => setSelectedProfile(profile)}>Edit</button></span></div>)}</div>
         {setDefaultProfile.error && <ErrorCallout message={setDefaultProfile.error.message} />}
       </section>
       <section>

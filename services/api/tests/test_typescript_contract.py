@@ -37,11 +37,15 @@ CHECKED_CONTRACTS = {
     "ArtifactLibraryItem": "ArtifactLibraryItem",
     "ArtifactStorageInfo": "ArtifactStorageInfo",
     "BackupInfo": "BackupInfo",
+    "BoundWorkflowAsset": "BoundWorkflowAssetOut",
     "CatalogDetail": "CatalogDetail",
     "CatalogModel": "CatalogModel",
     "CatalogPage": "CatalogPage",
+    "CatalogInstallPlan": "InstallPlanOut",
     "CatalogPreflight": "CatalogPreflight",
+    "CatalogPreflightCheck": "CatalogPreflightCheck",
     "ChatDetail": "ChatDetail",
+    "ChatItemRemovalReference": "ChatItemRemovalReferenceOut",
     "CredentialStatus": "CredentialStatus",
     "DraftClassification": "DraftClassification",
     "DeviceInfo": "DeviceInfo",
@@ -51,6 +55,8 @@ CHECKED_CONTRACTS = {
     "Job": "JobOut",
     "Message": "MessageOut",
     "MessagePart": "MessagePartOut",
+    "MessageReference": "MessageReferenceOut",
+    "ModelAssetInstall": "ModelAssetOut",
     "ModelStorageInfo": "ModelStorageInfo",
     "ModelUpdate": "ModelUpdateOut",
     "PlatformMatrixEntry": "PlatformMatrixEntry",
@@ -62,13 +68,19 @@ CHECKED_CONTRACTS = {
     "PromptTemplateRevision": "PromptTemplateRevisionOut",
     "PromptTemplateWriteResult": "PromptTemplateWriteOut",
     "ReferenceAsset": "ReferenceAssetOut",
+    "ReferenceSubject": "ReferenceSubjectOut",
     "RegistryInstall": "RegistryInstallOut",
     "ResponseRevision": "ResponseRevisionOut",
     "Run": "RunOut",
     "RuntimeStatus": "RuntimeStatus",
     "SettingField": "SettingField",
+    "SetupReadinessCheck": "SetupReadinessCheck",
     "SetupReadinessReport": "SetupReadinessReport",
+    "SetupRoleReadiness": "SetupRoleReadiness",
+    "SetupVerification": "SetupVerificationOut",
     "StorageCleanupResult": "StorageCleanupResult",
+    "StudioCapabilityReport": "StudioCapabilityReport",
+    "StudioToolCapability": "StudioToolCapability",
     "SystemInfo": "SystemInfo",
     "ToolCapabilityProbe": "ToolCapabilityProbe",
     "TurnAccepted": "TurnAccepted",
@@ -84,6 +96,7 @@ CHECKED_CONTRACTS = {
     "WorkflowFamilyRemovalImpact": "WorkflowFamilyRemovalImpactOut",
     "WorkflowFamilyPreference": "WorkflowFamilyPreferenceOut",
     "WorkflowFamilyVariant": "WorkflowFamilyVariantOut",
+    "WorkflowMissingNode": "WorkflowMissingNodeOut",
     "WorkflowPackageAnalysis": "WorkflowPackageAnalysisOut",
     "WorkflowPackageIssue": "WorkflowPackageIssueOut",
     "WorkflowPackageRequirement": "WorkflowPackageRequirementOut",
@@ -98,6 +111,20 @@ CHECKED_CONTRACTS = {
 # Fields the browser deliberately does not mirror, with the reason. Anything
 # not listed here is drift, not a decision.
 ALLOWED_MISSING = {
+    # Catalog preflight consumes only the plan summary, not its stored metadata.
+    ("CatalogInstallPlan", "activation_probe_json"): "not part of the catalog plan summary",
+    ("CatalogInstallPlan", "architecture"): "not part of the catalog plan summary",
+    ("CatalogInstallPlan", "artifacts_json"): "not part of the catalog plan summary",
+    ("CatalogInstallPlan", "created_at"): "not part of the catalog plan summary",
+    ("CatalogInstallPlan", "engine"): "not part of the catalog plan summary",
+    ("CatalogInstallPlan", "provider"): "not part of the catalog plan summary",
+    ("CatalogInstallPlan", "remote_id"): "not part of the catalog plan summary",
+    ("CatalogInstallPlan", "resolver_version"): "not part of the catalog plan summary",
+    ("CatalogInstallPlan", "revision"): "not part of the catalog plan summary",
+    ("CatalogInstallPlan", "role"): "not part of the catalog plan summary",
+    ("CatalogInstallPlan", "runtime_contract_json"): "not part of the catalog plan summary",
+    ("CatalogInstallPlan", "status"): "not part of the catalog plan summary",
+    ("CatalogInstallPlan", "updated_at"): "not part of the catalog plan summary",
     ("Job", "payload_json"): "opaque server payload; the browser reads named fields",
     ("Run", "provenance_json"): "read through helpers, not as a typed shape",
 }
@@ -150,6 +177,22 @@ def _typescript_fields(source: str, interface: str) -> set[str]:
     return fields
 
 
+def _array_item_components(spec: dict, *, array_item: bool = False) -> set[str]:
+    """Referenced array elements, including nullable and nested arrays."""
+    references: set[str] = set()
+    reference = spec.get("$ref")
+    if array_item and isinstance(reference, str):
+        prefix = "#/components/schemas/"
+        assert reference.startswith(prefix), f"Array item has a nonlocal ref: {reference}"
+        references.add(reference[len(prefix) :])
+    if spec.get("type") == "array":
+        references |= _array_item_components(spec.get("items") or {}, array_item=True)
+    for keyword in ("anyOf", "oneOf", "allOf"):
+        for option in spec.get(keyword, []):
+            references |= _array_item_components(option, array_item=array_item)
+    return references
+
+
 @pytest.fixture(scope="module")
 def schemas() -> dict[str, dict]:
     return _openapi_schemas()
@@ -182,6 +225,69 @@ def test_browser_type_mirrors_the_api_model(
         f"{interface} in types.ts declares {sorted(invented)}, which {component} "
         "does not return. Remove it, or map the interface to the right model."
     )
+
+    for field, spec in schema.get("properties", {}).items():
+        for target in sorted(_array_item_components(spec)):
+            target_schema = schemas.get(target)
+            assert target_schema is not None, f"{component}.{field} names unknown {target}"
+            if target_schema.get("type") != "object" and "properties" not in target_schema:
+                assert "allOf" not in target_schema, (
+                    f"{component}.{field} reaches {target}; "
+                    "array item components using only allOf are unsupported."
+                )
+                continue
+            declared = _typescript_field_type(types_source, interface, field)
+            element = re.fullmatch(
+                r"(?:(\w+)\[\]|Array<(\w+)>)(?:\s*\|\s*null)?",
+                (declared or "").strip(),
+            )
+            assert element is not None, (
+                f"{interface}.{field} reaches {target}; use a named array element "
+                "interface and register its pair in CHECKED_CONTRACTS."
+            )
+            child = element.group(1) or element.group(2)
+            assert CHECKED_CONTRACTS.get(child) == target, (
+                f"{interface}.{field} reaches {target}; register "
+                f"{child}/{target} in CHECKED_CONTRACTS."
+            )
+
+
+def test_a_closed_vocabulary_inside_an_array_is_still_compared() -> None:
+    """Both sides of the comparison have to follow an array, or neither counts.
+
+    A field declared as a list of a referenced enum returned NO admissible
+    values, so the browser union behind it was never compared - the same shape
+    of hole as reading only the inline `enum` form, and just as quiet. The
+    browser side had the mirror of it: `Foo[]` did not match the alias pattern,
+    so it resolved to nothing.
+
+    Today one checked field is shaped this way, and its vocabulary happens to be
+    compared at two non-array fields as well, so nothing is actually unguarded.
+    That is luck rather than cover: the first closed vocabulary used ONLY in an
+    array position would have been checked by neither side.
+    """
+
+    schemas = {
+        "DeviceKind": {"enum": ["cpu", "cuda"], "type": "string"},
+        "Wrapper": {"type": "object", "properties": {}},
+    }
+
+    referenced = {"type": "array", "items": {"$ref": "#/components/schemas/DeviceKind"}}
+    assert _admissible_values(referenced, schemas) == ["cpu", "cuda"]
+
+    inline = {"type": "array", "items": {"enum": ["a", "b"], "type": "string"}}
+    assert _admissible_values(inline, schemas) == ["a", "b"]
+
+    # A non-array reference keeps working; this is an addition, not a swap.
+    assert _admissible_values({"$ref": "#/components/schemas/DeviceKind"}, schemas) == [
+        "cpu",
+        "cuda",
+    ]
+
+    source = 'export type DeviceKind = "cpu" | "cuda";' + chr(10)
+    assert _declared_literals(source, "DeviceKind[]") == {"cpu", "cuda"}
+    assert _declared_literals(source, "DeviceKind[] | null") == {"cpu", "cuda"}
+    assert _declared_literals(source, "DeviceKind") == {"cpu", "cuda"}
 
 
 def test_every_checked_component_still_exists(schemas: dict[str, dict]) -> None:
@@ -219,65 +325,104 @@ def _typescript_field_type(source: str, interface: str, field: str) -> str | Non
 
 
 def _declared_literals(source: str, expression: str | None) -> set[str] | None:
-    """The string literals a type expression admits, or None if it is not a union.
-
-    Resolves one level of named alias, because the readiness and status unions
-    are written that way and comparing against the alias name proves nothing.
-    """
+    """Resolve finite string unions, including named members and array elements."""
 
     if expression is None:
         return None
-    if '"' in expression:
-        return set(re.findall(r'"([^"]+)"', expression))
-    alias = re.fullmatch(r"(\w+)(\s*\|\s*null)?", expression.strip())
-    if alias:
-        # Comments are removed first. A union is read up to its semicolon, and
-        # a member documented in a sentence containing one would otherwise cut
-        # the union short and report the rest as missing - a contract check
-        # that punctuation can defeat is worse than none.
-        uncommented = re.sub(r"//.*", "", source)
-        declaration = re.search(
-            rf"^export type {alias.group(1)} =\s*(.+?);", uncommented, re.MULTILINE | re.DOTALL
-        )
-        if declaration:
-            return set(re.findall(r'"([^"]+)"', declaration.group(1)))
-    return None
+    # Semicolons in comments must not end an alias declaration.
+    uncommented = re.sub(r"//.*", "", source)
+    decoder = json.JSONDecoder()
+
+    def resolve(expression: str, seen: frozenset[str]) -> set[str] | None:
+        array = re.fullmatch(r"(.+?)\[\](\s*\|\s*null)?", expression.strip())
+        if array:
+            expression = array.group(1)
+        remaining = expression.strip().removeprefix("|").lstrip()
+        values: set[str] = set()
+        while remaining:
+            if remaining.startswith('"'):
+                try:
+                    value, end = decoder.raw_decode(remaining)
+                except ValueError:
+                    return None
+                members = {value}
+            else:
+                atom = re.match(r"\w+", remaining)
+                if atom is None:
+                    return None
+                name = atom.group()
+                end = atom.end()
+                if name == "null":
+                    members = set()
+                else:
+                    if name in seen:
+                        return None
+                    declaration = re.search(
+                        rf"^export type {name} =\s*(.+?);",
+                        uncommented,
+                        re.MULTILINE | re.DOTALL,
+                    )
+                    if declaration is None:
+                        return None
+                    resolved = resolve(declaration.group(1), seen | {name})
+                    if resolved is None:
+                        return None
+                    members = resolved
+            values |= members
+            remaining = remaining[end:].strip()
+            if remaining.startswith("[]"):
+                remaining = remaining[2:].strip()
+            if not remaining:
+                return values
+            if not remaining.startswith("|"):
+                return None
+            remaining = remaining[1:].lstrip()
+        return None
+
+    return resolve(expression, frozenset())
 
 
 def _admissible_values(spec: dict, schemas: dict[str, dict]) -> list[str] | None:
-    """The string values one field admits, following a component reference.
+    """Read finite string vocabularies from the forms emitted by OpenAPI.
 
-    An inline `enum` is the shape a bare pydantic model produces. OpenAPI does
-    not use it for an enum-typed field - it emits a reference instead:
-
-        JobOut.status  ->  {"$ref": "#/components/schemas/JobStatus"}
-        JobStatus      ->  {"enum": [...], "type": "string"}
-
-    Reading only the inline form therefore saw NOTHING for every enum field in
-    every checked component - eight of them, which is the entire population
-    this check was written for. It had never failed because it had never
-    looked. Found by removing a member from a browser union and watching the
-    suite stay green.
-
-    One level of reference is followed, which is all the generator emits.
+    Enums, singleton constants and named components can be combined in nullable
+    anyOf branches or used as array elements. An open or unresolved branch does
+    not become finite merely because another branch has a closed vocabulary.
     """
 
-    seen = spec
-    for _ in range(2):
-        values = seen.get("enum") or next(
-            (option.get("enum") for option in seen.get("anyOf", []) if option.get("enum")),
-            None,
-        )
-        if values:
-            return values
-        reference = seen.get("$ref") or next(
-            (option.get("$ref") for option in seen.get("allOf", []) if option.get("$ref")),
-            None,
-        )
-        if not reference:
-            return None
-        seen = schemas.get(reference.rsplit("/", 1)[-1]) or {}
-    return None
+    def resolve(spec: dict, seen: frozenset[str]) -> list[str] | None:
+        if "enum" in spec:
+            return [value for value in spec["enum"] if isinstance(value, str)]
+        if "const" in spec:
+            value = spec["const"]
+            return [value] if isinstance(value, str) else []
+        if spec.get("type") == "null":
+            return []
+        if spec.get("type") == "array":
+            return resolve(spec.get("items") or {}, seen)
+        reference = spec.get("$ref")
+        if isinstance(reference, str):
+            prefix = "#/components/schemas/"
+            if not reference.startswith(prefix) or reference in seen:
+                return None
+            target = schemas.get(reference[len(prefix) :])
+            return resolve(target, seen | {reference}) if target is not None else None
+        branches = spec.get("anyOf")
+        if isinstance(branches, list):
+            combined: list[str] = []
+            for branch in branches:
+                values = resolve(branch, seen)
+                if values is None:
+                    return None
+                combined.extend(values)
+            return list(dict.fromkeys(combined))
+        # Retain the single-component wrapper used by earlier OpenAPI exports.
+        wrappers = spec.get("allOf")
+        if isinstance(wrappers, list) and len(wrappers) == 1:
+            return resolve(wrappers[0], seen)
+        return None
+
+    return resolve(spec, frozenset())
 
 
 @pytest.mark.parametrize(("interface", "component"), sorted(CHECKED_CONTRACTS.items()))
@@ -343,28 +488,8 @@ VOCABULARY_TOKENS = frozenset(
 # readiness-wording break reached main.
 OPEN_VOCABULARY_BASELINE = frozenset(
     {
-        "BoundWorkflowAssetOut.artifact_kind",
-        "BoundWorkflowAssetOut.kind",
-        "CatalogPreflight.auxiliary_kind",
-        "ChatItemRemovalReferenceOut.subject_kind",
-        "InstallPlanOut.failure_code",
-        "InstallPlanOut.status",
-        "JobOut.phase",
-        "MessageReferenceOut.subject_kind",
-        "ModelAssetOut.kind",
-        "ModelCapabilityEvidenceOut.failure_code",
-        "ModelUpdateOut.kind",
         "ReferenceSubjectCreate.kind",
-        "ReferenceSubjectOut.kind",
-        "ResponseRevisionOut.status",
-        "SetupReadinessCheck.code",
-        "SetupVerificationOut.failure_code",
-        "StudioToolCapability.kind",
-        "WorkPlanOut.status",
-        "WorkStepOut.status",
         "WorkflowInstallOfferOut.invalidation_code",
-        "WorkflowMissingNodeOut.node_type",
-        "WorkflowPackageIssueOut.code",
     }
 )
 
@@ -376,6 +501,135 @@ OPEN_VOCABULARY_BASELINE = frozenset(
 # something with no authority over the behaviour, and a fourth exclusion added
 # in code would have left the list silently wrong.
 EXCLUDED_COMPONENTS = frozenset({"ValidationError", "HTTPValidationError"})
+
+
+def test_array_contract_registration_exposes_nested_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = (
+        "export interface NestedReport {\n"
+        "  roles: NestedRole[];\n"
+        "}\n"
+        "export interface NestedRole {\n"
+        "  checks: Array<NestedCheck> | null;\n"
+        "}\n"
+        "export interface NestedCheck {\n"
+        '  status: "pending" | "ready";\n'
+        "}\n"
+    )
+    nested_schemas = {
+        "NestedReportOut": {
+            "properties": {
+                "roles": {
+                    "type": "array",
+                    "items": {"$ref": "#/components/schemas/NestedRoleOut"},
+                }
+            }
+        },
+        "NestedRoleOut": {
+            "properties": {
+                "checks": {
+                    "anyOf": [
+                        {
+                            "type": "array",
+                            "items": {"$ref": "#/components/schemas/NestedCheckOut"},
+                        },
+                        {"type": "null"},
+                    ]
+                }
+            }
+        },
+        "NestedCheckOut": {
+            "properties": {"status": {"type": "string", "enum": ["pending", "ready"]}}
+        },
+    }
+    with pytest.raises(AssertionError, match="NestedRole/NestedRoleOut"):
+        test_browser_type_mirrors_the_api_model(
+            "NestedReport", "NestedReportOut", nested_schemas, source
+        )
+    monkeypatch.setitem(CHECKED_CONTRACTS, "NestedRole", "NestedRoleOut")
+    test_browser_type_mirrors_the_api_model(
+        "NestedReport", "NestedReportOut", nested_schemas, source
+    )
+    with pytest.raises(AssertionError, match="NestedCheck/NestedCheckOut"):
+        test_browser_type_mirrors_the_api_model(
+            "NestedRole", "NestedRoleOut", nested_schemas, source
+        )
+    monkeypatch.setitem(CHECKED_CONTRACTS, "NestedCheck", "NestedCheckOut")
+    for interface in ("NestedRole", "NestedCheck"):
+        test_browser_type_mirrors_the_api_model(
+            interface, interface + "Out", nested_schemas, source
+        )
+        test_browser_can_represent_every_value_the_server_returns(
+            interface, interface + "Out", nested_schemas, source
+        )
+    changed = source.replace('"pending" | "ready"', '"ready"')
+    with pytest.raises(AssertionError, match="cannot represent.*pending"):
+        test_browser_can_represent_every_value_the_server_returns(
+            "NestedCheck", "NestedCheckOut", nested_schemas, changed
+        )
+
+
+@pytest.mark.parametrize(
+    ("expression", "registered_component", "message"),
+    [
+        ("Array<{ status: string }>", "ArrayChildOut", "named array element"),
+        ("ArrayChild[]", "DifferentChildOut", "ArrayChild/ArrayChildOut"),
+    ],
+)
+def test_array_contract_requires_the_exact_named_pair(
+    expression: str,
+    registered_component: str,
+    message: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = "export interface ArrayParent {\n  children: " + expression + ";\n}\n"
+    nested_schemas = {
+        "ArrayParentOut": {
+            "properties": {
+                "children": {
+                    "type": "array",
+                    "items": {"$ref": "#/components/schemas/ArrayChildOut"},
+                }
+            }
+        },
+        "ArrayChildOut": {"type": "object", "properties": {"status": {"type": "string"}}},
+    }
+    monkeypatch.setitem(CHECKED_CONTRACTS, "ArrayChild", registered_component)
+    with pytest.raises(AssertionError, match=message):
+        test_browser_type_mirrors_the_api_model(
+            "ArrayParent", "ArrayParentOut", nested_schemas, source
+        )
+
+
+def test_array_contract_rejects_composition_only_targets() -> None:
+    source = (
+        "export interface ArrayParent {\n"
+        "  children: ArrayChild[];\n"
+        "}\n"
+        "export interface ArrayChild {\n"
+        '  status: "ready";\n'
+        "}\n"
+    )
+    composed_schemas = {
+        "ArrayParentOut": {
+            "properties": {
+                "children": {
+                    "type": "array",
+                    "items": {"$ref": "#/components/schemas/WrappedChildOut"},
+                }
+            }
+        },
+        "WrappedChildOut": {"allOf": [{"$ref": "#/components/schemas/ArrayChildOut"}]},
+        "ArrayChildOut": {
+            "type": "object",
+            "properties": {"status": {"type": "string", "enum": ["pending", "ready"]}},
+        },
+    }
+    with pytest.raises(AssertionError, match="WrappedChildOut.*allOf"):
+        test_browser_type_mirrors_the_api_model(
+            "ArrayParent", "ArrayParentOut", composed_schemas, source
+        )
 
 
 def _is_identifier(name: str) -> bool:
@@ -395,6 +649,12 @@ VOCABULARY_NAME_EXCLUSIONS = (
 )
 
 VOCABULARY_COMPONENT_EXCLUSION = "FastAPI validation models, which the application does not define"
+
+# These exact fields carry open text or third-party values that cannot be enumerated.
+OPEN_VOCABULARY_FIELDS = {
+    "JobOut.phase": "Progress labels include external filenames, hostnames and component counts",
+    "WorkflowMissingNodeOut.node_type": "ComfyUI class names from user-supplied workflow graphs",
+}
 
 
 def _resolve_reference(
@@ -484,6 +744,8 @@ def _open_vocabulary_fields(schemas: dict[str, dict]) -> set[str]:
         if component in EXCLUDED_COMPONENTS:
             continue
         for field, field_spec in (spec.get("properties") or {}).items():
+            if f"{component}.{field}" in OPEN_VOCABULARY_FIELDS:
+                continue
             if field.split("_")[-1] not in VOCABULARY_TOKENS:
                 continue
             lowered = field.lower()
@@ -636,3 +898,131 @@ def test_a_reference_cycle_terminates_instead_of_recursing() -> None:
     assert _open_vocabulary_fields(schemas) == set()
     assert not _is_closed_vocabulary({"$ref": "#/components/schemas/Loop"}, schemas)
     assert not _is_closed_vocabulary({"$ref": "#/components/schemas/Missing"}, schemas)
+
+
+def test_custom_node_names_do_not_exempt_other_components() -> None:
+    schemas = {
+        "WorkflowMissingNodeOut": {
+            "properties": {
+                "node_type": {"type": "string"},
+                "status": {"type": "string"},
+            }
+        },
+        "OtherNodeOut": {"properties": {"node_type": {"type": "string"}}},
+    }
+    assert _open_vocabulary_fields(schemas) == {
+        "WorkflowMissingNodeOut.status",
+        "OtherNodeOut.node_type",
+    }
+
+
+def _composed_status_schemas() -> dict[str, dict]:
+    return {
+        "BaseStatus": {"type": "string", "enum": ["ready", "failed"]},
+        "MixedStatus": {
+            "anyOf": [
+                {"$ref": "#/components/schemas/BaseStatus"},
+                {"type": "string", "const": "blocked"},
+            ]
+        },
+        "AliasStatus": {"$ref": "#/components/schemas/MixedStatus"},
+        "MixedResponse": {"properties": {"status": {"$ref": "#/components/schemas/MixedStatus"}}},
+    }
+
+
+def _composed_status_source(base: str = '"ready" | "failed"') -> str:
+    return f"""
+export type BaseStatus = {base};
+export type MixedStatus =
+  | BaseStatus
+  | "blocked";
+export type AliasStatus = MixedStatus | null;
+export type CycleOne = CycleTwo;
+export type CycleTwo = CycleOne;
+export interface MixedResponse {{
+  status: MixedStatus;
+}}
+"""
+
+
+@pytest.mark.parametrize(
+    "expression", ["MixedStatus", "MixedStatus | null", "MixedStatus[] | null", "AliasStatus"]
+)
+def test_composed_browser_alias_keeps_every_member(expression: str) -> None:
+    assert _declared_literals(_composed_status_source(), expression) == {
+        "ready",
+        "failed",
+        "blocked",
+    }
+
+
+@pytest.mark.parametrize(
+    "expression",
+    ["BaseStatus | string", "BaseStatus | MissingStatus", '"blocked" | MissingStatus', "CycleOne"],
+)
+def test_composed_open_or_cyclic_browser_alias_is_not_a_finite_vocabulary(expression: str) -> None:
+    assert _declared_literals(_composed_status_source(), expression) is None
+
+
+def test_composed_browser_literals_can_contain_a_union_separator() -> None:
+    assert _declared_literals("", '"value|with|pipes" | "other"') == {"value|with|pipes", "other"}
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"$ref": "#/components/schemas/MixedStatus"},
+        {"anyOf": [{"$ref": "#/components/schemas/MixedStatus"}, {"type": "null"}]},
+        {"type": "array", "items": {"$ref": "#/components/schemas/MixedStatus"}},
+        {"$ref": "#/components/schemas/AliasStatus"},
+    ],
+)
+def test_composed_server_vocabulary_keeps_references_and_constants(spec: dict) -> None:
+    assert set(_admissible_values(spec, _composed_status_schemas()) or []) == {
+        "ready",
+        "failed",
+        "blocked",
+    }
+
+
+def test_composed_server_singleton_is_a_vocabulary() -> None:
+    assert _admissible_values({"type": "string", "const": "blocked"}, {}) == ["blocked"]
+
+
+def test_composed_open_server_union_is_not_a_finite_vocabulary() -> None:
+    spec = {"anyOf": [{"type": "string", "enum": ["ready"]}, {"type": "string"}]}
+    assert _admissible_values(spec, {}) is None
+
+
+def test_composed_cyclic_server_reference_is_not_a_finite_vocabulary() -> None:
+    schemas = {
+        "CycleOne": {"$ref": "#/components/schemas/CycleTwo"},
+        "CycleTwo": {"$ref": "#/components/schemas/CycleOne"},
+    }
+    assert _admissible_values({"$ref": "#/components/schemas/CycleOne"}, schemas) is None
+
+
+def test_composed_contract_rejects_a_missing_base_member() -> None:
+    with pytest.raises(AssertionError, match="cannot represent.*failed"):
+        test_browser_can_represent_every_value_the_server_returns(
+            "MixedResponse",
+            "MixedResponse",
+            _composed_status_schemas(),
+            _composed_status_source('"ready"'),
+        )
+
+
+def test_composed_contract_rejects_an_invented_base_member() -> None:
+    with pytest.raises(AssertionError, match="admits.*invented"):
+        test_browser_can_represent_every_value_the_server_returns(
+            "MixedResponse",
+            "MixedResponse",
+            _composed_status_schemas(),
+            _composed_status_source('"ready" | "failed" | "invented"'),
+        )
+
+
+def test_composed_matching_contract_remains_valid() -> None:
+    test_browser_can_represent_every_value_the_server_returns(
+        "MixedResponse", "MixedResponse", _composed_status_schemas(), _composed_status_source()
+    )

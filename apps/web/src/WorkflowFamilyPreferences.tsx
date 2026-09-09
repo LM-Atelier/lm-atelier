@@ -1,5 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
+import { WorkflowFamilyMetadata } from "./WorkflowFamilyMetadata";
 import { ErrorCallout } from "./ErrorCallout";
 import { preferenceRefusal } from "./workflowPreferenceErrors";
 import type {
@@ -60,6 +61,7 @@ export function WorkflowFamilyPreferences({ family }: { family: WorkflowFamily }
 
   return (
     <section className="family-preferences">
+      <WorkflowFamilyMetadata key={family.id} family={family} />
       <h3>Where this workflow is offered</h3>
       {save.error && (
         <ErrorCallout message={refusal ?? (save.error as Error).message} />

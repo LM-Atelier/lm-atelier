@@ -12,8 +12,8 @@ from alembic import op
 
 from local_lm.artifact_library_schema import (
     AUDIT_TRIGGER_SQL,
-    CREATE_TRIGGER_SQL,
     DROP_TRIGGER_SQL,
+    LEGACY_CREATE_TRIGGER_SQL,
     PREMIGRATION_INVALID_SQL,
 )
 
@@ -24,7 +24,7 @@ depends_on: str | Sequence[str] | None = None
 
 
 def _triggers() -> None:
-    for statement in CREATE_TRIGGER_SQL:
+    for statement in LEGACY_CREATE_TRIGGER_SQL:
         op.execute(statement)
     for statement in AUDIT_TRIGGER_SQL:
         op.execute(statement)

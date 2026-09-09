@@ -1,3 +1,4 @@
+import type { PriorTurnEditRequest, PriorTurnEditSource } from "./types";
 import { afterEach, expect, it, vi } from "vitest";
 
 afterEach(() => {
@@ -611,6 +612,180 @@ it("opens the event socket from the sequence returned by session initialization"
   dispose();
 });
 
+it("loads the exact prior-turn source with an optional encoded run selection", async () => {
+  const source: PriorTurnEditSource = {
+    source_user_message_id: "source-user",
+    source_run_id: "source/run?choice=1",
+    source_snapshot_sha256: "a".repeat(64),
+    chat_id: "source-chat",
+    text: "  Paint @ada near the lake  ",
+    mode: "image",
+    operation: "image_to_image",
+    input_artifact_ids: ["second-image", "first-image"],
+    input_artifacts: ["second-image", "first-image"].map((id) => ({
+      id, sha256: "b".repeat(64), kind: "input", media_type: "image/png",
+      size_bytes: 10, original_name: `${id}.png`, metadata_json: {},
+      created_at: "2026-09-06T12:00:00Z",
+    })),
+    references: [{
+      reference_subject_id: "subject-one", mention_slug: "ada", subject_name: "Ada",
+      subject_kind: "person", role: "subject", strength: 0.75, source: "mention",
+      reference_asset_ids_json: ["source-asset"], artifact_ids_json: ["source-image"],
+    }],
+    settings: { width: 768 },
+    resolved_settings: { width: 768, height: 512 },
+    settings_role: "image",
+    output_count: 3,
+    profile_id: "source-profile",
+    vision_profile_id: "source-vision",
+    preset_id: null,
+    preset: null,
+    model_selection: { profile_id: "source-profile" },
+    workflow_selection: {
+      selector_capability: "image", mode: "revision", workflow_family_id: "source-family",
+      workflow_revision_id: "source-revision", legacy_profile_id: null,
+    },
+    workflow_revision_id: "source-revision",
+    workflow_schema: { type: "object" },
+    context_messages: [{ role: "user", content: "A lake in a green landscape." }],
+    prompt_source: null,
+  };
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), { status: 200 }))
+    .mockImplementation(() => Promise.resolve(new Response(JSON.stringify(source), { status: 200 })));
+  vi.stubGlobal("fetch", fetchMock);
+  const { api } = await import("./api");
+
+  await expect(api.getPriorTurnEditSource("source/user", "source/run?choice=1")).resolves.toEqual(source);
+  await expect(api.getPriorTurnEditSource("source/user")).resolves.toEqual(source);
+
+  expect(fetchMock.mock.calls.slice(1).map((call) => call[0])).toEqual([
+    "/api/messages/source%2Fuser/edit-source?source_run_id=source%2Frun%3Fchoice%3D1",
+    "/api/messages/source%2Fuser/edit-source",
+  ]);
+  for (const call of fetchMock.mock.calls.slice(1)) {
+    expect(call[1]?.method).toBeUndefined();
+    expect(call[1]?.body).toBeUndefined();
+  }
+});
+
+it("queues an edit without replacing omitted source inputs or reference bindings", async () => {
+  const accepted = {
+    run: { id: "edited-run" },
+    user_message: { id: "edited-user" },
+    assistant_message: { id: "edited-assistant" },
+    source_message_id: "source-user",
+    source_run_id: "source-run",
+    work_plan_id: "edited-plan",
+    branch_head_message_id: "edited-assistant",
+    branch_activated: false,
+    accepted_context_sha256: "a".repeat(64),
+  };
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify(accepted), { status: 202 }));
+  vi.stubGlobal("fetch", fetchMock);
+  const { api } = await import("./api");
+
+  await expect(api.queueEditedMessage("source/user", {
+    text: "  Paint a green landscape  ",
+    idempotency_key: "edited-request",
+    source_run_id: "source-run",
+    source_snapshot_sha256: "b".repeat(64),
+    preset_id: "chosen-preset",
+    input_artifact_ids: undefined,
+    references: undefined,
+  })).resolves.toEqual(accepted);
+
+  expect(fetchMock.mock.calls[1][0]).toBe("/api/messages/source%2Fuser/edits");
+  expect(fetchMock.mock.calls[1][1]?.method).toBe("POST");
+  expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({
+    text: "  Paint a green landscape  ",
+    idempotency_key: "edited-request",
+    source_run_id: "source-run",
+    source_snapshot_sha256: "b".repeat(64),
+    preset_id: "chosen-preset",
+  });
+});
+
+it("preserves explicit removed or ordered replacement inputs and reference options in edits", async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), { status: 200 }))
+    .mockImplementation(() => Promise.resolve(new Response("{}", { status: 202 })));
+  vi.stubGlobal("fetch", fetchMock);
+  const { api } = await import("./api");
+  const removed = {
+    text: "Paint the empty landscape",
+    idempotency_key: "remove-inputs",
+    input_artifact_ids: [],
+    references: [],
+    output_count: 1,
+  };
+  await api.queueEditedMessage("source-user", removed);
+  const replacement: PriorTurnEditRequest = {
+    text: "Paint the selected subjects",
+    idempotency_key: "replace-inputs",
+    source_run_id: "source-run",
+    profile_id: "edited-profile",
+    vision_profile_id: null,
+    mode: "image" as const,
+    input_artifact_ids: ["second-image", "first-image"],
+    references: [{
+      reference_subject_id: "subject-one",
+      role: "subject",
+      selected_asset_ids: ["second-asset", "first-asset"],
+      strength: 0.75,
+      source: "picker" as const,
+    }],
+    settings: { width: 768, height: 512 },
+    ordered_settings: { image: { steps: 12 } },
+    workflow_revision_id: "source-revision",
+    output_count: 1,
+    confirm_media: true,
+  };
+  await api.queueEditedMessage("source-user", replacement);
+
+  expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual(removed);
+  expect(JSON.parse(String(fetchMock.mock.calls[2][1]?.body))).toEqual(replacement);
+
+  const workflowSelections: PriorTurnEditRequest["workflow_selection"][] = [
+    { selector_capability: "image", mode: "family", workflow_family_id: "edited-family" },
+    { selector_capability: "video", mode: "revision", workflow_revision_id: "edited-revision" },
+    { selector_capability: "chat", mode: "default" },
+    { selector_capability: "image", mode: "automatic" },
+    null,
+  ];
+  for (const [index, workflow_selection] of workflowSelections.entries()) {
+    const workflowEdit: PriorTurnEditRequest = {
+      text: "Paint the selected landscape",
+      idempotency_key: `workflow-choice-${index}`,
+      workflow_selection,
+    };
+    await api.queueEditedMessage("source-user", workflowEdit);
+    expect(JSON.parse(String(fetchMock.mock.calls[index + 3][1]?.body))).toEqual(workflowEdit);
+  }
+});
+
+it("keeps the caller's edit request identity when retrying a rejected acceptance", async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ detail: "Queue unavailable" }), { status: 503 }))
+    .mockResolvedValueOnce(new Response("{}", { status: 202 }));
+  vi.stubGlobal("fetch", fetchMock);
+  const { api } = await import("./api");
+  const payload = {
+    text: "Paint a green landscape",
+    idempotency_key: "stable-edit-request",
+    source_run_id: "source-run",
+  };
+
+  await expect(api.queueEditedMessage("source-user", payload)).rejects.toThrow("Queue unavailable");
+  await api.queueEditedMessage("source-user", payload);
+
+  expect(fetchMock.mock.calls[2][1]?.body).toBe(fetchMock.mock.calls[1][1]?.body);
+  expect(JSON.parse(String(fetchMock.mock.calls[2][1]?.body))).toEqual(payload);
+});
+
 it("sends turn overrides with edited branches and regenerated responses", async () => {
   const fetchMock = vi.fn()
     .mockResolvedValueOnce(
@@ -634,7 +809,7 @@ it("sends turn overrides with edited branches and regenerated responses", async 
     "text",
     { max_tokens: 4096 },
   );
-  await api.regenerateMessage("message-assistant", { max_tokens: 4096 });
+  await api.regenerateMessage("message-assistant", { max_tokens: 4096 }, "retry-regeneration");
 
   expect(fetchMock.mock.calls[1][0]).toBe("/api/messages/message-user/branch");
   expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toMatchObject({
@@ -646,6 +821,7 @@ it("sends turn overrides with edited branches and regenerated responses", async 
   expect(fetchMock.mock.calls[2][0]).toBe("/api/messages/message-assistant/regenerate");
   expect(JSON.parse(String(fetchMock.mock.calls[2][1]?.body))).toEqual({
     settings: { max_tokens: 4096 },
+    idempotency_key: "retry-regeneration",
   });
 });
 
@@ -1459,4 +1635,35 @@ it("sends an explicit media output count and never leaks it into Auto", async ()
     confirmLabel: "Start image",
     details: { operation: "image" },
   });
+});
+
+it("transmits the exact edited source binding with draft classification", async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ references_prior_visual: true }), { status: 200 }));
+  vi.stubGlobal("fetch", fetchMock);
+  const { api } = await import("./api");
+  const binding = { source_message_id: "source-user", source_run_id: "source-run", source_snapshot_sha256: "a".repeat(64) };
+  await expect(api.classifyDraft("chat-one", "Recolor the previous image", "image", binding))
+    .resolves.toEqual({ references_prior_visual: true });
+  expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({
+    text: "Recolor the previous image", mode: "image", edit_source: binding,
+  });
+});
+
+it("transports branch pagination and explicit activation with a guarded head", async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ items: [], next_cursor: null }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ chat_id: "chat/one", active_head_message_id: "edited" }), { status: 200 }));
+  vi.stubGlobal("fetch", fetchMock);
+  const { api } = await import("./api");
+  const controller = new AbortController();
+  await api.editedBranches("chat/one", "plan cursor", controller.signal);
+  expect(fetchMock.mock.calls[1][0]).toBe("/api/chats/chat%2Fone/edited-branches?limit=50&cursor=plan+cursor");
+  expect(fetchMock.mock.calls[1][1]?.signal).toBe(controller.signal);
+  await api.activateEditedBranch("chat/one", "plan/one", null);
+  expect(fetchMock.mock.calls[2][0]).toBe("/api/chats/chat%2Fone/edited-branches/plan%2Fone/activate");
+  expect(JSON.parse(fetchMock.mock.calls[2][1]?.body as string)).toEqual({ expected_active_head_message_id: null });
+  expect(fetchMock.mock.calls[2][1]?.method).toBe("POST");
 });

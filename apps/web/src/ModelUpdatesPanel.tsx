@@ -20,9 +20,16 @@ export function ModelUpdatesPanel({
   const check = useMutation({ mutationFn: () => api.modelUpdates() });
   const review = useMutation({
     mutationFn: async (update: ModelUpdate) => {
-      const role = update.kind === "lora" ? "lora" : null;
+      let role = "lora";
+      if (update.kind === "checkpoint") {
+        const installed = (await api.models()).find((model) => model.id === update.install_id);
+        if (!installed || !["chat", "image", "video"].includes(installed.role)) {
+          throw new Error("Could not determine the installed model's role. Check for updates again.");
+        }
+        role = installed.role;
+      }
       const detail = await api.catalogItemDetail("civitai", update.update_version_id ?? "", role);
-      return { model: detail.model, role: role ?? "image" };
+      return { model: detail.model, role };
     },
     onSuccess: ({ model, role }) => onInstall(model, role),
   });
@@ -45,17 +52,17 @@ export function ModelUpdatesPanel({
         {report && (
           <span className="storage-pill">
             {updates.length === 0
-              ? "Everything checkable is up to date"
+              ? current.length > 0 ? "Checked versions are up to date" : "No versions could be compared"
               : `${updates.length} update${updates.length === 1 ? "" : "s"} available`}
             {` · ${current.length} current`}
-            {unknown.length > 0 ? ` · ${unknown.length} unreachable` : ""}
+            {unknown.length > 0 ? ` · ${unknown.length} could not be checked` : ""}
           </span>
         )}
       </div>
       {error && <ErrorCallout message={(error as Error).message} />}
       {report && report.length === 0 && (
         <p className="package-review-note">
-          Nothing installed names an exact provider version yet, so there is nothing to compare.
+          Nothing installed has a CivitAI version available for comparison.
         </p>
       )}
       {updates.length > 0 && (
@@ -80,7 +87,7 @@ export function ModelUpdatesPanel({
                 </details>
               )}
               <span className="row-actions">
-                {update.kind === "lora" ? (
+                {update.kind === "lora" || update.kind === "checkpoint" ? (
                   <button
                     className="secondary compact-button"
                     disabled={review.isPending}

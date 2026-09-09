@@ -5,6 +5,7 @@ from collections.abc import AsyncGenerator
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
+from . import artifact_deletion_authority as _artifact_deletion_authority  # noqa: F401
 from .config import Settings, get_settings
 
 

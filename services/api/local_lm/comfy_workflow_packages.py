@@ -10,6 +10,8 @@ from pathlib import PurePosixPath
 from typing import Literal
 
 from .h3_node_observation_v1 import EXACT_H3_NODE_TYPES, H3NodeObservationV1, observe_h3_node_types
+from .model_asset_types import WorkflowAssetKind
+from .workflow_graph_error_types import WorkflowGraphErrorCode
 
 MAX_UI_GRAPH_BYTES = 1024 * 1024
 MAX_UI_GRAPH_NODES = 4_096
@@ -69,20 +71,26 @@ FRONTEND_SYSTEM_NODE_TYPES = frozenset(
 )
 
 AssetPolicy = Literal["supported", "blocked", "unsupported"]
-AssetKind = Literal[
-    "checkpoint",
-    "configuration",
-    "embedding",
-    "lora",
-    "upscaler",
-    "vae",
+AssetKind = WorkflowAssetKind
+WorkflowPackageIssueCode = Literal[
+    "blocked_asset_format",
+    "conflicting_custom_node_versions",
+    "custom_node_package_awaiting_review",
+    "dangling_link",
+    "missing_asset",
+    "remote_url_reference",
+    "unidentified_custom_node_package",
+    "unresolved_custom_node_package",
+    "unsafe_asset_reference",
+    "unsupported_asset_format",
+    "unversioned_custom_node_package",
 ]
 IssueSeverity = Literal["advisory", "blocking"]
 OperationGuess = Literal["image", "unknown", "video"]
 
 
 class WorkflowPackageError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: WorkflowGraphErrorCode, message: str) -> None:
         super().__init__(message)
         self.code = code
 
@@ -107,7 +115,7 @@ class WorkflowAssetReference:
 
 @dataclass(frozen=True)
 class WorkflowPackageIssue:
-    code: str
+    code: WorkflowPackageIssueCode
     count: int
     node_types: tuple[str, ...] = ()
     severity: IssueSeverity = "blocking"
@@ -722,7 +730,7 @@ def _asset_references(
     available_asset_filenames: Collection[str],
 ) -> tuple[tuple[WorkflowAssetReference, ...], tuple[WorkflowPackageIssue, ...]]:
     references: dict[str, WorkflowAssetReference] = {}
-    issue_counts: dict[str, int] = defaultdict(int)
+    issue_counts: dict[WorkflowPackageIssueCode, int] = defaultdict(int)
     available = {
         value.replace("\\", "/").casefold()
         for value in available_asset_filenames

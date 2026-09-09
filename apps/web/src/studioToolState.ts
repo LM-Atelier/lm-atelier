@@ -16,7 +16,9 @@ import {
 } from "./studioMasks";
 import { BrushTool, LassoTool, RectTool, type PointerTool } from "./studioTools";
 
-export type StudioToolKind = "instruct" | "brush" | "eraser" | "rect" | "lasso" | "enhance" | "extend";
+import type { StudioToolKind } from "./types";
+
+export type { StudioToolKind } from "./types";
 
 /** The tools whose drawing is part of the request.
  *

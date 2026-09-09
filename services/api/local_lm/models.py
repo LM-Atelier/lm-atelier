@@ -459,6 +459,29 @@ class Run(TimestampMixin, Base):
     chat: Mapped[Chat] = relationship(back_populates="runs")
 
 
+class RunContextSnapshot(Base):
+    """The exact conversation inputs accepted for one queued run."""
+
+    __tablename__ = "run_context_snapshots"
+
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), primary_key=True)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class RunContextArtifact(Base):
+    """Keep accepted context media until its owning run is removed."""
+
+    __tablename__ = "run_context_artifacts"
+
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("run_context_snapshots.run_id", ondelete="CASCADE"), primary_key=True
+    )
+    artifact_id: Mapped[str] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="RESTRICT"), primary_key=True, index=True
+    )
+
+
 class ResponseFeedback(TimestampMixin, Base):
     """One local preference verdict on a response or one of its revisions.
 
@@ -1153,6 +1176,28 @@ class InstallPlan(TimestampMixin, Base):
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class SharedPackageBinding(TimestampMixin, Base):
+    """One profile's recoverable reference to an immutable shared package."""
+
+    __tablename__ = "shared_package_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "library_id",
+            "consumer_id",
+            "package_digest",
+            name="uq_shared_package_binding_identity",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("shared"))
+    library_id: Mapped[str] = mapped_column(String(36))
+    consumer_id: Mapped[str] = mapped_column(String(64))
+    package_digest: Mapped[str] = mapped_column(String(64))
+    member_digests_json: Mapped[dict[str, str]] = mapped_column(JSON)
+    claim_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    state: Mapped[str] = mapped_column(String(24), default="preparing")
+
+
 class ModelInstall(TimestampMixin, Base):
     __tablename__ = "model_installs"
 
@@ -1164,6 +1209,11 @@ class ModelInstall(TimestampMixin, Base):
     role: Mapped[str] = mapped_column(String(16), default=ModelRole.CHAT.value)
     engine: Mapped[str] = mapped_column(String(32))
     local_path: Mapped[str] = mapped_column(Text)
+    shared_package_binding_id: Mapped[str | None] = mapped_column(
+        ForeignKey("shared_package_bindings.id"),
+        nullable=True,
+        index=True,
+    )
     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
     compatibility: Mapped[str] = mapped_column(
         String(24), default=CompatibilityLevel.ADVANCED.value
@@ -1189,6 +1239,11 @@ class ModelAssetInstall(TimestampMixin, Base):
     kind: Mapped[str] = mapped_column(String(40), index=True)
     family: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
     local_path: Mapped[str] = mapped_column(Text)
+    shared_package_binding_id: Mapped[str | None] = mapped_column(
+        ForeignKey("shared_package_bindings.id"),
+        nullable=True,
+        index=True,
+    )
     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
     manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
@@ -1238,7 +1293,7 @@ class ModelCapabilityEvidence(TimestampMixin, Base):
             "evidence_key",
             name="uq_model_capability_evidence_install_key",
         ),
-        Index("ix_model_capability_evidence_install_result", "model_install_id", "result"),
+        Index("ix_model_capability_evidence_install", "model_install_id"),
     )
 
     id: Mapped[str] = mapped_column(
@@ -1251,7 +1306,6 @@ class ModelCapabilityEvidence(TimestampMixin, Base):
         index=True,
     )
     evidence_key: Mapped[str] = mapped_column(String(64), index=True)
-    result: Mapped[str] = mapped_column(String(24))
     component_hashes_json: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
     runtime_build: Mapped[str] = mapped_column(String(200))
     adapter_contract_version: Mapped[int] = mapped_column(Integer)
@@ -1263,8 +1317,6 @@ class ModelCapabilityEvidence(TimestampMixin, Base):
     # to comparing `hardware_class` for equality.
     hardware_envelope_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     probe_version: Mapped[str] = mapped_column(String(40))
-    failure_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
-    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     details_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     probed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -1314,6 +1366,7 @@ class ModelProfile(TimestampMixin, Base):
     )
     name: Mapped[str] = mapped_column(String(200), index=True)
     use_case: Mapped[str] = mapped_column(Text, default="")
+    use_case_derived: Mapped[bool] = mapped_column(Boolean, default=False)
     role: Mapped[str] = mapped_column(String(16), default=ModelRole.CHAT.value)
     engine: Mapped[str] = mapped_column(String(32))
     load_settings_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
@@ -1630,6 +1683,21 @@ class WorkflowRevision(TimestampMixin, Base):
         back_populates="revision",
         passive_deletes="all",
     )
+
+
+class WorkflowRevisionReview(TimestampMixin, Base):
+    """A local decision over an exact revision and separately reviewed node code."""
+
+    __tablename__ = "workflow_revision_reviews"
+
+    workflow_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("workflow_revisions.id", ondelete="CASCADE"), primary_key=True
+    )
+    revision_sha256: Mapped[str] = mapped_column(String(64))
+    subject_sha256: Mapped[str] = mapped_column(String(64))
+    node_bindings_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    state: Mapped[str] = mapped_column(String(16))
+    reviewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class CustomNodeInstall(TimestampMixin, Base):

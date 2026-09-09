@@ -112,7 +112,6 @@ def _add_evidence(
     settings: Settings,
     install: ModelInstall,
     *,
-    result: str = "ready",
     current: bool = True,
 ) -> ModelCapabilityEvidence:
     template_sha256 = install.manifest_json.get("workflow_template_sha256")
@@ -124,7 +123,6 @@ def _add_evidence(
     return ModelCapabilityEvidence(
         model_install_id=install.id,
         evidence_key=(install.role[0] * 63) + ("1" if current else "0"),
-        result=result,
         component_hashes_json={
             str(path): str(digest)
             for path, digest in install.manifest_json["expected_sha256"].items()
@@ -429,12 +427,22 @@ async def test_partial_setup_reports_role_specific_install_progress(
     assert by_role["video"]["checks"][0]["code"] == "model_missing"
 
 
-async def test_failed_and_stale_activation_are_distinct_and_bounded(
+async def test_never_probed_and_stale_activation_are_distinct_and_bounded(
     client: AsyncClient,
     app: FastAPI,
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The two states a reader can actually reach, told apart.
+
+    A model that has never passed a probe and one whose probe no longer applies
+    need different repairs, and both are reported as failing checks. There used
+    to be a third case here for evidence recording a failed probe; no evidence
+    row is written when activation fails - both callers record only after it
+    succeeded - so that row could only ever be built by hand, and the branch
+    reading it went with the outcome columns.
+    """
+
     _set_runtime_and_worker_state(app, monkeypatch, workers=_workers())
     chat = _add_install(role="chat", engine="llama.cpp")
     image = _add_install(role="image", engine="comfyui", template_sha256="a" * 64)
@@ -445,7 +453,6 @@ async def test_failed_and_stale_activation_are_distinct_and_bounded(
             [
                 _add_profile(chat),
                 _add_profile(image),
-                _add_evidence(settings, chat, result="failed"),
                 _add_evidence(settings, image, current=False),
             ]
         )
@@ -455,9 +462,9 @@ async def test_failed_and_stale_activation_are_distinct_and_bounded(
     by_role = {role["role"]: role for role in payload["roles"]}
 
     assert by_role["chat"]["checks"][-1] == {
-        "code": "activation_failed",
+        "code": "activation_required",
         "status": "fail",
-        "message": "The model did not pass its activation probe.",
+        "message": "The model has not passed an activation probe.",
         "action": "activate_model",
     }
     assert by_role["image"]["checks"][-1]["code"] == "activation_stale"

@@ -128,7 +128,7 @@ def bind_search_cursor(
     generation = _require_int(index_generation, maximum=MAX_GENERATION)
     digest = _require_digest(query_digest)
     start = _require_int(offset, maximum=MAX_OFFSET)
-    expires = _require_int(expires_at_unix, maximum=MAX_EXPIRES, minimum=1)
+    expires = _require_int(expires_at_unix, maximum=MAX_EXPIRES)
     now = _require_int(now_unix, maximum=MAX_EXPIRES)
     if now >= expires:
         _invalid()
@@ -149,8 +149,6 @@ def encode_search_cursor(cursor: SearchCursorV1) -> str:
         f"{TOKEN_PREFIX}.{cursor.index_generation}.{cursor.offset}."
         f"{cursor.expires_at_unix}.{cursor.query_digest}"
     )
-    if len(token) > MAX_TOKEN_CHARS:
-        _invalid()
     return token
 
 

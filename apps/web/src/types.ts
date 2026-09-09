@@ -1,3 +1,5 @@
+import type { ComposerPromptSource } from "./composerPromptSource";
+
 export type RoutingMode = "auto" | "text" | "image" | "video";
 export type JobKind =
   | "chat"
@@ -96,6 +98,7 @@ export interface ArtifactCleanupResult {
   retention_pending_count: number;
   removed_count: number;
   reclaimed_bytes: number;
+  truncated?: boolean;
 }
 
 export interface ArtifactDeleteResult {
@@ -147,7 +150,7 @@ export interface MessageReference {
   reference_subject_id: string;
   mention_slug: string;
   subject_name: string;
-  subject_kind: string;
+  subject_kind: ReferenceKind;
   role?: string | null;
   strength?: number | null;
   source: string;
@@ -228,6 +231,124 @@ export interface TurnAccepted {
   assistant_message: Message;
 }
 
+export interface TurnReferenceInput {
+  reference_subject_id: string;
+  role?: string | null;
+  selected_asset_ids?: string[];
+  strength?: number | null;
+  source?: "mention" | "picker" | "inherited_context";
+}
+
+export type TurnWorkflowSelectionInput = {
+  selector_capability: "chat" | "image" | "video";
+} & (
+  | {
+      mode: "default" | "automatic";
+      workflow_family_id?: never;
+      workflow_revision_id?: never;
+    }
+  | {
+      mode: "family";
+      workflow_family_id: string;
+      workflow_revision_id?: never;
+    }
+  | {
+      mode: "revision";
+      workflow_revision_id: string;
+      workflow_family_id?: never;
+    }
+);
+
+export interface TurnRoleOverrides {
+  settings?: Record<string, unknown>;
+  preset_id?: string | null;
+  profile_id?: string | null;
+  vision_profile_id?: string | null;
+  workflow_revision_id?: string | null;
+  workflow_selection?: TurnWorkflowSelectionInput | null;
+}
+
+export interface PriorTurnEditRequest {
+  preset_id?: string | null;
+  text: string;
+  idempotency_key: string;
+  source_run_id?: string | null;
+  source_snapshot_sha256?: string | null;
+  profile_id?: string | null;
+  vision_profile_id?: string | null;
+  mode?: RoutingMode | null;
+  parent_message_id?: string | null;
+  /** Omit to inherit source inputs; an empty array explicitly removes them. */
+  input_artifact_ids?: string[];
+  /** Omit to inherit source bindings; an empty array explicitly removes them. */
+  references?: TurnReferenceInput[];
+  prompt_source?: ComposerPromptSource | null;
+  settings?: Record<string, unknown>;
+  ordered_settings?: Record<string, Record<string, unknown>>;
+  role_overrides?: Partial<Record<EngineRole, TurnRoleOverrides>>;
+  /** Explicit changes to exact source steps; applied after role-wide choices. */
+  step_overrides?: Record<string, TurnRoleOverrides>;
+  output_count?: number | null;
+  workflow_revision_id?: string | null;
+  workflow_selection?: TurnWorkflowSelectionInput | null;
+  confirm_media?: boolean;
+}
+
+export interface PriorTurnEditConfiguration {
+  image_edit_strength?: Record<string, unknown> | null;
+  operation: string;
+  profile_engine?: string | null;
+  settings: Record<string, unknown>;
+  resolved_settings: Record<string, unknown>;
+  settings_role: string;
+  output_count: number;
+  profile_id: string | null;
+  vision_profile_id: string | null;
+  preset_id: string | null;
+  preset: Record<string, unknown> | null;
+  model_selection: Record<string, unknown>;
+  workflow_selection: WorkflowSelection;
+  workflow_revision_id: string | null;
+  workflow_schema: Record<string, unknown> | null;
+  profile_settings?: Record<string, unknown>;
+}
+
+export interface PriorTurnEditStepSource extends PriorTurnEditConfiguration {
+  step_id: string;
+  ordinal: number;
+  source_run_id: string;
+  depends_on: string[];
+}
+
+export interface PriorTurnEditSource extends PriorTurnEditConfiguration {
+  source_user_message_id: string;
+  source_run_id: string;
+  /** Send with the edit to reject a source that changed while the editor was open. */
+  source_snapshot_sha256: string;
+  chat_id: string;
+  text: string;
+  mode: RoutingMode;
+  /** Null or absent means the historical routing mode was not recorded. */
+  original_mode?: RoutingMode | null;
+  plan_kind?: "single" | "ordered";
+  steps?: PriorTurnEditStepSource[];
+  input_artifact_ids: string[];
+  input_artifacts: Artifact[];
+  references: MessageReference[];
+  context_messages: Record<string, string>[];
+  context_visual_artifacts?: Artifact[];
+  prompt_source: Record<string, unknown> | null;
+}
+
+export interface PriorTurnEditAccepted extends TurnAccepted {
+  source_message_id: string;
+  source_run_id: string;
+  work_plan_id: string;
+  branch_head_message_id: string;
+  branch_activated: false;
+  accepted_context_sha256: string;
+}
+
 export interface Job {
   id: string;
   kind: JobKind;
@@ -285,6 +406,9 @@ export interface ProgressV2 {
   updated_at: string;
 }
 
+export type WorkStepStatus = JobStatus | "blocked";
+export type WorkPlanStatus = WorkStepStatus | "partial";
+
 export interface WorkStep {
   id: string;
   plan_id: string;
@@ -292,7 +416,7 @@ export interface WorkStep {
   ordinal: number;
   display_group: string | null;
   operation: string;
-  status: string;
+  status: WorkStepStatus;
   prompt: string;
   profile_id: string | null;
   workflow_revision_id: string | null;
@@ -311,7 +435,7 @@ export interface WorkPlan {
   idempotency_key: string | null;
   source_action: string;
   persistence_scope: "durable";
-  status: string;
+  status: WorkPlanStatus;
   context_head_message_id: string | null;
   transcript_sequence: number;
   priority: number;
@@ -321,6 +445,26 @@ export interface WorkPlan {
   steps: WorkStep[];
   created_at: string;
   updated_at: string;
+}
+
+export interface EditedBranch {
+  source_message_id: string;
+  source_run_id: string;
+  branch_head_message_id: string;
+  source_available: boolean;
+  can_continue: boolean;
+  plan: WorkPlan;
+  jobs: Job[];
+}
+
+export interface EditedBranchPage {
+  items: EditedBranch[];
+  next_cursor: string | null;
+}
+
+export interface EditedBranchActivation {
+  chat_id: string;
+  active_head_message_id: string;
 }
 
 export interface SettingField {
@@ -372,6 +516,7 @@ export interface ModelProfile {
   model_install_id: string | null;
   name: string;
   use_case: string;
+  use_case_derived?: boolean;
   role: "chat" | "image" | "video";
   engine: string;
   load_settings_json: Record<string, unknown>;
@@ -385,6 +530,7 @@ export interface ModelProfileBundle {
   version: 1;
   name: string;
   use_case: string;
+  use_case_derived?: boolean;
   role: "chat" | "image" | "video";
   engine: string;
   model_install_id: string | null;
@@ -477,8 +623,40 @@ export interface RuntimeStatus {
   message: string;
 }
 
+export type SetupReadinessCode =
+  | "activation_ready"
+  | "activation_required"
+  | "activation_stale"
+  | "generation_verification_failed"
+  | "generation_verification_required"
+  | "generation_verification_running"
+  | "generation_verified"
+  | "install_failed"
+  | "install_in_progress"
+  | "model_missing"
+  | "model_ready"
+  | "model_unsupported"
+  | "profile_missing"
+  | "profile_ready"
+  | "runtime_external"
+  | "runtime_failed"
+  | "runtime_installing"
+  | "runtime_missing"
+  | "runtime_ready"
+  | "runtime_unsupported"
+  | "worker_failed"
+  | "worker_not_loaded"
+  | "worker_ready"
+  | "worker_starting"
+  | "worker_status_unavailable"
+  | "workflow_activation_not_ready"
+  | "workflow_invalid"
+  | "workflow_missing"
+  | "workflow_ready"
+  | "workflow_untrusted";
+
 export interface SetupReadinessCheck {
-  code: string;
+  code: SetupReadinessCode;
   status: "pass" | "pending" | "fail";
   message: string;
   action: string | null;
@@ -504,12 +682,19 @@ export interface SetupReadinessReport {
   roles: SetupRoleReadiness[];
 }
 
+export type SetupVerificationFailureCode =
+  | "application_restarted"
+  | "empty_generation"
+  | "generation_cancelled"
+  | "generation_failed"
+  | "generation_not_started";
+
 export interface SetupVerification {
   id: string;
   role: "chat" | "image" | "video";
   state: "queued" | "running" | "ready" | "failed";
   job_id: string | null;
-  failure_code: string | null;
+  failure_code: SetupVerificationFailureCode | null;
   started_at: string | null;
   completed_at: string | null;
 }
@@ -540,7 +725,6 @@ export interface ModelInstall {
   capability_evidence: {
     id: string;
     evidence_key: string;
-    result: string;
     runtime_build: string;
     probed_at: string;
   } | null;
@@ -548,11 +732,24 @@ export interface ModelInstall {
   updated_at: string;
 }
 
+export type InstalledAssetKind =
+  | "checkpoint"
+  | "clip_vision"
+  | "controlnet"
+  | "diffusion_model"
+  | "embedding"
+  | "gguf_model"
+  | "ip_adapter"
+  | "lora"
+  | "text_encoder"
+  | "upscaler"
+  | "vae";
+
 export interface ModelAssetInstall {
   id: string;
   source_id: string | null;
   name: string;
-  kind: string;
+  kind: InstalledAssetKind;
   family: string | null;
   size_bytes: number;
   manifest_json: Record<string, unknown>;
@@ -644,7 +841,7 @@ export interface ChatItemRemovalReference {
   id: string;
   subject_name: string;
   mention_slug: string;
-  subject_kind: string;
+  subject_kind: ReferenceKind;
 }
 
 export interface ChatItemRemovalImpact {
@@ -687,10 +884,9 @@ export interface CatalogVersionRow {
   base_model?: string | null;
   size_bytes: number;
   changelog?: string | null;
-  /** True, false, or unknown - and unknown is a real answer, not a default.
-   * Checkpoint installs record no provider version, so for those we cannot
-   * tell. Rendering unknown as "not installed" is how someone installs a
-   * second copy of what they already have. */
+  /** True for an exact recorded installation. An unmatched version is false
+   * only when this model has another recorded version identity; otherwise
+   * it remains unknown. Preserve unknown instead of displaying not installed. */
   installed?: boolean | null;
   installed_as?: string | null;
 }
@@ -720,6 +916,53 @@ export interface CatalogFileVariant {
   precision: string | null;
 }
 
+export interface CatalogPreflightCheck {
+  id: string;
+  label: string;
+  status: "pass" | "warn" | "block";
+  detail: string;
+}
+
+export type InstallPlanFailureCode =
+  | "activation_contract_failed"
+  | "activation_probe_timeout"
+  | "activation_runtime_failed"
+  | "auxiliary_asset_not_primary"
+  | "auxiliary_kind_mismatch"
+  | "auxiliary_kind_not_implemented"
+  | "component_verification_failed"
+  | "conflicting_asset_ownership"
+  | "conflicting_workflow_contract"
+  | "incomplete_modelopt_snapshot"
+  | "install_cancelled"
+  | "install_failed"
+  | "insufficient_storage"
+  | "manifest_inspection_failed"
+  | "metadata_inspection_failed"
+  | "preflight_blocked"
+  | "unsafe_model_format"
+  | "unsafe_workflow_asset_format"
+  | "unsupported_auxiliary_engine"
+  | "unsupported_chat_engine"
+  | "unsupported_chat_layout"
+  | "unsupported_media_engine"
+  | "unsupported_workflow_asset_runtime"
+  | "unverified_workflow_asset"
+  | "workflow_asset_folder_mismatch"
+  | "workflow_asset_kind_mismatch"
+  | "workflow_asset_selection_required"
+  | "workflow_contract_changed"
+  | "workflow_contract_missing";
+
+export interface CatalogInstallPlan {
+  id: string;
+  plan_hash: string;
+  compatibility: "supported" | "unsupported" | "trusted_extension_required";
+  family: string | null;
+  failure_code: InstallPlanFailureCode | null;
+  failure_reason: string | null;
+}
+
 export interface CatalogPreflight {
   remote_id: string;
   source_remote_id: string | null;
@@ -745,35 +988,26 @@ export interface CatalogPreflight {
    * only for names that are genuinely ambiguous, so a list of one never
    * turns an ordinary install into a decision. */
   file_variants?: Record<string, CatalogFileVariant[]>;
-  auxiliary_kind?: string | null;
+  auxiliary_kind?: "lora" | "vae" | "controlnet" | "upscaler" | "embedding" | "ip_adapter" | null;
   content_rating?: ContentRating;
-  install_plan: {
-    id: string;
-    plan_hash: string;
-    compatibility: "supported" | "unsupported" | "trusted_extension_required";
-    family: string | null;
-    failure_code: string | null;
-    failure_reason: string | null;
-  } | null;
-  checks: Array<{
-    id: string;
-    label: string;
-    status: "pass" | "warn" | "block";
-    detail: string;
-  }>;
+  install_plan: CatalogInstallPlan | null;
+  checks: CatalogPreflightCheck[];
 }
+
+export type BoundWorkflowAssetKind = "checkpoint" | "embedding" | "lora" | "upscaler" | "vae";
+export type WorkflowAssetKind = BoundWorkflowAssetKind | "configuration";
 
 /** One missing workflow file bound to an exact plan artifact. */
 export interface BoundWorkflowAsset {
   reference_filename: string;
-  kind: string;
+  kind: BoundWorkflowAssetKind;
   install_plan_id: string;
   install_plan_hash: string;
   provider: string;
   remote_id: string;
   revision: string;
   artifact_path: string;
-  artifact_kind: string;
+  artifact_kind: InstalledAssetKind;
   target_folder: string;
   size_bytes: number;
   sha256: string;
@@ -822,6 +1056,21 @@ export interface ReferenceRecipe {
   notes: string[];
 }
 
+export interface WorkflowRevisionReview {
+  revision_id: string;
+  subject_sha256: string;
+  trusted: boolean;
+  can_approve: boolean;
+  reasons: string[];
+  state: string;
+  reviewed_at: string | null;
+  node_types: string[];
+  packages: Array<Record<string, unknown>>;
+  api_graph: Record<string, unknown>;
+  input_schema: Record<string, unknown>;
+  dependencies: Record<string, unknown>;
+}
+
 export interface WorkflowRevision {
   id: string;
   workflow_id: string;
@@ -838,6 +1087,7 @@ export interface WorkflowRevision {
 
 export interface Workflow {
   id: string;
+  family_id?: string | null;
   name: string;
   operation: string;
   description: string;
@@ -1003,6 +1253,12 @@ export interface AppEvent {
 }
 
 /** The router's answer for an unsent draft, so the composer need not guess. */
+export interface PriorTurnEditBinding {
+  source_message_id: string;
+  source_run_id: string;
+  source_snapshot_sha256: string;
+}
+
 export interface DraftClassification {
   references_prior_visual: boolean;
 }
@@ -1034,15 +1290,28 @@ export interface WorkflowAssetReference {
   filename: string;
   suffix: string;
   policy: "supported" | "blocked" | "unsupported";
-  kind: "checkpoint" | "configuration" | "embedding" | "lora" | "upscaler" | "vae";
+  kind: WorkflowAssetKind;
   source_url: string | null;
   present_locally: boolean;
   /** Present only when the author's text names this exact file. */
   source_candidates: WorkflowSourceCandidate[];
 }
 
+export type WorkflowPackageIssueCode =
+  | "blocked_asset_format"
+  | "conflicting_custom_node_versions"
+  | "custom_node_package_awaiting_review"
+  | "dangling_link"
+  | "missing_asset"
+  | "remote_url_reference"
+  | "unidentified_custom_node_package"
+  | "unresolved_custom_node_package"
+  | "unsafe_asset_reference"
+  | "unsupported_asset_format"
+  | "unversioned_custom_node_package";
+
 export interface WorkflowPackageIssue {
-  code: string;
+  code: WorkflowPackageIssueCode;
   count: number;
   node_types: string[];
   severity: "blocking" | "advisory";
@@ -1119,7 +1388,7 @@ export interface WorkflowPackagePreparation {
 export interface ModelUpdate {
   install_id: string;
   name: string;
-  kind: string;
+  kind: InstalledAssetKind;
   model_id: string;
   installed_version_id: string;
   installed_version_name: string | null;
@@ -1217,6 +1486,7 @@ export interface WorkflowFamily {
   name: string;
   description: string;
   use_case: string;
+  use_case_derived?: boolean;
   tags: string[];
   enabled: boolean;
   archived: boolean;
@@ -1334,8 +1604,10 @@ export interface WorkflowResourceConsumers {
   consumers: WorkflowResourceConsumer[];
 }
 
+export type StudioToolKind = "instruct" | "brush" | "eraser" | "rect" | "lasso" | "enhance" | "extend";
+
 export interface StudioToolCapability {
-  kind: string;
+  kind: StudioToolKind;
   workflow_class: string;
   available: boolean;
   reason: string | null;
@@ -1361,7 +1633,7 @@ export interface ReferenceSubject {
   id: string;
   name: string;
   mention_slug: string;
-  kind: string;
+  kind: ReferenceKind;
   description: string | null;
   aliases_json: string[];
   tags_json: string[];
@@ -1386,6 +1658,18 @@ export interface ReferenceAsset {
   view_label: string | null;
   sort_order: number;
   validation_state: "unchecked" | "usable" | "weak" | "rejected";
+}
+
+export interface ReferenceAssetReview {
+  outcome: "usable" | "weak" | "rejected";
+  reasons: string[];
+}
+
+export interface ReferenceAssetReviewed {
+  asset: ReferenceAsset;
+  width: number;
+  height: number;
+  review_version: number;
 }
 
 export type PromptTemplateSlotMode = "input" | "choice" | "model" | "fixed";

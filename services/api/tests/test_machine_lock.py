@@ -706,11 +706,11 @@ Invoke-LeasedStage -Label "sleeping stage" -FilePath "{sys.executable}" `
     stage_pid = -1
     try:
         deadline = time.monotonic() + 60
-        while not pid_file.exists() or not pid_file.read_text(encoding="utf-8").strip():
-            assert time.monotonic() < deadline, "the stage child never started"
+
+        def holder_alive() -> None:
             assert holder.poll() is None, "the holder died before its stage ran"
-            time.sleep(0.2)
-        stage_pid = int(pid_file.read_text(encoding="utf-8"))
+
+        stage_pid = int(_settled_text(pid_file, deadline=deadline, still_running=holder_alive))
 
         holder.kill()
         holder.wait(timeout=30)
@@ -2279,11 +2279,11 @@ Invoke-LeasedStage -Label "sleeping stage" -FilePath "{sys.executable}" `
     stage_pid = -1
     try:
         deadline = time.monotonic() + 60
-        while not pid_file.exists() or not pid_file.read_text(encoding="utf-8").strip():
-            assert time.monotonic() < deadline, "the stage child never started"
+
+        def holder_alive() -> None:
             assert holder.poll() is None, "the holder died before its stage ran"
-            time.sleep(0.2)
-        stage_pid = int(pid_file.read_text(encoding="utf-8"))
+
+        stage_pid = int(_settled_text(pid_file, deadline=deadline, still_running=holder_alive))
 
         holder.kill()
         holder.wait(timeout=30)
@@ -2309,6 +2309,38 @@ Invoke-LeasedStage -Label "sleeping stage" -FilePath "{sys.executable}" `
     assert Path(moved.path).parent == (other / ".git").resolve()
     _NAMESPACE["release"](moved)
     _repoint(pointer, original_pointer)
+
+
+def _settled_text(
+    path: Path,
+    *,
+    deadline: float,
+    still_running: Callable[[], None],
+) -> str:
+    """The file's content once it has been written AND closed.
+
+    Waiting on `path.exists()` waits for the wrong thing. A writer that creates
+    the file before it finishes writing holds it in between, and on Windows it
+    holds it without share-read - so a reader in that window gets
+    `PermissionError: [Errno 13]` on a path that plainly exists. That is a real
+    failure this suite hit in a merge-group run rather than a hypothetical: the
+    same commit had passed the identical job minutes earlier, and only the
+    timing differed.
+
+    So the condition is content, not presence. An unreadable or empty file is
+    the writer mid-write and is retried; `still_running` re-checks whatever
+    produced it, so a dead producer fails immediately instead of at the
+    deadline.
+    """
+
+    while True:
+        still_running()
+        assert time.monotonic() < deadline, f"{path.name} never became readable"
+        with suppress(OSError):
+            text = path.read_text(encoding="utf-8")
+            if text.strip():
+                return text
+        time.sleep(0.2)
 
 
 def _pointer_through_a_junction(
@@ -2447,11 +2479,11 @@ if (Exit-MachineLease $Lease) {{ Write-Output "RELEASED" }}
     )
     try:
         deadline = time.monotonic() + 60
-        while not entered.exists():
-            assert time.monotonic() < deadline, "the shell never entered the lease"
+
+        def shell_alive() -> None:
             assert process.poll() is None, process.communicate()[0]
-            time.sleep(0.2)
-        roles = entered.read_text(encoding="utf-8")
+
+        roles = _settled_text(entered, deadline=deadline, still_running=shell_alive)
         assert f"a link on the way to the checkout's private git directory={jump}" in roles, roles
         with pytest.raises(PermissionError):
             os.rmdir(jump)
@@ -3054,3 +3086,438 @@ Write-Output "EXACT:$($env:GIT_DIR -ceq "{value}")"
     out = result.stdout + result.stderr
     assert "COMMON_RETURNED:True" in result.stdout, out
     assert "EXACT:True" in result.stdout, "the value came back changed: " + out
+
+
+@pytest.mark.parametrize("host", _powershell_hosts())
+def test_pytest_scratch_is_held_outside_the_repository(
+    anchor: Path, tmp_path: Path, host: str
+) -> None:
+    target = tmp_path / "available-scratch"
+    target.mkdir()
+    fallback = tmp_path / "fallback-scratch"
+    fallback.mkdir()
+    script = f"""
+$ErrorActionPreference = "Stop"
+. "{ROOT / "scripts" / "machine-lease.ps1"}"
+. "{ROOT / "scripts" / "held-pytest-scratch.ps1"}"
+$env:RUNNER_TEMP = "{target}"
+$env:TEMP = "{fallback}"
+$env:TMP = "{fallback}"
+$Lease = Enter-MachineLease -RepositoryRoot "{anchor}" -Purpose "scratch-test"
+if (-not $Lease) {{ exit 2 }}
+try {{
+    $Scratch = New-HeldPytestScratch -RepositoryRoot "{anchor}" -Lease $Lease
+    New-Item -ItemType Directory -Path $Scratch -ErrorAction Stop | Out-Null
+    Set-Content -LiteralPath (Join-Path $Scratch "write.txt") -Value "ok"
+    Write-Output "SCRATCH:$Scratch"
+    Write-Output "INSIDE:$(Test-PytestScratchContainedBy -Path $Scratch -Root "{anchor}")"
+    Write-Output "RUNNER:$(Test-PytestScratchContainedBy -Path $Scratch -Root "{target}")"
+    Write-Output "EXISTS:$(Test-Path -LiteralPath $Scratch)"
+    Write-Output "USABLE:$(Test-Path -LiteralPath (Join-Path $Scratch "write.txt"))"
+}} finally {{
+    if (-not (Exit-MachineLease $Lease)) {{ exit 3 }}
+}}
+"""
+    result = subprocess.run(
+        [host, "-NoProfile", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    assert "INSIDE:False" in result.stdout, out
+    assert "RUNNER:True" in result.stdout, out
+    assert "EXISTS:True" in result.stdout, out
+    assert "USABLE:True" in result.stdout, out
+
+
+@pytest.mark.parametrize("host", _powershell_hosts())
+def test_pytest_scratch_refuses_a_root_that_reaches_the_repository(
+    anchor: Path, tmp_path: Path, host: str
+) -> None:
+    target = anchor / "scratch-target"
+    target.mkdir()
+    link = tmp_path / "scratch-link"
+    _junction(link, target)
+    script = f"""
+$ErrorActionPreference = "Stop"
+. "{ROOT / "scripts" / "machine-lease.ps1"}"
+. "{ROOT / "scripts" / "held-pytest-scratch.ps1"}"
+$env:RUNNER_TEMP = ""
+$env:TEMP = "{link}"
+$env:TMP = "{link}"
+$Lease = Enter-MachineLease -RepositoryRoot "{anchor}" -Purpose "scratch-refusal"
+if (-not $Lease) {{ exit 2 }}
+try {{
+    try {{
+        New-HeldPytestScratch -RepositoryRoot "{anchor}" -Lease $Lease | Out-Null
+        Write-Output "ACCEPTED"
+    }} catch {{
+        Write-Output "REFUSED:$($_.Exception.Message)"
+    }}
+}} finally {{
+    if (-not (Exit-MachineLease $Lease)) {{ exit 3 }}
+}}
+"""
+    result = subprocess.run(
+        [host, "-NoProfile", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    assert "REFUSED:The pytest scratch root resolves inside the repository." in out
+    assert "ACCEPTED" not in out
+
+
+@pytest.mark.parametrize("host", _powershell_hosts())
+def test_pytest_scratch_holds_every_link_to_its_external_root(
+    anchor: Path, tmp_path: Path, host: str
+) -> None:
+    target = tmp_path / "external-scratch"
+    target.mkdir()
+    link = tmp_path / "external-link"
+    _junction(link, target)
+    script = f"""
+$ErrorActionPreference = "Stop"
+. "{ROOT / "scripts" / "machine-lease.ps1"}"
+. "{ROOT / "scripts" / "held-pytest-scratch.ps1"}"
+$env:RUNNER_TEMP = ""
+$env:TEMP = "{link}"
+$env:TMP = "{link}"
+$Lease = Enter-MachineLease -RepositoryRoot "{anchor}" -Purpose "scratch-link"
+if (-not $Lease) {{ exit 2 }}
+try {{
+    $Scratch = New-HeldPytestScratch -RepositoryRoot "{anchor}" -Lease $Lease
+    try {{
+        Remove-Item -LiteralPath "{link}" -Force -ErrorAction Stop
+        Write-Output "MOVED-WHILE-HELD"
+    }} catch {{
+        Write-Output "PINNED"
+    }}
+    try {{
+        Rename-Item -LiteralPath "{target}" -NewName "external-moved" -ErrorAction Stop
+        Write-Output "ROOT-MOVED-WHILE-HELD"
+    }} catch {{
+        Write-Output "ROOT-PINNED"
+    }}
+}} finally {{
+    if (-not (Exit-MachineLease $Lease)) {{ exit 3 }}
+}}
+Write-Output "RELEASED"
+"""
+    result = subprocess.run(
+        [host, "-NoProfile", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    assert "PINNED" in result.stdout, out
+    assert "MOVED-WHILE-HELD" not in result.stdout, out
+    assert "ROOT-PINNED" in result.stdout, out
+    assert "ROOT-MOVED-WHILE-HELD" not in result.stdout, out
+    assert "RELEASED" in result.stdout, out
+    os.rmdir(link)
+    assert not link.exists()
+
+
+def test_gate_uses_the_held_external_pytest_scratch() -> None:
+    source = (ROOT / "scripts" / "verify.ps1").read_text(encoding="utf-8")
+    helper_at = source.index("held-pytest-scratch.ps1")
+    select_at = source.index("New-HeldPytestScratch")
+    api_at = source.index('Invoke-Checked "API tests"')
+    assert helper_at < select_at < api_at
+    assert 'Join-Path $RepositoryRoot "temp"' not in source
+
+
+def _second_pin_mark_refused(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    """Refuse the SECOND chain pin's inherit mark and protect both pins.
+
+    The first pin is protected from close as it is opened, so the chain
+    opener's own cleanup is refused; the second is protected when its mark is
+    refused, so the pin opener's cleanup is refused as well. Protection is
+    HANDLE_FLAG_PROTECT_FROM_CLOSE, a different bit from the inherit flag the
+    opener sets under mask 0x1, so marking a protected handle inheritable
+    still works.
+    """
+
+    import ctypes
+
+    kernel32 = _NAMESPACE["_kernel32"]()
+    real_create = kernel32.CreateFileW
+    real_mark = kernel32.SetHandleInformation
+    order: list[int] = []
+    taken: dict[str, int] = {}
+
+    def create_noting_pins(name: str, *rest: object) -> object:
+        handle = real_create(name, *rest)
+        # Pins are the only read-share opens: _SHARE_READ is 1.
+        number = 0 if handle is None else int(handle)
+        if rest[1] == 1 and number and number != _NAMESPACE["_INVALID_HANDLE"]:
+            order.append(number)
+            if len(order) == 1:
+                taken["outer"] = number
+                assert real_mark(ctypes.c_void_p(number), 2, 2)
+            elif len(order) == 2:
+                taken["inner"] = number
+        return handle
+
+    def refusing_mark(handle: object, mask: int, flags: int) -> int:
+        number = int(getattr(handle, "value", handle))  # type: ignore[arg-type]
+        if number == taken.get("inner") and mask == 1:
+            assert real_mark(ctypes.c_void_p(number), 2, 2)
+            return 0
+        return int(real_mark(handle, mask, flags))
+
+    monkeypatch.setattr(kernel32, "CreateFileW", create_noting_pins)
+    monkeypatch.setattr(kernel32, "SetHandleInformation", refusing_mark)
+    return taken
+
+
+def test_a_nested_pin_refusal_joins_the_outer_report(
+    anchor: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One report names both refused closes, not one plus a hidden cause.
+
+    The pin opener lets go of the pin it has just taken and its close is
+    refused; the chain opener then lets go of the earlier pin and that close
+    is refused too. Before this, the pin opener's report reached the chain
+    opener as an exception and became `__cause__` of the outer one - so the
+    outer report named the earlier pin only, and the new pin survived
+    somewhere no command line prints. The design promises ONE report naming
+    every acquired object whose close was refused.
+    """
+
+    taken = _second_pin_mark_refused(monkeypatch)
+    with pytest.raises(_NAMESPACE["LeaseStranded"], match="every refused close") as caught:
+        _NAMESPACE["acquire"]("nested-pin-strands", repo=anchor)
+    monkeypatch.undo()
+    assert "inner" in taken and "outer" in taken, "the two pins were never opened"
+    numbers = [number for _kind, number, _error in caught.value.strands]
+    # The nested cleanup ran first, so it is reported first.
+    assert numbers == [taken["inner"], taken["outer"]], caught.value.strands
+    assert all(kind == "pin" for kind, _number, _error in caught.value.strands)
+    # The failure that aborted the acquisition is still the cause, not the
+    # nested report: a report is not a reason.
+    assert isinstance(caught.value.__cause__, LeaseRefused)
+    assert "for a child's lifetime" in str(caught.value.__cause__)
+    _unprotect_and_close(taken["inner"])
+    _unprotect_and_close(taken["outer"])
+    successor = _NAMESPACE["acquire"]("after-nested-pin-strands", repo=anchor)
+    _NAMESPACE["release"](successor)
+
+
+def test_the_shell_pin_opener_hands_its_outcome_back_instead_of_exiting(
+    anchor: Path,
+) -> None:
+    """The shell's inner helper must not exit before the outer closer runs.
+
+    PowerShell cannot be made to refuse a real `SetHandleInformation`: the
+    P/Invoke lives on a compiled type, so unlike the Python control above this
+    one reads the source rather than driving the kernel. It is here because
+    the behaviour it guards is invisible in any run that succeeds - an `exit`
+    inside `Open-MachineLeasePin` leaves the caller's earlier pins unattempted
+    and unreported, and nothing else in this file would notice it coming back.
+    """
+
+    source = (ROOT / "scripts" / "machine-lease.ps1").read_text(encoding="utf-8")
+    opener = source[source.index("function Open-MachineLeasePin") :]
+    opener = opener[: opener.index("function Close-MachineLeaseAcquired")]
+    assert "exit 4" not in opener, (
+        "the pin opener exits before its caller can close the earlier pins"
+    )
+    assert "$script:MachineLeaseStranded = $true" in opener, (
+        "the pin opener must hand its refused close back to the caller"
+    )
+    assert "$script:MachineLeaseStranded = $false" in source, (
+        "a stale flag from an earlier acquisition would exit a healthy one"
+    )
+    assert "if (-not $Closed -or $script:MachineLeaseStranded) {" in source, (
+        "the chain opener must close its own pins and then consult the flag"
+    )
+
+
+def test_a_signal_file_is_read_once_it_is_written_not_once_it_appears() -> None:
+    """A file that exists but is still held must be waited for, not read.
+
+    This is the failure that removed a candidate from the merge queue. The
+    shell writes its signal with `Set-Content`, which creates the file and then
+    writes and closes it; a reader in between gets errno 13 on Windows. Polling
+    `exists()` returns as soon as the path appears, which is before the content
+    is there.
+
+    The fake reproduces exactly that window - two refusals, then an empty read,
+    then the content - without depending on the timing that made it rare.
+    """
+
+    attempts: list[str] = []
+
+    class HeldFile:
+        name = "held.txt"
+
+        def read_text(self, encoding: str = "utf-8") -> str:
+            attempts.append(encoding)
+            if len(attempts) <= 2:
+                raise PermissionError(13, "the writer still holds it")
+            if len(attempts) == 3:
+                return ""
+            return "settled content"
+
+    text = _settled_text(
+        HeldFile(),  # type: ignore[arg-type]
+        deadline=time.monotonic() + 30,
+        still_running=lambda: None,
+    )
+    assert text == "settled content"
+    assert len(attempts) == 4, attempts
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the lease helper is PowerShell")
+def test_a_culturally_equal_restored_value_still_refuses_the_resolution(
+    anchor: Path,
+) -> None:
+    """Case is not the only way two different strings compare as one.
+
+    PowerShell's comparison operators are cultural, `-cne` included: it is
+    case-sensitive but still asks the culture, and the culture says "Strasse"
+    and the eszett spelling are the same string. They are not the same bytes,
+    so a value restored as one when it was saved as the other is not the
+    environment this process was handed - and a case-only control cannot see
+    that, because the case is identical.
+
+    Same seam as the case control, for the same reason: the real setter
+    round-trips exactly, so only a shadowed read can produce a value that
+    differs from what was saved.
+    """
+
+    script = f"""
+$ErrorActionPreference = "Stop"
+. "{ROOT / "scripts" / "machine-lease.ps1"}"
+$env:GIT_DIR = "C:\Repository\Strasse\.git"
+$global:LeaseReads = 0
+function Read-MachineLeaseEnvironment {{
+    param([Parameter(Mandatory = $true)][string] $Name)
+    $Value = [Environment]::GetEnvironmentVariable($Name)
+    if ($Name -eq "GIT_DIR" -and $Value) {{
+        $global:LeaseReads++
+        if ($global:LeaseReads -gt 1) {{ return $Value.Replace("Strasse", "Straße") }}
+    }}
+    return $Value
+}}
+try {{
+    $Common = Get-MachineLeaseCommonDir -RepositoryRoot "{anchor}"
+    if ($null -ne $Common) {{ Write-Output "RESOLVED-ANYWAY"; exit 2 }}
+    Write-Output "REFUSED"
+}} finally {{
+    Remove-Item -LiteralPath "Env:GIT_DIR" -ErrorAction SilentlyContinue
+}}
+"""
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "RESOLVED-ANYWAY" not in result.stdout, (
+        "a value the culture calls equal but the bytes do not was accepted as restored"
+    )
+    assert "REFUSED" in result.stdout
+    assert "could not be restored to the value it had" in result.stdout, (
+        "the refusal did not name what went wrong"
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the lease helper is PowerShell")
+def test_a_restored_value_that_differs_only_in_case_refuses_the_resolution(
+    anchor: Path,
+) -> None:
+    """The guard is about the environment being what it was, not about paths.
+
+    PowerShell's `-ne` is case-insensitive, so a value coming back with
+    changed case was accepted as restored and the resolution was handed to the
+    caller. Every scrubbed name is path-valued and a path differing only in
+    case names the same object on Windows, so no caller was pointed at the
+    wrong repository by it - but the guard did not hold the property it exists
+    for.
+
+    The branch is unreachable without the seam: the real setter round-trips a
+    value exactly, so nothing a test can do to the environment produces a
+    case-altered read. `Read-MachineLeaseEnvironment` is shadowed here to
+    return the value uppercased on the SECOND read of one variable - the save
+    reads it first, the restoration check reads it second - which is the one
+    thing the production path cannot produce on its own.
+    """
+
+    script = f"""
+$ErrorActionPreference = "Stop"
+. "{ROOT / "scripts" / "machine-lease.ps1"}"
+$env:GIT_DIR = "C:\\NotThisRepository\\.git"
+$global:LeaseReads = 0
+function Read-MachineLeaseEnvironment {{
+    param([Parameter(Mandatory = $true)][string] $Name)
+    $Value = [Environment]::GetEnvironmentVariable($Name)
+    if ($Name -eq "GIT_DIR" -and $Value) {{
+        $global:LeaseReads++
+        if ($global:LeaseReads -gt 1) {{ return $Value.ToUpperInvariant() }}
+    }}
+    return $Value
+}}
+try {{
+    $Common = Get-MachineLeaseCommonDir -RepositoryRoot "{anchor}"
+    if ($null -ne $Common) {{ Write-Output "RESOLVED-ANYWAY"; exit 2 }}
+    Write-Output "REFUSED"
+}} finally {{
+    Remove-Item -LiteralPath "Env:GIT_DIR" -ErrorAction SilentlyContinue
+}}
+"""
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "RESOLVED-ANYWAY" not in result.stdout, (
+        "a value that came back with changed case was accepted as restored"
+    )
+    assert "REFUSED" in result.stdout
+    assert "could not be restored to the value it had" in result.stdout, (
+        "the refusal did not name what went wrong"
+    )
+
+
+def test_the_python_lease_never_mutates_the_process_environment() -> None:
+    """The other half of the same question, and its answer is different.
+
+    The row asks whether `machine_lock.py` shares the inexact comparison. It
+    cannot: it never restores anything. It builds a scrubbed COPY of the
+    environment and hands that to the subprocess, so the process it runs in is
+    never redirected and there is nothing to compare on the way back.
+
+    Checked here rather than asserted in prose, so that a later change which
+    starts mutating the real environment has to notice this.
+    """
+
+    source = (ROOT / "scripts" / "machine_lock.py").read_text(encoding="utf-8")
+
+    assert "_scrubbed_git_env" in source
+    assert "environment = dict(os.environ)" in source, (
+        "the scrub no longer works on a copy of the environment"
+    )
+    for mutation in ("os.environ[", "os.environ.pop(", "os.putenv", "setdefault("):
+        assert mutation not in source, (
+            f"machine_lock.py now writes the process environment through {mutation!r}, "
+            "so it needs the exact restoration comparison the shell helper has"
+        )

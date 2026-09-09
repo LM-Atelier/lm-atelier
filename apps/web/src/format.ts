@@ -64,7 +64,7 @@ export function downloadJson(value: unknown, filename: string): void {
  */
 export function docsLink(version: string, path: string): string {
   const reference = /^\d+\.\d+\.\d+$/.test(version) ? `v${version}` : "main";
-  return `https://github.com/ajccarlson/lm-atelier/blob/${reference}/${path}`;
+  return `https://github.com/LM-Atelier/lm-atelier/blob/${reference}/${path}`;
 }
 
 /** Help destinations, troubleshooting first because that is why people look. */
@@ -72,7 +72,7 @@ export function supportLinks(version: string): [string, string][] {
   return [
     ["Troubleshooting", docsLink(version, "docs/TROUBLESHOOTING.md")],
     ["Getting started", docsLink(version, "docs/GETTING-STARTED.md")],
-    ["Issues", "https://github.com/ajccarlson/lm-atelier/issues"],
+    ["Issues", "https://github.com/LM-Atelier/lm-atelier/issues"],
     ["Security", docsLink(version, "SECURITY.md")],
     ["Support", docsLink(version, "SUPPORT.md")],
     ["Privacy", docsLink(version, "docs/PRIVACY.md")],

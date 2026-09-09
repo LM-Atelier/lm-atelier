@@ -1,24 +1,25 @@
 from __future__ import annotations
 
-import asyncio
+from typing import cast
 
 import pytest
 from httpx2 import AsyncClient
+from run_waits import wait_for_terminal_status
 
 pytestmark = pytest.mark.asyncio
 
 
 async def _wait_for_run(client: AsyncClient, run_id: str) -> dict[str, object]:
-    deadline = asyncio.get_running_loop().time() + 5
-    run: dict[str, object] = {}
-    while asyncio.get_running_loop().time() < deadline:
+    async def read() -> dict[str, object]:
         response = await client.get(f"/api/runs/{run_id}")
         assert response.status_code == 200
-        run = response.json()
-        if run["status"] in {"complete", "failed", "cancelled"}:
-            return run
-        await asyncio.sleep(0.03)
-    raise AssertionError(f"run did not finish: {run}")
+        return cast(dict[str, object], response.json())
+
+    # This one accepts any ending: its callers assert which one themselves.
+    return cast(
+        dict[str, object],
+        await wait_for_terminal_status(read, what=f"run {run_id}", expected=None),
+    )
 
 
 async def test_media_regeneration_replaces_the_source_seed(
