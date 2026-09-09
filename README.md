@@ -11,7 +11,7 @@ conversation can chat, create and edit images, generate video, and analyze
 images with vision. It keeps conversations and media on your computer by
 default and can select an appropriate configured model for each request.
 
-![LM Atelier empty local workspace](docs/assets/application-preview.png)
+![A project chat in LM Atelier: a generated harbour still with a video rendering from it](docs/assets/application-preview.png)
 
 ## Explore the workspace
 
