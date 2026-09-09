@@ -20,9 +20,16 @@ export function ModelUpdatesPanel({
   const check = useMutation({ mutationFn: () => api.modelUpdates() });
   const review = useMutation({
     mutationFn: async (update: ModelUpdate) => {
-      const role = update.kind === "lora" ? "lora" : null;
+      let role = "lora";
+      if (update.kind === "checkpoint") {
+        const installed = (await api.models()).find((model) => model.id === update.install_id);
+        if (!installed || !["chat", "image", "video"].includes(installed.role)) {
+          throw new Error("Could not determine the installed model's role. Check for updates again.");
+        }
+        role = installed.role;
+      }
       const detail = await api.catalogItemDetail("civitai", update.update_version_id ?? "", role);
-      return { model: detail.model, role: role ?? "image" };
+      return { model: detail.model, role };
     },
     onSuccess: ({ model, role }) => onInstall(model, role),
   });
@@ -80,7 +87,7 @@ export function ModelUpdatesPanel({
                 </details>
               )}
               <span className="row-actions">
-                {update.kind === "lora" ? (
+                {update.kind === "lora" || update.kind === "checkpoint" ? (
                   <button
                     className="secondary compact-button"
                     disabled={review.isPending}
