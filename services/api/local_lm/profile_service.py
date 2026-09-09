@@ -6,7 +6,8 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from .domain import new_id
-from .models import AppSetting, Chat, ModelInstall, ModelProfile
+from .models import AppSetting, Chat, ModelInstall, ModelProfile, ModelSource
+from .profile_use_cases import derive_profile_use_case
 from .schemas import SettingField
 from .settings_registry import (
     CHAT_SETTINGS,
@@ -178,10 +179,12 @@ def ensure_profile_for_install(
         ensure_legacy_profile_workflow(session, existing)
         return existing
 
+    source = session.get(ModelSource, install.source_id) if install.source_id else None
     profile = build_profile_for_install(
         install,
         default_settings=default_settings,
         fields=fields,
+        source_metadata=source.metadata_json if source else None,
     )
     session.add(profile)
     session.flush()
@@ -192,6 +195,7 @@ def ensure_profile_for_install(
 def build_profile_for_install(
     install: ModelInstall,
     *,
+    source_metadata: object = None,
     default_settings: dict[str, object] | None = None,
     fields: Iterable[SettingField] | None = None,
 ) -> ModelProfile:
@@ -209,10 +213,14 @@ def build_profile_for_install(
     values = default_settings or {}
     load_fields = [field for field in profile_fields if field.scope == "load"]
     request_fields = [field for field in profile_fields if field.scope != "load"]
+    use_case = derive_profile_use_case(
+        (install.manifest_json or {}).get("use_case_metadata", source_metadata)
+    )
     profile = ModelProfile(
         id=new_id("profile"),
         name=install.name,
-        use_case="",
+        use_case=use_case,
+        use_case_derived=bool(use_case),
         role=install.role,
         engine=install.engine,
         model_install_id=install.id,

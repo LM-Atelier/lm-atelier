@@ -7436,6 +7436,16 @@ async def create_profile(
     request: Request,
     session: SessionDep,
 ) -> ModelProfile:
+    return await _create_profile(payload, request, session, use_case_derived=False)
+
+
+async def _create_profile(
+    payload: ModelProfileCreate,
+    request: Request,
+    session: SessionDep,
+    *,
+    use_case_derived: bool,
+) -> ModelProfile:
     _validated_profile_install(
         session,
         model_install_id=payload.model_install_id,
@@ -7465,6 +7475,7 @@ async def create_profile(
     profile = ModelProfile(
         name=payload.name,
         use_case=payload.use_case,
+        use_case_derived=bool(payload.use_case and use_case_derived),
         role=payload.role,
         engine=payload.engine,
         model_install_id=payload.model_install_id,
@@ -7531,6 +7542,8 @@ async def update_profile(
             )
         except ValueError as exc:
             raise api_error(422, "profile-request-settings-invalid", str(exc)) from exc
+    if "use_case" in values:
+        profile.use_case_derived = False
     for key, value in values.items():
         setattr(profile, key, value)
     reconcile_legacy_workflow_compatibility(session)
@@ -7575,7 +7588,7 @@ async def clone_profile(
     source = session.get(ModelProfile, profile_id)
     if not source:
         raise api_error(404, "profile-not-found", "profile not found")
-    return await create_profile(
+    return await _create_profile(
         ModelProfileCreate(
             name=payload.name or f"{source.name} copy",
             use_case=source.use_case,
@@ -7587,6 +7600,7 @@ async def clone_profile(
         ),
         request,
         session,
+        use_case_derived=source.use_case_derived,
     )
 
 
@@ -7617,6 +7631,7 @@ async def export_profile(profile_id: str, session: SessionDep) -> ModelProfileBu
     return ModelProfileBundle(
         name=profile.name,
         use_case=profile.use_case,
+        use_case_derived=profile.use_case_derived,
         role=cast(Literal["chat", "image", "video"], profile.role),
         engine=profile.engine,
         model_install_id=profile.model_install_id,
@@ -7631,7 +7646,7 @@ async def import_profile(
     request: Request,
     session: SessionDep,
 ) -> ModelProfile:
-    return await create_profile(
+    return await _create_profile(
         ModelProfileCreate(
             name=payload.name,
             use_case=payload.use_case,
@@ -7643,6 +7658,7 @@ async def import_profile(
         ),
         request,
         session,
+        use_case_derived=payload.use_case_derived,
     )
 
 
@@ -8230,11 +8246,15 @@ def _workflow_family_out(
             WorkflowProfileCompatibility.workflow_family_id == family.id
         )
     )
+    profile = session.get(ModelProfile, compatibility.model_profile_id) if compatibility else None
     return WorkflowFamilyOut(
         id=family.id,
         name=family.name,
         description=family.description,
         use_case=family.use_case,
+        use_case_derived=bool(
+            profile and profile.use_case_derived and family.use_case == profile.use_case
+        ),
         tags=[item for item in family.tags_json if isinstance(item, str)],
         enabled=family.enabled,
         archived=family.archived,
@@ -8405,6 +8425,7 @@ async def update_workflow_family(
         family.use_case = values["use_case"].strip()
         if compatibility_profile is not None:
             compatibility_profile.use_case = family.use_case
+            compatibility_profile.use_case_derived = False
     if values.get("tags") is not None:
         family.tags_json = _normalized_workflow_family_tags(values["tags"])
     if archiving:

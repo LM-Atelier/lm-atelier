@@ -1327,6 +1327,7 @@ class ModelProfileBundle(ApiModel):
     version: Literal[1] = 1
     name: str = Field(min_length=1, max_length=200)
     use_case: str = Field(default="", max_length=1_000)
+    use_case_derived: bool = False
     role: Literal["chat", "image", "video"]
     engine: str = Field(min_length=1, max_length=32)
     model_install_id: str | None = None
@@ -1339,6 +1340,7 @@ class ModelProfileOut(ApiModel):
     model_install_id: str | None
     name: str
     use_case: str
+    use_case_derived: bool = False
     role: str
     engine: str
     load_settings_json: dict[str, Any]
@@ -1569,6 +1571,7 @@ class WorkflowFamilyOut(ApiModel):
     name: str
     description: str
     use_case: str
+    use_case_derived: bool = False
     tags: list[str] = Field(default_factory=list)
     enabled: bool
     archived: bool

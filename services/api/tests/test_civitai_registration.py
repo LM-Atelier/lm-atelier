@@ -376,7 +376,13 @@ async def test_a_civitai_preflight_composes_into_the_download_manager(
     assert source.remote_id == "201"
     assert source.source_file_id == "301"
     assert revision == "201"
-    assert extra == {"source_version_id": "201"}
+    assert extra == {
+        "source_version_id": "201",
+        "tags": ["portrait"],
+        "category": ["LORA"],
+        "trained_words": ["portrait-style"],
+        "base_model": ["SDXL 1.0"],
+    }
 
 
 async def test_civitai_preflight_keeps_the_provider_primary_duplicate(

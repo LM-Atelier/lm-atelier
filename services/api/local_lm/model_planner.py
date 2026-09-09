@@ -17,6 +17,7 @@ from .domain import new_id
 from .install_plan_types import InstallPlanFailureCode
 from .model_manifests import ModelManifestInspection, comfy_folder_for_kind
 from .models import InstallPlan, ModelComponentManifest
+from .profile_use_cases import merge_provider_use_case_metadata
 
 INSTALL_RESOLVER_VERSION = "install-resolver-v9"
 ACTIVATION_PROBE_VERSION = "activation-probe-v2"
@@ -553,6 +554,11 @@ def resolve_install_plan(
         "quantization": "modelopt" if engine == "vllm" else None,
         "model_layout": "transformers_snapshot" if engine == "vllm" else None,
     }
+    use_case_metadata = merge_provider_use_case_metadata(
+        item.get("metadata") for item in selected_files
+    )
+    if use_case_metadata:
+        runtime_contract["use_case_metadata"] = use_case_metadata
     if workflow_reference_kind:
         runtime_contract["workflow_reference_kind"] = workflow_reference_kind
         if len(artifacts) == 1:

@@ -1366,6 +1366,7 @@ class ModelProfile(TimestampMixin, Base):
     )
     name: Mapped[str] = mapped_column(String(200), index=True)
     use_case: Mapped[str] = mapped_column(Text, default="")
+    use_case_derived: Mapped[bool] = mapped_column(Boolean, default=False)
     role: Mapped[str] = mapped_column(String(16), default=ModelRole.CHAT.value)
     engine: Mapped[str] = mapped_column(String(32))
     load_settings_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)

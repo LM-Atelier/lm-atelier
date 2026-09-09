@@ -1221,6 +1221,13 @@ async def test_civitai_sources_come_only_from_the_immutable_plan(
             "source_file_id": "303",
         }
     )
+    plan.runtime_contract_json = {
+        "use_case_metadata": {
+            "tags": ["landscapes"],
+            "base_model": ["Neutral base"],
+            "description": "not part of the use-case metadata",
+        }
+    }
     manager = DownloadManager(settings, EventBroker())
     manager._api = SimpleNamespace(
         model_info=lambda *_args, **_kwargs: pytest.fail(
@@ -1234,7 +1241,11 @@ async def test_civitai_sources_come_only_from_the_immutable_plan(
     )
 
     assert revision == "202"
-    assert metadata == {"source_version_id": "202"}
+    assert metadata == {
+        "source_version_id": "202",
+        "tags": ["landscapes"],
+        "base_model": ["Neutral base"],
+    }
     assert [(item.rfilename, item.size, item.lfs) for item in siblings] == [
         ("model.safetensors", 17, {"sha256": digest})
     ]
