@@ -35,6 +35,43 @@ beforeEach(() => {
 afterEach(() => { cleanup(); clients.splice(0).forEach((client) => client.clear()); });
 
 describe("editing workflow family metadata", () => {
+  it("preserves a newer use case when saving only the family name", async () => {
+    let server = family("a");
+    vi.mocked(api.updateWorkflowFamily).mockImplementation(async (_id, values) => {
+      server = { ...server, ...values };
+      return server;
+    });
+    const { client } = renderFamily(server);
+    fireEvent.click(screen.getByRole("button", { name: "Edit family details" }));
+    server = { ...server, use_case: "A newer description from another window" };
+    fireEvent.change(screen.getByRole("textbox", { name: "Family name" }), { target: { value: "Renamed family" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save family details" }));
+    await screen.findByText("Family details saved.");
+    expect(server.use_case).toBe("A newer description from another window");
+    expect(api.updateWorkflowFamily).toHaveBeenCalledWith("family-a", { name: "Renamed family" });
+    expect(client.getQueryData<WorkflowFamily>(["workflow-family", "family-a"])?.use_case).toBe(server.use_case);
+  });
+
+  it("persists an explicit clear of the family use case", async () => {
+    renderFamily(family("a"));
+    fireEvent.click(screen.getByRole("button", { name: "Edit family details" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Use case" }), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save family details" }));
+    await waitFor(() => expect(api.updateWorkflowFamily).toHaveBeenCalledWith("family-a", { name: "Family a", use_case: "" }));
+  });
+
+  it("does not carry a cancelled use-case edit into a later name-only save", async () => {
+    renderFamily(family("a"));
+    fireEvent.click(screen.getByRole("button", { name: "Edit family details" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Use case" }), { target: { value: "Cancelled draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel family changes" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit family details" }));
+    expect(screen.getByRole("textbox", { name: "Use case" })).toHaveValue("Neutral scenes");
+    fireEvent.change(screen.getByRole("textbox", { name: "Family name" }), { target: { value: "Renamed family" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save family details" }));
+    await waitFor(() => expect(api.updateWorkflowFamily).toHaveBeenCalledWith("family-a", { name: "Renamed family" }));
+  });
+
   it("saves trimmed family details and refreshes the family and linked-profile views", async () => {
     const { client } = renderFamily(family("a"));
     fireEvent.click(screen.getByRole("button", { name: "Edit family details" }));
@@ -70,7 +107,7 @@ describe("editing workflow family metadata", () => {
     changeFamily({ ...family("a"), name: "Refetched name" });
     expect(screen.getByRole("textbox", { name: "Family name" })).toHaveValue("Retained edit");
     fireEvent.click(screen.getByRole("button", { name: "Save family details" }));
-    await waitFor(() => expect(api.updateWorkflowFamily).toHaveBeenNthCalledWith(2, "family-a", { name: "Retained edit", use_case: "Neutral scenes" }));
+    await waitFor(() => expect(api.updateWorkflowFamily).toHaveBeenNthCalledWith(2, "family-a", { name: "Retained edit" }));
     await waitFor(() => expect(screen.queryByRole("textbox", { name: "Family name" })).not.toBeInTheDocument());
   });
 
@@ -81,7 +118,7 @@ describe("editing workflow family metadata", () => {
     fireEvent.click(screen.getByRole("button", { name: "Edit family details" }));
     fireEvent.change(screen.getByRole("textbox", { name: "Family name" }), { target: { value: "First family edit" } });
     fireEvent.click(screen.getByRole("button", { name: "Save family details" }));
-    await waitFor(() => expect(api.updateWorkflowFamily).toHaveBeenCalledWith("family-a", { name: "First family edit", use_case: "Neutral scenes" }));
+    await waitFor(() => expect(api.updateWorkflowFamily).toHaveBeenCalledWith("family-a", { name: "First family edit" }));
     changeFamily(family("b"));
     fireEvent.click(screen.getByRole("button", { name: "Edit family details" }));
     fireEvent.change(screen.getByRole("textbox", { name: "Family name" }), { target: { value: "Second family draft" } });
