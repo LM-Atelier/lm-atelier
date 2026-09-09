@@ -173,7 +173,7 @@ def local_identifiers_in(payload: Mapping[str, Any]) -> list[str]:
 
 # --- Resolving an imported record against this machine ------------------------
 #
-# Decided with Codex (R40/R36). An imported artifact resolves what this machine
+# An imported artifact resolves what this machine
 # already has and *offers* the rest: installed content-addressed components may
 # be selected automatically, anything missing stays behind the existing
 # approval-gated install path. A file must not be able to make this machine fetch
