@@ -85,15 +85,22 @@ function ProfileEditor({
   const client = useQueryClient();
   const [name, setName] = useState(profile.name);
   const [useCase, setUseCase] = useState(profile.use_case);
+  const [useCaseEdited, setUseCaseEdited] = useState(false);
   const [isDefault, setIsDefault] = useState(profile.is_default);
   const [loadSettings, setLoadSettings] = useState(profile.load_settings_json);
   const [requestSettings, setRequestSettings] = useState(profile.request_settings_json);
   const [visibility, setVisibility] = useState<Visibility>("basic");
-  const refresh = () => void client.invalidateQueries({ queryKey: ["profiles"] });
+  const refresh = () => {
+    void client.invalidateQueries({ queryKey: ["profiles"] });
+    void client.invalidateQueries({ queryKey: ["workflow-families"] });
+    void client.invalidateQueries({ queryKey: ["workflow-family"] });
+    void client.invalidateQueries({ queryKey: ["workflows"] });
+    void client.invalidateQueries({ queryKey: ["studio-capabilities"] });
+  };
   const save = useMutation({
     mutationFn: () => api.updateProfile(profile.id, {
       name,
-      use_case: useCase,
+      ...(useCaseEdited ? { use_case: useCase } : {}),
       is_default: isDefault,
       load_settings: loadSettings,
       request_settings: requestSettings,
@@ -135,7 +142,7 @@ function ProfileEditor({
       className="settings-editor"
     >
       <label>Profile name<input value={name} onChange={(event) => setName(event.target.value)} /></label>
-      <label>Best used for<textarea rows={3} value={useCase} onChange={(event) => setUseCase(event.target.value)} placeholder="Programming, code review, technical explanations" /></label>
+      <label>Best used for<textarea rows={3} value={useCase} onChange={(event) => { setUseCase(event.target.value); setUseCaseEdited(true); }} placeholder="Programming, code review, technical explanations" /></label>
       <label className="toggle-row"><span><strong>Default {profile.role} model</strong><small>Used by chats set to Default. Auto uses it when no use case matches.</small></span><input type="checkbox" checked={isDefault} onChange={(event) => setIsDefault(event.target.checked)} /></label>
       <div className="segmented compact" role="group" aria-label="Profile setting detail">
         {(["basic", "advanced", "expert"] as Visibility[]).map((level) => <button type="button" key={level} className={visibility === level ? "active" : ""} aria-pressed={visibility === level} onClick={() => setVisibility(level)}>{level}</button>)}
