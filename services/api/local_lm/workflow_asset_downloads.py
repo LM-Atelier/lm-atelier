@@ -14,6 +14,7 @@ from .workflow_asset_bindings import (
     BoundWorkflowAsset,
     WorkflowAssetBindingPlan,
 )
+from .workflow_dependency_error_types import WorkflowAssetDownloadErrorCode
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _CIVITAI_ID = re.compile(r"^[1-9][0-9]{0,19}$")
@@ -22,7 +23,7 @@ _PROVIDERS = frozenset({"huggingface", "civitai"})
 
 
 class WorkflowAssetDownloadError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: WorkflowAssetDownloadErrorCode, message: str) -> None:
         super().__init__(message)
         self.code = code
 
