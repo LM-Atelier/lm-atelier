@@ -72,7 +72,7 @@ export function ModelCard({
         )}
         <small>{model.total_size_bytes != null ? `${formatBytes(model.total_size_bytes)} · ` : ""}{formatDate(model.last_modified)}{model.compatibility_reasons.length ? ` · ${model.compatibility_reasons.join(" · ")}` : ""}</small>
       </div>
-      <div className="model-stats">{model.trending_score != null && <span title="Hugging Face trending score"><Sparkles size={14} />{model.trending_score.toLocaleString()}</span>}<span><Download size={14} />{model.downloads?.toLocaleString() ?? "—"}</span><button className="primary compact-button" title={model.compatibility === "unsupported" || runtimeUnavailable ? model.compatibility_reasons.join(" ") : undefined} onClick={choosing ? onChooseVersion : onDownload} disabled={(!choosing && status !== "idle") || model.compatibility === "unsupported" || runtimeUnavailable}>{actionLabel}</button></div>
+      <div className="model-stats">{model.trending_score != null && <span title="Hugging Face trending score"><Sparkles size={14} />{model.trending_score.toLocaleString()}</span>}<span><Download size={14} />{model.downloads?.toLocaleString() ?? "—"}</span><button className="primary compact-button" title={model.compatibility === "unsupported" || runtimeUnavailable ? model.compatibility_reasons.join(" ") : undefined} onClick={choosing ? onChooseVersion : onDownload} disabled={(!choosing && (status !== "idle" || model.compatibility === "unsupported")) || runtimeUnavailable}>{actionLabel}</button></div>
     </article>
   );
 }

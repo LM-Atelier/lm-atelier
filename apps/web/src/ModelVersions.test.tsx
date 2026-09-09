@@ -83,10 +83,29 @@ describe("grouped model versions", () => {
     expect(screen.getByRole("button", { name: "Installed" })).toBeDisabled();
   });
 
-  it("keeps unsupported grouped models disabled", () => {
-    render(<ModelCard model={{ ...model, compatibility: "unsupported" }} role={imageRole}
-      status="installed" onDownload={vi.fn()} onChooseVersion={vi.fn()} />);
-    expect(screen.getByRole("button")).toBeDisabled();
+  it.each(["idle", "installed"] as const)(
+    "opens sibling choices when the representative version is unsupported and %s",
+    (status) => {
+      const choose = vi.fn();
+      const download = vi.fn();
+      render(<ModelCard model={{ ...model, compatibility: "unsupported" }} role={imageRole}
+        status={status} onDownload={download} onChooseVersion={choose} />);
+      const action = screen.getByRole("button", { name: "Manage 2 versions" });
+      expect(action).toBeEnabled();
+      fireEvent.click(action);
+      expect(choose).toHaveBeenCalledTimes(1);
+      expect(download).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([1, 2])("does not install an unsupported version directly with %i listed", (count) => {
+    const download = vi.fn();
+    render(<ModelCard model={{ ...model, version_count: count, compatibility: "unsupported" }}
+      role={imageRole} status="idle" onDownload={download} />);
+    const action = screen.getByRole("button", { name: "No workflow" });
+    expect(action).toBeDisabled();
+    fireEvent.click(action);
+    expect(download).not.toHaveBeenCalled();
   });
 });
 
