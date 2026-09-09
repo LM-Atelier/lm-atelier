@@ -73,3 +73,23 @@ WorkflowAssetAliasErrorCode = (
     | WorkflowAssetBindingErrorCode
     | WorkflowAssetDownloadErrorCode
 )
+
+
+SubgraphExpansionErrorCode = Literal[
+    "ambiguous_subgraph_input",
+    "ambiguous_subgraph_output",
+    "doubled_input",
+    "duplicate_node_id",
+    "inconsistent_subgraph_boundary",
+    "invalid_link",
+    "invalid_node",
+    "invalid_node_mode",
+    "invalid_structure",
+    "invalid_subgraph",
+    "mistyped_subgraph_boundary",
+    "recursive_subgraph",
+    "subgraph_too_deep",
+    "unconnected_subgraph_input",
+    "unconnected_subgraph_output",
+    "unsupported_node_mode",
+]

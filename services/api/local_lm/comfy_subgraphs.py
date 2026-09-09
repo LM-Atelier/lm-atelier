@@ -22,6 +22,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from .workflow_dependency_error_types import SubgraphExpansionErrorCode
+
 MAX_SUBGRAPH_DEPTH = 8
 
 # The frontend's boundary pseudo-nodes inside a subgraph: links leaving the
@@ -37,7 +39,7 @@ BYPASS_MODE = 4
 
 
 class SubgraphExpansionError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: SubgraphExpansionErrorCode, message: str) -> None:
         super().__init__(message)
         self.code = code
 
