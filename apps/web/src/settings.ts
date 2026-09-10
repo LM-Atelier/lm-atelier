@@ -54,10 +54,21 @@ export function resolveWorkflowSettings(
     : new Set<string>();
 
   const baseKeys = new Set(fields.map((field) => field.key));
-  const resolved = fields.filter((field) => !hiddenVideoKeys.has(field.key)).map((field) => {
-    const property = properties[field.key];
-    return isRecord(property) ? workflowField(field.key, property, field) ?? field : field;
-  });
+  const resolved = fields
+    .filter((field) => !hiddenVideoKeys.has(field.key))
+    // A workflow that marks one of these read-only is saying the caller cannot
+    // set it - its graph decides that value itself, from a node the settings
+    // panel has no business editing. The server drops such a field outright
+    // (settings_registry.py, the readOnly check in workflow_settings), so
+    // keeping it here rendered a control that changed nothing: a Width box
+    // showing 1024 for a workflow whose own ResolutionSelector picks the size.
+    // Only the base fields are dropped, because only they are dropped there -
+    // a workflow's OWN key stays, and a const on it still reads as fixed.
+    .filter((field) => !isReadOnly(properties[field.key]))
+    .map((field) => {
+      const property = properties[field.key];
+      return isRecord(property) ? workflowField(field.key, property, field) ?? field : field;
+    });
   if (videoLength) resolved.push(videoLength);
   for (const [key, property] of Object.entries(properties)) {
     if (
@@ -71,6 +82,11 @@ export function resolveWorkflowSettings(
     if (custom) resolved.push(custom);
   }
   return resolved;
+}
+
+/** Whether a workflow says this value is not the caller's to set. */
+function isReadOnly(property: unknown): boolean {
+  return isRecord(property) && property.readOnly === true;
 }
 
 function workflowVideoLengthField(
