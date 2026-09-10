@@ -3,9 +3,12 @@ import type { Workflow } from "./types";
 import "./WorkflowRevisionHistory.css";
 
 function CreationDate({ value }: { value: string }) {
-  const date = new Date(value);
+  // Stored workflow dates are UTC even when SQLite omits their timezone.
+  const timestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value)
+    ? `${value}Z` : value;
+  const date = new Date(timestamp);
   if (!value || !Number.isFinite(date.getTime())) return <small>Creation date unavailable</small>;
-  return <time dateTime={value}>{date.toLocaleString(undefined, {
+  return <time dateTime={timestamp}>{date.toLocaleString(undefined, {
     year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
   })}</time>;
 }
