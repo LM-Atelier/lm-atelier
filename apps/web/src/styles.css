@@ -760,6 +760,9 @@ h1, h2, h3 { margin: 0; }
 .workflow-detail summary { color: var(--ink-secondary); font-size: 12px; font-weight: 700; cursor: pointer; }
 .detail-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: 17px; }
 .detail-title h2 { font-size: 20px; }
+.workflow-detail .detail-title { flex-wrap: wrap; gap: 12px; }
+.workflow-detail .detail-title > div:first-child { min-width: 0; overflow-wrap: anywhere; }
+.workflow-detail .detail-title .row-actions { max-width: 100%; flex-wrap: wrap; margin-left: auto; }
 .workflow-detail pre { max-height: 560px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-0); color: var(--ink-secondary); padding: 16px; font: 12px/1.6 "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace; }
 .workflow-revision-bar { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; margin: 18px 0; }
 .workflow-revision-bar label { display: grid; gap: 4px; color: var(--muted); font-size: 11px; }

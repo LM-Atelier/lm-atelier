@@ -138,6 +138,7 @@ describe("a verdict belongs to the workflow it was asked about", () => {
       valid: false,
       errors: ["Alpha is missing a node"],
       warnings: [],
+      revision_id: "wf-a",
     } as never);
 
     renderView();
