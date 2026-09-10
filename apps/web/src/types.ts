@@ -379,6 +379,12 @@ export interface Job {
   completed_at: string | null;
 }
 
+export interface JobActivity {
+  active: Job[];
+  active_count: number;
+  recent_issues: Job[];
+}
+
 export interface ProgressV2 {
   version: 2;
   stage: string;

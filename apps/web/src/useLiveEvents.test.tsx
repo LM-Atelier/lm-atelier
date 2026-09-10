@@ -1,7 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { QueryClient } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AppEvent } from "./types";
+import type { AppEvent, Job, JobActivity } from "./types";
 
 const handlers: Array<(event: AppEvent) => void> = [];
 
@@ -151,5 +151,87 @@ describe("useLiveEvents attempt fence", () => {
     ]);
     expect(text.m1).toBe("ab");
     expect(text.m2).toBe("xy");
+  });
+});
+
+
+describe("useLiveEvents activity projection", () => {
+  const clients: QueryClient[] = [];
+  afterEach(() => {
+    clients.splice(0).forEach((client) => client.clear());
+    vi.useRealTimers();
+  });
+  async function openActivity(activity: JobActivity, limit = 100) {
+    handlers.length = 0;
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    clients.push(client);
+    const key = ["jobs", "activity", limit];
+    client.setQueryData(key, activity);
+    const setText = vi.fn();
+    const hook = renderHook(() => useLiveEvents(client, setText));
+    await act(async () => { await Promise.resolve(); });
+    return { client, key, setText, hook, invalidate: vi.spyOn(client, "invalidateQueries") };
+  }
+  function activityJob(attempt = 1): Job {
+    return progress("job-1", attempt).payload.job as Job;
+  }
+  it("updates visible progress in every activity window without changing the total", async () => {
+    const job = activityJob();
+    const current = { active: [job], active_count: 501, recent_issues: [] };
+    const { client, key, invalidate } = await openActivity(current);
+    const expanded = ["jobs", "activity", 200];
+    client.setQueryData(expanded, current);
+    const event = progress(job.id, 1);
+    event.payload.job = { ...job, phase: "Downloading model", progress: 0.5 };
+    act(() => handlers[0]!(event));
+    for (const queryKey of [key, expanded]) {
+      expect(client.getQueryData<JobActivity>(queryKey)).toEqual({
+        ...current, active: [event.payload.job],
+      });
+    }
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+  it("coalesces membership changes into an authoritative count refresh", async () => {
+    vi.useFakeTimers();
+    const job = activityJob();
+    const current = { active: [job], active_count: 501, recent_issues: [] };
+    const { client, key, invalidate } = await openActivity(current);
+    const event = progress(job.id, 1);
+    event.payload.job = { ...job, status: "complete", progress: 1 };
+    act(() => { handlers[0]!(event); handlers[0]!(event); });
+    expect(client.getQueryData(key)).toEqual(current);
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(invalidate).toHaveBeenCalledExactlyOnceWith({ queryKey: ["jobs", "activity"] });
+  });
+  it("refreshes when a new active job arrives in a complete visible list", async () => {
+    vi.useFakeTimers();
+    const { invalidate } = await openActivity({ active: [], active_count: 0, recent_issues: [] });
+    act(() => handlers[0]!(progress("new-job", 1)));
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(invalidate).toHaveBeenCalledExactlyOnceWith({ queryKey: ["jobs", "activity"] });
+  });
+  it("keeps hidden active progress and verification jobs from causing refresh fanout", async () => {
+    vi.useFakeTimers();
+    const { invalidate } = await openActivity({ active: [activityJob()], active_count: 501, recent_issues: [] });
+    const verification = progress("verification", 1);
+    verification.payload.job = { ...activityJob(), id: "verification", kind: "edit_verify", status: "complete" };
+    act(() => { handlers[0]!(progress("hidden-active", 1)); handlers[0]!(verification); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+  it("seeds the attempt fence from activity rows after reconnecting", async () => {
+    const { setText } = await openActivity({ active: [activityJob(2)], active_count: 1, recent_issues: [] });
+    act(() => handlers[0]!(delta("message", "Earlier attempt", 1)));
+    expect(setText).not.toHaveBeenCalled();
+  });
+  it("does not replace activity with an older attempt or older stored snapshot", async () => {
+    const job = { ...activityJob(2), updated_at: "2026-09-02T00:00:02Z" };
+    const current = { active: [job], active_count: 1, recent_issues: [] };
+    const { client, key } = await openActivity(current);
+    act(() => {
+      handlers[0]!(progress(job.id, 1));
+      handlers[0]!(progress(job.id, 2));
+    });
+    expect(client.getQueryData(key)).toEqual(current);
   });
 });

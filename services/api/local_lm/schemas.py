@@ -1103,6 +1103,12 @@ class JobOut(ApiModel):
     updated_at: datetime
 
 
+class JobActivityOut(ApiModel):
+    active: list[JobOut]
+    active_count: int = Field(ge=0)
+    recent_issues: list[JobOut]
+
+
 class WorkStepImport(ApiModel):
     """Portable step input; unknown historical statuses normalize during import."""
 
