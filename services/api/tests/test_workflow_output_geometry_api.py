@@ -29,24 +29,25 @@ def _graph() -> dict[str, object]:
     }
 
 
-def _schema() -> dict[str, object]:
+def _dimension(minimum: int, default: int, maximum: int) -> dict[str, object]:
+    return {
+        "type": "integer",
+        "default": default,
+        "minimum": minimum,
+        "maximum": maximum,
+        "multipleOf": 64,
+    }
+
+
+def _schema(
+    width: dict[str, object] | None = None,
+    height: dict[str, object] | None = None,
+) -> dict[str, object]:
     return {
         "type": "object",
         "properties": {
-            "width": {
-                "type": "integer",
-                "default": 1024,
-                "minimum": 64,
-                "maximum": 2048,
-                "multipleOf": 64,
-            },
-            "height": {
-                "type": "integer",
-                "default": 768,
-                "minimum": 64,
-                "maximum": 2048,
-                "multipleOf": 64,
-            },
+            "width": width if width is not None else _dimension(64, 1024, 2048),
+            "height": height if height is not None else _dimension(64, 768, 2048),
         },
     }
 
@@ -105,15 +106,19 @@ async def test_revision_geometry_capability_is_read_only_and_revision_bound(
     assert len(body["artifact_sha256"]) == 64
     assert body["operation"] == "text_to_image"
     assert body["engine"] == "comfyui"
-    assert body["size_modes"] == ["exact"]
+    assert body["size_modes"] == ["exact", "preset"]
+    assert body["preset_ids"] == ["16:9", "1:1", "2:3", "3:2", "3:4", "4:3", "9:16"]
     assert body["width"]["node_id"] == "latent"
     assert body["width"]["default"] == 1024
     assert body["height"]["default"] == 768
     assert body["save_node_ids"] == ["save"]
     assert body["graph_binding_verified"] is True
     assert body["request_authorized"] is False
-    assert body["capability"]["allowed_preset_ids"] == []
-    assert body["capability"]["combinations"][0]["size_mode"] == "exact"
+    assert body["capability"]["allowed_preset_ids"] == body["preset_ids"]
+    assert [item["size_mode"] for item in body["capability"]["combinations"]] == [
+        "exact",
+        "preset",
+    ]
 
     after = (await client.get("/api/workflows")).json()
     assert after == before
@@ -155,6 +160,7 @@ async def test_revision_geometry_capability_refuses_without_leaking_graph_detail
         "operation": None,
         "engine": None,
         "size_modes": [],
+        "preset_ids": [],
         "width": None,
         "height": None,
         "latent_node_id": None,
@@ -236,6 +242,7 @@ async def test_revision_geometry_request_resolves_read_only_and_revision_bound(
         "engine": "comfyui",
         "mode": "image",
         "size_mode": "exact",
+        "preset_id": None,
         "width": 1536,
         "height": 512,
         "graph_binding_verified": True,
@@ -383,3 +390,75 @@ async def test_revision_geometry_request_returns_404_for_unknown_revision(
 
     assert response.status_code == 404
     assert response.json()["code"] == "workflow-revision-not-found"
+
+
+async def test_revision_geometry_resolves_a_ratio_preset_to_exact_dimensions(
+    client: AsyncClient,
+) -> None:
+    workflow_id, revision_id = await _trusted_revision(client, "Preset geometry")
+    capability = await client.get(f"/api/workflow-revisions/{revision_id}/output-geometry")
+    assert capability.status_code == 200, capability.text
+    assert "16:9" in capability.json()["preset_ids"]
+    before = (await client.get("/api/workflows")).json()
+    generation_rows_before = _generation_row_counts()
+
+    response = await client.post(
+        f"/api/workflow-revisions/{revision_id}/output-geometry/resolve",
+        json={"mode": "image", "size_mode": "preset", "preset_id": "16:9"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "version": 1,
+        "workflow_id": workflow_id,
+        "revision_id": revision_id,
+        "artifact_sha256": capability.json()["artifact_sha256"],
+        "operation": "text_to_image",
+        "engine": "comfyui",
+        "mode": "image",
+        "size_mode": "preset",
+        "preset_id": "16:9",
+        "width": 1024,
+        "height": 576,
+        "graph_binding_verified": True,
+        "request_authorized": False,
+    }
+
+    after = (await client.get("/api/workflows")).json()
+    assert after == before
+    assert _generation_row_counts() == generation_rows_before
+
+
+async def test_a_ratio_the_revision_cannot_express_is_neither_offered_nor_resolved(
+    client: AsyncClient,
+) -> None:
+    square = _dimension(1024, 1024, 1024)
+    _, revision_id = await _trusted_revision(
+        client,
+        "Locked square geometry",
+        input_schema=_schema(width=square, height=dict(square)),
+    )
+
+    capability = await client.get(f"/api/workflow-revisions/{revision_id}/output-geometry")
+
+    assert capability.status_code == 200, capability.text
+    assert capability.json()["preset_ids"] == ["1:1"]
+
+    refused = await client.post(
+        f"/api/workflow-revisions/{revision_id}/output-geometry/resolve",
+        json={"mode": "image", "size_mode": "preset", "preset_id": "16:9"},
+    )
+
+    assert refused.status_code == 422
+    assert refused.json() == {
+        "code": "workflow-geometry-request-invalid",
+        "detail": ("Output geometry request is invalid or unsupported for this workflow revision"),
+    }
+
+    offered = await client.post(
+        f"/api/workflow-revisions/{revision_id}/output-geometry/resolve",
+        json={"mode": "image", "size_mode": "preset", "preset_id": "1:1"},
+    )
+
+    assert offered.status_code == 200, offered.text
+    assert (offered.json()["width"], offered.json()["height"]) == (1024, 1024)

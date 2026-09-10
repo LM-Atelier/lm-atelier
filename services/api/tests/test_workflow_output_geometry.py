@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import FrozenInstanceError
+from fractions import Fraction
 from typing import Any, cast
 
 import pytest
@@ -134,7 +135,8 @@ def test_proof_binds_exact_revision_graph_and_schema_limits() -> None:
 
     payload = workflow_output_geometry_payload(result)
     assert payload["available"] is True
-    assert payload["size_modes"] == ["exact"]
+    assert payload["size_modes"] == ["exact", "preset"]
+    assert payload["preset_ids"] == ["16:9", "1:1", "2:3", "3:2", "3:4", "4:3", "9:16"]
     assert payload["width"] == {
         "key": "width",
         "node_id": "latent",
@@ -498,6 +500,7 @@ def test_resolution_binds_the_exact_revision_and_grants_no_authority() -> None:
         "engine": "comfyui",
         "mode": "image",
         "size_mode": "exact",
+        "preset_id": None,
         "width": 1024,
         "height": 768,
         "graph_binding_verified": True,
@@ -609,3 +612,211 @@ def test_a_result_that_is_not_this_verifier_own_is_refused() -> None:
         resolve_workflow_output_geometry(cast(Any, {"available": True}), _request())
     with pytest.raises(WorkflowOutputGeometryError):
         workflow_output_geometry_resolution_payload(cast(Any, {"width": 1024}))
+
+
+PRESET_IDS = ("1:1", "3:4", "2:3", "9:16", "4:3", "3:2", "16:9")
+
+
+def _preset(preset_id: str) -> dict[str, object]:
+    return {"mode": "image", "size_mode": "preset", "preset_id": preset_id}
+
+
+def _limits(width: dict[str, int], height: dict[str, int]) -> dict[str, object]:
+    arguments = _arguments()
+    schema = cast(dict[str, Any], arguments["input_schema"])
+    properties = cast(dict[str, Any], schema["properties"])
+    properties["width"].update(width)
+    properties["height"].update(height)
+    _rehash(arguments)
+    return arguments
+
+
+def _legal_pairs(preset_id: str, arguments: dict[str, object]) -> list[tuple[int, int]]:
+    """Every pair of this exact ratio the schema itself permits.
+
+    Enumerated straight from the schema rather than from the module's own
+    arithmetic, so a test of which pair was chosen cannot agree with the code
+    by sharing its reasoning.
+    """
+
+    schema = cast(dict[str, Any], arguments["input_schema"])
+    properties = cast(dict[str, Any], schema["properties"])
+    width = properties["width"]
+    height = properties["height"]
+    across, down = (int(part) for part in preset_id.split(":"))
+    pairs: list[tuple[int, int]] = []
+    for count in range(1, width["maximum"] // across + 1):
+        candidate = (across * count, down * count)
+        if (
+            width["minimum"] <= candidate[0] <= width["maximum"]
+            and height["minimum"] <= candidate[1] <= height["maximum"]
+            and candidate[0] % width["multipleOf"] == 0
+            and candidate[1] % height["multipleOf"] == 0
+        ):
+            pairs.append(candidate)
+    return pairs
+
+
+@pytest.mark.parametrize("preset_id", PRESET_IDS)
+def test_a_ratio_preset_resolves_to_the_ratio_its_id_names(preset_id: str) -> None:
+    result = _prove()
+
+    resolution = resolve_workflow_output_geometry(result, _preset(preset_id))
+
+    assert resolution is not None
+    geometry = resolution.geometry
+    across, down = (int(part) for part in preset_id.split(":"))
+    assert Fraction(geometry.width, geometry.height) == Fraction(across, down)
+    assert geometry.preset_id == preset_id
+    assert geometry.size_mode == "preset"
+    assert geometry.width % 64 == 0 and geometry.height % 64 == 0
+    assert 128 <= geometry.width <= 2048
+    assert 128 <= geometry.height <= 2048
+    assert resolution.graph_binding_verified is True
+    assert resolution.request_authorized is False
+    assert geometry.request_authorized is False
+
+
+@pytest.mark.parametrize("preset_id", PRESET_IDS)
+def test_a_preset_costs_what_the_workflow_already_defaults_to(preset_id: str) -> None:
+    arguments = _arguments()
+
+    resolution = resolve_workflow_output_geometry(_prove(arguments), _preset(preset_id))
+
+    assert resolution is not None
+    pairs = _legal_pairs(preset_id, arguments)
+    assert (resolution.geometry.width, resolution.geometry.height) in pairs
+    default_area = 1024 * 768
+    closest = min(
+        (width * height for width, height in pairs),
+        key=lambda area: (abs(area - default_area), 0 if area >= default_area else 1),
+    )
+    assert resolution.geometry.width * resolution.geometry.height == closest
+
+
+def test_the_advertised_presets_are_exactly_the_ones_that_resolve() -> None:
+    every_limit = [
+        _arguments(),
+        _limits(
+            {"default": 1024, "minimum": 1024, "maximum": 1024},
+            {"default": 1024, "minimum": 1024, "maximum": 1024},
+        ),
+        _limits(
+            {"default": 512, "minimum": 64, "maximum": 512},
+            {"default": 512, "minimum": 64, "maximum": 2048},
+        ),
+        _limits(
+            {"default": 1000, "minimum": 1000, "maximum": 1000, "multipleOf": 1},
+            {"default": 999, "minimum": 999, "maximum": 999, "multipleOf": 1},
+        ),
+    ]
+    for arguments in every_limit:
+        result = _prove(arguments)
+        payload = workflow_output_geometry_payload(result)
+        resolvable = sorted(
+            preset_id
+            for preset_id in PRESET_IDS
+            if resolve_workflow_output_geometry(result, _preset(preset_id)) is not None
+        )
+        assert payload["preset_ids"] == resolvable
+        assert bool(resolvable) == ("preset" in cast(list[str], payload["size_modes"]))
+
+
+def test_a_locked_workflow_offers_only_the_one_ratio_it_can_hold() -> None:
+    arguments = _limits(
+        {"default": 1024, "minimum": 1024, "maximum": 1024},
+        {"default": 1024, "minimum": 1024, "maximum": 1024},
+    )
+
+    result = _prove(arguments)
+
+    payload = workflow_output_geometry_payload(result)
+    assert payload["preset_ids"] == ["1:1"]
+    square = resolve_workflow_output_geometry(result, _preset("1:1"))
+    assert square is not None
+    assert (square.geometry.width, square.geometry.height) == (1024, 1024)
+
+
+def test_a_narrow_workflow_drops_the_ratios_it_cannot_reach() -> None:
+    arguments = _limits(
+        {"default": 512, "minimum": 64, "maximum": 512},
+        {"default": 512, "minimum": 64, "maximum": 2048},
+    )
+
+    result = _prove(arguments)
+
+    assert workflow_output_geometry_payload(result)["preset_ids"] == [
+        "1:1",
+        "2:3",
+        "3:2",
+        "3:4",
+        "4:3",
+    ]
+    for preset_id in ("9:16", "16:9"):
+        assert resolve_workflow_output_geometry(result, _preset(preset_id)) is None
+
+
+def test_a_workflow_whose_bounds_express_no_ratio_offers_no_preset_mode() -> None:
+    arguments = _limits(
+        {"default": 1000, "minimum": 1000, "maximum": 1000, "multipleOf": 1},
+        {"default": 999, "minimum": 999, "maximum": 999, "multipleOf": 1},
+    )
+
+    result = _prove(arguments)
+
+    payload = workflow_output_geometry_payload(result)
+    assert payload["available"] is True
+    assert payload["size_modes"] == ["exact"]
+    assert payload["preset_ids"] == []
+    for preset_id in PRESET_IDS:
+        assert resolve_workflow_output_geometry(result, _preset(preset_id)) is None
+
+
+def test_both_size_modes_report_the_same_workflow_bounds() -> None:
+    result = _prove()
+    payload = workflow_output_geometry_payload(result)
+    capability = cast(dict[str, Any], payload["capability"])
+    exact, preset = cast(list[dict[str, Any]], capability["combinations"])
+
+    shared = (
+        "min_width",
+        "max_width",
+        "min_height",
+        "max_height",
+        "width_multiple",
+        "height_multiple",
+        "max_pixels",
+        "default_width",
+        "default_height",
+    )
+    assert [exact[key] for key in shared] == [preset[key] for key in shared]
+    assert exact["buckets"] == [[1024, 768]]
+    assert [1024, 768] in preset["buckets"]
+
+
+@pytest.mark.parametrize(
+    "request_value",
+    [
+        {"mode": "image", "size_mode": "preset", "preset_id": "5:4"},
+        {"mode": "image", "size_mode": "preset", "preset_id": "16:9", "width": 1024},
+        {"mode": "image", "size_mode": "preset"},
+        {"mode": "video", "size_mode": "preset", "preset_id": "16:9"},
+        {"mode": "image", "size_mode": "preset", "preset_id": "16-9"},
+        {"mode": "image", "size_mode": "preset", "preset_id": None},
+    ],
+)
+def test_malformed_preset_requests_resolve_to_nothing(request_value: object) -> None:
+    assert resolve_workflow_output_geometry(_prove(), request_value) is None
+
+
+def test_the_resolution_payload_names_the_preset_it_resolved() -> None:
+    result = _prove()
+
+    resolution = resolve_workflow_output_geometry(result, _preset("16:9"))
+
+    assert resolution is not None
+    payload = workflow_output_geometry_resolution_payload(resolution)
+    assert payload["size_mode"] == "preset"
+    assert payload["preset_id"] == "16:9"
+    assert (payload["width"], payload["height"]) == (1024, 576)
+    assert payload["request_authorized"] is False

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from fractions import Fraction
-from typing import Literal, Never, cast
+from types import MappingProxyType
+from typing import Final, Literal, Never, cast
 
 OUTPUT_GEOMETRY_VERSION: Literal[1] = 1
 MAX_GEOMETRY_COMBINATIONS = 6
@@ -17,15 +19,21 @@ PresetId = Literal["1:1", "3:4", "2:3", "9:16", "4:3", "3:2", "16:9"]
 
 _MODES = frozenset({"image", "video"})
 _SIZE_MODES = frozenset({"exact", "preset", "workflow_native"})
-_PRESET_RATIOS: dict[str, tuple[int, int]] = {
-    "1:1": (1, 1),
-    "3:4": (3, 4),
-    "2:3": (2, 3),
-    "9:16": (9, 16),
-    "4:3": (4, 3),
-    "3:2": (3, 2),
-    "16:9": (16, 9),
-}
+# The reduced ratio each preset id names. Read-only and exported, because a
+# workflow verifier has to know which pixel pairs a ratio admits before it can
+# say whether the workflow supports that preset at all, and a second copy of
+# this table would be free to disagree with the one that resolves the request.
+PRESET_RATIOS: Final[Mapping[str, tuple[int, int]]] = MappingProxyType(
+    {
+        "1:1": (1, 1),
+        "3:4": (3, 4),
+        "2:3": (2, 3),
+        "9:16": (9, 16),
+        "4:3": (4, 3),
+        "3:2": (3, 2),
+        "16:9": (16, 9),
+    }
+)
 _COMBINATION_KEYS = {
     "mode",
     "size_mode",
@@ -127,7 +135,7 @@ def declare_output_geometry(value: object) -> OutputGeometryCapability:
     allowed_modes = _canonical_closed_list(root["allowed_modes"], _MODES)
     if not allowed_modes:
         _refuse()
-    allowed_presets = _canonical_closed_list(root["allowed_preset_ids"], _PRESET_RATIOS)
+    allowed_presets = _canonical_closed_list(root["allowed_preset_ids"], PRESET_RATIOS)
     raw = root["combinations"]
     if type(raw) is not list or not raw or len(raw) > MAX_GEOMETRY_COMBINATIONS:
         _refuse()
@@ -177,7 +185,7 @@ def resolve_output_geometry(
         return ResolvedOutputGeometry(mode, size_mode, width, height, None, None, None, None)
     if size_mode == "preset":
         preset = _mapping(request, {"mode", "size_mode", "preset_id"})
-        preset_id = cast(PresetId, _closed_string(preset["preset_id"], frozenset(_PRESET_RATIOS)))
+        preset_id = cast(PresetId, _closed_string(preset["preset_id"], frozenset(PRESET_RATIOS)))
         if preset_id not in capability.allowed_preset_ids:
             _refuse()
         bucket = _snap_preset(combination, preset_id)
@@ -302,7 +310,7 @@ def _validate_dimensions(combination: GeometryCombination, width: int, height: i
 
 
 def _snap_preset(combination: GeometryCombination, preset_id: PresetId) -> GeometryBucket:
-    numerator, denominator = _PRESET_RATIOS[preset_id]
+    numerator, denominator = PRESET_RATIOS[preset_id]
     target = Fraction(numerator, denominator)
     default_area = combination.default_width * combination.default_height
 
