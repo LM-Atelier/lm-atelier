@@ -1454,6 +1454,24 @@ export type WorkflowSelectionMode =
   | "revision"
   | "legacy";
 
+export interface WorkflowInstallOffer {
+  id: string;
+  workflow_revision_id: string;
+  workflow_artifact_sha256: string;
+  dependency_contract_sha256: string;
+  binding_plan_sha256: string;
+  offer_sha256: string;
+  assets: BoundWorkflowAsset[];
+  plan_count: number;
+  total_bytes: number;
+  status: "ready" | "queued" | "invalidated" | "completed" | "expired";
+  queued_at: string | null;
+  completed_at: string | null;
+  invalidated_at: string | null;
+  invalidation_code: string | null;
+  invalidation_reason: string | null;
+}
+
 export interface WorkflowFamilyVariant {
   id: string;
   variant_key: string;
@@ -1466,6 +1484,8 @@ export interface WorkflowFamilyVariant {
   trusted: boolean;
   readiness: WorkflowVariantReadiness;
   readiness_reason: string | null;
+  setup_resolution?: "reviewed_download_available" | "attention_required" | null;
+  install_offer?: WorkflowInstallOffer | null;
 }
 
 export interface WorkflowFamilyPreference {

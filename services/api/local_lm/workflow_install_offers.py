@@ -105,6 +105,59 @@ class ReviewedWorkflowInstallOffer:
     download_requests: tuple[DownloadRequest, ...]
 
 
+def current_reviewed_workflow_install_offer(
+    session: Session, *, workflow_id: str, revision_id: str
+) -> WorkflowInstallOffer | None:
+    """Project one reviewed snapshot for the current revision without side effects.
+
+    This checks recorded execution/dependency identities, not live inventory.
+    Installation must still use revalidate_workflow_install_offer before jobs.
+    Ambiguous ready records never become an arbitrary install action.
+    """
+
+    try:
+        offers = list(
+            session.scalars(
+                select(WorkflowInstallOffer)
+                .where(
+                    WorkflowInstallOffer.workflow_revision_id == revision_id,
+                    WorkflowInstallOffer.status == _READY,
+                )
+                .limit(2)
+            ).all()
+        )
+        if len(offers) != 1:
+            return None
+        revision = _eligible_revision(session, workflow_id, revision_id)
+        offer = offers[0]
+        if (
+            offer.workflow_artifact_sha256 != revision.artifact_sha256
+            or offer.dependency_contract_sha256 != revision.dependency_contract_sha256
+            or any(
+                value is not None
+                for value in (
+                    offer.queued_at,
+                    offer.completed_at,
+                    offer.invalidated_at,
+                    offer.invalidation_code,
+                    offer.invalidation_reason,
+                )
+            )
+            or not isinstance(offer.assets_json, list)
+            or not offer.assets_json
+            or offer.offer_sha256
+            != _offer_sha256(
+                revision,
+                binding_plan_sha256=offer.binding_plan_sha256,
+                assets=offer.assets_json,
+            )
+        ):
+            return None
+        return offer
+    except (TypeError, ValueError):
+        return None
+
+
 def create_workflow_install_offer(
     session: Session,
     *,

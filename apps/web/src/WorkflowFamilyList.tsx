@@ -1,6 +1,7 @@
 import { useState } from "react";
 import "./WorkflowFamilyList.css";
-import type { Workflow, WorkflowFamily, WorkflowVariantReadiness } from "./types";
+import { availableWorkflowInstallOffer, workflowVariantReadinessLabel } from "./workflowVariantSetup";
+import type { Workflow, WorkflowFamily, WorkflowVariantReadiness, WorkflowInstallOffer } from "./types";
 
 const readinessLabels: Record<WorkflowVariantReadiness, string> = {
   ready: "Ready",
@@ -30,10 +31,11 @@ interface Props {
   includeArchived: boolean;
   onIncludeArchivedChange: (include: boolean) => void;
   loading: boolean;
+  onReviewInstall?: (offer: WorkflowInstallOffer, workflowName: string) => void;
 }
 
 export function WorkflowFamilyList({
-  families, workflows, selectedId, onSelect, includeArchived, onIncludeArchivedChange, loading,
+  families, workflows, selectedId, onSelect, includeArchived, onIncludeArchivedChange, loading, onReviewInstall,
 }: Props) {
   const [search, setSearch] = useState("");
   const [operation, setOperation] = useState("");
@@ -127,17 +129,23 @@ export function WorkflowFamilyList({
                 {variants.map((variant) => {
                   const workflow = definitions.get(variant.id);
                   const selectable = workflow && (workflow.family_id === undefined || workflow.family_id === family.id);
+                  const offer = availableWorkflowInstallOffer(family, variant);
                   return (
-                    <button key={variant.id} disabled={!selectable}
+                    <div key={variant.id} className="workflow-family-variant">
+                    <button disabled={!selectable}
                       className={selectedId === variant.id && selectable ? "selected" : ""}
                       aria-pressed={selectedId === variant.id && Boolean(selectable)}
                       onClick={() => { if (selectable) onSelect(workflow); }}>
                       <span><strong>{variant.name}</strong>
                         <small>{operationLabels[variant.operation] ?? variant.operation}
                           {variant.current_revision_version !== null && ` · v${variant.current_revision_version}`}</small>
-                        <span className="badge">{readinessLabels[variant.readiness]}</span>
+                        <span className="badge">{workflowVariantReadinessLabel(variant)}</span>
                       </span>
                     </button>
+                    {offer && onReviewInstall && <button className="workflow-family-install-action"
+                      aria-label={`Review downloads for ${variant.name}`}
+                      onClick={() => onReviewInstall(offer, variant.name)}>Review downloads</button>}
+                    </div>
                   );
                 })}
               </div>

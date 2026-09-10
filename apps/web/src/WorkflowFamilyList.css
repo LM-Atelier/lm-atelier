@@ -14,3 +14,6 @@
   .workflow-family-browser { border-right: 0; border-bottom: 1px solid var(--border); }
   .workflow-family-browser .workflow-list { max-height: none; overflow: visible; }
 }
+
+.workflow-family-variant { min-width: 0; }
+.workflow-family-browser .workflow-list .workflow-family-install-action { width: calc(100% - 20px); margin: 0 10px 8px; padding: 7px 10px; justify-content: center; border: 1px solid var(--line-control); background: var(--panel-2); color: var(--ink-primary); font-size: 12px; }

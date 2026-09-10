@@ -1561,6 +1561,8 @@ class WorkflowFamilyVariantOut(ApiModel):
     trusted: bool
     readiness: WorkflowVariantReadiness
     readiness_reason: str | None = None
+    setup_resolution: Literal["reviewed_download_available", "attention_required"] | None = None
+    install_offer: WorkflowInstallOfferOut | None = None
 
 
 class WorkflowFamilyPreferenceOut(ApiModel):

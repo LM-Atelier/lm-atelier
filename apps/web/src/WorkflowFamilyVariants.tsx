@@ -1,10 +1,8 @@
 import { useState } from "react";
-import type { WorkflowFamily, WorkflowVariantReadiness } from "./types";
+import type { WorkflowFamily, WorkflowInstallOffer } from "./types";
 import "./WorkflowFamilyVariants.css";
+import { availableWorkflowInstallOffer, workflowVariantReadinessLabel } from "./workflowVariantSetup";
 
-const readinessLabels: Record<WorkflowVariantReadiness, string> = {
-  ready: "Ready", setup_required: "Needs setup", review_required: "Needs review", unavailable: "Unavailable",
-};
 const operationLabels: Record<string, string> = {
   text: "Text", text_to_image: "Text to image", image_to_image: "Image to image",
   text_to_video: "Text to video", image_to_video: "Image to video", video_to_video: "Video to video",
@@ -21,7 +19,9 @@ const reasons: Record<string, string> = {
   family_disabled: "This workflow family is disabled.",
 };
 
-export function WorkflowFamilyVariants({ family }: { family: WorkflowFamily }) {
+export function WorkflowFamilyVariants({ family, onReviewInstall }: {
+  family: WorkflowFamily; onReviewInstall?: (offer: WorkflowInstallOffer, workflowName: string) => void;
+}) {
   const [expanded, setExpanded] = useState(false);
   const variants = [...family.variants].sort((a, b) =>
     a.operation.localeCompare(b.operation) || a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
@@ -39,10 +39,17 @@ export function WorkflowFamilyVariants({ family }: { family: WorkflowFamily }) {
             <span>{operationLabels[variant.operation] ?? variant.operation}</span>
             <small>{variant.current_revision_version === null
               ? "No current revision" : `Current revision: v${variant.current_revision_version}`}</small>
-            <span className="badge">{readinessLabels[variant.readiness]}</span>
+            <span className="badge">{workflowVariantReadinessLabel(variant)}</span>
             <p>{variant.readiness === "ready" ? "Ready to run."
               : Object.hasOwn(reasons, variant.readiness_reason ?? "")
                 ? reasons[variant.readiness_reason ?? ""] : "No further readiness details are available."}</p>
+            {onReviewInstall && availableWorkflowInstallOffer(family, variant) && (
+              <button className="secondary compact-button" aria-label={`Review downloads for ${variant.name}`}
+                onClick={() => {
+                  const offer = availableWorkflowInstallOffer(family, variant);
+                  if (offer) onReviewInstall(offer, variant.name);
+                }}>Review downloads</button>
+            )}
           </li>
         ))}</ul>
       ))}

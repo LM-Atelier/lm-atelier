@@ -1,0 +1,9 @@
+.workflow-install-review { max-width: 640px; }
+.workflow-install-files { list-style: none; padding: 0; display: grid; gap: 10px; }
+.workflow-install-files li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; }
+.workflow-install-files li > span:first-child { display: grid; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
+.workflow-install-files small { color: var(--muted); }
+.workflow-install-review footer { flex-wrap: wrap; }
+@media (max-width: 480px) {
+  .workflow-install-files li { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+}
