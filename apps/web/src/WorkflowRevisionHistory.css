@@ -1,0 +1,8 @@
+.workflow-revision-history { min-width: 0; padding: 14px 0; }
+.workflow-revision-history h3 { margin: 0 0 8px; font-size: 14px; }
+.workflow-revision-history p { font-size: 12px; line-height: 1.5; color: var(--ink-secondary); }
+.workflow-revision-history ol { display: grid; gap: 8px; max-height: 320px; overflow: auto; padding: 3px; list-style: none; }
+.workflow-revision-history li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; min-width: 0; padding: 10px; border: 1px solid var(--border); border-radius: 8px; overflow-wrap: anywhere; }
+.workflow-revision-history time, .workflow-revision-history small, .workflow-history-viewing { font-size: 12px; }
+.workflow-revision-history time, .workflow-revision-history small { color: var(--ink-secondary); }
+.workflow-revision-history button[aria-pressed="true"], .workflow-history-viewing { font-weight: 700; }
