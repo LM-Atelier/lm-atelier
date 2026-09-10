@@ -351,37 +351,128 @@ def directory_owned_by_current_user(anchor: AnchoredDirectory) -> bool:
             _refuse()
         if not api.security.IsValidSid(owner):
             _refuse()
-        # GetCurrentThreadEffectiveToken is an SDK inline returning HANDLE(-6).
-        # It selects an impersonation token when present, otherwise the process
-        # token. This query-only pseudo-handle must not be closed.
-        token = ctypes.c_void_p(-6)
-        needed = ctypes.c_ulong()
-        sized = api.security.GetTokenInformation(token, 1, None, 0, ctypes.byref(needed))
-        if sized or api.ctypes.get_last_error() != 122:
-            _refuse()
-        minimum = ctypes.sizeof(api.TokenUser)
-        if not minimum <= needed.value <= 65536:
-            _refuse()
-        buffer = ctypes.create_string_buffer(needed.value)
-        if not api.security.GetTokenInformation(
-            token, 1, buffer, len(buffer), ctypes.byref(needed)
-        ):
-            _refuse()
-        if not minimum <= needed.value <= len(buffer):
-            _refuse()
-        user = api.TokenUser.from_buffer(buffer)
-        # TOKEN_USER's SID belongs to the returned buffer. Check its fixed
-        # header and variable subauthorities before passing it to native code.
-        start = ctypes.addressof(buffer)
-        sid = user.Sid
-        if not sid or not start + minimum <= sid <= start + needed.value - 8:
-            _refuse()
-        count = ctypes.c_ubyte.from_address(sid + 1).value
-        if sid + 8 + 4 * count > start + needed.value:
-            _refuse()
-        if not api.security.IsValidSid(ctypes.c_void_p(sid)):
-            _refuse()
+        _token_buffer, sid = _windows_effective_user(api)
         return bool(api.security.EqualSid(owner, ctypes.c_void_p(sid)))
+    finally:
+        if security_descriptor.value:
+            api.kernel.LocalFree(security_descriptor)
+
+
+def _windows_effective_user(api: Any) -> tuple[Any, int]:
+    # GetCurrentThreadEffectiveToken is an SDK inline returning HANDLE(-6).
+    # It selects an impersonation token when present, otherwise the process
+    # token. This query-only pseudo-handle must not be closed.
+    token = ctypes.c_void_p(-6)
+    needed = ctypes.c_ulong()
+    sized = api.security.GetTokenInformation(token, 1, None, 0, ctypes.byref(needed))
+    if sized or api.ctypes.get_last_error() != 122:
+        _refuse()
+    minimum = ctypes.sizeof(api.TokenUser)
+    if not minimum <= needed.value <= 65536:
+        _refuse()
+    buffer = ctypes.create_string_buffer(needed.value)
+    if not api.security.GetTokenInformation(token, 1, buffer, len(buffer), ctypes.byref(needed)):
+        _refuse()
+    if not minimum <= needed.value <= len(buffer):
+        _refuse()
+    user = api.TokenUser.from_buffer(buffer)
+    # TOKEN_USER's SID belongs to the returned buffer. Check its fixed
+    # header and variable subauthorities before passing it to native code.
+    start = ctypes.addressof(buffer)
+    sid = user.Sid
+    if not sid or not start + minimum <= sid <= start + needed.value - 8:
+        _refuse()
+    count = ctypes.c_ubyte.from_address(sid + 1).value
+    if sid + 8 + 4 * count > start + needed.value:
+        _refuse()
+    if not api.security.IsValidSid(ctypes.c_void_p(sid)):
+        _refuse()
+    return buffer, sid
+
+
+def directory_private_to_current_user(anchor: AnchoredDirectory) -> bool:
+    """Observe current-user ownership and restrictive access on the held root.
+
+    Windows anchors require read_security=True. Ordinary allow ACEs may name
+    only the owner, SYSTEM, or built-in administrators; unsupported ACE forms
+    refuse qualification. This conservative ACL policy is not an effective-
+    permissions evaluator. POSIX group and other mode bits must all be clear.
+    No permissions are changed, and later security changes are not prevented.
+    """
+
+    descriptor = anchor.descriptor
+    if descriptor is not None and sys.platform != "win32":
+        try:
+            information = os.fstat(descriptor)
+            return information.st_uid == os.geteuid() and information.st_mode & 0o077 == 0
+        except OSError:
+            _refuse()
+    handle = anchor.handle
+    if handle is None:
+        _refuse()
+    api = _windows_ownership_api()
+    owner = ctypes.c_void_p()
+    dacl = ctypes.c_void_p()
+    security_descriptor = ctypes.c_void_p()
+    try:
+        result = api.security.GetSecurityInfo(
+            ctypes.c_void_p(handle),
+            1,
+            1 | 4,
+            ctypes.byref(owner),
+            None,
+            ctypes.byref(dacl),
+            None,
+            ctypes.byref(security_descriptor),
+        )
+        if result != 0 or not security_descriptor.value or not owner.value:
+            _refuse()
+        if not api.security.IsValidSid(owner):
+            _refuse()
+        _token_buffer, user_sid = _windows_effective_user(api)
+        if not api.security.EqualSid(owner, ctypes.c_void_p(user_sid)):
+            return False
+        if not dacl.value:
+            return False
+        if not api.security.IsValidAcl(dacl):
+            _refuse()
+        # GetSecurityInfo owns the allocation until the finally below. Validate
+        # each ACE's bounds within the native ACL before reading its SID.
+        acl_start = dacl.value
+        acl_size = ctypes.c_ushort.from_address(acl_start + 2).value
+        ace_count = ctypes.c_ushort.from_address(acl_start + 4).value
+        if acl_size < 8 or ace_count > (acl_size - 8) // 4:
+            _refuse()
+        for index in range(ace_count):
+            ace = ctypes.c_void_p()
+            if not api.security.GetAce(dacl, index, ctypes.byref(ace)):
+                _refuse()
+            if not ace.value or not acl_start + 8 <= ace.value <= acl_start + acl_size - 4:
+                _refuse()
+            ace_type = ctypes.c_ubyte.from_address(ace.value).value
+            ace_size = ctypes.c_ushort.from_address(ace.value + 2).value
+            if ace_size < 16 or ace_size % 4 or ace.value + ace_size > acl_start + acl_size:
+                _refuse()
+            # Ordinary deny entries cannot grant access. Object, callback and
+            # other forms are outside this policy, including inheritance-only.
+            if ace_type not in (0, 1):
+                return False
+            sid = ace.value + 8
+            count = ctypes.c_ubyte.from_address(sid + 1).value
+            if sid + 8 + 4 * count > ace.value + ace_size:
+                _refuse()
+            sid_pointer = ctypes.c_void_p(sid)
+            if not api.security.IsValidSid(sid_pointer):
+                _refuse()
+            if ace_type == 1:
+                continue
+            if not (
+                api.security.EqualSid(sid_pointer, ctypes.c_void_p(user_sid))
+                or api.security.IsWellKnownSid(sid_pointer, 22)
+                or api.security.IsWellKnownSid(sid_pointer, 26)
+            ):
+                return False
+        return True
     finally:
         if security_descriptor.value:
             api.kernel.LocalFree(security_descriptor)
@@ -416,6 +507,12 @@ def _windows_ownership_api() -> Any:
     security.IsValidSid.restype = ctypes.c_int
     security.EqualSid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     security.EqualSid.restype = ctypes.c_int
+    security.IsValidAcl.argtypes = [ctypes.c_void_p]
+    security.IsValidAcl.restype = ctypes.c_int
+    security.GetAce.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(ctypes.c_void_p)]
+    security.GetAce.restype = ctypes.c_int
+    security.IsWellKnownSid.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    security.IsWellKnownSid.restype = ctypes.c_int
     kernel.LocalFree.argtypes = [ctypes.c_void_p]
     kernel.LocalFree.restype = ctypes.c_void_p
     return types.SimpleNamespace(
