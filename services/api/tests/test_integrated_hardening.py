@@ -6,8 +6,10 @@ import json
 import zipfile
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
+from typing import Any, cast
 
 from httpx2 import AsyncClient
+from run_waits import wait_for_terminal_status
 from sqlalchemy import select, update
 
 from local_lm.adapters.base import MediaEvent, MediaRequest
@@ -30,17 +32,16 @@ async def _wait_for_run(
     run_id: str,
     expected: str = "complete",
 ) -> dict:  # type: ignore[type-arg]
-    deadline = asyncio.get_running_loop().time() + 8
-    run: dict = {}  # type: ignore[type-arg]
-    while asyncio.get_running_loop().time() < deadline:
+    async def read() -> dict[str, Any]:
         response = await client.get(f"/api/runs/{run_id}")
         assert response.status_code == 200
-        run = response.json()
-        if run["status"] in {"complete", "failed", "cancelled"}:
-            assert run["status"] == expected, run
-            return run
-        await asyncio.sleep(0.03)
-    raise AssertionError(f"run {run_id} did not become {expected}: {run}")
+        run: dict[str, Any] = response.json()
+        return run
+
+    return cast(
+        dict[str, Any],
+        await wait_for_terminal_status(read, what=f"run {run_id}", expected=expected),
+    )
 
 
 async def _wait_for_step_states(

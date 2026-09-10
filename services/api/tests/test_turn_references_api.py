@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import asyncio
+from typing import Any
 
 from httpx2 import AsyncClient
+from run_waits import wait_for_terminal_status
 from sqlalchemy import func, select
 
 from local_lm.db import SessionLocal
@@ -11,12 +12,11 @@ from local_lm.models import MessageReference
 
 
 async def _wait_for_run(client: AsyncClient, run_id: str) -> None:
-    for _ in range(200):
-        run = (await client.get(f"/api/runs/{run_id}")).json()
-        if run["status"] in {"complete", "failed", "cancelled"}:
-            return
-        await asyncio.sleep(0.01)
-    raise AssertionError(f"run {run_id} did not finish")
+    async def read() -> dict[str, Any]:
+        run: dict[str, Any] = (await client.get(f"/api/runs/{run_id}")).json()
+        return run
+
+    await wait_for_terminal_status(read, what=f"run {run_id}", expected=None)
 
 
 async def _chat(client: AsyncClient, title: str) -> dict[str, object]:

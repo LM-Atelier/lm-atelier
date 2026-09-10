@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import copy
 import hashlib
 import json
@@ -9,6 +8,7 @@ from typing import Any, cast
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import wait_for_terminal_status
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from workflow_fixtures import seed_workflow_trust
@@ -82,14 +82,15 @@ def _create_payload(
 
 
 async def _wait_for_run(client: AsyncClient, run_id: str) -> dict[str, Any]:
-    for _ in range(300):
+    async def read() -> dict[str, Any]:
         response = await client.get(f"/api/runs/{run_id}")
         assert response.status_code == 200
-        run = response.json()
-        if run["status"] in {"complete", "failed", "cancelled"}:
-            return run
-        await asyncio.sleep(0.01)
-    raise AssertionError("run did not finish")
+        run: dict[str, Any] = response.json()
+        return run
+
+    return cast(
+        dict[str, Any], await wait_for_terminal_status(read, what=f"run {run_id}", expected=None)
+    )
 
 
 def _composer_source(batch: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS, wait_for_terminal_status
 from sqlalchemy import select
 
 from local_lm.db import SessionLocal
@@ -13,15 +14,14 @@ from local_lm.models import ResponseRevision, WorkPlan
 
 
 async def _complete(client: AsyncClient, run_id: str) -> None:
-    async with asyncio.timeout(10):
-        while True:
-            response = await client.get(f"/api/runs/{run_id}")
-            assert response.status_code == 200, response.text
-            status = response.json()["status"]
-            if status == "complete":
-                return
-            assert status not in {"failed", "cancelled"}, response.text
-            await asyncio.sleep(0.02)
+    async def read() -> dict[str, Any]:
+        response = await client.get(f"/api/runs/{run_id}")
+        assert response.status_code == 200, response.text
+        run: dict[str, Any] = response.json()
+        return run
+
+    async with asyncio.timeout(PATIENCE_SECONDS):
+        await wait_for_terminal_status(read, what=f"run {run_id}", expected="complete")
 
 
 async def _source(client: AsyncClient, chat_id: str | None = None) -> dict[str, Any]:
@@ -145,3 +145,26 @@ async def test_regeneration_retry_does_not_replay_removed_source_content(
         refused = await client.post(url, json=payload)
         assert refused.status_code == 409, refused.text
         assert refused.json()["code"] == "source-content-removed"
+
+
+async def test_regeneration_wait_cancels_a_stalled_status_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deadlines: list[float | None] = []
+    real_timeout = asyncio.timeout
+
+    def expire_on_suspend(delay: float | None) -> asyncio.Timeout:
+        deadlines.append(delay)
+        return real_timeout(0)
+
+    class StalledClient:
+        async def get(self, _url: str) -> None:
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(asyncio, "timeout", expire_on_suspend)
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(
+            _complete(cast(AsyncClient, StalledClient()), "stalled-run"),
+            timeout=1,
+        )
+    assert deadlines == [PATIENCE_SECONDS]
