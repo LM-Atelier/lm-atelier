@@ -26,6 +26,7 @@ from .filesystem_links import (
     AnchoredEntryExists,
     available_bytes,
     create_entry,
+    directory_private_to_current_user,
     discard_entry,
     link_entry,
     open_child_directory,
@@ -119,6 +120,7 @@ class RootProbeReport:
 
     directory: bool
     no_reparse_points: bool
+    private_access: bool
     atomic_rename: bool
     exclusive_create: bool
     free_space: bool
@@ -128,6 +130,7 @@ class RootProbeReport:
         return (
             self.directory
             and self.no_reparse_points
+            and self.private_access
             and self.atomic_rename
             and self.exclusive_create
             and self.free_space
@@ -197,7 +200,11 @@ def _refuse_reparse_chain(path: Path) -> None:
 
 @contextlib.contextmanager
 def _anchored(
-    store: Path, *, create: bool = False, absent_is_refusal: bool = True
+    store: Path,
+    *,
+    create: bool = False,
+    absent_is_refusal: bool = True,
+    read_security: bool = False,
 ) -> Iterator[AnchoredDirectory]:
     """Hold `store` anchored, translating containment refusals into ours.
 
@@ -207,7 +214,7 @@ def _anchored(
     """
 
     try:
-        anchor = AnchoredDirectory(store, create=create)
+        anchor = AnchoredDirectory(store, create=create, read_security=read_security)
     except AnchoredDirectoryNotFound:
         # Absence is a refusal everywhere except the one reader whose whole
         # question is whether a store is there. Defaulting the other way would
@@ -473,12 +480,17 @@ def _probe_free_space(anchor: AnchoredDirectory, minimum_free_bytes: int) -> boo
 def _probe_anchored(anchor: AnchoredDirectory, minimum_free_bytes: int) -> RootProbeReport:
     """Run the write probes against a directory the caller already holds."""
 
+    try:
+        private_access = directory_private_to_current_user(anchor)
+    except AnchoredDirectoryError:
+        private_access = False
     return RootProbeReport(
         directory=True,
         no_reparse_points=True,
-        atomic_rename=_probe_atomic_rename(anchor),
-        exclusive_create=_probe_exclusive_create(anchor),
-        free_space=_probe_free_space(anchor, minimum_free_bytes),
+        private_access=private_access,
+        atomic_rename=private_access and _probe_atomic_rename(anchor),
+        exclusive_create=private_access and _probe_exclusive_create(anchor),
+        free_space=private_access and _probe_free_space(anchor, minimum_free_bytes),
     )
 
 
@@ -489,8 +501,8 @@ def probe_store_root(
 ) -> RootProbeReport:
     """Run the acceptance battery against an existing candidate root.
 
-    The battery is diagnostic: each check reports independently so a chooser
-    can explain what failed without echoing the path. Gate with
+    The battery is diagnostic, but containment and private access must pass
+    before any write probes run. No existing permissions are changed. Gate with
     `require_usable_root` when only acceptance matters.
     """
 
@@ -507,6 +519,7 @@ def probe_store_root(
         return RootProbeReport(
             directory=directory,
             no_reparse_points=reparse_free,
+            private_access=False,
             atomic_rename=False,
             exclusive_create=False,
             free_space=False,
@@ -516,7 +529,7 @@ def probe_store_root(
     # redirect arriving after the containment check collect the probe
     # artifacts while this report still called the root clean.
     try:
-        with _anchored(store) as anchor:
+        with _anchored(store, read_security=True) as anchor:
             return _probe_anchored(anchor, minimum_free_bytes)
     except SharedAssetContractError:
         # The battery reports; it does not raise. A root that cannot even be
@@ -524,6 +537,7 @@ def probe_store_root(
         return RootProbeReport(
             directory=directory,
             no_reparse_points=False,
+            private_access=False,
             atomic_rename=False,
             exclusive_create=False,
             free_space=False,
@@ -554,7 +568,8 @@ def store_access_mode(
     The identity must already exist: access-mode resolution never creates a
     library as a side effect. A usable root with a compatible writer is
     read/write; a root whose battery fails writes (or whose format is newer
-    than this writer) is read-only; an unreadable identity refuses.
+    than this writer) is read-only; an unreadable identity refuses. Ownership
+    and private access must qualify even when the format selects read-only.
     """
 
     store = _require_absolute_root(root)
@@ -562,7 +577,12 @@ def store_access_mode(
     # one directory and then probing another would resolve two different
     # directories into a single answer, which is exactly the confusion this
     # module exists to prevent.
-    with _anchored(store) as anchor:
+    with _anchored(store, read_security=True) as anchor:
+        try:
+            if not directory_private_to_current_user(anchor):
+                _invalid()
+        except AnchoredDirectoryError:
+            _invalid()
         identity = _read_identity_anchored(anchor)
         if identity is None:
             _invalid()
@@ -574,7 +594,7 @@ def store_access_mode(
         if negotiated == "read_only":
             return "read_only"
         report = _probe_anchored(anchor, MINIMUM_FREE_BYTES)
-    if not report.directory or not report.no_reparse_points:
+    if not report.directory or not report.no_reparse_points or not report.private_access:
         _invalid()
     if not (report.atomic_rename and report.exclusive_create and report.free_space):
         return "read_only"
