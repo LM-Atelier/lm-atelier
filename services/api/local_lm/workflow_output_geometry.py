@@ -432,36 +432,54 @@ def _schema_capability(
         "default_width": width.default,
         "default_height": height.default,
     }
-    presets = _preset_dimensions(width, height, max_pixels)
-    combinations: list[dict[str, object]] = [
-        {
-            **bounds,
-            "size_mode": "exact",
-            "buckets": [[width.default, height.default]],
-        }
-    ]
-    if presets:
-        # Every combination must carry the workflow's own default among its
-        # buckets, so the preset list is unioned with it rather than replacing
-        # it. That costs nothing: a preset always resolves to the pair whose
-        # ratio matches it exactly, and no other bucket can tie.
-        pairs = sorted({(width.default, height.default)} | set(presets.values()))
-        combinations.append(
-            {
-                **bounds,
-                "size_mode": "preset",
-                "buckets": [[item[0], item[1]] for item in pairs],
-            }
-        )
-    capability = declare_output_geometry(
+    exact = {
+        **bounds,
+        "size_mode": "exact",
+        "buckets": [[width.default, height.default]],
+    }
+    # The exact sizes are what this workflow could always do, and they are built
+    # from values _field_binding has already validated. Declaring them on their
+    # own first means the presets are an addition rather than a condition: a
+    # derived bucket the validator refuses costs the presets and cannot take the
+    # workflow's own width and height away with it, which is what would happen
+    # if both were declared together - declare_output_geometry raises an
+    # OutputGeometryError, prove_workflow_output_geometry catches ValueError,
+    # and the whole revision reports no geometry at all.
+    sizes = declare_output_geometry(
         {
             "version": 1,
             "allowed_modes": ["image"],
-            "allowed_preset_ids": sorted(presets),
-            "combinations": combinations,
+            "allowed_preset_ids": [],
+            "combinations": [exact],
         }
     )
-    return width, height, capability
+    presets = _preset_dimensions(width, height, max_pixels)
+    if not presets:
+        return width, height, sizes
+    # Every combination must carry the workflow's own default among its buckets,
+    # so the preset list is unioned with it rather than replacing it. That costs
+    # nothing: a preset always resolves to the pair whose ratio matches it
+    # exactly, and no other bucket can tie.
+    pairs = sorted({(width.default, height.default)} | set(presets.values()))
+    try:
+        with_presets = declare_output_geometry(
+            {
+                "version": 1,
+                "allowed_modes": ["image"],
+                "allowed_preset_ids": sorted(presets),
+                "combinations": [
+                    exact,
+                    {
+                        **bounds,
+                        "size_mode": "preset",
+                        "buckets": [[item[0], item[1]] for item in pairs],
+                    },
+                ],
+            }
+        )
+    except OutputGeometryError:
+        return width, height, sizes
+    return width, height, with_presets
 
 
 def _preset_dimensions(
