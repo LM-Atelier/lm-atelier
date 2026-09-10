@@ -108,10 +108,13 @@ them. See [Privacy and local data](PRIVACY.md).
 The Model library's **Check for updates** asks the provider - only when you
 press it, never in the background - whether any installed asset with an exact
 recorded version has something newer. The report keeps its three answers
-separate: updates available, up to date, and could not check. The available action depends on the asset type: supported LoRA updates open a
-review, while other model updates direct you to the catalog. Downloads use the
-normal installation checks; nothing updates itself or silently switches a
-profile to a newer model.
+separate: updates available, up to date, and could not check.
+
+Supported LoRA and checkpoint updates offer **Review update**. Checkpoint review
+uses the installed model's chat, image, or video role; if that role cannot be
+determined, the app asks you to check for updates again. Other asset types direct
+you to the catalog. Downloads use the normal installation checks; nothing
+updates itself or silently switches a profile to a newer model.
 
 ## If a step will not complete
 
@@ -146,14 +149,27 @@ supported sizes depend on the selected model, workflow, and hardware.
 ### Browse workflows
 
 Open **Workflows** to browse families and their variants. Search names, descriptions,
-tags, or use cases; filter by operation, readiness, or source, and sort by name or
-readiness. A family groups related choices so their purpose and requirements can
+tags, use cases, or recorded dependency names; filter by operation, readiness,
+or source, and sort by name or readiness. A family groups related choices so their purpose and requirements can
 be compared together.
 
 Select a variant to inspect its revision and dependency details. Readiness labels
 explain whether it can run, needs setup, needs review, or is unavailable. Setting
 a default does not install missing dependencies or grant trust. The chat workflow
 selector also lists choices that need attention and explains why they cannot run.
+
+When a variant offers **Review downloads**, inspect its required files and total
+download size, then choose **Download reviewed files** to start. The app checks
+the current files and plans again before downloading. A dependency count is a
+summary of recorded requirements; use the readiness details to see what still
+needs attention.
+
+Open **Show revision history** to inspect saved versions and their dates. When
+viewing an older version, **Show changes** compares its saved graph, controls,
+and dependencies with the current revision. Large comparisons report when their
+display limit is reached. **Restore as new revision** is a separate action.
+Select the current revision to use **Validate**; its result applies to that
+revision.
 
 Names, tags, and use-case descriptions can be edited. Automatically derived
 use-case text is labeled, and your explicit text edits take precedence.
