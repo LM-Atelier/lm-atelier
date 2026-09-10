@@ -82,6 +82,11 @@ WorkflowInstallOfferErrorCode = (
 )
 
 
+WorkflowInstallOfferInvalidationCode = (
+    WorkflowInstallOfferErrorCode | Literal["asset-download-refused", "offer-superseded"]
+)
+
+
 class WorkflowInstallOfferError(ValueError):
     def __init__(self, code: WorkflowInstallOfferErrorCode, message: str) -> None:
         super().__init__(message)
@@ -219,7 +224,7 @@ def mark_workflow_install_offer_queued(offer: WorkflowInstallOffer) -> None:
 def invalidate_workflow_install_offer(
     offer: WorkflowInstallOffer,
     *,
-    code: str,
+    code: WorkflowInstallOfferInvalidationCode,
     reason: str,
 ) -> None:
     if offer.status in {"completed", "invalidated", "expired"}:
