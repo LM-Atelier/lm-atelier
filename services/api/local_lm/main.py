@@ -518,10 +518,12 @@ async def sweep_artifact_retention(
                 progress.transaction_finished()
                 raise
         logger.info(
-            "Artifact retention batch committed: %s row(s) examined, %s item(s) removed; "
+            "Artifact retention batch committed: %s row(s) examined, "
+            "%s artifact row(s), %s unindexed file(s) removed; "
             "elapsed %.3fs; writer reservation %.3fs",
             summary.examined_count,
-            summary.removed_count,
+            summary.removed_row_count,
+            summary.removed_orphan_file_count,
             time.monotonic() - progress.started,
             progress.writer_seconds,
         )
@@ -531,7 +533,8 @@ async def sweep_artifact_retention(
     logger.info("Artifact retention sweep started")
     batches = 0
     examined = 0
-    removed = 0
+    removed_rows = 0
+    removed_orphan_files = 0
     passes = 0
     locked_out = 0
     single = False
@@ -559,7 +562,8 @@ async def sweep_artifact_retention(
                     summary = await operation
                     batches += 1
                     examined += summary.examined_count
-                    removed += summary.removed_count
+                    removed_rows += summary.removed_row_count
+                    removed_orphan_files += summary.removed_orphan_file_count
                 raise
             except OperationalError as exc:
                 # A user transaction held the writer for longer than
@@ -583,7 +587,8 @@ async def sweep_artifact_retention(
             locked_out = 0
             batches += 1
             examined += summary.examined_count
-            removed += summary.removed_count
+            removed_rows += summary.removed_row_count
+            removed_orphan_files += summary.removed_orphan_file_count
             if summary.truncated:
                 if summary.removed_count == 0 and not single:
                     single = True
@@ -595,9 +600,11 @@ async def sweep_artifact_retention(
                     )
                 else:
                     logger.info(
-                        "Artifact retention batch %s removed %s artifact(s); more remain",
+                        "Artifact retention batch %s removed %s artifact row(s), "
+                        "%s unindexed file(s); more remain",
                         batches,
-                        summary.removed_count,
+                        summary.removed_row_count,
+                        summary.removed_orphan_file_count,
                     )
                 await asyncio.sleep(pause_seconds)
                 continue
@@ -610,10 +617,12 @@ async def sweep_artifact_retention(
             await asyncio.sleep(pause_seconds)
     except asyncio.CancelledError:
         logger.info(
-            "Artifact retention sweep stopped after %s batch(es), %s removed; "
+            "Artifact retention sweep stopped after %s batch(es), "
+            "%s artifact row(s), %s unindexed file(s) removed; "
             "elapsed %.3fs; it resumes at the next start",
             batches,
-            removed,
+            removed_rows,
+            removed_orphan_files,
             time.monotonic() - started,
         )
         raise
@@ -626,10 +635,12 @@ async def sweep_artifact_retention(
         )
         return
     logger.info(
-        "Artifact retention sweep complete: %s batch(es), %s artifact(s) removed; "
+        "Artifact retention sweep complete: %s batch(es), "
+        "%s artifact row(s), %s unindexed file(s) removed; "
         "%s row examination(s); elapsed %.3fs",
         batches,
-        removed,
+        removed_rows,
+        removed_orphan_files,
         examined,
         time.monotonic() - started,
     )

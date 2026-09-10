@@ -691,8 +691,8 @@ async def test_retention_progress_counts_rows_and_excludes_writer_wait(
     assert "Artifact retention sweep started" in messages
     committed = [message for message in messages if "retention batch committed:" in message]
     assert len(committed) == 2
-    assert "2 row(s) examined, 1 item(s) removed" in committed[0]
-    assert "1 row(s) examined, 0 item(s) removed" in committed[1]
+    assert "2 row(s) examined, 1 artifact row(s), 0 unindexed file(s) removed" in committed[0]
+    assert "1 row(s) examined, 0 artifact row(s), 0 unindexed file(s) removed" in committed[1]
     assert all("elapsed 12.000s; writer reservation 5.000s" in message for message in committed)
     assert "3 row examination(s); elapsed 24.000s" in messages[-1]
     with SessionLocal() as session:
@@ -840,6 +840,112 @@ async def test_retention_progress_includes_the_batch_committed_during_cancellati
     with SessionLocal() as session:
         assert _count(session) == 1
     assert "retention batch committed:" in caplog.text
-    assert "1 item(s) removed" in caplog.text
-    assert "sweep stopped after 1 batch(es), 1 removed" in caplog.text
+    assert "1 artifact row(s), 0 unindexed file(s) removed" in caplog.text
+    assert (
+        "sweep stopped after 1 batch(es), 1 artifact row(s), 0 unindexed file(s) removed"
+        in caplog.text
+    )
+    assert "sweep complete:" not in caplog.text
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+@pytest.mark.parametrize(("row_count", "orphan_count"), [(1, 0), (0, 2), (1, 2)])
+def test_retention_separates_missing_file_rows_from_unindexed_files(
+    sweepable: tuple[ArtifactStore, Session],
+    dry_run: bool,
+    row_count: int,
+    orphan_count: int,
+) -> None:
+    store, session = sweepable
+    row_ids = []
+    for index in range(row_count):
+        artifact = _aged_temporary(store, session, index)
+        store.resolve(artifact).unlink()
+        row_ids.append(artifact.id)
+    orphans = [_aged_orphan(store, index) for index in range(orphan_count)]
+    session.commit()
+
+    summary = store.cleanup_retention(
+        session, retention_days=30, temporary_hours=24, dry_run=dry_run
+    )
+    session.commit()
+
+    assert summary.removed_count == row_count + orphan_count
+    assert summary.removed_row_count == row_count
+    assert summary.removed_orphan_file_count == orphan_count
+    assert _count(session) == (row_count if dry_run else 0)
+    assert all(path.exists() is dry_run for path in orphans)
+    assert all((session.get(Artifact, row_id) is not None) is dry_run for row_id in row_ids)
+
+
+async def test_retention_logs_distinct_row_and_file_totals_across_batches(
+    settings: Settings, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = ArtifactStore(settings)
+    with SessionLocal() as session:
+        artifact = _aged_temporary(store, session, 0)
+        store.resolve(artifact).unlink()
+        session.commit()
+    orphans = [_aged_orphan(store, index) for index in range(2)]
+    caplog.set_level(logging.INFO)
+
+    await main_module.sweep_artifact_retention(
+        store, settings, batch_deletions=1, pause_seconds=0, batch_seconds=0
+    )
+
+    messages = [record.getMessage() for record in caplog.records]
+    committed = [message for message in messages if "retention batch committed:" in message]
+    assert any("1 artifact row(s), 0 unindexed file(s) removed" in m for m in committed)
+    assert sum("0 artifact row(s), 1 unindexed file(s) removed" in m for m in committed) == 2
+    continuing = [message for message in messages if "more remain" in message]
+    assert continuing
+    assert all("artifact row(s)" in m and "unindexed file(s)" in m for m in continuing)
+    assert "1 artifact row(s), 2 unindexed file(s) removed" in messages[-1]
+    assert "sweep complete:" in messages[-1]
+    assert not any(path.exists() for path in orphans)
+    with SessionLocal() as session:
+        assert _count(session) == 0
+
+
+async def test_retention_cancellation_reports_committed_unindexed_files(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = ArtifactStore(settings)
+    orphans = [_aged_orphan(store, index) for index in range(2)]
+    completed = threading.Event()
+    release = threading.Event()
+    real_cleanup = ArtifactStore.cleanup_retention
+
+    def paused_cleanup(self: ArtifactStore, session: Session, **kwargs: Any) -> Any:
+        result = real_cleanup(self, session, **kwargs)
+        completed.set()
+        assert release.wait(timeout=5), "the completed batch was not released"
+        return result
+
+    monkeypatch.setattr(ArtifactStore, "cleanup_retention", paused_cleanup)
+    caplog.set_level(logging.INFO)
+    operation = asyncio.create_task(
+        main_module.sweep_artifact_retention(
+            store, settings, batch_deletions=1, pause_seconds=0, batch_seconds=60
+        )
+    )
+    try:
+        assert await asyncio.to_thread(completed.wait, 5), "the first batch never completed"
+        operation.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await operation
+    finally:
+        release.set()
+        if not operation.done():
+            operation.cancel()
+        with suppress(asyncio.CancelledError):
+            await operation
+
+    assert sum(path.exists() for path in orphans) == 1
+    assert (
+        "sweep stopped after 1 batch(es), 0 artifact row(s), 1 unindexed file(s) removed"
+        in caplog.text
+    )
     assert "sweep complete:" not in caplog.text
