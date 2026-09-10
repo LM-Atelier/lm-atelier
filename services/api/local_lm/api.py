@@ -356,6 +356,7 @@ from .schemas import (
     ExchangeDeletionOut,
     GenerationIdentityOut,
     HealthOut,
+    JobActivityOut,
     JobOut,
     MessageOut,
     ModelAssetOut,
@@ -3980,6 +3981,40 @@ async def list_jobs(
     if status:
         statement = statement.where(Job.status == status)
     return list(session.scalars(statement).all())
+
+
+@router.get("/jobs/activity", response_model=JobActivityOut)
+async def job_activity(
+    session: ConversationSessionDep,
+    active_limit: int = Query(default=100, ge=1, le=500),
+) -> JobActivityOut:
+    active_rows = session.execute(
+        select(Job, func.count(Job.id).over())
+        .where(
+            Job.kind != JobKind.EDIT_VERIFY.value,
+            Job.status.in_(
+                (JobStatus.QUEUED.value, JobStatus.RUNNING.value, JobStatus.PAUSED.value)
+            ),
+        )
+        .order_by(Job.created_at.asc(), Job.id.asc())
+        .limit(active_limit)
+    ).all()
+    recent_issues = session.scalars(
+        select(Job)
+        .where(
+            Job.kind != JobKind.EDIT_VERIFY.value,
+            Job.status.in_(
+                (JobStatus.FAILED.value, JobStatus.CANCELLED.value, JobStatus.INTERRUPTED.value)
+            ),
+        )
+        .order_by(Job.updated_at.desc(), Job.id.desc())
+        .limit(3)
+    ).all()
+    return JobActivityOut(
+        active=[JobOut.model_validate(row[0]) for row in active_rows],
+        active_count=int(active_rows[0][1]) if active_rows else 0,
+        recent_issues=[JobOut.model_validate(job) for job in recent_issues],
+    )
 
 
 @router.post("/jobs/{job_id}/cancel", response_model=JobOut)

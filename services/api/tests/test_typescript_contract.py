@@ -53,6 +53,7 @@ CHECKED_CONTRACTS = {
     "EngineCapabilities": "EngineCapabilities",
     "ExchangeDeletion": "ExchangeDeletionOut",
     "Job": "JobOut",
+    "JobActivity": "JobActivityOut",
     "Message": "MessageOut",
     "MessagePart": "MessagePartOut",
     "MessageReference": "MessageReferenceOut",

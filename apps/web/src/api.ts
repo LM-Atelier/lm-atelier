@@ -41,6 +41,7 @@ import type {
   GenerationPreset,
   GenerationPresetBundle,
   Job,
+  JobActivity,
   Message,
   ModelAssetInstall,
   ModelInstall,
@@ -560,6 +561,8 @@ export const api = {
   cancelChat: (chatId: string) =>
     request<Job>(`/api/chats/${chatId}/cancel`, { method: "POST" }),
   jobs: () => request<Job[]>("/api/jobs"),
+  jobActivity: (activeLimit: number) =>
+    request<JobActivity>(`/api/jobs/activity?active_limit=${activeLimit}`),
   workPlans: (chatId?: string) =>
     request<WorkPlan[]>(
       `/api/work-plans${chatId ? `?chat_id=${encodeURIComponent(chatId)}` : ""}`,

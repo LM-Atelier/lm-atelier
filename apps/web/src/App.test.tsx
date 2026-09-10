@@ -137,6 +137,7 @@ vi.mock("./api", async (importOriginal) => ({
     queueEditedMessage: vi.fn(),
     cancelChat: vi.fn(),
     jobs: vi.fn().mockResolvedValue([]),
+    jobActivity: vi.fn(),
     workPlans: vi.fn().mockResolvedValue([]),
     editedBranches: vi.fn().mockResolvedValue({ items: [], next_cursor: null }),
     activateEditedBranch: vi.fn(),
@@ -354,6 +355,16 @@ describe("App", () => {
     vi.mocked(api.workerSettings).mockResolvedValue({ worker_startup_seconds: 60 });
     vi.mocked(api.runtimes).mockResolvedValue([]);
     vi.mocked(api.jobs).mockResolvedValue([]);
+    vi.mocked(api.jobActivity).mockImplementation(async (limit = 100) => {
+      const jobs = (await api.jobs()).filter((job) => job.kind !== "edit_verify");
+      const active = jobs.filter((job) => ["queued", "running", "paused"].includes(job.status));
+      return {
+        active: active.slice(0, limit),
+        active_count: active.length,
+        recent_issues: jobs.filter((job) => ["failed", "cancelled", "interrupted"].includes(job.status))
+          .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at)).slice(0, 3),
+      };
+    });
     vi.mocked(api.workPlans).mockResolvedValue([]);
     vi.mocked(api.editedBranches).mockResolvedValue({ items: [], next_cursor: null });
     vi.mocked(api.backups).mockResolvedValue([]);

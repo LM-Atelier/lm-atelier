@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import type { QueryClient } from "@tanstack/react-query";
 import { connectEvents } from "./api";
-import type { AppEvent, Job, WorkPlan, WorkPlanStatus, WorkStepStatus } from "./types";
+import type { AppEvent, Job, JobActivity, WorkPlan, WorkPlanStatus, WorkStepStatus } from "./types";
 
 const AUTHORITATIVE_QUERY_ROOTS = new Set([
   "about",
@@ -72,14 +72,24 @@ export function useLiveEvents(
     // newer attempt had already produced. The job list carries each job's
     // attempt and is already here, so the answer does not have to be waited
     // for.
-    for (const job of client.getQueryData<Job[]>(["jobs"]) ?? []) {
+    const activityJobs = client.getQueriesData<JobActivity>({ queryKey: ["jobs", "activity"] })
+      .flatMap(([, activity]) => activity ? [...activity.active, ...activity.recent_issues] : []);
+    for (const job of [...(client.getQueryData<Job[]>(["jobs"]) ?? []), ...activityJobs]) {
       if (job.id && typeof job.attempt === "number") {
-        latestAttemptByJob.set(job.id, job.attempt);
+        latestAttemptByJob.set(job.id, Math.max(latestAttemptByJob.get(job.id) ?? 0, job.attempt));
       }
     }
     const latestAttempt = new Map<string, number>();
     let mediaRefresh: number | undefined;
     let authoritativeRefresh: number | undefined;
+    let activityRefresh: number | undefined;
+    const scheduleActivityRefresh = () => {
+      if (activityRefresh !== undefined) return;
+      activityRefresh = window.setTimeout(() => {
+        activityRefresh = undefined;
+        void client.invalidateQueries({ queryKey: ["jobs", "activity"] });
+      }, 100);
+    };
     const scheduleMediaRefresh = () => {
       if (mediaRefresh !== undefined) return;
       mediaRefresh = window.setTimeout(() => {
@@ -139,6 +149,27 @@ export function useLiveEvents(
               if (index < 0) return [snapshot, ...current];
               return current.map((job) => job.id === snapshot.id ? snapshot : job);
             });
+            if (snapshot.kind !== "edit_verify") {
+              const active = ["queued", "running", "paused"].includes(snapshot.status);
+              for (const [key, activity] of client.getQueriesData<JobActivity>({ queryKey: ["jobs", "activity"] })) {
+                if (!activity) continue;
+                const prior = activity.active.find((job) => job.id === snapshot.id)
+                  ?? activity.recent_issues.find((job) => job.id === snapshot.id);
+                if (prior && (snapshot.attempt < prior.attempt
+                  || (snapshot.attempt === prior.attempt
+                    && Date.parse(snapshot.updated_at) < Date.parse(prior.updated_at)))) continue;
+                if (active && activity.active.some((job) => job.id === snapshot.id)) {
+                  client.setQueryData<JobActivity>(key, {
+                    ...activity,
+                    active: activity.active.map((job) => job.id === snapshot.id ? snapshot : job),
+                  });
+                } else if (prior || !active || activity.active_count === activity.active.length) {
+                  // The bounded list cannot establish a new total or refill a
+                  // vacated row. Coalesce membership changes into a server read.
+                  scheduleActivityRefresh();
+                }
+              }
+            }
             if (snapshot.work_plan_id) {
               client.setQueriesData<WorkPlan[]>(
                 { queryKey: ["work-plans"] },
@@ -220,6 +251,7 @@ export function useLiveEvents(
     return () => {
       if (mediaRefresh !== undefined) window.clearTimeout(mediaRefresh);
       if (authoritativeRefresh !== undefined) window.clearTimeout(authoritativeRefresh);
+      if (activityRefresh !== undefined) window.clearTimeout(activityRefresh);
       dispose?.();
     };
   }, [client, setLiveText]);
