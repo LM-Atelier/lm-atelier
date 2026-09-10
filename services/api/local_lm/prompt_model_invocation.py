@@ -22,7 +22,9 @@ from .prompt_model_values import (
     PromptModelSlotSpec,
     PromptModelValues,
     PromptModelValuesError,
-    parse_prompt_model_values_json,
+    PromptModelValuesResult,
+    parse_prompt_model_values_result_json,
+    prompt_model_values_result_sha256,
     prompt_model_values_sha256,
     prompt_model_values_tool,
 )
@@ -115,7 +117,7 @@ class PromptModelAttemptEvidence:
 class PromptModelInvocationResult:
     """Validated model values and their canonical content digest."""
 
-    values: PromptModelValues = field(repr=False)
+    values: PromptModelValues | PromptModelValuesResult = field(repr=False)
     values_sha256: str
     attempts: tuple[PromptModelAttemptEvidence, ...] = field(repr=False)
 
@@ -505,7 +507,14 @@ async def invoke_prompt_model_values(
                 async for event in adapter.stream(request):
                     collector.add(event)
             arguments = collector.arguments()
-            values = parse_prompt_model_values_json(arguments, contract=contract_snapshot)
+            parsed = parse_prompt_model_values_result_json(arguments, contract=contract_snapshot)
+            values: PromptModelValues | PromptModelValuesResult = (
+                PromptModelValues(
+                    version=parsed.version, batch_values=parsed.batch_values, items=parsed.items
+                )
+                if parsed.complete
+                else parsed
+            )
         except _AdapterFailure:
             _fail()
         except TimeoutError:
@@ -524,7 +533,11 @@ async def invoke_prompt_model_values(
             _fail()
         evidence.append(collector.evidence())
         try:
-            digest = prompt_model_values_sha256(values, contract=contract_snapshot)
+            digest = (
+                prompt_model_values_result_sha256(values, contract=contract_snapshot)
+                if isinstance(values, PromptModelValuesResult)
+                else prompt_model_values_sha256(values, contract=contract_snapshot)
+            )
         except PromptModelValuesError:
             _fail("values")
         return PromptModelInvocationResult(

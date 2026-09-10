@@ -1,3 +1,4 @@
+import "./PromptTemplatesDialog.partial.css";
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { BookOpen, Plus, Search } from "lucide-react";
@@ -68,14 +69,18 @@ function AttemptStatus({
   attempt,
   onClose,
   onRetry,
+  onQueuePartial,
   onDiscard,
 }: {
   attempt: PromptDirectQueueAttempt;
   onClose: () => void;
   onRetry: () => void;
+  onQueuePartial: () => void;
   onDiscard: () => void;
 }) {
-  const count = attempt.createPayload.item_count;
+  const requested = attempt.createPayload.item_count;
+  const count = attempt.batch?.items.length ?? requested;
+  const unfilled = attempt.batch?.unfilled_ordinals ?? [];
   const plural = count === 1 ? "prompt" : "prompts";
   const pending = attempt.status === "creating" || attempt.status === "queueing";
   const errorMessage = attempt.errorStage === "admission"
@@ -100,7 +105,7 @@ function AttemptStatus({
 
   return (
     <section
-      className="prompt-template-direct-status"
+      className={`prompt-template-direct-status${unfilled.length ? " partial" : ""}`}
       aria-busy={pending}
       aria-live="polite"
     >
@@ -114,16 +119,42 @@ function AttemptStatus({
               ? `Adding ${count} ${plural} to the queue...`
               : attempt.status === "queued"
                 ? `${count} ${plural} queued`
-                : "Prompt creation needs attention"}
+                : attempt.status === "partial"
+                  ? `${count} of ${requested} prompts filled`
+                  : "Prompt creation needs attention"}
         </h3>
         {pending && <p>You can close this window. The request will continue safely.</p>}
         {attempt.status === "queued" && (
           <p>Generation is queued in this chat. Your composer and generation settings were left unchanged.</p>
         )}
+        {attempt.status === "partial" && (
+          <>
+            <p>
+              {unfilled.length === 1 ? "Prompt" : "Prompts"} {unfilled.join(", ")} {unfilled.length === 1 ? "was" : "were"} not filled.
+              {" "}Review the filled prompts before adding them to the queue.
+            </p>
+            <ol className="prompt-partial-review" aria-label="Filled prompts">
+              {attempt.batch?.items.map((item) => (
+                <li key={item.id}>
+                  <strong>Prompt {item.ordinal}</strong>
+                  <p>{item.reviewed_prompt}</p>
+                </li>
+              ))}
+            </ol>
+          </>
+        )}
         {attempt.status === "error" && <ErrorCallout message={errorMessage} />}
       </div>
       <footer>
         {pending && <button type="button" className="secondary" onClick={onClose}>Hide</button>}
+        {attempt.status === "partial" && (
+          <>
+            <button type="button" className="secondary" onClick={onDiscard}>Start over</button>
+            <button type="button" className="primary" onClick={onQueuePartial}>
+              Queue {count} filled {plural}
+            </button>
+          </>
+        )}
         {attempt.status === "queued" && (
           <button type="button" className="primary" onClick={onClose}>Done</button>
         )}
@@ -148,6 +179,7 @@ export function PromptTemplatesDialog({
   onClose,
   onCreate,
   onRetry,
+  onQueuePartial,
   onDiscard,
 }: {
   currentPrompt: string;
@@ -156,6 +188,7 @@ export function PromptTemplatesDialog({
   onClose: () => void;
   onCreate: (request: PromptDirectQueueRequest) => void;
   onRetry: () => void;
+  onQueuePartial: () => void;
   onDiscard: () => void;
 }) {
   const client = useQueryClient();
@@ -294,6 +327,7 @@ export function PromptTemplatesDialog({
           attempt={attempt}
           onClose={onClose}
           onRetry={onRetry}
+          onQueuePartial={onQueuePartial}
           onDiscard={onDiscard}
         />
       ) : (

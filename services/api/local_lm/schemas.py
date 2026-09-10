@@ -670,8 +670,11 @@ class PromptExpansionBatchOut(ApiModel):
     prompt_template_revision_id: str = Field(min_length=1, max_length=40)
     schema_version: Literal[1]
     contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    codec_version: Literal[2]
+    codec_version: Literal[2, 3]
     requested_count: int = Field(ge=1, le=16)
+    unfilled_ordinals: list[Annotated[int, Field(ge=1, le=16)]] = Field(
+        default_factory=list, max_length=16
+    )
     selection_seed: int = Field(ge=0, lt=2_147_483_648)
     plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     state: Literal["draft", "queued"]

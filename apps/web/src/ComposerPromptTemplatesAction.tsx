@@ -19,6 +19,7 @@ import type {
 
 export type PromptDirectQueueStatus =
   | "creating"
+  | "partial"
   | "queueing"
   | "queued"
   | "error";
@@ -67,7 +68,7 @@ export function ComposerPromptTemplatesAction({
     void client.invalidateQueries({ queryKey: ["work-plans", chatId] });
   };
 
-  const run = async (frozen: PromptDirectQueueAttempt) => {
+  const run = async (frozen: PromptDirectQueueAttempt, acceptPartial = false) => {
     if (inFlight.current) return;
     inFlight.current = true;
     let current = frozen;
@@ -94,6 +95,11 @@ export function ComposerPromptTemplatesAction({
           complete(draft, current);
           return;
         }
+      }
+
+      if (draft.unfilled_ordinals.length > 0 && !acceptPartial) {
+        publish({ ...current, batch: draft, status: "partial", errorStage: null, errorCode: null });
+        return;
       }
 
       stage = "queue";
@@ -154,7 +160,13 @@ export function ComposerPromptTemplatesAction({
   const retry = () => {
     const current = attemptRef.current;
     if (!current || current.status !== "error" || inFlight.current) return;
-    void run(current);
+    void run(current, current.errorStage === "queue");
+  };
+
+  const queuePartial = () => {
+    const current = attemptRef.current;
+    if (!current || current.status !== "partial" || inFlight.current) return;
+    void run(current, true);
   };
 
   const discard = () => {
@@ -186,6 +198,7 @@ export function ComposerPromptTemplatesAction({
           onClose={close}
           onCreate={begin}
           onRetry={retry}
+          onQueuePartial={queuePartial}
           onDiscard={discard}
         />
       )}

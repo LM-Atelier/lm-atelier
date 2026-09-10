@@ -2192,3 +2192,142 @@ def test_invocation_data_requires_the_exact_authored_pending_contract() -> None:
         prompt_model_invocation_data(contract, plan)
     assert str(caught.value) == PROMPT_EXPANSION_INVALID
     assert "forged guidance" not in str(caught.value)
+
+
+def _partial_completion_fixture():
+    from local_lm.prompt_model_values import parse_prompt_model_values_result
+
+    contract = _contract(
+        body="{{subject}} {{mood}} {{detail}}",
+        slots=[
+            {"name": "subject", "mode": "input", "variation_scope": "item"},
+            {
+                "name": "mood",
+                "mode": "choice",
+                "variation_scope": "item",
+                "choices": ["calm", "bright", "quiet"],
+            },
+            {
+                "name": "detail",
+                "mode": "model",
+                "variation_scope": "item",
+                "guidance": "one visible detail",
+            },
+        ],
+    )
+    plan = expand_prompt_template(
+        contract,
+        _request(contract, inputs={"subject": ["fox", "tree", "bridge"]}),
+    )
+    result = parse_prompt_model_values_result(
+        {
+            "version": 1,
+            "batch_values": {},
+            "items": [
+                {"ordinal": 1, "values": {"detail": "leaves"}},
+                {"ordinal": 3, "values": {"detail": "clouds"}},
+            ],
+        },
+        contract=prompt_model_slot_contract(contract, item_count=3),
+    )
+    return contract, plan, result
+
+
+def _partial_completion():
+    import local_lm.prompt_expansion as expansion
+
+    contract, plan, result = _partial_completion_fixture()
+    return expansion.complete_prompt_expansion_with_model_result(contract, plan, result)
+
+
+def test_partial_completion_preserves_requested_ordinals_and_allocated_inputs() -> None:
+    contract, pending, _ = _partial_completion_fixture()
+    partial = _partial_completion()
+    assert partial.request == pending.request
+    assert partial.request.item_count == 3
+    assert partial.codec_version == 3
+    assert not partial.complete
+    assert partial.pending_model_slots == ()
+    assert partial.unfilled_ordinals == (2,)
+    assert [item.ordinal for item in partial.items] == [1, 3]
+    assert _values(partial, "subject") == ["fox", "bridge"]
+    assert _values(partial, "mood") == [_values(pending, "mood")[0], _values(pending, "mood")[2]]
+    payload = expansion_plan_payload(partial)
+    assert payload["unfilled_ordinals"] == [2]
+    assert parse_expansion_plan_payload(payload) == payload
+    assert expansion_plan_payload_digest(payload) == expansion_plan_digest(partial)
+
+
+def test_partial_completion_full_result_keeps_legacy_receipt_bytes() -> None:
+    import local_lm.prompt_expansion as expansion
+    from local_lm.prompt_model_values import parse_prompt_model_values_result
+
+    contract, plan = _bridge_plan()
+    values = _bridge_values(contract)
+    result = parse_prompt_model_values_result(
+        prompt_model_values_payload(
+            values, contract=prompt_model_slot_contract(contract, item_count=2)
+        ),
+        contract=prompt_model_slot_contract(contract, item_count=2),
+    )
+    actual = expansion.complete_prompt_expansion_with_model_result(contract, plan, result)
+    expected = complete_prompt_expansion_with_model_values(contract, plan, values)
+    assert actual.complete
+    assert actual.codec_version == 2
+    assert actual.unfilled_ordinals == ()
+    assert expansion_plan_payload(actual) == expansion_plan_payload(expected)
+    assert expansion_plan_digest(actual) == expansion_plan_digest(expected)
+    assert "unfilled_ordinals" not in expansion_plan_payload(actual)
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "missing",
+        "overlap",
+        "duplicate",
+        "bool",
+        "order",
+        "renumber",
+        "short_inputs",
+        "legacy",
+        "pending",
+        "unknown",
+    ],
+)
+def test_partial_completion_receipt_refuses_false_subset_authority(defect: str) -> None:
+    payload = expansion_plan_payload(_partial_completion())
+    if defect == "missing":
+        payload["unfilled_ordinals"] = []
+    elif defect == "overlap":
+        payload["unfilled_ordinals"] = [1, 2]
+    elif defect == "duplicate":
+        payload["unfilled_ordinals"] = [2, 2]
+    elif defect == "bool":
+        payload["unfilled_ordinals"] = [True]
+    elif defect == "order":
+        payload["items"].reverse()
+    elif defect == "renumber":
+        payload["items"][1]["ordinal"] = 2
+        payload["unfilled_ordinals"] = [3]
+    elif defect == "short_inputs":
+        payload["request"]["inputs"]["subject"] = ["fox", "bridge"]
+    elif defect == "legacy":
+        payload["codec_version"] = 2
+        del payload["unfilled_ordinals"]
+    elif defect == "pending":
+        payload["pending_model_slots"] = [
+            {"name": "detail", "variation_scope": "item", "guidance": "detail"}
+        ]
+    else:
+        payload["extra"] = True
+    with pytest.raises(PromptExpansionError, match="^" + PROMPT_EXPANSION_INVALID + "$"):
+        parse_expansion_plan_payload(payload)
+
+
+@pytest.mark.parametrize("missing", [(), (1, 2), (True,), (2, 2)])
+def test_partial_completion_writer_refuses_forged_missing_ordinals(missing: object) -> None:
+    partial = _partial_completion()
+    object.__setattr__(partial, "unfilled_ordinals", missing)
+    with pytest.raises(PromptExpansionError):
+        expansion_plan_payload(partial)

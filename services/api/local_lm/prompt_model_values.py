@@ -91,6 +91,21 @@ class PromptModelValues:
     items: tuple[PromptModelItemValues, ...] = field(repr=False)
 
 
+@dataclass(frozen=True, slots=True)
+class PromptModelValuesResult:
+    """Supplied values and explicit unfilled ordinals within the original request."""
+
+    version: int
+    requested_item_count: int
+    batch_values: tuple[tuple[str, str], ...] = field(repr=False)
+    items: tuple[PromptModelItemValues, ...] = field(repr=False)
+    unfilled_ordinals: tuple[int, ...]
+
+    @property
+    def complete(self) -> bool:
+        return not self.unfilled_ordinals
+
+
 def _detach_exact_json(value: object) -> object:
     """Detach an exact built-in JSON tree before any key lookup or comparison."""
 
@@ -393,12 +408,12 @@ def _parse_values(
     return tuple((name, _value(mapping[name])) for name in names)
 
 
-def parse_prompt_model_values(
+def parse_prompt_model_values_result(
     value: object,
     *,
     contract: PromptModelSlotContract,
-) -> PromptModelValues:
-    """Validate and detach one exact model tool payload."""
+) -> PromptModelValuesResult:
+    """Detach complete item values without treating missing ordinals as supplied."""
 
     if not _valid_contract(contract):
         _invalid()
@@ -408,31 +423,52 @@ def parse_prompt_model_values(
         _invalid()
     batch_values = _parse_values(root["batch_values"], contract.batch_slots)
     raw_items = root["items"]
-    if type(raw_items) is not list or len(raw_items) != contract.item_count:
+    if type(raw_items) is not list or not 1 <= len(raw_items) <= contract.item_count:
         _invalid()
     items: list[PromptModelItemValues] = []
-    for expected_ordinal, raw_item in enumerate(raw_items, start=1):
+    previous_ordinal = 0
+    for raw_item in raw_items:
         item = _exact_keys(raw_item, _ITEM_KEYS)
-        if type(item["ordinal"]) is not int or item["ordinal"] != expected_ordinal:
+        ordinal = item["ordinal"]
+        if type(ordinal) is not int or not previous_ordinal < ordinal <= contract.item_count:
             _invalid()
         items.append(
             PromptModelItemValues(
-                ordinal=expected_ordinal,
+                ordinal=ordinal,
                 values=_parse_values(item["values"], contract.item_slots),
             )
         )
-    return PromptModelValues(
+        previous_ordinal = ordinal
+    supplied = {item.ordinal for item in items}
+    return PromptModelValuesResult(
         version=PROMPT_MODEL_VALUES_VERSION,
+        requested_item_count=contract.item_count,
         batch_values=batch_values,
         items=tuple(items),
+        unfilled_ordinals=tuple(
+            ordinal for ordinal in range(1, contract.item_count + 1) if ordinal not in supplied
+        ),
     )
 
 
-def parse_prompt_model_values_json(
+def parse_prompt_model_values(
     value: object,
     *,
     contract: PromptModelSlotContract,
 ) -> PromptModelValues:
+    """Validate and detach one exact, complete model tool payload."""
+
+    result = parse_prompt_model_values_result(value, contract=contract)
+    if not result.complete:
+        _invalid()
+    return PromptModelValues(
+        version=result.version,
+        batch_values=result.batch_values,
+        items=result.items,
+    )
+
+
+def _decode_prompt_model_values_json(value: object) -> object:
     """Parse exact raw tool arguments without losing duplicate object keys."""
 
     if type(value) is not str or not value:
@@ -468,7 +504,43 @@ def parse_prompt_model_values_json(
         raise
     except (json.JSONDecodeError, RecursionError, TypeError, ValueError, OverflowError):
         _invalid()
-    return parse_prompt_model_values(decoded, contract=contract)
+    return decoded
+
+
+def parse_prompt_model_values_json(
+    value: object,
+    *,
+    contract: PromptModelSlotContract,
+) -> PromptModelValues:
+    """Keep the strict complete-result JSON boundary for legacy callers."""
+
+    return parse_prompt_model_values(_decode_prompt_model_values_json(value), contract=contract)
+
+
+def parse_prompt_model_values_result_json(
+    value: object,
+    *,
+    contract: PromptModelSlotContract,
+) -> PromptModelValuesResult:
+    """Read a bounded complete or partial result without losing duplicate keys."""
+
+    return parse_prompt_model_values_result(
+        _decode_prompt_model_values_json(value), contract=contract
+    )
+
+
+def _pairs_payload(raw: object) -> dict[str, str]:
+    if type(raw) is not tuple:
+        _invalid()
+    result: dict[str, str] = {}
+    for pair in raw:
+        if type(pair) is not tuple or len(pair) != 2:
+            _invalid()
+        name, text = pair
+        if type(name) is not str or name in result:
+            _invalid()
+        result[name] = _value(text)
+    return result
 
 
 def prompt_model_values_payload(
@@ -486,19 +558,6 @@ def prompt_model_values_payload(
     ):
         _invalid()
 
-    def pairs_payload(raw: object) -> dict[str, str]:
-        if type(raw) is not tuple:
-            _invalid()
-        result: dict[str, str] = {}
-        for pair in raw:
-            if type(pair) is not tuple or len(pair) != 2:
-                _invalid()
-            name, text = pair
-            if type(name) is not str or name in result:
-                _invalid()
-            result[name] = _value(text)
-        return result
-
     item_payloads: list[dict[str, object]] = []
     for item in values.items:
         if (
@@ -507,10 +566,10 @@ def prompt_model_values_payload(
             or type(item.values) is not tuple
         ):
             _invalid()
-        item_payloads.append({"ordinal": item.ordinal, "values": pairs_payload(item.values)})
+        item_payloads.append({"ordinal": item.ordinal, "values": _pairs_payload(item.values)})
     candidate: dict[str, object] = {
         "version": values.version,
-        "batch_values": pairs_payload(values.batch_values),
+        "batch_values": _pairs_payload(values.batch_values),
         "items": item_payloads,
     }
     normalized = parse_prompt_model_values(candidate, contract=contract)
@@ -527,6 +586,115 @@ def prompt_model_values_sha256(
     """Hash the exact accepted values without exposing their text."""
 
     payload = prompt_model_values_payload(values, contract=contract)
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def parse_prompt_model_values_result_payload(
+    value: object,
+    *,
+    contract: PromptModelSlotContract,
+) -> PromptModelValuesResult:
+    """Validate a result receipt against the unchanged original model contract."""
+
+    if not _valid_contract(contract):
+        _invalid()
+    root = _exact_keys(
+        _detach_exact_json(value),
+        _RESULT_KEYS | {"requested_item_count", "unfilled_ordinals"},
+    )
+    if (
+        type(root["requested_item_count"]) is not int
+        or root["requested_item_count"] != contract.item_count
+    ):
+        _invalid()
+    unfilled = root["unfilled_ordinals"]
+    if (
+        type(unfilled) is not list
+        or len(unfilled) > contract.item_count
+        or any(type(ordinal) is not int for ordinal in unfilled)
+    ):
+        _invalid()
+    result = parse_prompt_model_values_result(
+        {key: root[key] for key in _RESULT_KEYS},
+        contract=contract,
+    )
+    if tuple(unfilled) != result.unfilled_ordinals:
+        _invalid()
+    return result
+
+
+def prompt_model_values_result_payload(
+    result: PromptModelValuesResult,
+    *,
+    contract: PromptModelSlotContract,
+) -> dict[str, object]:
+    """Snapshot a bounded result and verify every claimed missing ordinal."""
+
+    if type(result) is not PromptModelValuesResult:
+        _invalid()
+    try:
+        version = object.__getattribute__(result, "version")
+        count = object.__getattribute__(result, "requested_item_count")
+        batch = object.__getattribute__(result, "batch_values")
+        items = object.__getattribute__(result, "items")
+        unfilled = object.__getattribute__(result, "unfilled_ordinals")
+    except AttributeError:
+        _invalid()
+    if (
+        type(version) is not int
+        or type(count) is not int
+        or type(batch) is not tuple
+        or len(batch) > MAX_TEMPLATE_SLOTS
+        or type(items) is not tuple
+        or not 1 <= len(items) <= MAX_PROMPT_MODEL_ITEMS
+        or type(unfilled) is not tuple
+        or len(unfilled) > MAX_PROMPT_MODEL_ITEMS
+    ):
+        _invalid()
+    item_payloads: list[dict[str, object]] = []
+    for item in items:
+        if type(item) is not PromptModelItemValues:
+            _invalid()
+        try:
+            ordinal = object.__getattribute__(item, "ordinal")
+            values = object.__getattribute__(item, "values")
+        except AttributeError:
+            _invalid()
+        if (
+            type(ordinal) is not int
+            or type(values) is not tuple
+            or len(values) > MAX_TEMPLATE_SLOTS
+        ):
+            _invalid()
+        item_payloads.append({"ordinal": ordinal, "values": _pairs_payload(values)})
+    candidate: dict[str, object] = {
+        "version": version,
+        "requested_item_count": count,
+        "batch_values": _pairs_payload(batch),
+        "items": item_payloads,
+        "unfilled_ordinals": list(unfilled),
+    }
+    normalized = parse_prompt_model_values_result_payload(candidate, contract=contract)
+    if normalized != result:
+        _invalid()
+    return candidate
+
+
+def prompt_model_values_result_sha256(
+    result: PromptModelValuesResult,
+    *,
+    contract: PromptModelSlotContract,
+) -> str:
+    """Bind supplied values and missing items to the original requested count."""
+
+    payload = prompt_model_values_result_payload(result, contract=contract)
     encoded = json.dumps(
         payload,
         sort_keys=True,

@@ -195,6 +195,7 @@ it("uses the isolated no-media Prompt Library batch transport contract", async (
     schema_version: 1,
     contract_sha256: "b".repeat(64),
     codec_version: 2,
+    unfilled_ordinals: [],
     requested_count: 1,
     selection_seed: 17,
     plan_sha256: "c".repeat(64),

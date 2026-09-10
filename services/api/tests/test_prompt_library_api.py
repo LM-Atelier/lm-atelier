@@ -1307,11 +1307,18 @@ def _ready_chat_model(app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> tuple[st
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("partial", [False, True])
 async def test_model_guided_prompt_batch_invokes_once_and_replays_before_readiness(
     app: FastAPI,
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
+    partial: bool,
 ) -> None:
+    from local_lm.prompt_model_values import (
+        parse_prompt_model_values_result,
+        prompt_model_values_result_sha256,
+    )
+
     _profile_id, install_id = _ready_chat_model(app, monkeypatch)
     calls = 0
 
@@ -1319,7 +1326,8 @@ async def test_model_guided_prompt_batch_invokes_once_and_replays_before_readine
         nonlocal calls
         calls += 1
         items = data.items
-        values = parse_prompt_model_values(
+        parse_values = parse_prompt_model_values_result if partial else parse_prompt_model_values
+        values = parse_values(
             {
                 "version": 1,
                 "batch_values": {},
@@ -1329,13 +1337,18 @@ async def test_model_guided_prompt_batch_invokes_once_and_replays_before_readine
                         "values": {"subject": f"model subject {item.ordinal}"},
                     }
                     for item in items
+                    if not partial or item.ordinal != 2
                 ],
             },
             contract=contract,
         )
         return PromptModelInvocationResult(
             values=values,
-            values_sha256=prompt_model_values_sha256(values, contract=contract),
+            values_sha256=(
+                prompt_model_values_result_sha256(values, contract=contract)
+                if partial
+                else prompt_model_values_sha256(values, contract=contract)
+            ),
             attempts=(),
         )
 
@@ -1365,7 +1378,7 @@ async def test_model_guided_prompt_batch_invokes_once_and_replays_before_readine
         "idempotency_key": "model-success-preview",
         "template_revision_id": revision["id"],
         "contract_sha256": revision["contract_sha256"],
-        "item_count": 2,
+        "item_count": 3 if partial else 2,
         "selection_seed": 9,
         "inputs": {},
     }
@@ -1373,6 +1386,13 @@ async def test_model_guided_prompt_batch_invokes_once_and_replays_before_readine
     assert first.status_code == 201
     assert first.json()["replayed"] is False
     assert len(first.json()["items"]) == 2
+    assert first.json()["requested_count"] == (3 if partial else 2)
+    assert first.json()["codec_version"] == (3 if partial else 2)
+    assert first.json()["unfilled_ordinals"] == ([2] if partial else [])
+    assert [item["ordinal"] for item in first.json()["items"]] == ([1, 3] if partial else [1, 2])
+    reread = await client.get(f"/api/prompt-batches/{first.json()['id']}")
+    assert reread.status_code == 200
+    assert reread.json()["unfilled_ordinals"] == ([2] if partial else [])
     assert calls == 1
 
     monkeypatch.setattr(app.state.services.processes, "statuses", lambda: [])
@@ -2805,3 +2825,112 @@ async def test_auto_prior_edit_keeps_only_a_compatible_accepted_recipe(
             assert inherited["submitted_sha256"] != witness["submitted_sha256"]
         current = await client.get(f"/api/prompt-batches/{batch['id']}")
         assert current.json()["plan_version"] == witness["queued_plan_version"]
+
+
+@pytest.mark.asyncio
+async def test_partial_prompt_batch_queues_only_supplied_original_ordinals(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_lm.prompt_model_values import (
+        parse_prompt_model_values_result,
+        prompt_model_values_result_sha256,
+    )
+
+    _ready_chat_model(app, monkeypatch)
+    calls = 0
+
+    async def invoke(_adapter: object, *, contract: Any, data: Any) -> PromptModelInvocationResult:
+        nonlocal calls
+        calls += 1
+        assert len(data.items) == 3
+        values = parse_prompt_model_values_result(
+            {
+                "version": 1,
+                "batch_values": {},
+                "items": [
+                    {"ordinal": 1, "values": {"subject": "a blue bridge"}},
+                    {"ordinal": 3, "values": {"subject": "a green tree"}},
+                ],
+            },
+            contract=contract,
+        )
+        return PromptModelInvocationResult(
+            values=values,
+            values_sha256=prompt_model_values_result_sha256(values, contract=contract),
+            attempts=(),
+        )
+
+    monkeypatch.setattr(api_module, "invoke_prompt_model_values", invoke)
+    chat = (await client.post("/api/chats", json={"title": "Partial batch queue"})).json()
+    template = (
+        await client.post(
+            "/api/prompt-templates",
+            json=_create_payload(
+                key="partial-queue-template",
+                name="Partial queue template",
+                contract=_model_slot_contract(),
+            ),
+        )
+    ).json()
+    revision = template["revision"]
+    created = await client.post(
+        f"/api/chats/{chat['id']}/prompt-batches",
+        json={
+            "idempotency_key": "partial-queue-create",
+            "template_revision_id": revision["id"],
+            "contract_sha256": revision["contract_sha256"],
+            "item_count": 3,
+            "selection_seed": 8,
+            "inputs": {},
+        },
+    )
+    assert created.status_code == 201
+    batch = created.json()
+    assert batch["requested_count"] == 3 and batch["unfilled_ordinals"] == [2]
+    assert [item["ordinal"] for item in batch["items"]] == [1, 3]
+    with SessionLocal() as session:
+        assert session.query(PromptExpansionItem).count() == 2
+        assert session.query(Run).count() == session.query(Job).count() == 0
+    missing = await client.patch(
+        f"/api/prompt-batches/{batch['id']}/items/2",
+        json={
+            "expected_review_version": 1,
+            "expected_plan_version": 1,
+            "reviewed_prompt": "an absent draft",
+            "selected": True,
+        },
+    )
+    assert missing.status_code == 404
+    payload = {
+        "idempotency_key": "partial-queue",
+        "expected_plan_version": batch["plan_version"],
+        "expected_plan_sha256": batch["plan_sha256"],
+    }
+    async with app.state.services.scheduler.lease("primary"):
+        response = await client.post(f"/api/prompt-batches/{batch['id']}/queue", json=payload)
+        assert response.status_code == 202, response.text
+        queued = response.json()
+        assert queued["requested_count"] == 3 and queued["unfilled_ordinals"] == [2]
+        assert [item["ordinal"] for item in queued["items"]] == [1, 3]
+        plan = (await client.get(f"/api/work-plans/{queued['work_plan_id']}")).json()
+        assert plan["summary_json"]["output_count"] == 2
+        assert [step["prompt"] for step in plan["steps"]] == [
+            item["reviewed_prompt"] for item in batch["items"]
+        ]
+        with SessionLocal() as session:
+            runs = list(
+                session.scalars(select(Run).where(Run.work_plan_id == queued["work_plan_id"])).all()
+            )
+            assert len(runs) == 2
+            assert sorted(run.provenance_json["prompt_source"]["item_ordinal"] for run in runs) == [
+                1,
+                3,
+            ]
+            assert session.query(PromptExpansionItem).count() == 2
+        replay = await client.post(f"/api/prompt-batches/{batch['id']}/queue", json=payload)
+        assert replay.status_code == 202
+        assert replay.json()["replayed"] is True
+        assert replay.json()["work_plan_id"] == queued["work_plan_id"]
+        assert calls == 1

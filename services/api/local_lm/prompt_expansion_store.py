@@ -23,9 +23,11 @@ from .models import (
 from .prompt_expansion import (
     MAX_EXPANSION_ITEMS,
     PROMPT_EXPANSION_CODEC_VERSION,
+    PROMPT_PARTIAL_EXPANSION_CODEC_VERSION,
     ExpansionPlan,
     ExpansionRequest,
     PromptExpansionError,
+    complete_prompt_expansion_with_model_result,
     complete_prompt_expansion_with_model_values,
     expand_prompt_template,
     expansion_plan_payload,
@@ -43,8 +45,11 @@ from .prompt_model_values import (
     PROMPT_MODEL_VALUES_VERSION,
     PromptModelValues,
     PromptModelValuesError,
+    PromptModelValuesResult,
     parse_prompt_model_values,
+    parse_prompt_model_values_result_payload,
     prompt_model_slot_contract,
+    prompt_model_values_result_sha256,
     prompt_model_values_sha256,
 )
 from .prompt_templates import (
@@ -354,11 +359,14 @@ def _receipt(
     contract: PromptTemplateContract,
     request: ExpansionRequest,
     original: bool,
+    codec_version: int,
 ) -> dict[str, Any]:
     entries: list[dict[str, object]] = []
-    for expected, item in enumerate(items, start=1):
-        if type(item.ordinal) is not int or item.ordinal != expected:
+    previous = 0
+    for item in items:
+        if type(item.ordinal) is not int or not previous < item.ordinal <= request.item_count:
             _invalid()
+        previous = item.ordinal
         if type(item.review_version) is not int or item.review_version < 1:
             _invalid()
         if type(item.reroll_count) is not int or item.reroll_count < 0:
@@ -371,7 +379,7 @@ def _receipt(
             _invalid()
         evidence_raw = item.original_evidence_json if original else item.current_evidence_json
         evidence = _load_canonical_json(evidence_raw, maximum=MAX_EXPANSION_EVIDENCE_JSON_CHARS)
-        prompt = _render_current_evidence(contract, request, evidence, ordinal=expected)
+        prompt = _render_current_evidence(contract, request, evidence, ordinal=item.ordinal)
         stored_digest = _prompt_sha256(prompt)
         if original and (
             prompt != _prompt(item.original_rendered_prompt)
@@ -380,19 +388,24 @@ def _receipt(
             _invalid()
         entries.append(
             {
-                "ordinal": expected,
+                "ordinal": item.ordinal,
                 "rendered_prompt": prompt,
                 "rendered_sha256": stored_digest,
                 "evidence": evidence,
             }
         )
     candidate: dict[str, object] = {
-        "codec_version": PROMPT_EXPANSION_CODEC_VERSION,
+        "codec_version": codec_version,
         "request": request_payload,
         "template_body": contract.body,
         "pending_model_slots": [],
         "items": entries,
     }
+    if codec_version == PROMPT_PARTIAL_EXPANSION_CODEC_VERSION:
+        present = {item.ordinal for item in items}
+        candidate["unfilled_ordinals"] = [
+            ordinal for ordinal in range(1, request.item_count + 1) if ordinal not in present
+        ]
     try:
         return parse_expansion_plan_payload(candidate)
     except PromptExpansionError:
@@ -474,7 +487,7 @@ def _model_values_from_receipt(
     contract: PromptTemplateContract,
     request: ExpansionRequest,
     receipt: dict[str, Any],
-) -> tuple[PromptModelValues, str]:
+) -> tuple[PromptModelValues | PromptModelValuesResult, str]:
     """Reconstruct the exact model output carried by completed evidence."""
 
     try:
@@ -482,7 +495,10 @@ def _model_values_from_receipt(
     except PromptModelValuesError:
         _invalid()
     raw_items = receipt["items"]
-    if type(raw_items) is not list or len(raw_items) != request.item_count:
+    partial = receipt["codec_version"] == PROMPT_PARTIAL_EXPANSION_CODEC_VERSION
+    if type(raw_items) is not list or not 1 <= len(raw_items) <= request.item_count:
+        _invalid()
+    if not partial and len(raw_items) != request.item_count:
         _invalid()
 
     evidence_by_item: list[dict[str, dict[str, object]]] = []
@@ -522,7 +538,8 @@ def _model_values_from_receipt(
         batch_values[slot.name] = observed
 
     item_payloads: list[dict[str, object]] = []
-    for ordinal, indexed in enumerate(evidence_by_item, start=1):
+    for raw_item, indexed in zip(raw_items, evidence_by_item, strict=True):
+        ordinal = raw_item["ordinal"]
         item_values: dict[str, str] = {}
         for slot in model_contract.item_slots:
             slot_evidence = indexed.get(slot.name)
@@ -537,15 +554,20 @@ def _model_values_from_receipt(
             item_values[slot.name] = cast(str, slot_evidence["value"])
         item_payloads.append({"ordinal": ordinal, "values": item_values})
     try:
-        values = parse_prompt_model_values(
-            {
-                "version": PROMPT_MODEL_VALUES_VERSION,
-                "batch_values": batch_values,
-                "items": item_payloads,
-            },
-            contract=model_contract,
-        )
-        digest = prompt_model_values_sha256(values, contract=model_contract)
+        payload: dict[str, object] = {
+            "version": PROMPT_MODEL_VALUES_VERSION,
+            "batch_values": batch_values,
+            "items": item_payloads,
+        }
+        values: PromptModelValues | PromptModelValuesResult
+        if partial:
+            payload["requested_item_count"] = request.item_count
+            payload["unfilled_ordinals"] = receipt["unfilled_ordinals"]
+            values = parse_prompt_model_values_result_payload(payload, contract=model_contract)
+            digest = prompt_model_values_result_sha256(values, contract=model_contract)
+        else:
+            values = parse_prompt_model_values(payload, contract=model_contract)
+            digest = prompt_model_values_sha256(values, contract=model_contract)
     except PromptModelValuesError:
         raise PromptExpansionStoreError() from None
     return values, digest
@@ -570,7 +592,10 @@ def _verify_original_plan(
             values, values_digest = _model_values_from_receipt(contract, request, receipt)
             if snapshot.values_sha256 != values_digest or pending.complete:
                 _invalid()
-            expected = complete_prompt_expansion_with_model_values(contract, pending, values)
+            if isinstance(values, PromptModelValuesResult):
+                expected = complete_prompt_expansion_with_model_result(contract, pending, values)
+            else:
+                expected = complete_prompt_expansion_with_model_values(contract, pending, values)
         expected_payload = expansion_plan_payload(expected)
     except (PromptExpansionError, PromptTemplateError):
         raise PromptExpansionStoreError() from None
@@ -588,7 +613,9 @@ def _verify_stored(
         or batch.plan_version < 1
         or batch.state not in {"draft", "queued"}
         or batch.schema_version != 1
-        or batch.codec_version != PROMPT_EXPANSION_CODEC_VERSION
+        or type(batch.codec_version) is not int
+        or batch.codec_version
+        not in {PROMPT_EXPANSION_CODEC_VERSION, PROMPT_PARTIAL_EXPANSION_CODEC_VERSION}
     ):
         _invalid()
     request_object = _load_canonical_json(
@@ -616,7 +643,10 @@ def _verify_stored(
     if revision.schema_version != batch.schema_version:
         _invalid()
     items = _items(session, batch.id, request.item_count)
-    if len(items) != request.item_count:
+    if batch.codec_version == PROMPT_EXPANSION_CODEC_VERSION:
+        if len(items) != request.item_count:
+            _invalid()
+    elif not 1 <= len(items) < request.item_count:
         _invalid()
     raw_selected = session.execute(
         text(
@@ -651,8 +681,22 @@ def _verify_stored(
     expected_plan_version = 1 + edits + (1 if batch.state == "queued" else 0)
     if batch.plan_version != expected_plan_version:
         _invalid()
-    original = _receipt(request_payload, items, contract=contract, request=request, original=True)
-    current = _receipt(request_payload, items, contract=contract, request=request, original=False)
+    original = _receipt(
+        request_payload,
+        items,
+        contract=contract,
+        request=request,
+        original=True,
+        codec_version=batch.codec_version,
+    )
+    current = _receipt(
+        request_payload,
+        items,
+        contract=contract,
+        request=request,
+        original=False,
+        codec_version=batch.codec_version,
+    )
     if expansion_plan_payload_digest(original) != _sha256(batch.original_plan_sha256):
         _invalid()
     if expansion_plan_payload_digest(current) != _sha256(batch.plan_sha256):
@@ -763,7 +807,7 @@ def create_or_replay_expansion(
                 prompt_template_revision_id=revision.id,
                 schema_version=revision.schema_version,
                 contract_sha256=revision.contract_sha256,
-                codec_version=PROMPT_EXPANSION_CODEC_VERSION,
+                codec_version=plan_payload["codec_version"],
                 request_json=request_json,
                 model_snapshot_json=snapshot_json,
                 original_plan_sha256=plan_digest,
@@ -988,8 +1032,8 @@ def _validate_reroll_target(
     plan: ExpansionPlan,
     ordinal: int,
 ) -> None:
-    expanded = plan.items[ordinal - 1]
-    if expanded.rendered_prompt is None:
+    expanded = next((item for item in plan.items if item.ordinal == ordinal), None)
+    if expanded is None or expanded.rendered_prompt is None:
         _invalid()
     supplied = dict(request.inputs)
     try:
@@ -1076,6 +1120,9 @@ def reroll_expansion_item(
     if (
         payload["request"] != verified.request_payload
         or payload["template_body"] != verified.contract.body
+        or payload["codec_version"] != verified.current_receipt["codec_version"]
+        or payload.get("unfilled_ordinals") != verified.current_receipt.get("unfilled_ordinals")
+        or len(payload["items"]) != len(verified.current_receipt["items"])
         or snapshot != verified.model_snapshot
         or snapshot_json != verified.stored.batch.model_snapshot_json
     ):
@@ -1083,10 +1130,10 @@ def reroll_expansion_item(
     item = next((one for one in verified.stored.items if one.id == item_identity), None)
     if item is None:
         _invalid()
-    for position, (candidate, current) in enumerate(
-        zip(payload["items"], verified.current_receipt["items"], strict=True), start=1
-    ):
-        if position != item.ordinal and candidate != current:
+    for candidate, current in zip(payload["items"], verified.current_receipt["items"], strict=True):
+        if candidate["ordinal"] != current["ordinal"]:
+            _invalid()
+        if current["ordinal"] != item.ordinal and candidate != current:
             _invalid()
     if snapshot.kind == "model":
         _values, values_digest = _model_values_from_receipt(
@@ -1102,10 +1149,11 @@ def reroll_expansion_item(
         else:
             _invalid()
     _validate_reroll_target(verified.contract, verified.request, plan, item.ordinal)
-    expanded = plan.items[item.ordinal - 1]
-    if expanded.rendered_prompt is None or expanded.rendered_sha256 is None:
+    expanded = next((one for one in plan.items if one.ordinal == item.ordinal), None)
+    if expanded is None or expanded.rendered_prompt is None or expanded.rendered_sha256 is None:
         _invalid()
-    evidence_json = _canonical_json(payload["items"][item.ordinal - 1]["evidence"])
+    evidence_payload = next(one for one in payload["items"] if one["ordinal"] == item.ordinal)
+    evidence_json = _canonical_json(evidence_payload["evidence"])
     return _cas_item_and_batch(
         session,
         verified,

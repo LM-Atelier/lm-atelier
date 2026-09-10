@@ -17,6 +17,7 @@ const batch: PromptBatch = {
   schema_version: 1,
   contract_sha256: "a".repeat(64),
   codec_version: 2,
+    unfilled_ordinals: [],
   requested_count: 1,
   selection_seed: 7,
   plan_sha256: "b".repeat(64),

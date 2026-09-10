@@ -105,7 +105,10 @@ ITEM_INSERT_TRIGGER = f"""
 CREATE TRIGGER prompt_expansion_item_insert_guard
 BEFORE INSERT ON prompt_expansion_items
 BEGIN
-  SELECT CASE WHEN NEW.ordinal IS NOT COALESCE((
+  SELECT CASE WHEN (
+    SELECT batch.codec_version FROM prompt_expansion_batches AS batch
+    WHERE batch.id = NEW.batch_id
+  ) = 2 AND NEW.ordinal IS NOT COALESCE((
     SELECT max(existing.ordinal) + 1
     FROM prompt_expansion_items AS existing
     WHERE existing.batch_id = NEW.batch_id
@@ -116,10 +119,21 @@ BEGIN
     WHERE existing.batch_id = NEW.batch_id
   ) >= COALESCE((
     SELECT json_extract(batch.request_json, '$.item_count')
+           - CASE WHEN batch.codec_version = 3 THEN 1 ELSE 0 END
     FROM prompt_expansion_batches AS batch
     WHERE batch.id = NEW.batch_id
   ), 0)
     THEN RAISE(ABORT, 'prompt expansion batch already has all items') END;
+  SELECT CASE WHEN typeof(NEW.ordinal) != 'integer'
+                        OR NEW.ordinal <= COALESCE((
+                          SELECT max(existing.ordinal) FROM prompt_expansion_items AS existing
+                          WHERE existing.batch_id = NEW.batch_id
+                        ), 0)
+                        OR NEW.ordinal > COALESCE((
+                          SELECT json_extract(batch.request_json, '$.item_count')
+                          FROM prompt_expansion_batches AS batch WHERE batch.id = NEW.batch_id
+                        ), 0)
+    THEN RAISE(ABORT, 'prompt expansion item ordinal is invalid') END;
   SELECT CASE WHEN NEW.review_version != 1
                         OR NEW.reroll_count != 0
                         OR typeof(NEW.selected) != 'integer'

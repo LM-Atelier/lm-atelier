@@ -858,7 +858,7 @@ class PromptExpansionBatch(TimestampMixin, Base):
             name="ck_prompt_expansion_batch_queue_key",
         ),
         CheckConstraint("schema_version = 1", name="ck_prompt_expansion_batch_schema_version"),
-        CheckConstraint("codec_version = 2", name="ck_prompt_expansion_batch_codec_version"),
+        CheckConstraint("codec_version IN (2, 3)", name="ck_prompt_expansion_batch_codec_version"),
         CheckConstraint(
             _lowercase_sha256_check("contract_sha256"),
             name="ck_prompt_expansion_batch_contract_sha256",
