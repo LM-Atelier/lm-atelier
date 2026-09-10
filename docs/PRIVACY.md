@@ -31,5 +31,13 @@ An explicit uninstall purge removes only the managed default data directory:
 Linux. A custom `XDG_DATA_HOME` or `LOCAL_LM_DATA_DIR`, and credentials in the
 operating-system vault, must be removed separately.
 
+Automatic recovery backups and **Back up state** in Settings save database
+records, including chats, settings, and library entries. They do not contain
+image or video files, so restoring a state-only backup cannot recover missing
+media. **Back up with media** also saves the referenced media files; creation
+fails if a required file is missing or changed. Use **Verify** to check the
+backup before relying on it, and keep its database snapshot and media archive
+together when copying it elsewhere.
+
 Before sharing issue details, inspect them and remove tokens, private prompts,
 chats, media, model inputs, and identifying file paths.

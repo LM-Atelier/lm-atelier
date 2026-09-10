@@ -391,9 +391,9 @@ export function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
         />
       </section>
       <section>
-        <div className="detail-title">
+        <div className="detail-title storage-actions">
           <div><h2>Recovery backups</h2></div>
-          <div className="row-actions">
+          <div className="row-actions storage-actions">
             <DownloadDiagnosticsButton />
             <button
               className="secondary"
@@ -411,6 +411,7 @@ export function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
             </button>
           </div>
         </div>
+        <p className="muted">State backups save chats, settings, and library records, but exclude image and video files. Choose Back up with media to save those files too.</p>
         {backups.data?.some((backup) => backup.restore_pending) && (
           <div className="callout success" role="status">
             Restore scheduled. Restart LM Atelier to apply the selected backup.
@@ -448,7 +449,7 @@ export function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
                       className="secondary compact-button"
                       aria-label={`Restore backup ${backup.name} on restart`}
                       disabled={backup.restore_pending || verifying || restoring || deleting}
-                      onClick={() => void confirm({ title: "Restore this backup on restart?", question: "The next time LM Atelier starts it will replace the current data with this backup. Anything created since the backup was taken is lost.", confirmLabel: "Restore on restart" }).then((ok) => ok && restoreBackup.mutate(backup.name))}
+                      onClick={() => void confirm({ title: "Restore this backup on restart?", question: "The next time LM Atelier starts it will replace the current data with this backup. Anything created since the backup was taken is lost." + (backup.media_included ? " This backup includes media files." : " This state-only backup cannot recover missing images or videos."), confirmLabel: "Restore on restart" }).then((ok) => ok && restoreBackup.mutate(backup.name))}
                     >
                       {restoring ? "Scheduling…" : backup.restore_pending ? "Restore scheduled" : "Restore on restart"}
                     </button>
