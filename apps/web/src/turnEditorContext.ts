@@ -18,6 +18,30 @@ export function activeBranchMessages(chat: ChatDetail): Message[] {
   return lineage.length > 0 ? lineage : visibleMessages;
 }
 
+/** The exact revision this turn would use, or null when nothing pins one.
+ *
+ * `workflowSchemaForTurn` already works this out and then keeps only the schema
+ * it resolved from. The geometry endpoints are addressed by revision, so the
+ * caller needs the id itself; deriving it here rather than at the call site
+ * keeps the two answers reading the same selections.
+ */
+export function workflowRevisionForTurn(
+  mode: RoutingMode,
+  hasAttachments: boolean,
+  families: WorkflowFamily[] = [],
+  chatSelection: WorkflowSelection | null | undefined = null,
+  projectSelection: WorkflowSelection | null | undefined = null,
+): string | null {
+  if (mode !== "image" && mode !== "video") return null;
+  return revisionForTurn(
+    families,
+    mode,
+    chatSelection,
+    projectSelection,
+    operationForTurn(mode, hasAttachments),
+  );
+}
+
 export function workflowSchemaForTurn(
   workflows: Workflow[],
   mode: RoutingMode,

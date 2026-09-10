@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from "react";
+import { OutputRatioControl } from "./OutputRatioControl";
 import { SettingControl } from "./SettingControl";
 import {
   IMAGE_EDIT_STRENGTH_MODE_KEY,
@@ -129,6 +130,7 @@ export function GenerationSettingsPanel({
   presetId,
   onPreset,
   workflowSchema,
+  workflowRevisionId = null,
   inheritedValues = {},
   inheritedPresetId = null,
   profileValues = {},
@@ -147,6 +149,7 @@ export function GenerationSettingsPanel({
   presetId: string | null;
   onPreset: (presetId: string | null) => void;
   workflowSchema?: Record<string, unknown>;
+  workflowRevisionId?: string | null;
   inheritedValues?: Record<string, unknown>;
   inheritedPresetId?: string | null;
   profileValues?: Record<string, unknown>;
@@ -184,6 +187,14 @@ export function GenerationSettingsPanel({
   // among steps and guidance. They get their own section so choosing one is a
   // deliberate act rather than scrolling past it.
   const loraField = visibleFields.find((field) => field.key === "loras");
+  // The ratio control reads these two through the same hierarchy every other
+  // control uses, so what it shows is the size the run will actually use rather
+  // than whatever was typed into a box that the workflow has since stopped
+  // accepting. It is not filtered to the visible ones: a workflow can put width
+  // and height behind the advanced level, and the shape of the output is not an
+  // advanced concern.
+  const widthField = allFields.find((field) => field.key === "width" && field.available);
+  const heightField = allFields.find((field) => field.key === "height" && field.available);
   const fields = visibleFields.filter((field) => field.key !== "loras");
   // The server resolves this same hierarchy and drops, per layer, any value the
   // field cannot accept - the workflow changed, and a saved sampler or a saved
@@ -265,6 +276,18 @@ export function GenerationSettingsPanel({
             onValues={onValues}
           />
         )}
+        {/* Mounted only when a turn actually pins a revision. The control asks
+            the server about one exact revision, so without an id there is
+            nothing to ask about - and rendering it anyway would put a data
+            fetch inside every panel that has no workflow at all. */}
+        {workflowRevisionId && <OutputRatioControl
+          revisionId={workflowRevisionId}
+          width={widthField ? effectiveValue(widthField) : undefined}
+          height={heightField ? effectiveValue(heightField) : undefined}
+          onDimensions={({ width, height }) => onValues(
+            { ...values, width, height }, ["width", "height"],
+          )}
+        />}
         {fields.map((field) => (
           <SettingControl
             key={`${field.scope}:${field.key}`}

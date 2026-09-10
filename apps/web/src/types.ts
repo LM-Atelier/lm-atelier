@@ -1151,6 +1151,71 @@ export interface Workflow {
   revisions: WorkflowRevision[];
 }
 
+/** The shapes a workflow can be asked for, and what it says they mean.
+ *
+ * The ids ARE the ratios. Which of them a given revision offers is decided by
+ * the server from the workflow's own bounds and multiples, so this list is the
+ * vocabulary, never the menu.
+ */
+export type OutputRatioPresetId = "1:1" | "3:4" | "2:3" | "9:16" | "4:3" | "3:2" | "16:9";
+
+export interface WorkflowOutputGeometryBinding {
+  key: "width" | "height";
+  node_id: string;
+  input_name: "width" | "height";
+  default: number;
+  minimum: number;
+  maximum: number;
+  multiple_of: number;
+}
+
+/** What one revision can actually produce, proved from its stored graph.
+ *
+ * `available` false means this revision has no proof that a declared width and
+ * height reach its output at all, and the reason is deliberately one value: the
+ * graph may be somebody's own, and capability discovery must not become a way to
+ * read it.
+ *
+ * Narrower than the payload on purpose. The server also sends the latent,
+ * sampler, decode and save node ids and the full capability declaration; those
+ * describe the inside of somebody's graph, and nothing in the browser has a use
+ * for them. Leaving them undeclared keeps them out of the browser's vocabulary
+ * rather than inviting a future control to render them.
+ */
+export interface WorkflowOutputGeometryCapability {
+  version: 1;
+  available: boolean;
+  reason: "unsupported_workflow_geometry" | null;
+  revision_id: string | null;
+  workflow_id: string | null;
+  artifact_sha256: string | null;
+  operation: "text_to_image" | null;
+  engine: "comfyui" | null;
+  size_modes: ("exact" | "preset")[];
+  preset_ids: OutputRatioPresetId[];
+  width: WorkflowOutputGeometryBinding | null;
+  height: WorkflowOutputGeometryBinding | null;
+  graph_binding_verified: boolean;
+  request_authorized: false;
+}
+
+/** The exact pixels one request resolves to. Preview evidence, never authority. */
+export interface WorkflowOutputGeometryResolution {
+  version: 1;
+  workflow_id: string;
+  revision_id: string;
+  artifact_sha256: string;
+  operation: "text_to_image";
+  engine: "comfyui";
+  mode: "image";
+  size_mode: "exact" | "preset";
+  preset_id: OutputRatioPresetId | null;
+  width: number;
+  height: number;
+  graph_binding_verified: true;
+  request_authorized: false;
+}
+
 export interface WorkflowEditorSession {
   id: string;
   protocol_version: number;

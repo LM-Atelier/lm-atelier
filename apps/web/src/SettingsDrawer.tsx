@@ -23,6 +23,7 @@ export function SettingsDrawer({
   presetId,
   onPreset,
   workflowSchema,
+  workflowRevisionId = null,
   inheritedValues,
   inheritedPresetId,
   profileValues,
@@ -45,6 +46,7 @@ export function SettingsDrawer({
   presetId: string | null;
   onPreset: (presetId: string | null) => void;
   workflowSchema?: Record<string, unknown>;
+  workflowRevisionId?: string | null;
   inheritedValues?: Record<string, unknown>;
   inheritedPresetId?: string | null;
   profileValues?: Record<string, unknown>;
@@ -92,6 +94,7 @@ export function SettingsDrawer({
         presetId={presetId}
         onPreset={onPreset}
         workflowSchema={workflowSchema}
+        workflowRevisionId={workflowRevisionId}
         inheritedValues={editSettings?.inheritedValues ?? inheritedValues}
         inheritedPresetId={inheritedPresetId}
         profileValues={profileValues}

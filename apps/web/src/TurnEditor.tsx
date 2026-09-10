@@ -15,7 +15,7 @@ import { composerDraftWithText, detachedComposerDraft, promptSourceForTurn, type
 import { artifactSource, mediaOriginLabel } from "./messageMedia";
 import { mediaOutputCountForTurn } from "./mediaOutputCount";
 import { normalizeSettingsForFields, resolveCapabilitySettings, resolveWorkflowSettings } from "./settings";
-import { activeBranchMessages, workflowSchemaForTurn } from "./turnEditorContext";
+import { activeBranchMessages, workflowRevisionForTurn, workflowSchemaForTurn } from "./turnEditorContext";
 import { survivingMentions, turnReferences, type TurnReference } from "./mentionDraft";
 import { useComposerUploads, type ComposerAttachment } from "./useComposerUploads";
 import { useDraftClassification } from "./useDraftClassification";
@@ -294,6 +294,17 @@ export function TurnEditor({
         selections.data?.find((one) => one.selector_capability === drawerMode),
         project ? projectSelections.data?.find((one) => one.selector_capability === drawerMode) : null,
       );
+  // The same selections the drawer's schema came from, so the shape control and
+  // the fields beneath it are describing one revision rather than two.
+  const drawerWorkflowRevisionId = workflowSchemaOverride !== undefined
+    ? null
+    : workflowRevisionForTurn(
+        drawerMode,
+        attachments.length > 0 || usePriorVisual,
+        families.data ?? [],
+        selections.data?.find((one) => one.selector_capability === drawerMode),
+        project ? projectSelections.data?.find((one) => one.selector_capability === drawerMode) : null,
+      );
   const clearAcceptedDraft = () => {
     setText("");
     updateState((current) => ({
@@ -502,6 +513,7 @@ export function TurnEditor({
         presetId={presetId}
         onPreset={onPreset}
         workflowSchema={drawerWorkflowSchema}
+        workflowRevisionId={drawerWorkflowRevisionId}
         inheritedValues={onAccept ? undefined : project?.generation_settings_json?.[settingsRole]}
         inheritedPresetId={onAccept ? undefined : project?.generation_preset_ids_json?.[settingsRole]}
         profileValues={profileValues}
