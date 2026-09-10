@@ -146,6 +146,23 @@ Images and video appear in the conversation, with queue progress while generatio
 runs. Output count and seed controls let you vary a request. Generation speed and
 supported sizes depend on the selected model, workflow, and hardware.
 
+### Watch accepted work
+
+Choose **View accepted work** in the Jobs panel to see active generation, transfers,
+and installs. Plans keep their jobs grouped. Use **Work category** to narrow the
+list and **Load more accepted work** to browse additional items. The count shows
+how many active items you have loaded out of the total.
+
+Items are ordered by acceptance time. Different resources can run at the same
+time. Plans show completed-step counts and running, queued, and paused job
+counts. Choose **Show steps** to inspect a plan's individual steps and unfinished
+prerequisites; **Load more steps** continues a long plan.
+
+The view updates automatically and shows when it was last checked. Use
+**Refresh** for a fresh list. If an update fails, an error warns when
+previously loaded items are still shown. Step details have their own
+**Retry step details** action.
+
 ### Browse workflows
 
 Open **Workflows** to browse families and their variants. Search names, descriptions,
