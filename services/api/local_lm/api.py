@@ -561,6 +561,7 @@ from .workflow_editor_shell import (
 from .workflow_install_offers import (
     WorkflowInstallOfferError,
     create_workflow_install_offer,
+    current_reviewed_workflow_install_offer,
     invalidate_workflow_install_offer,
     mark_workflow_install_offer_queued,
     revalidate_workflow_install_offer,
@@ -8234,6 +8235,23 @@ def _workflow_family_variant_out(
         readiness, reason = "unavailable", "family_archived"
     elif not family.enabled:
         readiness, reason = "unavailable", "family_disabled"
+    setup_resolution: Literal["reviewed_download_available", "attention_required"] | None = None
+    install_offer: WorkflowInstallOfferOut | None = None
+    if readiness == "setup_required":
+        setup_resolution = "attention_required"
+        if revision is not None and revision.id == definition.current_revision_id:
+            offer = current_reviewed_workflow_install_offer(
+                session,
+                workflow_id=definition.id,
+                revision_id=revision.id,
+            )
+            if offer is not None:
+                try:
+                    install_offer = _workflow_install_offer_out(offer)
+                except (TypeError, ValueError):
+                    pass
+                else:
+                    setup_resolution = "reviewed_download_available"
     return WorkflowFamilyVariantOut(
         id=definition.id,
         variant_key=definition.variant_key or "",
@@ -8246,6 +8264,8 @@ def _workflow_family_variant_out(
         trusted=revision.trusted if revision else compatibility is not None,
         readiness=readiness,
         readiness_reason=reason,
+        setup_resolution=setup_resolution,
+        install_offer=install_offer,
     )
 
 

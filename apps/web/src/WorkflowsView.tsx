@@ -10,6 +10,7 @@ import { RegistryInstallsPanel } from "./RegistryInstallsPanel";
 import { WorkflowFamilyArchive } from "./WorkflowFamilyArchive";
 import { WorkflowFamilyList } from "./WorkflowFamilyList";
 import { WorkflowFamilyUsage } from "./WorkflowFamilyUsage";
+import { WorkflowInstallOfferDialog } from "./WorkflowInstallOfferDialog";
 import { WorkflowFamilyVariants } from "./WorkflowFamilyVariants";
 import { WorkflowRevisionHistory } from "./WorkflowRevisionHistory";
 import { WorkflowRevisionComparison } from "./WorkflowRevisionComparison";
@@ -25,7 +26,7 @@ import {
   type WorkflowEditorPhase,
   type WorkflowEditorSubmission,
 } from "./workflowEditorBridge";
-import type { WorkflowEditorReturn, WorkflowFamily } from "./types";
+import type { WorkflowEditorReturn, WorkflowFamily, WorkflowInstallOffer } from "./types";
 
 const editorPhaseLabel: Record<WorkflowEditorPhase, string> = {
   preparing: "Preparing the native editor…",
@@ -90,6 +91,12 @@ export function WorkflowControls({ schema }: { schema: Record<string, unknown> }
 export function WorkflowsView() {
   const client = useQueryClient();
   const [includeArchived, setIncludeArchived] = useState(false);
+  const [installReview, setInstallReview] = useState<{ offer: WorkflowInstallOffer; name: string } | null>(null);
+  const [downloadsQueued, setDownloadsQueued] = useState(false);
+  const reviewInstall = (offer: WorkflowInstallOffer, name: string) => {
+    setDownloadsQueued(false);
+    setInstallReview({ offer, name });
+  };
   const workflows = useQuery({ queryKey: ["workflows"], queryFn: api.workflows });
   const families = useQuery({
     queryKey: ["workflow-families", "library", includeArchived],
@@ -374,7 +381,7 @@ export function WorkflowsView() {
           {editorNotice && <span role="status" className="muted">{editorNotice}</span>}
         </div>
       )}
-      {selectedFamily && <WorkflowFamilyVariants key={`variants-${selectedFamily.id}`} family={selectedFamily} />}
+      {selectedFamily && <WorkflowFamilyVariants key={`variants-${selectedFamily.id}`} family={selectedFamily} onReviewInstall={reviewInstall} />}
       {selectedFamily && <WorkflowFamilyDependencies key={`dependencies-${selectedFamily.id}`} familyId={selectedFamily.id} />}
       {selectedFamily && <WorkflowFamilyPreferences family={selectedFamily} />}
       {selectedFamily && <WorkflowFamilyUsage key={`usage-${selectedFamily.id}`} familyId={selectedFamily.id} />}
@@ -392,6 +399,11 @@ export function WorkflowsView() {
           onClose={() => setArchiveFamily(null)}
         />
       )}
+      {downloadsQueued && <p role="status">Downloads queued. Follow their progress in Jobs.</p>}
+      {installReview && <WorkflowInstallOfferDialog key={installReview.offer.id}
+        offer={installReview.offer} workflowName={installReview.name}
+        onClose={() => setInstallReview(null)}
+        onQueued={() => { setInstallReview(null); setDownloadsQueued(true); }} />}
       <div className="workflow-layout">
         <WorkflowFamilyList
           families={families.data ?? []}
@@ -404,6 +416,7 @@ export function WorkflowsView() {
           includeArchived={includeArchived}
           onIncludeArchivedChange={setIncludeArchived}
           loading={families.isPending || workflows.isPending}
+          onReviewInstall={reviewInstall}
         />
         <div className="workflow-detail">{selected && selectedRevision ? <><div className="detail-title"><div><small>{selected.operation}</small><h2>{selected.name}</h2><p>{selected.description}</p></div><div className="row-actions"><button className="secondary compact-button" onClick={openEdit}>New revision</button><button className="secondary compact-button" onClick={() => clone.mutate(selected.id)}>Duplicate</button><button className="secondary compact-button" onClick={() => exportBundle.mutate(selected.id)}>Export</button><button className="secondary compact-button" onClick={() => validate.mutate(selected.id)}>Validate</button></div></div><div className="workflow-revision-bar"><label>Revision<select value={selectedRevision.id} onChange={(event) => setSelectedRevisionId(event.target.value)}>{[...selected.revisions].sort((a, b) => b.version - a.version).map((revision) => <option key={revision.id} value={revision.id}>v{revision.version}{revision.id === selected.current_revision_id ? " · current" : ""}</option>)}</select></label>{selectedRevision.id !== selected.current_revision_id && <button className="secondary compact-button" onClick={() => restore.mutate({ id: selected.id, revisionId: selectedRevision.id })}>Restore as new revision</button>}<span className={`badge ${selectedRevision.trusted ? "likely" : "advanced_import"}`}>{selectedRevision.trusted ? "Trusted" : "Untrusted"}</span></div>
           <WorkflowRevisionHistory key={selected.id} workflow={selected}

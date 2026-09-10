@@ -1135,6 +1135,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ ui_graph: uiGraph, selections }),
     }),
+  installWorkflowOffer: (offerId: string) =>
+    request<Job[]>(`/api/workflow-install-offers/${encodeURIComponent(offerId)}/install`, { method: "POST" }),
   installWorkflowAssets: (
     uiGraph: Record<string, unknown>,
     selections: Array<{
