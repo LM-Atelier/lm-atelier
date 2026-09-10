@@ -7,6 +7,7 @@ from typing import Any, cast
 
 import pytest
 
+from local_lm import workflow_output_geometry
 from local_lm.model_planner import workflow_artifact_contract
 from local_lm.workflow_output_geometry import (
     WORKFLOW_OUTPUT_GEOMETRY_UNAVAILABLE,
@@ -820,3 +821,55 @@ def test_the_resolution_payload_names_the_preset_it_resolved() -> None:
     assert payload["preset_id"] == "16:9"
     assert (payload["width"], payload["height"]) == (1024, 576)
     assert payload["request_authorized"] is False
+
+
+def test_a_refused_preset_derivation_keeps_the_workflows_own_sizes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Presets are an addition to the capability, never a condition of it.
+
+    Declared together with the exact sizes, a derived bucket the validator
+    refuses raises an OutputGeometryError, which is a ValueError, which
+    prove_workflow_output_geometry catches - and the revision then reports no
+    output geometry at all. The width and height it could always produce would
+    disappear because a ratio could not be worked out, which is a defect in a
+    feature taking away something that predates it.
+
+    The forced bucket here is 7 by 7: the right ratio for 1:1 and not on the
+    workflow's multiple-of-64 grid, so the validator refuses it for a reason
+    that has nothing to do with the exact sizes.
+    """
+    monkeypatch.setattr(
+        workflow_output_geometry,
+        "_preset_dimensions",
+        lambda width, height, max_pixels: {"1:1": (7, 7)},
+    )
+
+    payload = workflow_output_geometry_payload(_prove())
+
+    assert payload["available"] is True
+    assert payload["size_modes"] == ["exact"]
+    assert payload["preset_ids"] == []
+    width = payload["width"]
+    assert isinstance(width, dict)
+    assert width["default"] == 1024
+    capability = payload["capability"]
+    assert isinstance(capability, dict)
+    assert capability["allowed_preset_ids"] == []
+
+
+def test_a_derivation_that_offers_nothing_is_not_a_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ordinary no-ratios case takes the same road and stays available."""
+    monkeypatch.setattr(
+        workflow_output_geometry,
+        "_preset_dimensions",
+        lambda width, height, max_pixels: {},
+    )
+
+    payload = workflow_output_geometry_payload(_prove())
+
+    assert payload["available"] is True
+    assert payload["size_modes"] == ["exact"]
+    assert payload["preset_ids"] == []
