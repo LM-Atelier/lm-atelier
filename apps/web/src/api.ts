@@ -617,6 +617,10 @@ export const api = {
       method: "DELETE",
     }),
   models: () => request<ModelInstall[]>("/api/models"),
+  modelInstall: async (installId: string) => {
+    const installs = await request<ModelInstall[]>("/api/models?install_id=" + encodeURIComponent(installId));
+    return installs.find((install) => install.id === installId) ?? null;
+  },
   modelStorage: () => request<ModelStorageInfo>("/api/models/storage"),
   modelUpdates: () => request<ModelUpdate[]>("/api/models/updates"),
   catalogItemDetail: (source: string, itemId: string, role: string | null) => {
