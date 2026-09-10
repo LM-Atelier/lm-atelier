@@ -8,6 +8,7 @@ from .model_planner import workflow_artifact_contract
 from .output_geometry import (
     MAX_DIMENSION,
     MAX_PIXELS,
+    PRESET_RATIOS,
     OutputGeometryCapability,
     OutputGeometryError,
     ResolvedOutputGeometry,
@@ -168,6 +169,7 @@ def workflow_output_geometry_payload(result: WorkflowOutputGeometryResult) -> di
             "operation": None,
             "engine": None,
             "size_modes": [],
+            "preset_ids": [],
             "width": None,
             "height": None,
             "latent_node_id": None,
@@ -187,7 +189,11 @@ def workflow_output_geometry_payload(result: WorkflowOutputGeometryResult) -> di
         "artifact_sha256": proof.artifact_sha256,
         "operation": proof.operation,
         "engine": proof.engine,
-        "size_modes": ["exact"],
+        # Read from the proven capability rather than restated, so a workflow
+        # whose bounds admit no ratio never advertises presets it would then
+        # refuse.
+        "size_modes": [item.size_mode for item in proof.capability.combinations],
+        "preset_ids": list(proof.capability.allowed_preset_ids),
         "width": _binding_payload(proof.width),
         "height": _binding_payload(proof.height),
         "latent_node_id": proof.latent_node_id,
@@ -259,6 +265,7 @@ def workflow_output_geometry_resolution_payload(
         "engine": resolution.engine,
         "mode": geometry.mode,
         "size_mode": geometry.size_mode,
+        "preset_id": geometry.preset_id,
         "width": geometry.width,
         "height": geometry.height,
         "graph_binding_verified": True,
@@ -411,32 +418,103 @@ def _schema_capability(
     max_pixels = min(MAX_PIXELS, width.maximum * height.maximum)
     if width.default * height.default > max_pixels:
         _refuse()
+    bounds: dict[str, object] = {
+        "mode": "image",
+        "min_width": width.minimum,
+        "max_width": width.maximum,
+        "min_height": height.minimum,
+        "max_height": height.maximum,
+        "width_multiple": width.multiple_of,
+        "height_multiple": height.multiple_of,
+        "max_pixels": max_pixels,
+        "min_aspect": [1, MAX_DIMENSION],
+        "max_aspect": [MAX_DIMENSION, 1],
+        "default_width": width.default,
+        "default_height": height.default,
+    }
+    presets = _preset_dimensions(width, height, max_pixels)
+    combinations: list[dict[str, object]] = [
+        {
+            **bounds,
+            "size_mode": "exact",
+            "buckets": [[width.default, height.default]],
+        }
+    ]
+    if presets:
+        # Every combination must carry the workflow's own default among its
+        # buckets, so the preset list is unioned with it rather than replacing
+        # it. That costs nothing: a preset always resolves to the pair whose
+        # ratio matches it exactly, and no other bucket can tie.
+        pairs = sorted({(width.default, height.default)} | set(presets.values()))
+        combinations.append(
+            {
+                **bounds,
+                "size_mode": "preset",
+                "buckets": [[item[0], item[1]] for item in pairs],
+            }
+        )
     capability = declare_output_geometry(
         {
             "version": 1,
             "allowed_modes": ["image"],
-            "allowed_preset_ids": [],
-            "combinations": [
-                {
-                    "mode": "image",
-                    "size_mode": "exact",
-                    "min_width": width.minimum,
-                    "max_width": width.maximum,
-                    "min_height": height.minimum,
-                    "max_height": height.maximum,
-                    "width_multiple": width.multiple_of,
-                    "height_multiple": height.multiple_of,
-                    "max_pixels": max_pixels,
-                    "min_aspect": [1, MAX_DIMENSION],
-                    "max_aspect": [MAX_DIMENSION, 1],
-                    "default_width": width.default,
-                    "default_height": height.default,
-                    "buckets": [[width.default, height.default]],
-                }
-            ],
+            "allowed_preset_ids": sorted(presets),
+            "combinations": combinations,
         }
     )
     return width, height, capability
+
+
+def _preset_dimensions(
+    width: WorkflowGeometryInputBinding,
+    height: WorkflowGeometryInputBinding,
+    max_pixels: int,
+) -> dict[str, tuple[int, int]]:
+    """The exact pixels each ratio preset means for this workflow, if any.
+
+    A preset states a shape, not a pixel count, so the pair chosen for a ratio
+    is the legal one whose area sits closest to the size the workflow already
+    defaults to: asking for 16:9 changes what the render is, never what it
+    costs. A ratio this workflow's own bounds and multiples cannot express
+    exactly is not offered at all, because snapping it to a nearby shape would
+    hand back an image of a ratio nobody asked for.
+    """
+
+    default_area = width.default * height.default
+    resolved: dict[str, tuple[int, int]] = {}
+    for preset_id, (across, down) in PRESET_RATIOS.items():
+        # A reduced ratio across:down admits exactly the pairs across*count by
+        # down*count, and the counts that land both sides on their own multiple
+        # grids are exactly the multiples of step.
+        step = math.lcm(
+            width.multiple_of // math.gcd(across, width.multiple_of),
+            height.multiple_of // math.gcd(down, height.multiple_of),
+        )
+        lowest = max(
+            -(-width.minimum // (across * step)),
+            -(-height.minimum // (down * step)),
+            1,
+        )
+        area_step = across * down * step * step
+        highest = min(
+            width.maximum // (across * step),
+            height.maximum // (down * step),
+            math.isqrt(max_pixels // area_step),
+        )
+        if lowest > highest:
+            continue
+        # Area grows with the count, so the closest legal area to the default is
+        # at one of the two counts around the ideal, clamped into range.
+        ideal = math.isqrt(default_area // area_step)
+        count = min(
+            {min(max(value, lowest), highest) for value in (ideal, ideal + 1)},
+            key=lambda value: (
+                abs(area_step * value * value - default_area),
+                0 if area_step * value * value >= default_area else 1,
+                value,
+            ),
+        )
+        resolved[preset_id] = (across * step * count, down * step * count)
+    return resolved
 
 
 def _field_binding(key: Literal["width", "height"], value: object) -> WorkflowGeometryInputBinding:
