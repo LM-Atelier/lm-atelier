@@ -52,6 +52,7 @@ import type {
   ModelUpdate,
   ModelProfile,
   ModelProfileBundle,
+  OutputRatioPresetId,
   PlatformMatrixEntry,
   PromptHelperDetail,
   PromptBatchCreateInput,
@@ -78,6 +79,8 @@ import type {
   PriorTurnEditSource,
   EditTemplate,
   Workflow,
+  WorkflowOutputGeometryCapability,
+  WorkflowOutputGeometryResolution,
   WorkflowBundle,
   WorkflowAssetReview,
   WorkflowPackageAnalysis,
@@ -983,6 +986,21 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   workflows: () => request<Workflow[]>("/api/workflows"),
+  workflowRevisionOutputGeometry: (revisionId: string) =>
+    request<WorkflowOutputGeometryCapability>(
+      `/api/workflow-revisions/${encodeURIComponent(revisionId)}/output-geometry`,
+    ),
+  // Read-only: resolving a shape writes nothing, queues nothing and grants no
+  // authority to generate. It exists so the browser can show the exact pixels a
+  // choice means instead of working them out itself.
+  resolveWorkflowRevisionOutputGeometry: (
+    revisionId: string,
+    geometry: { mode: "image"; size_mode: "preset"; preset_id: OutputRatioPresetId },
+  ) =>
+    request<WorkflowOutputGeometryResolution>(
+      `/api/workflow-revisions/${encodeURIComponent(revisionId)}/output-geometry/resolve`,
+      { method: "POST", body: JSON.stringify(geometry) },
+    ),
   workflowFamily: (familyId: string) =>
     request<WorkflowFamily>(`/api/workflow-families/${encodeURIComponent(familyId)}`),
   updateWorkflowFamily: (familyId: string, changes: WorkflowFamilyUpdate) =>

@@ -1,8 +1,17 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { api } from "./api";
 import { GenerationSettingsPanel } from "./GenerationSettingsPanel";
 import type { EngineCapabilities, EngineRole } from "./types";
+
+vi.mock("./api", () => ({
+  api: {
+    workflowRevisionOutputGeometry: vi.fn(),
+    resolveWorkflowRevisionOutputGeometry: vi.fn(),
+  },
+}));
 
 /**
  * A claim about React's reconciliation, which only a mounted tree can settle.
@@ -148,5 +157,143 @@ describe("GenerationSettingsPanel", () => {
     render(<NarrowedPanel stored={{ steps: 50 }} />);
 
     expect(screen.getByLabelText(/Steps/i)).toHaveValue(8);
+  });
+});
+
+// The shape control lives in its own file and is tested there. What only a
+// mounted panel can settle is that the panel RENDERS it, hands it the width and
+// height the hierarchy resolved, and stores what it answers - so deleting the
+// element from the panel fails here rather than passing quietly.
+const DIMENSIONED: EngineCapabilities[] = [
+  {
+    engine: "comfyui",
+    roles: ["image"],
+    settings: [
+      {
+        key: "width",
+        label: "Width",
+        type: "integer",
+        default: 1024,
+        minimum: 128,
+        maximum: 2048,
+        step: 64,
+        choices: [],
+        scope: "workflow",
+        visibility: "basic",
+        available: true,
+      },
+      {
+        key: "height",
+        label: "Height",
+        type: "integer",
+        default: 768,
+        minimum: 128,
+        maximum: 2048,
+        step: 64,
+        choices: [],
+        scope: "workflow",
+        visibility: "basic",
+        available: true,
+      },
+    ],
+    healthy: true,
+  } as unknown as EngineCapabilities,
+];
+
+function DimensionedPanel({ revisionId }: { revisionId?: string | null }) {
+  const [values, setValues] = useState<Record<string, unknown>>({});
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return (
+    <QueryClientProvider client={client}>
+      <GenerationSettingsPanel
+        role={ROLE}
+        engines={DIMENSIONED}
+        values={values}
+        onValues={setValues}
+        presets={[]}
+        presetId={null}
+        onPreset={vi.fn()}
+        workflowRevisionId={revisionId ?? null}
+        resetLabel="Reset"
+        onReset={vi.fn()}
+      />
+    </QueryClientProvider>
+  );
+}
+
+const CAPABILITY = {
+  version: 1 as const,
+  available: true,
+  reason: null,
+  revision_id: "rev-1",
+  workflow_id: "wf-1",
+  artifact_sha256: "a".repeat(64),
+  operation: "text_to_image" as const,
+  engine: "comfyui" as const,
+  size_modes: ["exact" as const, "preset" as const],
+  preset_ids: ["16:9" as const, "1:1" as const],
+  width: {
+    key: "width" as const,
+    node_id: "latent",
+    input_name: "width" as const,
+    default: 1024,
+    minimum: 128,
+    maximum: 2048,
+    multiple_of: 64,
+  },
+  height: {
+    key: "height" as const,
+    node_id: "latent",
+    input_name: "height" as const,
+    default: 768,
+    minimum: 128,
+    maximum: 2048,
+    multiple_of: 64,
+  },
+  graph_binding_verified: true,
+  request_authorized: false as const,
+};
+
+describe("the shape control in the panel", () => {
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  it("stores the pixels the server resolved for the ratio that was chosen", async () => {
+    vi.mocked(api.workflowRevisionOutputGeometry).mockResolvedValue(CAPABILITY);
+    vi.mocked(api.resolveWorkflowRevisionOutputGeometry).mockResolvedValue({
+      version: 1,
+      workflow_id: "wf-1",
+      revision_id: "rev-1",
+      artifact_sha256: "a".repeat(64),
+      operation: "text_to_image",
+      engine: "comfyui",
+      mode: "image",
+      size_mode: "preset",
+      preset_id: "16:9",
+      width: 1024,
+      height: 576,
+      graph_binding_verified: true,
+      request_authorized: false,
+    });
+
+    render(<DimensionedPanel revisionId="rev-1" />);
+
+    // The workflow's own defaults before anything is chosen.
+    await waitFor(() => expect(screen.getByText("Output: 1024 × 768")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "16:9 Wide" }));
+
+    // The height box is the proof: it holds a number nothing in this test typed.
+    await waitFor(() => expect(screen.getByLabelText(/Height/i)).toHaveValue(576));
+    expect(screen.getByLabelText(/Width/i)).toHaveValue(1024);
+    expect(screen.getByText("Output: 1024 × 576")).toBeTruthy();
+  });
+
+  it("asks about no revision when the turn pins none", () => {
+    render(<DimensionedPanel revisionId={null} />);
+
+    expect(screen.queryByRole("group", { name: "Output aspect ratio" })).toBeNull();
+    expect(api.workflowRevisionOutputGeometry).not.toHaveBeenCalled();
   });
 });
