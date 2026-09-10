@@ -42,6 +42,26 @@ async function openHistory() {
 }
 
 describe("workflow revision history", () => {
+  it("interprets zone-free stored dates as UTC and preserves explicit offsets", async () => {
+    const value = workflow();
+    value.revisions = [
+      revision(1, "2026-08-01T00:30:00.123456"),
+      revision(2, "2026-08-01T00:30:00.123456Z"),
+      revision(3, "2026-08-01T02:30:00.123456+02:00"),
+    ];
+    vi.mocked(api.workflows).mockResolvedValue([value]);
+    const history = await openHistory();
+    const dates = history.getAllByRole("listitem").map((row) => row.querySelector("time"));
+    const expected = new Date("2026-08-01T00:30:00.123456Z").toLocaleString(undefined, {
+      year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+    });
+    expect(dates.map((date) => date?.textContent)).toEqual([expected, expected, expected]);
+    expect(dates.map((date) => date?.dateTime)).toEqual([
+      "2026-08-01T02:30:00.123456+02:00", "2026-08-01T00:30:00.123456Z",
+      "2026-08-01T00:30:00.123456Z",
+    ]);
+  });
+
   it("lists newest versions first with recorded creation dates and the actual current revision", async () => {
     const history = await openHistory();
     const rows = history.getAllByRole("listitem");
