@@ -12,6 +12,7 @@ import { WorkflowFamilyList } from "./WorkflowFamilyList";
 import { WorkflowFamilyUsage } from "./WorkflowFamilyUsage";
 import { WorkflowFamilyVariants } from "./WorkflowFamilyVariants";
 import { WorkflowRevisionHistory } from "./WorkflowRevisionHistory";
+import { WorkflowRevisionComparison } from "./WorkflowRevisionComparison";
 import { WorkflowFamilyPreferences } from "./WorkflowFamilyPreferences";
 import { WorkflowFamilyDependencies } from "./WorkflowFamilyDependencies";
 import { WorkflowPackageReview } from "./WorkflowPackageReview";
@@ -412,7 +413,7 @@ export function WorkflowsView() {
             workflowId={selected.id}
             revisionId={selectedRevision.id}
           />
-          <section className="workflow-input-section"><h3>Declared controls</h3><WorkflowControls schema={selectedRevision.input_schema_json} /></section><details open><summary>Executable graph</summary><pre>{JSON.stringify(selectedRevision.api_graph_json, null, 2)}</pre></details><details><summary>Dependencies</summary><pre>{JSON.stringify(selectedRevision.dependencies_json, null, 2)}</pre></details>{currentRevision && currentRevision.id !== selectedRevision.id && <details><summary>Compare with current revision</summary><div className="workflow-compare"><pre>{JSON.stringify(selectedRevision.api_graph_json, null, 2)}</pre><pre>{JSON.stringify(currentRevision.api_graph_json, null, 2)}</pre></div></details>}{verdict && <div className={`callout ${verdict.valid ? "success" : "error"}`} role={verdict.valid ? "status" : "alert"}>{verdict.valid ? "Workflow and declared dependencies are valid for the active media engine." : verdict.errors.join("\n")}{verdict.warnings.map((warning) => `\nWarning: ${warning}`)}</div>}</> : <EmptyState icon={<WorkflowIcon />} title="Select a workflow" body="Review its revision, inputs, dependencies, and validation." />}</div>
+          <section className="workflow-input-section"><h3>Declared controls</h3><WorkflowControls schema={selectedRevision.input_schema_json} /></section><details open><summary>Executable graph</summary><pre>{JSON.stringify(selectedRevision.api_graph_json, null, 2)}</pre></details><details><summary>Dependencies</summary><pre>{JSON.stringify(selectedRevision.dependencies_json, null, 2)}</pre></details>{currentRevision && currentRevision.id !== selectedRevision.id && <WorkflowRevisionComparison key={selectedRevision.id + ":" + currentRevision.id} selected={selectedRevision} current={currentRevision} />}{verdict && <div className={`callout ${verdict.valid ? "success" : "error"}`} role={verdict.valid ? "status" : "alert"}>{verdict.valid ? "Workflow and declared dependencies are valid for the active media engine." : verdict.errors.join("\n")}{verdict.warnings.map((warning) => `\nWarning: ${warning}`)}</div>}</> : <EmptyState icon={<WorkflowIcon />} title="Select a workflow" body="Review its revision, inputs, dependencies, and validation." />}</div>
       </div>
       <RegistryInstallsPanel />
       <CustomNodesPanel />
