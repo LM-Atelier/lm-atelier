@@ -60,6 +60,7 @@ export function WorkflowFamilyList({
     .filter((family) => !defaultsOnly || family.preferences.some((preference) => preference.is_default))
     .filter((family) => matchesSearch([
       family.name, family.description, family.use_case, ...family.tags,
+      ...(family.dependency_summary?.names ?? []),
       ...family.variants.map((variant) => variant.name),
     ]))
     .map((family) => ({ family, variants: family.variants.filter((variant) =>
@@ -124,6 +125,9 @@ export function WorkflowFamilyList({
               <h3 id={`workflow-family-${family.id}`}>{family.name}</h3>
               {(family.use_case || family.description) && <p className="muted">{family.use_case || family.description}</p>}
               {family.use_case_derived && <p className="muted">Derived from model metadata</p>}
+              {family.dependency_summary && <p className="muted">
+                {family.dependency_summary.dependency_count} recorded {family.dependency_summary.dependency_count === 1 ? "dependency" : "dependencies"}
+              </p>}
               {family.archived && <span className="badge">Archived</span>}
               <div className="workflow-list">
                 {variants.map((variant) => {

@@ -151,7 +151,7 @@ describe("browsing workflow families", () => {
     expect(screen.queryByText("Workflow b")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("checkbox", { name: "Show archived families" }));
     expect(await screen.findByRole("heading", { name: "Archived family" })).toBeInTheDocument();
-    expect(api.workflowFamilies).toHaveBeenCalledWith(undefined, true);
+    expect(api.workflowFamilies).toHaveBeenCalledWith(undefined, true, true);
     fireEvent.click(screen.getByRole("checkbox", { name: "Show archived families" }));
     await waitFor(() => expect(screen.queryByRole("heading", { name: "Archived family" })).not.toBeInTheDocument());
   });

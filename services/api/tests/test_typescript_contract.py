@@ -93,6 +93,7 @@ CHECKED_CONTRACTS = {
     "WorkflowAssetReference": "WorkflowAssetReferenceOut",
     "WorkflowDependencyImpact": "WorkflowDependencyImpactOut",
     "WorkflowFamily": "WorkflowFamilyOut",
+    "WorkflowFamilyDependencySummary": "WorkflowFamilyDependencySummaryOut",
     "WorkflowFamilyPreferenceUpdate": "WorkflowFamilyPreferenceUpdate",
     "WorkflowFamilyRemovalImpact": "WorkflowFamilyRemovalImpactOut",
     "WorkflowFamilyPreference": "WorkflowFamilyPreferenceOut",

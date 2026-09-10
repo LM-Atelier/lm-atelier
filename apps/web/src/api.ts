@@ -988,10 +988,11 @@ export const api = {
     request<WorkflowResourceConsumers>(
       `/api/workflow-dependencies/${kind}/${encodeURIComponent(resourceId)}/consumers`,
     ),
-  workflowFamilies: (capability?: WorkflowSelectorCapability, includeArchived = false) => {
+  workflowFamilies: (capability?: WorkflowSelectorCapability, includeArchived = false, includeDependencies = false) => {
     const parameters = new URLSearchParams();
     if (capability) parameters.set("selector_capability", capability);
     if (includeArchived) parameters.set("include_archived", "true");
+    if (includeDependencies) parameters.set("include_dependencies", "true");
     const query = parameters.toString();
     return request<WorkflowFamily[]>(`/api/workflow-families${query ? `?${query}` : ""}`);
   },
