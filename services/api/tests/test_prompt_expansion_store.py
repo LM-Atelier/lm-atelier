@@ -1435,3 +1435,247 @@ def test_migration_is_self_contained_and_chat_delete_cascades(tmp_path: Path) ->
             ).fetchall()
             == []
         )
+
+
+def _seed_partial_model(session: Session):
+    from local_lm.prompt_expansion import complete_prompt_expansion_with_model_result
+    from local_lm.prompt_model_values import (
+        parse_prompt_model_values_result,
+        prompt_model_values_result_sha256,
+    )
+
+    chat, original_request, _completed, snapshot, contract, _values = _seed_model(session)
+    request = replace(original_request, item_count=3)
+    pending = expand_prompt_template(contract, request)
+    model_contract = prompt_model_slot_contract(contract, item_count=3)
+    values = parse_prompt_model_values_result(
+        {
+            "version": 1,
+            "batch_values": {"medium": "tempera"},
+            "items": [
+                {"ordinal": 1, "values": {"detail": "silver leaves"}},
+                {"ordinal": 3, "values": {"detail": "clear sky"}},
+            ],
+        },
+        contract=model_contract,
+    )
+    completed = complete_prompt_expansion_with_model_result(contract, pending, values)
+    snapshot["values_sha256"] = prompt_model_values_result_sha256(values, contract=model_contract)
+    return chat, request, completed, snapshot, contract
+
+
+def test_partial_storage_preserves_sparse_items_and_original_request(
+    sessions: SessionFactory,
+) -> None:
+    with sessions() as session:
+        chat, request, plan, snapshot, _contract = _seed_partial_model(session)
+        created = create_or_replay_expansion(session, chat.id, "partial", request, plan, snapshot)
+        session.commit()
+        reread = read_expansion(session, chat.id, created.batch.id)
+        assert reread.batch.codec_version == 3
+        assert json.loads(reread.batch.request_json)["item_count"] == 3
+        assert [item.ordinal for item in reread.items] == [1, 3]
+        assert len(reread.items) == 2
+        assert reread.batch.original_plan_sha256 == expansion_plan_digest(plan)
+        assert all(item.original_rendered_prompt for item in reread.items)
+        assert session.scalar(select(func.count()).select_from(ArtifactLibraryEntry)) == 0
+        replay = replay_expansion_request(session, chat.id, "partial", request)
+        assert replay is not None and replay.replayed
+        assert replay.batch.id == created.batch.id
+        exact = create_or_replay_expansion(session, chat.id, "partial", request, plan, snapshot)
+        assert exact.replayed and exact.batch.id == created.batch.id
+
+
+def test_partial_storage_edit_and_reroll_keep_original_ordinal(sessions: SessionFactory) -> None:
+    with sessions() as session:
+        chat, request, plan, snapshot, contract = _seed_partial_model(session)
+        created = create_or_replay_expansion(
+            session, chat.id, "partial-edit", request, plan, snapshot
+        )
+        item = created.items[1]
+        updated = update_expansion_item(
+            session,
+            chat.id,
+            created.batch.id,
+            item.id,
+            expected_item_version=1,
+            expected_plan_version=1,
+            reviewed_prompt="edited bridge in clear light",
+            selected=False,
+        )
+        assert updated.items[1].ordinal == 3
+        assert not updated.items[1].selected
+        original = plan.items[1]
+        evidence = list(original.evidence)
+        position = next(index for index, entry in enumerate(evidence) if entry.name == "mood")
+        mood = evidence[position]
+        assert mood.choice_index is not None
+        choices = ("calm", "bright", "stormy")
+        next_index = (mood.choice_index + 1) % len(choices)
+        evidence[position] = replace(mood, value=choices[next_index], choice_index=next_index)
+        prompt = render_prompt_template(
+            contract, {entry.name: entry.value for entry in evidence if entry.mode.value != "fixed"}
+        )
+        digest = hashlib.sha256(
+            ("prompt-expansion-rendered-v1" + chr(0) + prompt).encode()
+        ).hexdigest()
+        changed = replace(
+            original, evidence=tuple(evidence), rendered_prompt=prompt, rendered_sha256=digest
+        )
+        replacement = replace(plan, items=(plan.items[0], changed))
+        rolled = reroll_expansion_item(
+            session,
+            chat.id,
+            created.batch.id,
+            item.id,
+            expected_item_version=2,
+            expected_plan_version=2,
+            replacement_plan=replacement,
+            model_snapshot=snapshot,
+        )
+        assert rolled.items[0].original_rendered_prompt == plan.items[0].rendered_prompt
+        assert rolled.items[1].ordinal == 3 and rolled.items[1].reroll_count == 1
+        assert not rolled.items[1].selected
+        assert json.loads(rolled.batch.request_json)["item_count"] == 3
+        assert rolled.batch.original_plan_sha256 == expansion_plan_digest(plan)
+        assert rolled.batch.plan_sha256 == expansion_plan_digest(replacement)
+
+
+def test_partial_storage_deleted_item_is_not_a_new_valid_subset(sessions: SessionFactory) -> None:
+    with sessions() as session:
+        chat, request, plan, snapshot, _contract = _seed_partial_model(session)
+        created = create_or_replay_expansion(
+            session, chat.id, "partial-loss", request, plan, snapshot
+        )
+        session.execute(
+            text("DELETE FROM prompt_expansion_items WHERE id = :identity"),
+            {"identity": created.items[1].id},
+        )
+        session.flush()
+        with pytest.raises(PromptExpansionStoreError):
+            read_expansion(session, chat.id, created.batch.id)
+
+
+@pytest.mark.parametrize("defect", ["other_item", "changed_count"])
+def test_partial_storage_reroll_refuses_changed_batch_authority(
+    sessions: SessionFactory, defect: str
+) -> None:
+    with sessions() as session:
+        chat, request, plan, snapshot, _contract = _seed_partial_model(session)
+        created = create_or_replay_expansion(
+            session, chat.id, "partial-reroll-refusal", request, plan, snapshot
+        )
+        replacement = replace(
+            plan, request=replace(request, selection_seed=request.selection_seed + 1)
+        )
+        if defect == "other_item":
+            replacement = replace(plan, items=(plan.items[1],), unfilled_ordinals=(1, 2))
+        with pytest.raises(PromptExpansionStoreError):
+            reroll_expansion_item(
+                session,
+                chat.id,
+                created.batch.id,
+                created.items[1].id,
+                expected_item_version=1,
+                expected_plan_version=1,
+                replacement_plan=replacement,
+                model_snapshot=snapshot,
+            )
+
+
+_PARTIAL_TRIGGERS_SQL = (
+    "SELECT name, sql FROM sqlite_master WHERE type='trigger' "
+    "AND name LIKE 'prompt_expansion_%' ORDER BY name"
+)
+
+_PARTIAL_MIGRATION_PARENT = "d7a91c4e2b60"
+_PARTIAL_MIGRATION_HEAD = "e4b7c2d91a60"
+
+
+def test_partial_migration_preserves_populated_complete_batch_roundtrip(tmp_path: Path) -> None:
+    settings = Settings(data_dir=tmp_path / "partial-migration-roundtrip")
+    settings.prepare()
+    config = alembic_config(settings)
+    command.upgrade(config, _PARTIAL_MIGRATION_PARENT)
+    database = settings.state_dir / "local-lm.sqlite3"
+    engine = create_engine(f"sqlite+pysqlite:///{database}")
+    try:
+        with Session(engine, expire_on_commit=False) as session:
+            chat, request, plan, stored = _create(session)
+            chat_id, batch_id = chat.id, stored.batch.id
+            item_ids = [item.id for item in stored.items]
+            session.commit()
+        with sqlite3.connect(database) as connection:
+            before_rows = connection.execute(
+                "SELECT * FROM prompt_expansion_items ORDER BY ordinal"
+            ).fetchall()
+            before_batches = connection.execute("SELECT * FROM prompt_expansion_batches").fetchall()
+            before_triggers = connection.execute(_PARTIAL_TRIGGERS_SQL).fetchall()
+        command.upgrade(config, _PARTIAL_MIGRATION_HEAD)
+        Base.metadata.create_all(engine)
+        with Session(engine, expire_on_commit=False) as session:
+            reread = read_expansion(session, chat_id, batch_id)
+            assert [item.id for item in reread.items] == item_ids
+            assert reread.batch.codec_version == 2
+            assert reread.batch.original_plan_sha256 == expansion_plan_digest(plan)
+            assert json.loads(reread.batch.request_json)["item_count"] == request.item_count
+        command.downgrade(config, _PARTIAL_MIGRATION_PARENT)
+        with sqlite3.connect(database) as connection:
+            assert (
+                connection.execute(
+                    "SELECT * FROM prompt_expansion_items ORDER BY ordinal"
+                ).fetchall()
+                == before_rows
+            )
+            assert (
+                connection.execute("SELECT * FROM prompt_expansion_batches").fetchall()
+                == before_batches
+            )
+            assert connection.execute(_PARTIAL_TRIGGERS_SQL).fetchall() == before_triggers
+            assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        with Session(engine, expire_on_commit=False) as session:
+            assert read_expansion(
+                session, chat_id, batch_id
+            ).batch.original_plan_sha256 == expansion_plan_digest(plan)
+    finally:
+        engine.dispose()
+
+
+def test_partial_migration_accepts_partial_and_refuses_lossy_downgrade(tmp_path: Path) -> None:
+    settings = Settings(data_dir=tmp_path / "partial-migration-refusal")
+    settings.prepare()
+    config = alembic_config(settings)
+    command.upgrade(config, _PARTIAL_MIGRATION_HEAD)
+    database = settings.state_dir / "local-lm.sqlite3"
+    engine = create_engine(f"sqlite+pysqlite:///{database}")
+    try:
+        Base.metadata.create_all(engine)
+        with Session(engine, expire_on_commit=False) as session:
+            chat, request, plan, snapshot, _contract = _seed_partial_model(session)
+            stored = create_or_replay_expansion(
+                session, chat.id, "migrated-partial", request, plan, snapshot
+            )
+            chat_id, batch_id = chat.id, stored.batch.id
+            session.commit()
+        with sqlite3.connect(database) as connection:
+            before = connection.execute("SELECT * FROM prompt_expansion_batches").fetchall()
+            triggers = connection.execute(_PARTIAL_TRIGGERS_SQL).fetchall()
+        with pytest.raises(
+            RuntimeError,
+            match="Partial prompt batches cannot be represented by the previous schema",
+        ):
+            command.downgrade(config, _PARTIAL_MIGRATION_PARENT)
+        with sqlite3.connect(database) as connection:
+            assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
+                _PARTIAL_MIGRATION_HEAD,
+            )
+            assert connection.execute("SELECT * FROM prompt_expansion_batches").fetchall() == before
+            assert connection.execute(_PARTIAL_TRIGGERS_SQL).fetchall() == triggers
+            assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        with Session(engine, expire_on_commit=False) as session:
+            assert [item.ordinal for item in read_expansion(session, chat_id, batch_id).items] == [
+                1,
+                3,
+            ]
+    finally:
+        engine.dispose()

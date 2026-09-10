@@ -1046,3 +1046,28 @@ async def test_many_small_metadata_events_share_a_traversal_budget() -> None:
     metadata = ChatEvent(type="usage", data={"tokens": [0] * 3000})
     events = [metadata] * 12 + [_call(), ChatEvent(type="complete")]
     await _failed(SequenceAdapter([events, events]))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ordinal", [1, 2])
+async def test_partial_invocation_keeps_valid_subset_without_repair(ordinal: int) -> None:
+    from local_lm.prompt_model_values import (
+        PromptModelValuesResult,
+        prompt_model_values_result_sha256,
+    )
+
+    payload = _payload()
+    payload["items"] = [{"ordinal": ordinal, "values": {"lighting": "soft window light"}}]
+    events = [_call(arguments=json.dumps(payload)), ChatEvent(type="complete")]
+    adapter = SequenceAdapter([events, events])
+    result = await invoke_prompt_model_values(adapter, contract=_contract(), data=_data())
+    assert isinstance(result.values, PromptModelValuesResult)
+    assert result.values.requested_item_count == 2
+    assert [item.ordinal for item in result.values.items] == [ordinal]
+    assert result.values.unfilled_ordinals == (3 - ordinal,)
+    assert result.values_sha256 == prompt_model_values_result_sha256(
+        result.values, contract=_contract()
+    )
+    assert len(adapter.requests) == 1
+    assert len(result.attempts) == 1
+    assert "soft window light" not in repr(result)

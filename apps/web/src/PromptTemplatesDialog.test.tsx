@@ -79,6 +79,7 @@ function renderDialog({
         onCreate={onCreate}
         onRetry={vi.fn()}
         onDiscard={vi.fn()}
+        onQueuePartial={vi.fn()}
       />
     </QueryClientProvider>,
   );

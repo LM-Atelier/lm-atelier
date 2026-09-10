@@ -149,6 +149,7 @@ it("queues template prompts from chat without changing the composer or generatio
         schema_version: 1,
         contract_sha256: revision.contract_sha256,
         codec_version: 2,
+    unfilled_ordinals: [],
         requested_count: payload.item_count,
         selection_seed: payload.selection_seed,
         plan_sha256: "d".repeat(64),

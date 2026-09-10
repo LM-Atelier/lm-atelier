@@ -235,6 +235,7 @@ from .progress import update_job_progress
 from .prompt_expansion import (
     PromptExpansionDistinctCapacityError,
     PromptExpansionError,
+    complete_prompt_expansion_with_model_result,
     complete_prompt_expansion_with_model_values,
     expand_prompt_template,
     parse_expansion_request,
@@ -267,7 +268,11 @@ from .prompt_library import (
     update_prompt_template,
 )
 from .prompt_model_invocation import PromptModelInvocationError, invoke_prompt_model_values
-from .prompt_model_values import PromptModelValuesError, prompt_model_slot_contract
+from .prompt_model_values import (
+    PromptModelValuesError,
+    PromptModelValuesResult,
+    prompt_model_slot_contract,
+)
 from .prompt_template_import import PromptTemplateImportError, commit_prompt_template_import
 from .prompt_template_portability import (
     PromptTemplatePortabilityError,
@@ -2102,8 +2107,13 @@ def _prompt_expansion_out(stored: StoredExpansion) -> PromptExpansionBatchOut:
         prompt_template_revision_id=batch.prompt_template_revision_id,
         schema_version=cast(Literal[1], batch.schema_version),
         contract_sha256=batch.contract_sha256,
-        codec_version=cast(Literal[2], batch.codec_version),
+        codec_version=cast(Literal[2, 3], batch.codec_version),
         requested_count=request.item_count,
+        unfilled_ordinals=[
+            ordinal
+            for ordinal in range(1, request.item_count + 1)
+            if ordinal not in {item.ordinal for item in stored.items}
+        ],
         selection_seed=request.selection_seed,
         plan_sha256=batch.plan_sha256,
         state=cast(Literal["draft", "queued"], batch.state),
@@ -2784,11 +2794,14 @@ async def _create_prompt_batch_locked(
                     contract=model_contract,
                     data=invocation_data,
                 )
-                plan = complete_prompt_expansion_with_model_values(
-                    contract,
-                    plan,
-                    result.values,
-                )
+                if isinstance(result.values, PromptModelValuesResult):
+                    plan = complete_prompt_expansion_with_model_result(
+                        contract, plan, result.values
+                    )
+                else:
+                    plan = complete_prompt_expansion_with_model_values(
+                        contract, plan, result.values
+                    )
             except (
                 PromptExpansionError,
                 PromptModelValuesError,

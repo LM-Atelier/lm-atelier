@@ -68,6 +68,7 @@ function draftFor(payload: PromptBatchCreateInput): PromptBatch {
     schema_version: template.current_revision.schema_version,
     contract_sha256: template.current_revision.contract_sha256,
     codec_version: 2,
+    unfilled_ordinals: [],
     requested_count: payload.item_count,
     selection_seed: payload.selection_seed,
     plan_sha256: "b".repeat(64),
@@ -278,4 +279,35 @@ describe("ComposerPromptTemplatesAction", () => {
     expect(api.queuePromptBatch).not.toHaveBeenCalled();
     uuid.mockRestore();
   });
+});
+
+
+it("reviews partial filled prompts before queueing and preserves that attempt on retry", async () => {
+  let produced: PromptBatch;
+  vi.mocked(api.createPromptBatch).mockImplementation(async (_chatId, payload) => {
+    const full = draftFor(payload);
+    produced = { ...full, codec_version: 3, unfilled_ordinals: [2], items: [full.items[0], full.items[2]] };
+    return produced;
+  });
+  vi.mocked(api.queuePromptBatch)
+    .mockRejectedValueOnce(new Error("temporarily unavailable"))
+    .mockImplementation(async (_batchId, payload) => queuedFrom(produced, payload));
+  renderAction(3);
+  await configureAndCreate(3);
+  expect(await screen.findByRole("heading", { name: "2 of 3 prompts filled" })).toBeInTheDocument();
+  expect(screen.getByText("A portrait of Subject 1.")).toBeInTheDocument();
+  expect(screen.getByText("A portrait of Subject 3.")).toBeInTheDocument();
+  expect(screen.queryByText("A portrait of Subject 2.")).not.toBeInTheDocument();
+  expect(api.queuePromptBatch).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Close prompt templates" }));
+  fireEvent.click(screen.getByRole("button", { name: "Open prompt templates" }));
+  expect(screen.getByRole("heading", { name: "2 of 3 prompts filled" })).toBeInTheDocument();
+  expect(api.createPromptBatch).toHaveBeenCalledTimes(1);
+  fireEvent.click(screen.getByRole("button", { name: "Queue 2 filled prompts" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Retry queue" }));
+  expect(await screen.findByRole("heading", { name: "2 prompts queued" })).toBeInTheDocument();
+  expect(api.createPromptBatch).toHaveBeenCalledTimes(1);
+  expect(vi.mocked(api.createPromptBatch).mock.calls[0][1].item_count).toBe(3);
+  expect(api.queuePromptBatch).toHaveBeenCalledTimes(2);
+  expect(vi.mocked(api.queuePromptBatch).mock.calls[1]).toEqual(vi.mocked(api.queuePromptBatch).mock.calls[0]);
 });

@@ -1,0 +1,9 @@
+.prompt-template-direct-status.partial > div { min-width: 0; }
+.prompt-template-direct-status.partial footer { flex-wrap: wrap; }
+.prompt-partial-review { display: grid; gap: 12px; max-height: min(40vh, 320px); overflow: auto; list-style: none; margin: 16px 0 0; padding: 0; }
+.prompt-partial-review li { min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
+.prompt-partial-review strong { display: block; margin-bottom: 6px; font-size: 12px; }
+.prompt-partial-review p { white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 560px) {
+  .prompt-template-direct-status.partial { padding: 16px; }
+}

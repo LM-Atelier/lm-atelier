@@ -36,9 +36,12 @@ from .prompt_model_values import (
     PromptModelSlotContract,
     PromptModelValues,
     PromptModelValuesError,
+    PromptModelValuesResult,
     parse_prompt_model_values,
+    parse_prompt_model_values_result_payload,
     prompt_model_slot_contract,
     prompt_model_values_payload,
+    prompt_model_values_result_payload,
 )
 from .prompt_templates import (
     MAX_TEMPLATE_BODY_CHARS,
@@ -67,6 +70,7 @@ if TYPE_CHECKING:
     from .prompt_model_invocation import PromptModelInvocationData
 
 PROMPT_EXPANSION_CODEC_VERSION = 2
+PROMPT_PARTIAL_EXPANSION_CODEC_VERSION = 3
 
 MIN_EXPANSION_ITEMS = 1
 MAX_EXPANSION_ITEMS = 16
@@ -223,12 +227,13 @@ class ExpansionPlan:
     template_body: str = field(repr=False)
     items: tuple[ExpandedItem, ...]
     pending_model_slots: tuple[ModelSlotRequest, ...]
+    unfilled_ordinals: tuple[int, ...] = ()
 
     @property
     def complete(self) -> bool:
         """True when every item rendered, i.e. no model slot is outstanding."""
 
-        return not self.pending_model_slots
+        return not self.pending_model_slots and not self.unfilled_ordinals
 
 
 def _exact_str(value: object, *, maximum: int) -> str:
@@ -788,7 +793,8 @@ def _validate_receipt_authority(
     batch_values: dict[str, tuple[str | None, int | None]] = {}
     request_inputs = cast(dict[str, object], request_payload["inputs"])
 
-    for position, item in enumerate(items, start=1):
+    for item in items:
+        ordinal = cast(int, item["ordinal"])
         evidence = cast(list[dict[str, Any]], item["evidence"])
         shape = tuple(
             (
@@ -822,8 +828,8 @@ def _validate_receipt_authority(
                     expected = supplied if type(supplied) is str else None
                 else:
                     expected = (
-                        supplied[position - 1]
-                        if type(supplied) is list and len(supplied) == len(items)
+                        supplied[ordinal - 1]
+                        if type(supplied) is list and len(supplied) == request_payload["item_count"]
                         else None
                     )
                 if value != expected:
@@ -844,6 +850,37 @@ def _validate_receipt_authority(
                 _invalid()
 
 
+def _validate_plan_ordinals(
+    codec_version: int,
+    item_count: int,
+    ordinals: list[int],
+    unfilled: object,
+) -> list[int]:
+    """Require an exact ordered partition of the original requested items."""
+
+    if (
+        type(unfilled) is not list
+        or len(unfilled) > MAX_EXPANSION_ITEMS
+        or any(type(ordinal) is not int for ordinal in unfilled)
+    ):
+        _invalid()
+    missing = cast(list[int], unfilled)
+    expected = list(range(1, item_count + 1))
+    if codec_version == PROMPT_EXPANSION_CODEC_VERSION:
+        if missing or ordinals != expected:
+            _invalid()
+    else:
+        if (
+            not missing
+            or not ordinals
+            or any(not 1 <= ordinal <= item_count for ordinal in ordinals)
+            or ordinals != sorted(set(ordinals))
+            or missing != [ordinal for ordinal in expected if ordinal not in ordinals]
+        ):
+            _invalid()
+    return list(missing)
+
+
 def parse_expansion_plan_payload(value: object) -> dict[str, Any]:
     """Strictly validate a stored receipt, returning its canonical form.
 
@@ -856,12 +893,17 @@ def parse_expansion_plan_payload(value: object) -> dict[str, Any]:
     if type(value) is not dict:
         _invalid()
     payload = cast(dict[object, object], value)
-    _validate_exact_keys(payload, _PLAN_PAYLOAD_KEYS)
-
-    if type(payload["codec_version"]) is not int:
+    codec_version = payload.get("codec_version")
+    if type(codec_version) is not int or codec_version not in {
+        PROMPT_EXPANSION_CODEC_VERSION,
+        PROMPT_PARTIAL_EXPANSION_CODEC_VERSION,
+    }:
         _invalid()
-    if payload["codec_version"] != PROMPT_EXPANSION_CODEC_VERSION:
-        _invalid()
+    partial = codec_version == PROMPT_PARTIAL_EXPANSION_CODEC_VERSION
+    _validate_exact_keys(
+        payload,
+        _PLAN_PAYLOAD_KEYS | {"unfilled_ordinals"} if partial else _PLAN_PAYLOAD_KEYS,
+    )
 
     request = parse_expansion_request(payload["request"])
     request_payload = expansion_request_payload(request)
@@ -892,18 +934,19 @@ def parse_expansion_plan_payload(value: object) -> dict[str, Any]:
         _invalid()
     complete = not pending
 
+    if partial and pending:
+        _invalid()
     raw_items = payload["items"]
-    if type(raw_items) is not list or len(raw_items) != request.item_count:
+    if type(raw_items) is not list or not 1 <= len(raw_items) <= request.item_count:
         _invalid()
     items: list[dict[str, Any]] = []
     expected_slot_shapes: tuple[tuple[str, str, str], ...] | None = None
-    for position, entry in enumerate(cast(list[object], raw_items), start=1):
+    for entry in cast(list[object], raw_items):
         if type(entry) is not dict:
             _invalid()
         item = cast(dict[object, object], entry)
         _validate_exact_keys(item, _PLAN_ITEM_KEYS)
-        if type(item["ordinal"]) is not int or item["ordinal"] != position:
-            _invalid()
+        ordinal = _exact_int(item["ordinal"], minimum=1, maximum=request.item_count)
         (
             evidence,
             model_scopes,
@@ -933,7 +976,7 @@ def parse_expansion_plan_payload(value: object) -> dict[str, Any]:
                 _invalid()
             items.append(
                 {
-                    "ordinal": position,
+                    "ordinal": ordinal,
                     "rendered_prompt": prompt,
                     "rendered_sha256": digest,
                     "evidence": evidence,
@@ -944,7 +987,7 @@ def parse_expansion_plan_payload(value: object) -> dict[str, Any]:
                 _invalid()
             items.append(
                 {
-                    "ordinal": position,
+                    "ordinal": ordinal,
                     "rendered_prompt": None,
                     "rendered_sha256": None,
                     "evidence": evidence,
@@ -962,6 +1005,12 @@ def parse_expansion_plan_payload(value: object) -> dict[str, Any]:
         if tuple((slot["name"], slot["variation_scope"]) for slot in pending) != expected_pending:
             _invalid()
 
+    missing = _validate_plan_ordinals(
+        codec_version,
+        request.item_count,
+        [item["ordinal"] for item in items],
+        payload["unfilled_ordinals"] if partial else [],
+    )
     _validate_receipt_authority(
         items,
         request_payload=request_payload,
@@ -969,13 +1018,16 @@ def parse_expansion_plan_payload(value: object) -> dict[str, Any]:
         complete=complete,
     )
 
-    return {
-        "codec_version": PROMPT_EXPANSION_CODEC_VERSION,
+    result = {
+        "codec_version": codec_version,
         "request": request_payload,
         "template_body": template_body,
         "pending_model_slots": pending,
         "items": items,
     }
+    if partial:
+        result["unfilled_ordinals"] = missing
+    return result
 
 
 def _parse_evidence_payload(
@@ -1085,7 +1137,16 @@ def expansion_plan_payload(plan: ExpansionPlan) -> dict[str, Any]:
 
     if type(plan) is not ExpansionPlan:
         _invalid()
-    if type(plan.codec_version) is not int or plan.codec_version != PROMPT_EXPANSION_CODEC_VERSION:
+    if type(plan.codec_version) is not int or plan.codec_version not in {
+        PROMPT_EXPANSION_CODEC_VERSION,
+        PROMPT_PARTIAL_EXPANSION_CODEC_VERSION,
+    }:
+        _invalid()
+    partial = plan.codec_version == PROMPT_PARTIAL_EXPANSION_CODEC_VERSION
+    if (
+        type(plan.unfilled_ordinals) is not tuple
+        or len(plan.unfilled_ordinals) > MAX_EXPANSION_ITEMS
+    ):
         _invalid()
     request = plan.request
     if type(request) is not ExpansionRequest:
@@ -1097,7 +1158,7 @@ def expansion_plan_payload(plan: ExpansionPlan) -> dict[str, Any]:
     request_payload = expansion_request_payload(request)
     template_body = _exact_str(plan.template_body, maximum=MAX_TEMPLATE_BODY_CHARS)
     request_item_count = cast(int, request_payload["item_count"])
-    if len(plan.items) != request_item_count:
+    if not 1 <= len(plan.items) <= request_item_count:
         _invalid()
     request_input_names = sorted(request_payload["inputs"])
 
@@ -1130,11 +1191,10 @@ def expansion_plan_payload(plan: ExpansionPlan) -> dict[str, Any]:
     expected_slot_shapes: (
         tuple[tuple[str, PromptTemplateSlotMode, PromptTemplateVariationScope], ...] | None
     ) = None
-    for position, item in enumerate(plan.items, start=1):
+    for item in plan.items:
         if type(item) is not ExpandedItem:
             _invalid()
-        if type(item.ordinal) is not int or item.ordinal != position:
-            _invalid()
+        _exact_int(item.ordinal, minimum=1, maximum=request_item_count)
         # Not `or not item.evidence`. The contract permits a fixed literal
         # template with zero slots and the editor displays that shape, so an
         # item with no evidence is legitimate. Requiring evidence here refused a
@@ -1254,6 +1314,14 @@ def expansion_plan_payload(plan: ExpansionPlan) -> dict[str, Any]:
                 }
             )
 
+    if partial and pending:
+        _invalid()
+    missing = _validate_plan_ordinals(
+        plan.codec_version,
+        request_item_count,
+        [item["ordinal"] for item in items],
+        list(plan.unfilled_ordinals),
+    )
     payload = {
         "codec_version": plan.codec_version,
         "request": request_payload,
@@ -1261,6 +1329,8 @@ def expansion_plan_payload(plan: ExpansionPlan) -> dict[str, Any]:
         "pending_model_slots": pending,
         "items": items,
     }
+    if partial:
+        payload["unfilled_ordinals"] = missing
     _validate_receipt_authority(
         items,
         request_payload=request_payload,
@@ -1490,6 +1560,45 @@ def complete_prompt_expansion_with_model_values(
     # allocation, choice indices, and evidence order to this exact contract.
     expected = _bind_incomplete_plan(normalized_contract, plan_payload, request)
 
+    return _render_model_completion(normalized_contract, request, expected, normalized_values, ())
+
+
+def complete_prompt_expansion_with_model_result(
+    contract: PromptTemplateContract,
+    plan: ExpansionPlan,
+    result: PromptModelValuesResult,
+) -> ExpansionPlan:
+    """Keep complete supplied drafts at their original ordinals and record gaps."""
+
+    normalized_contract = _snapshot_completion_contract(contract)
+    plan_payload, request = _snapshot_completion_plan(plan)
+    try:
+        model_contract = prompt_model_slot_contract(
+            normalized_contract, item_count=request.item_count
+        )
+        normalized_result = parse_prompt_model_values_result_payload(
+            prompt_model_values_result_payload(result, contract=model_contract),
+            contract=model_contract,
+        )
+    except PromptModelValuesError:
+        _invalid()
+    expected = _bind_incomplete_plan(normalized_contract, plan_payload, request)
+    return _render_model_completion(
+        normalized_contract,
+        request,
+        expected,
+        normalized_result,
+        normalized_result.unfilled_ordinals,
+    )
+
+
+def _render_model_completion(
+    normalized_contract: PromptTemplateContract,
+    request: ExpansionRequest,
+    expected: ExpansionPlan,
+    normalized_values: PromptModelValues | PromptModelValuesResult,
+    unfilled_ordinals: tuple[int, ...],
+) -> ExpansionPlan:
     batch_values = dict(normalized_values.batch_values)
     item_values = {item.ordinal: dict(item.values) for item in normalized_values.items}
     completed_items: list[ExpandedItem] = []
@@ -1501,6 +1610,8 @@ def complete_prompt_expansion_with_model_values(
         for slot in normalized_contract.slots
     )
     for item in expected.items:
+        if item.ordinal in unfilled_ordinals:
+            continue
         completed_evidence: list[SlotEvidence] = []
         for entry in item.evidence:
             if entry.mode is not PromptTemplateSlotMode.MODEL:
@@ -1545,11 +1656,16 @@ def complete_prompt_expansion_with_model_values(
         )
 
     completed = ExpansionPlan(
-        codec_version=PROMPT_EXPANSION_CODEC_VERSION,
+        codec_version=(
+            PROMPT_PARTIAL_EXPANSION_CODEC_VERSION
+            if unfilled_ordinals
+            else PROMPT_EXPANSION_CODEC_VERSION
+        ),
         request=request,
         template_body=normalized_contract.body,
         items=tuple(completed_items),
         pending_model_slots=(),
+        unfilled_ordinals=unfilled_ordinals,
     )
     # Exercise both public receipt boundaries before returning. This guarantees
     # the bridge cannot manufacture a state persistence would later refuse.

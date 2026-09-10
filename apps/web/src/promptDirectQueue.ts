@@ -10,7 +10,7 @@ const BATCH_KEYS = [
   "id", "chat_id", "prompt_template_id", "prompt_template_revision_id",
   "schema_version", "contract_sha256", "codec_version", "requested_count",
   "selection_seed", "plan_sha256", "state", "plan_version", "items", "replayed",
-  "queue_idempotency_key", "work_plan_id", "queued_at",
+  "queue_idempotency_key", "work_plan_id", "queued_at", "unfilled_ordinals",
 ] as const;
 const ITEM_KEYS = [
   "id", "ordinal", "rendered_prompt", "rendered_sha256", "reviewed_prompt",
@@ -113,7 +113,7 @@ async function parsePromptBatch(
   const revisionId = boundedString(raw.prompt_template_revision_id, MAX_IDENTIFIER_CHARACTERS);
   const schemaVersion = exactInteger(raw.schema_version, 1, 1);
   const contractSha256 = digestString(raw.contract_sha256);
-  const codecVersion = exactInteger(raw.codec_version, 2, 2);
+  const codecVersion = exactInteger(raw.codec_version, 2, 3);
   const requestedCount = exactInteger(raw.requested_count, 1, MAX_PROMPT_BATCH_ITEMS);
   const selectionSeed = exactInteger(
     raw.selection_seed,
@@ -142,14 +142,20 @@ async function parsePromptBatch(
   if (
     !Array.isArray(raw.items)
     || Object.getPrototypeOf(raw.items) !== Array.prototype
-    || raw.items.length !== requestedCount
+    || raw.items.length < 1
+    || raw.items.length > requestedCount
+    || !Array.isArray(raw.unfilled_ordinals)
+    || Object.getPrototypeOf(raw.unfilled_ordinals) !== Array.prototype
+    || raw.unfilled_ordinals.length > requestedCount
   ) invalidBatch();
+  const unfilledOrdinals = raw.unfilled_ordinals.map((ordinal) =>
+    exactInteger(ordinal, 1, requestedCount));
 
   const itemIds = new Set<string>();
-  const items = await Promise.all(raw.items.map(async (candidate, index) => {
+  const items = await Promise.all(raw.items.map(async (candidate) => {
     const entry = exactRecord(candidate, ITEM_KEYS);
     const itemId = boundedString(entry.id, MAX_IDENTIFIER_CHARACTERS);
-    const ordinal = exactInteger(entry.ordinal, 1, MAX_PROMPT_BATCH_ITEMS);
+    const ordinal = exactInteger(entry.ordinal, 1, requestedCount);
     const renderedPrompt = boundedString(entry.rendered_prompt, MAX_PROMPT_CHARACTERS);
     const renderedSha256 = digestString(entry.rendered_sha256);
     const reviewedPrompt = boundedString(entry.reviewed_prompt, MAX_PROMPT_CHARACTERS);
@@ -162,8 +168,7 @@ async function parsePromptBatch(
       ? null
       : exactInteger(entry.media_seed, 0, MAX_PROMPT_SELECTION_SEED);
     if (
-      ordinal !== index + 1
-      || itemIds.has(itemId)
+      itemIds.has(itemId)
       || entry.selected !== true
       || reviewVersion !== 1
       || rerollCount !== 0
@@ -188,6 +193,19 @@ async function parsePromptBatch(
       media_seed: mediaSeed,
     };
   }));
+
+  if (items.some((item, index) => index > 0 && item.ordinal <= items[index - 1].ordinal)) {
+    invalidBatch();
+  }
+  const suppliedOrdinals = new Set(items.map((item) => item.ordinal));
+  const missing = Array.from({ length: requestedCount }, (_, index) => index + 1)
+    .filter((ordinal) => !suppliedOrdinals.has(ordinal));
+  if (
+    (codecVersion === 2 && missing.length !== 0)
+    || (codecVersion === 3 && missing.length === 0)
+    || unfilledOrdinals.length !== missing.length
+    || unfilledOrdinals.some((ordinal, index) => ordinal !== missing[index])
+  ) invalidBatch();
 
   if (state === "draft") {
     if (
@@ -231,7 +249,8 @@ async function parsePromptBatch(
     prompt_template_revision_id: revisionId,
     schema_version: schemaVersion,
     contract_sha256: contractSha256,
-    codec_version: codecVersion as 2,
+    codec_version: codecVersion as 2 | 3,
+    unfilled_ordinals: unfilledOrdinals,
     requested_count: requestedCount,
     selection_seed: selectionSeed,
     plan_sha256: planSha256,
@@ -263,6 +282,9 @@ export async function admitQueuedPromptBatch(
   if (
     admitted.state !== "queued"
     || admitted.id !== draft.id
+    || admitted.codec_version !== draft.codec_version
+    || admitted.unfilled_ordinals.length !== draft.unfilled_ordinals.length
+    || admitted.unfilled_ordinals.some((ordinal, index) => ordinal !== draft.unfilled_ordinals[index])
     || admitted.plan_version !== draft.plan_version + 1
     || admitted.plan_sha256 !== draft.plan_sha256
     || admitted.items.length !== draft.items.length

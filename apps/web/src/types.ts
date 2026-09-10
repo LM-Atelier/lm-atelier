@@ -1837,8 +1837,9 @@ export interface PromptBatch {
   prompt_template_revision_id: string;
   schema_version: number;
   contract_sha256: string;
-  codec_version: 2;
+  codec_version: 2 | 3;
   requested_count: number;
+  unfilled_ordinals: number[];
   selection_seed: number;
   plan_sha256: string;
   state: "draft" | "queued";
