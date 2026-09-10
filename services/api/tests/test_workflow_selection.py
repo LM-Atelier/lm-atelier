@@ -62,7 +62,7 @@ def _family_revision(
         definition=definition,
         version=1,
         engine="comfyui",
-        api_graph_json={"node": {"class_type": "TestOutput"}},
+        api_graph_json={"node": {"class_type": "TestOutput", "inputs": {"text": "${prompt}"}}},
         capabilities_json=capabilities or [],
         dependency_contract_sha256=dependency_contract_sha256,
         trusted=trusted,
@@ -308,7 +308,7 @@ def test_same_operation_variants_require_unambiguous_capability_match(session: S
         definition=second,
         version=1,
         engine="comfyui",
-        api_graph_json={"node": {"class_type": "DepthOutput"}},
+        api_graph_json={"node": {"class_type": "DepthOutput", "inputs": {"text": "${prompt}"}}},
         capabilities_json=["depth"],
         trusted=True,
     )
@@ -468,7 +468,7 @@ def test_compatibility_family_uses_bound_profile_and_legacy_revision(session: Se
         definition=legacy_definition,
         version=1,
         engine="comfyui",
-        api_graph_json={"node": {"class_type": "LegacyOutput"}},
+        api_graph_json={"node": {"class_type": "LegacyOutput", "inputs": {"text": "${prompt}"}}},
         trusted=True,
     )
     session.add_all([legacy_definition, revision])
