@@ -144,6 +144,7 @@ from .outpaint_workflows import (
 from .processes import ProcessSupervisor, WorkerStartRefused
 from .profile_service import AUTO_PROFILE_ID
 from .progress import apply_engine_progress, completed_progress, update_job_progress
+from .prompt_binding import ignores_the_description
 from .prompt_expansion_use import (
     PROMPT_SOURCE_INVALID,
     PromptBatchQueueSelection,
@@ -9389,6 +9390,8 @@ class ConversationOrchestrator:
             return "untrusted"
         if not self._revision_accepts_install(session, revision, model_install_id):
             return "model_mismatch"
+        if ignores_the_description(revision.engine, operation.value, revision.api_graph_json):
+            return "ignores_the_description"
         return None
 
     _PIN_PROBLEM_MESSAGES = {
@@ -9397,6 +9400,10 @@ class ConversationOrchestrator:
         "engine_mismatch": "The workflow this project pins was built for a different media engine.",
         "untrusted": "The workflow this project pins has not been trusted.",
         "model_mismatch": "The workflow this project pins requires a different model.",
+        "ignores_the_description": (
+            "The workflow this project pins never reads what you type, so it would "
+            "return the same result whatever you asked for."
+        ),
     }
 
     def _resolve_project_pin(
