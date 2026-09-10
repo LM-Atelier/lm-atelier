@@ -1507,6 +1507,11 @@ export interface WorkflowFamilyPreference {
  * authored as one, which is worth saying out loud rather than hiding: those
  * resolve to their original profile and behave exactly as they did.
  */
+export interface WorkflowFamilyDependencySummary {
+  dependency_count: number;
+  names: string[];
+}
+
 export interface WorkflowFamily {
   id: string;
   name: string;
@@ -1519,6 +1524,7 @@ export interface WorkflowFamily {
   compatibility: boolean;
   variants: WorkflowFamilyVariant[];
   preferences: WorkflowFamilyPreference[];
+  dependency_summary?: WorkflowFamilyDependencySummary | null;
   created_at: string;
   updated_at: string;
 }

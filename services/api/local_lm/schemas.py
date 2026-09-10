@@ -1578,6 +1578,11 @@ class WorkflowFamilyPreferenceOut(ApiModel):
     sort_order: int
 
 
+class WorkflowFamilyDependencySummaryOut(ApiModel):
+    dependency_count: int = Field(ge=0)
+    names: list[str] = Field(default_factory=list)
+
+
 class WorkflowFamilyOut(ApiModel):
     id: str
     name: str
@@ -1590,6 +1595,7 @@ class WorkflowFamilyOut(ApiModel):
     compatibility: bool
     variants: list[WorkflowFamilyVariantOut] = Field(default_factory=list)
     preferences: list[WorkflowFamilyPreferenceOut] = Field(default_factory=list)
+    dependency_summary: WorkflowFamilyDependencySummaryOut | None = None
     created_at: datetime
     updated_at: datetime
 

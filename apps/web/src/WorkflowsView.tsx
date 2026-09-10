@@ -99,8 +99,8 @@ export function WorkflowsView() {
   };
   const workflows = useQuery({ queryKey: ["workflows"], queryFn: api.workflows });
   const families = useQuery({
-    queryKey: ["workflow-families", "library", includeArchived],
-    queryFn: () => api.workflowFamilies(undefined, includeArchived),
+    queryKey: ["workflow-families", "library", includeArchived, "dependencies"],
+    queryFn: () => api.workflowFamilies(undefined, includeArchived, true),
   });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selected = workflows.data?.find((workflow) => workflow.id === selectedId) ?? null; const selectedFamily = families.data?.find((family) => family.variants.some((variant) => variant.id === selectedId));

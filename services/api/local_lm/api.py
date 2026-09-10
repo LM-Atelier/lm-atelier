@@ -463,6 +463,7 @@ from .schemas import (
     WorkflowEditorGraphDeltaOut,
     WorkflowEditorReturnOut,
     WorkflowEditorSessionOut,
+    WorkflowFamilyDependencySummaryOut,
     WorkflowFamilyOut,
     WorkflowFamilyPreferenceOut,
     WorkflowFamilyPreferenceUpdate,
@@ -559,6 +560,7 @@ from .workflow_editor_shell import (
     workflow_editor_shell_csp,
     workflow_editor_shell_document,
 )
+from .workflow_family_dependencies import workflow_family_dependency_summaries
 from .workflow_install_offers import (
     WorkflowInstallOfferError,
     create_workflow_install_offer,
@@ -8422,6 +8424,7 @@ async def list_workflow_families(
     session: SessionDep,
     selector_capability: WorkflowSelectorCapability | None = None,
     include_archived: bool = False,
+    include_dependencies: bool = False,
 ) -> list[WorkflowFamilyOut]:
     query = select(WorkflowFamily).options(
         selectinload(WorkflowFamily.definitions),
@@ -8437,7 +8440,21 @@ async def list_workflow_families(
         session.scalars(query.order_by(WorkflowFamily.name, WorkflowFamily.id)).unique()
     )
     services = _services(request)
-    return [_workflow_family_out(session, services, family) for family in families]
+    summaries = (
+        workflow_family_dependency_summaries(session, [family.id for family in families])
+        if include_dependencies
+        else {}
+    )
+    result = []
+    for family in families:
+        output = _workflow_family_out(session, services, family)
+        summary = summaries.get(family.id)
+        if summary is not None:
+            output.dependency_summary = WorkflowFamilyDependencySummaryOut(
+                dependency_count=summary.dependency_count, names=list(summary.names)
+            )
+        result.append(output)
+    return result
 
 
 @router.get("/workflow-families/{family_id}", response_model=WorkflowFamilyOut)
