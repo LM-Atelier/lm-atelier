@@ -253,6 +253,81 @@ describe("resolveWorkflowSettings", () => {
     expect(fields).toEqual([imageField]);
   });
 
+  // The server drops a base field a workflow marks read-only, so the caller can
+  // never set it. The browser kept it, and the two disagreed on the owner's own
+  // primary image workflow: its schema declares width and height read-only
+  // because a ResolutionSelector node inside the graph decides the size, and the
+  // panel offered editable Width and Height boxes reading 1024 that changed
+  // nothing at all.
+  it("drops a dimension the workflow says it decides for itself", () => {
+    const width: SettingField = {
+      ...imageField, key: "width", label: "Width", type: "integer",
+      default: 1024, minimum: 64, maximum: 4096, step: 8, multiple_of: 8,
+    } as SettingField;
+    const height: SettingField = { ...width, key: "height", label: "Height" } as SettingField;
+
+    const resolved = resolveWorkflowSettings([width, height], {
+      type: "object",
+      properties: { width: { readOnly: true }, height: { readOnly: true } },
+    });
+
+    expect(resolved.map((field) => field.key)).not.toContain("width");
+    expect(resolved.map((field) => field.key)).not.toContain("height");
+  });
+
+  it("keeps a dimension the workflow does declare", () => {
+    // The control that keeps the rule narrow: identical but for readOnly, so a
+    // filter that dropped every declared dimension would fail here.
+    const width: SettingField = {
+      ...imageField, key: "width", label: "Width", type: "integer",
+      default: 1024, minimum: 64, maximum: 4096, step: 8, multiple_of: 8,
+    } as SettingField;
+
+    const resolved = resolveWorkflowSettings([width], {
+      type: "object",
+      properties: {
+        width: { type: "integer", default: 768, minimum: 256, maximum: 2048, multipleOf: 64 },
+      },
+    });
+
+    const found = resolved.find((field) => field.key === "width");
+    expect(found?.default).toBe(768);
+    expect(found?.maximum).toBe(2048);
+  });
+
+  it("leaves a workflow's own read-only key alone, because the server does", () => {
+    // Parity is the whole point, and the server is not uniform here: its base
+    // loop drops read-only fields, its workflow-key loop does not. A read-only
+    // key with a const still reads as fixed rather than vanishing, and that is
+    // the behaviour to match rather than to tidy.
+    const resolved = resolveWorkflowSettings([imageField], {
+      type: "object",
+      properties: { sampler_preset: { type: "string", const: "euler", readOnly: true } },
+    });
+
+    const found = resolved.find((field) => field.key === "sampler_preset");
+    expect(found).toBeDefined();
+    expect(found?.default).toBe("euler");
+  });
+
+  it("drops a read-only base field even when it is otherwise well formed", () => {
+    // readOnly wins over a complete declaration; otherwise a workflow could say
+    // "you cannot set this" and be overruled by having also described it.
+    const width: SettingField = {
+      ...imageField, key: "width", label: "Width", type: "integer",
+      default: 1024, minimum: 64, maximum: 4096, step: 8, multiple_of: 8,
+    } as SettingField;
+
+    const resolved = resolveWorkflowSettings([width], {
+      type: "object",
+      properties: {
+        width: { type: "integer", default: 512, minimum: 64, maximum: 2048, readOnly: true },
+      },
+    });
+
+    expect(resolved.map((field) => field.key)).not.toContain("width");
+  });
+
   it("promotes workflow controls to the requested detail level", () => {
     const fields = resolveWorkflowSettings(
       [],
