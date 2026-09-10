@@ -1,0 +1,10 @@
+.workflow-revision-comparison { min-width: 0; padding: 14px 0; }
+.workflow-revision-comparison h3 { margin: 0 0 8px; font-size: 14px; }
+.workflow-revision-comparison p { font-size: 12px; line-height: 1.5; color: var(--ink-secondary); }
+.workflow-revision-change-table { overflow: auto; max-height: 520px; margin-top: 12px; }
+.workflow-revision-change-table table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.workflow-revision-change-table th, .workflow-revision-change-table td { padding: 10px; border: 1px solid var(--border); vertical-align: top; text-align: left; font-size: 12px; overflow-wrap: anywhere; }
+.workflow-revision-change-table th { font-weight: 600; }
+.workflow-revision-change-table code { display: block; margin-top: 6px; font-weight: 400; white-space: pre-wrap; overflow-wrap: anywhere; }
+.workflow-revision-change-table pre { margin: 0; max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.workflow-change-missing { color: var(--ink-secondary); font-style: italic; }

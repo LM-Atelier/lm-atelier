@@ -115,3 +115,76 @@ describe("workflow revision history", () => {
     expect(screen.getByLabelText("Revision")).toHaveValue("revision-1");
   });
 });
+
+describe("workflow revision comparison", () => {
+  it("names graph, control, and dependency changes from the selected revision to current", async () => {
+    const value = workflow();
+    value.revisions[0].api_graph_json = { loader: { class_type: "LoraLoader",
+      inputs: { lora_name: "old.safetensors", strength_model: 0.5 } } };
+    value.revisions[2].api_graph_json = { loader: { class_type: "LoraLoader",
+      inputs: { lora_name: "new.safetensors", strength_model: 0.8 } } };
+    value.revisions[0].input_schema_json = { strength: { maximum: 1 } };
+    value.revisions[2].input_schema_json = { strength: { maximum: 2 } };
+    value.revisions[0].dependencies_json = { binding: null };
+    value.revisions[2].dependencies_json = { binding: "replacement", editable: true };
+    value.revisions[0].ui_graph_json = { "layout/a~b": [1, 2] };
+    value.revisions[2].ui_graph_json = { "layout/a~b": [2, 1] };
+    value.revisions[2].engine_version = "2.0";
+    vi.mocked(api.workflows).mockResolvedValue([value]);
+    const history = await openHistory();
+    fireEvent.click(history.getByRole("button", { name: "Inspect v1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show changes from v1 to v2" }));
+    const comparison = within(screen.getByRole("region", { name: "Revision changes" }));
+    expect(comparison.getByRole("columnheader", { name: "Selected v1" })).toBeInTheDocument();
+    expect(comparison.getByRole("columnheader", { name: "Current v2" })).toBeInTheDocument();
+    expect(comparison.getByText("/loader/inputs/strength_model")).toBeInTheDocument();
+    expect(comparison.getByText("/strength/maximum")).toBeInTheDocument();
+    expect(comparison.getByText("Not present")).toBeInTheDocument();
+    expect(comparison.getAllByText("null")).toHaveLength(2);
+    expect(comparison.getByText("/layout~1a~0b/0")).toBeInTheDocument();
+    expect(comparison.getByText("/engine_version")).toBeInTheDocument();
+    expect(comparison.getByText('"old.safetensors"')).toBeInTheDocument();
+    expect(comparison.getByText('"new.safetensors"')).toBeInTheDocument();
+    expect(api.restoreWorkflowRevision).not.toHaveBeenCalled();
+    expect(api.updateWorkflow).not.toHaveBeenCalled();
+  });
+
+  it("ignores object key order and reports equal content without changing selection", async () => {
+    const value = workflow();
+    value.revisions[0].api_graph_json = { node: { a: 1, b: [2, 3] } };
+    value.revisions[2].api_graph_json = { node: { b: [2, 3], a: 1 } };
+    vi.mocked(api.workflows).mockResolvedValue([value]);
+    const history = await openHistory();
+    fireEvent.click(history.getByRole("button", { name: "Inspect v1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show changes from v1 to v2" }));
+    expect(screen.getByText("No content differences in these revisions.")).toBeInTheDocument();
+    expect(screen.getByLabelText("Revision")).toHaveValue("revision-1");
+    expect(api.restoreWorkflowRevision).not.toHaveBeenCalled();
+  });
+
+  it("discards the old comparison when another revision is selected", async () => {
+    const history = await openHistory();
+    fireEvent.click(history.getByRole("button", { name: "Inspect v1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show changes from v1 to v2" }));
+    expect(screen.getByRole("region", { name: "Revision changes" })).toBeInTheDocument();
+    fireEvent.click(history.getByRole("button", { name: "Inspect v3" }));
+    expect(screen.queryByRole("region", { name: "Revision changes" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show changes from v3 to v2" })).toHaveAttribute("aria-expanded", "false");
+  });
+});
+
+
+it("bounds the displayed changes for a large workflow revision", async () => {
+  const value = workflow();
+  value.revisions[0].api_graph_json = {};
+  value.revisions[2].api_graph_json = Object.fromEntries(
+    Array.from({ length: 150 }, (_, index) => ["node-" + index, index]),
+  );
+  vi.mocked(api.workflows).mockResolvedValue([value]);
+  const history = await openHistory();
+  fireEvent.click(history.getByRole("button", { name: "Inspect v1" }));
+  fireEvent.click(screen.getByRole("button", { name: "Show changes from v1 to v2" }));
+  const comparison = within(screen.getByRole("region", { name: "Revision changes" }));
+  expect(comparison.getByText(/Comparison limit reached/)).toBeInTheDocument();
+  expect(comparison.getAllByRole("row")).toHaveLength(101);
+});
