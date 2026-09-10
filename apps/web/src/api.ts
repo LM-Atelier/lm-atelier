@@ -42,6 +42,9 @@ import type {
   GenerationPresetBundle,
   Job,
   JobActivity,
+  QueueActivityItem,
+  QueueActivityPage,
+  QueuePlanSteps,
   Message,
   ModelAssetInstall,
   ModelInstall,
@@ -561,6 +564,18 @@ export const api = {
   cancelChat: (chatId: string) =>
     request<Job>(`/api/chats/${chatId}/cancel`, { method: "POST" }),
   jobs: () => request<Job[]>("/api/jobs"),
+  queuePlanSteps: (planId: string, offset: number, signal?: AbortSignal) =>
+    request<QueuePlanSteps>("/api/queue/plans/" + encodeURIComponent(planId)
+      + "/steps?limit=50&offset=" + String(offset), { signal }).then((value) => {
+      if (value.plan_id !== planId) throw new Error("The submitted work steps could not be read.");
+      return value;
+    }),
+  queueActivity: (options: { lane?: QueueActivityItem["lane"]; cursor?: string | null; limit: number }, signal?: AbortSignal) => {
+    const params = new URLSearchParams({ limit: String(options.limit) });
+    if (options.lane) params.set("lane", options.lane);
+    if (options.cursor) params.set("cursor", options.cursor);
+    return request<QueueActivityPage>("/api/queue/activity?" + params.toString(), { signal });
+  },
   jobActivity: (activeLimit: number) =>
     request<JobActivity>(`/api/jobs/activity?active_limit=${activeLimit}`),
   workPlans: (chatId?: string) =>

@@ -406,6 +406,8 @@ from .schemas import (
     PromptTemplateRevisionOut,
     PromptTemplateUpdate,
     PromptTemplateWriteOut,
+    QueueActivityPageOut,
+    QueuePlanStepsOut,
     ReferenceAssetAttach,
     ReferenceAssetAttached,
     ReferenceAssetOut,
@@ -520,6 +522,12 @@ from .studio_sessions import (
     STUDIO_SCOPE,
     find_studio_session,
     studio_session_title,
+)
+from .user_queue_activity import (
+    QueueActivityCursorError,
+    QueueStepStateError,
+    list_queue_activity,
+    list_queue_plan_steps,
 )
 from .verified_setup import build_verified_setup, resolve_verified_setup
 from .video_length import workflow_video_length
@@ -3983,6 +3991,48 @@ async def list_jobs(
     if status:
         statement = statement.where(Job.status == status)
     return list(session.scalars(statement).all())
+
+
+@router.get("/queue/plans/{plan_id}/steps", response_model=QueuePlanStepsOut)
+async def queue_plan_steps(
+    plan_id: str,
+    session: ConversationSessionDep,
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=9_223_372_036_854_775_807),
+) -> QueuePlanStepsOut:
+    try:
+        page = list_queue_plan_steps(session, plan_id, limit=limit, offset=offset)
+    except QueueStepStateError as exc:
+        raise api_error(
+            409, "queue-step-state-invalid", "Stored work step state is invalid."
+        ) from exc
+    if page is None:
+        raise api_error(404, "queue-plan-not-found", "The submitted work could not be found.")
+    return page
+
+
+@router.get("/queue/activity", response_model=QueueActivityPageOut)
+async def queue_activity(
+    request: Request,
+    session: ConversationSessionDep,
+    limit: int = Query(default=50, ge=1, le=100),
+    lane: Literal["generation", "transfer", "install"] | None = None,
+    cursor: str | None = Query(default=None, min_length=1, max_length=2_048),
+) -> QueueActivityPageOut:
+    try:
+        return list_queue_activity(
+            session,
+            signing_key=_services(request).security.local_state_signing_key(b"user-queue-activity"),
+            limit=limit,
+            lane=lane,
+            cursor=cursor,
+        )
+    except QueueActivityCursorError as exc:
+        raise api_error(
+            422,
+            "queue-activity-cursor-invalid",
+            "The accepted work page request is invalid. Refresh to start again.",
+        ) from exc
 
 
 @router.get("/jobs/activity", response_model=JobActivityOut)

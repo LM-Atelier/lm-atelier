@@ -83,6 +83,20 @@ export function useLiveEvents(
     let mediaRefresh: number | undefined;
     let authoritativeRefresh: number | undefined;
     let activityRefresh: number | undefined;
+    let queueRefresh: number | undefined;
+    const queueKeys = [["jobs", "queue"], ["jobs", "queue-steps"]] as const;
+    const scheduleQueueRefresh = () => {
+      if (queueRefresh !== undefined
+        || !queueKeys.some(queryKey => client.getQueryCache().findAll({ queryKey }).length)) return;
+      queueRefresh = window.setTimeout(() => {
+        queueRefresh = undefined;
+        for (const queryKey of queueKeys) {
+          if (client.getQueryCache().findAll({ queryKey }).length) {
+            void client.invalidateQueries({ queryKey });
+          }
+        }
+      }, 2_000);
+    };
     const scheduleActivityRefresh = () => {
       if (activityRefresh !== undefined) return;
       activityRefresh = window.setTimeout(() => {
@@ -150,6 +164,7 @@ export function useLiveEvents(
               return current.map((job) => job.id === snapshot.id ? snapshot : job);
             });
             if (snapshot.kind !== "edit_verify") {
+              scheduleQueueRefresh();
               const active = ["queued", "running", "paused"].includes(snapshot.status);
               for (const [key, activity] of client.getQueriesData<JobActivity>({ queryKey: ["jobs", "activity"] })) {
                 if (!activity) continue;
@@ -252,6 +267,7 @@ export function useLiveEvents(
       if (mediaRefresh !== undefined) window.clearTimeout(mediaRefresh);
       if (authoritativeRefresh !== undefined) window.clearTimeout(authoritativeRefresh);
       if (activityRefresh !== undefined) window.clearTimeout(activityRefresh);
+      if (queueRefresh !== undefined) window.clearTimeout(queueRefresh);
       dispose?.();
     };
   }, [client, setLiveText]);

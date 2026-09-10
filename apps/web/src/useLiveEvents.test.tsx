@@ -235,3 +235,67 @@ describe("useLiveEvents activity projection", () => {
     expect(client.getQueryData(key)).toEqual(current);
   });
 });
+
+describe("useLiveEvents accepted queue reconciliation", () => {
+  const clients: QueryClient[] = [];
+  afterEach(() => {
+    clients.splice(0).forEach((client) => client.clear());
+    vi.useRealTimers();
+  });
+  async function openQueue() {
+    vi.useFakeTimers(); handlers.length = 0;
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    clients.push(client);
+    const key = ["jobs", "queue", "all"];
+    const data = { pages: [{ items: [], total: 0 }], pageParams: [null] };
+    client.setQueryData(key, data);
+    const hook = renderHook(() => useLiveEvents(client, vi.fn()));
+    await act(async () => { await Promise.resolve(); });
+    return { client, key, data, hook, invalidate: vi.spyOn(client, "invalidateQueries") };
+  }
+  it("coalesces visible progress bursts into one queue read without copying job payloads", async () => {
+    const { client, key, data, invalidate } = await openQueue();
+    act(() => { for (let i = 0; i < 20; i++) handlers[0]!(progress("job-" + i, 1)); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_999); });
+    expect(invalidate).not.toHaveBeenCalled();
+    expect(client.getQueryData(key)).toEqual(data);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(invalidate).toHaveBeenCalledExactlyOnceWith({ queryKey: ["jobs", "queue"] });
+  });
+  it("omits verification events and clears a pending queue refresh on unmount", async () => {
+    const { hook, invalidate } = await openQueue();
+    const hidden = progress("check", 1);
+    hidden.payload.job = { ...(hidden.payload.job as Job), kind: "edit_verify" };
+    act(() => handlers[0]!(hidden));
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(invalidate).not.toHaveBeenCalled();
+    act(() => handlers[0]!(progress("visible", 1)));
+    hook.unmount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+  it("reconciles queue pages after a replay gap", async () => {
+    const { client, key } = await openQueue();
+    act(() => handlers[0]!({ sequence: 2, type: "events.replay_gap", entity_id: "",
+      payload: {}, created_at: "2026-09-02T00:00:00Z" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(client.getQueryState(key)?.isInvalidated).toBe(true);
+  });
+});
+
+describe("useLiveEvents expanded queue step reconciliation", () => {
+  afterEach(() => { vi.useRealTimers(); });
+  it("refreshes expanded steps on visible job progress even without an item-list cache", async () => {
+    vi.useFakeTimers(); handlers.length = 0;
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const key = ["jobs", "queue-steps", "plan"];
+    client.setQueryData(key, { pages: [{ items: [], total: 0 }], pageParams: [0] });
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const hook = renderHook(() => useLiveEvents(client, vi.fn()));
+    await act(async () => { await Promise.resolve(); });
+    act(() => { handlers[0]!(progress("one", 1)); handlers[0]!(progress("two", 1)); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(invalidate).toHaveBeenCalledExactlyOnceWith({ queryKey: ["jobs", "queue-steps"] });
+    hook.unmount(); client.clear();
+  });
+});

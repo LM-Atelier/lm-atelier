@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, CircleStop, Pause, Play, RotateCcw } from "lucide-react";
 import { api } from "./api";
+import { QueueActivityDialog } from "./QueueActivityDialog";
 import { jobProgressFraction, jobProgressText } from "./jobProgress";
 import "./JobsPanel.css";
 
@@ -16,6 +18,8 @@ function jobDisplayName(kind: string): string {
 
 export function JobsPanel() {
   const client = useQueryClient();
+  const [queueOpen, setQueueOpen] = useState(false);
+  const queueButton = useRef<HTMLButtonElement>(null);
   const [dismissedBefore, setDismissedBefore] = useState(() => {
     const saved = Number(localStorage.getItem(DISMISSED_JOB_ISSUES_KEY));
     return Number.isFinite(saved) && saved > 0 ? saved : 0;
@@ -50,11 +54,24 @@ export function JobsPanel() {
     localStorage.setItem(DISMISSED_JOB_ISSUES_KEY, String(cutoff));
     setDismissedBefore(cutoff);
   };
+  const queueEntry = (
+    <button ref={queueButton} className={"secondary compact-button queue-activity-entry"
+      + (!jobs.error && !activeCount && !recentUnsuccessful.length ? " queue-activity-entry-idle" : "")}
+      onClick={() => setQueueOpen(true)}>View accepted work</button>
+  );
+  const closeQueue = () => {
+    setQueueOpen(false);
+    queueButton.current?.focus();
+  };
+  const queueDialog = queueOpen
+    ? createPortal(<QueueActivityDialog onClose={closeQueue} />, document.body, "accepted-work")
+    : null;
   // A jobs read that failed is not "no jobs". Returning null took away the
   // one surface that would have explained what was happening, at exactly the
   // moment something was - and left the workspace looking idle instead.
   if (jobs.error) {
     return (
+      <>
       <aside className="jobs-panel" aria-label="Jobs">
         <div className="jobs-error" role="alert">
           {(jobs.error as Error).message}
@@ -62,11 +79,15 @@ export function JobsPanel() {
             Try again
           </button>
         </div>
+        {queueEntry}
       </aside>
+      {queueDialog}
+      </>
     );
   }
-  if (!activeCount && !recentUnsuccessful.length) return null;
+  if (!activeCount && !recentUnsuccessful.length) return <>{queueEntry}{queueDialog}</>;
   return (
+    <>
     <aside className="jobs-panel" aria-label="Jobs">
       <header>
         <Activity size={16} />
@@ -179,6 +200,9 @@ export function JobsPanel() {
           {(retry.error ?? cancel.error ?? pause.error ?? resume.error)!.message}
         </div>
       )}
+      {queueEntry}
     </aside>
+    {queueDialog}
+    </>
   );
 }
