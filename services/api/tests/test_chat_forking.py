@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from httpx2 import AsyncClient
+from run_waits import wait_for_terminal_status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -23,12 +23,13 @@ from local_lm.references import MentionSource
 
 
 async def wait_for_run(client: AsyncClient, run_id: str) -> dict[str, Any]:
-    for _ in range(400):
+    async def read() -> dict[str, Any]:
         payload: dict[str, Any] = (await client.get(f"/api/runs/{run_id}")).json()
-        if payload["status"] in {"complete", "failed", "cancelled"}:
-            return payload
-        await asyncio.sleep(0.01)
-    raise AssertionError("run did not finish in time")
+        return payload
+
+    return cast(
+        dict[str, Any], await wait_for_terminal_status(read, what=f"run {run_id}", expected=None)
+    )
 
 
 async def _turn(client: AsyncClient, chat_id: str, text: str) -> dict[str, Any]:

@@ -5,9 +5,11 @@ import copy
 import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import pytest
 from httpx2 import ASGITransport, AsyncClient
+from run_waits import wait_for_terminal_status
 from sqlalchemy import select
 from test_project_work_plans import _archive
 
@@ -32,16 +34,13 @@ async def _running(settings: Settings):
 
 
 async def _completed(client: AsyncClient, run_id: str) -> None:
-    deadline = asyncio.get_running_loop().time() + 10
-    while asyncio.get_running_loop().time() < deadline:
+    async def read() -> dict[str, Any]:
         response = await client.get(f"/api/runs/{run_id}")
         assert response.status_code == 200, response.text
-        status = response.json()["status"]
-        if status in {"complete", "failed", "cancelled"}:
-            assert status == "complete", response.text
-            return
-        await asyncio.sleep(0.03)
-    raise AssertionError("Constructed edited run did not finish")
+        run: dict[str, Any] = response.json()
+        return run
+
+    await wait_for_terminal_status(read, what=f"run {run_id}", expected="complete")
 
 
 @pytest.mark.parametrize("media", [False, True], ids=["text", "retained-image"])
