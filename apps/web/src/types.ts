@@ -379,6 +379,56 @@ export interface Job {
   completed_at: string | null;
 }
 
+export interface QueueStep {
+  id: string;
+  ordinal: number;
+  label: string;
+  status: WorkStepStatus;
+  blocked_by: number;
+}
+
+export interface QueuePlanSteps {
+  plan_id: string;
+  items: QueueStep[];
+  total: number;
+  next_offset: number | null;
+  observed_at: string;
+}
+
+export interface QueueLaneCounts {
+  generation: number;
+  transfer: number;
+  install: number;
+}
+
+export interface QueueActivityItem {
+  owner_type: "work_plan" | "job";
+  owner_id: string;
+  label: string;
+  lane: "generation" | "transfer" | "install";
+  status: "running" | "queued" | "paused" | "blocked";
+  chat_id: string | null;
+  chat_title: string | null;
+  created_at: string;
+  updated_at: string;
+  step_count: number;
+  completed_steps: number;
+  blocked_steps: number;
+  active_jobs: number;
+  running_jobs: number;
+  queued_jobs: number;
+  paused_jobs: number;
+  progress: number | null;
+}
+
+export interface QueueActivityPage {
+  items: QueueActivityItem[];
+  total: number;
+  lane_counts: QueueLaneCounts;
+  next_cursor: string | null;
+  observed_at: string;
+}
+
 export interface JobActivity {
   active: Job[];
   active_count: number;

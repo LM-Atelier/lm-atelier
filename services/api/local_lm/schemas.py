@@ -1109,6 +1109,40 @@ class JobActivityOut(ApiModel):
     recent_issues: list[JobOut]
 
 
+class QueueLaneCountsOut(ApiModel):
+    generation: int = Field(default=0, ge=0)
+    transfer: int = Field(default=0, ge=0)
+    install: int = Field(default=0, ge=0)
+
+
+class QueueActivityItemOut(ApiModel):
+    owner_type: Literal["work_plan", "job"]
+    owner_id: str
+    label: str
+    lane: Literal["generation", "transfer", "install"]
+    status: Literal["running", "queued", "paused", "blocked"]
+    chat_id: str | None
+    chat_title: str | None
+    created_at: datetime
+    updated_at: datetime
+    step_count: int = Field(ge=0)
+    completed_steps: int = Field(ge=0)
+    blocked_steps: int = Field(ge=0)
+    active_jobs: int = Field(ge=0)
+    running_jobs: int = Field(ge=0)
+    queued_jobs: int = Field(ge=0)
+    paused_jobs: int = Field(ge=0)
+    progress: float | None = Field(ge=0, le=1)
+
+
+class QueueActivityPageOut(ApiModel):
+    items: list[QueueActivityItemOut]
+    total: int = Field(ge=0)
+    lane_counts: QueueLaneCountsOut
+    next_cursor: str | None
+    observed_at: datetime
+
+
 class WorkStepImport(ApiModel):
     """Portable step input; unknown historical statuses normalize during import."""
 
@@ -1133,6 +1167,22 @@ class WorkStepImport(ApiModel):
 
 WorkStepStatus = JobStatus | Literal["blocked"]
 WorkPlanStatus = WorkStepStatus | Literal["partial"]
+
+
+class QueueStepOut(ApiModel):
+    id: str
+    ordinal: int
+    label: str
+    status: WorkStepStatus
+    blocked_by: int = Field(ge=0)
+
+
+class QueuePlanStepsOut(ApiModel):
+    plan_id: str
+    items: list[QueueStepOut]
+    total: int = Field(ge=0)
+    next_offset: int | None
+    observed_at: datetime
 
 
 class WorkStepOut(WorkStepImport):
