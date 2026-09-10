@@ -232,6 +232,7 @@ from .profile_service import (
     validate_profile_install,
 )
 from .progress import update_job_progress
+from .prompt_binding import ignores_the_description
 from .prompt_expansion import (
     PromptExpansionDistinctCapacityError,
     PromptExpansionError,
@@ -8227,6 +8228,8 @@ def _revision_readiness(
         return "unavailable", "engine_mismatch"
     if operation != Operation.TEXT and expected_engine != "mock" and not revision.api_graph_json:
         return "unavailable", "revision_not_executable"
+    if ignores_the_description(revision.engine, operation.value, revision.api_graph_json):
+        return "unavailable", "revision_ignores_the_description"
     if not revision.trusted:
         return "review_required", "revision_untrusted"
     if revision.dependency_contract_sha256 is None:

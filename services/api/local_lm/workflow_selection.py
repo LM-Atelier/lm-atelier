@@ -20,6 +20,7 @@ from .models import (
     WorkflowProfileCompatibility,
     WorkflowRevision,
 )
+from .prompt_binding import ignores_the_description
 from .workflow_revision_reviews import review_is_current
 
 WorkflowSelectorCapability = Literal["chat", "vision", "image", "video"]
@@ -491,6 +492,8 @@ def _validate_revision(
         raise _error(capability, operation, "engine_mismatch", workflow_family_id)
     if operation != Operation.TEXT and engine != "mock" and not revision.api_graph_json:
         raise _error(capability, operation, "revision_not_executable", workflow_family_id)
+    if ignores_the_description(revision.engine, operation.value, revision.api_graph_json):
+        raise _error(capability, operation, "revision_ignores_the_description", workflow_family_id)
     if not review_is_current(session, definition, revision):
         raise _error(capability, operation, "revision_untrusted", workflow_family_id)
     if not required_capabilities.issubset(set(revision.capabilities_json)):

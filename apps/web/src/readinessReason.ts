@@ -23,6 +23,7 @@ const REASON_TEXT: Record<string, string> = {
   family_archived: "This workflow is archived.",
   family_disabled: "This workflow is turned off.",
   dependency_contract_drift: "Its recorded dependencies no longer match itself.",
+  revision_ignores_the_description: "It never reads what you type, so it would return the same result whatever you asked for.",
 };
 
 /** The sentence to show, or `null` when there is nothing to say.
