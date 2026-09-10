@@ -6015,14 +6015,13 @@ def _assert_recipe_pins_hold(recipe: ReferenceRecipe, plan: ResolvedInstallPlan 
 
 
 @router.get("/models", response_model=list[ModelInstallOut])
-async def list_models(request: Request, session: SessionDep) -> list[ModelInstallOut]:
-    installs = list(
-        session.scalars(
-            select(ModelInstall)
-            .where(ModelInstall.active.is_(True))
-            .order_by(ModelInstall.updated_at.desc())
-        ).all()
-    )
+async def list_models(
+    request: Request, session: SessionDep, install_id: str | None = None
+) -> list[ModelInstallOut]:
+    query = select(ModelInstall).where(ModelInstall.active.is_(True))
+    if install_id is not None:
+        query = query.where(ModelInstall.id == install_id)
+    installs = list(session.scalars(query.order_by(ModelInstall.updated_at.desc())).all())
     services = _services(request)
     evidence_by_install = {
         install.id: evidence

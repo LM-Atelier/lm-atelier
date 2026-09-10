@@ -22,7 +22,7 @@ export function ModelUpdatesPanel({
     mutationFn: async (update: ModelUpdate) => {
       let role = "lora";
       if (update.kind === "checkpoint") {
-        const installed = (await api.models()).find((model) => model.id === update.install_id);
+        const installed = await api.modelInstall(update.install_id);
         if (!installed || !["chat", "image", "video"].includes(installed.role)) {
           throw new Error("Could not determine the installed model's role. Check for updates again.");
         }

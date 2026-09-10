@@ -9,6 +9,7 @@ vi.mock("./api", () => ({
   api: {
     modelUpdates: vi.fn(),
     models: vi.fn(),
+    modelInstall: vi.fn(),
     catalogItemDetail: vi.fn(),
   },
 }));
@@ -62,6 +63,7 @@ describe("ModelUpdatesPanel", () => {
   beforeEach(() => {
     vi.mocked(api.modelUpdates).mockResolvedValue([update()]);
     vi.mocked(api.models).mockResolvedValue([]);
+    vi.mocked(api.modelInstall).mockResolvedValue(null);
   });
   afterEach(() => {
     cleanup();
@@ -121,7 +123,7 @@ describe("ModelUpdatesPanel", () => {
     vi.mocked(api.modelUpdates).mockResolvedValue([
       update({ install_id: "checkpoint-a", name: "Landscape model", kind: "checkpoint" }),
     ]);
-    vi.mocked(api.models).mockResolvedValue([checkpoint("image", "other-model"), checkpoint(role)]);
+    vi.mocked(api.modelInstall).mockResolvedValue(checkpoint(role));
     const model = { provider: "civitai", remote_id: "204" } as CatalogModel;
     vi.mocked(api.catalogItemDetail).mockResolvedValue({ model, revision: "204", files: [] });
     const onInstall = renderPanel();
@@ -133,7 +135,8 @@ describe("ModelUpdatesPanel", () => {
     fireEvent.click(review);
 
     await waitFor(() => expect(onInstall).toHaveBeenCalledExactlyOnceWith(model, role));
-    expect(api.models).toHaveBeenCalledTimes(1);
+    expect(api.modelInstall).toHaveBeenCalledExactlyOnceWith("checkpoint-a");
+    expect(api.models).not.toHaveBeenCalled();
     expect(api.catalogItemDetail).toHaveBeenCalledExactlyOnceWith("civitai", "204", role);
   });
 
@@ -144,7 +147,7 @@ describe("ModelUpdatesPanel", () => {
     vi.mocked(api.modelUpdates).mockResolvedValue([
       update({ install_id: "checkpoint-a", kind: "checkpoint" }),
     ]);
-    vi.mocked(api.models).mockResolvedValue([...installs]);
+    vi.mocked(api.modelInstall).mockResolvedValue(installs.find((install) => install.id === "checkpoint-a") ?? null);
     const onInstall = renderPanel();
     fireEvent.click(screen.getByRole("button", { name: /Check for updates/ }));
     fireEvent.click(await screen.findByRole("button", { name: "Review update" }));
@@ -158,7 +161,7 @@ describe("ModelUpdatesPanel", () => {
     vi.mocked(api.modelUpdates).mockResolvedValue([
       update({ install_id: "checkpoint-a", kind: "checkpoint" }),
     ]);
-    vi.mocked(api.models).mockRejectedValue(new Error("Unable to read installed models."));
+    vi.mocked(api.modelInstall).mockRejectedValue(new Error("Unable to read installed models."));
     const onInstall = renderPanel();
     fireEvent.click(screen.getByRole("button", { name: /Check for updates/ }));
     fireEvent.click(await screen.findByRole("button", { name: "Review update" }));
@@ -166,6 +169,21 @@ describe("ModelUpdatesPanel", () => {
     expect(await screen.findByText("Unable to read installed models.")).toBeInTheDocument();
     expect(api.catalogItemDetail).not.toHaveBeenCalled();
     expect(onInstall).not.toHaveBeenCalled();
+  });
+
+
+  it("reads the selected install only when reviewing a checkpoint update", async () => {
+    vi.mocked(api.modelUpdates).mockResolvedValue([update({ install_id: "checkpoint-a", kind: "checkpoint" })]);
+    vi.mocked(api.modelInstall).mockResolvedValue(checkpoint("video"));
+    vi.mocked(api.models).mockRejectedValue(new Error("Unfiltered listing should not run"));
+    const model = { provider: "civitai", remote_id: "204" } as CatalogModel;
+    vi.mocked(api.catalogItemDetail).mockResolvedValue({ model, revision: "204", files: [] });
+    const onInstall = renderPanel();
+    fireEvent.click(screen.getByRole("button", { name: /Check for updates/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Review update" }));
+    await waitFor(() => expect(onInstall).toHaveBeenCalledExactlyOnceWith(model, "video"));
+    expect(api.modelInstall).toHaveBeenCalledExactlyOnceWith("checkpoint-a");
+    expect(api.models).not.toHaveBeenCalled();
   });
 
   it("keeps other auxiliary kinds on their existing catalog path", async () => {
