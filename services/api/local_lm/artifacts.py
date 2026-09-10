@@ -187,6 +187,13 @@ class RetentionCleanupSummary:
     truncated: bool = False
     #: Rows inspected in this pass, including retained rows and the stopping boundary.
     examined_count: int = 0
+    #: Unindexed files included in removed_count, or eligible files during a dry run.
+    removed_orphan_file_count: int = 0
+
+    @property
+    def removed_row_count(self) -> int:
+        """Artifact rows removed or eligible, even when their files are already missing."""
+        return self.removed_count - self.removed_orphan_file_count
 
 
 class _DeletionBudget:
@@ -897,6 +904,7 @@ class ArtifactStore:
             marked_count=marked_count,
             pending_count=pending_count,
             removed_count=removed_count + orphan_count,
+            removed_orphan_file_count=orphan_count,
             reclaimed_bytes=reclaimed_bytes + orphan_bytes,
             truncated=truncated,
         )
