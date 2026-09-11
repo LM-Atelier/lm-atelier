@@ -8,7 +8,7 @@ import re
 import secrets
 import shutil
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,7 +31,7 @@ from .accepted_turn_context import (
     resolve_context_dependencies,
     save_accepted_context,
 )
-from .adapters.base import ChatRequest, MediaEvent, MediaRequest
+from .adapters.base import ChatRequest, GeneratedAsset, MediaEvent, MediaRequest
 from .adapters.contracts import close_iterator
 from .adapters.message_projection import project_chat_messages
 from .artifact_library import ensure_library_entry
@@ -141,6 +141,7 @@ from .outpaint_workflows import (
     normalize_margins,
     workflow_declares_outpaint,
 )
+from .output_measurement import Budget, measure_output, record_to_keep
 from .processes import ProcessSupervisor, WorkerStartRefused
 from .profile_service import AUTO_PROFILE_ID
 from .progress import apply_engine_progress, completed_progress, update_job_progress
@@ -5389,6 +5390,27 @@ class ConversationOrchestrator:
             return None
         return capabilities if capabilities.healthy else None
 
+    async def _measured_outputs(
+        self, completed_assets: Sequence[GeneratedAsset]
+    ) -> list[dict[str, Any]]:
+        """What each produced file measures, as fact, before anything stores it.
+
+        One budget for the whole generation rather than one per file, so a run
+        that produced sixty-four hostile outputs costs what one does. Each
+        measurement is its own thread hop: the work is a tight decompression
+        loop that would otherwise stall every other chat on this event loop,
+        and a cancelled run then orphans one asset's work instead of the run's.
+
+        This never sees the run, the workflow, or the size that was asked for,
+        so it cannot agree with the request by construction.
+        """
+
+        budget = Budget()
+        return [
+            await asyncio.to_thread(measure_output, generated.content, budget)
+            for generated in completed_assets
+        ]
+
     def _record_successful_media_evidence(
         self,
         session: Session,
@@ -5849,6 +5871,10 @@ class ConversationOrchestrator:
         media_capabilities = (
             await self._successful_media_capabilities() if completed_assets else None
         )
+        # Measured here because nothing is open: the session below holds a write
+        # transaction across the artifact writes, and a measurement is pure work
+        # on bytes that has no business inside one.
+        measurements = await self._measured_outputs(completed_assets)
         completed_assistant_id = assistant_id
         verification_job_id: str | None = None
         with self.session_factory() as session:
@@ -5860,7 +5886,7 @@ class ConversationOrchestrator:
             parts: list[MessagePart] = []
             artifact_ids: list[str] = []
             output_provenance: list[dict[str, Any]] = []
-            for generated in completed_assets:
+            for generated, measurement in zip(completed_assets, measurements, strict=True):
                 # Asserted at the transaction that persists this asset,
                 # never across an await: the ingest and commit follow
                 # with no external work in between.
@@ -5888,6 +5914,17 @@ class ConversationOrchestrator:
                         "settings": copy.deepcopy(execution_settings),
                     },
                 )
+                # Recorded against the row the bytes themselves address, so the
+                # measurement cannot be attributed to a file it did not measure -
+                # and for the same reason an earlier run may already have
+                # written here, so the two records are composed rather than
+                # overwritten.
+                artifact.metadata_json = {
+                    **artifact.metadata_json,
+                    "output_measurement": record_to_keep(
+                        artifact.metadata_json.get("output_measurement"), measurement
+                    ),
+                }
                 output_chat = session.get(Chat, run.chat_id)
                 if (
                     setup_verification_for_chat(session, run.chat_id) is None
