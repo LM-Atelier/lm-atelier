@@ -9390,7 +9390,12 @@ class ConversationOrchestrator:
             return "untrusted"
         if not self._revision_accepts_install(session, revision, model_install_id):
             return "model_mismatch"
-        if ignores_the_description(revision.engine, operation.value, revision.api_graph_json):
+        if ignores_the_description(
+            revision.engine,
+            operation.value,
+            revision.api_graph_json,
+            revision.input_schema_json,
+        ):
             return "ignores_the_description"
         return None
 
