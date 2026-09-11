@@ -21,7 +21,7 @@ from .models import (
 from .profile_service import AUTO_PROFILE_ID
 from .project_portability import redact_local_paths
 from .saved_settings import SavedRoleSettings, normalize_saved_settings
-from .settings_registry import ROLE_SETTINGS
+from .settings_registry import ROLE_SETTINGS, validate_workflow_input_schema
 from .workflow_edit_calibration import validate_workflow_edit_calibration
 from .workflow_ownership import ensure_workflow_family_ownership
 
@@ -326,6 +326,9 @@ def dependency_source_index(dependencies: PortableDependencies) -> DependencySou
         workflow_revision_ids: set[str] = set()
         for revision in workflow.revisions:
             validate_workflow_edit_calibration(revision.input_schema)
+            # An archive is somebody else's file. Its settings schema is
+            # stored verbatim, so it is read here rather than trusted.
+            validate_workflow_input_schema(revision.input_schema)
             if revision.source_id in revision_operations:
                 raise ValueError(
                     "project manifest contains duplicate workflow revision dependency ids"

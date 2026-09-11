@@ -145,6 +145,30 @@ def test_malformed_contracts_fail_closed(change: dict[str, object], message: str
         workflow_video_length(_schema(**change))
 
 
+def test_a_frame_rate_too_large_to_be_one_is_refused_rather_than_converted() -> None:
+    """The integer spelling of a frame rate nothing can represent.
+
+    The float spelling was already refused: `1e400` is infinity, and the check
+    below says numbers must be finite. The whole-number spelling is not a float
+    at all until something converts it, and a Python integer has no size limit,
+    so the conversion itself raised - out of a reader that had already accepted
+    the value, and out of the endpoint that stores a workflow, which answered
+    with a server error instead of naming the field.
+    """
+    huge = _schema()
+    huge["properties"]["fps"]["const"] = 10**400  # type: ignore[index]
+
+    with pytest.raises(ValueError, match="must be a finite frame rate"):
+        workflow_video_length(huge)
+
+    # A large but usable rate is read the ordinary way: it converts, so it is
+    # judged on whether it matches the declared rational rate, which it does not.
+    representable = _schema()
+    representable["properties"]["fps"]["const"] = 10**20  # type: ignore[index]
+    with pytest.raises(ValueError, match="must match the declared rational FPS"):
+        workflow_video_length(representable)
+
+
 def test_window_and_fps_must_match_the_bound_workflow_properties() -> None:
     bad_window = _schema()
     bad_window["properties"]["frames"]["maximum"] = 80  # type: ignore[index]

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from local_lm.schemas import EngineCapabilities, SettingField
@@ -109,6 +111,77 @@ def test_nested_custom_setting_values_have_a_depth_bound() -> None:
 
     with pytest.raises(ValueError, match="nested too deeply"):
         validate_settings({"custom": nested}, [field])
+
+
+def test_a_number_nothing_can_represent_is_refused_whichever_way_it_is_written() -> None:
+    """The question is whether it can be used as a number, not how large it is.
+
+    A JSON number has no size limit written down and a float does, so a large
+    enough one cannot be converted at all. The two spellings have to answer the
+    same, because they are the same number: a browser writes ten to the four
+    hundredth with an exponent and a person may write it out, and Python reads
+    one as a float that is not finite and the other as an integer.
+    """
+    field = SettingField(key="custom", label="Custom", type="number", default=0, scope="workflow")
+
+    for unusable in (10**400, -(10**400), float("inf"), float("-inf"), float("nan")):
+        with pytest.raises(ValueError, match="must be finite"):
+            validate_settings({"custom": unusable}, [field])
+
+
+def test_a_large_but_usable_number_is_left_alone() -> None:
+    """The refusal above must not reach a number the product can actually use.
+
+    A workflow may declare a control whose range is far wider than anything the
+    engine offers, and the value chosen inside it is ordinary. Refusing the
+    declaration because the bound is large would make a working workflow
+    unusable, which is worse than the crash this rule exists to prevent.
+    """
+    field = SettingField(key="custom", label="Custom", type="number", default=0, scope="workflow")
+
+    for usable in (10**20, -(10**20), 1e20, 2**53, 2**53 + 1, 1.797e308):
+        validate_settings({"custom": usable}, [field])
+
+
+def test_the_same_number_written_two_ways_answers_the_same() -> None:
+    """A browser writes a bound without an exponent, and Python then reads an int.
+
+    `JSON.stringify` renders ten to the twentieth as a hundred thousand million
+    million million with no exponent, so a schema that left here as a float
+    comes back as a whole number. Judging the two differently would change
+    whether a workflow is accepted without the workflow changing at all.
+    """
+    exponent = {"type": "object", "properties": {"custom": {"type": "number", "maximum": 1e20}}}
+    written_out = json.loads(
+        '{"type":"object","properties":{"custom":'
+        '{"type":"number","maximum":100000000000000000000}}}'
+    )
+
+    assert written_out["properties"]["custom"]["maximum"] == 1e20
+    assert isinstance(written_out["properties"]["custom"]["maximum"], int)
+    assert isinstance(exponent["properties"]["custom"]["maximum"], float)
+
+    workflow_settings(IMAGE_SETTINGS, exponent)
+    workflow_settings(IMAGE_SETTINGS, written_out)
+
+
+def test_a_bound_no_engine_setting_could_hold_is_refused_before_it_is_compared() -> None:
+    """Where the old hole was widest, and hardest to see.
+
+    A workflow may narrow an engine setting's range. Comparing its bound against
+    the engine's own converts both to a float, and a whole number of more than
+    three hundred digits cannot become one - so the comparison raised from code
+    that had already accepted the value. The seed control took that path with a
+    `maximum` present but null, which is what skipped the two checks that would
+    otherwise have refused it first.
+    """
+    schema = {
+        "type": "object",
+        "properties": {"seed": {"type": "integer", "minimum": 10**400, "maximum": None}},
+    }
+
+    with pytest.raises(ValueError, match="must be finite"):
+        workflow_settings(IMAGE_SETTINGS, schema)
 
 
 def test_workflow_custom_controls_have_a_property_bound() -> None:

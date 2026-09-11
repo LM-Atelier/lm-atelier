@@ -1059,6 +1059,36 @@ async def test_project_v3_import_rejects_malformed_dependencies_and_object_abuse
     non_finite = json.loads(json.dumps(baseline))
     non_finite["project"]["description"] = float("nan")
 
+    # A whole number too large to survive a JSON round trip, in the one place an
+    # archive's contents are stored verbatim. Nothing between the zip and the
+    # row used to read it, so it landed and every later reader met it instead.
+    unrepresentable_number = json.loads(json.dumps(baseline))
+    unrepresentable_number["dependencies"]["workflows"] = [
+        {
+            "source_id": "workflow_huge",
+            "name": "Huge number",
+            "operation": "text_to_image",
+            "description": "",
+            "current_revision_source_id": "wfrev_huge",
+            "revisions": [
+                {
+                    "source_id": "wfrev_huge",
+                    "source_version": 1,
+                    "engine": "mock",
+                    "engine_version": None,
+                    "ui_graph": {},
+                    "api_graph": {},
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"seed": {"type": "integer", "minimum": 10**400}},
+                    },
+                    "dependencies": {},
+                    "trusted": True,
+                }
+            ],
+        }
+    ]
+
     cases = [
         (missing_profile, None, "incompatible role"),
         (extra_dependency_field, None, "invalid portable dependencies"),
@@ -1066,6 +1096,7 @@ async def test_project_v3_import_rejects_malformed_dependencies_and_object_abuse
         (invalid_workflow_head, None, "invalid current workflow revision"),
         (deeply_nested, None, "nested too deeply"),
         (non_finite, None, "invalid numeric value"),
+        (unrepresentable_number, None, "numbers must be finite"),
         (baseline, {"undeclared/payload.exe": b"MZ"}, "not declared"),
     ]
     project_count = len((await client.get("/api/projects")).json())
