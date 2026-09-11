@@ -49,8 +49,8 @@ for (const firstToFinish of ["plan-a", "plan-b"]) {
     await expect(setup).toBeVisible();
     await setup.getByRole("button", { name: "Not now" }).click();
     await page.getByRole("button", { name: "View accepted work", exact: true }).click();
-    const first = page.getByRole("button", { name: "Hold First landscape", exact: true });
-    const second = page.getByRole("button", { name: "Hold Second landscape", exact: true });
+    const first = page.getByRole("button", { name: /^(Hold|Saving hold for) First landscape$/ });
+    const second = page.getByRole("button", { name: /^(Hold|Saving hold for) Second landscape$/ });
     await first.focus();
     await page.keyboard.press("Enter");
     await expect.poll(() => waiting.has("plan-a")).toBe(true);
@@ -71,7 +71,7 @@ for (const firstToFinish of ["plan-a", "plan-b"]) {
     const firstFinishedTitle = firstToFinish === "plan-a" ? "First landscape" : "Second landscape";
     await expect(page.getByRole("button", { name: "Release " + firstFinishedTitle })).toBeVisible();
     const focusedSecond = page.getByRole("button", {
-      name: (firstToFinish === "plan-b" ? "Release " : "Hold ") + "Second landscape",
+      name: (firstToFinish === "plan-b" ? "Release " : "Saving hold for ") + "Second landscape",
       exact: true,
     });
     await expect(focusedSecond).toBeFocused();

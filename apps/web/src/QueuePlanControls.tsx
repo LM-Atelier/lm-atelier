@@ -41,7 +41,9 @@ export function QueuePlanControls({ item }: { item: QueueActivityItem }) {
       {item.control_state === "held" && <span role="status">Held — queued work will wait.</span>}
       {action && revision !== null && (
         <button className="secondary compact-button" aria-disabled={mutation.isPending}
-          onClick={submit} aria-label={(action === "hold" ? "Hold " : "Release ") + name}>
+          onClick={submit} aria-label={mutation.isPending
+            ? "Saving " + action + " for " + name
+            : (action === "hold" ? "Hold " : "Release ") + name}>
           {mutation.isPending ? "Saving…" : action === "hold" ? "Hold" : "Release"}
         </button>
       )}
