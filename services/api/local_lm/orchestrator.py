@@ -142,6 +142,7 @@ from .outpaint_workflows import (
     workflow_declares_outpaint,
 )
 from .output_measurement import Budget, measure_output, record_to_keep
+from .output_origin import record_for
 from .processes import ProcessSupervisor, WorkerStartRefused
 from .profile_service import AUTO_PROFILE_ID
 from .progress import apply_engine_progress, completed_progress, update_job_progress
@@ -6007,6 +6008,11 @@ class ConversationOrchestrator:
                         "size_bytes": artifact.size_bytes,
                         "poster_artifact_id": poster_artifact_id,
                         "browser_proxy_artifact_id": proxy_artifact_id,
+                        # Which part of the workflow wrote this file, as the
+                        # engine said it. The engine name is stamped here from
+                        # what this execution selected rather than claimed by
+                        # the adapter that answered.
+                        "output_origin": record_for(generated.origin, media_engine),
                     }
                 )
                 parts.append(

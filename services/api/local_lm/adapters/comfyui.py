@@ -31,6 +31,7 @@ from ..filesystem_links import (
     remove_entry,
 )
 from ..network import shared_tls_context
+from ..output_origin import stated_origin
 from ..schemas import EngineCapabilities
 from ..settings_registry import IMAGE_SETTINGS, VIDEO_SETTINGS
 from .base import GeneratedAsset, MediaEvent, MediaRequest
@@ -771,9 +772,13 @@ class ComfyUIAdapter:
             raise RuntimeError("ComfyUI returned invalid output history")
         assets: list[GeneratedAsset] = []
         managed_paths: set[Path] = set()
-        output_items: list[tuple[dict[str, Any], str]] = []
+        output_items: list[tuple[dict[str, Any], str, str, object]] = []
         too_many_outputs = False
-        for node_output in outputs.values():
+        # Keyed by the graph node that wrote each file. Dropping the key here
+        # was the only place that fact existed: afterwards a file is addressed
+        # by a digest of its own content, and two nodes that wrote the same
+        # bytes are one row.
+        for node_id, node_output in outputs.items():
             if not isinstance(node_output, dict):
                 continue
             for collection, default_kind in (
@@ -789,7 +794,7 @@ class ComfyUIAdapter:
                         continue
                     item = dict(raw_item)
                     if len(output_items) < _MAX_COMFY_OUTPUTS:
-                        output_items.append((item, default_kind))
+                        output_items.append((item, default_kind, collection, node_id))
                     else:
                         too_many_outputs = True
                     if managed_path := self._managed_output_path(item):
@@ -798,7 +803,7 @@ class ComfyUIAdapter:
             if too_many_outputs:
                 raise RuntimeError(f"ComfyUI returned more than {_MAX_COMFY_OUTPUTS} outputs")
             total_bytes = 0
-            for item, default_kind in output_items:
+            for item, default_kind, collection, node_id in output_items:
                 filename = str(item.get("filename") or "")
                 if (
                     not filename
@@ -854,6 +859,7 @@ class ComfyUIAdapter:
                         kind=kind,
                         name=filename,
                         metadata={"prompt_id": prompt_id, "operation": operation},
+                        origin=stated_origin(node_id, params["type"], collection),
                     )
                 )
             if not assets:
