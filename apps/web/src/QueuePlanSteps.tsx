@@ -27,8 +27,8 @@ function QueuePlanStepList({ planId, name, regionId }: { planId: string; name: s
         <p role="status">Showing {items.length} of {first.total} {first.total === 1 ? "step" : "steps"}</p>
         {!items.length && !steps.error && <p>No steps recorded for this plan.</p>}
         <ol className="queue-step-list">
-          {items.map(step => <li key={step.id}>
-            <strong>Step {step.ordinal + 1} · {step.label}</strong>
+          {items.map((step, index) => <li key={step.id}>
+            <strong>Step {index + 1} · {step.label}</strong>
             <span className="queue-activity-status">{step.status}</span>
             {step.blocked_by > 0 && <small>
               {step.blocked_by} {step.blocked_by === 1 ? "prerequisite" : "prerequisites"} unfinished
