@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 from directory_security import create_owned_directory
+from test_shared_asset_volume_qualification import eligible_disk as eligible_disk
 
 from local_lm import filesystem_links as links
 from local_lm import shared_asset_contract_v1 as contract
@@ -132,6 +133,7 @@ def test_read_only_negotiation_never_accepts_public_root_access(
         contract.store_access_mode(root=root)
 
 
+@pytest.mark.usefixtures("eligible_disk")
 def test_private_root_still_supports_read_write_and_newer_writer_read_only(tmp_path: Path) -> None:
     root = create_owned_directory(tmp_path / "private")
     contract.initialize_store_identity(root=root)

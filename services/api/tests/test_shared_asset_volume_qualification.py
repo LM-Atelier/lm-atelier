@@ -29,6 +29,18 @@ def _reported_device(
     return queried
 
 
+@pytest.fixture
+def eligible_disk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give capability tests an eligible volume while they exercise real probes.
+
+    A writable temporary directory may be on an unsupported logical volume.
+    Volume eligibility has its own controls; these tests need to reach the
+    rename, creation, capacity and access checks that they are measuring.
+    """
+    if sys.platform == "win32":
+        _reported_device(monkeypatch, 7, 0)
+
+
 def _write_probe_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     calls: list[str] = []
 
