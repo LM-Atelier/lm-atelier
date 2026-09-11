@@ -98,6 +98,7 @@ function renderControl(
     revisionId: string;
     width: unknown;
     height: unknown;
+    sizeIsTheWorkflowsOwn: boolean;
     onDimensions: (dimensions: { width: number; height: number }) => void;
   }> = {},
 ) {
@@ -108,6 +109,7 @@ function renderControl(
         revisionId={props.revisionId ?? "rev-1"}
         width={props.width ?? 1024}
         height={props.height ?? 768}
+        sizeIsTheWorkflowsOwn={props.sizeIsTheWorkflowsOwn ?? false}
         onDimensions={props.onDimensions ?? (() => {})}
       />
     </QueryClientProvider>,
@@ -325,7 +327,13 @@ describe("OutputRatioControl", () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const tree = (revisionId: string) => (
       <QueryClientProvider client={client}>
-        <OutputRatioControl revisionId={revisionId} width={1024} height={768} onDimensions={() => {}} />
+        <OutputRatioControl
+          revisionId={revisionId}
+          width={1024}
+          height={768}
+          sizeIsTheWorkflowsOwn={false}
+          onDimensions={() => {}}
+        />
       </QueryClientProvider>
     );
 
@@ -342,5 +350,56 @@ describe("OutputRatioControl", () => {
     // that has nothing to do with the refusal being cleared.
     await waitFor(() => expect(screen.getByRole("button", { name: "16:9 Wide" })).toBeTruthy());
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+describe("a workflow that decides its own size", () => {
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  it("says so, rather than leaving the panel silent", async () => {
+    // A workflow can declare its width and height as not yours to change. The
+    // panel then offers no shape control AND no number boxes, so before this
+    // the row for picture size simply was not there - no shapes, no
+    // dimensions, no reason, and nothing to distinguish it from a fault.
+    vi.mocked(api.workflowRevisionOutputGeometry).mockResolvedValue(
+      capability({ available: false, reason: "unsupported_workflow_geometry", preset_ids: [] }),
+    );
+
+    renderControl({ sizeIsTheWorkflowsOwn: true, width: undefined, height: undefined });
+
+    await waitFor(() =>
+      expect(screen.getByText("This workflow sets the picture size itself.")).toBeTruthy(),
+    );
+    expect(screen.queryByRole("group", { name: "Output aspect ratio" })).toBeNull();
+  });
+
+  it("stays out of the way while the number boxes can still be used", async () => {
+    // The other half of the same condition, and the reason this is not simply
+    // "explain whenever there is no proof": where width and height ARE offered
+    // they remain the honest way to ask for a size, and a row saying the
+    // workflow decides would contradict the boxes directly beneath it.
+    vi.mocked(api.workflowRevisionOutputGeometry).mockResolvedValue(
+      capability({ available: false, reason: "unsupported_workflow_geometry", preset_ids: [] }),
+    );
+
+    const { container } = renderControl({ sizeIsTheWorkflowsOwn: false });
+
+    await waitFor(() => expect(api.workflowRevisionOutputGeometry).toHaveBeenCalled());
+    expect(container.textContent).toBe("");
+  });
+
+  it("offers the shapes when a workflow proves it can produce them", async () => {
+    // The claim is about what this panel shows, not about the workflow's own
+    // nature, so a proven revision is never described as deciding for itself
+    // even when the panel happens to be asked the other way.
+    vi.mocked(api.workflowRevisionOutputGeometry).mockResolvedValue(capability());
+
+    renderControl({ sizeIsTheWorkflowsOwn: true });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "16:9 Wide" })).toBeTruthy());
+    expect(screen.queryByText("This workflow sets the picture size itself.")).toBeNull();
   });
 });

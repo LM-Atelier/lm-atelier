@@ -22,11 +22,14 @@ export function OutputRatioControl({
   revisionId,
   width,
   height,
+  sizeIsTheWorkflowsOwn,
   onDimensions,
 }: {
   revisionId: string;
   width: unknown;
   height: unknown;
+  /** The panel is offering no width and no height, so nothing here can be set. */
+  sizeIsTheWorkflowsOwn: boolean;
   onDimensions: (dimensions: { width: number; height: number }) => void;
 }) {
   const [pending, setPending] = useState<OutputRatioPresetId | null>(null);
@@ -43,11 +46,29 @@ export function OutputRatioControl({
   });
 
   const capability = geometry.data;
-  // Nothing to offer is not an error and gets no row. A revision with no proof
-  // that width and height reach its output, and one whose bounds express no
-  // ratio exactly, both land here - and in both cases the number boxes below
-  // are still the honest way to ask for a size.
-  if (!capability?.available || capability.preset_ids.length === 0) return null;
+  // Nothing to offer is not an error. A revision with no proof that width and
+  // height reach its output, and one whose bounds express no ratio exactly,
+  // both land here - and where the number boxes below are still offered, they
+  // remain the honest way to ask for a size, so this row simply stays away.
+  //
+  // Where they are NOT offered there is nothing left, and silence becomes its
+  // own answer: a person sees no shapes, no dimensions and no reason, and is
+  // left to guess whether the app is broken. Saying that the workflow decides
+  // is a statement about what this panel is showing, which is the only thing
+  // that can be known here - the server answers "unsupported" without saying
+  // why, on purpose, so that a caller cannot learn the shape of a graph it
+  // cannot see.
+  if (!capability?.available || capability.preset_ids.length === 0) {
+    if (!sizeIsTheWorkflowsOwn) return null;
+    return (
+      <div className="setting-row output-ratio-control">
+        <span>
+          <strong>Shape</strong>
+          <small>This workflow sets the picture size itself.</small>
+        </span>
+      </div>
+    );
+  }
 
   const offered = capability.preset_ids;
   const selected = ratioOf(width, height, offered);
