@@ -1175,6 +1175,8 @@ class QueueStepOut(ApiModel):
     label: str
     status: WorkStepStatus
     blocked_by: int = Field(ge=0)
+    progress: float | None = Field(default=None, ge=0, le=1)
+    progress_scope: Literal["overall", "stage"] | None = None
 
 
 class QueuePlanStepsOut(ApiModel):

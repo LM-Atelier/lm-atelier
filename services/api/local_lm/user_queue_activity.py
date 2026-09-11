@@ -355,12 +355,55 @@ def list_queue_plan_steps(
             .correlate(WorkStep)
             .scalar_subquery()
         )
+
+        # SQLite JSON extraction turns booleans into integers. Check JSON types
+        # before using values, and never fall back to the legacy monotonic counter.
+        overall_type = func.json_type(Job.progress_json, "$.overall_progress")
+        use_stage = or_(overall_type.is_(None), overall_type == "null")
+        reported = case(
+            (use_stage, Job.progress_json["stage_progress"].as_float()),
+            else_=Job.progress_json["overall_progress"].as_float(),
+        )
+        reported_type = case(
+            (use_stage, func.json_type(Job.progress_json, "$.stage_progress")),
+            else_=overall_type,
+        )
+        valid_report = (
+            (WorkStep.status == "running")
+            & (func.json_type(Job.progress_json, "$.version") == "integer")
+            & (Job.progress_json["version"].as_integer() == 2)
+            & (func.json_type(Job.progress_json, "$.indeterminate") == "false")
+            & reported_type.in_(("integer", "real"))
+            & (reported >= 0)
+            & (reported <= 1)
+        )
+        # Count every matching job, including those without valid progress.
+        # The aggregate returns one scalar only when ownership is unambiguous.
+        report_query = (
+            select(Job.id)
+            .where(
+                Job.work_step_id == WorkStep.id,
+                Job.work_plan_id == plan_id,
+                Job.kind.in_(_VISIBLE),
+                Job.status == "running",
+            )
+            .having(func.count(Job.id) == 1)
+            .correlate(WorkStep)
+        )
+        progress = report_query.with_only_columns(
+            func.min(case((valid_report, reported)))
+        ).scalar_subquery()
+        progress_scope = report_query.with_only_columns(
+            func.min(case((valid_report, case((use_stage, "stage"), else_="overall"))))
+        ).scalar_subquery()
         rows = session.execute(
             select(
                 WorkStep.id,
                 WorkStep.ordinal,
                 WorkStep.operation,
                 WorkStep.status,
+                progress.label("progress"),
+                progress_scope.label("progress_scope"),
                 case((WorkStep.status.in_(("queued", "blocked")), unfinished), else_=0).label(
                     "blocked_by"
                 ),
@@ -391,6 +434,8 @@ def list_queue_plan_steps(
                     label=labels.get(row.operation, "Work step"),
                     status=cast(WorkStepStatus, status),
                     blocked_by=row.blocked_by,
+                    progress=row.progress,
+                    progress_scope=row.progress_scope,
                 )
             )
         next_offset = offset + len(items) if offset + len(items) < total else None
