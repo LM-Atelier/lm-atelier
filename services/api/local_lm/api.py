@@ -8228,7 +8228,9 @@ def _revision_readiness(
         return "unavailable", "engine_mismatch"
     if operation != Operation.TEXT and expected_engine != "mock" and not revision.api_graph_json:
         return "unavailable", "revision_not_executable"
-    if ignores_the_description(revision.engine, operation.value, revision.api_graph_json):
+    if ignores_the_description(
+        revision.engine, operation.value, revision.api_graph_json, revision.input_schema_json
+    ):
         return "unavailable", "revision_ignores_the_description"
     if not revision.trusted:
         return "review_required", "revision_untrusted"
