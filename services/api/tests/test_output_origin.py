@@ -297,3 +297,36 @@ async def test_the_record_reaches_the_run_beside_the_measurement(
     # The engine name is stamped by the orchestrator from what this execution
     # selected, not claimed by whatever answered.
     assert {record["engine"] for record in by_digest.values()} == {"mock"}
+
+
+@pytest.mark.parametrize("malformed", [[], {}, ["output"], {"images": 1}, 7, 1.5, True])
+def test_a_label_that_is_not_a_string_is_dropped_rather_than_raising(
+    malformed: object,
+) -> None:
+    """The module says everything here is total, and this is what that costs.
+
+    `value in frozenset` raises TypeError for a list or a dictionary, and those
+    are exactly what ordinary JSON carries. An engine sending `{"type": []}`
+    would have taken down a generation that had already succeeded, over a label
+    - which is the one thing this module promises never to do.
+    """
+    origin = stated_origin("save", malformed, malformed)
+    record = record_for(
+        {"node_id": "save", "output_type": malformed, "collection": malformed}, "comfyui"
+    )
+
+    assert origin["output_type"] is None and origin["collection"] is None
+    assert record["state"] == "attributed", "the node is still named"
+    assert record["output_type"] is None and record["collection"] is None
+
+
+def test_a_malformed_label_is_dropped_wherever_it_arrives() -> None:
+    """Both entry points, because they were two separate membership tests.
+
+    `stated_origin` is what an adapter calls with the engine's own answer;
+    `record_for` is what the orchestrator calls with whatever reached the asset.
+    A guard on one of them leaves the other able to raise.
+    """
+    assert usable_identifier("save") is True
+    assert stated_origin("save", ["output"], ["images"])["node_id"] == "save"
+    assert record_for(stated_origin("save", ["output"], ["images"]), "comfyui")["node_id"] == "save"

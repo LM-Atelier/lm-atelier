@@ -53,6 +53,18 @@ def usable_identifier(candidate: object) -> bool:
     )
 
 
+def _from_vocabulary(value: object, vocabulary: frozenset[str]) -> str | None:
+    """A label this vocabulary contains, or nothing at all.
+
+    Membership is asked only of a string. `value in frozenset` raises TypeError
+    for a list or a dictionary, and ordinary JSON carries both, so asking
+    directly would make these functions total for every input except the two
+    shapes an engine is most likely to send by mistake.
+    """
+
+    return value if isinstance(value, str) and value in vocabulary else None
+
+
 def stated_origin(node_id: object, output_type: object, collection: object) -> dict[str, Any]:
     """What an engine said about one file it returned, reduced to safe values.
 
@@ -63,8 +75,8 @@ def stated_origin(node_id: object, output_type: object, collection: object) -> d
 
     return {
         "node_id": node_id if usable_identifier(node_id) else None,
-        "output_type": output_type if output_type in OUTPUT_TYPES else None,
-        "collection": collection if collection in COLLECTIONS else None,
+        "output_type": _from_vocabulary(output_type, OUTPUT_TYPES),
+        "collection": _from_vocabulary(collection, COLLECTIONS),
     }
 
 
@@ -92,13 +104,11 @@ def record_for(origin: object, engine: str) -> dict[str, Any]:
             "engine": engine,
             "reason": "node_id_unusable",
         }
-    output_type = origin.get("output_type")
-    collection = origin.get("collection")
     return {
         "v": RECORD_VERSION,
         "state": "attributed",
         "engine": engine,
         "node_id": node_id,
-        "output_type": output_type if output_type in OUTPUT_TYPES else None,
-        "collection": collection if collection in COLLECTIONS else None,
+        "output_type": _from_vocabulary(origin.get("output_type"), OUTPUT_TYPES),
+        "collection": _from_vocabulary(origin.get("collection"), COLLECTIONS),
     }
