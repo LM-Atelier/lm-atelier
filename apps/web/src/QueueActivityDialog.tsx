@@ -25,7 +25,10 @@ export function QueueActivityDialog({ onClose }: { onClose: () => void }) {
   const first = activity.data?.pages[0];
   const items = [...new Map((activity.data?.pages.flatMap((page) => page.items) ?? [])
     .map((item) => [item.owner_type + ":" + item.owner_id, item])).values()];
-  const refresh = () => void client.resetQueries({ queryKey, exact: true });
+  const refresh = () => {
+    if (activity.isFetching) return;
+    void client.resetQueries({ queryKey, exact: true });
+  };
   return (
     <AccessibleDialog title="Accepted work" eyebrow="Queue activity"
       closeLabel="Close accepted work" onClose={onClose} className="queue-activity-dialog">
@@ -42,8 +45,11 @@ export function QueueActivityDialog({ onClose }: { onClose: () => void }) {
             <option value="install">Installs</option>
           </select>
         </label>
-        <button className="secondary compact-button" disabled={activity.isFetching}
-          onClick={refresh} aria-label="Refresh accepted work">Refresh</button>
+        <button className="secondary compact-button" aria-disabled={activity.isFetching}
+          aria-busy={activity.isFetching} onClick={refresh}
+          aria-label={activity.isFetching ? "Refreshing accepted work" : "Refresh accepted work"}>
+          {activity.isFetching ? "Refreshing…" : "Refresh"}
+        </button>
       </div>
       {activity.error && (
         <div role="alert" className="queue-activity-error">
