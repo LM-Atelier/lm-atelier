@@ -160,6 +160,9 @@ prerequisites; **Load more steps** continues a long plan.
 Running steps show a reported percentage when available. **Current-stage progress**
 measures the active stage; **overall progress** measures the running job across
 stages. A step without a current percentage shows its status alone.
+Completed steps can also show a recorded media-output count. It includes recorded
+outputs whose media was later removed. Removing the response content also removes
+its recorded-output count.
 
 The view updates automatically and shows when it was last checked. Use
 **Refresh** for a fresh list. If an update fails, an error warns when

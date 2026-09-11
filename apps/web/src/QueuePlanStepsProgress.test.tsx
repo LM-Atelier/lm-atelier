@@ -14,11 +14,11 @@ it("shows the running step's reported percentage without inventing progress for 
     plan_id: "plan", total: 3, next_offset: null, observed_at: "2026-09-10T12:00:00Z",
     items: [
       { id: "running", ordinal: 1, label: "Image generation", status: "running",
-        blocked_by: 0, progress: 0.42, progress_scope: "stage" },
+        blocked_by: 0, recorded_media_outputs: null, progress: 0.42, progress_scope: "stage" },
       { id: "unknown", ordinal: 2, label: "Image generation", status: "running",
-        blocked_by: 0, progress: null, progress_scope: null },
+        blocked_by: 0, recorded_media_outputs: null, progress: null, progress_scope: null },
       { id: "queued", ordinal: 3, label: "Image generation", status: "queued",
-        blocked_by: 0, progress: 0.5, progress_scope: "stage" },
+        blocked_by: 0, recorded_media_outputs: null, progress: 0.5, progress_scope: "stage" },
     ],
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
@@ -35,7 +35,7 @@ it.each([0, 1])("keeps a reported boundary value of %s visible", async (value) =
   vi.mocked(api.queuePlanSteps).mockResolvedValue({
     plan_id: "plan", total: 1, next_offset: null, observed_at: "2026-09-10T12:00:00Z",
     items: [{ id: "step", ordinal: 1, label: "Image generation", status: "running",
-      blocked_by: 0, progress: value, progress_scope: "overall" }],
+      blocked_by: 0, recorded_media_outputs: null, progress: value, progress_scope: "overall" }],
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   clients.push(client);

@@ -15,7 +15,17 @@ from sqlalchemy import case, exists, func, literal, or_, select, tuple_, union_a
 from sqlalchemy.orm import Session, aliased
 
 from .domain import JobStatus
-from .models import Chat, Job, WorkPlan, WorkStep, WorkStepDependency
+from .models import (
+    Chat,
+    Job,
+    Message,
+    ResponseRevision,
+    ResponseRevisionPart,
+    Run,
+    WorkPlan,
+    WorkStep,
+    WorkStepDependency,
+)
 from .schemas import (
     QueueActivityItemOut,
     QueueActivityPageOut,
@@ -339,7 +349,8 @@ def list_queue_plan_steps(
         raise ValueError("Invalid work step page.")
     _begin_read_snapshot(session)
     with session.no_autoflush:
-        if session.scalar(select(WorkPlan.id).where(WorkPlan.id == plan_id)) is None:
+        plan_chat_id = session.scalar(select(WorkPlan.chat_id).where(WorkPlan.id == plan_id))
+        if plan_chat_id is None:
             return None
         total = int(
             session.scalar(select(func.count(WorkStep.id)).where(WorkStep.plan_id == plan_id)) or 0
@@ -396,6 +407,43 @@ def list_queue_plan_steps(
         progress_scope = report_query.with_only_columns(
             func.min(case((valid_report, case((use_stage, "stage"), else_="overall"))))
         ).scalar_subquery()
+        # Response revisions retain run ownership when the displayed reply changes.
+        # Count recorded output positions, including references to removed artifacts.
+        media_outputs = (
+            select(func.count(ResponseRevisionPart.id))
+            .select_from(Run)
+            .join(ResponseRevision, ResponseRevision.run_id == Run.id)
+            .join(Message, Message.id == ResponseRevision.message_id)
+            .outerjoin(
+                ResponseRevisionPart,
+                (ResponseRevisionPart.response_revision_id == ResponseRevision.id)
+                & ResponseRevisionPart.type.in_(("image", "video")),
+            )
+            .where(
+                Run.id == WorkStep.run_id,
+                Run.work_step_id == WorkStep.id,
+                Run.work_plan_id == plan_id,
+                Run.chat_id == plan_chat_id,
+                Run.status == "complete",
+                Run.operation.in_(
+                    (
+                        "text_to_image",
+                        "image_to_image",
+                        "text_to_video",
+                        "image_to_video",
+                        "video_to_video",
+                    )
+                ),
+                WorkStep.status == "complete",
+                ResponseRevision.status == "complete",
+                Message.chat_id == plan_chat_id,
+                Message.role == "assistant",
+                Message.content_removed_at.is_(None),
+            )
+            .group_by(ResponseRevision.id)
+            .correlate(WorkStep)
+            .scalar_subquery()
+        )
         rows = session.execute(
             select(
                 WorkStep.id,
@@ -404,6 +452,7 @@ def list_queue_plan_steps(
                 WorkStep.status,
                 progress.label("progress"),
                 progress_scope.label("progress_scope"),
+                media_outputs.label("recorded_media_outputs"),
                 case((WorkStep.status.in_(("queued", "blocked")), unfinished), else_=0).label(
                     "blocked_by"
                 ),
@@ -436,6 +485,7 @@ def list_queue_plan_steps(
                     blocked_by=row.blocked_by,
                     progress=row.progress,
                     progress_scope=row.progress_scope,
+                    recorded_media_outputs=row.recorded_media_outputs,
                 )
             )
         next_offset = offset + len(items) if offset + len(items) < total else None

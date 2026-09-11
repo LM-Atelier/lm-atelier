@@ -387,6 +387,7 @@ export interface QueueStep {
   blocked_by: number;
   progress: number | null;
   progress_scope: "overall" | "stage" | null;
+  recorded_media_outputs: number | null;
 }
 
 export interface QueuePlanSteps {
