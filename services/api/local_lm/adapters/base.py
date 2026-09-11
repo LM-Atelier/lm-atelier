@@ -72,6 +72,10 @@ class GeneratedAsset:
     kind: str
     name: str
     metadata: dict[str, Any] = field(default_factory=dict)
+    #: What the engine said about where this file came from, while it still had
+    #: the response in hand. None from an engine that does not attribute its
+    #: outputs, which is a different thing from a key that arrived unusable.
+    origin: dict[str, Any] | None = None
 
 
 @dataclass
