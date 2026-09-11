@@ -33,3 +33,7 @@
 .queue-plan-controls .secondary.compact-button[aria-disabled="true"] {
   background: transparent; color: var(--ink-secondary); cursor: wait; opacity: 0.6;
 }
+
+.queue-activity-toolbar .secondary.compact-button[aria-disabled="true"] {
+  background: transparent; color: var(--ink-secondary); cursor: wait; opacity: 0.6;
+}
