@@ -105,20 +105,20 @@ it("keeps the open category when the last job completes", async () => {
   expect(screen.getByRole("button", { name: "View accepted work" })).toHaveFocus();
 });
 
-function steps(planId: string, offset = 0, total = 101) {
+function steps(planId: string, offset = 0, total = 101, ordinalStart = 0) {
   return { plan_id: planId, total, next_offset: offset + 50 < total ? offset + 50 : null,
     observed_at: stamp,
     items: Array.from({ length: Math.min(50, total - offset) }, (_, index) => ({
-      id: "step-" + (offset + index), ordinal: offset + index, label: "Image generation",
+      id: "step-" + (offset + index), ordinal: ordinalStart + offset + index, label: "Image generation",
       status: offset + index === 0 ? "complete" as const : offset + index === 2 ? "blocked" as const : "queued" as const,
       blocked_by: offset + index === 2 ? 1 : 0,
     })),
   };
 }
 
-it("loads step metadata only when expanded and pages through one grouped plan", async () => {
+it.each([0, 1, 7])("numbers paged steps by position when stored ordinals start at %s", async (ordinalStart) => {
   vi.mocked(api.queueActivity).mockResolvedValue(page([{ ...item("plan"), step_count: 101 }]));
-  vi.mocked(api.queuePlanSteps).mockImplementation(async (id, offset) => steps(id, offset));
+  vi.mocked(api.queuePlanSteps).mockImplementation(async (id, offset) => steps(id, offset, 101, ordinalStart));
   open(); fireEvent.click(await screen.findByRole("button", { name: "View accepted work" }));
   const expand = await screen.findByRole("button", { name: "Show steps for Example plan" });
   expect(api.queuePlanSteps).not.toHaveBeenCalled();
@@ -126,11 +126,14 @@ it("loads step metadata only when expanded and pages through one grouped plan", 
   expect(await screen.findByText("Showing 50 of 101 steps")).toBeInTheDocument();
   const region = screen.getByRole("region", { name: "Steps for Example plan" });
   expect(within(region).getAllByRole("listitem")).toHaveLength(50);
+  expect(within(region).getAllByRole("listitem")[0]).toHaveTextContent("Step 1 · Image generation");
   expect(within(region).getByText("1 prerequisite unfinished")).toBeInTheDocument();
   fireEvent.click(within(region).getByRole("button", { name: "Load more steps" }));
   expect(await screen.findByText("Showing 100 of 101 steps")).toBeInTheDocument();
   fireEvent.click(within(region).getByRole("button", { name: "Load more steps" }));
   expect(await screen.findByText("Showing 101 of 101 steps")).toBeInTheDocument();
+  expect(within(region).getAllByRole("listitem").map(row => within(row).getByText(/^Step /).textContent))
+    .toEqual(Array.from({ length: 101 }, (_, index) => "Step " + (index + 1) + " · Image generation"));
   expect(within(region).queryByRole("button", { name: "Load more steps" })).not.toBeInTheDocument();
   expect(vi.mocked(api.queuePlanSteps).mock.calls.map(([id, offset]) => [id, offset]))
     .toEqual([["plan", 0], ["plan", 50], ["plan", 100]]);
