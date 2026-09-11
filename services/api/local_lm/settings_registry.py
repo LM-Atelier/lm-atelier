@@ -5,7 +5,7 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any, Final, Literal, cast
 
-from .saved_settings import MAX_SETTING_FIELDS
+from .saved_settings import MAX_SETTING_FIELDS, unusable_as_a_number
 from .schemas import EngineCapabilities, SettingField
 from .video_length import video_duration_field, workflow_video_length
 
@@ -811,10 +811,28 @@ def _validate_setting_value(key: str, value: Any) -> None:
                     )
                 walk(nested_value, depth + 1)
             return
-        if candidate is not None and not isinstance(candidate, (bool, int)):
+        if isinstance(candidate, int) and not isinstance(candidate, bool):
+            if unusable_as_a_number(candidate):
+                raise ValueError(f"{key} numbers must be finite")
+            return
+        if candidate is not None and not isinstance(candidate, bool):
             raise ValueError(f"{key} contains a value that cannot be stored as JSON")
 
     walk(value, 0)
+
+
+def validate_workflow_input_schema(input_schema: Mapping[str, Any] | None) -> None:
+    """Refuse a stored settings schema this build could not read back.
+
+    `workflow_settings` asks this of every schema it reads, so a schema that
+    fails here is one no reader can use. It is asked on the way IN as well,
+    because a row that reaches the database unreadable makes every later reader
+    defend against it one at a time, and the person who could have fixed it is
+    long gone by then.
+    """
+    if input_schema is None:
+        return
+    _validate_setting_value("workflow input schema", dict(input_schema))
 
 
 #: Settings a graph can fix for itself, where offering the control is a promise.

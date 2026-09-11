@@ -505,6 +505,7 @@ from .security import SessionSecurity
 from .settings_registry import (
     defaults,
     validate_settings,
+    validate_workflow_input_schema,
     workflow_settings,
 )
 from .setup_readiness import MEDIA_OPERATIONS_BY_ROLE, setup_readiness_report
@@ -8944,6 +8945,7 @@ async def _persist_workflow(
             payload.dependencies,
         )
         validate_workflow_edit_calibration(payload.input_schema)
+        validate_workflow_input_schema(payload.input_schema)
         workflow_video_length(payload.input_schema)
     except ValueError as exc:
         raise api_error(422, "workflow-invalid", str(exc)) from exc
@@ -11589,6 +11591,7 @@ async def _persist_workflow_revision(
             payload.dependencies,
         )
         validate_workflow_edit_calibration(payload.input_schema)
+        validate_workflow_input_schema(payload.input_schema)
         workflow_video_length(payload.input_schema)
     except ValueError as exc:
         raise api_error(422, "workflow-revision-invalid", str(exc)) from exc

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 from typing import Any, Final
 
+from .saved_settings import unusable_as_a_number
 from .schemas import SettingField
 
 VIDEO_LENGTH_SCHEMA_KEY: Final = "x-lm-atelier-video-length"
@@ -126,6 +127,13 @@ def workflow_video_length(
     declared_fps = fps_schema.get("const", fps_schema.get("default"))
     if isinstance(declared_fps, bool) or not isinstance(declared_fps, (int, float)):
         raise ValueError("workflow video length FPS property must declare a default or const")
+    # Asked before the conversion below rather than after it. A whole number has
+    # no size limit and a float does, so a large enough one cannot be converted
+    # at all - and this is reached straight from the workflow writer, which never
+    # reads the schema any other way and would answer with a server error rather
+    # than naming the field.
+    if isinstance(declared_fps, int) and unusable_as_a_number(declared_fps):
+        raise ValueError("workflow video length FPS property must be a finite frame rate")
     if not math.isfinite(float(declared_fps)) or not math.isclose(
         float(declared_fps), float(fps), rel_tol=0.0, abs_tol=1e-12
     ):
