@@ -558,15 +558,20 @@ def _open_shared_pin(path: Path, role: str, share: int) -> _Pin:
     return _Pin(str(path), role, handle)
 
 
-def _relax_parent_pins(pins: list[_Pin]) -> None:
+def _relax_parent_pins(pins: list[_Pin], *, held_child: Path | None = None) -> None:
     """Allow atomic child writes once a held child keeps each parent nonempty.
 
     Every name is still held against rename/delete. Only an ordinary directory
     with an already pinned direct child can share writes: that child cannot be
-    removed, so the directory cannot become an in-place junction. Files, reparse
-    points and leaves retain their strict write exclusion.
+    removed, so the directory cannot become an in-place junction. An explicitly
+    held ordinary lease file can supply that child after its no-follow open.
+    Files, reparse points and other leaves retain their strict write exclusion.
     """
-    parents = {os.path.normcase(str(Path(pin.path).parent)) for pin in pins}
+    parents = (
+        {os.path.normcase(str(held_child.parent))}
+        if held_child is not None
+        else {os.path.normcase(str(Path(pin.path).parent)) for pin in pins}
+    )
     for index in range(len(pins)):
         original = pins[index]
         if os.path.normcase(original.path) not in parents:
@@ -710,7 +715,7 @@ def _open_lease_handle(
             _SHARE_READ,
             None,
             disposition,
-            _ATTRIBUTE_NORMAL,
+            _ATTRIBUTE_NORMAL | _FILE_FLAG_OPEN_REPARSE_POINT,
             None,
         )
         if opened is None or opened == _INVALID_HANDLE:
@@ -719,6 +724,27 @@ def _open_lease_handle(
                 raise LeaseRefused(f"contended: {_holder_line(Path(plain, LEASE_BASENAME))}")
             raise LeaseRefused(f"the lease file could not be opened (error {error})")
         handle = int(opened)
+        information = _ByHandleFileInformation()
+        if not _kernel32().GetFileInformationByHandle(
+            ctypes.c_void_p(handle), ctypes.byref(information)
+        ):
+            raise LeaseRefused("the held lease entry could not be identified")
+        if information.attributes & (_FILE_ATTRIBUTE_DIRECTORY | _FILE_ATTRIBUTE_REPARSE_POINT):
+            raise LeaseRefused("the lease entry is not an ordinary file")
+        # The lease's no-delete hold keeps its ordinary parent nonempty. Relax
+        # both common-directory pins only now, retaining every mapping hold.
+        pins = list(binding.pins)
+        try:
+            _relax_parent_pins(pins, held_child=Path(plain, LEASE_BASENAME))
+        finally:
+            # Replacement pins remain owned even if retiring an old pin fails.
+            binding = _Binding(
+                binding.anchor,
+                binding.anchor_identity,
+                binding.common,
+                binding.common_identity,
+                tuple(pins),
+            )
         _assert_binding(binding)
         retired, directory = directory, -1
         strand = _abandon(during="lease acquisition", handles=(("directory-probe", retired),))

@@ -2600,12 +2600,13 @@ def test_a_refused_common_directory_pin_reports_a_chain_pin_that_will_not_close(
 
 
 def test_a_failed_initialization_reports_a_pin_that_will_not_close(
-    anchor: Path, monkeypatch: pytest.MonkeyPatch
+    anchor: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The record cannot be built after the open. The descriptor closes,
     every pin is attempted, and the one the kernel refuses is a strand
     raised from the initialization failure; the machine itself is free."""
 
+    linked, _other, _pointer, _original = _linked_worktree(anchor, tmp_path)
     taken: dict[str, int] = {}
     module = _NAMESPACE["acquire"].__globals__
 
@@ -2615,18 +2616,18 @@ def test_a_failed_initialization_reports_a_pin_that_will_not_close(
     monkeypatch.setitem(module, "_open_pin", _protecting_entry_pin(taken))
     monkeypatch.setattr(module["json"], "dumps", failing_dumps)
     with pytest.raises(_NAMESPACE["LeaseStranded"], match="a failed acquisition") as caught:
-        _NAMESPACE["acquire"]("doomed-record", repo=anchor)
+        _NAMESPACE["acquire"]("doomed-record", repo=linked)
     monkeypatch.undo()
     assert isinstance(caught.value.__cause__, RuntimeError)
     assert caught.value.strands == (("pin", taken["pin"], caught.value.error),)
     # The lease handle closed: a contender takes the machine at once.
-    successor = _NAMESPACE["acquire"]("after-failed-record", repo=anchor)
+    successor = _NAMESPACE["acquire"]("after-failed-record", repo=linked)
     _NAMESPACE["release"](successor)
     _unprotect_and_close(taken["pin"])
 
 
 def test_a_refused_binding_reports_the_handle_and_a_pin_that_will_not_close(
-    anchor: Path, monkeypatch: pytest.MonkeyPatch
+    anchor: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The binding is refused after the open; the lease handle and one pin
     both refuse to close. One strand names both, the handle first, raised
@@ -2636,6 +2637,7 @@ def test_a_refused_binding_reports_the_handle_and_a_pin_that_will_not_close(
 
     kernel32 = _NAMESPACE["_kernel32"]()
     real_create_file = kernel32.CreateFileW
+    linked, _other, _pointer, _original = _linked_worktree(anchor, tmp_path)
     taken: dict[str, int] = {}
 
     def create_file_protecting_the_lease(name: str, *rest: object) -> object:
@@ -2654,37 +2656,38 @@ def test_a_refused_binding_reports_the_handle_and_a_pin_that_will_not_close(
     monkeypatch.setattr(kernel32, "CreateFileW", create_file_protecting_the_lease)
     monkeypatch.setitem(module, "_assert_binding", refuse_binding)
     with pytest.raises(_NAMESPACE["LeaseStranded"], match="every refused close") as caught:
-        _NAMESPACE["acquire"]("doomed-binding", repo=anchor)
+        _NAMESPACE["acquire"]("doomed-binding", repo=linked)
     monkeypatch.undo()
     assert isinstance(caught.value.__cause__, LeaseRefused)
     kinds = [(kind, number) for kind, number, _error in caught.value.strands]
     assert kinds == [("handle", taken["handle"]), ("pin", taken["pin"])]
     with pytest.raises(LeaseRefused, match="contended"):
-        _NAMESPACE["acquire"]("contender", repo=anchor)
+        _NAMESPACE["acquire"]("contender", repo=linked)
     assert kernel32.SetHandleInformation(ctypes.c_void_p(taken["handle"]), 2, 0)
     assert kernel32.CloseHandle(ctypes.c_void_p(taken["handle"]))
     _unprotect_and_close(taken["pin"])
-    successor = _NAMESPACE["acquire"]("after-refused-binding", repo=anchor)
+    successor = _NAMESPACE["acquire"]("after-refused-binding", repo=linked)
     _NAMESPACE["release"](successor)
 
 
 def test_a_status_probe_reports_a_pin_that_will_not_close_and_frees_the_machine(
-    anchor: Path, monkeypatch: pytest.MonkeyPatch
+    anchor: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The status probe's pin refuses to close: the probe's write-access
     handle is closed first all the same, so the machine is free, and the
     strand names the pin."""
 
     _lease_file(anchor).write_text("stale record", encoding="utf-8")
+    linked, _other, _pointer, _original = _linked_worktree(anchor, tmp_path)
     taken: dict[str, int] = {}
     module = _NAMESPACE["acquire"].__globals__
     monkeypatch.setitem(module, "_open_pin", _protecting_entry_pin(taken))
     with pytest.raises(_NAMESPACE["LeaseStranded"], match="a status probe") as caught:
-        _NAMESPACE["status"](anchor)
+        _NAMESPACE["status"](linked)
     monkeypatch.undo()
     assert caught.value.strands == (("pin", taken["pin"], caught.value.error),)
     # The probe closed: a contender takes the machine at once.
-    successor = _NAMESPACE["acquire"]("after-probe-strand", repo=anchor)
+    successor = _NAMESPACE["acquire"]("after-probe-strand", repo=linked)
     _NAMESPACE["release"](successor)
     _unprotect_and_close(taken["pin"])
 
@@ -4167,11 +4170,13 @@ def test_a_writable_parent_cannot_be_retargeted_with_its_child_held(
         _NAMESPACE["release"](lease)
 
 
+@pytest.mark.parametrize("location", ["repository", "common"])
 def test_a_refused_parent_pin_retirement_closes_the_replacement_once(
-    anchor: Path, monkeypatch: pytest.MonkeyPatch
+    anchor: Path, monkeypatch: pytest.MonkeyPatch, location: str
 ) -> None:
     import ctypes
 
+    chosen = anchor if location == "repository" else anchor / ".git"
     module = _NAMESPACE["acquire"].__globals__
     original_pin = module["_open_pin"]
     original_close = module["_close"]
@@ -4185,14 +4190,14 @@ def test_a_refused_parent_pin_retirement_closes_the_replacement_once(
 
     def create(name: str, *arguments: object) -> object:
         handle = original_create(name, *arguments)
-        if Path(name) == anchor and int(arguments[0]) & 0x80000000:
+        if Path(name) == chosen and int(arguments[0]) & 0x80000000:
             assert handle is not None and handle != module["_INVALID_HANDLE"]
             opened.append(int(handle))
         return handle
 
     def pin(path: Path, role: str) -> object:
         value = original_pin(path, role)
-        if path == anchor and not taken:
+        if path == chosen and not taken:
             taken.append(value.handle)
             _protect(value.handle)
         return value
@@ -4215,10 +4220,12 @@ def test_a_refused_parent_pin_retirement_closes_the_replacement_once(
         assert failure.strands == (("pin", taken[0], failure.error),)
         assert "strict parent hold could not be retired" in str(failure.__cause__)
         assert closes == taken, "cleanup attempted the refused old handle twice"
-        assert len(opened) == 2 and opened[0] == taken[0]
-        assert not kernel.GetFileInformationByHandle(
-            ctypes.c_void_p(opened[1]), ctypes.byref(module["_ByHandleFileInformation"]())
-        ), "the replacement hold leaked when old-pin retirement failed"
+        assert len(opened) == (2 if location == "repository" else 3)
+        assert opened[0] == taken[0]
+        for handle in opened[1:]:
+            assert not kernel.GetFileInformationByHandle(
+                ctypes.c_void_p(handle), ctypes.byref(module["_ByHandleFileInformation"]())
+            ), "a replacement hold leaked when old-pin retirement failed"
     finally:
         if taken:
             assert kernel.SetHandleInformation(ctypes.c_void_p(taken[0]), 2, 0)
@@ -4323,3 +4330,141 @@ def test_parent_sharing_refuses_a_different_replacement_identity(
     assert substituted == [anchor], "the replacement boundary was not exercised once"
     successor = module["acquire"]("after-parent-identity-refusal", repo=anchor)
     module["release"](successor)
+
+
+def test_git_configuration_can_be_written_while_its_directory_is_held(anchor: Path) -> None:
+    lease = _NAMESPACE["acquire"]("configuration-write", repo=anchor)
+    try:
+        written = subprocess.run(
+            ["git", "-C", str(anchor), "config", "--local", "lease.example", "recorded"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert written.returncode == 0, written.stdout + written.stderr
+        actual = subprocess.run(
+            ["git", "-C", str(anchor), "config", "--local", "--get", "lease.example"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert actual.returncode == 0 and actual.stdout.strip() == "recorded"
+        with pytest.raises(PermissionError):
+            (anchor / ".git").rename(anchor / "moved-git-directory")
+        lease.assert_bound()
+    finally:
+        _NAMESPACE["release"](lease)
+
+
+@pytest.mark.parametrize("host", _powershell_hosts())
+def test_shell_lease_allows_git_configuration_without_allowing_a_swap(
+    anchor: Path, host: str
+) -> None:
+    script = f"""
+$ErrorActionPreference = "Stop"
+. "{ROOT / "scripts" / "machine-lease.ps1"}"
+$Lease = Enter-MachineLease -RepositoryRoot "{anchor}" -Purpose "configuration-write"
+if (-not $Lease) {{ throw "lease was not acquired" }}
+try {{
+    & git -C "{anchor}" config --local lease.example recorded
+    if ($LASTEXITCODE -ne 0) {{ throw "git configuration write failed" }}
+    $Actual = & git -C "{anchor}" config --local --get lease.example
+    if ($LASTEXITCODE -ne 0 -or $Actual -ne "recorded") {{
+        throw "git did not store the requested configuration"
+    }}
+    $Moved = $false
+    try {{
+        [IO.Directory]::Move("{anchor / ".git"}", "{anchor / "moved-git-directory"}")
+        $Moved = $true
+    }} catch [IO.IOException] {{}}
+    if ($Moved) {{
+        [IO.Directory]::Move("{anchor / "moved-git-directory"}", "{anchor / ".git"}")
+        throw "the held directory could be moved"
+    }}
+    Assert-MachineLeaseHeld -Lease $Lease
+}} finally {{
+    if (-not (Exit-MachineLease $Lease)) {{ exit 4 }}
+}}
+Write-Output "CONFIGURATION-STORED-AND-DIRECTORY-HELD"
+"""
+    result = subprocess.run(
+        [host, "-NoProfile", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "CONFIGURATION-STORED-AND-DIRECTORY-HELD" in result.stdout
+
+
+def test_the_writable_common_directory_keeps_its_lease_entry_held(
+    anchor: Path, tmp_path: Path
+) -> None:
+    target = tmp_path / "junction-target"
+    target.mkdir()
+    lease = _NAMESPACE["acquire"]("ordinary-common-directory", repo=anchor)
+    try:
+        opened, changed, error = _set_junction_in_place(anchor / ".git", target)
+        assert opened, f"ordinary common-directory writes were refused: {error}"
+        assert not changed and error == 145
+        with pytest.raises(PermissionError):
+            _lease_file(anchor).rename(anchor / ".git" / "moved-lease")
+        assert not (anchor / ".git").is_junction()
+        lease.assert_bound()
+    finally:
+        _NAMESPACE["release"](lease)
+
+
+def _lease_file_link(anchor: Path, tmp_path: Path) -> Path:
+    target = tmp_path / "lease-target"
+    target.write_bytes(b"untouched target")
+    try:
+        _lease_file(anchor).symlink_to(target)
+    except OSError as error:
+        if error.winerror == 1314:
+            pytest.skip("creating file links requires the Windows developer setting")
+        raise
+    return target
+
+
+def test_a_linked_lease_entry_is_refused_before_its_target_is_written(
+    anchor: Path, tmp_path: Path
+) -> None:
+    target = _lease_file_link(anchor, tmp_path)
+    lease = None
+    try:
+        with pytest.raises(LeaseRefused, match="not an ordinary file"):
+            lease = _NAMESPACE["acquire"]("linked-lease", repo=anchor)
+    finally:
+        if lease is not None:
+            _NAMESPACE["release"](lease)
+    assert target.read_bytes() == b"untouched target"
+
+
+@pytest.mark.parametrize("host", _powershell_hosts())
+def test_shell_refuses_a_linked_lease_entry_without_writing_its_target(
+    anchor: Path, tmp_path: Path, host: str
+) -> None:
+    target = _lease_file_link(anchor, tmp_path)
+    script = f"""
+$ErrorActionPreference = "Stop"
+. "{ROOT / "scripts" / "machine-lease.ps1"}"
+$Lease = Enter-MachineLease -RepositoryRoot "{anchor}" -Purpose "linked-lease"
+if ($Lease) {{
+    [void](Exit-MachineLease $Lease)
+    exit 7
+}}
+Write-Output "LINKED-LEASE-REFUSED"
+"""
+    result = subprocess.run(
+        [host, "-NoProfile", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "not an ordinary file" in result.stdout
+    assert "LINKED-LEASE-REFUSED" in result.stdout
+    assert target.read_bytes() == b"untouched target"

@@ -375,14 +375,21 @@ function Open-MachineLeaseSharedPin {
 
 
 function Enable-MachineLeaseParentWrites {
-    param([Parameter(Mandatory)][AllowEmptyCollection()][Collections.ArrayList]$Pins)
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][Collections.ArrayList]$Pins,
+        [string]$HeldChild = ""
+    )
 
     # A held direct child cannot be removed, keeping an ordinary parent
-    # nonempty and unable to become a junction. Keep files, links and leaves
-    # write-exclusive; every replacement still excludes rename and delete.
+    # nonempty and unable to become a junction. The ordinary lease file can
+    # supply that child after its no-follow open. Keep files and links strict.
     $Parents = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    foreach ($Pin in $Pins) {
-        [void]$Parents.Add([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Pin.Path)))
+    if ($HeldChild) {
+        [void]$Parents.Add([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($HeldChild)))
+    } else {
+        foreach ($Pin in $Pins) {
+            [void]$Parents.Add([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Pin.Path)))
+        }
     }
     for ($Index = 0; $Index -lt $Pins.Count; $Index++) {
         $Original = $Pins[$Index]
@@ -567,7 +574,7 @@ function Open-MachineLeaseHandle {
         $LeasePath = Join-Path $Plain "machine-exclusive.lease"
         $Handle = [LeaseNative.Kernel]::CreateFileW(
             $LeasePath, $Access, [uint32]1, [IntPtr]::Zero,
-            $Disposition, [uint32]128, [IntPtr]::Zero
+            $Disposition, [uint32]0x00200080, [IntPtr]::Zero
         )
         $Error32 = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
         if (Test-MachineLeaseHandleInvalid $Handle) {
@@ -580,6 +587,15 @@ function Open-MachineLeaseHandle {
             Write-Host "ERROR: $Reason"
             return $null
         }
+        $Information = New-Object LeaseNative.Kernel+FileInformation
+        if (-not [LeaseNative.Kernel]::GetFileInformationByHandle($Handle, [ref]$Information)) {
+            throw "the held lease entry could not be identified"
+        }
+        if ($Information.FileAttributes -band (16 -bor 1024)) {
+            throw "the lease entry is not an ordinary file"
+        }
+        # Its no-delete file hold keeps both common-directory pins nonempty.
+        Enable-MachineLeaseParentWrites -Pins $Pins -HeldChild $LeasePath
         $Binding = [pscustomobject]@{
             Anchor = $AnchorName
             AnchorIdentity = $AnchorIdentity
