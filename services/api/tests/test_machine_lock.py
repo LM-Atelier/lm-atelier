@@ -3521,3 +3521,262 @@ def test_the_python_lease_never_mutates_the_process_environment() -> None:
             f"machine_lock.py now writes the process environment through {mutation!r}, "
             "so it needs the exact restoration comparison the shell helper has"
         )
+
+
+@pytest.mark.parametrize(
+    ("operation", "protected_open"),
+    [("identity", 1), ("acquire", 1), ("acquire", 2), ("binding", 1), ("binding", 2)],
+)
+def test_temporary_directory_close_refusal_is_reported(
+    anchor: Path, monkeypatch: pytest.MonkeyPatch, operation: str, protected_open: int
+) -> None:
+    """A temporary probe must not silently survive a successful operation."""
+    module = _NAMESPACE["acquire"].__globals__
+    original_open = module["_open_directory"]
+    original_close = module["_close"]
+    held = _NAMESPACE["acquire"]("binding-probe", repo=anchor) if operation == "binding" else None
+    returned = None
+    opened: list[int] = []
+    protected: list[int] = []
+    attempts: list[int] = []
+
+    def open_probe(path: Path) -> int:
+        handle = original_open(path)
+        opened.append(handle)
+        if len(opened) == protected_open:
+            _protect(handle)
+            protected.append(handle)
+        return handle
+
+    def close_probe(handle: int) -> bool:
+        if handle in protected:
+            attempts.append(handle)
+        return bool(original_close(handle))
+
+    failure: BaseException | None = None
+    try:
+        with monkeypatch.context() as patch:
+            patch.setitem(module, "_open_directory", open_probe)
+            patch.setitem(module, "_close", close_probe)
+            try:
+                if operation == "identity":
+                    module["_directory_identity"](anchor)
+                elif operation == "binding":
+                    held.assert_bound()
+                else:
+                    returned = _NAMESPACE["acquire"]("probe-refusal", repo=anchor)
+            except _NAMESPACE["LeaseStranded"] as refusal:
+                failure = refusal
+        if returned is not None:
+            _NAMESPACE["release"](returned)
+        if held is not None:
+            _NAMESPACE["release"](held)
+            held = None
+        assert len(protected) == 1
+        assert isinstance(failure, _NAMESPACE["LeaseStranded"]), "temporary close refusal was lost"
+        assert [(kind, number) for kind, number, _error in failure.strands] == [
+            ("directory-probe", protected[0])
+        ]
+        assert attempts == protected, "a refused handle must be attempted exactly once"
+        successor = _NAMESPACE["acquire"]("after-temporary-probe-refusal", repo=anchor)
+        _NAMESPACE["release"](successor)
+    finally:
+        if held is not None:
+            _NAMESPACE["release"](held)
+        for handle in protected:
+            _unprotect_and_close(handle)
+
+
+def test_directory_probe_close_refusal_keeps_the_identity_error(
+    anchor: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _NAMESPACE["acquire"].__globals__
+    original_open = module["_open_directory"]
+    protected: list[int] = []
+    primary = LeaseRefused("constructed identity refusal")
+
+    def open_probe(path: Path) -> int:
+        handle = original_open(path)
+        _protect(handle)
+        protected.append(handle)
+        return handle
+
+    def refuse_identity(handle: int) -> tuple[int, int, int]:
+        raise primary
+
+    failure: BaseException | None = None
+    try:
+        with monkeypatch.context() as patch:
+            patch.setitem(module, "_open_directory", open_probe)
+            patch.setitem(module, "_identity", refuse_identity)
+            try:
+                module["_directory_identity"](anchor)
+            except BaseException as refusal:
+                failure = refusal
+        assert isinstance(failure, _NAMESPACE["LeaseStranded"]), "cleanup refusal was discarded"
+        assert failure.__cause__ is primary
+        assert [(kind, number) for kind, number, _error in failure.strands] == [
+            ("directory-probe", protected[0])
+        ]
+    finally:
+        for handle in protected:
+            _unprotect_and_close(handle)
+
+
+@pytest.mark.parametrize("protected_opens", [(1,), (2,), (3,), (1, 2, 3)])
+@pytest.mark.parametrize("host", _powershell_hosts())
+def test_shell_acquisition_reports_every_temporary_probe_close_refusal(
+    anchor: Path, host: str, protected_opens: tuple[int, ...]
+) -> None:
+    """Real protected handles cannot be returned as an ordinary acquisition."""
+    selected = ",".join(str(number) for number in protected_opens)
+    script = f"""
+$ErrorActionPreference = "Stop"
+. "{ROOT / "scripts" / "machine-lease.ps1"}"
+$script:RealDirectory = (Get-Command Open-MachineLeaseDirectory).ScriptBlock
+$script:ProbeCount = 0
+$script:ProtectedProbes = @()
+function Open-MachineLeaseDirectory {{
+    param([string]$Path)
+    $Handle = & $script:RealDirectory -Path $Path
+    $script:ProbeCount++
+    if (@({selected}) -contains $script:ProbeCount) {{
+        if (-not [LeaseNative.Kernel]::SetHandleInformation($Handle, 2, 2)) {{
+            throw "could not protect constructed probe"
+        }}
+        $script:ProtectedProbes += $Handle
+        Write-Host "PROTECTED:$Handle"
+    }}
+    return $Handle
+}}
+$Lease = Enter-MachineLease -RepositoryRoot "{anchor}" -Purpose "temporary-probe"
+Write-Output "RETURNED"
+if ($Lease) {{ Exit-MachineLease $Lease | Out-Null }}
+"""
+    result = subprocess.run(
+        [host, "-NoProfile", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    out = result.stdout + result.stderr
+    protected = [
+        line.removeprefix("PROTECTED:")
+        for line in out.splitlines()
+        if line.startswith("PROTECTED:")
+    ]
+    assert protected, out
+    assert result.returncode == 4, out
+    assert "RETURNED" not in out, "the helper returned despite a refused temporary close"
+    for number in protected:
+        assert f"refused the directory probe {number} " in out, out
+    successor = _NAMESPACE["acquire"]("after-shell-temporary-probes", repo=anchor)
+    _NAMESPACE["release"](successor)
+
+
+def test_acquisition_reports_temporary_probes_and_pins_in_one_failure(
+    anchor: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _NAMESPACE["acquire"].__globals__
+    original_open = module["_open_directory"]
+    original_pin = module["_open_pin"]
+    original_common = module["_common_dir"]
+    original_close = module["_close"]
+    protected: list[tuple[str, int]] = []
+    opens = 0
+    resolutions = 0
+    closes: list[int] = []
+    primary = LeaseRefused("constructed final resolution refusal")
+
+    def open_probe(path: Path) -> int:
+        nonlocal opens
+        handle = original_open(path)
+        opens += 1
+        if opens <= 2:
+            _protect(handle)
+            protected.append(("directory-probe", handle))
+        return handle
+
+    def open_pin(path: Path, role: str) -> object:
+        pin = original_pin(path, role)
+        if not any(kind == "pin" for kind, _number in protected):
+            _protect(pin.handle)
+            protected.append(("pin", pin.handle))
+        return pin
+
+    def resolve_common(repo: Path | None) -> Path:
+        nonlocal resolutions
+        resolutions += 1
+        if resolutions == 3:
+            raise primary
+        return original_common(repo)
+
+    def close_handle(handle: int) -> bool:
+        if any(number == handle for _kind, number in protected):
+            closes.append(handle)
+        return bool(original_close(handle))
+
+    failure: BaseException | None = None
+    try:
+        with monkeypatch.context() as patch:
+            patch.setitem(module, "_open_directory", open_probe)
+            patch.setitem(module, "_open_pin", open_pin)
+            patch.setitem(module, "_common_dir", resolve_common)
+            patch.setitem(module, "_close", close_handle)
+            try:
+                _NAMESPACE["acquire"]("several-temporary-refusals", repo=anchor)
+            except BaseException as refusal:
+                failure = refusal
+        assert len(protected) == 3
+        assert isinstance(failure, _NAMESPACE["LeaseStranded"])
+        assert failure.__cause__ is primary
+        assert sorted((kind, number) for kind, number, _error in failure.strands) == sorted(
+            protected
+        ), "the report omitted a temporary probe or pin"
+        assert sorted(closes) == sorted(number for _kind, number in protected)
+    finally:
+        for _kind, handle in protected:
+            _unprotect_and_close(handle)
+    successor = _NAMESPACE["acquire"]("after-several-temporary-refusals", repo=anchor)
+    _NAMESPACE["release"](successor)
+
+
+@pytest.mark.parametrize("host", _powershell_hosts())
+def test_shell_directory_probe_preserves_the_primary_failure(anchor: Path, host: str) -> None:
+    script = f"""
+$ErrorActionPreference = "Stop"
+. "{ROOT / "scripts" / "machine-lease.ps1"}"
+$script:RealDirectory = (Get-Command Open-MachineLeaseDirectory).ScriptBlock
+function Open-MachineLeaseDirectory {{
+    param([string]$Path)
+    $Handle = & $script:RealDirectory -Path $Path
+    if (-not [LeaseNative.Kernel]::SetHandleInformation($Handle, 2, 2)) {{
+        throw "could not protect constructed probe"
+    }}
+    Write-Host "PROTECTED:$Handle"
+    return $Handle
+}}
+function Get-MachineLeaseIdentity {{
+    param($Handle)
+    throw [System.InvalidOperationException]::new("constructed identity refusal")
+}}
+try {{
+    Get-MachineLeaseDirectoryIdentity -Path "{anchor}" | Out-Null
+    Write-Output "RETURNED"
+}} catch {{
+    Write-Output "CAUGHT:$($_.Exception.ToString())"
+}}
+"""
+    result = subprocess.run(
+        [host, "-NoProfile", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    assert "RETURNED" not in out
+    assert "CAUGHT:" in out and "constructed identity refusal" in out
+    assert "refused the directory probe " in out, "cleanup lost its own failure"

@@ -226,10 +226,14 @@ function Get-MachineLeaseDirectoryIdentity {
     if (Test-MachineLeaseHandleInvalid $Probe) {
         return $null
     }
+    $Failure = $null
     try {
         return Get-MachineLeaseIdentity -Handle $Probe
+    } catch {
+        $Failure = $_
+        throw
     } finally {
-        [LeaseNative.Kernel]::CloseHandle($Probe) | Out-Null
+        Close-MachineLeaseDirectoryProbe -Handle $Probe -Failure $Failure -During "directory identity lookup"
     }
 }
 
@@ -372,7 +376,7 @@ function Open-MachineLeasePin {
 }
 
 function Close-MachineLeaseAcquired {
-    param($Handle, $Pins, [Parameter(Mandatory)][string]$During)
+    param($Handle, $Pins, $Probes, [Parameter(Mandatory)][string]$During)
 
     # Close everything a boundary acquired, each exactly once - the lease
     # handle when there is one, then every pin - and report every close the
@@ -395,7 +399,28 @@ function Close-MachineLeaseAcquired {
             $Ok = $false
         }
     }
+    foreach ($Probe in @($Probes)) {
+        if ($null -eq $Probe -or (Test-MachineLeaseHandleInvalid $Probe)) { continue }
+        if (-not [LeaseNative.Kernel]::CloseHandle($Probe)) {
+            $LastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            Write-Host "ERROR: CloseHandle refused the directory probe $Probe after $During (error $LastError); this process retains a temporary kernel handle."
+            $Ok = $false
+        }
+    }
     return $Ok
+}
+
+function Close-MachineLeaseDirectoryProbe {
+    param($Handle, $Failure, [Parameter(Mandatory)][string]$During)
+
+    if (-not (Close-MachineLeaseAcquired -Probes @($Handle) -During $During)) {
+        $script:MachineLeaseStranded = $true
+        $Message = "A temporary directory probe could not be closed after $During."
+        if ($Failure) {
+            throw [System.InvalidOperationException]::new($Message, $Failure.Exception)
+        }
+        throw [System.InvalidOperationException]::new($Message)
+    }
 }
 
 function Test-MachineLeaseBinding {
@@ -411,13 +436,17 @@ function Test-MachineLeaseBinding {
     if (Test-MachineLeaseHandleInvalid $Anchor) {
         return "the repository directory $AnchorPlain could not be opened"
     }
+    $Failure = $null
     try {
         if ((Get-MachineLeaseIdentity -Handle $Anchor) -ne $Binding.AnchorIdentity) {
             return "$AnchorPlain is another object"
         }
         $Resolved = Get-MachineLeaseCommonDir -RepositoryRoot $AnchorPlain
+    } catch {
+        $Failure = $_
+        throw
     } finally {
-        [LeaseNative.Kernel]::CloseHandle($Anchor) | Out-Null
+        Close-MachineLeaseDirectoryProbe -Handle $Anchor -Failure $Failure -During "binding verification"
     }
     if (-not $Resolved) {
         return "$AnchorPlain no longer resolves a git repository"
@@ -435,23 +464,20 @@ function Open-MachineLeaseHandle {
         [Parameter(Mandatory)][uint32]$Disposition
     )
 
-    # The repository directory is held as an OBJECT before anything is
-    # resolved; the common directory is resolved through its held name and
-    # held the same way; the repository is re-read to prove it did not move
-    # while its name was used, and the resolution is repeated through it to
-    # prove the held common directory is still what the repository names.
-    # The lease is opened under the held name, the directory is read back
-    # from its handle after the open, and the binding is re-verified: a
-    # directory renamed or replaced under its name, or a pointer moved
-    # elsewhere, is refused with the lease closed - and a close the kernel
-    # refuses on that path strands this process, which then exits 4 rather
-    # than report an ordinary refusal over a live hold.
-    $Anchor = Open-MachineLeaseDirectory -Path $RepositoryRoot
-    if (Test-MachineLeaseHandleInvalid $Anchor) {
-        Write-Host "ERROR: the repository directory could not be held: $RepositoryRoot (error $script:MachineLeaseLastError)."
-        return $null
-    }
+    # Own every acquired object until both temporary probes have closed.
+    # A refusal leaves no successful result over unreported live handles.
+    $Anchor = $null
+    $Directory = $null
+    $Handle = $null
+    $Pins = @()
+    $Transferred = $false
+    $script:MachineLeaseStranded = $false
     try {
+        $Anchor = Open-MachineLeaseDirectory -Path $RepositoryRoot
+        if (Test-MachineLeaseHandleInvalid $Anchor) {
+            Write-Host "ERROR: the repository directory could not be held: $RepositoryRoot (error $script:MachineLeaseLastError)."
+            return $null
+        }
         $AnchorIdentity = Get-MachineLeaseIdentity -Handle $Anchor
         $AnchorName = Get-MachineLeaseFinalPath -Handle $Anchor
         if (-not $AnchorIdentity -or -not $AnchorName) {
@@ -469,120 +495,94 @@ function Open-MachineLeaseHandle {
             Write-Host "ERROR: the common git directory could not be held: $Common (error $script:MachineLeaseLastError)."
             return $null
         }
-        try {
-            $Identity = Get-MachineLeaseIdentity -Handle $Directory
-            $Name = Get-MachineLeaseFinalPath -Handle $Directory
-            if (-not $Identity -or -not $Name) {
-                Write-Host "ERROR: the held common git directory could not be identified."
-                return $null
-            }
-            if ((Get-MachineLeaseFinalPath -Handle $Anchor) -ne $AnchorName -or
-                (Get-MachineLeaseIdentity -Handle $Anchor) -ne $AnchorIdentity) {
-                Write-Host "ERROR: the repository directory moved while it was being resolved."
-                return $null
-            }
-            $Again = Get-MachineLeaseCommonDir -RepositoryRoot $AnchorPlain
-            if (-not $Again -or (Get-MachineLeaseDirectoryIdentity -Path $Again) -ne $Identity) {
-                Write-Host "ERROR: the repository's common git directory changed while it was being held: now $Again."
-                return $null
-            }
-            $Plain = ConvertTo-MachineLeasePlainName $Name
-            # Every link between the repository and the held common
-            # directory, and that directory itself, is now pinned; the
-            # resolution is repeated once more through the pinned chain, so
-            # a change slipped in before the pins took hold is refused and
-            # nothing can change after them.
-            $Pins = @()
-            # A stale $true from an earlier Enter-MachineLease in the same
-            # dot-sourced session would exit a healthy acquisition.
-            $script:MachineLeaseStranded = $false
-            try {
-                foreach ($Link in Get-MachineLeaseResolutionChain -Anchor $AnchorPlain) {
-                    $Pins += Open-MachineLeasePin -Path $Link.Path -Role $Link.Role
-                }
-                $Pins += Open-MachineLeasePin -Path $Plain -Role "the common git directory"
-            } catch {
-                Write-Host "ERROR: the resolution chain could not be pinned. $_"
-                $Closed = Close-MachineLeaseAcquired -Pins $Pins -During "a refused pinning"
-                # $script:MachineLeaseStranded is set when the pin opener's own
-                # close was refused. Both halves are reported above by
-                # Close-MachineLeaseAcquired before this decides, so one exit
-                # covers every refused close rather than one per helper.
-                if (-not $Closed -or $script:MachineLeaseStranded) {
-                    exit 4
-                }
-                return $null
-            }
-            $Pinned = Get-MachineLeaseCommonDir -RepositoryRoot $AnchorPlain
-            if (-not $Pinned -or (Get-MachineLeaseDirectoryIdentity -Path $Pinned) -ne $Identity) {
-                Write-Host "ERROR: the repository's common git directory changed while it was being pinned: now $Pinned."
-                if (-not (Close-MachineLeaseAcquired -Pins $Pins -During "a refused acquisition")) {
-                    exit 4
-                }
-                return $null
-            }
-            if (-not (Test-Path -LiteralPath (Join-Path $Plain "HEAD") -PathType Leaf) -or
-                -not (Test-Path -LiteralPath (Join-Path $Plain "config") -PathType Leaf)) {
-                Write-Host "ERROR: the held common git directory is not a git dir: $Plain."
-                if (-not (Close-MachineLeaseAcquired -Pins $Pins -During "a refused acquisition")) {
-                    exit 4
-                }
-                return $null
-            }
-            $LeasePath = Join-Path $Plain "machine-exclusive.lease"
-            $Handle = [LeaseNative.Kernel]::CreateFileW(
-                $LeasePath, $Access, [uint32]1, [IntPtr]::Zero,
-                $Disposition, [uint32]128, [IntPtr]::Zero
-            )
-            $Error32 = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-            if (Test-MachineLeaseHandleInvalid $Handle) {
-                $Reason = "the lease file could not be opened (error $Error32)"
-                if ($Error32 -eq 32) {
-                    $Recorded = ""
-                    try { $Recorded = [IO.File]::ReadAllText($LeasePath) } catch {}
-                    $Reason = "the machine is held: $Recorded"
-                }
-                Write-Host "ERROR: $Reason"
-                if (-not (Close-MachineLeaseAcquired -Pins $Pins -During "a refused acquisition")) {
-                    exit 4
-                }
-                return $null
-            }
-            $Bound = $false
-            try {
-                $Binding = [pscustomobject]@{
-                    Anchor = $AnchorName
-                    AnchorIdentity = $AnchorIdentity
-                    Common = $Name
-                    CommonIdentity = $Identity
-                    Pins = $Pins
-                }
-                $Drift = Test-MachineLeaseBinding -Binding $Binding
-                if ($Drift) {
-                    Write-Host "ERROR: the repository's common git directory changed during acquisition: $Drift."
-                    return $null
-                }
-                $Bound = $true
-            } finally {
-                if (-not $Bound) {
-                    # The lease handle and every pin are closed, each exactly
-                    # once, and every refused close is reported before the
-                    # process exits stranded.
-                    if (-not (Close-MachineLeaseAcquired -Handle $Handle -Pins $Pins -During "the refused acquisition")) {
-                        exit 4
-                    }
-                }
-            }
-            return [pscustomobject]@{
-                Handle = $Handle
-                Path = $LeasePath
-                Binding = $Binding
-            }
-        } finally {
-            [LeaseNative.Kernel]::CloseHandle($Directory) | Out-Null
+        $Identity = Get-MachineLeaseIdentity -Handle $Directory
+        $Name = Get-MachineLeaseFinalPath -Handle $Directory
+        if (-not $Identity -or -not $Name) {
+            Write-Host "ERROR: the held common git directory could not be identified."
+            return $null
         }
+        if ((Get-MachineLeaseFinalPath -Handle $Anchor) -ne $AnchorName -or
+            (Get-MachineLeaseIdentity -Handle $Anchor) -ne $AnchorIdentity) {
+            Write-Host "ERROR: the repository directory moved while it was being resolved."
+            return $null
+        }
+        $Again = Get-MachineLeaseCommonDir -RepositoryRoot $AnchorPlain
+        if (-not $Again -or (Get-MachineLeaseDirectoryIdentity -Path $Again) -ne $Identity) {
+            Write-Host "ERROR: the repository's common git directory changed while it was being held: now $Again."
+            return $null
+        }
+        $Plain = ConvertTo-MachineLeasePlainName $Name
+        try {
+            foreach ($Link in Get-MachineLeaseResolutionChain -Anchor $AnchorPlain) {
+                $Pins += Open-MachineLeasePin -Path $Link.Path -Role $Link.Role
+            }
+            $Pins += Open-MachineLeasePin -Path $Plain -Role "the common git directory"
+        } catch {
+            Write-Host "ERROR: the resolution chain could not be pinned. $_"
+            return $null
+        }
+        $Pinned = Get-MachineLeaseCommonDir -RepositoryRoot $AnchorPlain
+        if (-not $Pinned -or (Get-MachineLeaseDirectoryIdentity -Path $Pinned) -ne $Identity) {
+            Write-Host "ERROR: the repository's common git directory changed while it was being pinned: now $Pinned."
+            return $null
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $Plain "HEAD") -PathType Leaf) -or
+            -not (Test-Path -LiteralPath (Join-Path $Plain "config") -PathType Leaf)) {
+            Write-Host "ERROR: the held common git directory is not a git dir: $Plain."
+            return $null
+        }
+        $LeasePath = Join-Path $Plain "machine-exclusive.lease"
+        $Handle = [LeaseNative.Kernel]::CreateFileW(
+            $LeasePath, $Access, [uint32]1, [IntPtr]::Zero,
+            $Disposition, [uint32]128, [IntPtr]::Zero
+        )
+        $Error32 = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        if (Test-MachineLeaseHandleInvalid $Handle) {
+            $Reason = "the lease file could not be opened (error $Error32)"
+            if ($Error32 -eq 32) {
+                $Recorded = ""
+                try { $Recorded = [IO.File]::ReadAllText($LeasePath) } catch {}
+                $Reason = "the machine is held: $Recorded"
+            }
+            Write-Host "ERROR: $Reason"
+            return $null
+        }
+        $Binding = [pscustomobject]@{
+            Anchor = $AnchorName
+            AnchorIdentity = $AnchorIdentity
+            Common = $Name
+            CommonIdentity = $Identity
+            Pins = $Pins
+        }
+        $Drift = Test-MachineLeaseBinding -Binding $Binding
+        if ($Drift) {
+            Write-Host "ERROR: the repository's common git directory changed during acquisition: $Drift."
+            return $null
+        }
+        # Mark each probe transferred to its closer before attempting it.
+        # A refused handle value must never be retried during outer cleanup.
+        $Retired = $Directory
+        $Directory = $null
+        Close-MachineLeaseDirectoryProbe -Handle $Retired -During "lease acquisition"
+        $Retired = $Anchor
+        $Anchor = $null
+        Close-MachineLeaseDirectoryProbe -Handle $Retired -During "repository resolution"
+        $Transferred = $true
+        return [pscustomobject]@{
+            Handle = $Handle
+            Path = $LeasePath
+            Binding = $Binding
+        }
+    } catch {
+        Write-Host "ERROR: the lease acquisition was refused. $_"
+        return $null
     } finally {
-        [LeaseNative.Kernel]::CloseHandle($Anchor) | Out-Null
+        if (-not $Transferred) {
+            $Closed = Close-MachineLeaseAcquired -Handle $Handle -Pins $Pins -Probes @($Directory, $Anchor) -During "a refused acquisition"
+            if (-not $Closed -or $script:MachineLeaseStranded) {
+                exit 4
+            }
+        }
     }
 }
 
