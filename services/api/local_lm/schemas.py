@@ -1177,6 +1177,7 @@ class QueueStepOut(ApiModel):
     blocked_by: int = Field(ge=0)
     progress: float | None = Field(default=None, ge=0, le=1)
     progress_scope: Literal["overall", "stage"] | None = None
+    recorded_media_outputs: int | None = Field(default=None, ge=0)
 
 
 class QueuePlanStepsOut(ApiModel):

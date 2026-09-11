@@ -38,6 +38,9 @@ function QueuePlanStepList({ planId, name, regionId }: { planId: string; name: s
                 <div style={{ width: String(step.progress * 100) + "%" }} />
               </div>
             </div>}
+            {step.status === "complete" && step.recorded_media_outputs !== null && <small>
+              {step.recorded_media_outputs} recorded media {step.recorded_media_outputs === 1 ? "output" : "outputs"}
+            </small>}
             {step.blocked_by > 0 && <small>
               {step.blocked_by} {step.blocked_by === 1 ? "prerequisite" : "prerequisites"} unfinished
             </small>}
