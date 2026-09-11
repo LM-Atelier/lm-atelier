@@ -154,6 +154,45 @@ def prove_workflow_output_geometry(
     return WorkflowOutputGeometryResult(available=True, reason=None, proof=proof)
 
 
+def executed_graph_carries_the_proof(proof: object, executed_graph: object) -> bool:
+    """Does the graph that actually ran still carry the binding that was proven?
+
+    The proof is over the STORED revision. What executes is not always that: a
+    run with a LoRA stack active is dispatched with a rewritten graph, and other
+    transforms may follow. So a proof, on its own, is evidence about a document
+    rather than about a generation, and anything that reasons from it to "the
+    size that was asked for reached the output" needs this gap closed first.
+
+    Closed by re-walking the executed graph with the same requirement the proof
+    was granted under, and demanding the SAME node identities back. Equality of
+    the whole spine is the point: a relocated latent, a node inserted between the
+    sampler and the decode, an extra SaveImage on a scaled branch - each changes
+    the answer even where the walk still succeeds, and each is a real way for a
+    run to produce something other than the pair it declared.
+
+    A bool rather than a reason. Nothing here can say WHY a graph diverged in
+    terms a caller could act on, and inventing a vocabulary for it would invite
+    exactly the false precision this area keeps having to refuse. It answers one
+    question and refuses everything it cannot establish, including a proof it
+    did not mint itself.
+    """
+
+    if type(proof) is not WorkflowOutputGeometryProof:
+        return False
+    if type(executed_graph) is not dict:
+        return False
+    try:
+        binding = _graph_binding(cast(dict[str, Any], executed_graph))
+    except WorkflowOutputGeometryError:
+        return False
+    return binding == (
+        proof.latent_node_id,
+        proof.sampler_node_ids,
+        proof.decode_node_ids,
+        proof.save_node_ids,
+    )
+
+
 def workflow_output_geometry_payload(result: WorkflowOutputGeometryResult) -> dict[str, object]:
     if type(result) is not WorkflowOutputGeometryResult:
         _refuse()
