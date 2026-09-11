@@ -50,14 +50,11 @@ function New-HeldPytestScratch {
         throw "The pytest scratch root resolves inside the repository."
     }
 
-    $Pins = @()
+    $Pins = [Collections.ArrayList]::new()
     try {
-        foreach ($Link in Get-MachineLeaseReparseLinks `
-            -Path $NamedRoot -Role "the pytest scratch root" -Itself) {
-            $Pins += Open-MachineLeasePin -Path $Link.Path -Role $Link.Role
-        }
-        $Pins += Open-MachineLeasePin `
-            -Path $HeldRoot -Role "the pytest scratch root directory"
+        $Seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        Add-MachineLeasePathPins -Path $NamedRoot -Role "the pytest scratch root" -Pins $Pins -Seen $Seen -Itself
+        Add-MachineLeasePathPins -Path $HeldRoot -Role "the pytest scratch root directory" -Pins $Pins -Seen $Seen -Itself
 
         $Again = Open-MachineLeaseDirectory -Path $NamedRoot
         if (Test-MachineLeaseHandleInvalid $Again) {
@@ -85,7 +82,7 @@ function New-HeldPytestScratch {
         New-Item -ItemType Directory -Path $Parent -ErrorAction Stop | Out-Null
         $ParentPin = Open-MachineLeasePin `
             -Path $Parent -Role "the pytest scratch directory"
-        $Pins += $ParentPin
+        [void]$Pins.Add($ParentPin)
         $ParentItem = Get-Item -LiteralPath $Parent -Force -ErrorAction Stop
         $ParentName = Get-MachineLeaseFinalPath -Handle $ParentPin.Handle
         if (
@@ -102,7 +99,8 @@ function New-HeldPytestScratch {
             }
         }
         $PytestPath = Join-Path $Parent "pytest"
-        $Lease.Binding.Pins = @($Lease.Binding.Pins) + @($Pins)
+        Enable-MachineLeaseParentWrites -Pins $Pins
+        $Lease.Binding.Pins = @($Lease.Binding.Pins) + $Pins.ToArray()
         return $PytestPath
     } catch {
         if (-not (Close-MachineLeaseAcquired -Pins $Pins -During "a refused pytest scratch selection")) {

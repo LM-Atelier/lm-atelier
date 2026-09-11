@@ -327,16 +327,14 @@ def _close(handle: int) -> bool:
 
 @dataclass(frozen=True)
 class _Pin:
-    """One link of the checkout's resolution chain, held read-share only for
-    the lease lifetime: the .git entry under the repository directory, for a
-    pointer the private git directory it names and that directory's
-    commondir file, and every reparse point on the way to either. While a
-    pin lives, any open that would write, rename, delete or retarget the
-    link is refused by the kernel, so what the repository names cannot
-    change under the holder or under a child. A pin is inheritable exactly
-    as the lease is: a stage child launched while the lease is held carries
-    every pin for as long as it can act, so the chain stays held for the
-    child's lifetime even when the holder dies first."""
+    """One inheritable name hold in the checkout resolution chain.
+
+    Rename and deletion are excluded for every pin. Files, reparse points
+    and leaf directories also exclude writes. An ordinary parent shares
+    writes only after its direct child is pinned, keeping it nonempty and
+    unable to become a junction while allowing atomic child-file updates.
+    Stage children inherit the pins for their own lifetime.
+    """
 
     path: str
     role: str
@@ -459,96 +457,79 @@ def _attributes(path: Path) -> int:
     return int(attributes)
 
 
-def _reparse_links(path: Path, role: str, *, itself: bool = False) -> list[tuple[Path, str]]:
-    """Every reparse point among the components of a textual path, root
-    first - and the path itself when ``itself`` is set and it is one. Git
-    resolves the text at each invocation, so retargeting one of these
-    changes what the text names while the object at its end stays held;
-    each is pinned as itself. ``..`` components collapse lexically, as
-    Win32 collapses them before the kernel sees the name."""
+def _path_chain(
+    path: Path, role: str, seen: set[str], *, itself: bool = False
+) -> Iterator[tuple[Path, str]]:
+    """Yield each component before inspecting it; the caller pins each yield.
 
+    Ordinary directories matter too: an unheld directory can become a junction.
+    A link's resolved target has its own namespace, which must also be held.
+    """
     plain = Path(os.path.normpath(str(path)))
     components = list(reversed(plain.parents))[1:]
     if itself:
         components.append(plain)
-    links: list[tuple[Path, str]] = []
     for prefix in components:
+        key = os.path.normcase(str(prefix))
+        if key in seen:
+            continue
+        seen.add(key)
+        yield prefix, role if itself and prefix == plain else f"a component on the way to {role}"
         if _attributes(prefix) & _FILE_ATTRIBUTE_REPARSE_POINT:
-            links.append((prefix, f"a link on the way to {role}"))
-    return links
+            with _directory_probe(prefix) as probe:
+                identity = _identity(probe)
+                target = Path(_plain(_final_path(probe)))
+            yield from _path_chain(target, role, seen, itself=True)
+            if _directory_identity(prefix) != identity or _directory_identity(target) != identity:
+                raise LeaseRefused(f"a link target changed while its path was being held: {prefix}")
 
 
 def _named_directory(base: Path, file: Path) -> Path:
-    """The directory a commondir file names, as git reads it: its text,
-    relative to the directory holding the file."""
-
+    """The directory a commondir file names, relative to its holding directory."""
     text = file.read_text(encoding="utf-8").strip()
     named = Path(text)
     return named if named.is_absolute() else base / named
 
 
-def _resolution_chain(anchor: Path) -> list[tuple[Path, str]]:
-    """The links git follows from the repository directory to its common
-    directory, each a path whose change would change what the repository
-    names: the .git entry; for a pointer file, the private git directory it
-    names and that directory's commondir file; for a directory, its
-    commondir file if it has one; and every reparse point among the
-    components of the paths the pointer and the commondir file name. A
-    reparse point is a link as itself."""
-
+def _resolution_chain(anchor: Path) -> Iterator[tuple[Path, str]]:
+    """Walk the Git mapping only after the caller holds each yielded component."""
+    seen: set[str] = set()
+    yield from _path_chain(anchor, "the repository directory", seen, itself=True)
     entry = anchor / ".git"
-    links = [(entry, "the repository's .git entry")]
-    attributes = _attributes(entry)
-    if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
-        return links
-    if attributes & _FILE_ATTRIBUTE_DIRECTORY:
-        commondir = entry / "commondir"
-        if commondir.is_file():
-            links.append((commondir, "the commondir file"))
-            links.extend(
-                _reparse_links(
-                    _named_directory(entry, commondir),
-                    "the common git directory",
-                    itself=True,
-                )
-            )
-        return links
-    text = entry.read_text(encoding="utf-8")
-    if not text.startswith("gitdir:"):
-        raise LeaseRefused(f"the .git file is not a git pointer: {entry}")
-    target = Path(text[len("gitdir:") :].strip())
-    private = target if target.is_absolute() else anchor / target
-    links.extend(_reparse_links(private, "the checkout's private git directory"))
-    links.append((private, "the checkout's private git directory"))
+    yield from _path_chain(entry, "the repository's .git entry", seen, itself=True)
+    if _attributes(entry) & _FILE_ATTRIBUTE_DIRECTORY:
+        private = entry
+    else:
+        text = entry.read_text(encoding="utf-8")
+        if not text.startswith("gitdir:"):
+            raise LeaseRefused(f"the .git file is not a git pointer: {entry}")
+        target = Path(text[len("gitdir:") :].strip())
+        private = target if target.is_absolute() else anchor / target
+        yield from _path_chain(private, "the checkout's private git directory", seen, itself=True)
     commondir = private / "commondir"
     if commondir.is_file():
-        links.append((commondir, "the commondir file"))
-        links.extend(
-            _reparse_links(
-                _named_directory(private, commondir),
-                "the common git directory",
-                itself=True,
-            )
+        yield from _path_chain(commondir, "the commondir file", seen, itself=True)
+        yield from _path_chain(
+            _named_directory(private, commondir),
+            "the common git directory",
+            seen,
+            itself=True,
         )
-    return links
 
 
 def _open_pin(path: Path, role: str) -> _Pin:
-    """Hold one link against change: read share only. A directory is held
-    with backup semantics, a reparse point as itself rather than through
-    its target, and a file for reading; the kernel then refuses every other
-    open that would write, rename, delete or retarget the link."""
+    """Hold a component strictly before the walk inspects its name."""
+    return _open_shared_pin(path, role, _SHARE_READ)
 
-    attributes = _attributes(path)
-    flags = _ATTRIBUTE_NORMAL
-    if attributes & _FILE_ATTRIBUTE_DIRECTORY:
-        flags = _FILE_FLAG_BACKUP_SEMANTICS
-    if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
-        flags |= _FILE_FLAG_OPEN_REPARSE_POINT
+
+def _open_shared_pin(path: Path, role: str, share: int) -> _Pin:
+    """Open an inheritable name hold with the selected sharing mode."""
+
+    flags = _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT
     handle = _kernel32().CreateFileW(
         str(path),
         _FILE_READ_ATTRIBUTES | _GENERIC_READ,
-        _SHARE_READ,
+        share,
         None,
         _OPEN_EXISTING,
         flags,
@@ -575,6 +556,42 @@ def _open_pin(path: Path, role: str) -> _Pin:
     return _Pin(str(path), role, handle)
 
 
+def _relax_parent_pins(pins: list[_Pin]) -> None:
+    """Allow atomic child writes once a held child keeps each parent nonempty.
+
+    Every name is still held against rename/delete. Only an ordinary directory
+    with an already pinned direct child can share writes: that child cannot be
+    removed, so the directory cannot become an in-place junction. Files, reparse
+    points and leaves retain their strict write exclusion.
+    """
+    parents = {os.path.normcase(str(Path(pin.path).parent)) for pin in pins}
+    for index in range(len(pins)):
+        original = pins[index]
+        if os.path.normcase(original.path) not in parents:
+            continue
+        information = _ByHandleFileInformation()
+        if not _kernel32().GetFileInformationByHandle(
+            ctypes.c_void_p(original.handle), ctypes.byref(information)
+        ):
+            raise LeaseRefused("a held parent could not be identified")
+        if (
+            not information.attributes & _FILE_ATTRIBUTE_DIRECTORY
+            or information.attributes & _FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            continue
+        replacement = _open_shared_pin(Path(original.path), original.role, _SHARE_READ | 2)
+        # Keep both handles owned until the replacement has been checked. Once
+        # the old handle is handed to cleanup, never attempt its close twice.
+        pins.append(replacement)
+        if _identity(replacement.handle) != _identity(original.handle):
+            raise LeaseRefused("a held parent changed while its sharing was adjusted")
+        pins[index] = replacement
+        pins.pop()
+        strand = _abandon(during="parent sharing adjustment", pins=(original,))
+        if strand is not None:
+            raise strand from LeaseRefused("a strict parent hold could not be retired")
+
+
 def _open_pins(anchor: Path) -> tuple[_Pin, ...]:
     """Pin every link of the chain; a link that cannot be pinned lets the
     pins already taken go, each closed exactly once, and a close the kernel
@@ -584,6 +601,7 @@ def _open_pins(anchor: Path) -> tuple[_Pin, ...]:
     try:
         for path, role in _resolution_chain(anchor):
             pins.append(_open_pin(path, role))
+        _relax_parent_pins(pins)
     except BaseException as refusal:
         nested, primary = _merge_strand(refusal)
         strand = _abandon(during="a refused pinning", pins=tuple(pins), stranded=nested)
