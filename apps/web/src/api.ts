@@ -43,6 +43,8 @@ import type {
   Job,
   JobActivity,
   QueueActivityItem,
+  QueueControlCommand,
+  QueueControlResult,
   QueueActivityPage,
   QueuePlanSteps,
   Message,
@@ -573,6 +575,9 @@ export const api = {
       if (value.plan_id !== planId) throw new Error("The submitted work steps could not be read.");
       return value;
     }),
+  queueControl: (planId: string, action: "hold" | "release", command: QueueControlCommand) =>
+    request<QueueControlResult>("/api/queue/items/" + encodeURIComponent(planId) + "/" + action,
+      { method: "POST", body: JSON.stringify(command) }),
   queueActivity: (options: { lane?: QueueActivityItem["lane"]; cursor?: string | null; limit: number }, signal?: AbortSignal) => {
     const params = new URLSearchParams({ limit: String(options.limit) });
     if (options.lane) params.set("lane", options.lane);

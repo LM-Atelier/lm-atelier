@@ -169,6 +169,16 @@ The view updates automatically and shows when it was last checked. Use
 previously loaded items are still shown. Step details have their own
 **Retry step details** action.
 
+When a generation plan offers **Hold**, its remaining work can safely wait without
+cancelling the plan or changing its accepted settings. **Release** makes that work
+eligible again. Completed results stay intact, and held work still counts toward
+the pending-work limit. Release starts a fresh waiting period for scheduling
+priority; it does not change when you submitted the work.
+
+Controls appear only when the plan supports the action. Work that has already
+started cannot be held. If the queue changes while you click, refresh and use the
+updated action. Holds survive an app restart.
+
 ### Browse workflows
 
 Open **Workflows** to browse families and their variants. Search names, descriptions,

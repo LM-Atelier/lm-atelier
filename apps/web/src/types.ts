@@ -404,6 +404,18 @@ export interface QueueLaneCounts {
   install: number;
 }
 
+export interface QueueControlCommand {
+  expected_revision: number;
+  idempotency_key: string;
+}
+
+export interface QueueControlResult {
+  owner_id: string;
+  control_state: "eligible" | "held";
+  control_revision: number;
+  eligible_since: string | null;
+}
+
 export interface QueueActivityItem {
   owner_type: "work_plan" | "job";
   owner_id: string;
@@ -422,6 +434,9 @@ export interface QueueActivityItem {
   queued_jobs: number;
   paused_jobs: number;
   progress: number | null;
+  control_state: "eligible" | "held" | null;
+  control_revision: number | null;
+  allowed_actions: ("hold" | "release")[];
 }
 
 export interface QueueActivityPage {

@@ -26,3 +26,6 @@
 .queue-activity-items .queue-step-list li { padding: 8px; gap: 3px; }
 
 .queue-plan-step-details { display: grid; gap: 7px; min-width: 0; }
+
+.queue-plan-controls { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+.queue-plan-controls p { flex-basis: 100%; margin: 0; overflow-wrap: anywhere; }

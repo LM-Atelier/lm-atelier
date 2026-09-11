@@ -55,6 +55,8 @@ CHECKED_CONTRACTS = {
     "Job": "JobOut",
     "JobActivity": "JobActivityOut",
     "QueueLaneCounts": "QueueLaneCountsOut",
+    "QueueControlCommand": "QueueControlCommand",
+    "QueueControlResult": "QueueControlResultOut",
     "QueueActivityItem": "QueueActivityItemOut",
     "QueueActivityPage": "QueueActivityPageOut",
     "QueueStep": "QueueStepOut",

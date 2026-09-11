@@ -1115,6 +1115,18 @@ class QueueLaneCountsOut(ApiModel):
     install: int = Field(default=0, ge=0)
 
 
+class QueueControlCommand(ApiModel):
+    expected_revision: StrictInt = Field(ge=0, le=9_223_372_036_854_775_807)
+    idempotency_key: StrictStr = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class QueueControlResultOut(ApiModel):
+    owner_id: str
+    control_state: Literal["eligible", "held"]
+    control_revision: int = Field(ge=1)
+    eligible_since: datetime | None
+
+
 class QueueActivityItemOut(ApiModel):
     owner_type: Literal["work_plan", "job"]
     owner_id: str
@@ -1133,6 +1145,10 @@ class QueueActivityItemOut(ApiModel):
     queued_jobs: int = Field(ge=0)
     paused_jobs: int = Field(ge=0)
     progress: float | None = Field(ge=0, le=1)
+
+    control_state: Literal["eligible", "held"] | None = None
+    control_revision: int | None = Field(default=None, ge=0)
+    allowed_actions: list[Literal["hold", "release"]] = Field(default_factory=list)
 
 
 class QueueActivityPageOut(ApiModel):

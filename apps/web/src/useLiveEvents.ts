@@ -148,6 +148,10 @@ export function useLiveEvents(
           setLiveText((current) => ({ ...current, [messageId]: `${current[messageId] ?? ""}${text}` }));
           return;
         }
+        if (event.type === "queue.control") {
+          scheduleQueueRefresh();
+          return;
+        }
         if (event.type === "job.progress") {
           const snapshot = event.payload.job as Job | undefined;
           if (snapshot?.id && typeof snapshot.attempt === "number") {

@@ -370,6 +370,33 @@ class WorkPlan(TimestampMixin, Base):
     )
 
 
+class WorkPlanControl(Base):
+    """Queue eligibility, kept separate from execution and portable history."""
+
+    __tablename__ = "work_plan_controls"
+
+    plan_id: Mapped[str] = mapped_column(
+        ForeignKey("work_plans.id", ondelete="CASCADE"), primary_key=True
+    )
+    state: Mapped[str] = mapped_column(String(16), default="eligible")
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    eligible_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WorkPlanControlReceipt(Base):
+    """Exact successful command responses, retained for the owner's lifetime."""
+
+    __tablename__ = "work_plan_control_receipts"
+
+    plan_id: Mapped[str] = mapped_column(
+        ForeignKey("work_plans.id", ondelete="CASCADE"), primary_key=True
+    )
+    command_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    action: Mapped[str] = mapped_column(String(16))
+    expected_revision: Mapped[int] = mapped_column(Integer)
+    response_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
 class WorkStep(TimestampMixin, Base):
     __tablename__ = "work_steps"
     __table_args__ = (
