@@ -13,6 +13,7 @@ from local_lm.output_measurement import (
     MAX_DECODED,
     Budget,
     measure_output,
+    record_to_keep,
 )
 
 _MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -252,3 +253,47 @@ def test_an_exhausted_budget_says_so_about_itself_and_not_about_the_file() -> No
     assert record["about"] == "budget"
     assert record["reason"] == "over_step_budget"
     assert "raster_width" not in record
+
+
+def test_a_measurement_is_never_lost_to_our_own_ceiling() -> None:
+    """The composition rule, for a store addressed by its own content.
+
+    Two runs that produce an identical file write to the same row. The answer
+    is a pure function of those bytes, so they agree - except that the budget
+    is shared across a generation and can be spent, and a starved second look
+    says nothing about the file. Overwriting a measurement with that would turn
+    evidence we hold into evidence we do not.
+    """
+    measured = measure_output(_real(64, 64), Budget())
+    starved = measure_output(_real(64, 64), Budget(steps=2))
+    assert measured["state"] == "measured"
+    assert starved == {
+        "v": 1,
+        "state": "unmeasured",
+        "about": "budget",
+        "reason": "over_step_budget",
+    }
+
+    assert record_to_keep(measured, starved) is measured, "the measurement survives"
+    assert record_to_keep(starved, measured) is measured, "and it replaces a starved one"
+
+
+def test_a_fact_about_the_file_still_replaces_an_older_one() -> None:
+    """The rule is about OUR ceiling, not about deferring to whatever is there.
+
+    A row can only hold one answer, and every answer except a starved one is a
+    statement about the bytes. Those agree with each other by construction, so
+    keeping the fresh one is both harmless and simpler than ranking them.
+    """
+    absent = record_to_keep(None, measure_output(_real(8, 8), Budget()))
+    assert absent["state"] == "measured"
+
+    a_file_fact = {"v": 1, "state": "unmeasured", "about": "file", "reason": "raster_short"}
+    a_scope_fact = {
+        "v": 1,
+        "state": "unmeasured",
+        "about": "scope",
+        "reason": "unsupported_container",
+    }
+    assert record_to_keep(a_file_fact, a_scope_fact) is a_scope_fact
+    assert record_to_keep("not a record at all", a_file_fact) is a_file_fact

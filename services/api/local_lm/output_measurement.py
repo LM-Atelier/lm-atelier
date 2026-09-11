@@ -260,3 +260,25 @@ def measure_output(payload: bytes, budget: Budget) -> dict[str, Any]:
         return _measure_png(payload, budget)
     except _Stop as stop:
         return _unmeasured(stop.about, stop.reason)
+
+
+def record_to_keep(previous: object, fresh: dict[str, Any]) -> dict[str, Any]:
+    """Which of two records about the same bytes survives.
+
+    A store addressed by a digest of its own content holds one row for one set
+    of bytes, so a later run that produces an identical file writes where an
+    earlier one already did. The answer is a pure function of those bytes and
+    normally agrees with itself - but a budget is shared across a generation
+    and can be spent, so the second look may be `unmeasured/budget` where the
+    first was a measurement.
+
+    That is a fact about our ceiling on a busy run, not about the file, and it
+    must not overwrite evidence we already hold. Only a measurement replaces a
+    measurement; anything else defers to one.
+    """
+    if not isinstance(previous, dict):
+        return fresh
+    held: dict[str, Any] = previous
+    if held.get("state") == "measured" and fresh.get("state") != "measured":
+        return held
+    return fresh
