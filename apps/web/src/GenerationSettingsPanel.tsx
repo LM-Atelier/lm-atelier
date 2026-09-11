@@ -284,6 +284,7 @@ export function GenerationSettingsPanel({
           revisionId={workflowRevisionId}
           width={widthField ? effectiveValue(widthField) : undefined}
           height={heightField ? effectiveValue(heightField) : undefined}
+          sizeIsTheWorkflowsOwn={!widthField && !heightField}
           onDimensions={({ width, height }) => onValues(
             { ...values, width, height }, ["width", "height"],
           )}
