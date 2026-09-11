@@ -17,7 +17,7 @@ import stat
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Final, NoReturn
+from typing import Final, Literal, NoReturn
 
 from .filesystem_links import (
     AnchoredDirectory,
@@ -26,6 +26,7 @@ from .filesystem_links import (
     AnchoredEntryExists,
     available_bytes,
     create_entry,
+    directory_device_information,
     directory_private_to_current_user,
     discard_entry,
     link_entry,
@@ -114,6 +115,42 @@ class StoreIdentity:
     min_writer_version: int
 
 
+# FileFsDeviceInformation describes the reported logical volume, not whether
+# hardware can be unplugged. An explicitly reported disk with zero characteristics
+# is valid. Read-only affects the later write probes, not volume eligibility.
+# https://learn.microsoft.com/openspecs/windows_protocols/ms-fscc/616b66d5-b335-4e1c-8f87-b4a55e8d3e4a
+_FILE_DEVICE_DISK: Final = 0x00000007
+_ELIGIBLE_DISK_CHARACTERISTICS: Final = (
+    0x00000002  # FILE_READ_ONLY_DEVICE
+    | 0x00000020  # FILE_DEVICE_IS_MOUNTED
+    | 0x00000100  # FILE_DEVICE_SECURE_OPEN
+    | 0x00004000  # FILE_PORTABLE_DEVICE (hardware, not removable media)
+    | 0x00020000  # FILE_DEVICE_ALLOW_APPCONTAINER_TRAVERSAL
+)
+WindowsVolumeQualification = Literal["eligible", "ineligible", "not_checked", "not_applicable"]
+
+
+def _windows_volume_qualification(anchor: AnchoredDirectory) -> WindowsVolumeQualification:
+    """Qualify an understood Windows disk report through the held directory.
+
+    Remote, removable, optical, write-once, virtual and unknown reports do not
+    qualify. POSIX retains its existing checks; not_applicable is no claim of
+    fixed-volume evidence there or of resolved SQLite pathname confinement.
+    """
+    if os.name != "nt":
+        return "not_applicable"
+    try:
+        information = directory_device_information(anchor)
+    except AnchoredDirectoryError:
+        return "ineligible"
+    if (
+        information.device_type != _FILE_DEVICE_DISK
+        or information.characteristics & ~_ELIGIBLE_DISK_CHARACTERISTICS
+    ):
+        return "ineligible"
+    return "eligible"
+
+
 @dataclasses.dataclass(frozen=True)
 class RootProbeReport:
     """Per-check outcome of the root-acceptance battery."""
@@ -121,6 +158,7 @@ class RootProbeReport:
     directory: bool
     no_reparse_points: bool
     private_access: bool
+    windows_volume: WindowsVolumeQualification
     atomic_rename: bool
     exclusive_create: bool
     free_space: bool
@@ -131,6 +169,7 @@ class RootProbeReport:
             self.directory
             and self.no_reparse_points
             and self.private_access
+            and self.windows_volume in {"eligible", "not_applicable"}
             and self.atomic_rename
             and self.exclusive_create
             and self.free_space
@@ -484,13 +523,18 @@ def _probe_anchored(anchor: AnchoredDirectory, minimum_free_bytes: int) -> RootP
         private_access = directory_private_to_current_user(anchor)
     except AnchoredDirectoryError:
         private_access = False
+    volume: WindowsVolumeQualification = (
+        _windows_volume_qualification(anchor) if private_access else "not_checked"
+    )
+    qualified = private_access and volume in {"eligible", "not_applicable"}
     return RootProbeReport(
         directory=True,
         no_reparse_points=True,
         private_access=private_access,
-        atomic_rename=private_access and _probe_atomic_rename(anchor),
-        exclusive_create=private_access and _probe_exclusive_create(anchor),
-        free_space=private_access and _probe_free_space(anchor, minimum_free_bytes),
+        windows_volume=volume,
+        atomic_rename=qualified and _probe_atomic_rename(anchor),
+        exclusive_create=qualified and _probe_exclusive_create(anchor),
+        free_space=qualified and _probe_free_space(anchor, minimum_free_bytes),
     )
 
 
@@ -501,9 +545,9 @@ def probe_store_root(
 ) -> RootProbeReport:
     """Run the acceptance battery against an existing candidate root.
 
-    The battery is diagnostic, but containment and private access must pass
-    before any write probes run. No existing permissions are changed. Gate with
-    `require_usable_root` when only acceptance matters.
+    The battery is diagnostic, but containment, private access and applicable
+    Windows volume qualification must pass before any write probes run. No existing
+    permissions are changed. Gate with `require_usable_root` when only acceptance matters.
     """
 
     if not isinstance(minimum_free_bytes, int) or isinstance(minimum_free_bytes, bool):
@@ -520,6 +564,7 @@ def probe_store_root(
             directory=directory,
             no_reparse_points=reparse_free,
             private_access=False,
+            windows_volume="not_checked",
             atomic_rename=False,
             exclusive_create=False,
             free_space=False,
@@ -538,6 +583,7 @@ def probe_store_root(
             directory=directory,
             no_reparse_points=False,
             private_access=False,
+            windows_volume="not_checked",
             atomic_rename=False,
             exclusive_create=False,
             free_space=False,
@@ -570,6 +616,8 @@ def store_access_mode(
     read/write; a root whose battery fails writes (or whose format is newer
     than this writer) is read-only; an unreadable identity refuses. Ownership
     and private access must qualify even when the format selects read-only.
+    Windows also requires an understood local disk report before negotiation.
+    POSIX retains its existing acceptance scope without a volume certificate.
     """
 
     store = _require_absolute_root(root)
@@ -583,6 +631,8 @@ def store_access_mode(
                 _invalid()
         except AnchoredDirectoryError:
             _invalid()
+        if _windows_volume_qualification(anchor) == "ineligible":
+            _invalid()
         identity = _read_identity_anchored(anchor)
         if identity is None:
             _invalid()
@@ -594,7 +644,12 @@ def store_access_mode(
         if negotiated == "read_only":
             return "read_only"
         report = _probe_anchored(anchor, MINIMUM_FREE_BYTES)
-    if not report.directory or not report.no_reparse_points or not report.private_access:
+    if (
+        not report.directory
+        or not report.no_reparse_points
+        or not report.private_access
+        or report.windows_volume not in {"eligible", "not_applicable"}
+    ):
         _invalid()
     if not (report.atomic_rename and report.exclusive_create and report.free_space):
         return "read_only"
