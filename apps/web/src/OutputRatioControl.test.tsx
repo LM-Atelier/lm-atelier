@@ -6,7 +6,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "./api";
 import { OutputRatioControl } from "./OutputRatioControl";
 import { ratioOf } from "./outputRatio";
-import type { OutputRatioPresetId, WorkflowOutputGeometryCapability } from "./types";
+import type {
+  OutputRatioPresetId,
+  WorkflowOutputGeometryCapability,
+  WorkflowOutputGeometryResolution,
+} from "./types";
 
 vi.mock("./api", () => ({
   api: {
@@ -51,6 +55,42 @@ function capability(
     request_authorized: false,
     ...overrides,
   };
+}
+
+function resolution(
+  overrides: Partial<WorkflowOutputGeometryResolution> = {},
+): WorkflowOutputGeometryResolution {
+  return {
+    version: 1,
+    workflow_id: "wf-1",
+    revision_id: "rev-1",
+    artifact_sha256: "a".repeat(64),
+    operation: "text_to_image",
+    engine: "comfyui",
+    mode: "image",
+    size_mode: "preset",
+    preset_id: "3:4",
+    width: 896,
+    height: 1152,
+    graph_binding_verified: true,
+    request_authorized: false,
+    ...overrides,
+  };
+}
+
+/** A resolve call whose answer this test decides when to give.
+ *
+ * The window between the press and the answer is where the focus defect lived,
+ * so it has to be held open and observed rather than waited out.
+ */
+function deferredResolve(): (value: WorkflowOutputGeometryResolution) => void {
+  let answer!: (value: WorkflowOutputGeometryResolution) => void;
+  vi.mocked(api.resolveWorkflowRevisionOutputGeometry).mockReturnValue(
+    new Promise<WorkflowOutputGeometryResolution>((resolve) => {
+      answer = resolve;
+    }),
+  );
+  return answer;
 }
 
 function renderControl(
@@ -213,5 +253,94 @@ describe("OutputRatioControl", () => {
       expect(screen.getByText("This workflow no longer offers 16:9.")).toBeTruthy(),
     );
     expect(onDimensions).not.toHaveBeenCalled();
+  });
+
+  it("leaves the choice under the hand that made it", async () => {
+    // Somebody who is using the keyboard is standing ON the button when they
+    // press it. Taking that button away from them - which the disabled
+    // attribute does, because the browser will not leave focus on a disabled
+    // control - drops them on the document body, so nothing announces the
+    // choice and there is nowhere to carry on from.
+    vi.mocked(api.workflowRevisionOutputGeometry).mockResolvedValue(capability());
+    const answer = deferredResolve();
+
+    renderControl();
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "3:4 Portrait" })).toBeTruthy());
+    const chosen = screen.getByRole("button", { name: "3:4 Portrait" });
+    chosen.focus();
+    fireEvent.click(chosen);
+
+    // While the answer is still in flight: the whole point, since this is the
+    // window in which the old code had already thrown focus away.
+    await waitFor(() => expect(chosen.getAttribute("aria-disabled")).toBe("true"));
+    expect(document.activeElement).toBe(chosen);
+
+    answer(resolution());
+    await waitFor(() => expect(chosen.getAttribute("aria-disabled")).toBe("false"));
+    expect(document.activeElement).toBe(chosen);
+  });
+
+  it("ignores a second press rather than taking the button away to prevent one", async () => {
+    // Keeping focus must not cost the protection the disabled attribute gave.
+    vi.mocked(api.workflowRevisionOutputGeometry).mockResolvedValue(capability());
+    const answer = deferredResolve();
+
+    renderControl();
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "3:4 Portrait" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "3:4 Portrait" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "1:1 Square" }).getAttribute("aria-disabled")).toBe("true"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "1:1 Square" }));
+    fireEvent.click(screen.getByRole("button", { name: "3:4 Portrait" }));
+
+    expect(api.resolveWorkflowRevisionOutputGeometry).toHaveBeenCalledTimes(1);
+    answer(resolution());
+  });
+
+  it("says a refusal out loud rather than only on screen", async () => {
+    // A failed action that is merely drawn is not reported at all to somebody
+    // listening, who is then left believing the shape they chose was taken.
+    vi.mocked(api.workflowRevisionOutputGeometry).mockResolvedValue(capability());
+    vi.mocked(api.resolveWorkflowRevisionOutputGeometry).mockRejectedValue(new Error("422"));
+
+    renderControl();
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "16:9 Wide" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "16:9 Wide" }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("alert").textContent).toBe("This workflow no longer offers 16:9."),
+    );
+  });
+
+  it("does not carry a refusal over to a different revision", async () => {
+    // The panel's role tabs change which revision this row describes without
+    // remounting it, so a message held across that change contradicts the
+    // buttons beside it: the shape it says is gone is offered right there.
+    vi.mocked(api.workflowRevisionOutputGeometry).mockResolvedValue(capability());
+    vi.mocked(api.resolveWorkflowRevisionOutputGeometry).mockRejectedValue(new Error("422"));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const tree = (revisionId: string) => (
+      <QueryClientProvider client={client}>
+        <OutputRatioControl revisionId={revisionId} width={1024} height={768} onDimensions={() => {}} />
+      </QueryClientProvider>
+    );
+
+    const { rerender } = render(tree("rev-1"));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "16:9 Wide" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "16:9 Wide" }));
+    await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
+
+    rerender(tree("rev-2"));
+
+    // Wait for the new revision's own answer to arrive first. Asserting the
+    // message is gone while the row is still empty would pass for a reason
+    // that has nothing to do with the refusal being cleared.
+    await waitFor(() => expect(screen.getByRole("button", { name: "16:9 Wide" })).toBeTruthy());
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });
