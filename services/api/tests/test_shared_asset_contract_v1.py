@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 from directory_security import create_owned_directory
+from test_shared_asset_volume_qualification import eligible_disk as eligible_disk
 
 from local_lm import filesystem_links as links
 from local_lm import shared_asset_contract_v1 as contract
@@ -563,6 +564,7 @@ def test_an_unreadable_identity_refuses_rather_than_reading_as_absent(tmp_path: 
     assert str(caught.value) == INVALID_STORE
 
 
+@pytest.mark.usefixtures("eligible_disk")
 def test_rename_probe_is_wired_to_a_real_rename(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -639,6 +641,7 @@ def test_negotiation_orders_reader_before_writer() -> None:
         negotiate_store_access(compatible, writer_version=True)
 
 
+@pytest.mark.usefixtures("eligible_disk")
 def test_probe_battery_accepts_a_plain_writable_directory(tmp_path: Path) -> None:
     root = create_owned_directory(tmp_path / "packages")
     report = probe_store_root(root=root, minimum_free_bytes=0)
@@ -890,6 +893,7 @@ def test_probe_battery_fails_closed_for_missing_or_file_roots(tmp_path: Path) ->
         require_usable_root(root=file_root)
 
 
+@pytest.mark.usefixtures("eligible_disk")
 def test_every_probe_in_one_report_sees_the_same_held_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1100,6 +1104,7 @@ def test_access_mode_requires_an_existing_identity(tmp_path: Path) -> None:
         store_access_mode(root=root)
 
 
+@pytest.mark.usefixtures("eligible_disk")
 def test_access_mode_resolves_read_write_then_degrades(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1127,6 +1132,7 @@ def test_access_mode_never_creates_a_library(tmp_path: Path) -> None:
     assert not root.exists()
 
 
+@pytest.mark.usefixtures("eligible_disk")
 def test_the_exclusive_probe_refuses_a_wrong_failure_as_proof(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1163,6 +1169,7 @@ def test_the_exclusive_probe_refuses_a_wrong_failure_as_proof(
     assert not report.usable
 
 
+@pytest.mark.usefixtures("eligible_disk")
 def test_a_collision_still_proves_exclusive_creation(tmp_path: Path) -> None:
     """The other direction, so the control above cannot pass vacuously."""
 
