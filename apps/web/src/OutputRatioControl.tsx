@@ -30,7 +30,13 @@ export function OutputRatioControl({
   onDimensions: (dimensions: { width: number; height: number }) => void;
 }) {
   const [pending, setPending] = useState<OutputRatioPresetId | null>(null);
-  const [refused, setRefused] = useState<OutputRatioPresetId | null>(null);
+  // A refusal is a fact about one revision, so it is remembered with the
+  // revision it came from. The panel's role tabs swap which revision this row
+  // describes without remounting it, and a message carried across that swap
+  // would say a shape is gone while the button offering it sits alongside.
+  const [refused, setRefused] = useState<
+    { revisionId: string; preset: OutputRatioPresetId } | null
+  >(null);
   const geometry = useQuery({
     queryKey: ["workflow-revision", revisionId, "output-geometry"],
     queryFn: () => api.workflowRevisionOutputGeometry(revisionId),
@@ -48,8 +54,15 @@ export function OutputRatioControl({
   const resolved = Number.isInteger(width) && Number.isInteger(height)
     ? `${width as number} × ${height as number}`
     : null;
+  const refusal = refused?.revisionId === revisionId ? refused.preset : null;
 
   const choose = async (preset: OutputRatioPresetId) => {
+    // The guard lives here rather than on a disabled attribute. Disabling a
+    // button that currently holds focus makes the browser drop focus to the
+    // document body and never give it back, which costs a keyboard user their
+    // place in the page - and with it the announcement of the choice they just
+    // made. Refusing the second press is the same protection without that.
+    if (pending !== null) return;
     setPending(preset);
     setRefused(null);
     try {
@@ -63,7 +76,7 @@ export function OutputRatioControl({
       // The offer came from the same proof that resolves it, so a refusal here
       // means the revision changed underneath this panel. Saying so beats
       // leaving a button that appears to do nothing.
-      setRefused(preset);
+      setRefused({ revisionId, preset });
     } finally {
       setPending(null);
     }
@@ -74,7 +87,9 @@ export function OutputRatioControl({
       <span>
         <strong>Shape</strong>
         {resolved && <small>{`Output: ${resolved}`}</small>}
-        {refused && <small>{`This workflow no longer offers ${refused}.`}</small>}
+        {refusal && (
+          <small role="alert">{`This workflow no longer offers ${refusal}.`}</small>
+        )}
       </span>
       <div className="segmented compact" role="group" aria-label="Output aspect ratio">
         {offered.map((preset) => (
@@ -83,7 +98,7 @@ export function OutputRatioControl({
             type="button"
             aria-pressed={selected === preset}
             className={selected === preset ? "active" : ""}
-            disabled={pending !== null}
+            aria-disabled={pending !== null}
             onClick={() => void choose(preset)}
           >
             {`${preset} ${RATIO_LABELS[preset]}`}

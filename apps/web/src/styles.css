@@ -564,6 +564,14 @@ h1, h2, h3 { margin: 0; }
 .setting-row span { display: flex; flex-direction: column; gap: 4px; }
 .setting-row strong { font-size: 13px; }
 .setting-row small { color: var(--muted); line-height: 1.3; }
+/* The shape row carries seven named choices, not one input. The 105px control
+   track above is sized for a number box, and a flex item keeps min-width:auto,
+   so seven labels asking for about 500px were laid out past the edge of the
+   list at every window size - five of them entirely outside it. Give this row
+   the full width and let the choices wrap onto as many lines as they need. */
+.setting-row.output-ratio-control { grid-template-columns: minmax(0, 1fr); }
+.output-ratio-control .segmented.compact { margin: 8px 0 0; flex-wrap: wrap; }
+.output-ratio-control .segmented button { flex: 0 1 auto; }
 .image-edit-strength-inputs { display: grid; gap: 6px; }
 .image-edit-strength-inputs .segmented.compact { margin: 0; }
 .image-edit-strength-inputs .segmented button { padding: 6px 4px; font-size: 11px; }
