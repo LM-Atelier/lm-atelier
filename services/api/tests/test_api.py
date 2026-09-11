@@ -10010,15 +10010,29 @@ async def test_a_stale_phase_write_neither_persists_nor_publishes(
         assert row.phase == "Live phase"
 
 
-def _queued_verification_job(session, ticket: str) -> str:  # type: ignore[no-untyped-def]
-    """An EDIT_VERIFY job whose payload cannot validate: the real verifier
-    reaches its first terminal funnel without any vision worker."""
-
+def _queued_verification_job(session: Session, ticket: str) -> str:
+    """A claimable EDIT_VERIFY job with an incomplete assessment payload."""
+    chat = Chat()
+    session.add(chat)
+    session.flush()
+    user = Message(chat_id=chat.id, role="user")
+    assistant = Message(chat_id=chat.id, role="assistant")
+    session.add_all([user, assistant])
+    session.flush()
+    source = Run(
+        chat_id=chat.id,
+        user_message_id=user.id,
+        assistant_message_id=assistant.id,
+        operation="image_edit",
+        status="complete",
+    )
+    session.add(source)
+    session.flush()
     job = Job(
         kind=JobKind.EDIT_VERIFY.value,
         status="queued",
         phase="queued",
-        payload_json={"not": "a verification payload"},
+        payload_json={"source_run_id": source.id},
         queue_group="primary",
         queue_resource="interactive_compute",
         queue_ticket=ticket,

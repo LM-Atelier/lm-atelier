@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { api } from "./api";
+import { QueuePlanControls } from "./QueuePlanControls";
 import { QueuePlanSteps } from "./QueuePlanSteps";
 import type { QueueActivityItem } from "./types";
 import "./QueueActivityDialog.css";
@@ -75,6 +76,7 @@ export function QueueActivityDialog({ onClose }: { onClose: () => void }) {
                     {item.blocked_steps > 0 && <span>
                       {item.blocked_steps} {item.blocked_steps === 1 ? "step" : "steps"} waiting for prerequisites
                     </span>}
+                    <QueuePlanControls item={item} />
                     <QueuePlanSteps planId={item.owner_id} name={item.chat_title || item.label} />
                   </>
                 ) : item.progress !== null ? (

@@ -26,6 +26,7 @@ from .models import (
     WorkStepDependency,
 )
 from .progress import update_job_progress
+from .queue_control import claim_control_predicate, job_controls
 from .schemas import JobOut
 from .work_plans import BLOCKED_WORK_STATUS, plan_status_summary, refresh_plan_status
 
@@ -131,6 +132,13 @@ class ResourceScheduler:
             await self._release_job(job_id, claim.token, group)
             lock.release()
 
+    async def queue_control_changed(self, plan_id: str) -> None:
+        self._eligibility.clear()
+        for event in self._queue_events.values():
+            event.set()
+        if self._events is not None:
+            await self._events.publish("queue.control", plan_id)
+
     def _invalidate_eligibility(self, group: str) -> None:
         """Drop the shared scan because the queue actually changed."""
 
@@ -228,7 +236,18 @@ class ResourceScheduler:
                     (index for index, candidate in enumerate(candidates) if candidate == job.id),
                     None,
                 )
-                if position is None:
+                control = job_controls(session, [job.id])[job.id]
+                if position is None and (not control.valid or control.state == "held"):
+                    update_job_progress(
+                        job,
+                        stage="held" if control.state == "held" else "waiting for queue state",
+                        queue_resource=resource,
+                        queue_position=None,
+                        queue_length=len(candidates),
+                        indeterminate=True,
+                        now=now,
+                    )
+                elif position is None:
                     failed_dependencies = self._failed_dependencies(
                         session,
                         job.work_step_id,
@@ -315,10 +334,11 @@ class ResourceScheduler:
                 try:
                     with self.session_factory() as session:
                         current = session.get(Job, job_id)
+                        control_snapshot = job_controls(session, [job_id]).get(job_id)
                         claimed_at = utcnow()
                         # Fresh, never shared: this decides whether the job
-                        # STARTS, and the update below guards only QUEUED and
-                        # unclaimed.
+                        # STARTS. The final update also compares the control
+                        # revision captured before ranking, including Hold/Release.
                         candidates = self._fresh_eligible_job_ids(session, group, claimed_at)
                         position = next(
                             (
@@ -338,7 +358,11 @@ class ResourceScheduler:
                             )
                             or 0
                         )
-                        if position is not None and position < max(0, capacity - active_claims):
+                        if (
+                            position is not None
+                            and position < max(0, capacity - active_claims)
+                            and control_snapshot is not None
+                        ):
                             result = cast(
                                 CursorResult[Any],
                                 session.execute(
@@ -347,6 +371,7 @@ class ResourceScheduler:
                                         Job.id == job_id,
                                         Job.status == JobStatus.QUEUED.value,
                                         Job.claim_owner.is_(None),
+                                        claim_control_predicate(control_snapshot),
                                     )
                                     .values(
                                         status=JobStatus.RUNNING.value,
@@ -357,13 +382,14 @@ class ResourceScheduler:
                                         started_at=claimed_at,
                                         attempt=Job.attempt + 1,
                                     )
+                                    .execution_options(synchronize_session="fetch")
                                 ),
                             )
                             if result.rowcount == 1:
                                 claimed_job = session.get(Job, job_id)
                                 if claimed_job:
                                     # The ORM-enabled UPDATE synchronizes the
-                                    # identity map (evaluate strategy), so the
+                                    # identity map using the returned row, so the
                                     # cached row already shows the incremented
                                     # attempt; a refresh here would re-read
                                     # what the session already holds.
@@ -407,6 +433,7 @@ class ResourceScheduler:
                 )
             ).all()
         )
+        controls = job_controls(session, [job.id for job in jobs])
         blocked = {
             job.id for job in jobs if ResourceScheduler._blocking_steps(session, job.work_step_id)
         }
@@ -415,6 +442,9 @@ class ResourceScheduler:
             enqueued = job.enqueued_at or job.created_at
             if enqueued.tzinfo is None:
                 enqueued = enqueued.replace(tzinfo=UTC)
+            released = controls[job.id].eligible_since
+            if released is not None:
+                enqueued = max(enqueued, released)
             # Verification is best-effort background work. Queue aging may
             # reorder foreground jobs, but can never promote a check ahead of
             # a user-requested generation.
@@ -433,7 +463,16 @@ class ResourceScheduler:
                 job.id,
             )
 
-        return sorted((job for job in jobs if job.id not in blocked), key=rank)
+        return sorted(
+            (
+                job
+                for job in jobs
+                if job.id not in blocked
+                and controls[job.id].valid
+                and controls[job.id].state == "eligible"
+            ),
+            key=rank,
+        )
 
     def peek_next_eligible_job(self, group: str) -> tuple[str, str | None] | None:
         """Return the next durable job without claiming or changing it."""

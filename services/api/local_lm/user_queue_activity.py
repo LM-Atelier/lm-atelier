@@ -26,6 +26,7 @@ from .models import (
     WorkStep,
     WorkStepDependency,
 )
+from .queue_control import QueueControlView, plan_controls
 from .schemas import (
     QueueActivityItemOut,
     QueueActivityPageOut,
@@ -279,8 +280,14 @@ def list_queue_activity(
                 .group_by(WorkStep.plan_id)
             ):
                 step_counts[row[0]] = row[1], row[2], row[3]
+        controls = plan_controls(session, plan_ids)
         items: list[QueueActivityItemOut] = []
         for row in selected:
+            control = (
+                controls.get(row.owner_id, QueueControlView())
+                if row.owner_type == "work_plan"
+                else QueueControlView()
+            )
             steps, completed, blocked_count = step_counts.get(row.owner_id, (0, 0, 0))
             status = (
                 "running"
@@ -315,6 +322,9 @@ def list_queue_activity(
                     queued_jobs=row.queued_jobs,
                     paused_jobs=row.paused_jobs,
                     progress=progress,
+                    control_state=control.state,
+                    control_revision=control.revision,
+                    allowed_actions=list(control.allowed_actions),
                 )
             )
         next_cursor = None

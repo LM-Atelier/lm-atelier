@@ -287,6 +287,7 @@ from .prompt_templates import (
     prompt_template_contract_payload,
     prompt_template_contract_sha256,
 )
+from .queue_control import QueueControlConflict, QueueControlMissing, change_plan_control
 from .recipes import get_reference_recipe, list_reference_recipes
 from .reference_library import (
     DEFAULT_PAGE,
@@ -408,6 +409,8 @@ from .schemas import (
     PromptTemplateUpdate,
     PromptTemplateWriteOut,
     QueueActivityPageOut,
+    QueueControlCommand,
+    QueueControlResultOut,
     QueuePlanStepsOut,
     ReferenceAssetAttach,
     ReferenceAssetAttached,
@@ -4035,6 +4038,47 @@ async def queue_activity(
             "queue-activity-cursor-invalid",
             "The accepted work page request is invalid. Refresh to start again.",
         ) from exc
+
+
+async def _change_queue_control(
+    request: Request,
+    plan_id: str,
+    action: Literal["hold", "release"],
+    payload: QueueControlCommand,
+    session: Session,
+) -> QueueControlResultOut:
+    try:
+        result = change_plan_control(session, plan_id, action, payload)
+    except QueueControlMissing as exc:
+        raise api_error(
+            404, "queue-plan-not-found", "The submitted work could not be found."
+        ) from exc
+    except QueueControlConflict as exc:
+        raise api_error(
+            409, "queue-control-conflict", "The queue changed. Refresh before trying again."
+        ) from exc
+    await _services(request).scheduler.queue_control_changed(plan_id)
+    return result
+
+
+@router.post("/queue/items/{plan_id}/hold", response_model=QueueControlResultOut)
+async def hold_queue_plan(
+    request: Request,
+    plan_id: str,
+    payload: QueueControlCommand,
+    session: ConversationSessionDep,
+) -> QueueControlResultOut:
+    return await _change_queue_control(request, plan_id, "hold", payload, session)
+
+
+@router.post("/queue/items/{plan_id}/release", response_model=QueueControlResultOut)
+async def release_queue_plan(
+    request: Request,
+    plan_id: str,
+    payload: QueueControlCommand,
+    session: ConversationSessionDep,
+) -> QueueControlResultOut:
+    return await _change_queue_control(request, plan_id, "release", payload, session)
 
 
 @router.get("/jobs/activity", response_model=JobActivityOut)

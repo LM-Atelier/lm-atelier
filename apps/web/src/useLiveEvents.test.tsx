@@ -274,6 +274,14 @@ describe("useLiveEvents accepted queue reconciliation", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
     expect(invalidate).not.toHaveBeenCalled();
   });
+  it("reconciles a committed queue control change received from another client", async () => {
+    const { client, key, data, invalidate } = await openQueue();
+    act(() => handlers[0]!({ sequence: 2, type: "queue.control", entity_id: "plan-a",
+      payload: {}, created_at: "2026-09-02T00:00:00Z" }));
+    expect(client.getQueryData(key)).toEqual(data);
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(invalidate).toHaveBeenCalledExactlyOnceWith({ queryKey: ["jobs", "queue"] });
+  });
   it("reconciles queue pages after a replay gap", async () => {
     const { client, key } = await openQueue();
     act(() => handlers[0]!({ sequence: 2, type: "events.replay_gap", entity_id: "",

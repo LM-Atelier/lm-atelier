@@ -11,7 +11,7 @@ from local_lm import scheduler as scheduler_module
 from local_lm.config import Settings
 from local_lm.db import SessionLocal, configure_database, init_db
 from local_lm.domain import JobStatus, utcnow
-from local_lm.models import Chat, Job, WorkPlan, WorkStep, WorkStepDependency
+from local_lm.models import Chat, Job, Message, Run, WorkPlan, WorkStep, WorkStepDependency
 from local_lm.scheduler import _ELIGIBILITY_SHARE_SECONDS, ResourceScheduler
 
 
@@ -87,11 +87,28 @@ def test_image_edit_checks_never_age_ahead_of_foreground_work(settings: Settings
     init_db()
     now = utcnow()
     with SessionLocal() as session:
+        chat = Chat()
+        session.add(chat)
+        session.flush()
+        user = Message(chat_id=chat.id, role="user")
+        assistant = Message(chat_id=chat.id, role="assistant")
+        session.add_all([user, assistant])
+        session.flush()
+        source = Run(
+            chat_id=chat.id,
+            user_message_id=user.id,
+            assistant_message_id=assistant.id,
+            operation="image_edit",
+            status="complete",
+        )
+        session.add(source)
+        session.flush()
         session.add_all(
             [
                 Job(
                     id="job_background_check",
                     kind="edit_verify",
+                    payload_json={"source_run_id": source.id},
                     status=JobStatus.QUEUED.value,
                     queue_group="primary",
                     queue_priority=10_000,

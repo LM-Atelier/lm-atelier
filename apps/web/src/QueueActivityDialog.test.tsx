@@ -5,8 +5,8 @@ import { JobsPanel } from "./JobsPanel";
 import { api } from "./api";
 import type { QueueActivityItem, QueueActivityPage } from "./types";
 
-vi.mock("./api", () => ({ api: {
-  jobActivity: vi.fn(), queueActivity: vi.fn(), queuePlanSteps: vi.fn(), cancelJob: vi.fn(),
+vi.mock("./api", async (importOriginal) => ({ ...(await importOriginal<typeof import("./api")>()), api: {
+  queueControl: vi.fn(), jobActivity: vi.fn(), queueActivity: vi.fn(), queuePlanSteps: vi.fn(), cancelJob: vi.fn(),
   pauseDownload: vi.fn(), resumeDownload: vi.fn(), retryJob: vi.fn(),
 } }));
 const clients: QueryClient[] = [];
@@ -16,7 +16,7 @@ function item(id: string, lane: QueueActivityItem["lane"] = "generation"): Queue
     status: "running", chat_id: "example-chat", chat_title: "Example " + id,
     created_at: stamp, updated_at: stamp, step_count: 3, completed_steps: 1,
     blocked_steps: 1, active_jobs: 2, running_jobs: 1, queued_jobs: 1, paused_jobs: 0,
-    progress: null };
+    progress: null, control_state: "eligible", control_revision: 0, allowed_actions: [] };
 }
 function page(items: QueueActivityItem[], next: string | null = null, total = items.length): QueueActivityPage {
   return { items, next_cursor: next, total,
