@@ -87,10 +87,4 @@ max-statements = 326
 python_version = "3.12"
 strict = true
 plugins = ["pydantic.mypy"]
-# machine_lock.py is a Windows-only module: it reads GetLastError and turns a
-# kernel handle into a descriptor through msvcrt, neither of which typeshed
-# declares off Windows. The gate type-checks for the Linux platform as well as
-# this one, so including it would mean either restructuring the module around
-# platform guards or suppressing a dozen errors that are correct. Excluded here
-# rather than silently, so what is not checked is visible.
-exclude = ["alembic", 'scripts/machine_lock\.py$']
+exclude = ["alembic"]

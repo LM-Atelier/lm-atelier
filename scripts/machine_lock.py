@@ -178,14 +178,16 @@ def _kernel32() -> Any:
     """kernel32 bound with per-call error capture.
 
     ``use_last_error=True`` copies GetLastError immediately after every call
-    through this binding, so ``ctypes.get_last_error()`` read right after a
+    through this binding, so ``_last_error()`` read right after a
     call is that call's own result - never a stale copy left by an earlier
     call through some other binding.
     """
 
+    if os.name != "nt" or sys.platform != "win32":
+        raise LeaseRefused("the machine lease requires Windows kernel handles")
     global _KERNEL32
     if _KERNEL32 is None:
-        kernel = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel.CreateFileW.restype = ctypes.c_void_p
         kernel.CreateFileW.argtypes = [
             ctypes.c_wchar_p,
@@ -215,6 +217,13 @@ def _kernel32() -> Any:
         ]
         _KERNEL32 = kernel
     return _KERNEL32
+
+
+def _last_error() -> int:
+    """Read the calling thread's captured Windows error."""
+    if os.name == "nt" and sys.platform == "win32":
+        return ctypes.get_last_error()
+    raise LeaseRefused("the machine lease requires Windows kernel handles")
 
 
 def _now_text() -> str:
@@ -276,9 +285,7 @@ def _identity(handle: int) -> tuple[int, int, int]:
     if not _kernel32().GetFileInformationByHandle(
         ctypes.c_void_p(handle), ctypes.byref(information)
     ):
-        raise LeaseRefused(
-            f"the held object's identity could not be read (error {ctypes.get_last_error()})"
-        )
+        raise LeaseRefused(f"the held object's identity could not be read (error {_last_error()})")
     return (information.volume_serial, information.index_high, information.index_low)
 
 
@@ -288,9 +295,7 @@ def _final_path(handle: int) -> str:
     buffer = ctypes.create_unicode_buffer(32768)
     length = _kernel32().GetFinalPathNameByHandleW(ctypes.c_void_p(handle), buffer, len(buffer), 0)
     if length == 0 or length >= len(buffer):
-        raise LeaseRefused(
-            f"the held directory's name could not be read (error {ctypes.get_last_error()})"
-        )
+        raise LeaseRefused(f"the held directory's name could not be read (error {_last_error()})")
     return buffer.value
 
 
@@ -315,9 +320,7 @@ def _open_directory(path: Path) -> int:
         None,
     )
     if handle is None or handle == _INVALID_HANDLE:
-        raise LeaseRefused(
-            f"the directory could not be held: {path} (error {ctypes.get_last_error()})"
-        )
+        raise LeaseRefused(f"the directory could not be held: {path} (error {_last_error()})")
     return int(handle)
 
 
@@ -393,10 +396,10 @@ def _abandon(
             cause = refusal
     for kind, number in handles:
         if not _close(number):
-            strands.append((kind, number, ctypes.get_last_error()))
+            strands.append((kind, number, _last_error()))
     for pin in pins:
         if not _close(pin.handle):
-            strands.append(("pin", pin.handle, ctypes.get_last_error()))
+            strands.append(("pin", pin.handle, _last_error()))
     if not strands:
         return None
     (kind, number, error), *others = strands
@@ -452,7 +455,7 @@ def _attributes(path: Path) -> int:
     attributes = _kernel32().GetFileAttributesW(str(path))
     if attributes == _INVALID_FILE_ATTRIBUTES:
         raise LeaseRefused(
-            f"the resolution chain could not be read: {path} (error {ctypes.get_last_error()})"
+            f"the resolution chain could not be read: {path} (error {_last_error()})"
         )
     return int(attributes)
 
@@ -536,7 +539,7 @@ def _open_shared_pin(path: Path, role: str, share: int) -> _Pin:
         None,
     )
     if handle is None or handle == _INVALID_HANDLE:
-        error = ctypes.get_last_error()
+        error = _last_error()
         if error == _ERROR_SHARING_VIOLATION:
             raise LeaseRefused(f"{role} is open for writing elsewhere: {path}")
         raise LeaseRefused(f"{role} could not be held: {path} (error {error})")
@@ -546,8 +549,7 @@ def _open_shared_pin(path: Path, role: str, share: int) -> _Pin:
     )
     if not marked:
         refusal = LeaseRefused(
-            f"{role} could not be held for a child's lifetime: {path} "
-            f"(error {ctypes.get_last_error()})"
+            f"{role} could not be held for a child's lifetime: {path} (error {_last_error()})"
         )
         strand = _abandon(during="a refused pinning", handles=(("pin", handle),))
         if strand is not None:
@@ -712,7 +714,7 @@ def _open_lease_handle(
             None,
         )
         if opened is None or opened == _INVALID_HANDLE:
-            error = ctypes.get_last_error()
+            error = _last_error()
             if error == _ERROR_SHARING_VIOLATION:
                 raise LeaseRefused(f"contended: {_holder_line(Path(plain, LEASE_BASENAME))}")
             raise LeaseRefused(f"the lease file could not be opened (error {error})")
@@ -849,7 +851,7 @@ def acquire(
         raise LeaseRefused("purpose must be a short non-empty string")
     if holder_pid is not None and (type(holder_pid) is not int or holder_pid <= 0):
         raise LeaseRefused("holder_pid must be a positive integer")
-    if os.name != "nt":
+    if os.name != "nt" or sys.platform != "win32":
         raise LeaseRefused(
             "the machine lease is implemented for Windows only; "
             "this platform has no executed hold implementation"
@@ -870,9 +872,7 @@ def acquire(
             ctypes.c_void_p(handle), _HANDLE_FLAG_INHERIT, _HANDLE_FLAG_INHERIT
         )
         if not marked:
-            raise LeaseRefused(
-                f"the hold could not be marked inheritable (error {ctypes.get_last_error()})"
-            )
+            raise LeaseRefused(f"the hold could not be marked inheritable (error {_last_error()})")
         descriptor = msvcrt.open_osfhandle(handle, os.O_RDWR)
         record = json.dumps(
             {
