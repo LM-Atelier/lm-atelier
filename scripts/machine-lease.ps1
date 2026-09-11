@@ -237,19 +237,16 @@ function Get-MachineLeaseDirectoryIdentity {
     }
 }
 
-function Get-MachineLeaseReparseLinks {
+function Add-MachineLeasePathPins {
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$Role,
+        [Parameter(Mandatory)][AllowEmptyCollection()][Collections.ArrayList]$Pins,
+        [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.HashSet[string]]$Seen,
         [switch]$Itself
     )
 
-    # Every reparse point among the components of a textual path, root
-    # first - and the path itself when -Itself is given and it is one. Git
-    # resolves the text at each invocation, so retargeting one of these
-    # changes what the text names while the object at its end stays held;
-    # each is pinned as itself. ".." components collapse lexically, as
-    # Win32 collapses them before the kernel sees the name.
+    # Hold every component before inspecting it, including ordinary directories.
     $Full = [IO.Path]::GetFullPath($Path)
     $Prefixes = @()
     $Current = Split-Path -Parent $Full
@@ -257,17 +254,35 @@ function Get-MachineLeaseReparseLinks {
         $Prefixes = @($Current) + $Prefixes
         $Current = Split-Path -Parent $Current
     }
-    if ($Itself) {
-        $Prefixes += $Full
-    }
-    $Links = @()
+    if ($Itself) { $Prefixes += $Full }
     foreach ($Prefix in $Prefixes) {
+        if (-not $Seen.Add($Prefix)) { continue }
+        $PinRole = if ($Itself -and $Prefix -eq $Full) { $Role } else { "a component on the way to $Role" }
+        [void]$Pins.Add((Open-MachineLeasePin -Path $Prefix -Role $PinRole))
         $Item = Get-Item -LiteralPath $Prefix -Force -ErrorAction Stop
         if ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-            $Links += @{ Path = $Prefix; Role = "a link on the way to $Role" }
+            $Probe = Open-MachineLeaseDirectory -Path $Prefix
+            if (Test-MachineLeaseHandleInvalid $Probe) {
+                throw "the link target could not be held: $Prefix"
+            }
+            $Failure = $null
+            try {
+                $Identity = Get-MachineLeaseIdentity -Handle $Probe
+                $Target = ConvertTo-MachineLeasePlainName (Get-MachineLeaseFinalPath -Handle $Probe)
+                if (-not $Identity -or -not $Target) { throw "the link target could not be identified: $Prefix" }
+            } catch {
+                $Failure = $_
+                throw
+            } finally {
+                Close-MachineLeaseDirectoryProbe -Handle $Probe -Failure $Failure -During "link target lookup"
+            }
+            Add-MachineLeasePathPins -Path $Target -Role $Role -Pins $Pins -Seen $Seen -Itself
+            if ((Get-MachineLeaseDirectoryIdentity -Path $Prefix) -ne $Identity -or
+                (Get-MachineLeaseDirectoryIdentity -Path $Target) -ne $Identity) {
+                throw "a link target changed while its path was being held: $Prefix"
+            }
         }
     }
-    return $Links
 }
 
 function Get-MachineLeaseNamedDirectory {
@@ -275,58 +290,37 @@ function Get-MachineLeaseNamedDirectory {
         [Parameter(Mandatory)][string]$Base,
         [Parameter(Mandatory)][string]$File
     )
-
-    # The directory a commondir file names, as git reads it: its text,
-    # relative to the directory holding the file.
     $Text = [IO.File]::ReadAllText($File).Trim()
-    if ([IO.Path]::IsPathRooted($Text)) {
-        return $Text
-    }
+    if ([IO.Path]::IsPathRooted($Text)) { return $Text }
     return (Join-Path $Base $Text)
 }
 
 function Get-MachineLeaseResolutionChain {
-    param([Parameter(Mandatory)][string]$Anchor)
+    param(
+        [Parameter(Mandatory)][string]$Anchor,
+        [Parameter(Mandatory)][AllowEmptyCollection()][Collections.ArrayList]$Pins
+    )
 
-    # The links git follows from the repository directory to its common
-    # directory, each a path whose change would change what the repository
-    # names: the .git entry; for a pointer file, the private git directory
-    # it names and that directory's commondir file; for a directory, its
-    # commondir file if it has one; and every reparse point among the
-    # components of the paths the pointer and the commondir file name. A
-    # reparse point is a link as itself.
+    $Seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    Add-MachineLeasePathPins -Path $Anchor -Role "the repository directory" -Pins $Pins -Seen $Seen -Itself
     $Entry = Join-Path $Anchor ".git"
+    Add-MachineLeasePathPins -Path $Entry -Role "the repository's .git entry" -Pins $Pins -Seen $Seen -Itself
     $Item = Get-Item -LiteralPath $Entry -Force -ErrorAction Stop
-    $Links = @(@{ Path = $Entry; Role = "the repository's .git entry" })
-    if ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-        return $Links
-    }
     if ($Item.PSIsContainer) {
-        $CommonDir = Join-Path $Entry "commondir"
-        if (Test-Path -LiteralPath $CommonDir -PathType Leaf) {
-            $Links += @{ Path = $CommonDir; Role = "the commondir file" }
-            $Named = Get-MachineLeaseNamedDirectory -Base $Entry -File $CommonDir
-            $Links += @(Get-MachineLeaseReparseLinks -Path $Named -Role "the common git directory" -Itself)
-        }
-        return $Links
+        $Private = $Entry
+    } else {
+        $Text = [IO.File]::ReadAllText($Entry)
+        if (-not $Text.StartsWith("gitdir:")) { throw "the .git file is not a git pointer: $Entry" }
+        $Private = $Text.Substring(7).Trim()
+        if (-not [IO.Path]::IsPathRooted($Private)) { $Private = Join-Path $Anchor $Private }
+        Add-MachineLeasePathPins -Path $Private -Role "the checkout's private git directory" -Pins $Pins -Seen $Seen -Itself
     }
-    $Text = [IO.File]::ReadAllText($Entry)
-    if (-not $Text.StartsWith("gitdir:")) {
-        throw "the .git file is not a git pointer: $Entry"
-    }
-    $Target = $Text.Substring(7).Trim()
-    if (-not [IO.Path]::IsPathRooted($Target)) {
-        $Target = Join-Path $Anchor $Target
-    }
-    $Links += @(Get-MachineLeaseReparseLinks -Path $Target -Role "the checkout's private git directory")
-    $Links += @{ Path = $Target; Role = "the checkout's private git directory" }
-    $CommonDir = Join-Path $Target "commondir"
+    $CommonDir = Join-Path $Private "commondir"
     if (Test-Path -LiteralPath $CommonDir -PathType Leaf) {
-        $Links += @{ Path = $CommonDir; Role = "the commondir file" }
-        $Named = Get-MachineLeaseNamedDirectory -Base $Target -File $CommonDir
-        $Links += @(Get-MachineLeaseReparseLinks -Path $Named -Role "the common git directory" -Itself)
+        Add-MachineLeasePathPins -Path $CommonDir -Role "the commondir file" -Pins $Pins -Seen $Seen -Itself
+        $Named = Get-MachineLeaseNamedDirectory -Base $Private -File $CommonDir
+        Add-MachineLeasePathPins -Path $Named -Role "the common git directory" -Pins $Pins -Seen $Seen -Itself
     }
-    return $Links
 }
 
 function Open-MachineLeasePin {
@@ -334,18 +328,22 @@ function Open-MachineLeasePin {
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$Role
     )
+    return Open-MachineLeaseSharedPin -Path $Path -Role $Role -Share 1
+}
 
-    # Hold one link against change: read share only. A directory is held
-    # with backup semantics, a reparse point as itself, a file for reading;
-    # the kernel then refuses every other open that would write, rename,
-    # delete or retarget the link.
-    $Item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
-    $Flags = [uint32]128
-    if ($Item.PSIsContainer) { $Flags = [uint32]33554432 }
-    if ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) { $Flags = $Flags -bor [uint32]2097152 }
-    # FILE_READ_ATTRIBUTES | GENERIC_READ, share read, OPEN_EXISTING.
+function Open-MachineLeaseSharedPin {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Role,
+        [Parameter(Mandatory)][uint32]$Share
+    )
+
+    # Hold the component itself, with the caller's sharing mode. Neither
+    # strict nor parent sharing permits rename or deletion of this name.
+    $Flags = [uint32]33554432 -bor [uint32]2097152
+    # FILE_READ_ATTRIBUTES | GENERIC_READ, selected sharing, OPEN_EXISTING.
     $Handle = [LeaseNative.Kernel]::CreateFileW(
-        $Path, [uint32]2147483776, [uint32]1, [IntPtr]::Zero,
+        $Path, [uint32]2147483776, $Share, [IntPtr]::Zero,
         [uint32]3, $Flags, [IntPtr]::Zero
     )
     $script:MachineLeaseLastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
@@ -373,6 +371,42 @@ function Open-MachineLeasePin {
         throw "$Role could not be held for a child's lifetime: $Path (error $MarkError)"
     }
     return [pscustomobject]@{ Path = $Path; Role = $Role; Handle = $Handle }
+}
+
+
+function Enable-MachineLeaseParentWrites {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][Collections.ArrayList]$Pins)
+
+    # A held direct child cannot be removed, keeping an ordinary parent
+    # nonempty and unable to become a junction. Keep files, links and leaves
+    # write-exclusive; every replacement still excludes rename and delete.
+    $Parents = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($Pin in $Pins) {
+        [void]$Parents.Add([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Pin.Path)))
+    }
+    for ($Index = 0; $Index -lt $Pins.Count; $Index++) {
+        $Original = $Pins[$Index]
+        if (-not $Parents.Contains([IO.Path]::GetFullPath($Original.Path))) { continue }
+        $Information = New-Object LeaseNative.Kernel+FileInformation
+        if (-not [LeaseNative.Kernel]::GetFileInformationByHandle($Original.Handle, [ref]$Information)) {
+            throw "a held parent could not be identified"
+        }
+        if (-not ($Information.FileAttributes -band 16) -or ($Information.FileAttributes -band 1024)) {
+            continue
+        }
+        $Replacement = Open-MachineLeaseSharedPin -Path $Original.Path -Role $Original.Role -Share 3
+        [void]$Pins.Add($Replacement)
+        $OriginalIdentity = Get-MachineLeaseIdentity -Handle $Original.Handle
+        if (-not $OriginalIdentity -or (Get-MachineLeaseIdentity -Handle $Replacement.Handle) -ne $OriginalIdentity) {
+            throw "a held parent changed while its sharing was adjusted"
+        }
+        $Pins[$Index] = $Replacement
+        $Pins.RemoveAt($Pins.Count - 1)
+        if (-not (Close-MachineLeaseAcquired -Pins @($Original) -During "parent sharing adjustment")) {
+            $script:MachineLeaseStranded = $true
+            throw "a strict parent hold could not be retired"
+        }
+    }
 }
 
 function Close-MachineLeaseAcquired {
@@ -469,7 +503,7 @@ function Open-MachineLeaseHandle {
     $Anchor = $null
     $Directory = $null
     $Handle = $null
-    $Pins = @()
+    $Pins = [Collections.ArrayList]::new()
     $Transferred = $false
     $script:MachineLeaseStranded = $false
     try {
@@ -513,10 +547,9 @@ function Open-MachineLeaseHandle {
         }
         $Plain = ConvertTo-MachineLeasePlainName $Name
         try {
-            foreach ($Link in Get-MachineLeaseResolutionChain -Anchor $AnchorPlain) {
-                $Pins += Open-MachineLeasePin -Path $Link.Path -Role $Link.Role
-            }
-            $Pins += Open-MachineLeasePin -Path $Plain -Role "the common git directory"
+            Get-MachineLeaseResolutionChain -Anchor $AnchorPlain -Pins $Pins
+            Enable-MachineLeaseParentWrites -Pins $Pins
+            [void]$Pins.Add((Open-MachineLeasePin -Path $Plain -Role "the common git directory"))
         } catch {
             Write-Host "ERROR: the resolution chain could not be pinned. $_"
             return $null
@@ -552,7 +585,7 @@ function Open-MachineLeaseHandle {
             AnchorIdentity = $AnchorIdentity
             Common = $Name
             CommonIdentity = $Identity
-            Pins = $Pins
+            Pins = $Pins.ToArray()
         }
         $Drift = Test-MachineLeaseBinding -Binding $Binding
         if ($Drift) {
