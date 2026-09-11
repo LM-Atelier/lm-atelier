@@ -99,7 +99,9 @@ class LeaseStranded(RuntimeError):
     ``kind`` names the object that would not close: ``"descriptor"`` (the C
     runtime descriptor that owned the handle), ``"handle"`` (the raw kernel
     handle before any descriptor owned it) or ``"probe"`` (the status
-    probe's write-access handle). ``number`` is that descriptor or handle
+    probe's write-access handle). A directory-probe names a temporary
+    share-all directory handle; it does not carry machine exclusion.
+    ``number`` is that descriptor or handle
     value and ``error`` the Win32 error the close returned. A strand raised
     during an acquisition - a failed initialization or a refused binding -
     is raised FROM that failure, so ``__cause__`` is the error that aborted
@@ -419,12 +421,33 @@ class _Binding:
     pins: tuple[_Pin, ...] = ()
 
 
-def _directory_identity(path: Path) -> tuple[int, int, int]:
+@contextlib.contextmanager
+def _directory_probe(path: Path) -> Iterator[int]:
+    """Report a temporary handle's refused close without losing the operation's error."""
     handle = _open_directory(path)
     try:
+        yield handle
+    except BaseException as refusal:
+        nested, primary = _merge_strand(refusal)
+        strand = _abandon(
+            during="a directory identity probe",
+            handles=(("directory-probe", handle),),
+            stranded=nested,
+        )
+        if strand is not None:
+            raise strand from primary
+        raise
+    else:
+        strand = _abandon(
+            during="a directory identity probe", handles=(("directory-probe", handle),)
+        )
+        if strand is not None:
+            raise strand
+
+
+def _directory_identity(path: Path) -> tuple[int, int, int]:
+    with _directory_probe(path) as handle:
         return _identity(handle)
-    finally:
-        _close(handle)
 
 
 def _attributes(path: Path) -> int:
@@ -585,48 +608,53 @@ def _hold_common_dir(repo: Path | None) -> tuple[int, _Binding]:
     start = repo if repo is not None else _repo_root_default()
     if not isinstance(start, Path) or not Path(start).is_absolute():
         raise LeaseRefused(f"--repo must be an absolute path: {start}")
-    anchor = _open_directory(start)
+    anchor = -1
+    directory = -1
+    pins: tuple[_Pin, ...] = ()
+    during = "a refused acquisition"
     try:
+        anchor = _open_directory(start)
         anchor_identity = _identity(anchor)
         anchor_name = _final_path(anchor)
         common = _common_dir(Path(_plain(anchor_name)))
         directory = _open_directory(common)
-        try:
-            identity = _identity(directory)
-            name = _final_path(directory)
-            if _final_path(anchor) != anchor_name or _identity(anchor) != anchor_identity:
-                raise LeaseRefused("the repository directory moved while it was being resolved")
-            if _directory_identity(_common_dir(Path(_plain(anchor_name)))) != identity:
-                raise LeaseRefused(
-                    "the repository's common git directory changed while it was being held"
-                )
-            # Every link between the repository and the held common
-            # directory is now pinned; the resolution is repeated once more
-            # through the pinned chain, so a change slipped in before the
-            # pins took hold is refused and nothing can change after them.
-            pins = _open_pins(Path(_plain(anchor_name)))
-            try:
-                pins = (
-                    *pins,
-                    _open_pin(Path(_plain(name)), "the common git directory"),
-                )
-                resolved = _common_dir(Path(_plain(anchor_name)))
-                if _directory_identity(resolved) != identity:
-                    raise LeaseRefused(
-                        "the repository's common git directory changed while it was being pinned"
-                    )
-            except BaseException as refusal:
-                nested, primary = _merge_strand(refusal)
-                strand = _abandon(during="a refused acquisition", pins=pins, stranded=nested)
-                if strand is not None:
-                    raise strand from primary
-                raise
-        except BaseException:
-            _close(directory)
-            raise
+        identity = _identity(directory)
+        name = _final_path(directory)
+        if _final_path(anchor) != anchor_name or _identity(anchor) != anchor_identity:
+            raise LeaseRefused("the repository directory moved while it was being resolved")
+        if _directory_identity(_common_dir(Path(_plain(anchor_name)))) != identity:
+            raise LeaseRefused(
+                "the repository's common git directory changed while it was being held"
+            )
+        # Pin every link before repeating resolution through the held chain.
+        during = "a refused pinning"
+        pins = _open_pins(Path(_plain(anchor_name)))
+        during = "a refused acquisition"
+        pins = (*pins, _open_pin(Path(_plain(name)), "the common git directory"))
+        resolved = _common_dir(Path(_plain(anchor_name)))
+        if _directory_identity(resolved) != identity:
+            raise LeaseRefused(
+                "the repository's common git directory changed while it was being pinned"
+            )
+        # Transfer the directory and pins only after temporary cleanup succeeds.
+        retired, anchor = anchor, -1
+        strand = _abandon(during="repository resolution", handles=(("directory-probe", retired),))
+        if strand is not None:
+            raise strand
         return directory, _Binding(anchor_name, anchor_identity, name, identity, pins)
-    finally:
-        _close(anchor)
+    except BaseException as refusal:
+        nested, primary = _merge_strand(refusal)
+        strand = _abandon(
+            during=during,
+            handles=tuple(
+                ("directory-probe", value) for value in (directory, anchor) if value != -1
+            ),
+            pins=pins,
+            stranded=nested,
+        )
+        if strand is not None:
+            raise strand from primary
+        raise
 
 
 def _open_lease_handle(
@@ -672,20 +700,26 @@ def _open_lease_handle(
             raise LeaseRefused(f"the lease file could not be opened (error {error})")
         handle = int(opened)
         _assert_binding(binding)
+        retired, directory = directory, -1
+        strand = _abandon(during="lease acquisition", handles=(("directory-probe", retired),))
+        if strand is not None:
+            raise strand
         return handle, Path(plain, LEASE_BASENAME), binding
     except BaseException as refusal:
         nested, primary = _merge_strand(refusal)
         strand = _abandon(
             during="a refused acquisition",
-            handles=(("handle", handle),) if handle != -1 else (),
+            handles=tuple(
+                (kind, value)
+                for kind, value in (("handle", handle), ("directory-probe", directory))
+                if value != -1
+            ),
             pins=binding.pins,
             stranded=nested,
         )
         if strand is not None:
             raise strand from primary
         raise
-    finally:
-        _close(directory)
 
 
 def _assert_binding(binding: _Binding) -> None:
@@ -698,15 +732,12 @@ def _assert_binding(binding: _Binding) -> None:
     if it still held this repository's machine.
     """
 
-    anchor = _open_directory(Path(_plain(binding.anchor)))
-    try:
+    with _directory_probe(Path(_plain(binding.anchor))) as anchor:
         if _identity(anchor) != binding.anchor_identity:
             raise LeaseRefused(
                 f"the repository moved under the lease: {_plain(binding.anchor)} is another object"
             )
         resolved = _common_dir(Path(_plain(binding.anchor)))
-    finally:
-        _close(anchor)
     if _directory_identity(resolved) != binding.common_identity:
         raise LeaseRefused(
             "the repository moved under the lease: its common git directory is now "
