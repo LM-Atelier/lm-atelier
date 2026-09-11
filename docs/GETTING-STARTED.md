@@ -171,9 +171,15 @@ previously loaded items are still shown. Step details have their own
 
 When a generation plan offers **Hold**, its remaining work can safely wait without
 cancelling the plan or changing its accepted settings. **Release** makes that work
-eligible again. Completed results stay intact, and held work still counts toward
-the pending-work limit. Release starts a fresh waiting period for scheduling
-priority; it does not change when you submitted the work.
+eligible again. Completed results stay intact.
+
+New submissions are checked against a limit of 32 pending work items per chat.
+Queued, running and paused work all count, including held items. A request can
+contain several work items. When the limit is reached, wait for work to finish
+or cancel unwanted work before submitting more.
+
+Release starts a fresh waiting period for scheduling priority; it does not
+change when you submitted the work.
 
 Controls appear only when the plan supports the action. Work that has already
 started cannot be held. If the queue changes while you click, refresh and use the
