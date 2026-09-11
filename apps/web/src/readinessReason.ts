@@ -11,8 +11,13 @@ import type { WorkflowFamilyVariant } from "./types";
  *
  * Slugs are the right thing to send. A stable code survives rewording and can
  * be matched on; a sentence cannot. The translation belongs here.
+ *
+ * Here and nowhere else. The Workflows view kept a second list of its own,
+ * worded differently and two reasons short, so the same refusal read one way in
+ * the selectors and gave no answer at all there. A test now refuses a second
+ * list rather than trusting everyone to remember this one.
  */
-const REASON_TEXT: Record<string, string> = {
+export const REASON_TEXT: Record<string, string> = {
   engine_mismatch: "This workflow was built for a different engine.",
   revision_not_executable: "This version has no runnable graph yet.",
   revision_untrusted: "Needs review before it can run.",

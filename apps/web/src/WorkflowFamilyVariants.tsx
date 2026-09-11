@@ -2,21 +2,11 @@ import { useState } from "react";
 import type { WorkflowFamily, WorkflowInstallOffer } from "./types";
 import "./WorkflowFamilyVariants.css";
 import { availableWorkflowInstallOffer, workflowVariantReadinessLabel } from "./workflowVariantSetup";
+import { readinessReason } from "./readinessReason";
 
 const operationLabels: Record<string, string> = {
   text: "Text", text_to_image: "Text to image", image_to_image: "Image to image",
   text_to_video: "Text to video", image_to_video: "Image to video", video_to_video: "Video to video",
-};
-const reasons: Record<string, string> = {
-  engine_mismatch: "This variant uses a different engine from the configured one.",
-  revision_not_executable: "This revision has no executable workflow graph.",
-  revision_untrusted: "This revision needs review before it can run.",
-  activation_not_ready: "Its required dependencies are not activated for this revision.",
-  model_unavailable: "Its model is not available for the configured engine.",
-  operation_unavailable: "No compatible workflow revision is available for this operation.",
-  current_revision_missing: "Choose or create a current revision before running.",
-  family_archived: "This workflow family is archived.",
-  family_disabled: "This workflow family is disabled.",
 };
 
 export function WorkflowFamilyVariants({ family, onReviewInstall }: {
@@ -40,9 +30,7 @@ export function WorkflowFamilyVariants({ family, onReviewInstall }: {
             <small>{variant.current_revision_version === null
               ? "No current revision" : `Current revision: v${variant.current_revision_version}`}</small>
             <span className="badge">{workflowVariantReadinessLabel(variant)}</span>
-            <p>{variant.readiness === "ready" ? "Ready to run."
-              : Object.hasOwn(reasons, variant.readiness_reason ?? "")
-                ? reasons[variant.readiness_reason ?? ""] : "No further readiness details are available."}</p>
+            <p>{variant.readiness === "ready" ? "Ready to run." : readinessReason(variant)}</p>
             {onReviewInstall && availableWorkflowInstallOffer(family, variant) && (
               <button className="secondary compact-button" aria-label={`Review downloads for ${variant.name}`}
                 onClick={() => {
