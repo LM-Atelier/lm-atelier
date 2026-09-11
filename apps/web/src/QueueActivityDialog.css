@@ -29,3 +29,7 @@
 
 .queue-plan-controls { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
 .queue-plan-controls p { flex-basis: 100%; margin: 0; overflow-wrap: anywhere; }
+
+.queue-plan-controls .secondary.compact-button[aria-disabled="true"] {
+  background: transparent; color: var(--ink-secondary); cursor: wait; opacity: 0.6;
+}

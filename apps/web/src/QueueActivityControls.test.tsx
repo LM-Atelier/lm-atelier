@@ -82,8 +82,8 @@ it("retains one command key after a network failure and ignores an in-flight ret
   fireEvent.click(screen.getByRole("button", { name: "Hold Example" }));
   await waitFor(() => expect(api.queueControl).toHaveBeenCalledTimes(2));
   expect(vi.mocked(api.queueControl).mock.calls[1]?.[2]).toEqual(first);
-  expect(screen.getByRole("button", { name: "Hold Example" })).toHaveAttribute("aria-disabled", "true");
-  fireEvent.click(screen.getByRole("button", { name: "Hold Example" }));
+  expect(screen.getByRole("button", { name: "Saving hold for Example" })).toHaveAttribute("aria-disabled", "true");
+  fireEvent.click(screen.getByRole("button", { name: "Saving hold for Example" }));
   expect(api.queueControl).toHaveBeenCalledTimes(2);
   finish?.();
   await waitFor(() => expect(screen.getByRole("button", { name: "Hold Example" })).toHaveAttribute("aria-disabled", "false"));
