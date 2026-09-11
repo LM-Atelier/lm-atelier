@@ -30,6 +30,14 @@ function QueuePlanStepList({ planId, name, regionId }: { planId: string; name: s
           {items.map((step, index) => <li key={step.id}>
             <strong>Step {index + 1} · {step.label}</strong>
             <span className="queue-activity-status">{step.status}</span>
+            {step.status === "running" && step.progress !== null && step.progress_scope !== null && <div>
+              <small>{Math.round(step.progress * 100)}% {step.progress_scope === "overall" ? "overall" : "current-stage"} progress</small>
+              <div className="progress-track" role="progressbar"
+                aria-label={"Step " + (index + 1) + " " + (step.progress_scope === "overall" ? "overall" : "current-stage") + " progress"}
+                aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(step.progress * 100)}>
+                <div style={{ width: String(step.progress * 100) + "%" }} />
+              </div>
+            </div>}
             {step.blocked_by > 0 && <small>
               {step.blocked_by} {step.blocked_by === 1 ? "prerequisite" : "prerequisites"} unfinished
             </small>}

@@ -157,6 +157,9 @@ Items are ordered by acceptance time. Different resources can run at the same
 time. Plans show completed-step counts and running, queued, and paused job
 counts. Choose **Show steps** to inspect a plan's individual steps and unfinished
 prerequisites; **Load more steps** continues a long plan.
+Running steps show a reported percentage when available. **Current-stage progress**
+measures the active stage; **overall progress** measures the running job across
+stages. A step without a current percentage shows its status alone.
 
 The view updates automatically and shows when it was last checked. Use
 **Refresh** for a fresh list. If an update fails, an error warns when

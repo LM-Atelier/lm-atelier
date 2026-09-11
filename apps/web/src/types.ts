@@ -385,6 +385,8 @@ export interface QueueStep {
   label: string;
   status: WorkStepStatus;
   blocked_by: number;
+  progress: number | null;
+  progress_scope: "overall" | "stage" | null;
 }
 
 export interface QueuePlanSteps {

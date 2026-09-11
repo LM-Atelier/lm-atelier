@@ -112,6 +112,7 @@ function steps(planId: string, offset = 0, total = 101, ordinalStart = 0) {
       id: "step-" + (offset + index), ordinal: ordinalStart + offset + index, label: "Image generation",
       status: offset + index === 0 ? "complete" as const : offset + index === 2 ? "blocked" as const : "queued" as const,
       blocked_by: offset + index === 2 ? 1 : 0,
+      progress: null, progress_scope: null,
     })),
   };
 }
