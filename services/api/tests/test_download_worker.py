@@ -300,7 +300,51 @@ def test_prepare_destination_holds_the_nested_parent_after_a_name_swap(
         return original_open_entry(parent, name)
 
     monkeypatch.setattr(transfer_module, "open_entry", swap_then_open)
-    transfer_module._prepare_destination(request)
+    with transfer_module._hold_destination(request):
+        assert "sentinel" in seen
+
+
+def test_download_holds_the_nested_parent_through_the_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The nested parent stays held while the body is written.
+
+    Closing every handle before streaming hands back unheld paths. Listing
+    the captured nested parent during _stream_response only works if that
+    handle is still open. On the parent the listing refuses because the
+    handle is already closed.
+    """
+    models = tmp_path / "models"
+    models.mkdir()
+    (models / "sentinel").write_text("inside", encoding="utf-8")
+    content = b"verified artifact"
+    captured: dict[str, object] = {}
+    original_open_child = transfer_module.open_child_directory
+
+    def wrap_open_child(parent: object, name: str, *, create: bool = False) -> object:
+        child = original_open_child(parent, name, create=create)
+        captured["parent"] = child
+        return child
+
+    original_stream = transfer_module._stream_response
+    seen: list[str] = []
+
+    def wrap_stream(*args: object, **kwargs: object) -> int:
+        from local_lm.filesystem_links import list_entries
+
+        seen.extend(entry.name for entry in list_entries(captured["parent"]))
+        return original_stream(*args, **kwargs)
+
+    monkeypatch.setattr(transfer_module, "open_child_directory", wrap_open_child)
+    monkeypatch.setattr(transfer_module, "_stream_response", wrap_stream)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _response(200, content, headers={"content-length": str(len(content))})
+
+    path = download_https_artifact(
+        _https_payload(tmp_path, content), transport=httpx.MockTransport(handler)
+    )
+    assert Path(path).read_bytes() == content
     assert "sentinel" in seen
 
 
