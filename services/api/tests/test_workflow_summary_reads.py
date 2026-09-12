@@ -371,6 +371,9 @@ async def test_consumer_reads_do_not_borrow_another_definitions_draft_visibility
     choices = await client.get("/api/workflow-revision-choices")
     assert choices.status_code == 200
     assert [row["revision_id"] for row in choices.json()] == ["selected-r1"]
+    summaries = await client.get("/api/workflow-summaries")
+    assert summaries.status_code == 200
+    assert [row["id"] for row in summaries.json()] == ["selected"]
 
 
 async def test_consumer_reads_do_not_flush_pending_work(
