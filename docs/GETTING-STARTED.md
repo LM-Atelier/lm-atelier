@@ -185,6 +185,12 @@ Controls appear only when the plan supports the action. Work that has already
 started cannot be held. If the queue changes while you click, refresh and use the
 updated action. Holds survive an app restart.
 
+In **Generation**, choose **Pause after current** to let current generation finish
+while new generation waits. You can keep submitting work; accepted settings stay
+intact. The state changes to **Generation paused** when current generation finishes.
+Choose **Resume** to allow generation to start again; held plans still need
+**Release**. The pause survives an app restart. Transfers and installs continue.
+
 ### Browse workflows
 
 Open **Workflows** to browse families and their variants. Search names, descriptions,

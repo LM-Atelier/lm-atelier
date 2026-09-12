@@ -404,6 +404,15 @@ export interface QueueLaneCounts {
   install: number;
 }
 
+export type GenerationQueueAction = "pause_after_current" | "resume";
+export interface GenerationQueuePolicy {
+  lane: "generation";
+  dispatch_state: "open" | "draining" | "paused";
+  revision: number;
+  running_jobs: number;
+  allowed_actions: GenerationQueueAction[];
+}
+
 export interface QueueControlCommand {
   expected_revision: number;
   idempotency_key: string;

@@ -16,6 +16,12 @@ from sqlalchemy.orm import Session
 
 from .db import SessionLocal
 from .domain import JobKind, JobStatus, MessageStatus, PartType, RunStatus, utcnow
+from .generation_queue import (
+    GENERATION_KINDS,
+    generation_claim_predicate,
+    generation_dispatch,
+    reconcile_generation_queue,
+)
 from .models import (
     Job,
     Message,
@@ -237,7 +243,19 @@ class ResourceScheduler:
                     None,
                 )
                 control = job_controls(session, [job.id])[job.id]
-                if position is None and (not control.valid or control.state == "held"):
+                dispatch = generation_dispatch(session)
+                if job.kind in GENERATION_KINDS and not dispatch.open:
+                    position = None
+                    update_job_progress(
+                        job,
+                        stage="generation paused",
+                        queue_resource=resource,
+                        queue_position=None,
+                        queue_length=len(candidates),
+                        indeterminate=True,
+                        now=now,
+                    )
+                elif position is None and (not control.valid or control.state == "held"):
                     update_job_progress(
                         job,
                         stage="held" if control.state == "held" else "waiting for queue state",
@@ -335,6 +353,7 @@ class ResourceScheduler:
                     with self.session_factory() as session:
                         current = session.get(Job, job_id)
                         control_snapshot = job_controls(session, [job_id]).get(job_id)
+                        dispatch_snapshot = generation_dispatch(session)
                         claimed_at = utcnow()
                         # Fresh, never shared: this decides whether the job
                         # STARTS. The final update also compares the control
@@ -372,6 +391,7 @@ class ResourceScheduler:
                                         Job.status == JobStatus.QUEUED.value,
                                         Job.claim_owner.is_(None),
                                         claim_control_predicate(control_snapshot),
+                                        generation_claim_predicate(dispatch_snapshot),
                                     )
                                     .values(
                                         status=JobStatus.RUNNING.value,
@@ -434,6 +454,7 @@ class ResourceScheduler:
             ).all()
         )
         controls = job_controls(session, [job.id for job in jobs])
+        dispatch = generation_dispatch(session)
         blocked = {
             job.id for job in jobs if ResourceScheduler._blocking_steps(session, job.work_step_id)
         }
@@ -470,6 +491,7 @@ class ResourceScheduler:
                 if job.id not in blocked
                 and controls[job.id].valid
                 and controls[job.id].state == "eligible"
+                and (job.kind not in GENERATION_KINDS or dispatch.open)
             ),
             key=rank,
         )
@@ -538,7 +560,9 @@ class ResourceScheduler:
                         .where(
                             Job.id == job_id,
                             Job.claim_owner == token,
-                            Job.status == JobStatus.RUNNING.value,
+                            # Completion may precede a slow resource handoff.
+                            # Keep ownership live until job_lease releases it.
+                            Job.status.in_([JobStatus.RUNNING.value, *_TERMINAL_STATUSES]),
                         )
                         .values(
                             heartbeat_at=now,
@@ -559,7 +583,7 @@ class ResourceScheduler:
             jobs = session.scalars(
                 select(Job).where(
                     Job.queue_group == group,
-                    Job.status == JobStatus.RUNNING.value,
+                    Job.status.in_([JobStatus.RUNNING.value, *_TERMINAL_STATUSES]),
                     Job.claim_owner.is_not(None),
                     Job.claim_expires_at.is_not(None),
                     Job.claim_expires_at < now,
@@ -568,6 +592,14 @@ class ResourceScheduler:
             ).all()
             expired_ids: list[str] = []
             for job in jobs:
+                if job.status in _TERMINAL_STATUSES:
+                    # The result is settled; only an abandoned handoff remains.
+                    job.claim_owner = None
+                    job.claim_expires_at = None
+                    job.heartbeat_at = None
+                    self._invalidate_eligibility(group)
+                    expired_ids.append(job.id)
+                    continue
                 job.status = JobStatus.INTERRUPTED.value
                 job.error = error
                 job.completed_at = now
@@ -646,6 +678,9 @@ class ResourceScheduler:
                                 "status_counts": plan_status_summary(session, plan.id),
                             }
                 expired_ids.append(job.id)
+            if expired_ids:
+                session.flush()
+                reconcile_generation_queue(session)
             session.commit()
         return expired_ids
 
@@ -660,6 +695,7 @@ class ResourceScheduler:
                     heartbeat_at=None,
                 )
             )
+            reconcile_generation_queue(session)
             session.commit()
         self._invalidate_eligibility(group)
         self._queue_event(group).set()

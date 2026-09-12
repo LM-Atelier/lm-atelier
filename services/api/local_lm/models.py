@@ -397,6 +397,30 @@ class WorkPlanControlReceipt(Base):
     response_json: Mapped[dict[str, Any]] = mapped_column(JSON)
 
 
+class GenerationQueuePolicy(Base):
+    """Database-local dispatch policy; never part of portable conversation history."""
+
+    __tablename__ = "generation_queue_policies"
+
+    lane: Mapped[str] = mapped_column(String(16), primary_key=True)
+    dispatch_state: Mapped[str] = mapped_column(String(16), default="open")
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class GenerationQueueReceipt(Base):
+    """Exact command retries retained for the database policy's lifetime."""
+
+    __tablename__ = "generation_queue_receipts"
+
+    lane: Mapped[str] = mapped_column(
+        ForeignKey("generation_queue_policies.lane", ondelete="CASCADE"), primary_key=True
+    )
+    command_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    action: Mapped[str] = mapped_column(String(24))
+    expected_revision: Mapped[int] = mapped_column(Integer)
+    response_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
 class WorkStep(TimestampMixin, Base):
     __tablename__ = "work_steps"
     __table_args__ = (
