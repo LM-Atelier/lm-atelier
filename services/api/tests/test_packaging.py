@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -1645,15 +1646,66 @@ def test_public_repository_configuration_verifies_every_applied_control() -> Non
     assert "allow_auto_merge = $false" not in script
 
 
+def test_the_managed_media_engine_needs_only_the_standard_library() -> None:
+    """The product may launch this fixture with an interpreter it cannot choose.
+
+    `ProcessSupervisor.start_media` resolves the configured executable with
+    `Path.resolve(strict=True)`. On Linux a virtual environment's `bin/python`
+    is a symlink to the base interpreter, so resolving it discards the
+    environment and the fixture starts under a Python with none of the project's
+    packages; on Windows the launcher is a real file and the environment
+    survives. That difference is invisible locally and cost a hosted Ubuntu run
+    with `No module named 'uvicorn'`, so the constraint is checked rather than
+    described.
+    """
+
+    engine = ROOT / "e2e/fixtures/managed_media_engine.py"
+    tree = ast.parse(engine.read_text())
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            imported.add(node.module.split(".")[0])
+    outside = sorted(imported - sys.stdlib_module_names - {"__future__"})
+    assert not outside, f"the managed media engine must not import {outside}"
+
+
 def test_browser_runners_do_not_execute_an_environment_selected_program() -> None:
-    for runner in (
-        ROOT / "scripts/run-browser-e2e.mjs",
+    """No browser run may start a Python the environment chose for it.
+
+    Two runners share their machinery, so the resolution they use lives in the
+    harness rather than in each of them. Asserting the literal in every runner
+    would therefore have forced the code to be copied back out - so this names
+    the files that may CHOOSE an interpreter, requires the explicit-path
+    resolution there, and requires every other runner to delegate and to contain
+    no resolution of its own. That is what keeps one place to audit.
+    """
+
+    harness = ROOT / "scripts/isolated-e2e-harness.mjs"
+    delegating = (
         ROOT / "scripts/run-workflow-editor-e2e.mjs",
-    ):
-        source = runner.read_text()
-        assert "LM_ATELIER_E2E_PYTHON" not in source
+        ROOT / "scripts/run-managed-media-e2e.mjs",
+    )
+    choosing = (ROOT / "scripts/run-browser-e2e.mjs", harness)
+
+    for chooser in choosing:
+        source = chooser.read_text()
         assert "firstExistingPath([environmentPython, projectPython])" in source
         assert 'process.platform === "win32" ? "python.exe" : "python3"' in source
+
+    for runner in delegating:
+        source = runner.read_text()
+        assert "pythonExecutable" in source
+        # Delegation is the point: a second resolution here would be a second
+        # thing to audit, and the one that drifted would be the unaudited one.
+        assert "firstExistingPath" not in source
+        assert "python3" not in source
+
+    # An environment override would be introduced in one of these files, so the
+    # refusal has to cover every one of them rather than the two it started with.
+    for source_file in (*choosing, *delegating):
+        assert "LM_ATELIER_E2E_PYTHON" not in source_file.read_text()
 
 
 def test_frozen_installer_contracts_are_explicit() -> None:

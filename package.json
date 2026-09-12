@@ -32,6 +32,8 @@
     "lint": "npm --workspace @lm-atelier/web run lint",
     "test": "npm --workspace @lm-atelier/web run test",
     "typecheck": "npm --workspace @lm-atelier/web run typecheck",
+    "e2e:managed-media": "npm run build && npm run e2e:typecheck && npm run e2e:managed-media:run",
+    "e2e:managed-media:run": "node scripts/run-managed-media-e2e.mjs",
     "e2e:workflow-editor": "npm run build && npm run e2e:typecheck && npm run e2e:workflow-editor:run",
     "e2e:workflow-editor:run": "node scripts/run-workflow-editor-e2e.mjs"
   },
