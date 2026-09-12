@@ -13,7 +13,13 @@ from urllib.parse import parse_qsl, urljoin, urlsplit
 
 import httpx
 
-from .filesystem_links import is_link_or_reparse
+from .filesystem_links import (
+    AnchoredDirectory,
+    AnchoredDirectoryError,
+    is_link_or_reparse,
+    open_child_directory,
+    open_entry,
+)
 
 _CHUNK_BYTES = 1024 * 1024
 _MAX_ALLOWED_HOSTS = 16
@@ -153,26 +159,33 @@ def _parse_request(payload: Mapping[str, Any]) -> HttpsArtifactRequest:
 
 
 def _prepare_destination(request: HttpsArtifactRequest) -> tuple[Path, Path]:
-    root = request.local_dir
-    if not root.is_dir() or _is_link_or_reparse(root):
-        raise HttpsTransferError("unsafe_local_dir")
-    resolved_root = root.resolve(strict=True)
-    if _is_link_or_reparse(resolved_root):
-        raise HttpsTransferError("unsafe_local_dir")
-    parent = resolved_root
-    for part in request.filename.parts[:-1]:
-        parent /= part
-        if parent.exists() or parent.is_symlink():
-            if not parent.is_dir() or _is_link_or_reparse(parent):
-                raise HttpsTransferError("unsafe_destination")
-        else:
-            parent.mkdir()
-    destination = parent / request.filename.name
-    partial = parent / f".{request.filename.name}.{request.expected_sha256[:12]}.https-partial"
-    for path in (destination, partial):
-        if _is_link_or_reparse(path) or (path.exists() and not path.is_file()):
-            raise HttpsTransferError("unsafe_destination")
-    return destination, partial
+    try:
+        root = AnchoredDirectory(request.local_dir)
+    except AnchoredDirectoryError as exc:
+        raise HttpsTransferError("unsafe_local_dir") from exc
+    held = [root]
+    try:
+        parent = root
+        for part in request.filename.parts[:-1]:
+            try:
+                child = open_child_directory(parent, part, create=True)
+            except AnchoredDirectoryError as exc:
+                raise HttpsTransferError("unsafe_destination") from exc
+            held.append(child)
+            parent = child
+        destination_name = request.filename.name
+        partial_name = f".{destination_name}.{request.expected_sha256[:12]}.https-partial"
+        for name in (destination_name, partial_name):
+            try:
+                descriptor = open_entry(parent, name)
+            except AnchoredDirectoryError as exc:
+                raise HttpsTransferError("unsafe_destination") from exc
+            if descriptor is not None:
+                os.close(descriptor)
+        return parent.path / destination_name, parent.path / partial_name
+    finally:
+        for directory in reversed(held):
+            directory.close()
 
 
 def _stream_response(
