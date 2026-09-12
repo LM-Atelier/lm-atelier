@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     auto_unload_chat_for_media: bool = True
     hf_token: str | None = None
     civitai_token: str | None = None
+    crw_endpoint: str | None = Field(default=None, max_length=2000)
+    crw_token: str | None = Field(default=None, repr=False, exclude=True)
+    credential_namespace: str = Field(
+        default="lm-atelier", min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.-]+$", repr=False
+    )
     max_upload_bytes: int = 100 * 1024 * 1024
     vision_max_images: int = Field(default=4, ge=1, le=16)
     vision_max_image_bytes: int = Field(

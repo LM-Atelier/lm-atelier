@@ -84,6 +84,8 @@ class WebSettings(ApiModel):
     """
 
     allow_url_fetch: bool = False
+    allow_search: bool = Field(default=False, strict=True)
+    allow_search_without_asking: bool = Field(default=False, strict=True)
 
 
 class ProjectCreate(ApiModel):
@@ -347,8 +349,76 @@ class ChatOut(ApiModel):
     updated_at: datetime
 
 
+class WebSearchResultOut(ApiModel):
+    url: str = Field(max_length=2_000)
+    title: str = Field(max_length=200)
+    snippet: str = Field(max_length=2_000)
+
+
+class WebSearchOut(ApiModel):
+    run_id: str
+    assistant_message_id: str
+    job_id: str | None = None
+    revision: int | None = None
+    state: Literal[
+        "awaiting_approval",
+        "scheduled",
+        "approved",
+        "declined",
+        "cancelled",
+        "dispatching",
+        "complete",
+        "failed",
+        "uncertain",
+    ]
+    query: str = Field(min_length=1, max_length=2_000)
+    provider: Literal["CRW"] = "CRW"
+    provider_endpoint: str = Field(max_length=2_000)
+    dispatch_after: datetime | None = None
+    results: list[WebSearchResultOut] = Field(default_factory=list, max_length=5)
+    result_count: int = Field(default=0, ge=0, le=5)
+    truncated: bool = False
+    error_code: (
+        Literal[
+            "search_provider_invalid",
+            "search_query_invalid",
+            "search_credentials_refused",
+            "search_redirect_refused",
+            "search_rate_limited",
+            "search_unavailable",
+            "search_timeout",
+            "search_response_invalid",
+            "search_response_too_large",
+            "search_dispatch_uncertain",
+            "search_permission_revoked",
+            "search_provider_changed",
+            "search_work_unavailable",
+        ]
+        | None
+    ) = None
+
+
+class WebSearchDecisionRequest(ApiModel):
+    revision: int = Field(strict=True, ge=1, le=2**63 - 1)
+    action: Literal["approve", "decline", "cancel"]
+
+
+class WebSearchEditRequest(ApiModel):
+    revision: int = Field(strict=True, ge=1, le=2**63 - 1)
+    query: str = Field(strict=True, min_length=1, max_length=2_000)
+
+
+class WebSearchConfiguration(ApiModel):
+    installation_enabled: bool
+    configured: bool
+    provider: Literal["CRW"] = "CRW"
+    provider_endpoint: str | None = None
+    error_code: Literal["search_not_configured", "search_provider_invalid"] | None = None
+
+
 class ChatDetail(ChatOut):
     messages: list[MessageOut]
+    web_searches: list[WebSearchOut] = Field(default_factory=list)
 
 
 class ExchangeDeletionOut(ApiModel):
@@ -2938,7 +3008,7 @@ class HealthOut(ApiModel):
 
 
 class CredentialStatus(ApiModel):
-    provider: Literal["huggingface", "civitai"]
+    provider: Literal["huggingface", "civitai", "crw"]
     configured: bool
     source: Literal["none", "environment", "credential_vault"]
     vault_available: bool

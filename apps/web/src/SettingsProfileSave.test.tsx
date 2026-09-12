@@ -6,6 +6,10 @@ import { SettingsView } from "./SettingsView";
 import type { ModelProfile } from "./types";
 
 vi.mock("./api", () => ({ api: {
+  searchConfiguration: vi.fn().mockResolvedValue({
+    installation_enabled: false, configured: false, provider: "CRW",
+    provider_endpoint: null, error_code: "search_not_configured",
+  }),
   system: vi.fn().mockResolvedValue(null),
   about: vi.fn().mockResolvedValue(null),
   profiles: vi.fn(),

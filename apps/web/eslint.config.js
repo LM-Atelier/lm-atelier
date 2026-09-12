@@ -34,7 +34,7 @@ export default tseslint.config(
   {
     files: ["src/App.tsx"],
     rules: {
-      "max-lines": ["error", { max: 1458 }],
+      "max-lines": ["error", { max: 1486 }],
     },
   },
   {

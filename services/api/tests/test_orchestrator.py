@@ -10,6 +10,7 @@ import pytest
 from local_lm.adapters.base import ChatEvent, MediaEvent, estimate_chat_tokens
 from local_lm.comfy_registry_paths import registry_wheel_environment_root
 from local_lm.comfy_templates import COMFY_TEMPLATE_COMPILER_VERSION
+from local_lm.config import Settings
 from local_lm.domain import JobKind
 from local_lm.models import (
     Job,
@@ -1503,7 +1504,7 @@ def test_chat_progress_is_removed_without_discarding_text() -> None:
     assert message.parts == [text]
 
 
-async def test_chat_phase_advances_when_the_first_token_arrives() -> None:
+async def test_chat_phase_advances_when_the_first_token_arrives(settings: Settings) -> None:
     """The phase used to say "waiting" for the whole generation.
 
     It was set once before the stream and never updated, so a long answer that
@@ -1512,6 +1513,9 @@ async def test_chat_phase_advances_when_the_first_token_arrives() -> None:
     something is.
     """
     from local_lm.adapters.base import ChatEvent
+
+    settings.web_access_enabled = False
+    settings.crw_endpoint = None
 
     async def stream(_request):  # type: ignore[no-untyped-def]
         yield ChatEvent(type="delta", text="Hello", data={})
@@ -1538,9 +1542,9 @@ async def test_chat_phase_advances_when_the_first_token_arrives() -> None:
             return None
 
         def execute(self, _statement):  # type: ignore[no-untyped-def]
-            # The ownership probe and the claim-bound writes are conditional
-            # UPDATEs; one owned row answers them.
-            return SimpleNamespace(rowcount=1)
+            # There is no pending search proposal. Ownership probes and
+            # claim-bound writes each affect the one owned row.
+            return SimpleNamespace(rowcount=1, one_or_none=lambda: None)
 
         def in_transaction(self) -> bool:
             # The owned commit asserts ownership inside the transaction it
@@ -1554,7 +1558,7 @@ async def test_chat_phase_advances_when_the_first_token_arrives() -> None:
             return False
 
     orchestrator = ConversationOrchestrator(
-        engines=SimpleNamespace(chat=SimpleNamespace(stream=stream), settings=SimpleNamespace()),
+        engines=SimpleNamespace(chat=SimpleNamespace(stream=stream), settings=settings),
         artifacts=Mock(),
         events=SimpleNamespace(publish=AsyncMock()),
         scheduler=Mock(),

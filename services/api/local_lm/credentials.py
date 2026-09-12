@@ -12,8 +12,8 @@ class CredentialVaultUnavailable(RuntimeError):
     pass
 
 
-CredentialProvider = Literal["huggingface", "civitai"]
-CREDENTIAL_PROVIDERS: tuple[CredentialProvider, ...] = ("huggingface", "civitai")
+CredentialProvider = Literal["huggingface", "civitai", "crw"]
+CREDENTIAL_PROVIDERS: tuple[CredentialProvider, ...] = ("huggingface", "civitai", "crw")
 
 
 @dataclass(frozen=True)
@@ -28,10 +28,12 @@ class CredentialStore:
     ACCOUNTS: Mapping[CredentialProvider, str] = {
         "huggingface": "huggingface-token",
         "civitai": "civitai-token",
+        "crw": "crw-token",
     }
     ENVIRONMENT_VARIABLES: Mapping[CredentialProvider, str] = {
         "huggingface": "LOCAL_LM_HF_TOKEN",
         "civitai": "LOCAL_LM_CIVITAI_TOKEN",
+        "crw": "LOCAL_LM_CRW_TOKEN",
     }
 
     def __init__(
@@ -39,7 +41,19 @@ class CredentialStore:
         environment_token: str | None = None,
         *,
         environment_tokens: Mapping[CredentialProvider, str | None] | None = None,
+        service: str | None = None,
     ) -> None:
+        active_service = self.SERVICE if service is None else service
+        if (
+            not active_service
+            or len(active_service) > 128
+            or any(
+                not (character.isascii() and (character.isalnum() or character in "._-"))
+                for character in active_service
+            )
+        ):
+            raise ValueError("credential namespace is invalid")
+        self.service = active_service
         configured = dict(environment_tokens or {})
         if environment_token:
             configured["huggingface"] = environment_token
@@ -54,7 +68,7 @@ class CredentialStore:
         if keyring is None:
             return None
         try:
-            return keyring.get_password(self.SERVICE, self.ACCOUNTS[provider]) or None
+            return keyring.get_password(self.service, self.ACCOUNTS[provider]) or None
         except KeyringError:
             return None
 
@@ -83,10 +97,15 @@ class CredentialStore:
         normalized = token.strip()
         if not normalized:
             raise ValueError("token cannot be empty")
+        if provider == "crw" and (
+            len(normalized) > 4096
+            or any(ord(character) <= 32 or ord(character) >= 127 for character in normalized)
+        ):
+            raise ValueError("search credential is invalid")
         if keyring is None:
             raise CredentialVaultUnavailable("the operating-system credential vault is unavailable")
         try:
-            keyring.set_password(self.SERVICE, self.ACCOUNTS[provider], normalized)
+            keyring.set_password(self.service, self.ACCOUNTS[provider], normalized)
         except KeyringError as exc:
             raise CredentialVaultUnavailable(
                 "the operating-system credential vault rejected the token"
@@ -99,12 +118,12 @@ class CredentialStore:
         if keyring is None:
             raise CredentialVaultUnavailable("the operating-system credential vault is unavailable")
         try:
-            keyring.delete_password(self.SERVICE, self.ACCOUNTS[provider])
+            keyring.delete_password(self.service, self.ACCOUNTS[provider])
         except KeyringError as exc:
             # Deleting an absent token is intentionally idempotent. Backends use
             # different exception types, so confirm absence before surfacing it.
             try:
-                if keyring.get_password(self.SERVICE, self.ACCOUNTS[provider]) is None:
+                if keyring.get_password(self.service, self.ACCOUNTS[provider]) is None:
                     return
             except KeyringError:
                 pass
@@ -125,5 +144,5 @@ class CredentialStore:
 
 def credential_provider(value: str) -> CredentialProvider:
     if value not in CREDENTIAL_PROVIDERS:
-        raise ValueError("credential provider must be huggingface or civitai")
+        raise ValueError("credential provider must be huggingface, civitai, or crw")
     return value

@@ -8,6 +8,10 @@ import type { Chat, PromptBatch, PromptBatchCreateInput } from "./types";
 
 vi.mock("./api", () => ({
   api: {
+  searchConfiguration: vi.fn().mockResolvedValue({
+    installation_enabled: false, configured: false, provider: "CRW",
+    provider_endpoint: null, error_code: "search_not_configured",
+  }),
     setupReadiness: vi.fn(),
     projects: vi.fn(),
     chats: vi.fn(),

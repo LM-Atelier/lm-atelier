@@ -2556,3 +2556,30 @@ def _guard_artifact_reference_flush(
     from .artifact_library import guard_artifact_reference_flush
 
     guard_artifact_reference_flush(session, flush_context, instances)
+
+
+class WebSearchProposal(TimestampMixin, Base):
+    """Exact query approval; transport credentials never belong in this row."""
+
+    __tablename__ = "web_search_proposals"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("search"))
+    job_id: Mapped[str] = mapped_column(
+        ForeignKey("jobs.id", ondelete="CASCADE"),
+        unique=True,
+    )
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"),
+        unique=True,
+    )
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    state: Mapped[str] = mapped_column(String(32), default="awaiting_approval")
+    query: Mapped[str] = mapped_column(Text)
+    provider_endpoint: Mapped[str] = mapped_column(Text)
+    provider_revision: Mapped[str] = mapped_column(String(80))
+    approved_automatically: Mapped[bool] = mapped_column(Boolean, default=False)
+    dispatch_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    dispatch_owner: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    dispatch_attempt: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    result_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)

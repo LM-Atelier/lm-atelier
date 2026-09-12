@@ -1,3 +1,5 @@
+import { ChatWebAccess } from "./ChatWebAccess";
+import { ChatSearchConsent } from "./ChatSearchConsent";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Bot,
@@ -97,6 +99,7 @@ import { activeBranchMessages, workflowSchemaForTurn } from "./turnEditorContext
 import type {
   Chat,
   ChatDetail,
+  WebSearch,
   EngineCapabilities,
   EngineRole,
   GenerationPreset,
@@ -801,6 +804,21 @@ function ChatView({
   };
   if (!chat) return <EmptyState icon={<MessageSquare />} title="Start a local conversation" body="Create a chat and choose a model. Conversations stay on this machine." />;
   const messages = activeBranchMessages(chat);
+  const searchCard = (search: WebSearch) => (
+    <ChatSearchConsent key={search.run_id} search={search}
+      onChanged={() => {
+        void favoriteClient.invalidateQueries({ queryKey: ["chat"] });
+        void favoriteClient.invalidateQueries({ queryKey: ["jobs"] });
+        void favoriteClient.invalidateQueries({ queryKey: ["work-plans"] });
+      }}
+      onUseSource={(url) => onComposerDraft((current) => ({
+        text: current.text ? current.text + "\n\n" + url : url,
+        promptSource: null,
+      }))} />
+  );
+  const hiddenSearches = (chat.web_searches ?? []).filter((search) =>
+    search.job_id !== null && ["awaiting_approval", "approved", "scheduled"].includes(search.state)
+    && !messages.some((message) => message.id === search.assistant_message_id));
   const previewMessages = edited.preview && chat.messages.some(
     (message) => message.id === edited.preview?.branch_head_message_id,
   ) ? activeBranchMessages({ ...chat, active_head_message_id: edited.preview.branch_head_message_id }) : [];
@@ -838,13 +856,22 @@ function ChatView({
   );
   return (
     <div className="chat-view">
-      <div className="chat-header">
-        <div><small>{chat.project_id ? "Project chat" : "Unfiled chat"}</small><h1>{chat.title}</h1></div>
+      <div className="chat-heading">
+        <div className="chat-header">
+          <div><small>{chat.project_id ? "Project chat" : "Unfiled chat"}</small><h1>{chat.title}</h1></div>
+        </div>
+        <ChatWebAccess chat={chat} />
       </div>
       {/* Reported here because the global list belongs to a component the
           transcript cannot reach. */}
       <FirstFailure of={[feedback, toggleFavorite]} />
       <div className="messages" ref={messagesRef} onScroll={trackMessageScroll}>
+        {hiddenSearches.length > 0 && (
+          <section aria-label="Pending searches in other branches">
+            <p>Another branch is waiting for your search decision.</p>
+            {hiddenSearches.map(searchCard)}
+          </section>
+        )}
         {messages.length === 0 && pendingTurns.length === 0 ? (
           <EmptyState icon={<Sparkles />} title="What should we make?" body="Ask anything or create an image or video. Auto mode picks the model." />
         ) : messages.map((message, messageIndex) => {
@@ -873,6 +900,9 @@ function ChatView({
                   onRetryStep={onRetryStep}
                 />
               )}
+              {(chat.web_searches ?? []).filter(
+                (search) => search.assistant_message_id === message.id,
+              ).map(searchCard)}
               <MessageBubble
                 message={message}
                 liveText={liveText[message.id]}

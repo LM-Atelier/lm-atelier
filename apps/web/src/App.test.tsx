@@ -98,6 +98,12 @@ const roleAwareMediaEngine: EngineCapabilities = {
 vi.mock("./api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./api")>()),
   api: {
+    searchConfiguration: vi.fn().mockResolvedValue({
+      installation_enabled: true, configured: true, provider: "CRW",
+      provider_endpoint: "https://search.example.test", error_code: null,
+    }),
+    decideSearch: vi.fn(),
+    editSearch: vi.fn(),
     initialize: vi.fn().mockResolvedValue(undefined),
     setupReadiness: vi.fn().mockResolvedValue({ version: 2, state: "ready", roles: [] }),
     verifySetupRole: vi.fn(),
@@ -204,7 +210,7 @@ vi.mock("./api", async (importOriginal) => ({
     }),
     platforms: vi.fn().mockResolvedValue([]),
     createDiagnostics: vi.fn(),
-    credentialStatus: vi.fn((provider: "huggingface" | "civitai") => Promise.resolve({ provider, configured: false, source: "none", vault_available: true })),
+    credentialStatus: vi.fn((provider: "huggingface" | "civitai" | "crw") => Promise.resolve({ provider, configured: false, source: "none", vault_available: true })),
     setCredentialToken: vi.fn(),
     deleteCredentialToken: vi.fn(),
     models: vi.fn(),
@@ -6640,5 +6646,68 @@ describe("App", () => {
     await waitFor(() => expect(vi.mocked(api.upload)).toHaveBeenCalledWith(pasted));
     expect(await screen.findByRole("link", { name: "Preview clipboard.png" })).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("Only images can be pasted.");
+  });
+
+  it.each(["answer-one", "question-one"])("keeps search consent reachable with active branch %s", async (head) => {
+    const stamp = "2026-09-11T00:00:00Z";
+    localStorage.setItem("local-lm-chat", "chat-search");
+    let chat: ChatDetail = {
+      id: "chat-search", project_id: null, title: "Material search", pinned: false, archived: false,
+      routing_mode: "text", confirm_uncertain_media: false,
+      active_chat_profile_id: null, active_image_profile_id: null, active_video_profile_id: null,
+      active_head_message_id: head, created_at: stamp, updated_at: stamp,
+      messages: [
+        { id: "question-one", chat_id: "chat-search", parent_id: null, role: "user", status: "complete",
+          parts: [{ id: "question-part", position: 0, type: "text", text: "Compare metals",
+            artifact_id: null, metadata_json: {} }], created_at: stamp, updated_at: stamp },
+        { id: "answer-one", chat_id: "chat-search", parent_id: "question-one", role: "assistant", status: "pending",
+          parts: [], created_at: stamp, updated_at: stamp },
+      ],
+      web_searches: [{
+        run_id: "run-one", assistant_message_id: "answer-one", job_id: "job-one", revision: 3,
+        state: "awaiting_approval", query: "Compare copper and steel", provider: "CRW",
+        provider_endpoint: "https://search.example.test", dispatch_after: null,
+        results: [], result_count: 0, truncated: false, error_code: null,
+      }],
+    };
+    vi.mocked(api.chats).mockResolvedValue([chat]);
+    vi.mocked(api.chat).mockImplementation(async () => chat);
+    vi.mocked(api.decideSearch).mockImplementation(async () => {
+      const search = {
+        ...chat.web_searches![0]!, state: "complete" as const, job_id: null, revision: null,
+        results: [{ url: "https://materials.example.test/comparison", title: "Material comparison", snippet: "A neutral summary." }],
+        result_count: 1,
+      };
+      chat = { ...chat, web_searches: [search] };
+      return search;
+    });
+    renderApp();
+    expect(await screen.findByLabelText("Exact query")).toHaveValue("Compare copper and steel");
+    expect(screen.getByText("Web access")).toBeVisible();
+    expect(api.decideSearch).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    await waitFor(() => expect(api.decideSearch).toHaveBeenCalledWith("job-one", 3, "approve"));
+    if (head === "question-one") {
+      await waitFor(() => expect(screen.queryByLabelText("Exact query")).not.toBeInTheDocument());
+      expect(api.sendTurn).not.toHaveBeenCalled();
+      return;
+    }
+    const useSource = await screen.findByRole("button", { name: "Add source to message" });
+    const message = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(message, { target: { value: "Explain the comparison." } });
+    fireEvent.click(useSource);
+    expect(message).toHaveValue("Explain the comparison.\n\nhttps://materials.example.test/comparison");
+    expect(api.sendTurn).not.toHaveBeenCalled();
+    expect(api.decideSearch).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers CRW vault settings without enabling a chat or dispatching a search", async () => {
+    renderApp();
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    expect(await screen.findByRole("heading", { name: "Web search" })).toBeVisible();
+    expect(await screen.findByLabelText("CRW access token")).toHaveAttribute("type", "password");
+    expect(screen.getByText("Search provider: CRW at https://search.example.test")).toBeVisible();
+    expect(api.updateChat).not.toHaveBeenCalled();
+    expect(api.decideSearch).not.toHaveBeenCalled();
   });
 });
