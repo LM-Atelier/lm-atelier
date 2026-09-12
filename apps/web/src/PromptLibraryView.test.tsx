@@ -697,7 +697,8 @@ describe("Prompt Library", () => {
     renderLibrary();
     await screen.findByRole("heading", { name: "Portrait variants" });
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
-    await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
+    const workflowChoice = await screen.findByLabelText("Option 1 workflow revision");
+    await within(workflowChoice).findByRole("option", { name: "Portrait · Base (ready)" });
     // Load the valid contract boundary in one render instead of paying for 64
     // sequential editor updates. Eight per stack keeps the aggregate cap
     // distinct from the independent sixteen-per-stack guard.
