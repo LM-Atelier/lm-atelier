@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from .capability_evidence import current_capability_evidence
 from .config import Settings
+from .generation_queue import generation_dispatch
 from .model_planner import revision_accepts_install
 from .models import (
     Job,
@@ -287,7 +288,7 @@ def _role_readiness(
                     "verify_generation",
                 )
             )
-        elif verification.state in {"queued", "running"}:
+        elif verification.state == "running":
             checks.append(
                 _check(
                     "generation_verification_running",
@@ -296,6 +297,8 @@ def _role_readiness(
                     "wait_for_verification",
                 )
             )
+        elif verification.state == "queued":
+            checks.append(_queued_verification_check(session))
         elif verification.state == "ready":
             checks.append(
                 _check(
@@ -560,6 +563,46 @@ def _worker_check(
         "pass",
         "This model is not loaded yet. The first request will wait while it loads.",
         "prepare_worker",
+    )
+
+
+def _queued_verification_check(session: Session) -> SetupReadinessCheck:
+    """Why a test that has not started has not started.
+
+    A queued verification and a running one used to share one message, so a
+    person whose generation lane is paused watched a spinner tell them a test
+    was running that could never start. The verification's own state already
+    distinguishes the two - it becomes `running` only when the job is claimed -
+    and the dispatch lane says whether anything can be claimed at all.
+
+    This reports; it decides nothing. Pausing remains exactly as deliberate as
+    it was, and the resume control stays where it already lives.
+    """
+
+    dispatch = generation_dispatch(session)
+    if dispatch.valid and dispatch.state == "paused":
+        return _check(
+            "generation_verification_paused",
+            "pending",
+            "Generation is paused, so the local test cannot start. "
+            "Resume generation under View accepted work.",
+            "wait_for_verification",
+        )
+    if dispatch.valid and dispatch.state == "draining":
+        return _check(
+            "generation_verification_pausing",
+            "pending",
+            "Generation is finishing its current work and will then pause, so the local "
+            "test cannot start. Resume generation under View accepted work.",
+            "wait_for_verification",
+        )
+    # An unreadable policy row is not evidence of a pause, and claiming one
+    # would send somebody to resume a lane that is already open.
+    return _check(
+        "generation_verification_queued",
+        "pending",
+        "The local generation test is waiting to start.",
+        "wait_for_verification",
     )
 
 
