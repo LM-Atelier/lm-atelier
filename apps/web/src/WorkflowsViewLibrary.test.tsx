@@ -1,3 +1,4 @@
+import { mockWorkflowReadsFromFixture } from "./workflowReadFixtures";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -6,7 +7,7 @@ import { api } from "./api";
 import type { Workflow, WorkflowFamily } from "./types";
 
 vi.mock("./api", () => ({ api: {
-  workflows: vi.fn(), workflowFamilies: vi.fn(), workflowFamilyRemovalImpact: vi.fn(),
+  workflows: vi.fn(), workflowSummaries: vi.fn(), workflow: vi.fn(), workflowFamilies: vi.fn(), workflowFamilyRemovalImpact: vi.fn(),
   updateWorkflowFamily: vi.fn(), setWorkflowFamilyPreference: vi.fn(),
 } }));
 vi.mock("./CustomNodesPanel", () => ({ CustomNodesPanel: () => null }));
@@ -36,6 +37,7 @@ function wrap(element: React.ReactNode) {
 }
 beforeEach(() => {
   vi.resetAllMocks();
+  mockWorkflowReadsFromFixture(() => api.workflows());
   vi.mocked(api.workflows).mockResolvedValue([workflow("a"), workflow("b")]);
   vi.mocked(api.workflowFamilies).mockResolvedValue([family("a"), family("b")]);
 
@@ -65,6 +67,7 @@ describe("browsing workflow families", () => {
     fireEvent.change(screen.getByRole("combobox", { name: "Family source" }), { target: { value: "" } });
     expect(screen.getByRole("heading", { name: "Ungrouped workflows" })).toBeInTheDocument();
     fireEvent.click(screen.getByText("Workflow c"));
+    await screen.findByRole("button", { name: "New revision" });
     expect(screen.getByRole("button", { name: "New revision" })).toBeInTheDocument();
   });
 
@@ -101,6 +104,7 @@ describe("browsing workflow families", () => {
     expect(screen.queryByRole("heading", { name: "Landscape family" })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Portrait family" })).toBeInTheDocument();
     fireEvent.click(screen.getByText("Workflow b"));
+    await screen.findByRole("button", { name: "New revision" });
     expect(screen.getByRole("button", { name: "New revision" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Export" })).toBeInTheDocument();
   });
@@ -162,6 +166,7 @@ describe("browsing workflow families", () => {
     wrap(<WorkflowsView />);
     await screen.findByRole("heading", { name: "Ungrouped workflows" });
     fireEvent.click(screen.getByText("Workflow b"));
+    await screen.findByRole("button", { name: "New revision" });
     expect(screen.getByRole("button", { name: "New revision" })).toBeInTheDocument();
     fireEvent.change(screen.getByRole("searchbox", { name: "Search workflow families" }), { target: { value: "no matching family" } });
     expect(screen.getByText("No workflows match these filters.")).toBeInTheDocument();

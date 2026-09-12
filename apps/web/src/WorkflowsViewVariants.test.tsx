@@ -1,3 +1,4 @@
+import { mockWorkflowReadsFromFixture } from "./workflowReadFixtures";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -9,7 +10,7 @@ import type { Workflow, WorkflowFamily } from "./types";
 import { REASON_TEXT } from "./readinessReason";
 
 vi.mock("./api", () => ({ api: {
-  workflows: vi.fn(), workflowFamilies: vi.fn(), workflowFamilyRemovalImpact: vi.fn(),
+  workflows: vi.fn(), workflowSummaries: vi.fn(), workflow: vi.fn(), workflowFamilies: vi.fn(), workflowFamilyRemovalImpact: vi.fn(),
   updateWorkflowFamily: vi.fn(), setWorkflowFamilyPreference: vi.fn(),
 } }));
 vi.mock("./CustomNodesPanel", () => ({ CustomNodesPanel: () => null }));
@@ -39,6 +40,7 @@ function wrap(element: React.ReactNode) {
 }
 beforeEach(() => {
   vi.resetAllMocks();
+  mockWorkflowReadsFromFixture(() => api.workflows());
   vi.mocked(api.workflows).mockResolvedValue([workflow("a"), workflow("b")]);
   vi.mocked(api.workflowFamilies).mockResolvedValue([family("a"), family("b")]);
 
@@ -60,6 +62,7 @@ describe("workflow family variants", () => {
     vi.mocked(api.workflowFamilies).mockResolvedValue([mixed]);
     wrap(<WorkflowsView />);
     fireEvent.click(await screen.findByText("Workflow a"));
+    await screen.findByRole("button", { name: "New revision" });
     fireEvent.click(screen.getByRole("button", { name: "Show operation variants" }));
     const region = within(screen.getByRole("region", { name: "Operation variants" }));
     expect(region.getAllByRole("listitem")).toHaveLength(4);
@@ -76,8 +79,10 @@ describe("workflow family variants", () => {
   it("resets the disclosure when selecting another family", async () => {
     wrap(<WorkflowsView />);
     fireEvent.click(await screen.findByText("Workflow a"));
+    await screen.findByRole("button", { name: "New revision" });
     fireEvent.click(screen.getByRole("button", { name: "Show operation variants" }));
     fireEvent.click(screen.getByText("Workflow b"));
+    await screen.findByRole("button", { name: "New revision" });
     expect(screen.getByRole("button", { name: "Show operation variants" })).toHaveAttribute("aria-expanded", "false");
     fireEvent.click(screen.getByRole("button", { name: "Show operation variants" }));
     const region = within(screen.getByRole("region", { name: "Operation variants" }));
@@ -93,6 +98,7 @@ describe("workflow family variants", () => {
     vi.mocked(api.workflowFamilies).mockResolvedValue([blocked]);
     wrap(<WorkflowsView />);
     fireEvent.click(await screen.findByText("Workflow a"));
+    await screen.findByRole("button", { name: "New revision" });
     fireEvent.click(screen.getByRole("button", { name: "Show operation variants" }));
     const region = within(screen.getByRole("region", { name: "Operation variants" }));
     expect(region.getByText("Unavailable")).toBeInTheDocument();

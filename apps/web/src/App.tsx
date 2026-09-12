@@ -92,10 +92,9 @@ import { type View } from "./rooms";
 import {
   promptPreviewSettings,
   resolveCapabilitySettings,
-  resolveWorkflowSettings,
 } from "./settings";
 import { useWorkspaceChrome, type SidebarLayout } from "./sidebarLayout";
-import { activeBranchMessages, workflowSchemaForTurn } from "./turnEditorContext";
+import { activeBranchMessages } from "./turnEditorContext";
 import type {
   Chat,
   ChatDetail,
@@ -109,7 +108,6 @@ import type {
   Project,
   SetupReadinessReport,
   TurnAccepted,
-  Workflow
 } from "./types";
 import { useAutoSettingsRoles } from "./useAutoSettingsRoles";
 import { useEditedBranches } from "./useEditedBranches";
@@ -492,7 +490,6 @@ function PromptHelperDialog({
   sourceChat,
   initialDraft,
   engines,
-  workflows,
   editSourceArtifactIds,
   onAccept,
   onClose,
@@ -500,7 +497,6 @@ function PromptHelperDialog({
   sourceChat: ChatDetail;
   initialDraft: string;
   engines: EngineCapabilities[];
-  workflows: Workflow[];
   // When improving an image-edit instruction, the source image rides along so
   // a vision-capable helper grounds its rewrite in what the picture shows.
   editSourceArtifactIds?: string[];
@@ -580,8 +576,7 @@ function PromptHelperDialog({
       await api.updatePromptHelper(helperId, draft.trim());
       const role = roleForMode(mode);
       const engine = engines.find((item) => item.roles.includes(role));
-      const schema = workflowSchemaForTurn(workflows, mode, false);
-      const fields = resolveWorkflowSettings(resolveCapabilitySettings(engine, role), schema);
+      const fields = resolveCapabilitySettings(engine, role);
       await api.sendTurn(
         helperId,
         text.trim(),
@@ -724,7 +719,6 @@ function ChatView({
   chat,
   engines,
   profiles,
-  workflows,
   project,
   liveText,
   pendingTurns,
@@ -1001,10 +995,10 @@ function ChatView({
           liveText={liveText[message.id]} onOpenEdit={setEditMessageId} />)}
       </section>}
       {editMessageId && <PriorTurnEditor key={editMessageId} messageId={editMessageId} chat={chat}
-        engines={engines} profiles={profiles} workflows={workflows} presets={presets}
+        engines={engines} profiles={profiles} presets={presets}
         maxMediaOutputsPerPlan={maxMediaOutputsPerPlan} PromptHelper={PromptHelperDialog}
         onAccepted={onEditAccepted} onClose={() => setEditMessageId(null)} />}
-      <TurnEditor PromptHelper={PromptHelperDialog} chat={chat} engines={engines} profiles={profiles} stoppable={stoppable} settings={settings} onSettings={onSettings} settingsRole={settingsRole} onSettingsRole={onSettingsRole} presets={presets} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} onStopAndSend={onStopAndSend} maxMediaOutputsPerPlan={maxMediaOutputsPerPlan} workflows={workflows} project={project} visualTarget={visualTarget} quoteTarget={quoteTarget} draft={composerDraft} onDraftChange={onComposerDraft} />
+      <TurnEditor PromptHelper={PromptHelperDialog} chat={chat} engines={engines} profiles={profiles} stoppable={stoppable} settings={settings} onSettings={onSettings} settingsRole={settingsRole} onSettingsRole={onSettingsRole} presets={presets} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} onStopAndSend={onStopAndSend} maxMediaOutputsPerPlan={maxMediaOutputsPerPlan} project={project} visualTarget={visualTarget} quoteTarget={quoteTarget} draft={composerDraft} onDraftChange={onComposerDraft} />
     </div>
   );
 }
@@ -1151,7 +1145,6 @@ export default function App() {
   const engines = useQuery({ queryKey: ["engines"], queryFn: api.engines });
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
   const presets = useQuery({ queryKey: ["presets"], queryFn: api.presets });
-  const workflows = useQuery({ queryKey: ["workflows"], queryFn: api.workflows });
   const applicationInfo = useQuery({ queryKey: ["about"], queryFn: api.about });
   const eventsConnected = useLiveEvents(client, setLiveText);
   const createChat = useMutation({
@@ -1398,7 +1391,7 @@ export default function App() {
       ));
       updateChat.mutate({ id: displayedChat.id, values });
     };
-    return <ChatView key={displayedChat?.id ?? "empty-chat"} onOpenStudio={(artifactId) => { setStudioSource({ artifactId, chatId: displayedChat?.id ?? null }); setView("studio"); focusMainContent(); }} chat={displayedChat} engines={engines.data ?? []} profiles={profiles.data ?? []} presets={presets.data ?? []} workflows={workflows.data ?? []} project={allProjects.find((item) => item.id === displayedChat?.project_id)} liveText={liveText} pendingTurns={displayedChat ? pendingTurns[displayedChat.id] ?? [] : []} workPlans={workPlans.data ?? []} settings={scopedSettings} settingsRole={selectedRole} onSettingsRole={(role) => { if (displayedChat) rememberSettingsRole(displayedChat.id, role); }} presetId={presetId} maxMediaOutputsPerPlan={applicationInfo.data?.max_media_outputs_per_plan ?? 1} composerDraft={displayedChat ? composerDrafts[displayedChat.id] ?? EMPTY_COMPOSER_DRAFT : EMPTY_COMPOSER_DRAFT} onComposerDraft={(update) => {
+    return <ChatView key={displayedChat?.id ?? "empty-chat"} onOpenStudio={(artifactId) => { setStudioSource({ artifactId, chatId: displayedChat?.id ?? null }); setView("studio"); focusMainContent(); }} chat={displayedChat} engines={engines.data ?? []} profiles={profiles.data ?? []} presets={presets.data ?? []} project={allProjects.find((item) => item.id === displayedChat?.project_id)} liveText={liveText} pendingTurns={displayedChat ? pendingTurns[displayedChat.id] ?? [] : []} workPlans={workPlans.data ?? []} settings={scopedSettings} settingsRole={selectedRole} onSettingsRole={(role) => { if (displayedChat) rememberSettingsRole(displayedChat.id, role); }} presetId={presetId} maxMediaOutputsPerPlan={applicationInfo.data?.max_media_outputs_per_plan ?? 1} composerDraft={displayedChat ? composerDrafts[displayedChat.id] ?? EMPTY_COMPOSER_DRAFT : EMPTY_COMPOSER_DRAFT} onComposerDraft={(update) => {
       if (!displayedChat) return;
       setComposerDrafts((current) => updatedComposerDrafts(current, displayedChat.id, update));
     }} onSettings={(settings) => {
@@ -1448,7 +1441,7 @@ export default function App() {
         send.mutate({ chatId: displayedChat.id, id: crypto.randomUUID(), text, mode, artifacts, settings, references, outputCount, promptSource });
       }
     }} />;
-  }, [studioSource, view, modelLibraryRole, engines.data, profiles.data, presets.data, workflows.data, applicationInfo.data, allProjects, chat.data, chatDrafts, autoSettingsRoles, rememberSettingsRole, composerDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, removeItem, forkThread, client, openLibraryImage, applyAcceptedTurn]);
+  }, [studioSource, view, modelLibraryRole, engines.data, profiles.data, presets.data, applicationInfo.data, allProjects, chat.data, chatDrafts, autoSettingsRoles, rememberSettingsRole, composerDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, removeItem, forkThread, client, openLibraryImage, applyAcceptedTurn]);
 
   if (firstRunSetup && setupReadiness.data) {
     return <FirstRunSetup report={setupReadiness.data} onExit={exitFirstRunSetup} onOpenModels={(role) => { exitFirstRunSetup(); setModelLibraryRole(role); setView("models"); }} onOpenWorkflows={() => { exitFirstRunSetup(); setView("workflows"); }} />;

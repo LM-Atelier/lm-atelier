@@ -1,3 +1,4 @@
+import { mockWorkflowReadsFromFixture } from "./workflowReadFixtures";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -6,7 +7,7 @@ import { api } from "./api";
 import type { Workflow, WorkflowRevision } from "./types";
 
 vi.mock("./api", () => ({ api: {
-  workflows: vi.fn(), workflowFamilies: vi.fn(), restoreWorkflowRevision: vi.fn(),
+  workflows: vi.fn(), workflowSummaries: vi.fn(), workflow: vi.fn(), workflowFamilies: vi.fn(), restoreWorkflowRevision: vi.fn(),
   updateWorkflow: vi.fn(), cloneWorkflow: vi.fn(),
 } }));
 vi.mock("./CustomNodesPanel", () => ({ CustomNodesPanel: () => null }));
@@ -28,6 +29,7 @@ function workflow(): Workflow {
 const clients: QueryClient[] = [];
 beforeEach(() => {
   vi.resetAllMocks();
+  mockWorkflowReadsFromFixture(() => api.workflows());
   vi.mocked(api.workflows).mockResolvedValue([workflow()]);
   vi.mocked(api.workflowFamilies).mockResolvedValue([]);
 });
@@ -37,6 +39,7 @@ async function openHistory() {
   clients.push(client);
   render(<QueryClientProvider client={client}><WorkflowsView /></QueryClientProvider>);
   fireEvent.click(await screen.findByText("Landscape study"));
+  await screen.findByRole("button", { name: "New revision" });
   fireEvent.click(screen.getByRole("button", { name: "Show revision history" }));
   return within(screen.getByRole("region", { name: "Revision history" }));
 }
@@ -98,6 +101,7 @@ describe("workflow revision history", () => {
     const history = await openHistory();
     fireEvent.click(history.getByRole("button", { name: "Inspect v1" }));
     fireEvent.click(screen.getByText("Portrait study"));
+    await screen.findByRole("button", { name: "New revision" });
     expect(screen.getByRole("button", { name: "Show revision history" })).toHaveAttribute("aria-expanded", "false");
     fireEvent.click(screen.getByRole("button", { name: "Show revision history" }));
     const selected = within(screen.getByRole("region", { name: "Revision history" }));

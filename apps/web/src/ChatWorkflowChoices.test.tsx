@@ -27,7 +27,7 @@ const clients: QueryClient[] = [];
 function Harness({ workflowControl }: { workflowControl?: ReactNode }) {
   const [mode, setMode] = useState<RoutingMode>("auto");
   const [draft, setDraft] = useState<ComposerDraft>({ text: "", promptSource: null });
-  return <TurnEditor chat={{ ...chat, routing_mode: mode }} engines={[]} profiles={[]} workflows={[]}
+  return <TurnEditor chat={{ ...chat, routing_mode: mode }} engines={[]} profiles={[]}
     presets={[]} stoppable={false} settings={{}} onSettings={ignore} settingsRole="chat"
     onSettingsRole={ignore} presetId={null} onPreset={ignore} onMode={setMode} onSend={ignore}
     onStop={ignore} onStopAndSend={ignore} maxMediaOutputsPerPlan={4}

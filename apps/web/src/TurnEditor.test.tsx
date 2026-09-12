@@ -70,7 +70,7 @@ function Harness({ initial, initialText = "Paint a green landscape", onAccept, o
   const [visible, setVisible] = useState(true);
   return <>
     {remountable && <button onClick={() => setVisible((current) => !current)}>Toggle editor</button>}
-    {visible && <TurnEditor chat={chat} engines={[engine]} profiles={[]} workflows={[]} presets={presets}
+    {visible && <TurnEditor chat={chat} engines={[engine]} profiles={[]} presets={presets}
       stoppable={stoppable} settings={settings} onSettings={setSettings} settingsRole="image" onSettingsRole={ignore}
       presetId={presetId} onPreset={setPresetId} onMode={ignore} onSend={onSend} onStop={ignore} onStopAndSend={onStopAndSend}
       maxMediaOutputsPerPlan={4} draft={draft} onDraftChange={setDraft}

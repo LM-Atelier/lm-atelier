@@ -1,3 +1,4 @@
+import { mockWorkflowReadsFromFixture } from "./workflowReadFixtures";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -6,7 +7,7 @@ import { api } from "./api";
 import type { Workflow, WorkflowRevision } from "./types";
 
 vi.mock("./api", () => ({ api: {
-  workflows: vi.fn(), workflowFamilies: vi.fn(), validateWorkflow: vi.fn(),
+  workflows: vi.fn(), workflowSummaries: vi.fn(), workflow: vi.fn(), workflowFamilies: vi.fn(), validateWorkflow: vi.fn(),
 } }));
 vi.mock("./CustomNodesPanel", () => ({ CustomNodesPanel: () => null }));
 vi.mock("./RegistryInstallsPanel", () => ({ RegistryInstallsPanel: () => null }));
@@ -25,6 +26,7 @@ const success = "Workflow and declared dependencies are valid for the active med
 const clients: QueryClient[] = [];
 beforeEach(() => {
   vi.resetAllMocks();
+  mockWorkflowReadsFromFixture(() => api.workflows());
   vi.mocked(api.workflows).mockResolvedValue([workflow()]);
   vi.mocked(api.workflowFamilies).mockResolvedValue([]);
   vi.mocked(api.validateWorkflow).mockResolvedValue({
@@ -38,6 +40,7 @@ async function open() {
   clients.push(client);
   render(<QueryClientProvider client={client}><WorkflowsView /></QueryClientProvider>);
   fireEvent.click(await screen.findByText("Landscape study"));
+  await screen.findByRole("button", { name: "New revision" });
   return client;
 }
 function inspect(id: string) { fireEvent.change(screen.getByLabelText("Revision"), { target: { value: id } }); }
@@ -100,7 +103,7 @@ describe("validation belongs to the returned current revision", () => {
     expect(await screen.findByText(success)).toBeInTheDocument();
     const updated = workflow();
     updated.revisions.push(revision(3)); updated.current_revision_id = "revision-3";
-    await act(async () => { client.setQueryData(["workflows"], [updated]); });
+    await act(async () => { client.setQueryData(["workflows", "detail", "landscape"], updated); });
     await screen.findByRole("option", { name: /^v3/ });
     expect(screen.queryByText(success)).not.toBeInTheDocument();
     inspect("revision-3");

@@ -1,3 +1,4 @@
+import { mockWorkflowReadsFromFixture, mockWorkflowConsumerReadsFromFixture } from "./workflowReadFixtures";
 import { exerciseEditedBranchNavigation } from "./editedBranchAppCase.test-support";
 import { exerciseQueuedOutputActions } from "./queuedOutputActions.test-support";
 import { exercisePriorTurnEditor } from "./priorTurnEditAppCase.test-support";
@@ -6,9 +7,11 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { api, connectEvents } from "./api";
-import type { BackupInfo, Chat, ChatDetail, EngineCapabilities, EngineRole, Job, ModelAssetInstall, SettingField, SetupReadinessReport, SetupRoleReadiness, TurnAccepted, WorkPlan } from "./types";
+import type { BackupInfo, Chat, ChatDetail, EngineCapabilities, EngineRole, Job, ModelAssetInstall, SettingField, SetupReadinessReport, SetupRoleReadiness, TurnAccepted, WorkPlan, Workflow } from "./types";
 import { DEFAULT_CHAT_WORKFLOW_SELECTIONS, DEFAULT_PROJECT_WORKFLOW_SELECTIONS, familiesForWorkflows } from "./workflowSelectionFixtures";
 const clipboardWrite = vi.fn();
+let workflowFixtures: Workflow[] = [];
+function setWorkflowFixtures(values: Workflow[]) { workflowFixtures = values; }
 
 function renderApp() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -260,6 +263,10 @@ vi.mock("./api", async (importOriginal) => ({
     installRecipe: vi.fn(),
     download: vi.fn(),
     importModel: vi.fn(),
+    workflowSummaries: vi.fn().mockResolvedValue([]),
+    workflow: vi.fn(),
+    workflowRevisionChoices: vi.fn().mockResolvedValue([]),
+    workflowRevisionSchema: vi.fn(),
     workflows: vi.fn(), workflowFamilies: vi.fn().mockResolvedValue([]), setWorkflowFamilyPreference: vi.fn(), chatWorkflowSelections: vi.fn().mockResolvedValue([]), setChatWorkflowSelection: vi.fn(), projectWorkflowSelections: vi.fn().mockResolvedValue([]), setProjectWorkflowSelection: vi.fn(),
     editTemplates: vi.fn().mockResolvedValue([]),
     createEditTemplate: vi.fn(),
@@ -385,12 +392,28 @@ describe("App", () => {
     vi.mocked(api.catalog).mockResolvedValue({ items: [], next_cursor: null });
     vi.mocked(api.artifactLibrary).mockResolvedValue({ items: [], next_cursor: null });
     vi.mocked(api.workflowCatalogModels).mockResolvedValue([]);
-    vi.mocked(api.workflows).mockResolvedValue([]);
-    vi.mocked(api.workflowFamilies).mockImplementation(async () => familiesForWorkflows(await api.workflows()));
+    setWorkflowFixtures([]);
+    vi.mocked(api.workflows).mockRejectedValue(new Error("Bulk workflow reads are forbidden"));
+    mockWorkflowReadsFromFixture(async () => workflowFixtures);
+    mockWorkflowConsumerReadsFromFixture(async () => workflowFixtures);
+    vi.mocked(api.workflowFamilies).mockImplementation(async () => familiesForWorkflows(workflowFixtures));
     vi.mocked(api.chatWorkflowSelections).mockResolvedValue(DEFAULT_CHAT_WORKFLOW_SELECTIONS);
     vi.mocked(api.projectWorkflowSelections).mockResolvedValue(DEFAULT_PROJECT_WORKFLOW_SELECTIONS);
     vi.mocked(api.customNodes).mockResolvedValue([]);
   });
+  it("opens the workspace and workflow Library without requesting bulk graphs", async () => {
+    vi.mocked(api.workflows).mockRejectedValue(new Error("Bulk workflow reads are forbidden"));
+    vi.mocked(api.workflowFamilies).mockResolvedValue([]);
+    vi.mocked(api.workflowSummaries).mockResolvedValue([]);
+    renderApp();
+    const library = await screen.findByRole("button", { name: "Workflows" });
+    expect(api.workflows).not.toHaveBeenCalled();
+    fireEvent.click(library);
+    await waitFor(() => expect(api.workflowSummaries).toHaveBeenCalledTimes(1));
+    expect(api.workflows).not.toHaveBeenCalled();
+    expect(api.workflow).not.toHaveBeenCalled();
+  });
+
   it("renders the local workspace shell without an existing chat", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
@@ -1619,7 +1642,7 @@ describe("App", () => {
     vi.mocked(api.chats).mockResolvedValue([chat]);
     vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
     vi.mocked(api.engines).mockResolvedValue([roleAwareMediaEngine]);
-    vi.mocked(api.workflows).mockResolvedValue([{
+    setWorkflowFixtures([{
       id: "workflow-auto-schema",
       name: "Schema image",
       operation: "text_to_image",
@@ -1910,7 +1933,7 @@ describe("App", () => {
     vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
     vi.mocked(api.engines).mockResolvedValue([roleAwareMediaEngine]);
     vi.mocked(api.projectWorkflowSelections).mockResolvedValue([{ selector_capability: "video", mode: "revision", workflow_family_id: null, workflow_revision_id: "revision-video", legacy_profile_id: null }]);
-    vi.mocked(api.workflows).mockResolvedValue([{
+    setWorkflowFixtures([{
       id: "workflow-lora",
       name: "LoRA image",
       operation: "text_to_image",
@@ -3983,7 +4006,7 @@ describe("App", () => {
 
   it("renders workflow revision history and declared controls", async () => {
     const stamp = "2026-07-22T00:00:00Z";
-    vi.mocked(api.workflows).mockResolvedValue([
+    setWorkflowFixtures([
       {
         id: "workflow-1",
         name: "Studio image",
@@ -4038,7 +4061,7 @@ describe("App", () => {
     expect(screen.queryByText("Restore as new revision")).not.toBeInTheDocument();
   });
   it("reviews a raw ComfyUI workflow instead of rejecting it", async () => {
-    vi.mocked(api.workflows).mockResolvedValue([]);
+    setWorkflowFixtures([]);
     vi.mocked(api.analyzeWorkflowPackage).mockResolvedValue({
       format_version: "0.4",
       frontend_version: "1.45.21",
@@ -4106,7 +4129,7 @@ describe("App", () => {
   });
 
   it("still imports LM Atelier bundles directly", async () => {
-    vi.mocked(api.workflows).mockResolvedValue([]);
+    setWorkflowFixtures([]);
     vi.mocked(api.importWorkflow).mockResolvedValue({
       id: "workflow-imported",
       name: "Bundle",
@@ -5630,7 +5653,7 @@ describe("App", () => {
     vi.mocked(api.chats).mockResolvedValue([chat]);
     vi.mocked(api.chat).mockResolvedValue({ ...chat, messages: [] });
     vi.mocked(api.engines).mockResolvedValue([roleAwareMediaEngine]);
-    vi.mocked(api.workflows).mockResolvedValue([{
+    setWorkflowFixtures([{
       id: "workflow-video",
       name: "Fixed video",
       operation: "text_to_video",
@@ -5887,7 +5910,7 @@ describe("App", () => {
       ...chat,
       messages: [userMessage, assistantMessage],
     });
-    vi.mocked(api.workflows).mockResolvedValue([
+    setWorkflowFixtures([
       workflow("fresh-image", "text_to_image", "Fresh image exclusion"),
       workflow("edit-image", "image_to_image", "Edit image exclusion"),
     ]);
@@ -6108,7 +6131,7 @@ describe("App", () => {
     let currentDetail = detail;
     vi.mocked(api.chat).mockImplementation(async () => currentDetail);
     vi.mocked(api.engines).mockResolvedValue([roleAwareMediaEngine]);
-    vi.mocked(api.workflows).mockResolvedValue([
+    setWorkflowFixtures([
       workflow("text_to_video", "Text video frames"),
       workflow("image_to_video", "Image motion frames"),
     ]);

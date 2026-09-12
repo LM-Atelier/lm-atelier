@@ -1,3 +1,4 @@
+import { mockWorkflowReadsFromFixture } from "./workflowReadFixtures";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -5,7 +6,7 @@ import { WorkflowsView } from "./WorkflowsView";
 import { api } from "./api";
 import type { Workflow, WorkflowFamily } from "./types";
 
-vi.mock("./api", () => ({ api: { workflows: vi.fn(), workflowFamilies: vi.fn() } }));
+vi.mock("./api", () => ({ api: { workflowSummaries: vi.fn(), workflow: vi.fn(), workflows: vi.fn(), workflowFamilies: vi.fn() } }));
 vi.mock("./CustomNodesPanel", () => ({ CustomNodesPanel: () => null }));
 vi.mock("./RegistryInstallsPanel", () => ({ RegistryInstallsPanel: () => null }));
 vi.mock("./WorkflowRevisionReviewPanel", () => ({ WorkflowRevisionReviewPanel: () => null }));
@@ -34,6 +35,7 @@ function show() {
 }
 beforeEach(() => {
   vi.resetAllMocks();
+  mockWorkflowReadsFromFixture(() => api.workflows());
   vi.mocked(api.workflows).mockResolvedValue([workflow("a"), workflow("b"), workflow("c")]);
 });
 afterEach(() => { cleanup(); clients.splice(0).forEach((client) => client.clear()); });
@@ -52,7 +54,7 @@ it("requests dependency summaries and finds a family by a current dependency nam
   expect(screen.getByRole("heading", { name: "Family a" })).toBeInTheDocument();
   expect(screen.queryByRole("heading", { name: "Family b" })).not.toBeInTheDocument();
   fireEvent.click(screen.getByText("Workflow a"));
-  expect(screen.getByRole("button", { name: "New revision" })).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "New revision" })).toBeInTheDocument();
 });
 
 it("shows exact empty and single-dependency counts without treating an unknown summary as empty", async () => {

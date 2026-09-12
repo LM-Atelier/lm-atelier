@@ -90,6 +90,9 @@ import type {
   WorkflowBundle,
   WorkflowAssetReview,
   WorkflowPackageAnalysis,
+  WorkflowRevisionChoice,
+  WorkflowRevisionSchema,
+  WorkflowSummary,
   WorkflowRevision,
   WorkflowRevisionReview,
   WorkflowEditorDraft,
@@ -1023,6 +1026,21 @@ export const api = {
       `/api/workflow-revisions/${encodeURIComponent(revisionId)}/output-geometry/resolve`,
       { method: "POST", body: JSON.stringify(geometry) },
     ),
+  workflowSummaries: () => request<WorkflowSummary[]>("/api/workflow-summaries"),
+  workflow: (id: string, signal?: AbortSignal) =>
+    request<Workflow>("/api/workflows/" + encodeURIComponent(id), { signal }).then((value) => {
+      if (value.id !== id) throw new Error("The selected workflow could not be read.");
+      return value;
+    }),
+  workflowRevisionChoices: (signal?: AbortSignal) =>
+    request<WorkflowRevisionChoice[]>("/api/workflow-revision-choices", { signal }),
+  workflowRevisionSchema: (revisionId: string, signal?: AbortSignal) =>
+    request<WorkflowRevisionSchema>(
+      "/api/workflow-revisions/" + encodeURIComponent(revisionId) + "/settings-schema", { signal },
+    ).then((value) => {
+      if (value.revision_id !== revisionId) throw new Error("The selected workflow settings could not be read.");
+      return value;
+    }),
   workflowFamily: (familyId: string) =>
     request<WorkflowFamily>(`/api/workflow-families/${encodeURIComponent(familyId)}`),
   updateWorkflowFamily: (familyId: string, changes: WorkflowFamilyUpdate) =>

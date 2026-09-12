@@ -1,15 +1,15 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { api, ApiError } from "./api";
-import { readPriorTurnEditDraft } from "./priorTurnEditDraft";
+import { initializePriorTurnEditDraft, readPriorTurnEditDraft, writePriorTurnEditDraft } from "./priorTurnEditDraft";
 import { PriorTurnEditor } from "./PriorTurnEditor";
 import type { ChatDetail, EngineCapabilities, GenerationPreset, PriorTurnEditSource, SettingField } from "./types";
 
 vi.mock("./api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./api")>();
   return { ...actual, api: { ...actual.api,
-    workflowFamilies: vi.fn(), chatWorkflowSelections: vi.fn(), projectWorkflowSelections: vi.fn(),
+    workflowRevisionChoices: vi.fn(), workflowRevisionSchema: vi.fn(), workflowFamilies: vi.fn(), chatWorkflowSelections: vi.fn(), projectWorkflowSelections: vi.fn(),
     classifyDraft: vi.fn(), references: vi.fn(), modelAssets: vi.fn(),
     getPriorTurnEditSource: vi.fn(), queueEditedMessage: vi.fn(), updateChat: vi.fn(),
   } };
@@ -42,6 +42,7 @@ const presets: GenerationPreset[] = [{ id: "preset-scene", name: "Scene today", 
 const onAccepted = vi.fn();
 const clients: QueryClient[] = [];
 beforeEach(() => {
+  vi.mocked(api.workflowRevisionChoices).mockResolvedValue([]);
   localStorage.clear();
   vi.mocked(api.workflowFamilies).mockResolvedValue([]);
   vi.mocked(api.chatWorkflowSelections).mockResolvedValue([]);
@@ -56,7 +57,7 @@ async function mount() {
   clients.push(client);
   const mounted = render(<QueryClientProvider client={client}>
     <PriorTurnEditor chat={chat} messageId={source.source_user_message_id} engines={[engine]} profiles={[]}
-      workflows={[]} presets={presets} maxMediaOutputsPerPlan={4} onAccepted={onAccepted} onClose={vi.fn()} />
+      presets={presets} maxMediaOutputsPerPlan={4} onAccepted={onAccepted} onClose={vi.fn()} />
   </QueryClientProvider>);
   await screen.findByRole("textbox", { name: "Message" });
   fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
@@ -258,4 +259,66 @@ it("does not ask again or make a third submission when the confirmed retry is re
   expect(api.queueEditedMessage).toHaveBeenCalledTimes(2);
   expect(screen.queryByRole("button", { name: "Start video" })).not.toBeInTheDocument();
   expect(onAccepted).not.toHaveBeenCalled();
+});
+
+it.each(["text_to_image", "image_to_image"])(
+  "loads the chosen historical %s schema and preserves the original snapshot",
+  async (operation) => {
+    vi.mocked(api.getPriorTurnEditSource).mockResolvedValue({ ...structuredClone(source),
+      workflow_schema: { properties: { width: { type: "integer", title: "Original width" } } },
+    });
+    vi.mocked(api.workflowRevisionChoices).mockResolvedValue([1, 2].map((version) => ({
+      revision_id: "history-r" + version, workflow_id: "history", workflow_name: "Example history",
+      operation, version,
+    })));
+    vi.mocked(api.workflowRevisionSchema).mockResolvedValue({
+      revision_id: "history-r1", workflow_id: "history", operation,
+      input_schema_json: { properties: { width: { type: "integer", title: "Historical width" } } },
+    });
+    await mount();
+    expect(screen.getByRole("spinbutton", { name: "Original width" })).toHaveValue(640);
+    expect(api.workflowRevisionSchema).not.toHaveBeenCalled();
+    await screen.findByRole("option", { name: "Example history · version 1" });
+    expect(screen.getByRole("option", { name: "Example history · version 2" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Workflow for this version"), { target: { value: "revision:history-r1" } });
+    await screen.findByRole("spinbutton", { name: "Historical width" });
+    expect(api.workflowRevisionSchema).toHaveBeenCalledTimes(1);
+    expect(api.workflowRevisionSchema).toHaveBeenCalledWith("history-r1", expect.any(AbortSignal));
+    fireEvent.change(screen.getByLabelText("Workflow for this version"), { target: { value: "inherit" } });
+    expect(screen.getByRole("spinbutton", { name: "Original width" })).toHaveValue(640);
+    expect(api.workflowRevisionSchema).toHaveBeenCalledTimes(1);
+  },
+);
+
+it.each(["loading", "failed", "missing"])("keeps the pinned revision visible when choices are %s", async (state) => {
+  const choice = { kind: "explicit" as const, value: { selector_capability: "image" as const,
+    mode: "revision" as const, workflow_revision_id: "history-r1" } };
+  writePriorTurnEditDraft({ ...initializePriorTurnEditDraft(structuredClone(source)), workflowChoice: choice });
+  let finish!: (choices: Awaited<ReturnType<typeof api.workflowRevisionChoices>>) => void;
+  if (state === "loading") vi.mocked(api.workflowRevisionChoices).mockReturnValue(
+    new Promise(resolve => { finish = resolve; }));
+  else if (state === "failed") vi.mocked(api.workflowRevisionChoices).mockRejectedValue(new Error("neutral choices unavailable"));
+  vi.mocked(api.workflowRevisionSchema).mockResolvedValue({
+    revision_id: "history-r1", workflow_id: "history", operation: "text_to_image", input_schema_json: {},
+  });
+  await mount();
+  if (state === "failed") await screen.findByText("Workflow choices or settings could not be loaded.");
+  const select = screen.getByLabelText<HTMLSelectElement>("Workflow for this version");
+  expect(select).toHaveValue("revision:history-r1");
+  await waitFor(() => expect(select.selectedOptions[0].textContent).toBe(state === "loading"
+    ? "Selected workflow (loading details…)" : "Selected workflow (details unavailable)"));
+  expect(readPriorTurnEditDraft(chat.id, source.source_user_message_id)?.workflowChoice).toEqual(choice);
+  if (state !== "missing") {
+    const choices = [{ revision_id: "history-r1", workflow_id: "history",
+      workflow_name: "Example history", operation: "text_to_image", version: 1 }];
+    if (state === "loading") await act(async () => finish(choices));
+    else {
+      vi.mocked(api.workflowRevisionChoices).mockResolvedValue(choices);
+      fireEvent.click(screen.getByRole("button", { name: "Retry workflow reads" }));
+    }
+    await screen.findByRole("option", { name: "Example history · version 1" });
+    expect(select).toHaveValue("revision:history-r1");
+    expect(select.selectedOptions[0].textContent?.trim()).toBe("Example history · version 1");
+  }
+  expect((await submit()).workflow_selection).toEqual(choice.value);
 });
