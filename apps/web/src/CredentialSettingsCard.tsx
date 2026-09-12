@@ -29,11 +29,15 @@ export function CredentialSettingsCard({
     onSuccess: (value) => {
       setToken("");
       client.setQueryData(["credential", provider], value);
+      if (provider === "crw") void client.invalidateQueries({ queryKey: ["web-search"] });
     },
   });
   const removeCredential = useMutation({
     mutationFn: () => api.deleteCredentialToken(provider),
-    onSuccess: (value) => client.setQueryData(["credential", provider], value),
+    onSuccess: (value) => {
+      client.setQueryData(["credential", provider], value);
+      if (provider === "crw") void client.invalidateQueries({ queryKey: ["web-search"] });
+    },
   });
   const status = credential.data?.configured
     ? `Configured - ${credential.data.source.replace("credential_vault", "credential vault")}`

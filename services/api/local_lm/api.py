@@ -454,6 +454,10 @@ from .schemas import (
     TurnAccepted,
     TurnRequest,
     VerifiedSetup,
+    WebSearchConfiguration,
+    WebSearchDecisionRequest,
+    WebSearchEditRequest,
+    WebSearchOut,
     WorkerLogLocation,
     WorkerLogTail,
     WorkerResetResult,
@@ -543,6 +547,10 @@ from .user_queue_activity import (
 )
 from .verified_setup import build_verified_setup, resolve_verified_setup
 from .video_length import video_length_reaches_graph, workflow_video_length
+from .web_search import WebSearchError
+from .web_search_configuration import configured_search_provider, search_provider_revision
+from .web_search_consent import SearchConsentConflict, decide_search, replace_search_proposal
+from .web_search_projection import chat_searches, search_for_run
 from .workflow_asset_aliases import (
     WorkflowAssetAliasError,
     materialize_workflow_asset_aliases,
@@ -754,7 +762,7 @@ def _refresh_credential_clients(
         services.settings.hf_token = token
         services.catalog.set_token(token)
         services.downloads.set_token(token)
-    else:
+    elif provider == "civitai":
         services.settings.civitai_token = token
         try:
             civitai_source = services.catalog_sources.get("civitai")
@@ -762,6 +770,8 @@ def _refresh_credential_clients(
             return
         if isinstance(civitai_source, CivitaiCatalog):
             civitai_source.set_token(token)
+    elif provider == "crw":
+        services.settings.crw_token = token
 
 
 @router.get("/credentials/{provider}", response_model=CredentialStatus)
@@ -797,6 +807,103 @@ async def delete_credential(provider: str, request: Request) -> CredentialStatus
         raise api_error(503, "credential-vault-unavailable", str(exc)) from exc
     _refresh_credential_clients(services, selected, None)
     return _credential_status(selected, request)
+
+
+@router.get("/web-search/configuration", response_model=WebSearchConfiguration)
+async def web_search_configuration(request: Request) -> WebSearchConfiguration:
+    settings = _services(request).settings
+    try:
+        provider = configured_search_provider(settings)
+    except WebSearchError:
+        return WebSearchConfiguration(
+            installation_enabled=settings.web_access_enabled,
+            configured=False,
+            error_code="search_provider_invalid",
+        )
+    return WebSearchConfiguration(
+        installation_enabled=settings.web_access_enabled,
+        configured=provider is not None,
+        provider_endpoint=provider.endpoint if provider else None,
+        error_code=None if provider else "search_not_configured",
+    )
+
+
+@router.post("/jobs/{job_id}/search/decision", response_model=WebSearchOut)
+async def decide_web_search(
+    job_id: str,
+    payload: WebSearchDecisionRequest,
+    request: Request,
+    session: ConversationSessionDep,
+) -> WebSearchOut:
+    try:
+        decision = decide_search(session, job_id, payload.revision, payload.action)
+    except SearchConsentConflict:
+        raise api_error(
+            409, "search-consent-conflict", "The search is no longer waiting for this decision."
+        ) from None
+    result = search_for_run(session, decision.run_id)
+    if result is None:
+        raise api_error(409, "search-consent-conflict", "The search is no longer available.")
+    services = _services(request)
+    services.orchestrator.resume_search(job_id)
+    await services.scheduler.publish_job(job_id)
+    await services.events.publish(
+        "web.search.changed",
+        decision.run_id,
+        {"job_id": job_id, "state": decision.state},
+    )
+    return result
+
+
+@router.put("/jobs/{job_id}/search", response_model=WebSearchOut)
+async def edit_web_search(
+    job_id: str,
+    payload: WebSearchEditRequest,
+    request: Request,
+    session: ConversationSessionDep,
+) -> WebSearchOut:
+    services = _services(request)
+    try:
+        provider = configured_search_provider(services.settings)
+        if provider is None:
+            raise api_error(
+                409, "search-not-configured", "Configure the search provider in Settings."
+            )
+        proposal = replace_search_proposal(
+            session,
+            job_id,
+            payload.revision,
+            query=payload.query,
+            provider_endpoint=provider.endpoint,
+            provider_revision=search_provider_revision(provider),
+            installation_enabled=services.settings.web_access_enabled,
+        )
+    except WebSearchError as exc:
+        code = (
+            "search-query-invalid"
+            if exc.code == "search_query_invalid"
+            else "search-provider-invalid"
+        )
+        message = (
+            "Use one line of visible text, without tabs or hidden control characters "
+            "(1 to 2,000 characters)."
+            if exc.code == "search_query_invalid"
+            else "The search provider configuration is invalid. Check Settings."
+        )
+        raise api_error(422, code, message) from None
+    except SearchConsentConflict:
+        raise api_error(
+            409, "search-consent-conflict", "The search is no longer waiting for an edit."
+        ) from None
+    result = search_for_run(session, proposal.run_id)
+    if result is None:
+        raise api_error(409, "search-consent-conflict", "The search is no longer available.")
+    await services.events.publish(
+        "web.search.changed",
+        proposal.run_id,
+        {"job_id": job_id, "state": proposal.state},
+    )
+    return result
 
 
 @router.get("/system", response_model=SystemInfo)
@@ -1812,7 +1919,7 @@ async def create_chat(
 
 
 @router.get("/chats/{chat_id}", response_model=ChatDetail)
-async def get_chat(chat_id: str, session: ConversationSessionDep) -> Chat:
+async def get_chat(chat_id: str, session: ConversationSessionDep) -> ChatDetail:
     chat = session.scalar(
         select(Chat)
         .options(
@@ -1837,7 +1944,9 @@ async def get_chat(chat_id: str, session: ConversationSessionDep) -> Chat:
     )
     if not chat:
         raise api_error(404, "chat-not-found", "chat not found")
-    return chat
+    return ChatDetail.model_validate(chat).model_copy(
+        update={"web_searches": chat_searches(session, chat_id)}
+    )
 
 
 @router.put("/messages/{message_id}/feedback", response_model=ResponseFeedbackOut)
@@ -3094,6 +3203,8 @@ async def update_chat(
     if not chat or chat.scope != STANDARD_CHAT_SCOPE:
         raise api_error(404, "chat-not-found", "chat not found")
     values = payload.model_dump(exclude_unset=True, mode="json")
+    if "web_settings_json" in values and values["web_settings_json"] is None:
+        raise api_error(422, "web-settings-invalid", "Web permissions must be an object.")
     await _validate_generation_defaults(request, session, values)
     if (
         "project_id" in values

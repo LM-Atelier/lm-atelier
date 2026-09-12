@@ -294,10 +294,13 @@ def build_services(settings: Settings) -> Services:
         environment_tokens={
             "huggingface": settings.hf_token,
             "civitai": settings.civitai_token,
-        }
+            "crw": settings.crw_token,
+        },
+        service=settings.credential_namespace,
     )
     settings.hf_token = credentials.token("huggingface")
     settings.civitai_token = credentials.token("civitai")
+    settings.crw_token = credentials.token("crw")
     events = EventBroker(settings.event_history_size)
     artifacts = ArtifactStore(settings)
     runtimes = RuntimeProvisioner(settings)

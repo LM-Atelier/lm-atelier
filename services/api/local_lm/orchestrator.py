@@ -11,6 +11,7 @@ import time
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlparse
@@ -210,7 +211,7 @@ from .visual_prompt_compiler import (
     compile_visual_prompt,
     visual_prompt_compilation_eligibility,
 )
-from .web_access import may_fetch_urls
+from .web_access import may_fetch_urls, may_search
 from .web_lookup import choose_from_conversation, source_message
 from .web_retrieval import (
     REQUEST_HEADERS,
@@ -218,6 +219,23 @@ from .web_retrieval import (
     WebRetrievalError,
     fetch_source,
 )
+from .web_search import SearchResults, WebSearchError, search_crw
+from .web_search_configuration import configured_search_provider, search_provider_revision
+from .web_search_consent import (
+    SearchConsentConflict,
+    approve_scheduled_search,
+    cancel_pending_search,
+    finish_search,
+    pause_for_search,
+    pending_search,
+    prepare_search_dispatch,
+    recover_search_dispatches,
+    resumable_search_run,
+    retain_search_wait,
+    scheduled_search_jobs,
+    search_result_for_answer,
+)
+from .web_search_decision import propose_search, search_results_message
 from .work_plans import plan_status_summary, refresh_plan_status
 from .workflow_activations import (
     WorkflowActivationError,
@@ -525,6 +543,8 @@ class ConversationOrchestrator:
         self._closing = False
 
     def recover_interrupted(self) -> None:
+        with self.session_factory() as session:
+            recover_search_dispatches(session)
         queued: list[tuple[str, str | None]] = []
         with self.session_factory() as session:
             # Turn-creation claims only live while one API process is planning.
@@ -644,6 +664,10 @@ class ConversationOrchestrator:
             session.commit()
         for job_id, run_id in queued:
             self.start(job_id, run_id)
+        with self.session_factory() as session:
+            scheduled = scheduled_search_jobs(session)
+        for job_id in scheduled:
+            self.resume_search(job_id)
 
     async def create_turn(
         self,
@@ -3062,6 +3086,83 @@ class ConversationOrchestrator:
         self._tasks[job_id] = task
         task.add_done_callback(lambda finished: self._task_done(job_id, finished))
 
+    def resume_search(self, job_id: str) -> None:
+        """Resume committed consent after the pausing task releases its scope."""
+        if self._closing:
+            return
+        previous = self._tasks.get(job_id)
+
+        def start_when_released(_finished: asyncio.Task[None] | None = None) -> None:
+            if self._closing:
+                return
+            current = self._tasks.get(job_id)
+            if current is not None and not current.done():
+                return
+            with self.session_factory() as session:
+                run_id = resumable_search_run(session, job_id)
+            if run_id is not None:
+                task = asyncio.create_task(
+                    self._resume_search_execution(job_id, run_id),
+                    name=f"local-lm-search-{job_id}",
+                )
+                self._tasks[job_id] = task
+                task.add_done_callback(lambda finished: self._task_done(job_id, finished))
+
+        if previous is not None and not previous.done():
+            previous.add_done_callback(start_when_released)
+        else:
+            start_when_released()
+
+    async def _wait_for_search_dispatch(self, deadline: datetime) -> None:
+        """Wait without a database transaction or a generation lease."""
+        await asyncio.sleep(max(0.0, (deadline - utcnow()).total_seconds()))
+
+    async def _resume_search_execution(self, job_id: str, run_id: str) -> None:
+        # Existing admitted work can still drain after stop_admission. close
+        # owns and cancels this task through the ordinary task registry.
+        while not self._closing:
+            with self.session_factory() as session:
+                proposal = pending_search(session, job_id)
+            if proposal is None:
+                return
+            if proposal.state != "scheduled":
+                break
+            if proposal.dispatch_after is None:
+                return
+            await self._wait_for_search_dispatch(proposal.dispatch_after)
+            if self._closing:
+                return
+            try:
+                provider = configured_search_provider(self.engines.settings)
+            except WebSearchError:
+                provider = None
+            try:
+                with self.session_factory() as session:
+                    updated = approve_scheduled_search(
+                        session,
+                        job_id,
+                        proposal.revision,
+                        provider_endpoint=provider.endpoint if provider else None,
+                        provider_revision=search_provider_revision(provider) if provider else None,
+                        installation_enabled=self.engines.settings.web_access_enabled,
+                    )
+            except SearchConsentConflict:
+                # A command won while the timer slept. Read its committed
+                # outcome; the timer never restores its own earlier approval.
+                continue
+            if updated.state != "scheduled":
+                await self.events.publish(
+                    "web.search.changed",
+                    run_id,
+                    {"job_id": job_id, "state": updated.state},
+                )
+        if self._closing:
+            return
+        with self.session_factory() as session:
+            current_run = resumable_search_run(session, job_id)
+        if current_run == run_id:
+            await self._execute_after_preempting_verification(job_id, run_id)
+
     async def _execute_after_preempting_verification(
         self,
         job_id: str,
@@ -3115,6 +3216,7 @@ class ConversationOrchestrator:
     def prepare_retry(self, session: Session, run: Run) -> None:
         """Reset the existing assistant slot before dispatching a retry."""
 
+        cancel_pending_search(session, run)
         message = session.get(Message, run.assistant_message_id)
         if not message:
             raise LookupError("run assistant message not found")
@@ -3650,12 +3752,26 @@ class ConversationOrchestrator:
                 chat_settings=getattr(chat, "web_settings_json", None),
             )
 
+        paused_for_search, search_results = await self._search_before_answer(
+            messages,
+            job_id,
+            run_id,
+            claim,
+            tool_calling_available=tool_calling_available,
+        )
+        if paused_for_search:
+            return
+
         # Retrieval runs with no session held. A fetch may take the whole
         # timeout, and a database session open across it blocks every other
         # writer for that long.
         web_source = (
             await self._read_linked_page(messages, run_id, job_id, claim) if web_allowed else None
         )
+        # Offer search results only after URL selection has finished. Their
+        # addresses cannot become an implicit request to fetch another page.
+        if search_results is not None:
+            messages.append(search_results_message(search_results))
 
         with self.session_factory() as session:
             run = session.get(Run, run_id)
@@ -3878,6 +3994,144 @@ class ConversationOrchestrator:
                 "assistant_message_id": completed_assistant_id,
             },
         )
+
+    async def _publish_search_change(self, job_id: str, run_id: str, state: str) -> None:
+        await self.scheduler.publish_job(job_id)
+        await self.events.publish(
+            "web.search.changed",
+            run_id,
+            {"job_id": job_id, "state": state},
+        )
+
+    async def _search_before_answer(
+        self,
+        messages: list[dict[str, Any]],
+        job_id: str,
+        run_id: str,
+        claim: JobClaim,
+        *,
+        tool_calling_available: bool,
+    ) -> tuple[bool, SearchResults | None]:
+        with self.session_factory() as session:
+            proposal = pending_search(session, job_id)
+            run = session.get(Run, run_id)
+            chat = session.get(Chat, run.chat_id) if run else None
+            enabled = may_search(
+                installation_enabled=self.engines.settings.web_access_enabled,
+                chat_settings=chat.web_settings_json if chat else None,
+            )
+        try:
+            provider = configured_search_provider(self.engines.settings)
+        except WebSearchError:
+            provider = None
+        if proposal is None:
+            if not enabled or not tool_calling_available or provider is None:
+                return False, None
+            latest_content = next(
+                (
+                    message.get("content")
+                    for message in reversed(messages)
+                    if message.get("role") == "user"
+                ),
+                None,
+            )
+            if isinstance(latest_content, str):
+                user_text = latest_content
+            elif isinstance(latest_content, list):
+                user_text = "\n".join(
+                    part["text"]
+                    for part in latest_content
+                    if isinstance(part, dict)
+                    and part.get("type") == "text"
+                    and isinstance(part.get("text"), str)
+                )
+            else:
+                user_text = ""
+            await self._require_phase(job_id, run_id, "Considering a web search", claim)
+            requested = await propose_search(
+                self.engines.chat,
+                enabled=True,
+                text=user_text,
+                run_id=run_id,
+                persistence_scope=self.persistence_scope,
+                scope_id=self.scope_id,
+            )
+            if requested is None:
+                return False, None
+            # The model decision awaited; bind the displayed proposal to the
+            # current provider, and let the transaction recheck chat permission.
+            try:
+                provider = configured_search_provider(self.engines.settings)
+                if provider is None:
+                    return False, None
+                with self.session_factory() as session:
+                    proposal = pause_for_search(
+                        session,
+                        job_id,
+                        claim,
+                        query=requested.query,
+                        provider_endpoint=provider.endpoint,
+                        provider_revision=search_provider_revision(provider),
+                        installation_enabled=self.engines.settings.web_access_enabled,
+                    )
+            except (WebSearchError, SearchConsentConflict):
+                if not self._claim_still_owns(job_id, claim):
+                    raise ClaimLost("Search preparation lost execution ownership.") from None
+                return False, None
+            await self._publish_search_change(job_id, run_id, proposal.state)
+            if proposal.state == "scheduled":
+                self.resume_search(job_id)
+            return True, None
+
+        try:
+            if proposal.state in ("awaiting_approval", "scheduled"):
+                with self.session_factory() as session:
+                    proposal = retain_search_wait(session, job_id, proposal.revision, claim)
+                await self._publish_search_change(job_id, run_id, proposal.state)
+                if proposal.state == "scheduled":
+                    self.resume_search(job_id)
+                return True, None
+            if proposal.state != "approved":
+                with self.session_factory() as session:
+                    result = search_result_for_answer(session, job_id, proposal.revision, claim)
+                return False, result
+            with self.session_factory() as session:
+                proposal = prepare_search_dispatch(
+                    session,
+                    job_id,
+                    proposal.revision,
+                    claim,
+                    provider_endpoint=provider.endpoint if provider else None,
+                    provider_revision=search_provider_revision(provider) if provider else None,
+                    installation_enabled=self.engines.settings.web_access_enabled,
+                )
+            await self._publish_search_change(job_id, run_id, proposal.state)
+            if proposal.state == "awaiting_approval":
+                return True, None
+            if proposal.state != "dispatching" or provider is None:
+                return False, None
+            await self._require_phase(job_id, run_id, "Searching the web", claim)
+            result = None
+            error_code = None
+            try:
+                result = await search_crw(provider, proposal.query)
+            except WebSearchError as refused:
+                error_code = refused.code
+            except Exception:
+                error_code = "search_unavailable"
+            with self.session_factory() as session:
+                outcome = finish_search(
+                    session,
+                    job_id,
+                    proposal.revision,
+                    claim,
+                    results=result,
+                    error_code=error_code,
+                )
+            await self._publish_search_change(job_id, run_id, outcome.state)
+            return False, result
+        except SearchConsentConflict:
+            raise ClaimLost("Search execution lost its current proposal or ownership.") from None
 
     async def _read_linked_page(
         self,
@@ -7289,6 +7543,7 @@ class ConversationOrchestrator:
                     job_id,
                 )
                 return
+            cancel_pending_search(session, run)
             run.status = RunStatus.FAILED.value
             run.error = error
             run.completed_at = now
@@ -7639,6 +7894,7 @@ class ConversationOrchestrator:
         run = session.get(Run, job.run_id)
         if not run:
             return
+        cancel_pending_search(session, run)
         run.status = RunStatus.CANCELLED.value
         run.completed_at = now
         self._set_work_status(session, run, JobStatus.CANCELLED.value)

@@ -5,6 +5,8 @@ import {
   type ArtifactLibraryFilters,
 } from "./artifactLibraryPage";
 import type {
+  WebSearch,
+  WebSearchConfiguration,
   StudioCapabilityReport,
   ApplicationInfo,
   AppEvent,
@@ -307,6 +309,13 @@ type WorkflowCreateInput = WorkflowRevisionInput & Pick<
 >;
 
 export const api = {
+  searchConfiguration: () => request<WebSearchConfiguration>("/api/web-search/configuration"),
+  decideSearch: (jobId: string, revision: number, action: "approve" | "decline" | "cancel") =>
+    request<WebSearch>("/api/jobs/" + encodeURIComponent(jobId) + "/search/decision",
+      { method: "POST", body: JSON.stringify({ revision, action }) }),
+  editSearch: (jobId: string, revision: number, query: string) =>
+    request<WebSearch>("/api/jobs/" + encodeURIComponent(jobId) + "/search",
+      { method: "PUT", body: JSON.stringify({ revision, query }) }),
   initialize: ensureSession,
   setupReadiness: () => request<SetupReadinessReport>("/api/setup/readiness"),
   verifySetupRole: (role: SetupVerification["role"]) =>

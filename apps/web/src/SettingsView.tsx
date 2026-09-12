@@ -5,6 +5,7 @@ import { api } from "./api";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { CopyTextButton } from "./CopyTextButton";
 import { SettingControl } from "./SettingControl";
+import { WebSearchSettings } from "./WebSearchSettings";
 import { CredentialSettingsCard } from "./CredentialSettingsCard";
 import { DownloadDiagnosticsButton } from "./DownloadDiagnosticsButton";
 import { ErrorCallout } from "./ErrorCallout";
@@ -351,6 +352,7 @@ export function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
         environmentVariable="LOCAL_LM_CIVITAI_TOKEN"
         placeholder="CivitAI API token"
       />
+      <WebSearchSettings />
       <section><h2>Engines</h2><div className="engine-grid">{engines.map((engine) => <article className="engine-card" key={`${engine.engine}:${engine.roles.join()}`}><header><div className="model-icon"><Cpu /></div><div><h3>{engine.engine}</h3><p>{engine.roles.join(" · ")} · {engine.version}</p></div><StatusDot healthy={engine.healthy} label={`${engine.engine} engine`} /></header>{engine.roles.includes("chat") && <div className="capability-list"><button className="secondary compact-button" onClick={() => toolProbe.mutate()} disabled={toolProbe.isPending}>{toolProbe.isPending ? "Testing…" : "Test structured tools"}</button></div>}</article>)}</div>{toolProbe.data && <div className={`callout ${toolProbe.data.passed ? "success" : "error"}`} role={toolProbe.data.passed ? "status" : "alert"}>{toolProbe.data.passed ? `Structured tool schema passed on ${toolProbe.data.engine} ${toolProbe.data.version}.` : `Structured tool schema failed: ${toolProbe.data.error || "unknown response"}`}</div>}{toolProbe.error && <ErrorCallout message={toolProbe.error.message} />}<div className="runtime-setup-grid">{runtimes.data?.map((runtime) => <RuntimeSetupCard key={runtime.engine} runtime={runtime} installPending={installRuntime.isPending} onInstall={(engine) => installRuntime.mutate(engine)} />)}</div>{(runtimes.error || installRuntime.error) && <ErrorCallout message={(runtimes.error || installRuntime.error)?.message} />}</section>
       <section><h2>Machine</h2>{system.data && <div className="metric-grid"><div className="cpu-metric"><Cpu /><span><strong>{system.data.cpu_model}</strong><small>CPU model</small></span></div><div><HardDrive /><span><strong>{formatBytes(system.data.disk_free_bytes)}</strong> disk free</span></div></div>}<div className="device-list">{system.data?.devices.filter((device) => device.kind !== "cpu").map((device) => <div key={device.id}><span className="device-icon"><Cpu size={18} /></span><span><strong>{device.name}</strong><small>{device.backend}</small></span></div>)}</div></section>
       <section>

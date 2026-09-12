@@ -146,6 +146,39 @@ Images and video appear in the conversation, with queue progress while generatio
 runs. Output count and seed controls let you vary a request. Generation speed and
 supported sizes depend on the selected model, workflow, and hardware.
 
+### Read links and search the web
+
+Web access starts off. To make it available, set
+`LOCAL_LM_WEB_ACCESS_ENABLED=true` in the application's launch environment and
+restart it. Keeping this value false prevents both link reading and search;
+chat settings cannot override it.
+
+Search uses a separately configured [CRW service](https://docs.fastcrw.com/).
+Set `LOCAL_LM_CRW_ENDPOINT` to its HTTPS address, or to an HTTP address with a
+loopback IP such as `http://127.0.0.1:3000` for your own local service. LM Atelier
+does not install or start that service. **Settings > Web search** shows the
+configured address and connection setup. If the service needs a token, save it
+under **CRW access**; it uses the operating-system credential vault.
+`LOCAL_LM_CRW_TOKEN` is an optional environment override.
+
+Open **Web access** beneath a chat's title. **Read links I include in messages**
+and **Allow web searches** are separate permissions. A model that supports
+structured tools can propose a search when it would help answer the message.
+The chat shows the exact query and provider. Edit and **Save query** if needed,
+then choose **Search**, or **Continue without search**.
+
+**Allow searches without asking again** applies only to that chat. Each proposed
+query is still shown and waits five seconds before dispatch, with **Cancel
+search** available. Changing the provider or account requires fresh approval.
+Once a request has been sent, stopping the response can interrupt local work
+but cannot retract the query from the provider.
+
+Results supply titles, links and short excerpts for the answer; pages are not
+opened automatically. **Add source to message** puts a chosen address into your
+draft without sending it. Send that message with link reading enabled if you
+want the model to consider reading the page. An interrupted request is never
+resent automatically.
+
 ### Watch accepted work
 
 Choose **View accepted work** in the Jobs panel to see active generation, transfers,

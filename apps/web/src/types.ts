@@ -196,6 +196,7 @@ export interface Chat {
 
 export interface ChatDetail extends Chat {
   messages: Message[];
+  web_searches?: WebSearch[];
 }
 export interface PromptHelperDetail extends ChatDetail {
   draft_prompt: string;
@@ -1359,9 +1360,11 @@ export interface ApplicationInfo {
 
 export interface WebSettings {
   allow_url_fetch: boolean;
+  allow_search: boolean;
+  allow_search_without_asking: boolean;
 }
 
-export type CredentialProvider = "huggingface" | "civitai";
+export type CredentialProvider = "huggingface" | "civitai" | "crw";
 
 export interface CredentialStatus {
   provider: CredentialProvider;
@@ -2047,4 +2050,38 @@ export interface ReferenceDeletionImpact {
   name: string;
   asset_count: number;
   exclusive_artifact_ids: string[];
+}
+
+
+export interface WebSearchResult {
+  url: string;
+  title: string;
+  snippet: string;
+}
+
+export interface WebSearch {
+  run_id: string;
+  assistant_message_id: string;
+  job_id: string | null;
+  revision: number | null;
+  state: "awaiting_approval" | "scheduled" | "approved" | "declined" | "cancelled" | "dispatching" | "complete" | "failed" | "uncertain";
+  query: string;
+  provider: "CRW";
+  provider_endpoint: string;
+  dispatch_after: string | null;
+  results: WebSearchResult[];
+  result_count: number;
+  truncated: boolean;
+  error_code: "search_provider_invalid" | "search_query_invalid" | "search_credentials_refused"
+    | "search_redirect_refused" | "search_rate_limited" | "search_unavailable" | "search_timeout"
+    | "search_response_invalid" | "search_response_too_large" | "search_dispatch_uncertain"
+    | "search_permission_revoked" | "search_provider_changed" | "search_work_unavailable" | null;
+}
+
+export interface WebSearchConfiguration {
+  installation_enabled: boolean;
+  configured: boolean;
+  provider: "CRW";
+  provider_endpoint: string | null;
+  error_code: "search_not_configured" | "search_provider_invalid" | null;
 }

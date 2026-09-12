@@ -11,6 +11,21 @@ application data. Advanced source deployments may instead provide
 `LOCAL_LM_HF_TOKEN`; that value remains the operator's environment-secret
 responsibility.
 
+Optional web search sends the displayed query to your configured CRW service.
+It needs installation-wide web access and separate permission for the chat.
+By default each exact query needs approval; a chat can instead allow automatic
+searches after a visible five-second cancellation window. A changed destination
+or account requires fresh approval. Stopping a sent request cannot retract its
+query from the service.
+
+Search results are quoted evidence for the answer, and result pages are not
+opened automatically. Reading a link requires its separate chat permission and
+an address included in a user message. Search queries, provider addresses,
+results and outcomes are retained in local response history and may be included
+in database backups. Credentials are not stored in that history. Search tokens
+use the operating-system vault, or the optional `LOCAL_LM_CRW_TOKEN` environment
+override.
+
 The default data locations are:
 
 - Windows installer: `%LOCALAPPDATA%\LMAtelier\data`

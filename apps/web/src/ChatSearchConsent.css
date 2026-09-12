@@ -1,0 +1,14 @@
+.chat-search-consent { margin: 12px 0; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
+.chat-search-consent p { margin: 6px 0; }
+.chat-search-provider { overflow-wrap: anywhere; color: var(--muted); }
+.chat-search-query { display: grid; gap: 6px; margin: 10px 0; }
+.chat-search-query textarea { width: 100%; min-width: 0; resize: vertical; font: inherit; }
+.chat-search-query-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-search-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.chat-search-actions button[aria-disabled="true"] { opacity: .6; cursor: default; }
+.chat-search-results { display: grid; gap: 12px; padding-left: 20px; }
+.chat-search-results a, .chat-search-results p { overflow-wrap: anywhere; }
+
+.chat-search-formatting { min-width: 0; }
+.chat-search-formatting-preview { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; overflow-wrap: anywhere; }
+.chat-search-character { display: block; border: 1px solid var(--line-control); border-radius: 4px; padding: 1px 3px; margin: 0 2px; font-size: .875em; background: var(--surface-1); color: var(--ink-primary); }

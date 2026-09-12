@@ -307,3 +307,44 @@ describe("useLiveEvents expanded queue step reconciliation", () => {
     hook.unmount(); client.clear();
   });
 });
+
+describe("web search state refresh", () => {
+  it("refreshes visible consent and paused work from a content-free event", async () => {
+    handlers.length = 0;
+    const client = new QueryClient();
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const hook = renderHook(() => useLiveEvents(client, vi.fn()));
+    await act(async () => { await Promise.resolve(); });
+    act(() => handlers[0]!({
+      sequence: 1, type: "web.search.changed", entity_id: "chat-one",
+      payload: {}, created_at: "2026-09-11T00:00:00Z",
+    }));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["chat"] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["jobs"] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["work-plans"] });
+    hook.unmount();
+    client.clear();
+  });
+
+  it("refreshes provider configuration after a replay gap", async () => {
+    vi.useFakeTimers();
+    handlers.length = 0;
+    const client = new QueryClient();
+    const key = ["web-search", "configuration"];
+    client.setQueryData(key, { configured: false });
+    const hook = renderHook(() => useLiveEvents(client, vi.fn()));
+    try {
+      await act(async () => { await Promise.resolve(); });
+      act(() => handlers[0]!({
+        sequence: 1, type: "events.replay_gap", entity_id: null,
+        payload: {}, created_at: "2026-09-11T00:00:00Z",
+      }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      expect(client.getQueryState(key)?.isInvalidated).toBe(true);
+    } finally {
+      hook.unmount();
+      client.clear();
+      vi.useRealTimers();
+    }
+  });
+});
