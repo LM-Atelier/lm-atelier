@@ -327,6 +327,12 @@ function setupReport(...roles: SetupRoleReadiness[]): SetupReadinessReport {
 }
 
 afterEach(cleanup);
+/** Settings is destinations now, so a case must say which one it means. */
+async function openSettings(destination: string) {
+  fireEvent.click(await screen.findByText("Settings"));
+  fireEvent.click(screen.getByRole("button", { name: destination }));
+}
+
 describe("App", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -2270,7 +2276,7 @@ describe("App", () => {
         <App />
       </QueryClientProvider>,
     );
-    fireEvent.click(screen.getByText("Settings"));
+    await openSettings("Advanced");
     expect(await screen.findByText("Test CPU 9000")).toBeInTheDocument();
     expect(screen.getByText("CPU model")).toBeInTheDocument();
     expect(screen.queryByText(/logical processors/i)).not.toBeInTheDocument();
@@ -2305,7 +2311,7 @@ describe("App", () => {
       </QueryClientProvider>,
     );
 
-    fireEvent.click(await screen.findByText("Settings"));
+    await openSettings("Data & backups");
     expect(await screen.findByText(first.name)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: `Verify backup ${first.name}` }));
     expect(await screen.findByText("Backup verified.")).toBeInTheDocument();
@@ -2333,7 +2339,7 @@ describe("App", () => {
     );
     renderApp();
 
-    fireEvent.click(await screen.findByText("Settings"));
+    await openSettings("Data & backups");
     const create = await screen.findByRole("button", { name: "Back up state" });
     fireEvent.click(create);
     expect(await screen.findByRole("button", { name: "Backing up…" })).toBeDisabled();
@@ -2392,7 +2398,7 @@ describe("App", () => {
     });
     renderApp();
 
-    fireEvent.click(await screen.findByText("Settings"));
+    await openSettings("Advanced");
     expect(await screen.findByText("v0.28.0 · Manual setup required")).toBeInTheDocument();
     expect(
       screen.getByText(
@@ -2454,7 +2460,7 @@ describe("App", () => {
     });
     renderApp();
 
-    fireEvent.click(await screen.findByText("Settings"));
+    await openSettings("About & support");
     expect(await screen.findByText("Version 0.1.7")).toBeInTheDocument();
     expect(screen.getByText("C:\\Users\\someone\\LM Atelier\\data")).toBeInTheDocument();
     expect(screen.getByText("C:\\Users\\someone\\LM Atelier\\data\\artifacts")).toBeInTheDocument();
@@ -2516,7 +2522,7 @@ describe("App", () => {
         <App />
       </QueryClientProvider>,
     );
-    fireEvent.click(await screen.findByText("Settings"));
+    await openSettings("Model sources");
     const input = await screen.findByLabelText(`${label} access token`);
     fireEvent.change(input, { target: { value: "temporary-token" } });
     fireEvent.click(screen.getByRole("button", { name: `Save ${label} token` }));
@@ -3091,7 +3097,7 @@ describe("App", () => {
         <App />
       </QueryClientProvider>,
     );
-    fireEvent.click(await screen.findByText("Settings"));
+    await openSettings("Advanced");
     expect(await screen.findByText("Ready · PID 123")).toBeInTheDocument();
     expect(screen.getByText("current RAM")).toBeInTheDocument();
     expect(screen.getByText("measured peak")).toBeInTheDocument();
@@ -3129,7 +3135,7 @@ describe("App", () => {
       </QueryClientProvider>,
     );
 
-    fireEvent.click(await screen.findByText("Settings"));
+    await openSettings("Advanced");
     const alert = await screen.findByRole("alert");
     // The headline says what happened; the exit code is no longer the lead.
     expect(alert).toHaveTextContent("The chat engine could not read the selected model.");
@@ -3173,7 +3179,7 @@ describe("App", () => {
       </QueryClientProvider>,
     );
 
-    fireEvent.click(await screen.findByText("Settings"));
+    await openSettings("Advanced");
     // The ordinary controls stay refused while jobs are queued...
     expect(await screen.findByRole("button", { name: "Unload chat worker" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Restart chat worker" })).toBeDisabled();
@@ -3193,7 +3199,7 @@ describe("App", () => {
       </QueryClientProvider>,
     );
 
-    fireEvent.click(await screen.findByText("Settings"));
+    await openSettings("Advanced");
     const input = await screen.findByLabelText("Worker startup time limit in seconds");
     await waitFor(() => expect(input).toHaveValue(60));
     const save = screen.getByRole("button", { name: "Save limit" });
@@ -3228,7 +3234,7 @@ describe("App", () => {
         <App />
       </QueryClientProvider>,
     );
-    fireEvent.click(await screen.findByText("Settings"));
+    await openSettings("Advanced");
     fireEvent.click(await screen.findByText("Test structured tools"));
     expect(await screen.findByText("Structured tool schema passed on mock 1.")).toBeInTheDocument();
   });
@@ -3240,7 +3246,7 @@ describe("App", () => {
         <App />
       </QueryClientProvider>,
     );
-    fireEvent.click(await screen.findByText("Settings"));
+    await openSettings("Advanced");
     expect(await screen.findByRole("img", { name: "mock engine: ready" })).toBeInTheDocument();
     expect(screen.queryByText("Download redacted diagnostics")).not.toBeInTheDocument();
     expect(screen.queryByText("FFmpeg")).not.toBeInTheDocument();
@@ -6703,7 +6709,7 @@ describe("App", () => {
 
   it("offers CRW vault settings without enabling a chat or dispatching a search", async () => {
     renderApp();
-    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    await openSettings("Advanced");
     expect(await screen.findByRole("heading", { name: "Web search" })).toBeVisible();
     expect(await screen.findByLabelText("CRW access token")).toHaveAttribute("type", "password");
     expect(screen.getByText("Search provider: CRW at https://search.example.test")).toBeVisible();
