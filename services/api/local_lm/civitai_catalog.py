@@ -34,6 +34,13 @@ _SORTS = {
     "updated": "Newest",
     "compatible": "Most Downloaded",
 }
+# BOTH of these carry ComfyUI workflows and they do not overlap. The published
+# enums page documents only "Workflows"; "ComfyWorkflows" is live and absent
+# from it, so asking for the documented one alone silently returns a partial
+# library. Sent as repeated query parameters: the comma-joined form is refused
+# with HTTP 400, and the bracket form is accepted and then ignored, which
+# returns checkpoints and LoRAs as though the filter had never been applied.
+_WORKFLOW_TYPES = ("Workflows", "ComfyWorkflows")
 _MAX_RETRY_AFTER_SECONDS = 30.0
 _MAX_METADATA_VALUES = 128
 _NORMALIZATION_VERSION = 2
@@ -176,6 +183,67 @@ class CivitaiCatalog:
                 items=items,
                 next_cursor=self._next_cursor(payload),
             )
+            self._cache.write_text(cache_path, result.model_dump_json())
+            return result
+        except (httpx.HTTPError, ValueError, ValidationError) as error:
+            if not self._is_transient_error(error):
+                raise
+            stale = self._read_page_cache(
+                cache_path,
+                max_age_seconds=self._cache.policy.stale_seconds,
+            )
+            if stale is None:
+                raise
+            return stale.model_copy(update={"stale": True})
+
+    async def search_workflows(
+        self,
+        *,
+        query: str = "",
+        sort: str = "trending",
+        limit: int = 30,
+        cursor: str | None = None,
+    ) -> CatalogPage:
+        """Workflows from the same /models endpoint, under their own types.
+
+        CivitAI has no workflows resource; a workflow is a model whose type is
+        one of the two workflow types. So this shares the model search's
+        transport, cache policy and stale fallback, and differs only in what it
+        asks for and what it refuses to assume.
+
+        `primaryFileOnly` is deliberately NOT sent. It returns one file per
+        version, and for a workflow the file that matters is the graph, which is
+        not reliably the primary one - selecting it is a client-side choice over
+        the whole file list.
+        """
+
+        params: dict[str, Any] = {
+            "query": query or None,
+            "sort": _SORTS.get(sort, _SORTS["trending"]),
+            "limit": max(1, min(limit, 100)),
+            "nsfw": "false",
+            "types": list(_WORKFLOW_TYPES),
+        }
+        url = self._validated_workflow_cursor(cursor) if cursor else "/api/v1/models"
+        # A distinct first segment, so a workflow search and a model search with
+        # the same words can never read each other's cached page.
+        cache_path = self._cache_path("workflow-search", url, None if cursor else params)
+        cached = self._read_page_cache(
+            cache_path,
+            max_age_seconds=self._cache.policy.fresh_seconds,
+        )
+        if cached is not None:
+            return cached.model_copy(update={"stale": False})
+        try:
+            payload = await self._request_json(url, params=None if cursor else params)
+            items = [
+                self._normalize(item, None, version=version)
+                for item in self._items(payload)
+                if self._is_general_item(item)
+                for version in self._versions(item)
+                if self._is_general_version(version)
+            ]
+            result = CatalogPage(items=items, next_cursor=self._next_workflow_cursor(payload))
             self._cache.write_text(cache_path, result.model_dump_json())
             return result
         except (httpx.HTTPError, ValueError, ValidationError) as error:
@@ -627,6 +695,16 @@ class CivitaiCatalog:
         return selected
 
     def _next_cursor(self, payload: dict[str, Any]) -> str | None:
+        return self._continuation(payload, self._validated_cursor)
+
+    def _next_workflow_cursor(self, payload: dict[str, Any]) -> str | None:
+        return self._continuation(payload, self._validated_workflow_cursor)
+
+    @staticmethod
+    def _continuation(
+        payload: dict[str, Any],
+        validate: Callable[[str | None], str],
+    ) -> str | None:
         metadata = payload.get("metadata")
         if not isinstance(metadata, dict):
             return None
@@ -634,12 +712,23 @@ class CivitaiCatalog:
         if not candidate:
             return None
         try:
-            return self._validated_cursor(candidate)
+            return validate(candidate)
         except ValueError:
             return None
 
     @staticmethod
-    def _validated_cursor(cursor: str | None) -> str:
+    def _safe_cursor_query(cursor: str | None) -> dict[str, list[str]]:
+        """Where a continuation may point, regardless of what it asks for.
+
+        Origin, path and content-rating constraints are the same question for
+        every search: this URL came back in a response body, so it is only
+        followed when it still points at the endpoint we meant, over https, with
+        no credentials and no fragment. What the continuation FILTERS for is a
+        separate question, and each search answers it separately - a model
+        cursor and a workflow cursor are not interchangeable, and treating them
+        as one was a real defect rather than a theoretical one.
+        """
+
         if not cursor or len(cursor) > 2048:
             raise ValueError("CivitAI catalog cursor is invalid")
         parsed = urlparse(cursor)
@@ -653,10 +742,35 @@ class CivitaiCatalog:
             or parsed.path != "/api/v1/models"
             or parsed.fragment
             or query.get("nsfw") != ["false"]
-            or query.get("primaryFileOnly") != ["true"]
         ):
             raise ValueError("CivitAI catalog cursor is invalid")
-        return cursor
+        return query
+
+    @classmethod
+    def _validated_cursor(cls, cursor: str | None) -> str:
+        query = cls._safe_cursor_query(cursor)
+        if query.get("primaryFileOnly") != ["true"]:
+            raise ValueError("CivitAI catalog cursor is invalid")
+        return str(cursor)
+
+    @classmethod
+    def _validated_workflow_cursor(cls, cursor: str | None) -> str:
+        """A workflow continuation must still be asking the workflow question.
+
+        Two ways this goes wrong if the model policy is reused. A workflow
+        response's own nextPage carries no `primaryFileOnly`, so the model
+        policy rejects it and the page is silently truncated to its first page.
+        And a model cursor - one file per version, types=Checkpoint - satisfies
+        the model policy, so it would be followed here and answer a workflow
+        search with models.
+        """
+
+        query = cls._safe_cursor_query(cursor)
+        if sorted(query.get("types") or []) != sorted(_WORKFLOW_TYPES):
+            raise ValueError("CivitAI catalog cursor is invalid")
+        if "primaryFileOnly" in query:
+            raise ValueError("CivitAI catalog cursor is invalid")
+        return str(cursor)
 
     def _cache_path(self, *parts: Any) -> Path:
         payload = json.dumps(
