@@ -280,14 +280,28 @@ jobs:
           # The community feed returns 503 and 504 often enough to fail runs
           # on its own. The pinned version is what matters; how many attempts
           # it took to fetch it does not.
+          #
+          # The budget is deliberate rather than arbitrary. Four attempts with
+          # linear backoff covered ninety seconds, and on 2026-09-10 an outage
+          # outlasted it: every attempt failed inside 105 seconds, the step
+          # never reached the verification script, and a merge-group run was
+          # dequeued without a single test having run. These waits cover about
+          # seven minutes, which is an order of magnitude more outage for a
+          # cost paid only when the feed is actually down.
+          #
+          # Waiting is the right answer here rather than making the install
+          # optional: three tests in test_integrated_hardening.py drive the
+          # real video path and FAIL, not skip, without a working ffmpeg.
+          $waits = @(15, 30, 60, 120, 180)
           $attempt = 0
           while ($true) {
             $attempt++
             choco install ffmpeg --version 8.1.2 --yes --no-progress
             if ($LASTEXITCODE -eq 0) { break }
-            if ($attempt -ge 4) { throw "choco install ffmpeg failed after $attempt attempts." }
-            Write-Host "Attempt $attempt failed; retrying in $(15 * $attempt)s."
-            Start-Sleep -Seconds (15 * $attempt)
+            if ($attempt -gt $waits.Length) { throw "choco install ffmpeg failed after $attempt attempts." }
+            $wait = $waits[$attempt - 1]
+            Write-Host "Attempt $attempt failed; retrying in ${wait}s."
+            Start-Sleep -Seconds $wait
           }
       - name: Run repository verification
         run: .\scripts\verify.ps1
