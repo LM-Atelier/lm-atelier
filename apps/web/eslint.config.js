@@ -32,6 +32,12 @@ export default tseslint.config(
     },
   },
   {
+    files: ["src/App.tsx"],
+    rules: {
+      "max-lines": ["error", { max: 1458 }],
+    },
+  },
+  {
     // Test ceilings exist to stop unbounded drift, not to discourage coverage:
     // a cap that blocks adding a test is a cap pointed the wrong way. Raise
     // these when a change adds real cases; ratchet the source limits down.
