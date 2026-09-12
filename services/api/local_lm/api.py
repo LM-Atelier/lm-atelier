@@ -542,7 +542,7 @@ from .user_queue_activity import (
     list_queue_plan_steps,
 )
 from .verified_setup import build_verified_setup, resolve_verified_setup
-from .video_length import workflow_video_length
+from .video_length import video_length_reaches_graph, workflow_video_length
 from .workflow_asset_aliases import (
     WorkflowAssetAliasError,
     materialize_workflow_asset_aliases,
@@ -9038,6 +9038,7 @@ async def _persist_workflow(
         validate_workflow_edit_calibration(payload.input_schema)
         validate_workflow_input_schema(payload.input_schema)
         workflow_video_length(payload.input_schema)
+        video_length_reaches_graph(payload.api_graph, payload.input_schema)
     except ValueError as exc:
         raise api_error(422, "workflow-invalid", str(exc)) from exc
     definition = WorkflowDefinition(

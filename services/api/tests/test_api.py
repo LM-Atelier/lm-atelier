@@ -5136,7 +5136,10 @@ async def test_workflow_seconds_resolve_before_video_dispatch(
             "name": "Measured video window",
             "operation": "text_to_video",
             "engine": "mock",
-            "api_graph": {"node": {"class_type": "Mock"}},
+            # The stub graph now has to USE the frame count it declares: a
+            # workflow that declares a length contract and never consumes it is
+            # refused at creation, because the duration control would do nothing.
+            "api_graph": {"node": {"class_type": "Mock", "inputs": {"length": "${frames}"}}},
             "input_schema": {
                 "type": "object",
                 "properties": {
