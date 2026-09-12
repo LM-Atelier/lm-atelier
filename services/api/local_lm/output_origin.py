@@ -80,6 +80,20 @@ def stated_origin(node_id: object, output_type: object, collection: object) -> d
     }
 
 
+def names_a_preview(record: object) -> bool:
+    """Whether this record says the file is a throwaway the engine does not keep.
+
+    Only an ATTRIBUTED record can say so. An engine that named nothing, or a key
+    that arrived unusable, leaves us not knowing which part of the workflow wrote
+    the file - and treating "we do not know" as "it is a preview" would quietly
+    discard somebody's picture. Absence of evidence decides nothing here.
+    """
+
+    if not isinstance(record, Mapping):
+        return False
+    return record.get("state") == "attributed" and record.get("output_type") == "temp"
+
+
 def record_for(origin: object, engine: str) -> dict[str, Any]:
     """The record stored beside one produced file, or a named reason there is none.
 
