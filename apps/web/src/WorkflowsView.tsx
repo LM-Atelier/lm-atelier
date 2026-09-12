@@ -97,13 +97,20 @@ export function WorkflowsView() {
     setDownloadsQueued(false);
     setInstallReview({ offer, name });
   };
-  const workflows = useQuery({ queryKey: ["workflows"], queryFn: api.workflows });
+  const workflows = useQuery({ queryKey: ["workflows", "summaries"], queryFn: api.workflowSummaries });
   const families = useQuery({
     queryKey: ["workflow-families", "library", includeArchived, "dependencies"],
     queryFn: () => api.workflowFamilies(undefined, includeArchived, true),
   });
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const selected = workflows.data?.find((workflow) => workflow.id === selectedId) ?? null; const selectedFamily = families.data?.find((family) => family.variants.some((variant) => variant.id === selectedId));
+  const selectedDetail = useQuery({
+    queryKey: ["workflows", "detail", selectedId],
+    queryFn: ({ signal }) => api.workflow(selectedId ?? "", signal),
+    enabled: selectedId !== null,
+  });
+  const selected = !selectedDetail.error && selectedDetail.data?.id === selectedId
+    ? selectedDetail.data : null;
+  const selectedFamily = families.data?.find((family) => family.variants.some((variant) => variant.id === selectedId));
   const [archiveFamily, setArchiveFamily] = useState<WorkflowFamily | null>(null);
   const [selectedRevisionId, setSelectedRevisionId] = useState<string | null>(null);
   const [newOpen, setNewOpen] = useState(false);
@@ -144,7 +151,8 @@ export function WorkflowsView() {
   const save = useMutation({
     mutationFn: async () => {
       const revision = { engine_version: null, api_graph: JSON.parse(graph), ui_graph: JSON.parse(uiGraph), input_schema: JSON.parse(inputSchema), dependencies: JSON.parse(dependencies) };
-      if (editing && selected) {
+      if (editing) {
+        if (!selected) throw new Error("Reload workflow details before saving this revision.");
         // Two writes, and the second is the one that validates: a rejected
         // schema or dependency block used to leave a committed rename behind
         // while the dialog reported one failed save. Skipping the write that
@@ -323,6 +331,13 @@ export function WorkflowsView() {
       {(workflows.error || families.error) && (
         <ErrorCallout message={((workflows.error ?? families.error) as Error).message} />
       )}
+      {selectedDetail.error && (
+        <div>
+          <ErrorCallout message={selectedDetail.error.message} />
+          <button className="secondary compact-button" disabled={selectedDetail.isFetching}
+            onClick={() => void selectedDetail.refetch()}>Retry workflow details</button>
+        </div>
+      )}
       {(importError || clone.error || restore.error || exportBundle.error || downloadForComfy.error || nativeEditor.error || retrySubmission.error || retryDraft.error || popupError || validate.error) && <ErrorCallout message={(importError || clone.error || restore.error || exportBundle.error || downloadForComfy.error || nativeEditor.error || retrySubmission.error || retryDraft.error || popupError || validate.error)?.message} />}
       {packageReview && <WorkflowPackageReview analysis={packageReview.analysis} fileName={packageReview.fileName} uiGraph={packageReview.uiGraph} onImported={() => { closePackageReview(); refresh(); }} onClose={closePackageReview} />}
       {selected && (
@@ -350,6 +365,10 @@ export function WorkflowsView() {
               Open ComfyUI manually
             </a>
           )}
+        </div>
+      )}
+      {(editorPhase || pendingDraft || pendingSubmission || editorNotice) && (
+        <div className="storage-actions">
           {editorPhase && <span role="status" className="muted">{editorPhaseLabel[editorPhase]}</span>}
           {pendingDraft && editorRecoveryReady && (
             <button
@@ -427,7 +446,7 @@ export function WorkflowsView() {
             revisionId={selectedRevision.id}
           />
           {!viewingCurrentRevision && <p className="muted">Select the current revision to validate it.</p>}
-          <section className="workflow-input-section"><h3>Declared controls</h3><WorkflowControls schema={selectedRevision.input_schema_json} /></section><details open><summary>Executable graph</summary><pre>{JSON.stringify(selectedRevision.api_graph_json, null, 2)}</pre></details><details><summary>Dependencies</summary><pre>{JSON.stringify(selectedRevision.dependencies_json, null, 2)}</pre></details>{currentRevision && currentRevision.id !== selectedRevision.id && <WorkflowRevisionComparison key={selectedRevision.id + ":" + currentRevision.id} selected={selectedRevision} current={currentRevision} />}{verdict && <div className={`callout ${verdict.valid ? "success" : "error"}`} role={verdict.valid ? "status" : "alert"}>{verdict.valid ? "Workflow and declared dependencies are valid for the active media engine." : verdict.errors.join("\n")}{verdict.warnings.map((warning) => `\nWarning: ${warning}`)}</div>}</> : <EmptyState icon={<WorkflowIcon />} title="Select a workflow" body="Review its revision, inputs, dependencies, and validation." />}</div>
+          <section className="workflow-input-section"><h3>Declared controls</h3><WorkflowControls schema={selectedRevision.input_schema_json} /></section><details open><summary>Executable graph</summary><pre>{JSON.stringify(selectedRevision.api_graph_json, null, 2)}</pre></details><details><summary>Dependencies</summary><pre>{JSON.stringify(selectedRevision.dependencies_json, null, 2)}</pre></details>{currentRevision && currentRevision.id !== selectedRevision.id && <WorkflowRevisionComparison key={selectedRevision.id + ":" + currentRevision.id} selected={selectedRevision} current={currentRevision} />}{verdict && <div className={`callout ${verdict.valid ? "success" : "error"}`} role={verdict.valid ? "status" : "alert"}>{verdict.valid ? "Workflow and declared dependencies are valid for the active media engine." : verdict.errors.join("\n")}{verdict.warnings.map((warning) => `\nWarning: ${warning}`)}</div>}</> : selectedId && selectedDetail.isPending ? <p role="status">Loading workflow details…</p> : selectedDetail.error ? <p className="muted">Workflow details are unavailable.</p> : <EmptyState icon={<WorkflowIcon />} title="Select a workflow" body="Review its revision, inputs, dependencies, and validation." />}</div>
       </div>
       <RegistryInstallsPanel />
       <CustomNodesPanel />
@@ -446,8 +465,15 @@ export function WorkflowsView() {
           <label>UI workflow JSON<textarea rows={5} value={uiGraph} onChange={(event) => setUiGraph(event.target.value)} /></label>
           <label>Declared input schema JSON<textarea rows={6} value={inputSchema} onChange={(event) => setInputSchema(event.target.value)} /></label>
           <label>Dependencies JSON<textarea rows={5} value={dependencies} onChange={(event) => setDependencies(event.target.value)} /></label>
+          {editing && !selected && (
+            <div role="alert">
+              <p>Workflow details are unavailable. Your edits remain in this dialog.</p>
+              <button className="secondary compact-button" disabled={selectedDetail.isFetching}
+                onClick={() => void selectedDetail.refetch()}>Reload workflow details</button>
+            </div>
+          )}
           {save.error && <ErrorCallout message={save.error.message} />}
-          <footer><button className="secondary" onClick={() => setNewOpen(false)}>Cancel</button><button className="primary" disabled={!name.trim() || save.isPending} onClick={() => save.mutate()}>{save.isPending ? "Saving…" : editing ? "Create revision" : "Save workflow"}</button></footer>
+          <footer><button className="secondary" onClick={() => setNewOpen(false)}>Cancel</button><button className="primary" disabled={!name.trim() || save.isPending || (editing && !selected)} onClick={() => save.mutate()}>{save.isPending ? "Saving…" : editing ? "Create revision" : "Save workflow"}</button></footer>
         </AccessibleDialog>
       )}
     </div>

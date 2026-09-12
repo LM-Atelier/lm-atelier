@@ -503,13 +503,16 @@ from .schemas import (
     WorkflowPackageRequirementOut,
     WorkflowResourceConsumerOut,
     WorkflowResourceConsumersOut,
+    WorkflowRevisionChoiceOut,
     WorkflowRevisionCreate,
     WorkflowRevisionOut,
     WorkflowRevisionReviewRequest,
+    WorkflowRevisionSchemaOut,
     WorkflowSelectionOut,
     WorkflowSelectionResponseMode,
     WorkflowSelectorCapability,
     WorkflowSourceCandidateOut,
+    WorkflowSummaryOut,
     WorkflowUpdate,
     WorkflowVariantReadiness,
     WorkPlanOut,
@@ -650,6 +653,12 @@ from .workflow_revision_reviews import (
     review_is_current as workflow_review_is_current,
 )
 from .workflow_source_candidates import collect_source_candidates
+from .workflow_summary_reads import (
+    list_workflow_revision_choices,
+    list_workflow_summaries,
+    load_workflow_detail,
+    load_workflow_revision_schema,
+)
 from .workflow_trust import (
     TRUST_DERIVATION_VERSION,
     TrustDecision,
@@ -9105,6 +9114,36 @@ async def set_project_workflow_selection(
         setattr(project, legacy_field, revision_id)
     session.commit()
     return _project_workflow_selection_out(session, project, selector_capability)
+
+
+@router.get("/workflow-summaries", response_model=list[WorkflowSummaryOut])
+async def workflow_summaries(session: SessionDep) -> list[WorkflowSummaryOut]:
+    return list_workflow_summaries(session)
+
+
+@router.get("/workflow-revision-choices", response_model=list[WorkflowRevisionChoiceOut])
+async def workflow_revision_choices(session: SessionDep) -> list[WorkflowRevisionChoiceOut]:
+    return list_workflow_revision_choices(session)
+
+
+@router.get(
+    "/workflow-revisions/{revision_id}/settings-schema", response_model=WorkflowRevisionSchemaOut
+)
+async def workflow_revision_settings_schema(
+    revision_id: str, session: SessionDep
+) -> WorkflowRevisionSchemaOut:
+    schema = load_workflow_revision_schema(session, revision_id)
+    if schema is None:
+        raise api_error(404, "workflow-revision-not-found", "Workflow revision not found.")
+    return schema
+
+
+@router.get("/workflows/{workflow_id}", response_model=WorkflowOut)
+async def workflow_detail(workflow_id: str, session: SessionDep) -> WorkflowDefinition:
+    definition = load_workflow_detail(session, workflow_id)
+    if definition is None:
+        raise api_error(404, "workflow-not-found", "Workflow not found.")
+    return definition
 
 
 @router.get("/workflows", response_model=list[WorkflowOut])

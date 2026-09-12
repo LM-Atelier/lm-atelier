@@ -13,9 +13,11 @@ import {
 import { TurnEditor, type TurnEditorProps } from "./TurnEditor";
 import { roleForMode } from "./viewHelpers";
 import type { EngineRole, Message, PriorTurnEditAccepted, RoutingMode, TurnWorkflowSelectionInput, WorkflowSelection } from "./types";
-import { workflowSchemaForTurn } from "./turnEditorContext";
+import { workflowRevisionForTurn } from "./turnEditorContext";
+import { operationForTurn } from "./turnWorkflow";
+import { useWorkflowRevisionSchema } from "./useWorkflowRevisionSchema";
 
-type Props = Pick<ComposerProps, "chat" | "engines" | "profiles" | "workflows" | "presets" | "maxMediaOutputsPerPlan"> & {
+type Props = Pick<ComposerProps, "chat" | "engines" | "profiles" | "presets" | "maxMediaOutputsPerPlan"> & {
   messageId: string;
   onAccepted: (accepted: PriorTurnEditAccepted) => void;
   onClose: () => void;
@@ -35,7 +37,7 @@ function contextMessages(draft: PriorTurnEditDraft): Message[] {
 }
 
 /** One source and one durable draft; every control changes only this request. */
-export function PriorTurnEditor({ chat, messageId, engines, profiles, workflows, presets,
+export function PriorTurnEditor({ chat, messageId, engines, profiles, presets,
   maxMediaOutputsPerPlan, onAccepted, onClose, PromptHelper }: Props) {
   const [draft, setDraft] = useState<PriorTurnEditDraft | null>(null);
   const current = useRef<PriorTurnEditDraft | null>(null);
@@ -92,11 +94,27 @@ export function PriorTurnEditor({ chat, messageId, engines, profiles, workflows,
     legacy_profile_id: null,
   } : undefined;
   const sameRole = Boolean(configurationSource);
-  const schema = draft && workflowChoice?.kind === "inherit" && selectedWorkflow === undefined && sameRole ? configurationSource?.workflow_schema
-    : selectedWorkflow?.mode === "revision"
-      ? workflows.flatMap((workflow) => workflow.revisions).find((revision) => revision.id === selectedWorkflow.workflow_revision_id)?.input_schema_json
-      : workflowSchemaForTurn(workflows, role === "chat" ? "text" : role, Boolean(draft?.editor.attachments.length),
-        families.data ?? [], selection);
+  const inheritsSchema = Boolean(draft && workflowChoice?.kind === "inherit"
+    && selectedWorkflow === undefined && sameRole);
+  const revisionId = inheritsSchema ? null : selectedWorkflow?.mode === "revision"
+    ? selectedWorkflow.workflow_revision_id
+    : workflowRevisionForTurn(role === "chat" ? "text" : role,
+        Boolean(draft?.editor.attachments.length), families.data ?? [], selection);
+  // An explicit historical choice keeps that revision's own operation, as before.
+  const expectedOperation = selectedWorkflow?.mode === "revision" ? undefined : role === "chat" ? "text"
+    : operationForTurn(role, Boolean(draft?.editor.attachments.length));
+  const schemaRead = useWorkflowRevisionSchema(revisionId, expectedOperation);
+  const schema = inheritsSchema ? configurationSource?.workflow_schema : schemaRead.schema;
+  const revisionChoices = useQuery({
+    queryKey: ["workflows", "revision-choices"],
+    queryFn: ({ signal }) => api.workflowRevisionChoices(signal),
+  });
+  const visibleRevisions = (revisionChoices.isError ? [] : revisionChoices.data ?? [])
+    .filter((revision) => role === "chat" ? revision.operation === "text"
+      : role === "video" ? revision.operation.includes("video")
+        : revision.operation.includes("image") && !revision.operation.includes("video"));
+  const missingPinnedRevision = workflowValue.startsWith("revision:")
+    && !visibleRevisions.some((revision) => "revision:" + revision.revision_id === workflowValue);
   const profileChoice = draft?.profileChoice;
   const profileId = profileChoice?.kind === "explicit" ? profileChoice.value
     : roleOverrides && Object.hasOwn(roleOverrides, "profile_id") ? roleOverrides.profile_id : configurationSource?.profile_id;
@@ -122,6 +140,13 @@ export function PriorTurnEditor({ chat, messageId, engines, profiles, workflows,
     {confirmationDialog}
     <p>The original and current generations will continue.</p>
     {error && <ErrorCallout message={error} />}
+    {(revisionChoices.error || schemaRead.error) && <div>
+      <ErrorCallout message="Workflow choices or settings could not be loaded." />
+      <button type="button" onClick={() => {
+        if (revisionChoices.error) void revisionChoices.refetch();
+        if (schemaRead.error) void schemaRead.retry();
+      }}>Retry workflow reads</button>
+    </div>}
     {!draft ? <div role="status">{error
       ? <button onClick={() => setReload((value) => value + 1)}>Try loading again</button> : "Loading original turn…"}</div>
       : <>
@@ -150,7 +175,7 @@ export function PriorTurnEditor({ chat, messageId, engines, profiles, workflows,
             </span>)}
         </div>
         <TurnEditor chat={{ ...chat, routing_mode: draft.editor.mode, messages: contextMessages(draft), active_head_message_id: null }}
-          engines={engines} profiles={profiles} workflows={workflows} presets={presets} maxMediaOutputsPerPlan={maxMediaOutputsPerPlan}
+          engines={engines} profiles={profiles} presets={presets} maxMediaOutputsPerPlan={maxMediaOutputsPerPlan}
           stoppable={false} onStop={ignore} onStopAndSend={ignore} onSend={ignore}
           editorState={draft.editor} onEditorStateChange={(change) => update((value) => ({
             ...value, editor: typeof change === "function" ? change(value.editor) : change,
@@ -214,12 +239,17 @@ export function PriorTurnEditor({ chat, messageId, engines, profiles, workflows,
             <option value="current">Current selection</option><option value="default">Default</option><option value="automatic">Auto</option>
             {(families.data ?? []).filter((family) => family.enabled && !family.archived).map((family) =>
               <option key={family.id} value={"family:" + family.id}>{family.name}</option>)}
-            {workflows.filter((workflow) => role === "chat" ? workflow.operation === "text"
-              : role === "video" ? workflow.operation.includes("video") : workflow.operation.includes("image") && !workflow.operation.includes("video"))
-              .flatMap((workflow) => workflow.revisions.map((revision) =>
-                <option key={revision.id} value={"revision:" + revision.id}>{workflow.name} · version {revision.version}</option>))}
+            {missingPinnedRevision && <option value={workflowValue} disabled>
+              {revisionChoices.isPending ? "Selected workflow (loading details…)" : "Selected workflow (details unavailable)"}
+            </option>}
+            {visibleRevisions.map((revision) => <option key={revision.revision_id} value={"revision:" + revision.revision_id}>
+                {revision.workflow_name} · version {revision.version}
+              </option>)}
           </select></label>} PromptHelper={PromptHelper} submitLabel="Queue edited version"
           onAccept={async (submission) => {
+            if (revisionId && (schemaRead.isLoading || schemaRead.error)) {
+              throw new Error("Wait for the selected workflow settings to load, then try again.");
+            }
             if (!current.current) throw new Error("The source draft is unavailable.");
             const prepared = preparePriorTurnEditSubmission(current.current, submission);
             current.current = prepared.draft;

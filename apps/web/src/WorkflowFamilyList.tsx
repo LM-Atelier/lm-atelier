@@ -1,7 +1,7 @@
 import { useState } from "react";
 import "./WorkflowFamilyList.css";
 import { availableWorkflowInstallOffer, workflowVariantReadinessLabel } from "./workflowVariantSetup";
-import type { Workflow, WorkflowFamily, WorkflowVariantReadiness, WorkflowInstallOffer } from "./types";
+import type { WorkflowSummary, WorkflowFamily, WorkflowVariantReadiness, WorkflowInstallOffer } from "./types";
 
 const readinessLabels: Record<WorkflowVariantReadiness, string> = {
   ready: "Ready",
@@ -25,9 +25,9 @@ const operationLabels: Record<string, string> = {
 
 interface Props {
   families: WorkflowFamily[];
-  workflows: Workflow[];
+  workflows: WorkflowSummary[];
   selectedId: string | null;
-  onSelect: (workflow: Workflow) => void;
+  onSelect: (workflow: WorkflowSummary) => void;
   includeArchived: boolean;
   onIncludeArchivedChange: (include: boolean) => void;
   loading: boolean;
@@ -76,11 +76,11 @@ export function WorkflowFamilyList({
     .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
   const ungrouped = remaining.filter((workflow) => workflow.family_id === null);
   const other = remaining.filter((workflow) => workflow.family_id === undefined);
-  const definitionButton = (workflow: Workflow) => (
+  const definitionButton = (workflow: WorkflowSummary) => (
     <button key={workflow.id} className={selectedId === workflow.id ? "selected" : ""}
       aria-pressed={selectedId === workflow.id} onClick={() => onSelect(workflow)}>
       <span><strong>{workflow.name}</strong><small>{operationLabels[workflow.operation] ?? workflow.operation}
-        {" · "}{workflow.revisions.length} revision{workflow.revisions.length === 1 ? "" : "s"}</small></span>
+        {" · "}{workflow.revision_count} revision{workflow.revision_count === 1 ? "" : "s"}</small></span>
     </button>
   );
 

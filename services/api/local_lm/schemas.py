@@ -1673,6 +1673,33 @@ class WorkflowOutputGeometryResolutionOut(ApiModel):
     request_authorized: Literal[False]
 
 
+class WorkflowSummaryOut(ApiModel):
+    id: str
+    family_id: str | None = None
+    name: str
+    operation: str
+    description: str
+    current_revision_id: str | None
+    revision_count: int = Field(ge=0)
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkflowRevisionChoiceOut(ApiModel):
+    revision_id: str
+    workflow_id: str
+    workflow_name: str
+    operation: str
+    version: int
+
+
+class WorkflowRevisionSchemaOut(ApiModel):
+    revision_id: str
+    workflow_id: str
+    operation: str
+    input_schema_json: dict[str, Any]
+
+
 class WorkflowOut(ApiModel):
     id: str
     family_id: str | None = None

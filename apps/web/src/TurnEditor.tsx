@@ -15,14 +15,16 @@ import { composerDraftWithText, detachedComposerDraft, promptSourceForTurn, type
 import { artifactSource, mediaOriginLabel } from "./messageMedia";
 import { mediaOutputCountForTurn } from "./mediaOutputCount";
 import { normalizeSettingsForFields, resolveCapabilitySettings, resolveWorkflowSettings } from "./settings";
-import { activeBranchMessages, workflowRevisionForTurn, workflowSchemaForTurn } from "./turnEditorContext";
+import { activeBranchMessages, workflowRevisionForTurn } from "./turnEditorContext";
 import { survivingMentions, turnReferences, type TurnReference } from "./mentionDraft";
 import { useComposerUploads, type ComposerAttachment } from "./useComposerUploads";
 import { useDraftClassification } from "./useDraftClassification";
 import { drawerRoleView, roleForMode } from "./viewHelpers";
+import { useWorkflowRevisionSchema } from "./useWorkflowRevisionSchema";
+import { operationForTurn } from "./turnWorkflow";
 import { useTurnEditorState, type TurnEditorState } from "./useTurnEditorState";
 export type { TurnEditorState } from "./useTurnEditorState";
-import type { Artifact, ChatDetail, EngineCapabilities, EngineRole, Message, PriorTurnEditBinding, RoutingMode, Workflow, WorkflowSelection } from "./types";
+import type { Artifact, ChatDetail, EngineCapabilities, EngineRole, Message, PriorTurnEditBinding, RoutingMode, WorkflowSelection } from "./types";
 export interface TurnEditorSubmission {
   requestId: string;
   text: string;
@@ -42,7 +44,6 @@ export interface TurnEditorPromptHelperProps {
   sourceChat: ChatDetail;
   initialDraft: string;
   engines: EngineCapabilities[];
-  workflows: Workflow[];
   editSourceArtifactIds?: string[];
   onAccept: (draft: string) => void;
   onClose: () => void;
@@ -157,7 +158,6 @@ export function TurnEditor({
   onStop,
   onStopAndSend,
   maxMediaOutputsPerPlan,
-  workflows,
   project,
   visualTarget,
   quoteTarget,
@@ -274,37 +274,28 @@ export function TurnEditor({
     ...(imageProfile?.load_settings_json ?? {}),
     ...(imageProfile?.request_settings_json ?? {}),
   };
-  const workflowSchema = workflowSchemaOverride !== undefined ? workflowSchemaOverride ?? undefined : workflowSchemaForTurn(
-    workflows,
-    mode,
-    attachments.length > 0 || usePriorVisual,
-    families.data ?? [],
+  const hasWorkflowAttachments = attachments.length > 0 || usePriorVisual;
+  const workflowRevisionId = workflowSchemaOverride !== undefined ? null : workflowRevisionForTurn(
+    mode, hasWorkflowAttachments, families.data ?? [],
     workflowSelection ?? selections.data?.find((one) => one.selector_capability === mode),
     project ? projectSelections.data?.find((one) => one.selector_capability === mode) : null,
   );
-  const drawerWorkflowSchema = workflowSchemaOverride !== undefined
-    ? workflowSchemaOverride ?? undefined
-    : drawerMode === mode
-    ? workflowSchema
-    : workflowSchemaForTurn(
-        workflows,
-        drawerMode,
-        attachments.length > 0 || usePriorVisual,
-        families.data ?? [],
-        selections.data?.find((one) => one.selector_capability === drawerMode),
-        project ? projectSelections.data?.find((one) => one.selector_capability === drawerMode) : null,
-      );
-  // The same selections the drawer's schema came from, so the shape control and
-  // the fields beneath it are describing one revision rather than two.
-  const drawerWorkflowRevisionId = workflowSchemaOverride !== undefined
-    ? null
+  const drawerWorkflowRevisionId = workflowSchemaOverride !== undefined ? null : drawerMode === mode
+    ? workflowRevisionId
     : workflowRevisionForTurn(
-        drawerMode,
-        attachments.length > 0 || usePriorVisual,
-        families.data ?? [],
+        drawerMode, hasWorkflowAttachments, families.data ?? [],
         selections.data?.find((one) => one.selector_capability === drawerMode),
         project ? projectSelections.data?.find((one) => one.selector_capability === drawerMode) : null,
       );
+  const workflowRead = useWorkflowRevisionSchema(workflowRevisionId,
+    mode === "image" || mode === "video" ? operationForTurn(mode, hasWorkflowAttachments) : null);
+  const drawerWorkflowRead = useWorkflowRevisionSchema(drawerWorkflowRevisionId,
+    drawerMode === "image" || drawerMode === "video"
+      ? operationForTurn(drawerMode, hasWorkflowAttachments) : null);
+  const workflowSchema = workflowSchemaOverride !== undefined
+    ? workflowSchemaOverride ?? undefined : workflowRead.schema;
+  const drawerWorkflowSchema = workflowSchemaOverride !== undefined
+    ? workflowSchemaOverride ?? undefined : drawerWorkflowRead.schema;
   const clearAcceptedDraft = () => {
     setText("");
     updateState((current) => ({
@@ -314,6 +305,10 @@ export function TurnEditor({
   };
   const submit = (stopCurrent = false) => {
     if (!text.trim() || uploading || acceptancePending.current) return;
+    if (workflowRevisionId && (workflowRead.isLoading || workflowRead.error)) {
+      setAcceptanceError("Wait for the selected workflow settings to load, then try again.");
+      return;
+    }
     const selectedMode = currentMode();
     const role = roleForMode(selectedMode);
     const fields = resolveWorkflowSettings(resolveCapabilitySettings(engines.find((item) => item.roles.includes(role)), role), workflowSchema);
@@ -388,6 +383,13 @@ export function TurnEditor({
         {dropActive && <div className="drop-hint">Drop images or videos to attach</div>}
         {uploadError && <ErrorCallout message={uploadError} />}
         {acceptanceError && <ErrorCallout message={acceptanceError} />}
+        {(workflowRead.error || drawerWorkflowRead.error) && <div>
+          <ErrorCallout message="The selected workflow settings could not be loaded." />
+          <button type="button" onClick={() => {
+            if (workflowRead.error) void workflowRead.retry();
+            if (drawerWorkflowRead.error) void drawerWorkflowRead.retry();
+          }}>Retry workflow settings</button>
+        </div>}
         {attachments.length > 0 && <TurnEditorAttachments attachments={attachments} changeMode={onAccept ? changeMode : onMode}
           onFocus={() => textInput.current?.focus()}
           onAnimate={() => { detachPromptSource(); setText((current) => current.trim() ? current : "Animate this image"); }}
@@ -490,7 +492,7 @@ export function TurnEditor({
       }} />}
 
       {promptHelperDraft !== null && PromptHelper && <PromptHelper
-        sourceChat={chat} initialDraft={promptHelperDraft} engines={engines} workflows={workflows}
+        sourceChat={chat} initialDraft={promptHelperDraft} engines={engines}
         // The helper has no lineage: only explicit attachments ground it.
         editSourceArtifactIds={imageEdit ? attachments.filter((item) => item.kind === "image").map((item) => item.id) : undefined}
         onAccept={(nextDraft) => {

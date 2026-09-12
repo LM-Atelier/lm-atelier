@@ -1,3 +1,4 @@
+import { mockWorkflowReadsFromFixture } from "./workflowReadFixtures";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -7,7 +8,7 @@ import { api } from "./api";
 import type { Workflow, WorkflowFamily, WorkflowFamilyRemovalImpact } from "./types";
 
 vi.mock("./api", () => ({ api: {
-  workflows: vi.fn(), workflowFamilies: vi.fn(), workflowFamilyRemovalImpact: vi.fn(),
+  workflows: vi.fn(), workflowSummaries: vi.fn(), workflow: vi.fn(), workflowFamilies: vi.fn(), workflowFamilyRemovalImpact: vi.fn(),
   updateWorkflowFamily: vi.fn(), setWorkflowFamilyPreference: vi.fn(),
 } }));
 vi.mock("./CustomNodesPanel", () => ({ CustomNodesPanel: () => null }));
@@ -43,6 +44,7 @@ function wrap(element: React.ReactNode) {
 }
 beforeEach(() => {
   vi.resetAllMocks();
+  mockWorkflowReadsFromFixture(() => api.workflows());
   vi.mocked(api.workflows).mockResolvedValue([workflow("a"), workflow("b")]);
   vi.mocked(api.workflowFamilies).mockResolvedValue([family("a"), family("b")]);
   vi.mocked(api.workflowFamilyRemovalImpact).mockResolvedValue(impact());
@@ -56,6 +58,7 @@ describe("archiving workflow families from the page", () => {
     const client = wrap(<WorkflowsView />);
     const invalidate = vi.spyOn(client, "invalidateQueries");
     fireEvent.click(await screen.findByText("Workflow b"));
+    await screen.findByRole("button", { name: "New revision" });
     fireEvent.click(screen.getByRole("button", { name: "Archive family" }));
     const dialog = await screen.findByRole("dialog", { name: "Archive Family b?" });
     expect(await within(dialog).findByText("1 queued step still runs")).toBeInTheDocument();
@@ -98,6 +101,7 @@ describe("archiving workflow families from the page", () => {
     vi.mocked(api.updateWorkflowFamily).mockRejectedValueOnce(new Error("The family became selected"));
     wrap(<WorkflowsView />);
     fireEvent.click(await screen.findByText("Workflow b"));
+    await screen.findByRole("button", { name: "New revision" });
     fireEvent.click(screen.getByRole("button", { name: "Archive family" }));
     fireEvent.click(await screen.findByRole("button", { name: "Archive it" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("The family became selected");
@@ -111,6 +115,7 @@ describe("archiving workflow families from the page", () => {
     vi.mocked(api.workflowFamilies).mockResolvedValue([]);
     wrap(<WorkflowsView />);
     fireEvent.click(await screen.findByText("Workflow a"));
+    await screen.findByRole("button", { name: "New revision" });
     expect(screen.getByRole("button", { name: "New revision" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Archive family" })).not.toBeInTheDocument();
   });

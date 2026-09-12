@@ -1172,6 +1172,33 @@ export interface WorkflowRevision {
   created_at: string;
 }
 
+export interface WorkflowSummary {
+  id: string;
+  family_id?: string | null;
+  name: string;
+  operation: string;
+  description: string;
+  current_revision_id: string | null;
+  revision_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkflowRevisionChoice {
+  revision_id: string;
+  workflow_id: string;
+  workflow_name: string;
+  operation: string;
+  version: number;
+}
+
+export interface WorkflowRevisionSchema {
+  revision_id: string;
+  workflow_id: string;
+  operation: string;
+  input_schema_json: Record<string, unknown>;
+}
+
 export interface Workflow {
   id: string;
   family_id?: string | null;

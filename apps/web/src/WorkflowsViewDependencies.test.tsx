@@ -1,3 +1,4 @@
+import { mockWorkflowReadsFromFixture } from "./workflowReadFixtures";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within, act } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -6,7 +7,7 @@ import { api } from "./api";
 import type { Workflow, WorkflowFamily, WorkflowFamilyRemovalImpact, WorkflowDependencyImpact } from "./types";
 
 vi.mock("./api", () => ({ api: {
-  workflows: vi.fn(), workflowFamilies: vi.fn(), workflowFamilyRemovalImpact: vi.fn(),
+  workflows: vi.fn(), workflowSummaries: vi.fn(), workflow: vi.fn(), workflowFamilies: vi.fn(), workflowFamilyRemovalImpact: vi.fn(),
   updateWorkflowFamily: vi.fn(), setWorkflowFamilyPreference: vi.fn(),
 } }));
 vi.mock("./CustomNodesPanel", () => ({ CustomNodesPanel: () => null }));
@@ -36,6 +37,7 @@ function wrap(element: React.ReactNode) {
 }
 beforeEach(() => {
   vi.resetAllMocks();
+  mockWorkflowReadsFromFixture(() => api.workflows());
   vi.mocked(api.workflows).mockResolvedValue([workflow("a"), workflow("b")]);
   vi.mocked(api.workflowFamilies).mockResolvedValue([family("a"), family("b")]);
 

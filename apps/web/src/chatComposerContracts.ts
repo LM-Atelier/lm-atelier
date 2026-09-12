@@ -14,7 +14,6 @@ import type {
   Project,
   PriorTurnEditAccepted,
   RoutingMode,
-  Workflow,
   WorkPlan,
 } from "./types";
 
@@ -47,7 +46,6 @@ export interface ComposerProps {
   onStop: () => void;
   onStopAndSend: SendFromComposer;
   maxMediaOutputsPerPlan: number;
-  workflows: Workflow[];
   project?: Project;
   visualTarget?: VisualTarget | null;
   quoteTarget?: { text: string; requestId: number } | null;
@@ -60,7 +58,6 @@ export interface ChatViewProps {
   chat?: ChatDetail;
   engines: EngineCapabilities[];
   profiles: ModelProfile[];
-  workflows: Workflow[];
   project?: Project;
   liveText: Record<string, string>;
   pendingTurns: PendingTurn[];
