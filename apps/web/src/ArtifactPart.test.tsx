@@ -92,3 +92,83 @@ describe("media action row", () => {
     expect(screen.getAllByRole("img")).toHaveLength(1);
   });
 });
+
+/** Beside the picture, not instead of it.
+ *
+ * The run succeeded and the picture is real and usable; it is simply not the
+ * shape that was asked for. So the note sits inside the same card, and the
+ * picture, its caption and every action stay exactly where they were.
+ */
+describe("the size note", () => {
+  afterEach(cleanup);
+
+  /** On the PART. Two runs making identical bytes share one artifact, so a
+   * judgement stored there would show one conversation the other's answer. */
+  function withAgreement(agreement: unknown): MessagePart {
+    const base = imagePart();
+    return {
+      ...base,
+      metadata_json: { ...base.metadata_json, output_size_agreement: agreement },
+    };
+  }
+
+  const disagreed = {
+    v: 1,
+    state: "disagreed",
+    requested_width: 1024,
+    requested_height: 768,
+    raster_width: 2048,
+    raster_height: 1536,
+  };
+
+  it("says what arrived and what was asked for, beside the picture", () => {
+    render(<ArtifactPart part={withAgreement(disagreed)} origin="generated" />);
+
+    const note = screen.getByRole("status");
+    expect(note).toHaveTextContent("This came out 2048 × 1536, not the 1024 × 768 you asked for.");
+    // Inside the card, so it reads as being about THIS picture rather than
+    // about the conversation.
+    expect(note.closest("figure")).toContainElement(screen.getByRole("img", { name: /generated/i }));
+  });
+
+  it("leaves the picture and its actions untouched", () => {
+    render(
+      <ArtifactPart
+        part={withAgreement(disagreed)}
+        origin="generated"
+        onEditImage={vi.fn()}
+        onToggleFavorite={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("img", { name: /generated/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Edit this image" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Favorite this image" })).toBeInTheDocument();
+  });
+
+  it("says nothing when the size was the one asked for", () => {
+    render(<ArtifactPart part={withAgreement({ ...disagreed, state: "agreed" })} origin="generated" />);
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("says nothing when the tool never formed an opinion", () => {
+    render(
+      <ArtifactPart
+        part={withAgreement({ v: 1, state: "not_assessed", reason: "binding_unconfirmed" })}
+        origin="generated"
+      />,
+    );
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("says nothing on a streaming preview, which is not the picture in question", () => {
+    const part = withAgreement(disagreed);
+    render(
+      <ArtifactPart
+        part={{ ...part, metadata_json: { ...part.metadata_json, preview: true } }}
+        origin="generated"
+      />,
+    );
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+})
