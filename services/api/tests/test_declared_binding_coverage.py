@@ -9,6 +9,12 @@ and an edit STEP COUNT are frequently fixed by the model rather than taken as
 graph inputs, so demanding placeholders for those would refuse workflows that
 are behaving correctly - a worse failure than the one being fixed. Those
 exemptions are pinned here rather than left to be rediscovered.
+
+A read-only edit strength is exempt for a different and stronger reason: the
+settings path removes the control altogether, so there is no slider to be a lie.
+Video length looks like the same case and is not - a declared length contract
+still produces a duration control - and that asymmetry is measured below rather
+than argued, because the obvious "fix" is to make the two consistent.
 """
 
 from __future__ import annotations
@@ -19,6 +25,7 @@ import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
 
+from local_lm.settings_registry import IMAGE_SETTINGS, VIDEO_SETTINGS, workflow_settings
 from local_lm.workflow_edit_calibration import standard_edit_calibration
 
 _LENGTH_CONTRACT: dict[str, Any] = {
@@ -60,6 +67,40 @@ _EDIT_SCHEMA_WITH_STEPS: dict[str, Any] = {
     "x-lm-atelier-edit-calibration": standard_edit_calibration(
         parameter="denoise", minimum=0.0, maximum=1.0, steps_parameter="steps"
     ),
+}
+
+
+# The same two declarations with the parameter marked read-only. They are not
+# merely "another case": they are what separates a control that lies from a
+# workflow that has told the truth about deciding its own value.
+_READ_ONLY_EDIT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "denoise": {
+            "type": "number",
+            "default": 0.5,
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "readOnly": True,
+        }
+    },
+    "x-lm-atelier-edit-calibration": standard_edit_calibration(
+        parameter="denoise", minimum=0.0, maximum=1.0, steps_parameter=None
+    ),
+}
+_READ_ONLY_LENGTH_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "frames": {
+            "type": "integer",
+            "default": 17,
+            "minimum": 9,
+            "maximum": 129,
+            "readOnly": True,
+        },
+        "fps": {"type": "integer", "default": 8, "minimum": 8, "maximum": 8, "readOnly": True},
+    },
+    "x-lm-atelier-video-length": _LENGTH_CONTRACT,
 }
 
 
@@ -213,3 +254,83 @@ async def test_a_workflow_declaring_neither_contract_is_untouched(
         {"type": "object", "properties": {}},
     )
     assert created.status_code in (200, 201), created.text
+
+
+async def test_a_read_only_strength_fixed_in_the_graph_is_accepted(
+    app: FastAPI, client: AsyncClient
+) -> None:
+    """The workflow that declares it decides its own strength, and is believed.
+
+    This is the case that separates "the slider does nothing" from "there is no
+    slider". A read-only property is dropped from the offered settings, so
+    nothing is shown and nothing is injected, and the graph's own value is
+    simply what runs. Refusing it would turn away a workflow that has been
+    honest about what it controls.
+    """
+    accepted = await _create(
+        client,
+        "Strength fixed and declared read-only",
+        "image_to_image",
+        _edit_graph(0.5),
+        _READ_ONLY_EDIT_SCHEMA,
+    )
+    assert accepted.status_code in (200, 201), accepted.text
+
+
+async def test_a_revision_may_also_fix_a_read_only_strength(
+    app: FastAPI, client: AsyncClient
+) -> None:
+    """The exemption has to hold on the route that stores revisions too.
+
+    Without this, a workflow could be created read-only and then be unable to
+    revise anything else about itself.
+    """
+    created = await _create(
+        client,
+        "Read-only strength revised",
+        "image_to_image",
+        _edit_graph(0.5),
+        _READ_ONLY_EDIT_SCHEMA,
+    )
+    assert created.status_code in (200, 201), created.text
+
+    revised = await _revise(client, created.json()["id"], _edit_graph(0.4), _READ_ONLY_EDIT_SCHEMA)
+    assert revised.status_code in (200, 201), revised.text
+
+
+async def test_a_read_only_video_length_is_still_refused(app: FastAPI, client: AsyncClient) -> None:
+    """Video length is NOT exempt, and this is the case that looks like it should be.
+
+    Read-only is the same word in both schemas and means different things, so
+    the reason is measured in the test below rather than asserted here.
+    """
+    refused = await _create(
+        client,
+        "Length fixed and declared read-only",
+        "text_to_video",
+        _video_graph(16),
+        _READ_ONLY_LENGTH_SCHEMA,
+    )
+    assert refused.status_code == 422, refused.text
+    assert "frames" in refused.json()["detail"]
+
+
+def test_read_only_removes_an_edit_control_but_not_a_duration_control() -> None:
+    """Why the two are treated differently, measured rather than argued.
+
+    A read-only edit strength leaves the settings with no strength field at all,
+    so nothing can be offered or injected. A read-only frame count leaves the
+    settings with a DURATION control, because the length contract appends one
+    from its own declaration - so the run still resolves a frame count and
+    records the seconds it believes it delivered, against a graph that ignored
+    both.
+
+    Anyone tempted to make these consistent should change this test first and
+    watch what it says.
+    """
+    image = workflow_settings(IMAGE_SETTINGS, _READ_ONLY_EDIT_SCHEMA)
+    assert not [field for field in image if field.key == "denoise"]
+
+    video = workflow_settings(VIDEO_SETTINGS, _READ_ONLY_LENGTH_SCHEMA)
+    assert not [field for field in video if field.key in {"frames", "fps"}]
+    assert [field for field in video if field.key == "duration_seconds"]

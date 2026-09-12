@@ -81,6 +81,17 @@ def edit_calibration_reaches_graph(
     placeholder for it would refuse workflows behaving correctly - the same
     reasoning that exempts a video frame rate.
 
+    A parameter the workflow declares `readOnly` is exempt too, because then no
+    slider exists to be a lie. `workflow_settings` drops a read-only property
+    from the offered fields (settings_registry.py), and with the field gone
+    `resolve_image_edit_strength` returns None and injects nothing - so a graph
+    holding its own fixed value is simply what runs, honestly and visibly.
+
+    Video length does NOT get that exemption, and the difference is measured
+    rather than assumed: a declared length contract appends a duration control
+    whether or not the frame count is read-only, so the run still resolves a
+    frame count and records the seconds it believes it delivered.
+
     This asks whether the value reaches the GRAPH, not whether it decides the
     output. A placeholder feeding an unrelated input still passes.
     """
@@ -90,11 +101,23 @@ def edit_calibration_reaches_graph(
     calibration = validate_workflow_edit_calibration(input_schema)
     if calibration is None:
         return
+    if _declared_read_only(input_schema, calibration.parameter):
+        return
     if not binds_parameter(workflow, calibration.parameter):
         raise ValueError(
             "workflow edit calibration declares "
             f"{calibration.parameter} but the graph never uses it"
         )
+
+
+def _declared_read_only(input_schema: Mapping[str, Any], parameter: str) -> bool:
+    """Whether the schema marks this parameter read-only, offering no control."""
+
+    properties = input_schema.get("properties")
+    if not isinstance(properties, Mapping):
+        return False
+    parameter_schema = properties.get(parameter)
+    return isinstance(parameter_schema, Mapping) and parameter_schema.get("readOnly") is True
 
 
 def validate_workflow_edit_calibration(
