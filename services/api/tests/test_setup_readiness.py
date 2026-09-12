@@ -720,3 +720,47 @@ async def test_an_unreadable_dispatch_policy_does_not_claim_a_pause(
 
     role = next(item for item in payload["roles"] if item["role"] == "chat")
     assert role["checks"][-1]["code"] == "generation_verification_queued"
+
+
+async def test_pausing_generation_the_ordinary_way_changes_what_the_checklist_says(
+    client: AsyncClient,
+    app: FastAPI,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same case again, with the pause arriving the way a person makes one.
+
+    The tests above write the dispatch row directly, which is a fixture rather
+    than a demonstration. This one presses the control: the checklist says the
+    test is waiting to start, generation is paused through its own endpoint,
+    and the same checklist then says it cannot start and where to resume it.
+    Nothing else changes in between.
+    """
+    chat = _add_install(role="chat", engine="llama.cpp")
+    profile = _add_profile(chat)
+    evidence = _add_evidence(settings, chat)
+    with SessionLocal() as session:
+        session.add(chat)
+        session.flush()
+        session.add_all([profile, evidence])
+        session.flush()
+        session.add(_add_verification(chat, profile, evidence, state="queued"))
+        session.commit()
+
+    _set_runtime_and_worker_state(app, monkeypatch, workers=_workers(chat_state="stopped"))
+
+    before = (await client.get("/api/setup/readiness")).json()
+    before_chat = next(item for item in before["roles"] if item["role"] == "chat")
+    assert before_chat["checks"][-1]["code"] == "generation_verification_queued"
+
+    paused = await client.post(
+        "/api/queue/lanes/generation/pause-after-current",
+        json={"expected_revision": 0, "idempotency_key": "setup-readiness-pause"},
+    )
+    assert paused.status_code == 200, paused.text
+    assert paused.json()["dispatch_state"] == "paused"
+
+    after = (await client.get("/api/setup/readiness")).json()
+    after_chat = next(item for item in after["roles"] if item["role"] == "chat")
+    assert after_chat["checks"][-1]["code"] == "generation_verification_paused"
+    assert "Resume generation under View accepted work." in after_chat["checks"][-1]["message"]
