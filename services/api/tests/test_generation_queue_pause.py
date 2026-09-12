@@ -748,3 +748,37 @@ async def test_real_startup_releases_abandoned_terminal_claims_with_no_waiting_j
             assert job.result_json == {"summary": "Recorded result"}
             assert job.claim_owner is None and job.claim_expires_at is None
             assert policy is not None and policy.dispatch_state == "paused" and policy.revision == 2
+
+
+@pytest.mark.asyncio
+async def test_policy_read_executes_sql_outside_the_event_loop(
+    client: AsyncClient, sessions: sessionmaker[Session]
+) -> None:
+    from threading import get_ident
+
+    event_loop_thread = get_ident()
+    sql_threads: list[int] = []
+
+    def before(
+        connection: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        many: bool,
+    ) -> None:
+        if statement.lstrip().upper().startswith("SELECT"):
+            sql_threads.append(get_ident())
+
+    engine = sessions.kw["bind"]
+    event.listen(engine, "before_cursor_execute", before)
+    try:
+        response = await client.get(POLICY)
+    finally:
+        event.remove(engine, "before_cursor_execute", before)
+    assert response.status_code == 200
+    assert response.json()["dispatch_state"] == "open"
+    assert sql_threads, "The real policy request must execute its database reads."
+    assert all(thread != event_loop_thread for thread in sql_threads), (
+        "Policy database reads ran on the ASGI event-loop thread."
+    )
