@@ -15,6 +15,10 @@ for (const cause of ["manual", "automatic"] as const) {
       if (requests === 1) await route.fulfill({ json: result });
       else pending = route;
     });
+    await page.route("**/api/queue/lanes/generation", (route) => route.fulfill({ json: {
+      lane: "generation", dispatch_state: "open", revision: 0,
+      running_jobs: 0, allowed_actions: ["pause_after_current"],
+    } }));
     await page.goto("/");
     const setup = page.getByRole("dialog", { name: "Set up LM Atelier" });
     await expect(setup).toBeVisible();

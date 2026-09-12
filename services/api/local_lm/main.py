@@ -51,6 +51,7 @@ from .downloads import DownloadManager
 from .engines import EngineRegistry
 from .events import EventBroker
 from .exports import ProjectExporter
+from .generation_queue import recover_generation_queue
 from .instance_identity import INSTANCE_ID_HEADER, load_or_create_instance_identity
 from .instance_lock import DataDirectoryLock
 from .orchestrator import ConversationOrchestrator
@@ -680,6 +681,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 services.orchestrator.recover_interrupted()
             with _startup_stage("download-recovery"):
                 services.downloads.recover_interrupted()
+            with _startup_stage("generation-queue-recovery"), SessionLocal() as session:
+                recover_generation_queue(session)
+                session.commit()
             logger.info(
                 "LM Atelier %s started on %s:%s",
                 __version__,

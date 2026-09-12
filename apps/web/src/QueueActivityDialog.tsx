@@ -3,6 +3,7 @@ import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { api } from "./api";
 import { QueuePlanControls } from "./QueuePlanControls";
+import { GenerationQueueControls } from "./GenerationQueueControls";
 import { QueuePlanSteps } from "./QueuePlanSteps";
 import type { QueueActivityItem } from "./types";
 import "./QueueActivityDialog.css";
@@ -51,6 +52,7 @@ export function QueueActivityDialog({ onClose }: { onClose: () => void }) {
           {activity.isFetching ? "Refreshing…" : "Refresh"}
         </button>
       </div>
+      <GenerationQueueControls />
       {activity.error && (
         <div role="alert" className="queue-activity-error">
           {activity.error.message}

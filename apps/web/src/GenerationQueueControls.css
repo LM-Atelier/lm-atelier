@@ -1,0 +1,41 @@
+.generation-queue-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-block: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.generation-queue-controls > div:first-child {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.generation-queue-controls p {
+  margin-block: 6px;
+}
+
+.generation-queue-controls > button {
+  flex: 0 1 auto;
+  max-width: 100%;
+  white-space: normal;
+}
+
+.generation-queue-controls .secondary.compact-button[aria-disabled="true"] {
+  background: transparent;
+  color: var(--ink-secondary);
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.generation-queue-controls[aria-busy="true"] .secondary.compact-button[aria-disabled="true"] {
+  cursor: wait;
+}
+
+.generation-queue-error {
+  flex-basis: 100%;
+  overflow-wrap: anywhere;
+}

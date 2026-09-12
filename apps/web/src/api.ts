@@ -44,6 +44,8 @@ import type {
   JobActivity,
   QueueActivityItem,
   QueueControlCommand,
+  GenerationQueueAction,
+  GenerationQueuePolicy,
   QueueControlResult,
   QueueActivityPage,
   QueuePlanSteps,
@@ -575,6 +577,12 @@ export const api = {
       if (value.plan_id !== planId) throw new Error("The submitted work steps could not be read.");
       return value;
     }),
+  generationQueuePolicy: (signal?: AbortSignal) =>
+    request<GenerationQueuePolicy>("/api/queue/lanes/generation", { signal }),
+  generationQueueControl: (action: GenerationQueueAction, command: QueueControlCommand) =>
+    request<GenerationQueuePolicy>("/api/queue/lanes/generation/"
+      + (action === "pause_after_current" ? "pause-after-current" : "resume"),
+    { method: "POST", body: JSON.stringify(command) }),
   queueControl: (planId: string, action: "hold" | "release", command: QueueControlCommand) =>
     request<QueueControlResult>("/api/queue/items/" + encodeURIComponent(planId) + "/" + action,
       { method: "POST", body: JSON.stringify(command) }),

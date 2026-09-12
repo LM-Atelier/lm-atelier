@@ -34,6 +34,7 @@ from fastapi import (
 from sqlalchemy import Select, and_, func, or_, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
+from starlette.concurrency import run_in_threadpool
 from starlette.responses import FileResponse, HTMLResponse
 
 from . import __version__
@@ -138,6 +139,11 @@ from .engines import (
     EngineSchemaUnavailableError,
 )
 from .filesystem_links import is_link_or_reparse
+from .generation_queue import (
+    GenerationQueueConflict,
+    change_generation_queue,
+    read_generation_queue,
+)
 from .gguf import (
     GGUFSelectionError,
     automatic_gguf_selection,
@@ -357,6 +363,7 @@ from .schemas import (
     EngineCapabilities,
     ExchangeDeletionOut,
     GenerationIdentityOut,
+    GenerationQueuePolicyOut,
     HealthOut,
     JobActivityOut,
     JobOut,
@@ -4079,6 +4086,46 @@ async def release_queue_plan(
     session: ConversationSessionDep,
 ) -> QueueControlResultOut:
     return await _change_queue_control(request, plan_id, "release", payload, session)
+
+
+@router.get("/queue/lanes/generation", response_model=GenerationQueuePolicyOut)
+def generation_queue_policy(session: ConversationSessionDep) -> GenerationQueuePolicyOut:
+    try:
+        return read_generation_queue(session)
+    except GenerationQueueConflict as exc:
+        raise api_error(
+            409, "queue-lane-conflict", "The generation queue changed. Refresh before trying again."
+        ) from exc
+
+
+async def _change_generation_policy(
+    request: Request,
+    action: Literal["pause_after_current", "resume"],
+    payload: QueueControlCommand,
+    session: Session,
+) -> GenerationQueuePolicyOut:
+    try:
+        result = await run_in_threadpool(change_generation_queue, session, action, payload)
+    except GenerationQueueConflict as exc:
+        raise api_error(
+            409, "queue-lane-conflict", "The generation queue changed. Refresh before trying again."
+        ) from exc
+    await _services(request).scheduler.queue_control_changed("generation")
+    return result
+
+
+@router.post("/queue/lanes/generation/pause-after-current", response_model=GenerationQueuePolicyOut)
+async def pause_generation_queue(
+    request: Request, payload: QueueControlCommand, session: ConversationSessionDep
+) -> GenerationQueuePolicyOut:
+    return await _change_generation_policy(request, "pause_after_current", payload, session)
+
+
+@router.post("/queue/lanes/generation/resume", response_model=GenerationQueuePolicyOut)
+async def resume_generation_queue(
+    request: Request, payload: QueueControlCommand, session: ConversationSessionDep
+) -> GenerationQueuePolicyOut:
+    return await _change_generation_policy(request, "resume", payload, session)
 
 
 @router.get("/jobs/activity", response_model=JobActivityOut)
