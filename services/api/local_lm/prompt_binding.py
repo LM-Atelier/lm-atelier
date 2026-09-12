@@ -32,6 +32,7 @@ import re
 from collections.abc import Collection, Mapping
 from typing import Any
 
+from .graph_placeholders import binds_parameter
 from .settings_registry import IMAGE_SETTINGS, VIDEO_SETTINGS, workflow_settings
 
 #: The exact string a ComfyUI input must equal for the description to replace
@@ -47,16 +48,7 @@ def binds_prompt(workflow: dict[str, Any]) -> bool:
     runs and most workflows declare no prompt property at all - the description
     is not one of the settings a schema describes.
     """
-    stack: list[Any] = [workflow]
-    while stack:
-        value = stack.pop()
-        if isinstance(value, dict):
-            stack.extend(value.values())
-        elif isinstance(value, list):
-            stack.extend(value)
-        elif value == PROMPT_PLACEHOLDER:
-            return True
-    return False
+    return binds_parameter(workflow, PROMPT_PLACEHOLDER[2:-1])
 
 
 #: The input names a ComfyUI node gives the words it is to render. `prompt` is
