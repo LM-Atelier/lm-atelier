@@ -7,6 +7,37 @@ from .schemas import CatalogPage
 from .workflow_source_candidates import catalog_host_map
 
 
+class WorkflowCatalogSource(Protocol):
+    """A source that can be asked for workflows rather than models.
+
+    Deliberately a SECOND protocol rather than another parameter on
+    `CatalogSource.search`. That signature carries fifteen model-shaped
+    filters - quantization, architecture, parameter counts - which no workflow
+    source can answer, and it is repeated byte-identically in three files with
+    37 call sites between them. Widening it would make every one of those
+    places carry a question none of them asks.
+
+    The cost is that serving workflows becomes a runtime capability rather than
+    a typed one: a source that does not implement this is discovered when it is
+    asked. A caller narrows to it the same way `versions()` is already reached,
+    and answers a 404 shaped like the existing catalog-source-not-found when
+    the narrowing fails.
+    """
+
+    source_id: str
+    display_name: str
+    web_origin: str
+
+    async def search_workflows(
+        self,
+        *,
+        query: str = "",
+        sort: str = "trending",
+        limit: int = 30,
+        cursor: str | None = None,
+    ) -> CatalogPage: ...
+
+
 class CatalogSource(Protocol):
     source_id: str
     display_name: str
