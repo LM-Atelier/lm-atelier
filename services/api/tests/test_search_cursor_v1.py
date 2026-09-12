@@ -165,6 +165,20 @@ def test_require_int_text_refuses_empty_non_string_and_non_digits() -> None:
         require_int_text("1" * (MAX_INT_DIGITS + 1), maximum=MAX_OFFSET)
 
 
+def test_require_int_text_refuses_an_over_long_digit_string_inside_the_value_ceiling() -> None:
+    """The length bound is not the same fact as the value ceiling.
+
+    An eleven-digit string of ones is larger than MAX_OFFSET, so the existing
+    over-long case is still refused by the ceiling after the length check is
+    removed. The same spelling with a ceiling above that integer is inside
+    the value bound and is refused only by the length check. Mutating that
+    check left require_int_text returning 11111111111.
+    """
+    over_long = "1" * (MAX_INT_DIGITS + 1)
+    with pytest.raises(SearchCursorError, match=INVALID_CURSOR):
+        require_int_text(over_long, maximum=10**20)
+
+
 def test_require_int_text_refuses_a_value_above_its_ceiling() -> None:
     """The digit string can be legal and still name a place past the bound.
 
