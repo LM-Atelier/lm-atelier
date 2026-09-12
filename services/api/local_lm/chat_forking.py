@@ -83,6 +83,11 @@ def fork_chat_from_message(session: Session, message_id: str) -> ChatFork:
             role=message.role,
             status=message.status,
             transcript_visible=message.transcript_visible,
+            # A removed item travels as a removed item. Its parts are already
+            # gone, so omitting this does not hide anything - it mints an empty
+            # message that does not say why it is empty, which reads as a turn
+            # that never had content rather than one whose content was removed.
+            content_removed_at=message.content_removed_at,
         )
         session.add(clone)
         session.flush()
