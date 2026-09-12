@@ -17,6 +17,7 @@ from local_lm.model_planner import (
     media_workflow_contract_version,
 )
 from local_lm.models import (
+    GenerationQueuePolicy,
     Job,
     ModelCapabilityEvidence,
     ModelInstall,
@@ -302,6 +303,8 @@ def _add_verification(
     profile: ModelProfile,
     capability_evidence: ModelCapabilityEvidence,
     workflow: WorkflowRevision | None = None,
+    *,
+    state: str = "ready",
 ) -> SetupVerification:
     return SetupVerification(
         role=install.role,
@@ -312,7 +315,7 @@ def _add_verification(
             workflow,
             capability_evidence,
         ),
-        state="ready",
+        state=state,
         model_install_id=install.id,
         profile_id=profile.id,
         workflow_revision_id=workflow.id if workflow else None,
@@ -611,3 +614,153 @@ async def test_polled_endpoints_do_not_block_the_event_loop() -> None:
 
     assert not inspect.iscoroutinefunction(api_module.get_setup_readiness)
     assert not inspect.iscoroutinefunction(api_module.runtime_status)
+
+
+@pytest.mark.parametrize(
+    ("verification_state", "dispatch_state", "expected_code", "expected_message"),
+    [
+        (
+            "running",
+            "open",
+            "generation_verification_running",
+            "The local generation test is running.",
+        ),
+        (
+            "queued",
+            "open",
+            "generation_verification_queued",
+            "The local generation test is waiting to start.",
+        ),
+        (
+            "queued",
+            "paused",
+            "generation_verification_paused",
+            "Generation is paused, so the local test cannot start. "
+            "Resume generation under View accepted work.",
+        ),
+        (
+            "queued",
+            "draining",
+            "generation_verification_pausing",
+            "Generation is finishing its current work and will then pause, so the local "
+            "test cannot start. Resume generation under View accepted work.",
+        ),
+    ],
+)
+async def test_a_queued_generation_test_says_why_it_has_not_started(
+    client: AsyncClient,
+    app: FastAPI,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    verification_state: str,
+    dispatch_state: str,
+    expected_code: str,
+    expected_message: str,
+) -> None:
+    """A test that cannot start must not be described as running.
+
+    Queued and running shared one message, so somebody who had paused
+    generation watched a spinner say a test was running that could never
+    start - and the checklist offered nothing to do about it. The verification
+    already distinguishes the two, because it becomes `running` only when the
+    job is claimed; the dispatch lane supplies the reason it has not been.
+    """
+    chat = _add_install(role="chat", engine="llama.cpp")
+    profile = _add_profile(chat)
+    evidence = _add_evidence(settings, chat)
+    with SessionLocal() as session:
+        session.add(chat)
+        session.flush()
+        session.add_all([profile, evidence])
+        session.flush()
+        session.add(_add_verification(chat, profile, evidence, state=verification_state))
+        session.add(
+            GenerationQueuePolicy(lane="generation", dispatch_state=dispatch_state, revision=1)
+        )
+        session.commit()
+
+    _set_runtime_and_worker_state(app, monkeypatch, workers=_workers(chat_state="stopped"))
+    payload = (await client.get("/api/setup/readiness")).json()
+
+    role = next(item for item in payload["roles"] if item["role"] == "chat")
+    check = role["checks"][-1]
+    assert check["code"] == expected_code
+    assert check["message"] == expected_message
+    # Reporting only: a paused lane is still a deliberate choice, so the role
+    # stays in progress rather than being turned into a setup failure.
+    assert check["status"] == "pending"
+    assert role["state"] == "in_progress"
+
+
+async def test_an_unreadable_dispatch_policy_does_not_claim_a_pause(
+    client: AsyncClient,
+    app: FastAPI,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A policy row nobody can read is not evidence of anything.
+
+    Sending somebody to resume a lane that is already open is a worse answer
+    than the plain one, so an invalid policy falls back to simply waiting.
+    """
+    chat = _add_install(role="chat", engine="llama.cpp")
+    profile = _add_profile(chat)
+    evidence = _add_evidence(settings, chat)
+    with SessionLocal() as session:
+        session.add(chat)
+        session.flush()
+        session.add_all([profile, evidence])
+        session.flush()
+        session.add(_add_verification(chat, profile, evidence, state="queued"))
+        session.add(GenerationQueuePolicy(lane="generation", dispatch_state="paused", revision=-1))
+        session.commit()
+
+    _set_runtime_and_worker_state(app, monkeypatch, workers=_workers(chat_state="stopped"))
+    payload = (await client.get("/api/setup/readiness")).json()
+
+    role = next(item for item in payload["roles"] if item["role"] == "chat")
+    assert role["checks"][-1]["code"] == "generation_verification_queued"
+
+
+async def test_pausing_generation_the_ordinary_way_changes_what_the_checklist_says(
+    client: AsyncClient,
+    app: FastAPI,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same case again, with the pause arriving the way a person makes one.
+
+    The tests above write the dispatch row directly, which is a fixture rather
+    than a demonstration. This one presses the control: the checklist says the
+    test is waiting to start, generation is paused through its own endpoint,
+    and the same checklist then says it cannot start and where to resume it.
+    Nothing else changes in between.
+    """
+    chat = _add_install(role="chat", engine="llama.cpp")
+    profile = _add_profile(chat)
+    evidence = _add_evidence(settings, chat)
+    with SessionLocal() as session:
+        session.add(chat)
+        session.flush()
+        session.add_all([profile, evidence])
+        session.flush()
+        session.add(_add_verification(chat, profile, evidence, state="queued"))
+        session.commit()
+
+    _set_runtime_and_worker_state(app, monkeypatch, workers=_workers(chat_state="stopped"))
+
+    before = (await client.get("/api/setup/readiness")).json()
+    before_chat = next(item for item in before["roles"] if item["role"] == "chat")
+    assert before_chat["checks"][-1]["code"] == "generation_verification_queued"
+
+    paused = await client.post(
+        "/api/queue/lanes/generation/pause-after-current",
+        json={"expected_revision": 0, "idempotency_key": "setup-readiness-pause"},
+    )
+    assert paused.status_code == 200, paused.text
+    assert paused.json()["dispatch_state"] == "paused"
+
+    after = (await client.get("/api/setup/readiness")).json()
+    after_chat = next(item for item in after["roles"] if item["role"] == "chat")
+    assert after_chat["checks"][-1]["code"] == "generation_verification_paused"
+    assert "Resume generation under View accepted work." in after_chat["checks"][-1]["message"]
