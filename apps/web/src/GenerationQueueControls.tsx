@@ -31,6 +31,10 @@ export function GenerationQueueControls() {
     onSettled: () => { saving.current = false; },
   });
   const value = policy.data;
+  const conflictResolved = mutation.error instanceof ApiError
+    && mutation.error.status === 409 && mutation.error.code === "queue-lane-conflict"
+    && value !== undefined && mutation.variables !== undefined
+    && value.revision > mutation.variables.command.expected_revision;
   const action = value?.allowed_actions[0];
   const unavailable = mutation.isPending || policy.isError;
   const submit = () => {
@@ -72,7 +76,7 @@ export function GenerationQueueControls() {
           Retry generation state
         </button>
       </div>}
-      {mutation.error && <p role="alert" className="generation-queue-error">{mutation.error.message}</p>}
+      {mutation.error && !conflictResolved && <p role="alert" className="generation-queue-error">{mutation.error.message}</p>}
     </section>
   );
 }
