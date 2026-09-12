@@ -22,7 +22,6 @@ import {
 import { useConfirm } from "./useConfirm";
 import { SettingsNavigation } from "./SettingsNavigation";
 import {
-  DEFAULT_SETTINGS_DESTINATION,
   settingsDestinationFor,
 } from "./settingsDestinations";
 import type {
@@ -208,23 +207,22 @@ function PresetEditor({
   );
 }
 
-export function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
+export function SettingsView({ engines, destinationId, onDestinationChange, focusRequest }: {
+  engines: EngineCapabilities[];
+  destinationId: string;
+  onDestinationChange: (id: string) => void;
+  focusRequest?: number;
+}) {
   const [confirmDialog, confirm] = useConfirm();
-  const [destination, setDestination] = useState(DEFAULT_SETTINGS_DESTINATION);
+  const destination = settingsDestinationFor(destinationId).id;
   const on = (id: string) => destination === id;
   const destinationRef = useRef<HTMLDivElement>(null);
-  const chosen = useRef(false);
-  // Focus follows a destination the person CHOSE, and only then. Moving it
-  // on first paint would steal focus from whatever opened Settings, and
-  // moving it on an unrelated re-render would interrupt someone mid-form.
+  // Only selection or browser history requests focus, never first paint.
   useEffect(() => {
-    if (!chosen.current) return;
+    if (focusRequest === undefined) return;
     destinationRef.current?.focus();
-  }, [destination]);
-  const choose = (id: string) => {
-    chosen.current = true;
-    setDestination(id);
-  };
+  }, [destination, focusRequest]);
+  const choose = onDestinationChange;
   const client = useQueryClient();
   const [selectedProfile, setSelectedProfile] = useState<ModelProfile | null>(null);
   const [selectedPreset, setSelectedPreset] = useState<GenerationPreset | null>(null);

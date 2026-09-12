@@ -1,6 +1,7 @@
+import { useAppNavigation } from "./useAppNavigation";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { SettingsView } from "./SettingsView";
 import { SETTINGS_DESTINATIONS, settingsDestinationFor } from "./settingsDestinations";
 
@@ -17,6 +18,15 @@ vi.mock("./api", () => ({ api: {
 } }));
 
 const clients: QueryClient[] = [];
+function NavigationSettings() {
+  const navigation = useAppNavigation();
+  return <SettingsView engines={[]} destinationId={navigation.settingsDestination}
+    onDestinationChange={navigation.setSettingsDestination} focusRequest={navigation.settingsFocusRequest} />;
+}
+beforeEach(() => {
+  window.history.replaceState(null, "", "/?view=settings");
+  sessionStorage.clear();
+});
 
 afterEach(() => {
   cleanup();
@@ -26,7 +36,7 @@ afterEach(() => {
 function show() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   clients.push(client);
-  render(<QueryClientProvider client={client}><SettingsView engines={[]} /></QueryClientProvider>);
+  render(<QueryClientProvider client={client}><NavigationSettings /></QueryClientProvider>);
 }
 
 function rail(name: string) {
@@ -91,4 +101,15 @@ it("an id that no longer exists lands somewhere usable", () => {
     .toBe(SETTINGS_DESTINATIONS[0].id);
   expect(settingsDestinationFor(undefined).id).toBe(SETTINGS_DESTINATIONS[0].id);
   expect(settingsDestinationFor("advanced").label).toBe("Advanced");
+});
+
+it("refocuses the current destination without adding history", () => {
+  show();
+  fireEvent.click(rail("Advanced"));
+  rail("Advanced").focus();
+  const push = vi.spyOn(window.history, "pushState");
+  fireEvent.click(rail("Advanced"));
+  expect(screen.getByRole("region", { name: "Advanced" })).toHaveFocus();
+  expect(push).not.toHaveBeenCalled();
+  push.mockRestore();
 });
