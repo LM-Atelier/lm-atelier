@@ -7,6 +7,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from .graph_placeholders import binds_parameter
+
 EDIT_CALIBRATION_SCHEMA_KEY = "x-lm-atelier-edit-calibration"
 EDIT_CALIBRATION_VERSION = 1
 EDIT_SCOPES = ("minimal", "localized", "replacement", "global", "fallback")
@@ -62,6 +64,37 @@ def standard_edit_calibration(
             "minimum_effective_steps": dict(_DEFAULT_MINIMUM_EFFECTIVE_STEPS),
         }
     return result
+
+
+def edit_calibration_reaches_graph(
+    workflow: object, input_schema: Mapping[str, Any] | None
+) -> None:
+    """Refuse a declared edit strength the graph never consumes.
+
+    An edit workflow declares which of its settings is the change strength, and
+    the product builds a slider from that declaration. Nothing downstream checks
+    the graph takes the number, so a workflow that declares the parameter and
+    then fixes the value in its node offers a slider that changes nothing.
+
+    Only the STRENGTH is required. `steps_parameter` is deliberately not: a step
+    count is frequently fixed by the model or the schedule, and demanding a
+    placeholder for it would refuse workflows behaving correctly - the same
+    reasoning that exempts a video frame rate.
+
+    This asks whether the value reaches the GRAPH, not whether it decides the
+    output. A placeholder feeding an unrelated input still passes.
+    """
+
+    if not input_schema:
+        return
+    calibration = validate_workflow_edit_calibration(input_schema)
+    if calibration is None:
+        return
+    if not binds_parameter(workflow, calibration.parameter):
+        raise ValueError(
+            "workflow edit calibration declares "
+            f"{calibration.parameter} but the graph never uses it"
+        )
 
 
 def validate_workflow_edit_calibration(

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 from typing import Any, Final
 
+from .graph_placeholders import binds_parameter
 from .saved_settings import unusable_as_a_number
 from .schemas import SettingField
 
@@ -150,26 +151,6 @@ def workflow_video_length(
     )
 
 
-def _graph_carries(workflow: object, placeholder: str) -> bool:
-    """Whether this graph offers the placeholder anywhere a value can sit.
-
-    Iterative rather than recursive, and by the same walk `binds_prompt` uses:
-    the graph is what runs, and a declared parameter that appears nowhere in it
-    is a control over nothing.
-    """
-
-    stack: list[Any] = [workflow]
-    while stack:
-        value = stack.pop()
-        if isinstance(value, dict):
-            stack.extend(value.values())
-        elif isinstance(value, list):
-            stack.extend(value)
-        elif value == placeholder:
-            return True
-    return False
-
-
 def video_length_reaches_graph(
     workflow: object,
     input_schema: Mapping[str, Any] | None,
@@ -204,7 +185,7 @@ def video_length_reaches_graph(
     contract = workflow_video_length(input_schema)
     if contract is None:
         return
-    if not _graph_carries(workflow, f"${{{contract.frames_parameter}}}"):
+    if not binds_parameter(workflow, contract.frames_parameter):
         raise ValueError(
             "workflow video length declares "
             f"{contract.frames_parameter} but the graph never uses it"

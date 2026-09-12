@@ -566,7 +566,10 @@ from .workflow_compatibility import (
     reconcile_legacy_workflow_compatibility,
     retire_legacy_profile_workflow,
 )
-from .workflow_edit_calibration import validate_workflow_edit_calibration
+from .workflow_edit_calibration import (
+    edit_calibration_reaches_graph,
+    validate_workflow_edit_calibration,
+)
 from .workflow_editor_sessions import (
     WorkflowEditorSessionError,
     workflow_api_graph_sha256,
@@ -9039,6 +9042,7 @@ async def _persist_workflow(
         validate_workflow_input_schema(payload.input_schema)
         workflow_video_length(payload.input_schema)
         video_length_reaches_graph(payload.api_graph, payload.input_schema)
+        edit_calibration_reaches_graph(payload.api_graph, payload.input_schema)
     except ValueError as exc:
         raise api_error(422, "workflow-invalid", str(exc)) from exc
     definition = WorkflowDefinition(
@@ -11685,6 +11689,8 @@ async def _persist_workflow_revision(
         validate_workflow_edit_calibration(payload.input_schema)
         validate_workflow_input_schema(payload.input_schema)
         workflow_video_length(payload.input_schema)
+        video_length_reaches_graph(payload.api_graph, payload.input_schema)
+        edit_calibration_reaches_graph(payload.api_graph, payload.input_schema)
     except ValueError as exc:
         raise api_error(422, "workflow-revision-invalid", str(exc)) from exc
     version = (
@@ -11856,6 +11862,8 @@ async def validate_workflow(
         validate_settings(defaults(declared_fields), declared_fields)
         validate_workflow_edit_calibration(revision.input_schema_json)
         workflow_video_length(revision.input_schema_json)
+        video_length_reaches_graph(revision.api_graph_json, revision.input_schema_json)
+        edit_calibration_reaches_graph(revision.api_graph_json, revision.input_schema_json)
     except ValueError as exc:
         # Explaining why a schema is invalid is what this endpoint is for, so the
         # message survives - but it now comes only from our own validators,

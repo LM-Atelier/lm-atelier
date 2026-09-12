@@ -7816,7 +7816,10 @@ async def test_workflow_edit_calibration_is_validated_and_portable(
             "name": "Calibrated edit",
             "operation": "image_to_image",
             "engine": "mock",
-            "api_graph": {"node": {"class_type": "Mock"}},
+            # The stub graph has to USE the strength it declares: a workflow
+            # that declares an edit strength and never consumes it is refused,
+            # because the slider built from that declaration would do nothing.
+            "api_graph": {"node": {"class_type": "Mock", "inputs": {"denoise": "${strength}"}}},
             "input_schema": input_schema,
         },
     )
