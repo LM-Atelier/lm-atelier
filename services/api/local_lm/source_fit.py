@@ -188,6 +188,33 @@ def _crop(width: int, height: int, source_ratio: Fraction, target_ratio: Fractio
     Margins are all zero here and that is not an oversight: a crop removes
     rather than invents, so there is no region for a workflow to paint. The
     rectangle is the answer.
+
+    THE RECTANGLE IS TRUNCATED, AND IT IS NOT ALWAYS THE REQUESTED RATIO. The
+    exact edge is a rational, and `int()` drops whatever is left of it, so the
+    kept rectangle is exactly the requested ratio only when that edge is already
+    a whole number:
+
+        400x300 to 16:9   kept 400x225   exactly 16/9
+        400x300 to 9:16   kept 168x300   14/25, because 168.75 truncates
+        400x300 to 3:2    kept 400x266   200/133, because 266.67 truncates
+
+    The error is under one pixel on one axis and it is still real - 0.5600
+    against 0.5625 - so a consumer that needs an exact ratio cannot get it from
+    this rectangle, and one that scales this rectangle to an exact-ratio output
+    is applying slightly different factors per axis. That is a distortion,
+    small but not nothing.
+
+    Truncating rather than rounding is deliberate: it keeps the rectangle
+    INSIDE the source on the cropped axis, so no consumer is ever handed an edge
+    the picture does not have. Rounding 168.75 up to 169 would exceed the exact
+    ratio instead, which trades one kind of wrongness for another.
+
+    Whoever needs exactness has three ways out and none of them belongs here:
+    shrink both axes to the largest exactly-ratio rectangle, choose the output
+    size FROM this rectangle so the scale is uniform by construction, or keep a
+    fractional viewport and resample it. `source_crop` takes the third road with
+    a rational viewport and one exact scale; this module stays the integer cost
+    estimate it has always been.
     """
 
     if source_ratio > target_ratio:
