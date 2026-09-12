@@ -63,44 +63,44 @@ def download_https_artifact(
     transport: httpx.BaseTransport | None = None,
 ) -> str:
     request = _parse_request(payload)
-    destination, partial = _prepare_destination(request)
-    if _verified_file(destination, request):
+    with _hold_destination(request) as (destination, partial):
+        if _verified_file(destination, request):
+            return str(destination)
+        if destination.exists() or destination.is_symlink():
+            raise HttpsTransferError("destination_conflict")
+        if _verified_partial(partial, destination, request):
+            return str(destination)
+
+        starting_size = partial.stat().st_size if partial.is_file() else 0
+        if starting_size > request.expected_size:
+            partial.unlink()
+            starting_size = 0
+
+        timeout = httpx.Timeout(connect=20, read=60, write=20, pool=20)
+        try:
+            with (
+                _quiet_http_loggers(),
+                httpx.Client(
+                    follow_redirects=False,
+                    timeout=timeout,
+                    transport=transport,
+                    trust_env=False,
+                ) as client,
+            ):
+                downloaded = _stream_response(client, request, partial, starting_size)
+        except HttpsTransferError:
+            raise
+        except (httpx.HTTPError, OSError) as exc:
+            code = "network_error" if isinstance(exc, httpx.HTTPError) else "filesystem_error"
+            raise HttpsTransferError(code) from None
+
+        if downloaded != request.expected_size:
+            raise HttpsTransferError("truncated_body")
+        if _sha256_file(partial) != request.expected_sha256:
+            partial.unlink(missing_ok=True)
+            raise HttpsTransferError("digest_mismatch")
+        os.replace(partial, destination)
         return str(destination)
-    if destination.exists() or destination.is_symlink():
-        raise HttpsTransferError("destination_conflict")
-    if _verified_partial(partial, destination, request):
-        return str(destination)
-
-    starting_size = partial.stat().st_size if partial.is_file() else 0
-    if starting_size > request.expected_size:
-        partial.unlink()
-        starting_size = 0
-
-    timeout = httpx.Timeout(connect=20, read=60, write=20, pool=20)
-    try:
-        with (
-            _quiet_http_loggers(),
-            httpx.Client(
-                follow_redirects=False,
-                timeout=timeout,
-                transport=transport,
-                trust_env=False,
-            ) as client,
-        ):
-            downloaded = _stream_response(client, request, partial, starting_size)
-    except HttpsTransferError:
-        raise
-    except (httpx.HTTPError, OSError) as exc:
-        code = "network_error" if isinstance(exc, httpx.HTTPError) else "filesystem_error"
-        raise HttpsTransferError(code) from None
-
-    if downloaded != request.expected_size:
-        raise HttpsTransferError("truncated_body")
-    if _sha256_file(partial) != request.expected_sha256:
-        partial.unlink(missing_ok=True)
-        raise HttpsTransferError("digest_mismatch")
-    os.replace(partial, destination)
-    return str(destination)
 
 
 def _parse_request(payload: Mapping[str, Any]) -> HttpsArtifactRequest:
@@ -158,7 +158,8 @@ def _parse_request(payload: Mapping[str, Any]) -> HttpsArtifactRequest:
     )
 
 
-def _prepare_destination(request: HttpsArtifactRequest) -> tuple[Path, Path]:
+@contextmanager
+def _hold_destination(request: HttpsArtifactRequest) -> Iterator[tuple[Path, Path]]:
     try:
         root = AnchoredDirectory(request.local_dir)
     except AnchoredDirectoryError as exc:
@@ -182,7 +183,7 @@ def _prepare_destination(request: HttpsArtifactRequest) -> tuple[Path, Path]:
                 raise HttpsTransferError("unsafe_destination") from exc
             if descriptor is not None:
                 os.close(descriptor)
-        return parent.path / destination_name, parent.path / partial_name
+        yield parent.path / destination_name, parent.path / partial_name
     finally:
         for directory in reversed(held):
             directory.close()
