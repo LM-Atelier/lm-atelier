@@ -172,6 +172,33 @@ def test_compose_wraps_invalid_query_and_visibility() -> None:
     _refuse([{"not": "a complete row"}])
 
 
+def test_compose_refuses_a_non_string_query_before_privacy() -> None:
+    """A non-string query is invalid compose, not a wrapped privacy refusal.
+
+    query=123 is already refused. Privacy also refuses a non-string, so
+    dropping this module's type check still raises INVALID_COMPOSE, with
+    SearchPrivacyError as the cause. The cause being absent is the unique
+    bind: mutating `type(query) is not str` left a privacy cause attached.
+    """
+    with pytest.raises(SearchComposeError, match=INVALID_COMPOSE) as caught:
+        compose_conversation_search([_row("m1", "hello")], 123)
+    assert caught.value.__cause__ is None
+
+
+def test_compose_refuses_a_non_int_limit_before_bounds() -> None:
+    """A boolean limit is invalid compose, not a wrapped bounds refusal.
+
+    limit=True is already refused. Resource bounds also refuse a non-int, so
+    dropping this module's type check still raises INVALID_COMPOSE, with
+    SearchResourceBoundsError as the cause. The cause being absent is the
+    unique bind: mutating `type(limit) is not int` left a bounds cause
+    attached.
+    """
+    with pytest.raises(SearchComposeError, match=INVALID_COMPOSE) as caught:
+        compose_conversation_search([_row("m1", "hello")], "hello", limit=True)
+    assert caught.value.__cause__ is None
+
+
 def test_compose_pages_after_bounded_rank() -> None:
     rows = [_row(f"m{i:02d}", "hello world") for i in range(12)]
     result = compose_conversation_search(rows, "hello", limit=5)
