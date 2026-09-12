@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Cpu, Folder, HardDrive, Plus } from "lucide-react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { CopyTextButton } from "./CopyTextButton";
@@ -20,6 +20,11 @@ import {
   type Visibility,
 } from "./settings";
 import { useConfirm } from "./useConfirm";
+import { SettingsNavigation } from "./SettingsNavigation";
+import {
+  DEFAULT_SETTINGS_DESTINATION,
+  settingsDestinationFor,
+} from "./settingsDestinations";
 import type {
   ApplicationInfo,
   BackupInfo,
@@ -205,6 +210,21 @@ function PresetEditor({
 
 export function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
   const [confirmDialog, confirm] = useConfirm();
+  const [destination, setDestination] = useState(DEFAULT_SETTINGS_DESTINATION);
+  const on = (id: string) => destination === id;
+  const destinationRef = useRef<HTMLDivElement>(null);
+  const chosen = useRef(false);
+  // Focus follows a destination the person CHOSE, and only then. Moving it
+  // on first paint would steal focus from whatever opened Settings, and
+  // moving it on an unrelated re-render would interrupt someone mid-form.
+  useEffect(() => {
+    if (!chosen.current) return;
+    destinationRef.current?.focus();
+  }, [destination]);
+  const choose = (id: string) => {
+    chosen.current = true;
+    setDestination(id);
+  };
   const client = useQueryClient();
   const [selectedProfile, setSelectedProfile] = useState<ModelProfile | null>(null);
   const [selectedPreset, setSelectedPreset] = useState<GenerationPreset | null>(null);
@@ -338,6 +358,10 @@ export function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
   return (
     <div className="page-view settings-page">
       <header className="page-header"><div><h1>Settings</h1></div></header>
+      <SettingsNavigation current={destination} onSelect={choose} />
+      <div className="settings-destination" role="region" tabIndex={-1} ref={destinationRef}
+        aria-label={settingsDestinationFor(destination).label}>
+      {on("model-sources") && (<>
       <CredentialSettingsCard
         provider="huggingface"
         providerLabel="Hugging Face"
@@ -352,9 +376,13 @@ export function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
         environmentVariable="LOCAL_LM_CIVITAI_TOKEN"
         placeholder="CivitAI API token"
       />
+      </>)}
+      {on("advanced") && (<>
       <WebSearchSettings />
       <section><h2>Engines</h2><div className="engine-grid">{engines.map((engine) => <article className="engine-card" key={`${engine.engine}:${engine.roles.join()}`}><header><div className="model-icon"><Cpu /></div><div><h3>{engine.engine}</h3><p>{engine.roles.join(" · ")} · {engine.version}</p></div><StatusDot healthy={engine.healthy} label={`${engine.engine} engine`} /></header>{engine.roles.includes("chat") && <div className="capability-list"><button className="secondary compact-button" onClick={() => toolProbe.mutate()} disabled={toolProbe.isPending}>{toolProbe.isPending ? "Testing…" : "Test structured tools"}</button></div>}</article>)}</div>{toolProbe.data && <div className={`callout ${toolProbe.data.passed ? "success" : "error"}`} role={toolProbe.data.passed ? "status" : "alert"}>{toolProbe.data.passed ? `Structured tool schema passed on ${toolProbe.data.engine} ${toolProbe.data.version}.` : `Structured tool schema failed: ${toolProbe.data.error || "unknown response"}`}</div>}{toolProbe.error && <ErrorCallout message={toolProbe.error.message} />}<div className="runtime-setup-grid">{runtimes.data?.map((runtime) => <RuntimeSetupCard key={runtime.engine} runtime={runtime} installPending={installRuntime.isPending} onInstall={(engine) => installRuntime.mutate(engine)} />)}</div>{(runtimes.error || installRuntime.error) && <ErrorCallout message={(runtimes.error || installRuntime.error)?.message} />}</section>
       <section><h2>Machine</h2>{system.data && <div className="metric-grid"><div className="cpu-metric"><Cpu /><span><strong>{system.data.cpu_model}</strong><small>CPU model</small></span></div><div><HardDrive /><span><strong>{formatBytes(system.data.disk_free_bytes)}</strong> disk free</span></div></div>}<div className="device-list">{system.data?.devices.filter((device) => device.kind !== "cpu").map((device) => <div key={device.id}><span className="device-icon"><Cpu size={18} /></span><span><strong>{device.name}</strong><small>{device.backend}</small></span></div>)}</div></section>
+      </>)}
+      {on("models-and-generation") && (<>
       <section>
         <div className="detail-title"><div><h2>Model profiles</h2></div><button className="secondary" onClick={() => profileImport.current?.click()}>Import profile</button></div>
         <input ref={profileImport} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0], "profile"); event.target.value = ""; }} />
@@ -368,6 +396,8 @@ export function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
         <div className="profile-table interactive">{presets.data?.map((preset) => <div key={preset.id}><span className="badge">{preset.role}</span><strong>{preset.name}{preset.is_default ? " · default" : ""}</strong><span>{Object.keys(preset.settings_json).length} overrides</span><button className="secondary compact-button" aria-label={`Edit preset: ${preset.name}`} onClick={() => setSelectedPreset(preset)}>Edit</button></div>)}</div>
         {(createPreset.error || importError) && <ErrorCallout message={createPreset.error?.message || importError} />}
       </section>
+      </>)}
+      {on("advanced") && (<>
       <section>
         <div className="detail-title">
           <div><h2>Workers</h2><p>A model must finish loading within the startup time limit. Large models on slow disks can need more than the default 60 seconds.</p></div>
@@ -392,6 +422,8 @@ export function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
           message={(loadChat.error || startMedia.error || stopWorker.error)?.message}
         />
       </section>
+      </>)}
+      {on("data-and-backups") && (<>
       <section>
         <div className="detail-title storage-actions">
           <div><h2>Recovery backups</h2></div>
@@ -481,6 +513,8 @@ export function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
         )}
         {backups.error && <ErrorCallout message={backups.error.message} />}
       </section>
+      </>)}
+      {on("about-and-support") && (<>
       <section>
         <div className="detail-title">
           <div><h2>About &amp; support</h2></div>
@@ -506,6 +540,8 @@ export function SettingsView({ engines }: { engines: EngineCapabilities[] }) {
         </div>}
         {(about.error || system.error) && <ErrorCallout message="About information is unavailable." />}
       </section>
+      </>)}
+      </div>
       {selectedProfile && <ProfileEditor profile={selectedProfile} engines={engines} onClose={() => setSelectedProfile(null)} />}
       {selectedPreset && <PresetEditor preset={selectedPreset} engines={engines} onClose={() => setSelectedPreset(null)} />}
       {confirmDialog}
