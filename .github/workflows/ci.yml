@@ -176,6 +176,9 @@ jobs:
       - name: Certify synthetic workflow editor browser protocol
         if: needs.verification-plan.outputs.mode == 'full'
         run: npm run e2e:workflow-editor:run
+      - name: Certify surfaces that need a managed media engine
+        if: needs.verification-plan.outputs.mode == 'full'
+        run: npm run e2e:managed-media:run
       - name: Validate documentation-only change
         if: needs.verification-plan.outputs.mode == 'documentation'
         env:
