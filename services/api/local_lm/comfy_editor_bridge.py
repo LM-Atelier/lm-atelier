@@ -466,5 +466,5 @@ def _is_link_or_reparse(path: Path) -> bool:
     return is_link_or_reparse(
         path,
         missing="assume_regular",
-        unreadable="assume_regular",
+        unreadable="assume_link",
     )

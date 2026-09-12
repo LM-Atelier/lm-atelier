@@ -4,6 +4,7 @@ import base64
 import csv
 import hashlib
 import io
+import os
 import sys
 import zipfile
 from collections.abc import Generator
@@ -1051,3 +1052,37 @@ async def test_failed_renewal_keeps_the_prior_binding_and_environment(
         / "registry-wheel-environments"
         / f"registry-wheels-v3-{renewed_closure.closure_sha256}"
     ).exists()
+
+
+async def test_unreadable_cleanup_path_is_refused_not_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreadable tree is unsafe cleanup, not a regular directory to rmtree.
+
+    Path.exists still succeeds. lstat raising PermissionError is the
+    unreadable half of the shared inspection. Mutating unreadable back to
+    assume_regular called shutil.rmtree.
+    """
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "pkg"
+    target.mkdir()
+    (target / "kept.txt").write_text("x", encoding="utf-8")
+    removed: list[Path] = []
+    real_lstat = Path.lstat
+
+    def fake_lstat(self: Path) -> os.stat_result:
+        if self.resolve() == target.resolve():
+            raise PermissionError("locked")
+        return real_lstat(self)
+
+    def track_rmtree(path: Path, *args: object, **kwargs: object) -> None:
+        removed.append(path)
+
+    monkeypatch.setattr(Path, "lstat", fake_lstat)
+    monkeypatch.setattr(lifecycle_module.shutil, "rmtree", track_rmtree)
+    with pytest.raises(ComfyRegistryLifecycleError) as raised:
+        await lifecycle_module._remove_tree(target, root)
+    assert raised.value.code == "cleanup_failed"
+    assert removed == []
+    assert (target / "kept.txt").is_file()
