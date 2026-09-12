@@ -56,7 +56,7 @@ from .artifacts import (
 from .auxiliary_assets import AUXILIARY_ASSET_KINDS, validate_lora_workflow_contract
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
 from .capability_probe import probe_structured_tools
-from .catalog_sources import CatalogSource, CatalogSourceNotFound
+from .catalog_sources import CatalogSource, CatalogSourceNotFound, WorkflowCatalogSource
 from .chat_deletion import (
     ExchangeBusy,
     ExchangeHasReplies,
@@ -5183,6 +5183,59 @@ async def catalog_search(
                     _grouped_by_parent(items), _installed_counts_by_parent(session)
                 )
             }
+        )
+    except ValueError as exc:
+        raise api_error(422, "catalog-request-invalid", f"invalid catalog request: {exc}") from exc
+    except Exception as exc:
+        raise api_error(
+            503,
+            "catalog-unavailable",
+            f"{catalog.display_name} is temporarily unavailable. Check your connection and retry.",
+        ) from exc
+
+
+@router.get("/workflow-catalog", response_model=CatalogPage)
+async def workflow_catalog_search(
+    request: Request,
+    source: str = Query(default="civitai", min_length=1, max_length=32),
+    query: str = "",
+    sort: str = "trending",
+    limit: int = Query(default=30, ge=1, le=100),
+    cursor: str | None = None,
+) -> CatalogPage:
+    """Find workflows on a remote source, the way models are already found.
+
+    Deliberately NOT a parameter on `/catalog`. That route answers a question
+    about models - role, quantization, architecture, parameter counts - and a
+    workflow can answer none of it. Two routes keep each one honest about what
+    it accepts, instead of one route with filters that mean nothing on half its
+    inputs.
+
+    Serving workflows is a RUNTIME capability: a source satisfies
+    `WorkflowCatalogSource` structurally or it does not. A source that does not
+    is a 404 naming that specific fact, rather than a 500 or an empty page.
+    An empty page would be the worst of the three - indistinguishable from a
+    source that serves workflows and happens to have none.
+    """
+
+    services = _services(request)
+    try:
+        catalog: CatalogSource = services.catalog_sources.get(source)
+    except CatalogSourceNotFound as exc:
+        raise api_error(404, "catalog-source-not-found", str(exc)) from exc
+    if getattr(catalog, "search_workflows", None) is None:
+        raise api_error(
+            404,
+            "catalog-source-serves-no-workflows",
+            f"{catalog.display_name} does not offer workflows.",
+        )
+    source_with_workflows = cast(WorkflowCatalogSource, catalog)
+    try:
+        return await source_with_workflows.search_workflows(
+            query=query,
+            sort=sort,
+            limit=limit,
+            cursor=cursor,
         )
     except ValueError as exc:
         raise api_error(422, "catalog-request-invalid", f"invalid catalog request: {exc}") from exc
