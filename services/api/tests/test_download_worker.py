@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -238,6 +239,69 @@ def test_https_transfer_rejects_a_linked_destination_root(tmp_path: Path) -> Non
         download_https_artifact(payload)
 
     assert raised.value.code == "unsafe_local_dir"
+
+
+def test_https_transfer_rejects_a_linked_nested_destination_parent(tmp_path: Path) -> None:
+    """Nested destination directories are opened through the held root.
+
+    A linked local_dir is already refused. A junction planted as the first
+    filename component is a different entry: mkdir-by-path would follow it.
+    open_child_directory refuses the reparse instead.
+    """
+    real_models = tmp_path / "real-models"
+    linked_models = tmp_path / "models"
+    real_models.mkdir()
+    try:
+        linked_models.symlink_to(real_models, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory links are unavailable")
+    payload = _https_payload(tmp_path)
+
+    with pytest.raises(HttpsTransferError) as raised:
+        download_https_artifact(payload)
+
+    assert raised.value.code == "unsafe_destination"
+
+
+def test_prepare_destination_holds_the_nested_parent_after_a_name_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The nested parent stays the opened directory after its path is replaced.
+
+    The path-based walk looks the name up again for destination and partial.
+    After open_child_directory, a swap would make those lookups follow the
+    link. open_entry uses the held parent, so the original directory is still
+    the one inspected. On the parent this test never reaches open_entry.
+    """
+    models = tmp_path / "models"
+    models.mkdir()
+    (models / "sentinel").write_text("inside", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "sentinel").write_text("outside", encoding="utf-8")
+    request = transfer_module._parse_request(_https_payload(tmp_path))
+    original_open_entry = transfer_module.open_entry
+    seen: list[str] = []
+
+    def swap_then_open(parent: object, name: str) -> int | None:
+        moved = tmp_path / "models-moved"
+        if os.name == "nt":
+            with pytest.raises(OSError):
+                models.rename(moved)
+        elif models.is_dir() and not models.is_symlink():
+            models.rename(moved)
+            try:
+                (tmp_path / "models").symlink_to(outside, target_is_directory=True)
+            except OSError:
+                pytest.skip("directory links are unavailable")
+        from local_lm.filesystem_links import list_entries
+
+        seen.extend(entry.name for entry in list_entries(parent))
+        return original_open_entry(parent, name)
+
+    monkeypatch.setattr(transfer_module, "open_entry", swap_then_open)
+    transfer_module._prepare_destination(request)
+    assert "sentinel" in seen
 
 
 def test_https_transfer_resumes_only_from_the_exact_content_range(tmp_path: Path) -> None:
