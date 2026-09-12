@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import re
 import shutil
 import stat
@@ -10,7 +11,14 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from .filesystem_links import is_link_or_reparse
+from .filesystem_links import (
+    AnchoredDirectory,
+    AnchoredDirectoryError,
+    AnchoredEntryKind,
+    list_entries,
+    open_child_directory,
+    open_entry,
+)
 
 MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
 MAX_ARCHIVE_ENTRIES = 4_096
@@ -201,42 +209,69 @@ def snapshot_staged_comfy_registry_files(
     destination: Path,
 ) -> tuple[ComfyRegistryRuntimeFile, ...]:
     """Capture exact non-cache file identities without trusting their contents."""
-    if _is_link_or_reparse(destination) or not destination.is_dir():
-        raise ComfyRegistryArchiveError("staged Registry archive is missing or unsafe")
     files: list[ComfyRegistryRuntimeFile] = []
-    expanded_bytes = 0
+    expanded_bytes = [0]
     try:
-        for path in sorted(destination.rglob("*")):
-            if _is_link_or_reparse(path):
-                raise ComfyRegistryArchiveError("staged Registry archive contains a link")
-            if path.is_dir():
-                continue
-            if not path.is_file():
-                raise ComfyRegistryArchiveError("staged Registry archive contains a special file")
-            relative_path = path.relative_to(destination)
-            if _is_runtime_python_cache(destination, relative_path):
-                continue
-            size = path.stat().st_size
-            expanded_bytes += size
-            if (
-                len(files) >= MAX_ARCHIVE_ENTRIES + MAX_RUNTIME_FILE_COUNT
-                or expanded_bytes > MAX_ARCHIVE_EXPANDED_BYTES + MAX_RUNTIME_FILES_BYTES
-            ):
-                raise ComfyRegistryArchiveError("staged Registry archive exceeds its limits")
-            digest = hashlib.sha256()
-            with path.open("rb") as source:
-                while chunk := source.read(1024 * 1024):
-                    digest.update(chunk)
-            files.append(
-                ComfyRegistryRuntimeFile(
-                    relative_path.as_posix(),
-                    size,
-                    digest.hexdigest(),
-                )
-            )
+        with AnchoredDirectory(destination) as root:
+            _collect_staged_runtime_files(root, (), None, files, expanded_bytes)
+    except AnchoredDirectoryError as exc:
+        raise ComfyRegistryArchiveError("staged Registry archive is missing or unsafe") from exc
     except OSError as exc:
         raise ComfyRegistryArchiveError("could not verify staged Registry archive") from exc
     return tuple(sorted(files, key=lambda item: item.path))
+
+
+def _collect_staged_runtime_files(
+    anchor: AnchoredDirectory,
+    prefix: tuple[str, ...],
+    parent: AnchoredDirectory | None,
+    files: list[ComfyRegistryRuntimeFile],
+    expanded_bytes: list[int],
+) -> None:
+    """Walk one held directory. Kind and bytes come from the held objects."""
+
+    for entry in list_entries(anchor):
+        if entry.kind is AnchoredEntryKind.LINK:
+            raise ComfyRegistryArchiveError("staged Registry archive contains a link")
+        if entry.kind in {AnchoredEntryKind.UNKNOWN, AnchoredEntryKind.OTHER}:
+            raise ComfyRegistryArchiveError("staged Registry archive contains a special file")
+        if entry.kind is AnchoredEntryKind.DIRECTORY:
+            child = open_child_directory(anchor, entry.name)
+            try:
+                _collect_staged_runtime_files(
+                    child, (*prefix, entry.name), anchor, files, expanded_bytes
+                )
+            finally:
+                child.close()
+            continue
+        if entry.kind is not AnchoredEntryKind.FILE:
+            raise ComfyRegistryArchiveError("staged Registry archive contains a special file")
+        relative = (*prefix, entry.name)
+        if _is_runtime_python_cache_beside_source(relative, parent):
+            continue
+        descriptor = open_entry(anchor, entry.name)
+        if descriptor is None:
+            raise ComfyRegistryArchiveError("could not verify staged Registry archive")
+        try:
+            size = os.fstat(descriptor).st_size
+            expanded_bytes[0] += size
+            if (
+                len(files) >= MAX_ARCHIVE_ENTRIES + MAX_RUNTIME_FILE_COUNT
+                or expanded_bytes[0] > MAX_ARCHIVE_EXPANDED_BYTES + MAX_RUNTIME_FILES_BYTES
+            ):
+                raise ComfyRegistryArchiveError("staged Registry archive exceeds its limits")
+            digest = hashlib.sha256()
+            while chunk := os.read(descriptor, 1024 * 1024):
+                digest.update(chunk)
+        finally:
+            os.close(descriptor)
+        files.append(
+            ComfyRegistryRuntimeFile(
+                "/".join(relative),
+                size,
+                digest.hexdigest(),
+            )
+        )
 
 
 def capture_staged_comfy_registry_runtime_files(
@@ -363,20 +398,30 @@ def _identities_are_sorted_and_unique(
     return paths == tuple(sorted(paths)) and len(keys) == len(set(keys))
 
 
-def _is_runtime_python_cache(destination: Path, path: Path) -> bool:
+def _is_runtime_python_cache_beside_source(
+    relative: tuple[str, ...],
+    parent: AnchoredDirectory | None,
+) -> bool:
     """Recognize only bytecode Python writes beside reviewed source at import."""
 
     if (
-        path.suffix.casefold() != ".pyc"
-        or len(path.parts) < 2
-        or path.parts[-2].casefold() != "__pycache__"
+        parent is None
+        or len(relative) < 2
+        or not relative[-1].casefold().endswith(".pyc")
+        or relative[-2].casefold() != "__pycache__"
     ):
         return False
-    source_name, separator, implementation_tag = path.name.partition(".")
+    source_name, separator, implementation_tag = relative[-1].partition(".")
     if not separator or not source_name or not implementation_tag.casefold().startswith("cpython-"):
         return False
-    source = destination.joinpath(*path.parts[:-2], f"{source_name}.py")
-    return source.is_file() and not _is_link_or_reparse(source)
+    try:
+        descriptor = open_entry(parent, f"{source_name}.py")
+    except AnchoredDirectoryError:
+        return False
+    if descriptor is None:
+        return False
+    os.close(descriptor)
+    return True
 
 
 def _read_bounded_archive(path: Path) -> bytes:
@@ -539,12 +584,4 @@ def _extract_entries(
         startup_hooks=tuple(sorted(startup_hooks)),
         native_files=tuple(sorted(native_files)),
         top_level_entries=tuple(sorted({entry.path.parts[0] for entry in entries})),
-    )
-
-
-def _is_link_or_reparse(path: Path) -> bool:
-    return is_link_or_reparse(
-        path,
-        missing="assume_link",
-        unreadable="assume_link",
     )

@@ -410,3 +410,28 @@ def test_explicit_directory_after_implicit_parent_is_supported(tmp_path: Path) -
     )
     report = stage_comfy_registry_archive(source, tmp_path / "staged")
     assert report.file_count == 1
+
+
+def test_snapshot_refuses_a_linked_child(tmp_path: Path) -> None:
+    """A staged tree is the held directory, not a path walk that can follow a link.
+
+    Zip staging already refuses link members. A link planted after staging is a
+    different entry point: snapshot used to rglob by path. Mutating the walk
+    back to rglob still refuses this child because the path-based link check
+    remains, so this test is the reachable plant, not a uniqueness proof of
+    listing versus rglob. The walk now takes kind from the held listing and
+    hashes through the held file.
+    """
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    (staged / "ok.py").write_text("pass\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.py").write_text("secret\n", encoding="utf-8")
+    alias = staged / "alias"
+    try:
+        alias.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+    with pytest.raises(ComfyRegistryArchiveError, match="link"):
+        snapshot_staged_comfy_registry_files(staged)
