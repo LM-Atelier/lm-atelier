@@ -143,6 +143,7 @@ from .outpaint_workflows import (
 )
 from .output_measurement import Budget, measure_output, record_to_keep
 from .output_origin import names_a_preview, record_for
+from .output_size_agreement import size_agreement
 from .processes import ProcessSupervisor, WorkerStartRefused
 from .profile_service import AUTO_PROFILE_ID
 from .progress import apply_engine_progress, completed_progress, update_job_progress
@@ -234,6 +235,10 @@ from .workflow_compatibility import (
     resolve_project_workflow_selection,
 )
 from .workflow_node_dependencies import node_dependency_errors
+from .workflow_output_geometry import (
+    executed_graph_carries_the_proof,
+    prove_workflow_output_geometry,
+)
 from .workflow_review_runtime import (
     revalidate_workflow_review_runtime,
     verify_workflow_review_runtime,
@@ -5391,6 +5396,40 @@ class ConversationOrchestrator:
             return None
         return capabilities if capabilities.healthy else None
 
+    def _geometry_binding_confirmed(
+        self, accepted_inputs: AcceptedContext | None, executed_graph: dict[str, Any]
+    ) -> bool:
+        """Was a size binding proven for this revision, and did the run keep it?
+
+        Two questions, and both have to be yes. The proof is granted over the
+        revision as STORED; what actually runs may have been rewritten on the way
+        to the engine. Answering only the first would let a rewritten graph
+        inherit a promise made about a different document.
+
+        Everything the prover needs is already frozen on the accepted context -
+        the revision's identity, graph, schema, dependencies, digest and trust -
+        so this reads nothing live and cannot be affected by a revision that
+        changed after the turn was accepted.
+        """
+
+        if accepted_inputs is None or accepted_inputs.workflow is None:
+            return False
+        accepted_workflow = accepted_inputs.workflow
+        proven = prove_workflow_output_geometry(
+            workflow_id=accepted_workflow.workflow_id,
+            revision_id=accepted_workflow.id,
+            operation=accepted_inputs.operation,
+            engine=accepted_workflow.engine,
+            api_graph=accepted_workflow.api_graph_json,
+            input_schema=accepted_workflow.input_schema_json,
+            dependencies=accepted_workflow.dependencies_json,
+            artifact_sha256=accepted_workflow.artifact_sha256,
+            trusted=accepted_workflow.trusted,
+        )
+        if not proven.available:
+            return False
+        return executed_graph_carries_the_proof(proven.proof, executed_graph)
+
     async def _measured_outputs(
         self, completed_assets: Sequence[GeneratedAsset]
     ) -> list[dict[str, Any]]:
@@ -5684,6 +5723,12 @@ class ConversationOrchestrator:
                         raise RuntimeError(
                             "The effective LoRA graph changed after this run was queued."
                         )
+            # Asked here, once, because this is where the graph stops changing.
+            # The proof is about the STORED revision and the rewrite above is
+            # about this run, so the two have to be compared after the rewrite
+            # and before the dispatch - anywhere later and it would be a claim
+            # about a graph nobody kept.
+            size_binding_confirmed = self._geometry_binding_confirmed(accepted_inputs, workflow)
             # The mask travels as a resolved path beside the settings, never
             # as an input reference: it is instruction, not content, and must
             # not appear as an attachment or count toward edit lineage.
@@ -5939,6 +5984,22 @@ class ConversationOrchestrator:
                 # never chosen.
                 origin = record_for(generated.origin, media_engine)
                 throwaway = names_a_preview(origin)
+                # Kept OFF the artifact row, which is the whole point. An
+                # artifact is addressed by its contents, so two runs that make
+                # identical bytes are one row - and whether a picture is the
+                # size somebody asked for is a fact about the ASKING, not about
+                # the bytes. Writing it on the shared row let a later run
+                # replace what an earlier conversation had already been told.
+                # The measurement can live there, because dimensions really are
+                # a property of the bytes; the judgement cannot.
+                agreement = size_agreement(
+                    requested_settings=(
+                        accepted_inputs.settings if accepted_inputs is not None else None
+                    ),
+                    measurement=measurement,
+                    origin=origin,
+                    binding_confirmed=size_binding_confirmed,
+                )
                 output_chat = session.get(Chat, run.chat_id)
                 if (
                     setup_verification_for_chat(session, run.chat_id) is None
@@ -6029,6 +6090,9 @@ class ConversationOrchestrator:
                         # what this execution selected rather than claimed by
                         # the adapter that answered.
                         "output_origin": origin,
+                        # The durable half: this run's own judgement, kept where
+                        # nothing another run does can reach it.
+                        "output_size_agreement": agreement,
                     }
                 )
                 parts.append(
@@ -6042,6 +6106,11 @@ class ConversationOrchestrator:
                             "media_type": artifact.media_type,
                             "poster_artifact_id": poster_artifact_id,
                             "browser_proxy_artifact_id": proxy_artifact_id,
+                            # The shown half. A part belongs to one message in
+                            # one conversation, so the judgement beside a
+                            # picture stays the judgement that picture's own run
+                            # made.
+                            "output_size_agreement": agreement,
                         },
                     )
                 )
