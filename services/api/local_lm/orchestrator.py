@@ -142,7 +142,7 @@ from .outpaint_workflows import (
     workflow_declares_outpaint,
 )
 from .output_measurement import Budget, measure_output, record_to_keep
-from .output_origin import record_for
+from .output_origin import names_a_preview, record_for
 from .processes import ProcessSupervisor, WorkerStartRefused
 from .profile_service import AUTO_PROFILE_ID
 from .progress import apply_engine_progress, completed_progress, update_job_progress
@@ -5886,6 +5886,11 @@ class ConversationOrchestrator:
                 return None
             parts: list[MessagePart] = []
             artifact_ids: list[str] = []
+            # Kept apart from artifact_ids on purpose: a throwaway is still
+            # shown, still reaches the browser and still has its own provenance,
+            # so the only thing that changes is whether it counts as something
+            # this run produced for you.
+            throwaway_ids: list[str] = []
             output_provenance: list[dict[str, Any]] = []
             for generated, measurement in zip(completed_assets, measurements, strict=True):
                 # Asserted at the transaction that persists this asset,
@@ -5926,11 +5931,20 @@ class ConversationOrchestrator:
                         artifact.metadata_json.get("output_measurement"), measurement
                     ),
                 }
+                # Worked out before the library decision because it decides
+                # it. A preview NODE in the graph writes a file the engine marks
+                # as its own throwaway - a different thing from the streaming
+                # previews this module also calls `preview`. The picture is still
+                # shown; a library is a collection somebody curates, and this was
+                # never chosen.
+                origin = record_for(generated.origin, media_engine)
+                throwaway = names_a_preview(origin)
                 output_chat = session.get(Chat, run.chat_id)
                 if (
                     setup_verification_for_chat(session, run.chat_id) is None
                     and output_chat
                     and output_chat.scope != PROMPT_HELPER_SCOPE
+                    and not throwaway
                 ):
                     ensure_library_entry(session, artifact)
                 # Derived-video helpers can spend minutes in ffmpeg. Persist the
@@ -5999,6 +6013,8 @@ class ConversationOrchestrator:
                             "poster_artifact_id": poster.id,
                         }
                 artifact_ids.append(artifact.id)
+                if throwaway:
+                    throwaway_ids.append(artifact.id)
                 output_provenance.append(
                     {
                         "artifact_id": artifact.id,
@@ -6012,7 +6028,7 @@ class ConversationOrchestrator:
                         # engine said it. The engine name is stamped here from
                         # what this execution selected rather than claimed by
                         # the adapter that answered.
-                        "output_origin": record_for(generated.origin, media_engine),
+                        "output_origin": origin,
                     }
                 )
                 parts.append(
@@ -6034,7 +6050,7 @@ class ConversationOrchestrator:
                     session,
                     run,
                     media_capabilities,
-                    output_count=len(artifact_ids),
+                    output_count=len(artifact_ids) - len(throwaway_ids),
                 )
             except Exception:
                 logger.exception("Could not record successful media capability evidence")
