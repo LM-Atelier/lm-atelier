@@ -25,6 +25,8 @@ import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
 
+from local_lm.domain import Operation
+from local_lm.image_edit_strength import resolve_image_edit_strength
 from local_lm.settings_registry import IMAGE_SETTINGS, VIDEO_SETTINGS, workflow_settings
 from local_lm.workflow_edit_calibration import standard_edit_calibration
 
@@ -334,3 +336,27 @@ def test_read_only_removes_an_edit_control_but_not_a_duration_control() -> None:
     video = workflow_settings(VIDEO_SETTINGS, _READ_ONLY_LENGTH_SCHEMA)
     assert not [field for field in video if field.key in {"frames", "fps"}]
     assert [field for field in video if field.key == "duration_seconds"]
+
+
+def test_a_read_only_strength_cannot_be_supplied_by_a_remembered_setting() -> None:
+    """The exemption survives the obvious objection to it.
+
+    "No control" would be worth little if a value could still arrive from a
+    preset or a remembered chat setting. It cannot: with the field gone the
+    resolver not only declines to choose a strength, it discards one that was
+    already in the settings, so nothing is left for the graph to receive.
+    """
+    fields = workflow_settings(IMAGE_SETTINGS, _READ_ONLY_EDIT_SCHEMA)
+    carried_over = {"denoise": 0.9}
+
+    resolution = resolve_image_edit_strength(
+        Operation.IMAGE_TO_IMAGE,
+        "make the sky darker",
+        fields,
+        carried_over,
+        (),
+        workflow_schema=_READ_ONLY_EDIT_SCHEMA,
+    )
+
+    assert resolution is None
+    assert "denoise" not in carried_over
