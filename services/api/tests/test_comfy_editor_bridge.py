@@ -364,3 +364,27 @@ def test_linked_destination_is_never_trusted(tmp_path: Path) -> None:
         _stage(custom_nodes)
 
     assert refused.value.code == "workflow-editor-bridge-integrity-failed"
+
+
+def test_unreadable_runtime_metadata_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreadable metadata file is not treated as ordinary bytes.
+
+    Path.exists still succeeds. lstat raising PermissionError is the
+    unreadable half of the shared inspection. Mutating unreadable back to
+    assume_regular opened the file and returned its contents.
+    """
+    path = tmp_path / "distribution.json"
+    path.write_bytes(b'{"ok": true}')
+    real_lstat = Path.lstat
+
+    def fake_lstat(self: Path) -> os.stat_result:
+        if self.resolve() == path.resolve():
+            raise PermissionError("locked")
+        return real_lstat(self)
+
+    monkeypatch.setattr(Path, "lstat", fake_lstat)
+    with pytest.raises(ComfyEditorBridgeError) as refused:
+        editor_bridge._read_bounded(path, 1024)
+    assert refused.value.code == "workflow-editor-runtime-metadata-invalid"
