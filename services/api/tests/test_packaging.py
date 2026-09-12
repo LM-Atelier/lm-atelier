@@ -1312,6 +1312,31 @@ def test_merge_gate_accepts_verified_merge_group_without_pull_request_fields(pr_
             assert namespace["decide"](refused, []) == 1, (job, result)
 
 
+def test_the_ffmpeg_fetch_waits_long_enough_for_a_real_outage() -> None:
+    """The retry budget is a decision, so it cannot shrink without saying so.
+
+    ffmpeg comes from a community feed that returns 503 and 504 on its own, and
+    the Windows leg cannot start verification without it. On 2026-09-10 an
+    outage outlasted the original ninety-second budget: every attempt failed
+    inside 105 seconds and a merge-group run was dequeued with no test having
+    run. Waiting longer is the right answer rather than making the install
+    optional, because three tests in test_integrated_hardening.py drive the real
+    video path and FAIL, not skip, when ffmpeg is absent.
+    """
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    windows = workflow.split("  windows-compatibility:", 1)[1].split("  scheduled-audit:", 1)[0]
+
+    declared = re.search(r"\$waits = @\(([\d, ]+)\)", windows)
+    assert declared, "the ffmpeg retry waits are no longer declared as one array"
+    waits = [int(value) for value in declared.group(1).split(",")]
+
+    assert sum(waits) >= 300, (
+        f"the ffmpeg retry budget is {sum(waits)}s; a recorded outage already "
+        "outlasted 90s, so this must stay well above it"
+    )
+    assert waits == sorted(waits), "back off progressively rather than hammering the feed"
+
+
 def test_ci_workflow_retains_required_check_for_every_pr_scope() -> None:
     workflow = (ROOT / ".github/workflows/ci.yml").read_text()
     plan = workflow.split("  verification-plan:", 1)[1].split("  compatibility:", 1)[0]
