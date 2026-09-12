@@ -149,3 +149,59 @@ it("blocks stale controls after a failed read and offers a state retry", async (
   fireEvent.click(screen.getByRole("button", { name: "Retry generation state" }));
   await waitFor(() => expect(pause).toHaveAttribute("aria-disabled", "false"));
 });
+
+it("clears only the conflict resolved by a newer authoritative policy", async () => {
+  vi.mocked(api.generationQueueControl).mockRejectedValue(
+    new ApiError(409, "Generation state changed", "Generation state changed", "queue-lane-conflict"),
+  );
+  const client = open();
+  fireEvent.click(await screen.findByRole("button", { name: "Pause generation after current work" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Generation state changed");
+  await waitFor(() => expect(api.generationQueuePolicy).toHaveBeenCalledTimes(2));
+  expect(screen.getByRole("alert")).toHaveTextContent("Generation state changed");
+  current = { ...current, dispatch_state: "paused", revision: 1, allowed_actions: ["resume"] };
+  await act(() => client.invalidateQueries({ queryKey: ["jobs", "queue"] }));
+  expect(await screen.findByRole("button", { name: "Resume generation" })).toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(api.generationQueueControl).toHaveBeenCalledTimes(1);
+});
+
+it("clears a second-click conflict after the first successful command refreshes", async () => {
+  const refreshes: Array<(value: GenerationQueuePolicy) => void> = [];
+  vi.mocked(api.generationQueuePolicy)
+    .mockResolvedValueOnce({ ...current })
+    .mockImplementation(() => new Promise((resolve) => { refreshes.push(resolve); }));
+  vi.mocked(api.generationQueueControl)
+    .mockImplementationOnce(async () => {
+      current = { ...current, dispatch_state: "paused", revision: 1, allowed_actions: ["resume"] };
+      return current;
+    })
+    .mockRejectedValueOnce(new ApiError(409, "Generation state changed",
+      "Generation state changed", "queue-lane-conflict"));
+  open();
+  fireEvent.click(await screen.findByRole("button", { name: "Pause generation after current work" }));
+  await waitFor(() => expect(refreshes).toHaveLength(1));
+  const again = await screen.findByRole("button", { name: "Pause generation after current work" });
+  await waitFor(() => expect(again).toHaveAttribute("aria-disabled", "false"));
+  fireEvent.click(again);
+  expect(await screen.findByRole("alert")).toHaveTextContent("Generation state changed");
+  await waitFor(() => expect(refreshes).toHaveLength(2));
+  await act(async () => { refreshes.forEach((resolve) => resolve(current)); });
+  expect(await screen.findByRole("button", { name: "Resume generation" })).toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(api.generationQueueControl).toHaveBeenCalledTimes(2);
+});
+
+it.each([
+  new Error("Connection interrupted"),
+  new ApiError(409, "Another refusal", "Another refusal", "another-refusal"),
+])("keeps an unrelated failure after a newer policy arrives: %s", async (error) => {
+  vi.mocked(api.generationQueueControl).mockRejectedValue(error);
+  const client = open();
+  fireEvent.click(await screen.findByRole("button", { name: "Pause generation after current work" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(error.message);
+  current = { ...current, dispatch_state: "paused", revision: 1, allowed_actions: ["resume"] };
+  await act(() => client.invalidateQueries({ queryKey: ["jobs", "queue"] }));
+  expect(await screen.findByRole("button", { name: "Resume generation" })).toBeInTheDocument();
+  expect(screen.getByRole("alert")).toHaveTextContent(error.message);
+});
