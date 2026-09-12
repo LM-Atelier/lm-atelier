@@ -150,6 +150,67 @@ def workflow_video_length(
     )
 
 
+def _graph_carries(workflow: object, placeholder: str) -> bool:
+    """Whether this graph offers the placeholder anywhere a value can sit.
+
+    Iterative rather than recursive, and by the same walk `binds_prompt` uses:
+    the graph is what runs, and a declared parameter that appears nowhere in it
+    is a control over nothing.
+    """
+
+    stack: list[Any] = [workflow]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, dict):
+            stack.extend(value.values())
+        elif isinstance(value, list):
+            stack.extend(value)
+        elif value == placeholder:
+            return True
+    return False
+
+
+def video_length_reaches_graph(
+    workflow: object,
+    input_schema: Mapping[str, Any] | None,
+) -> None:
+    """Refuse a declared length whose frame count the graph never consumes.
+
+    A workflow declares how its length works, and from that declaration the
+    product offers a duration in seconds and converts back to frames. Nothing
+    downstream checks the graph takes the number: the compiler replaces
+    `${name}` where it finds it and never notices a parameter it did not use.
+    So a workflow that declares the contract while hardcoding its frame count
+    offers a duration control that changes nothing, and the run still records
+    the length it believes it delivered - a false record rather than a silent
+    no-op, which is the worse of the two.
+
+    Only the FRAME COUNT is required here. The frame rate is frequently a
+    property of the model rather than a graph input, and demanding a
+    placeholder for it would refuse workflows that are behaving correctly.
+
+    WHAT THIS DOES NOT PROVE, stated because the gap is easy to overstate. It
+    closes the declared-but-completely-unconsumed case and nothing more. A
+    placeholder sitting in a node the graph never reaches, or one feeding an
+    input that is not the frame count, still passes here and still fails to
+    decide the emitted length. The `delivered_seconds` a run records therefore
+    remains a resolved estimate until a measured output is compared against it.
+
+    The stronger claim - that a declared input decides what comes OUT - is what
+    the geometry proof makes for width and height by walking from the save node
+    backwards, and it is deliberately not attempted here.
+    """
+
+    contract = workflow_video_length(input_schema)
+    if contract is None:
+        return
+    if not _graph_carries(workflow, f"${{{contract.frames_parameter}}}"):
+        raise ValueError(
+            "workflow video length declares "
+            f"{contract.frames_parameter} but the graph never uses it"
+        )
+
+
 def video_duration_field(contract: WorkflowVideoLength) -> SettingField:
     return SettingField(
         key=VIDEO_DURATION_SETTING_KEY,
