@@ -17,6 +17,7 @@ import {
   type EditLineageStep,
   type MediaOrigin,
 } from "./messageMedia";
+import { sizeDisagreement, sizeDisagreementMessage } from "./outputSizeAgreement";
 import type { MessagePart } from "./types";
 
 export function ArtifactPart({
@@ -57,6 +58,11 @@ export function ArtifactPart({
     return <a className="message-attachment" href={source} download><Paperclip size={14} />{name}</a>;
   }
   const kind = part.type === "video" ? "video" : "image";
+  // A preview node's throwaway was never the picture that was asked for, so a
+  // size note beside it would be about the wrong file. The record already
+  // refuses those, and this is the second half of the same refusal for the
+  // streaming previews the part flag marks.
+  const sizeNote = preview ? null : sizeDisagreement(part);
   const label = preview ? "Generation preview" : mediaOriginLabel(
     origin,
     kind,
@@ -142,6 +148,15 @@ export function ArtifactPart({
             </a>
           )}
         </figcaption>
+        {/* Beside the picture rather than in place of it: the run succeeded and
+            the picture is real, it simply is not the shape that was asked for.
+            A status role announces it once when it appears without stealing
+            focus from whatever the person was doing. */}
+        {sizeNote && (
+          <p className="media-size-note" role="status">
+            {sizeDisagreementMessage(sizeNote)}
+          </p>
+        )}
       </figure>
     );
   }
