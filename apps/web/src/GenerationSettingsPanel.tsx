@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { OutputRatioControl } from "./OutputRatioControl";
 import { SettingControl } from "./SettingControl";
+import { storedSettingDetail } from "./settingDetail";
 import {
   IMAGE_EDIT_STRENGTH_MODE_KEY,
   calibratedImageEditStrength,
@@ -160,7 +161,7 @@ export function GenerationSettingsPanel({
   onReset: () => void;
   editSettings?: { presetControl: ReactNode };
 }) {
-  const [visibility, setVisibility] = useState<Visibility>("basic");
+  const [visibility, setVisibility] = useState<Visibility>(storedSettingDetail);
   const engine = engines.find((item) => item.roles.includes(role));
   const rolePresets = presets.filter((preset) => preset.role === role);
   const defaultPreset = !editSettings ? rolePresets.find((preset) => preset.is_default) : undefined;
