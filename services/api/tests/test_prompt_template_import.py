@@ -178,7 +178,7 @@ async def test_fixed_import_rebinds_the_exact_authorized_local_workflow(
             "name": "Atomic local workflow",
             "operation": "text_to_image",
             "engine": "mock",
-            "api_graph": {},
+            "api_graph": {"node": {"class_type": "PortableTemplateFixture"}},
         },
     )
     seed_workflow_trust(workflow.json()["current_revision_id"])

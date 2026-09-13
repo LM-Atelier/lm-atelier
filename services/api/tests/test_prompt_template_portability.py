@@ -537,7 +537,7 @@ async def test_fixed_export_erases_source_identity_and_preview_suggests_local_ma
             "name": "Private portable workflow",
             "operation": "text_to_image",
             "engine": "mock",
-            "api_graph": {},
+            "api_graph": {"node": {"class_type": "PortableTemplateFixture"}},
         },
     )
     seed_workflow_trust(workflow.json()["current_revision_id"])
@@ -958,7 +958,7 @@ async def test_workflow_pool_keys_deduplicate_only_exact_source_revisions(
                 "name": f"Private same-descriptor workflow {ordinal}",
                 "operation": "text_to_image",
                 "engine": "mock",
-                "api_graph": {},
+                "api_graph": {"node": {"class_type": "PortableTemplateFixture"}},
             },
         )
         seed_workflow_trust(workflow.json()["current_revision_id"])

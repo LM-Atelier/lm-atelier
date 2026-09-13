@@ -13,6 +13,7 @@ from .profile_service import (
     retire_profiles_for_installs,
 )
 from .revision_dependency_contract import persist_dependency_contract
+from .workflow_artifact_identity import reconcile_missing_artifact_identity
 from .workflow_compatibility import reconcile_legacy_workflow_compatibility
 from .workflow_ownership import reconcile_workflow_family_ownership
 
@@ -78,6 +79,7 @@ def seed_defaults(session: Session, settings: Settings) -> None:
             definition.current_revision_id = revision.id
     reconcile_legacy_workflow_compatibility(session)
     reconcile_workflow_family_ownership(session)
+    reconcile_missing_artifact_identity(session)
     session.commit()
 
 
