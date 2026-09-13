@@ -42,7 +42,7 @@ export const SETTINGS_DESTINATIONS: readonly SettingsDestination[] = [
   {
     id: "data-and-backups",
     label: "Data & backups",
-    summary: "Recovery backups of your library and settings.",
+    summary: "Where disk space goes, clearing media nothing uses, and recovery backups.",
   },
   {
     id: "advanced",

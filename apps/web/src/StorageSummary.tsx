@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "./api";
+import { ClearReadyMedia } from "./ClearReadyMedia";
 import { ErrorCallout } from "./ErrorCallout";
 import { formatBytes } from "./format";
 
@@ -9,10 +10,10 @@ function count(value: number, one: string, many: string): string {
 
 /** How much space the workspace is using, and how much of it could be given back.
  *
- * Read-only on purpose: every figure here comes from the server's own
- * accounting, and the places that act on it - the Model Library's partial
- * download cleanup, retention - already exist. Showing them together is what
- * was missing, so somebody short of space can see where it went.
+ * Every figure here comes from the server's own accounting, shown together
+ * so somebody short of space can see where it went. The one action is
+ * clearing what retention would clear anyway; partial downloads keep their
+ * cleanup in the Model Library.
  *
  * Mounted only while Data & backups is open. Working out what retention could
  * clear means examining every stored file, which is not a cost to pay while
@@ -84,6 +85,7 @@ export function StorageSummary() {
               <dd>
                 {count(media.data.eligible_count, "file", "files")} · {formatBytes(media.data.eligible_bytes)}
                 <small>unused, unfavorited and past their time: {count(media.data.retention_days, "day", "days")} unused, or the preview limit</small>
+                <ClearReadyMedia info={media.data} />
               </dd>
             </div>
             {Boolean(media.data.retention_pending_count) && (
