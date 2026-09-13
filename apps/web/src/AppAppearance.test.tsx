@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "./App";
 import { api } from "./api";
 import { CLOCK_KEY } from "./clockPreference";
-import { MODE_KEY, ROOM_KEY } from "./theme";
+import { CHAT_WIDTH_KEY, MODE_KEY, ROOM_KEY } from "./theme";
 
 vi.mock("./api", () => ({
   api: {
@@ -149,4 +149,22 @@ it("writes times on the clock chosen in Settings, and shows how they will look",
   expect(within(clock).getByRole("button", { name: "24-hour" }).getAttribute("aria-pressed")).toBe("true");
   expect(within(clock).getByRole("button", { name: "Automatic" }).getAttribute("aria-pressed")).toBe("false");
   expect(screen.getByText(/Times look like 15:45\./)).toBeTruthy();
+});
+
+it("widens the chat from Settings and opens on that width next time", async () => {
+  renderApp();
+  await openSettings();
+  const width = screen.getByRole("group", { name: "Chat width" });
+  expect(within(width).getByRole("button", { name: "Standard" }).getAttribute("aria-pressed")).toBe("true");
+
+  fireEvent.click(within(width).getByRole("button", { name: "Wide" }));
+
+  expect(document.documentElement.dataset.chatWidth).toBe("wide");
+  expect(localStorage.getItem(CHAT_WIDTH_KEY)).toBe("wide");
+  expect(within(width).getByRole("button", { name: "Wide" }).getAttribute("aria-pressed")).toBe("true");
+  cleanup();
+
+  renderApp();
+  await screen.findByRole("button", { name: "Settings" });
+  expect(document.documentElement.dataset.chatWidth).toBe("wide");
 });
