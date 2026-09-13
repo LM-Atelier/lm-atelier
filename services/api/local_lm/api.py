@@ -663,6 +663,7 @@ from .workflow_library import (
     workflow_resource_consumers,
     workflow_resource_name,
 )
+from .workflow_lora_admission import WorkflowLoraAdmissionError
 from .workflow_lora_slots import WorkflowLoraSlotError
 from .workflow_loras import WorkflowLoraProjectionError, workflow_lora_controls
 from .workflow_node_dependencies import node_dependency_errors
@@ -3354,6 +3355,9 @@ async def queue_prompt_batch(
     except EngineSchemaUnavailableError as exc:
         session.rollback()
         raise api_error(503, "engine-schema-unavailable", str(exc)) from exc
+    except WorkflowLoraAdmissionError as exc:
+        session.rollback()
+        raise api_error(409 if exc.conflict else 422, exc.code, str(exc)) from exc
     except ValueError as exc:
         session.rollback()
         raise api_error(422, "generation-settings-invalid", str(exc)) from exc
@@ -3744,6 +3748,8 @@ async def _accept_turn(
         raise api_error(409, "prompt-source-conflict", str(exc)) from exc
     except PromptExpansionUseError as exc:
         raise api_error(422, "prompt-source-invalid", str(exc)) from exc
+    except WorkflowLoraAdmissionError as exc:
+        raise api_error(409 if exc.conflict else 422, exc.code, str(exc)) from exc
     except ValueError as exc:
         raise api_error(422, "turn-invalid", str(exc)) from exc
 
@@ -4053,6 +4059,8 @@ async def _regenerate_message_locked(
         raise api_error(409, "engine-not-configured", str(exc)) from exc
     except EngineSchemaUnavailableError as exc:
         raise api_error(503, "engine-schema-unavailable", str(exc)) from exc
+    except WorkflowLoraAdmissionError as exc:
+        raise api_error(409, exc.code, str(exc)) from exc
     except ValueError as exc:
         raise api_error(422, "generation-settings-invalid", str(exc)) from exc
     turn = TurnRequest(
@@ -4222,6 +4230,8 @@ async def edit_and_branch(
                 raise api_error(409, "engine-not-configured", str(exc)) from exc
             except EngineSchemaUnavailableError as exc:
                 raise api_error(503, "engine-schema-unavailable", str(exc)) from exc
+            except WorkflowLoraAdmissionError as exc:
+                raise api_error(409, exc.code, str(exc)) from exc
             except ValueError as exc:
                 raise api_error(422, "generation-settings-invalid", str(exc)) from exc
     turn = payload.model_copy(update=updates)
@@ -4413,10 +4423,17 @@ async def retry_work_plan(
     )
     if not jobs:
         raise api_error(409, "work-plan-not-retryable", "work plan has no retryable steps")
+    orchestrator = _services(request).orchestrator
     for job in jobs:
         source_run = _job_replay_source_run(session, job)
         if source_run is not None:
             _require_run_replay_sources(session, source_run)
+        run = session.get(Run, job.run_id) if job.run_id else None
+        if run is not None:
+            try:
+                orchestrator.preflight_workflow_lora_replay(session, run)
+            except WorkflowLoraAdmissionError as exc:
+                raise api_error(409, exc.code, str(exc)) from exc
     for job in jobs:
         await retry_job(job.id, request, session)
     session.expire_all()
@@ -4887,6 +4904,10 @@ async def retry_job(
         if not run:
             raise api_error(422, "job-not-retryable", "job has no retryable operation")
         _require_run_replay_sources(session, run)
+        try:
+            orchestrator.preflight_workflow_lora_replay(session, run)
+        except WorkflowLoraAdmissionError as exc:
+            raise api_error(409, exc.code, str(exc)) from exc
         job.status = "queued"
         job.progress = 0
         job.error = None
@@ -4909,6 +4930,8 @@ async def retry_job(
             orchestrator.prepare_retry(session, run)
         except LookupError as exc:
             raise api_error(422, "job-not-retryable", str(exc)) from exc
+        except WorkflowLoraAdmissionError as exc:
+            raise api_error(409, exc.code, str(exc)) from exc
         session.commit()
         orchestrator.start(job.id, run.id)
         session.refresh(job)

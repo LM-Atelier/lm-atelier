@@ -1322,9 +1322,32 @@ export interface WorkflowLoraControlSlot {
   editable_fields: Array<"enabled" | "model_strength" | "clip_strength">;
 }
 
-/** The LoRAs one exact workflow revision applies, read-only. */
+/** The strength range a workflow LoRA edit may use. */
+export interface WorkflowLoraStrengthBounds {
+  minimum: number;
+  maximum: number;
+}
+
+/** The exact workflow revision and activation an edit to its LoRAs must name. */
+export interface WorkflowLoraOverrideTargetWitness {
+  workflow_family_id: string | null;
+  workflow_definition_id: string;
+  workflow_variant_key: string | null;
+  workflow_revision_id: string;
+  slot_contract_version: 1;
+  revision_scope_sha256: string;
+  api_graph_sha256: string;
+  dependency_contract_sha256: string;
+  activation_binding_sha256: string;
+  activation_witness_sha256: string;
+}
+
+/** The LoRAs one exact workflow revision applies, and what may change them. */
 export interface WorkflowLoraControls {
   version: 1;
+  override_contract_version: 1;
+  strength_bounds: WorkflowLoraStrengthBounds;
+  override_target: WorkflowLoraOverrideTargetWitness | null;
   revision_scope_sha256: string;
   api_graph_sha256: string;
   dependency_contract_sha256: string;

@@ -38,12 +38,19 @@ WorkflowLoraOverrideOrigin = Literal[
     "project",
     "chat_preset",
     "chat",
+    "turn_preset",
     "turn",
 ]
 WorkflowLoraInactiveTargetReason = Literal["different_workflow", "different_revision"]
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _SLOT_ID = re.compile(r"^wflora_[0-9a-f]{64}$")
+_SAFE_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_RESOLUTION_FIELDS = frozenset({"version", "target", "overrides"})
+_RESOLUTION_SLOT_FIELDS = frozenset(
+    {"slot_id", "loader_contract", "loader_authority_sha256", "changes"}
+)
+_RESOLUTION_CHANGE_FIELDS = frozenset({"value", "origin"})
 _TARGET_FIELDS = frozenset(
     {
         "workflow_family_id",
@@ -75,8 +82,12 @@ _ORIGIN_ORDER: dict[str, int] = {
     "project": 3,
     "chat_preset": 4,
     "chat": 5,
-    "turn": 6,
+    "turn_preset": 6,
+    "turn": 7,
 }
+WORKFLOW_LORA_OVERRIDE_ORIGINS: tuple[WorkflowLoraOverrideOrigin, ...] = cast(
+    tuple[WorkflowLoraOverrideOrigin, ...], tuple(_ORIGIN_ORDER)
+)
 
 
 class WorkflowLoraOverrideError(ValueError):
@@ -249,6 +260,110 @@ def workflow_lora_overrides_sha256(value: WorkflowLoraOverrides) -> str:
     return hashlib.sha256(_canonical_bytes(payload)).hexdigest()
 
 
+def parse_workflow_lora_override_resolution(
+    value: object,
+) -> WorkflowLoraOverrideResolution:
+    """Parse one persisted public effective plan without granting authority.
+
+    The public payload deliberately has no inactive-target evidence or graph
+    locator. Replay must still derive the current catalog and private graph
+    targets independently before it can use the returned field plan.
+    """
+
+    root = _exact_object(value, "Workflow LoRA override resolution")
+    _exact_keys(root, _RESOLUTION_FIELDS, "Workflow LoRA override resolution")
+    _exact_version(root.get("version"), WORKFLOW_LORA_OVERRIDE_CONTRACT_VERSION)
+    raw_target = _exact_object(
+        root.get("target"),
+        "Workflow LoRA override resolution target",
+    )
+    _exact_keys(
+        raw_target,
+        _TARGET_FIELDS - {"overrides"},
+        "Workflow LoRA override resolution target",
+    )
+    target = _parse_witness(raw_target)
+    raw_overrides = _exact_array(
+        root.get("overrides"),
+        "Workflow LoRA resolved overrides",
+    )
+    if len(raw_overrides) > MAX_WORKFLOW_LORA_SLOTS:
+        raise WorkflowLoraOverrideError(
+            "invalid_workflow_lora_override_resolution",
+            "Workflow LoRA override resolution has too many slots",
+        )
+
+    overrides: list[ResolvedWorkflowLoraOverride] = []
+    seen_slots: set[str] = set()
+    for raw_override in raw_overrides:
+        raw = _exact_object(raw_override, "Workflow LoRA resolved slot override")
+        _exact_keys(raw, _RESOLUTION_SLOT_FIELDS, "Workflow LoRA resolved slot override")
+        slot_id = _validated_resolution_slot_id(raw.get("slot_id"))
+        raw_changes = _exact_object(
+            raw.get("changes"),
+            "Workflow LoRA resolved changes",
+        )
+        _reject_unknown_keys(raw_changes, _CHANGE_FIELDS)
+        if not raw_changes:
+            raise WorkflowLoraOverrideError(
+                "invalid_workflow_lora_override_resolution",
+                "Workflow LoRA resolved changes cannot be empty",
+            )
+
+        values: dict[str, object] = {}
+        origins: dict[str, WorkflowLoraOverrideOrigin] = {}
+        for field, raw_change in raw_changes.items():
+            change = _exact_object(raw_change, "Workflow LoRA resolved field")
+            _exact_keys(change, _RESOLUTION_CHANGE_FIELDS, "Workflow LoRA resolved field")
+            origin = change.get("origin")
+            if type(origin) is not str or origin not in _ORIGIN_ORDER:
+                raise WorkflowLoraOverrideError(
+                    "invalid_workflow_lora_override_resolution",
+                    "Workflow LoRA resolved field has an invalid origin",
+                )
+            values[field] = change.get("value")
+            origins[field] = cast(WorkflowLoraOverrideOrigin, origin)
+
+        normalized = _parse_slot_override(
+            {
+                "slot_id": slot_id,
+                "loader_contract": raw.get("loader_contract"),
+                "loader_authority_sha256": raw.get("loader_authority_sha256"),
+                "changes": values,
+            }
+        )
+        if normalized.slot_id in seen_slots:
+            raise WorkflowLoraOverrideError(
+                "duplicate_workflow_lora_override_slot",
+                "Workflow LoRA override resolution repeats a slot",
+            )
+        seen_slots.add(normalized.slot_id)
+        overrides.append(
+            ResolvedWorkflowLoraOverride(
+                slot_id=normalized.slot_id,
+                loader_contract=normalized.loader_contract,
+                loader_authority_sha256=normalized.loader_authority_sha256,
+                changes=tuple(
+                    ResolvedWorkflowLoraField(
+                        field=change.field,
+                        value=change.value,
+                        origin=origins[change.field],
+                    )
+                    for change in normalized.changes
+                ),
+            )
+        )
+
+    resolution = WorkflowLoraOverrideResolution(
+        version=WORKFLOW_LORA_OVERRIDE_CONTRACT_VERSION,
+        target=target,
+        overrides=tuple(sorted(overrides, key=lambda item: item.slot_id)),
+        inactive_targets=(),
+    )
+    workflow_lora_override_resolution_payload(resolution)
+    return resolution
+
+
 def workflow_lora_override_resolution_payload(
     value: WorkflowLoraOverrideResolution,
 ) -> dict[str, object]:
@@ -284,12 +399,7 @@ def workflow_lora_override_resolution_payload(
                 "invalid_workflow_lora_override_resolution",
                 "Workflow LoRA override resolution has invalid changes",
             )
-        if override.slot_id in seen_slots:
-            raise WorkflowLoraOverrideError(
-                "duplicate_workflow_lora_override_slot",
-                "Workflow LoRA override resolution repeats a slot",
-            )
-        seen_slots.add(override.slot_id)
+        slot_id = _validated_resolution_slot_id(override.slot_id)
         seen_fields: set[str] = set()
         origins: dict[str, WorkflowLoraOverrideOrigin] = {}
         raw_changes: dict[str, bool | float] = {}
@@ -311,12 +421,18 @@ def workflow_lora_override_resolution_payload(
             raw_changes[change.field] = change.value
         normalized = _parse_slot_override(
             {
-                "slot_id": override.slot_id,
+                "slot_id": slot_id,
                 "loader_contract": override.loader_contract,
                 "loader_authority_sha256": override.loader_authority_sha256,
                 "changes": raw_changes,
             }
         )
+        if normalized.slot_id in seen_slots:
+            raise WorkflowLoraOverrideError(
+                "duplicate_workflow_lora_override_slot",
+                "Workflow LoRA override resolution repeats a slot",
+            )
+        seen_slots.add(normalized.slot_id)
         overrides.append(
             {
                 "slot_id": normalized.slot_id,
@@ -477,22 +593,22 @@ def _parse_target(value: object) -> WorkflowLoraOverrideTarget:
 
 
 def _parse_witness(raw: dict[str, object]) -> WorkflowLoraOverrideTargetWitness:
-    family_id = _nullable_text(
+    family_id = _nullable_token(
         raw.get("workflow_family_id"),
         "workflow family id",
         maximum=64,
     )
-    definition_id = _bounded_text(
+    definition_id = _bounded_token(
         raw.get("workflow_definition_id"),
         "workflow definition id",
         maximum=64,
     )
-    variant_key = _nullable_text(
+    variant_key = _nullable_token(
         raw.get("workflow_variant_key"),
         "workflow variant key",
         maximum=100,
     )
-    revision_id = _bounded_text(
+    revision_id = _bounded_token(
         raw.get("workflow_revision_id"),
         "workflow revision id",
         maximum=40,
@@ -530,7 +646,7 @@ def _parse_slot_override(value: object) -> WorkflowLoraSlotOverride:
             "invalid_workflow_lora_override_slot",
             "Workflow LoRA override slot id is invalid",
         )
-    loader_contract = _bounded_text(
+    loader_contract = _bounded_token(
         raw.get("loader_contract"),
         "workflow LoRA loader contract",
         maximum=200,
@@ -540,12 +656,7 @@ def _parse_slot_override(value: object) -> WorkflowLoraSlotOverride:
         "workflow LoRA loader authority",
     )
     changes = _exact_object(raw.get("changes"), "Workflow LoRA override changes")
-    unknown = set(changes) - _CHANGE_FIELDS
-    if unknown:
-        raise WorkflowLoraOverrideError(
-            "unsupported_workflow_lora_override_field",
-            f"Workflow LoRA override contains unsupported field {sorted(unknown)[0]}",
-        )
+    _reject_unknown_keys(changes, _CHANGE_FIELDS)
     if not changes:
         raise WorkflowLoraOverrideError(
             "empty_workflow_lora_override_changes",
@@ -574,6 +685,15 @@ def _parse_slot_override(value: object) -> WorkflowLoraSlotOverride:
         loader_authority_sha256=loader_authority,
         changes=tuple(normalized),
     )
+
+
+def _validated_resolution_slot_id(value: object) -> str:
+    if type(value) is not str or _SLOT_ID.fullmatch(value) is None:
+        raise WorkflowLoraOverrideError(
+            "invalid_workflow_lora_override_resolution",
+            "Workflow LoRA override resolution has invalid slots",
+        )
+    return value
 
 
 def _validated_catalog(
@@ -837,16 +957,31 @@ def _exact_array(value: object, label: str) -> list[object]:
     return cast(list[object], value)
 
 
-def _exact_keys(value: dict[str, object], expected: set[str] | frozenset[str], label: str) -> None:
-    actual = set(value)
-    if actual != expected:
-        unknown = sorted(actual - expected)
-        missing = sorted(expected - actual)
-        detail = f"unsupported field {unknown[0]}" if unknown else f"missing field {missing[0]}"
+def _exact_keys(
+    value: dict[str, object],
+    expected: set[str] | frozenset[str],
+    _label: str,
+) -> None:
+    if set(value) != expected:
+        _raise_invalid_payload_fields()
+
+
+def _reject_unknown_keys(
+    value: dict[str, object],
+    allowed: set[str] | frozenset[str],
+) -> None:
+    if not set(value).issubset(allowed):
         raise WorkflowLoraOverrideError(
-            "invalid_workflow_lora_overrides",
-            f"{label} contains {detail}",
+            "unsupported_workflow_lora_override_field",
+            "Workflow LoRA override payload has unsupported or missing fields",
         )
+
+
+def _raise_invalid_payload_fields() -> None:
+    raise WorkflowLoraOverrideError(
+        "invalid_workflow_lora_overrides",
+        "Workflow LoRA override payload has unsupported or missing fields",
+    )
 
 
 def _exact_version(value: object, expected: int) -> None:
@@ -871,10 +1006,20 @@ def _bounded_text(value: object, label: str, *, maximum: int) -> str:
     return value
 
 
-def _nullable_text(value: object, label: str, *, maximum: int) -> str | None:
+def _bounded_token(value: object, label: str, *, maximum: int) -> str:
+    text = _bounded_text(value, label, maximum=maximum)
+    if _SAFE_TOKEN.fullmatch(text) is None:
+        raise WorkflowLoraOverrideError(
+            "invalid_workflow_lora_override_identity",
+            f"{label} is invalid",
+        )
+    return text
+
+
+def _nullable_token(value: object, label: str, *, maximum: int) -> str | None:
     if value is None:
         return None
-    return _bounded_text(value, label, maximum=maximum)
+    return _bounded_token(value, label, maximum=maximum)
 
 
 def _catalog_text(value: object, *, maximum: int) -> bool:

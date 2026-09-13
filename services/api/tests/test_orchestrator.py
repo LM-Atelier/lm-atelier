@@ -664,6 +664,7 @@ def test_media_execution_revalidates_the_exact_queued_activation(
     )
     run = SimpleNamespace(
         workflow_revision_id="wfrev-one",
+        settings_json={},
         provenance_json={"workflow": {"activation": snapshot}},
     )
     scope = WorkflowActivationLaunchScope(

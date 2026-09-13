@@ -1836,8 +1836,29 @@ class WorkflowLoraControlSlotOut(ApiModel):
     editable_fields: list[WorkflowLoraEditableField] = Field(max_length=3)
 
 
+class WorkflowLoraStrengthBoundsOut(ApiModel):
+    minimum: float
+    maximum: float
+
+
+class WorkflowLoraOverrideTargetWitnessOut(ApiModel):
+    workflow_family_id: str | None = Field(min_length=1, max_length=64)
+    workflow_definition_id: str = Field(min_length=1, max_length=64)
+    workflow_variant_key: str | None = Field(min_length=1, max_length=100)
+    workflow_revision_id: str = Field(min_length=1, max_length=40)
+    slot_contract_version: Literal[1]
+    revision_scope_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    api_graph_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    dependency_contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    activation_binding_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    activation_witness_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class WorkflowLoraControlsOut(ApiModel):
     version: Literal[1]
+    override_contract_version: Literal[1]
+    strength_bounds: WorkflowLoraStrengthBoundsOut
+    override_target: WorkflowLoraOverrideTargetWitnessOut | None
     revision_scope_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     api_graph_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     dependency_contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
