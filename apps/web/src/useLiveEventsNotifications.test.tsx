@@ -4,6 +4,8 @@ import { act, cleanup, renderHook } from "@testing-library/react";
 import { QueryClient } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { setNotifyWhenFinished } from "./completionNotifications";
+import { CHIME_TONES, setSoundWhenFinished } from "./completionSound";
+import { browserWithAudio } from "./completionSound.test-support";
 import type { AppEvent } from "./types";
 
 const handlers: Array<(event: AppEvent) => void> = [];
@@ -93,4 +95,17 @@ it("refreshes for a cancelled run without announcing it, even in a browser with 
 
   expect(invalidatedRoots(invalidate)).toEqual(expect.arrayContaining(["chat", "chats"]));
   expect(shown).toEqual([]);
+});
+
+it("chimes for a run the live connection reports failed, with notifications never turned on", async () => {
+  vi.stubGlobal("Notification", undefined);
+  const audio = browserWithAudio();
+  setSoundWhenFinished(true);
+  audio.tones = [];
+  const { deliver, invalidate } = await connected();
+
+  await deliver(runEvent("run.failed", "live-run-5"));
+
+  expect(audio.tones).toEqual([...CHIME_TONES.failed]);
+  expect(invalidatedRoots(invalidate)).toEqual(expect.arrayContaining(["chat", "chats"]));
 });

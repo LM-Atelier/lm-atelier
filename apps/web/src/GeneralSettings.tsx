@@ -4,6 +4,7 @@ import {
   useNotifyWhenFinished,
   type NotificationOutcome,
 } from "./completionNotifications";
+import { setSoundWhenFinished, useSoundWhenFinished } from "./completionSound";
 import { setSendKeyChoice, useSendKeyChoice, type SendKeyChoice } from "./sendKey";
 
 const SEND_KEYS: readonly { value: SendKeyChoice; label: string }[] = [
@@ -44,7 +45,36 @@ function NotificationSetting() {
         </div>
       </div>
       {refusal && <p className="muted" role="status">{refusal}</p>}
+      <SoundSetting />
     </section>
+  );
+}
+
+function SoundSetting() {
+  const on = useSoundWhenFinished();
+  const [unavailable, setUnavailable] = useState(false);
+  const id = useId();
+  const choose = (next: boolean) => setUnavailable(!setSoundWhenFinished(next));
+  return (
+    <>
+      <div className="setting-row appearance-row">
+        <span>
+          <strong id={`${id}-sound`}>Sound</strong>
+          <small id={`${id}-sound-help`}>
+            A short chime at the same moments, with or without notifications. Turning it on plays it once.
+          </small>
+        </span>
+        <div className="segmented" role="group" aria-labelledby={`${id}-sound`} aria-describedby={`${id}-sound-help`}>
+          <button type="button" className={on ? "" : "active"} aria-pressed={!on} onClick={() => choose(false)}>
+            Silent
+          </button>
+          <button type="button" className={on ? "active" : ""} aria-pressed={on} onClick={() => choose(true)}>
+            Play a chime
+          </button>
+        </div>
+      </div>
+      {unavailable && <p className="muted" role="status">This browser cannot play sounds.</p>}
+    </>
   );
 }
 

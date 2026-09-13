@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { playFinishedSound, soundWhenFinished } from "./completionSound";
 import type { AppEvent } from "./types";
 
 /** Telling somebody their work finished while they were looking at something else.
@@ -89,6 +90,8 @@ const announced: string[] = [];
  * `run.cancelled`, which is deliberately never announced: cancelling was
  * somebody's own action. A run is announced once, keyed by the run the event
  * names, however many times the event arrives - a reconnect replays events.
+ * The chime, when chosen, follows the same rules, and plays before the
+ * notification so a browser that refuses the one still makes the other.
  *
  * It never throws. It runs inside the handler that keeps the workspace's data
  * current, and a notification that fails - an unsupported browser, a blocked
@@ -97,12 +100,16 @@ const announced: string[] = [];
 export function notifyRunFinished(event: AppEvent): void {
   try {
     const body = FINISHED_TEXT[event.type];
-    if (!body || event.entity_id === null || !storedEnabled() || !document.hidden) return;
-    if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+    if (!body || event.entity_id === null || !document.hidden) return;
+    const notify =
+      storedEnabled() && typeof Notification !== "undefined" && Notification.permission === "granted";
+    const chime = soundWhenFinished();
+    if (!notify && !chime) return;
     if (announced.includes(event.entity_id)) return;
     announced.push(event.entity_id);
     if (announced.length > REMEMBERED_RUNS) announced.shift();
-    new Notification("LM Atelier", { body, tag: `run:${event.entity_id}` });
+    if (chime) playFinishedSound(event.type === "run.failed" ? "failed" : "completed");
+    if (notify) new Notification("LM Atelier", { body, tag: `run:${event.entity_id}` });
   } catch {
     // Some browsers only allow notifications from a service worker. Missing one
     // announcement is better than breaking the live update that carried it.
