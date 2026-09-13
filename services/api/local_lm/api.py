@@ -174,6 +174,7 @@ from .gguf import (
 )
 from .hardware import collect_system_info
 from .image_edit_strength import STRENGTH_MODE_PARAMETER
+from .lora_suggestions import lora_suggestion_scope, suggested_loras
 from .model_manifests import (
     MAX_METADATA_BYTES,
     MAX_WEIGHT_HEADER_BYTES,
@@ -406,6 +407,7 @@ from .schemas import (
     HealthOut,
     JobActivityOut,
     JobOut,
+    LoraSuggestionsOut,
     MessageOut,
     ModelAssetOut,
     ModelAssetUpdate,
@@ -9690,6 +9692,51 @@ def get_workflow_lora_controls(revision_id: str, session: SessionDep) -> Workflo
             "Workflow LoRA controls cannot be derived from this stored revision.",
         ) from exc
     return WorkflowLoraControlsOut.model_validate(projection)
+
+
+@router.get(
+    "/workflow-revisions/{revision_id}/lora-suggestions",
+    response_model=LoraSuggestionsOut,
+)
+async def get_workflow_lora_suggestions(
+    revision_id: str,
+    request: Request,
+    session: SessionDep,
+    cursor: str | None = Query(default=None, max_length=2048),
+) -> LoraSuggestionsOut:
+    """Ask CivitAI for well-rated LoRAs that fit the model this workflow runs."""
+
+    revision = session.get(WorkflowRevision, revision_id)
+    if revision is None:
+        raise api_error(404, "workflow-revision-not-found", "Workflow revision not found.")
+    scope = lora_suggestion_scope(session, revision)
+    if scope.gap is not None:
+        return LoraSuggestionsOut(family=scope.family, gap=scope.gap)
+    catalog = _services(request).catalog_sources.get("civitai")
+    if not isinstance(catalog, CivitaiCatalog):
+        raise api_error(503, "catalog-unavailable", "CivitAI is not available here.")
+    try:
+        page = await catalog.search(
+            role="lora",
+            sort="likes",
+            limit=30,
+            cursor=cursor,
+            base_models=scope.base_models,
+        )
+    except ValueError as exc:
+        raise api_error(422, "catalog-request-invalid", "The suggestion page is invalid.") from exc
+    except Exception as exc:
+        raise api_error(
+            503,
+            "catalog-unavailable",
+            "CivitAI is temporarily unavailable. Check your connection and retry.",
+        ) from exc
+    return LoraSuggestionsOut(
+        family=scope.family,
+        items=suggested_loras(scope, page),
+        next_cursor=page.next_cursor,
+        stale=page.stale,
+    )
 
 
 @router.get("/workflows/{workflow_id}", response_model=WorkflowOut)

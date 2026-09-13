@@ -2543,6 +2543,16 @@ class CatalogPage(ApiModel):
     stale: bool = False
 
 
+class LoraSuggestionsOut(ApiModel):
+    """Well-rated general-audience LoRAs for the model family a workflow runs."""
+
+    family: str | None = Field(default=None, max_length=64)
+    gap: Literal["family_unknown", "family_unsupported"] | None = None
+    items: list[CatalogModel] = Field(default_factory=list, max_length=12)
+    next_cursor: str | None = None
+    stale: bool = False
+
+
 class WorkflowCatalogGraphOut(ApiModel):
     """A discovered workflow's graph, fetched so it can be reviewed like a local file."""
 

@@ -9,6 +9,7 @@ import { AccessibleDialog } from "./AccessibleDialog";
 import { ErrorCallout } from "./ErrorCallout";
 import { FirstFailure } from "./FirstFailure";
 import { InstallConfirmDialog } from "./InstallConfirmDialog";
+import { useCatalogInstall } from "./useCatalogInstall";
 import { ModelCard } from "./ModelCard";
 import { ModelUpdatesPanel } from "./ModelUpdatesPanel";
 import { RecipeCard } from "./RecipeCard";
@@ -18,7 +19,6 @@ import { api } from "./api";
 import { formatBytes } from "./format";
 import type {
   CatalogModel,
-  CatalogPreflight,
   EngineRole,
   ModelAssetInstall,
   ModelInstall,
@@ -194,14 +194,6 @@ function InstalledAssetRow({
   );
 }
 
-interface PendingInstall {
-  model: CatalogModel;
-  preflight: CatalogPreflight;
-  installRole: string;
-  engine: string;
-  auxiliaryKind: "lora" | null;
-}
-
 export function ModelsView({ initialRole }: { initialRole: EngineRole }) {
   const [choosingVersions, setChoosingVersions] = useState<CatalogModel | null>(null);
   const [confirmDialog, confirm] = useConfirm();
@@ -248,82 +240,7 @@ export function ModelsView({ initialRole }: { initialRole: EngineRole }) {
   const runtimeFor = (model: CatalogModel) => runtimes.data?.find(
     (runtime) => runtime.engine === model.required_runtime,
   );
-  // Preflight and transfer are separate steps so the user sees what a download
-  // will cost before it starts; the numbers were previously computed and dropped.
-  const [pendingInstall, setPendingInstall] = useState<PendingInstall | null>(null);
-  const download = useMutation({
-    mutationFn: async ({ model, selectedRole }: { model: CatalogModel; selectedRole: string }) => {
-      const auxiliaryKind = selectedRole === "lora" ? "lora" : null;
-      const installRole = auxiliaryKind ? "image" : selectedRole;
-      const engine = model.required_runtime ?? (installRole === "chat" ? "llama.cpp" : "comfyui");
-      // A CivitAI card's remote id is its exact version; that is also the
-      // revision it pins. Hugging Face keeps floating "main".
-      const revision = model.provider === "civitai" ? model.remote_id : "main";
-      const preflight = auxiliaryKind
-        ? await api.catalogPreflight(
-            model.remote_id,
-            installRole,
-            engine,
-            revision,
-            [],
-            auxiliaryKind,
-            null,
-            model.provider,
-          )
-        : await api.catalogPreflight(
-            model.remote_id,
-            installRole,
-            engine,
-            revision,
-            [],
-            null,
-            // Preflight the exact workflow this card represents; a repository
-            // can ship several and ranking must not answer for the user.
-            model.workflow_template_id ?? null,
-            model.provider,
-          );
-      if (!preflight.can_install) {
-        const blockers = preflight.checks
-          .filter((check) => check.status === "block")
-          .map((check) => check.detail);
-        throw new Error(blockers.join(" ") || "This model cannot be installed safely.");
-      }
-      if (!preflight.install_plan || preflight.install_plan.compatibility !== "supported") {
-        throw new Error(
-          preflight.install_plan?.failure_reason
-          || "LM Atelier cannot safely activate this model with the current runtime.",
-        );
-      }
-      return { model, preflight, installRole, engine, auxiliaryKind } satisfies PendingInstall;
-    },
-    onSuccess: (ready) => setPendingInstall(ready),
-  });
-  const confirmInstall = useMutation({
-    mutationFn: ({ preflight, installRole, engine, auxiliaryKind }: PendingInstall) => {
-      const downloadArguments = [
-        preflight.remote_id,
-        preflight.source_remote_id,
-        installRole,
-        engine,
-        preflight.revision,
-        preflight.selected_files,
-        preflight.expected_sha256,
-        preflight.file_sources ?? {},
-        preflight.comfy_paths,
-        preflight.workflow_template_id,
-        preflight.workflow_template_sha256,
-        preflight.install_plan?.id ?? null,
-      ] as const;
-      const contentRating = preflight.content_rating ?? "unknown";
-      return auxiliaryKind
-        ? api.download(...downloadArguments, auxiliaryKind, contentRating)
-        : api.download(...downloadArguments, null, contentRating);
-    },
-    onSuccess: () => {
-      setPendingInstall(null);
-      void client.invalidateQueries({ queryKey: ["jobs"] });
-    },
-  });
+  const { pendingInstall, cancel: cancelInstall, prepare: download, confirm: confirmInstall } = useCatalogInstall();
   const installRecipe = useMutation({
     mutationFn: (recipeId: string) => api.installRecipe(recipeId),
     onSuccess: () => void client.invalidateQueries({ queryKey: ["jobs"] }),
@@ -532,7 +449,7 @@ export function ModelsView({ initialRole }: { initialRole: EngineRole }) {
           system={machine.data}
           pending={confirmInstall.isPending}
           onConfirm={() => confirmInstall.mutate(pendingInstall)}
-          onCancel={() => setPendingInstall(null)}
+          onCancel={cancelInstall}
         />
       )}
       <FirstFailure of={[createProfile, download, confirmInstall, deleteModel, cleanupDownloads, updateUseCase, setDefaultModel, updateModelAsset, deleteModelAsset]} />

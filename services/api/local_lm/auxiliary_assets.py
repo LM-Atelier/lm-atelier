@@ -800,6 +800,34 @@ def _strength(value: object, index: int, label: str) -> float:
     return result
 
 
+def workflow_model_family(session: Session, revision: WorkflowRevision) -> str | None:
+    """The one model family a workflow revision runs, or None when that is not known.
+
+    A revision with a dependency contract answers only through its current ready
+    activation, the same binding automatic LoRA selection reads; one without a
+    contract falls back to its legacy install ids. Anything partial, mixed or
+    invalid is unknown rather than a guess.
+    """
+
+    activation_id: str | None = None
+    if revision.dependency_contract_sha256 is not None:
+        activation = session.scalar(
+            select(WorkflowActivation).where(
+                WorkflowActivation.workflow_revision_id == revision.id,
+                WorkflowActivation.is_active.is_(True),
+                WorkflowActivation.state == "ready",
+            )
+        )
+        if activation is None:
+            return None
+        activation_id = activation.id
+    try:
+        families = _workflow_families(session, revision, workflow_activation_id=activation_id)
+    except ValueError:
+        return None
+    return next(iter(families)) if len(families) == 1 else None
+
+
 def _workflow_families(
     session: Session,
     revision: WorkflowRevision,

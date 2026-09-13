@@ -44,6 +44,7 @@ CHECKED_CONTRACTS = {
     "CatalogDetail": "CatalogDetail",
     "CatalogModel": "CatalogModel",
     "CatalogPage": "CatalogPage",
+    "LoraSuggestions": "LoraSuggestionsOut",
     "WorkflowCatalogGraph": "WorkflowCatalogGraphOut",
     "CatalogInstallPlan": "InstallPlanOut",
     "CatalogPreflight": "CatalogPreflight",
