@@ -69,6 +69,8 @@ function renderApp() {
 
 async function openSettings() {
   fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+  // Settings opens on General; Appearance is one destination along.
+  fireEvent.click(await screen.findByRole("button", { name: "Appearance" }));
   return screen.findByRole("region", { name: "Appearance" });
 }
 

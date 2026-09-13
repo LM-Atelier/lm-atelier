@@ -10,6 +10,7 @@ import { CredentialSettingsCard } from "./CredentialSettingsCard";
 import { DownloadDiagnosticsButton } from "./DownloadDiagnosticsButton";
 import { EmptyChatMaintenance } from "./EmptyChatMaintenance";
 import { ErrorCallout } from "./ErrorCallout";
+import { GeneralSettings } from "./GeneralSettings";
 import { RuntimeSetupCard } from "./RuntimeSetupCard";
 import { StatusDot } from "./StatusDot";
 import { WorkerLogFolderButton, WorkerStartupLimit } from "./WorkerStartupLimit";
@@ -364,6 +365,7 @@ export function SettingsView({ engines, appearance, destinationId, onDestination
       <SettingsNavigation current={destination} onSelect={choose} />
       <div className="settings-destination" role="region" tabIndex={-1} ref={destinationRef}
         aria-label={settingsDestinationFor(destination).label}>
+      {on("general") && <GeneralSettings />}
       {on("appearance") && <AppearanceSettings appearance={appearance} />}
       {on("model-sources") && (<>
       <CredentialSettingsCard

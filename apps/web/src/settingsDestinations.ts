@@ -5,15 +5,9 @@
  * component would make every consumer import a component to ask a question that
  * needs no rendered tree.
  *
- * GENERAL IS NOT HERE YET, and its absence is deliberate rather than an
- * oversight. It is a destination for behaviour the product does not have -
- * startup destination, reopen behaviour, send-key behaviour - so shipping it now
- * would add an empty page. It arrives with its content. The ids below do not
- * shift when it does: a destination is identified by its own id, never by
- * position.
- *
- * Settings opens on the first entry, so the order also decides where a person
- * lands. General takes the first place when it exists.
+ * General is first, so Settings opens on it. It holds everyday behaviour that is
+ * not about appearance, and grows as that behaviour arrives: a destination is
+ * identified by its own id, never by position, so adding to it moves nothing.
  */
 
 export interface SettingsDestination {
@@ -24,6 +18,11 @@ export interface SettingsDestination {
 }
 
 export const SETTINGS_DESTINATIONS: readonly SettingsDestination[] = [
+  {
+    id: "general",
+    label: "General",
+    summary: "Which key sends a message.",
+  },
   {
     id: "appearance",
     label: "Appearance",
