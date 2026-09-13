@@ -1366,5 +1366,6 @@ h1, h2, h3 { margin: 0; }
 .workflow-discover-facts dd { margin: 0; font-weight: 600; }
 .workflow-discover-tags { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; padding: 0; margin: 10px 0 0; }
 .workflow-discover-tags li { font-size: 11px; color: var(--mut); border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; }
+.workflow-discover-card > button { margin-top: 12px; }
 .workflow-destinations { display: flex; gap: 6px; align-items: center; }
 .workflow-destinations [aria-current="page"] { border-color: var(--accent); color: var(--ink); }

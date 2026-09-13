@@ -19,6 +19,10 @@ vi.mock("./api", () => ({
     workflows: vi.fn(), workflowSummaries: vi.fn(), workflow: vi.fn(),
     workflowFamilies: vi.fn().mockResolvedValue([]),
     workflowCatalog: vi.fn().mockResolvedValue({ items: [], next_cursor: null, stale: false }),
+    workflowCatalogGraph: vi.fn(),
+    analyzeWorkflowPackage: vi.fn(),
+    ensureWorkflowPackageDraft: vi.fn(),
+    importWorkflowPackage: vi.fn(),
     validateWorkflow: vi.fn(),
     createWorkflow: vi.fn(),
     createWorkflowEditorDraft: vi.fn(),
@@ -190,4 +194,47 @@ it("keeps the library's own filters through a visit to Discover", async () => {
   openDestination("Library");
 
   expect((screen.getByLabelText("Search workflow families") as HTMLInputElement).value).toBe("alp");
+});
+
+it("brings a workflow added from Discover into view in the library", async () => {
+  vi.mocked(api.workflows).mockResolvedValue([workflow("wf-a", "Alpha")] as never);
+  vi.mocked(api.workflowCatalog).mockResolvedValue({
+    items: [{ provider: "civitai", remote_id: "801", name: "Valley", tags: [], formats: [] }],
+    next_cursor: null,
+    stale: false,
+  } as never);
+  vi.mocked(api.workflowCatalogGraph).mockResolvedValue({ version_id: "801", ui_graph: { nodes: [] } });
+  vi.mocked(api.analyzeWorkflowPackage).mockResolvedValue({
+    format_version: "0.4", frontend_version: null, node_count: 0, link_count: 0, subgraph_count: 0,
+    operation_guess: "image", truncated: false, required_node_types: [], frontend_node_types: [],
+    missing_node_types: [], missing_nodes: [], custom_packages: [], asset_references: [], issues: [],
+    ready: true, runtime_nodes_available: true, dependencies_resolved: true,
+    node_inventory_available: true, source_candidates: [],
+  });
+  vi.mocked(api.ensureWorkflowPackageDraft).mockResolvedValue(
+    { id: "wf-b", current_revision_id: "wf-b" } as never,
+  );
+  vi.mocked(api.importWorkflowPackage).mockImplementation(async () => {
+    vi.mocked(api.workflows).mockResolvedValue(
+      [workflow("wf-a", "Alpha"), workflow("wf-b", "Valley")] as never,
+    );
+    return workflow("wf-b", "Valley") as never;
+  });
+  renderView();
+  await screen.findByText("Alpha");
+
+  openDestination("Discover");
+  fireEvent.click(await screen.findByRole("button", { name: "Review and add" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Import workflow" }));
+
+  // Back in the library, which has read the new workflow rather than showing
+  // the list it held before the import.
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Library" })).toHaveAttribute("aria-current", "page"),
+  );
+  // The Discover card keeps its own copy of the name while hidden, so only a
+  // visible one counts as the library showing it.
+  const visibleValley = () =>
+    screen.queryAllByText("Valley").some((element) => !element.closest("[hidden]"));
+  await waitFor(() => expect(visibleValley()).toBe(true));
 });

@@ -485,7 +485,7 @@ export function WorkflowsView() {
         </AccessibleDialog>
       )}
       </div>
-      {discoverVisited && <div hidden={destination !== "discover"}><WorkflowDiscover /></div>}
+      {discoverVisited && <div hidden={destination !== "discover"}><WorkflowDiscover onImported={() => { refresh(); showDestination("library"); }} /></div>}
     </div>
   );
 }
