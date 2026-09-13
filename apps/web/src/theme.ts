@@ -31,6 +31,16 @@ export const ROOM_LABELS: Record<Room, string> = {
 export const ROOM_KEY = "local-lm-room";
 export const MODE_KEY = "local-lm-mode";
 export const CHAT_WIDTH_KEY = "local-lm-chat-width";
+export const MOTION_KEY = "local-lm-motion";
+
+/** Whether the workspace animates: as the computer asks, or always as little as it can.
+ *
+ * "system" follows the operating system's reduced-motion setting, including
+ * when it changes while the workspace is open. "reduce" reduces motion whatever
+ * the computer says, for somebody who wants it here without changing it
+ * everywhere else.
+ */
+export type MotionChoice = "system" | "reduce";
 
 /** How much of the window the conversation and its composer may use.
  *
@@ -53,6 +63,52 @@ export function isMode(value: unknown): value is ThemeMode {
 
 export function isModeChoice(value: unknown): value is ModeChoice {
   return isMode(value) || value === "system";
+}
+
+export function isMotionChoice(value: unknown): value is MotionChoice {
+  return value === "system" || value === "reduce";
+}
+
+const PREFERS_LESS_MOTION = "(prefers-reduced-motion: reduce)";
+
+function systemPrefersLessMotion(): boolean {
+  return typeof matchMedia === "function" && matchMedia(PREFERS_LESS_MOTION).matches;
+}
+
+export function storedMotionChoice(): MotionChoice {
+  const stored = localStorage.getItem(MOTION_KEY);
+  return isMotionChoice(stored) ? stored : "system";
+}
+
+/** Whether motion should be reduced right now, for movement the stylesheet cannot reach.
+ *
+ * A script that scrolls with `behavior: "smooth"` animates whatever CSS says, so
+ * it has to ask. This reads the remembered choice and the computer's setting
+ * directly rather than the document attribute: a component's effect can run
+ * before the one that sets the attribute, and the first scroll would then
+ * animate for somebody who asked it not to.
+ */
+export function prefersLessMotion(): boolean {
+  return storedMotionChoice() === "reduce" || systemPrefersLessMotion();
+}
+
+/** The motion choice, whether motion is reduced now, and a way to change the choice. */
+export function useMotion(): [MotionChoice, boolean, (choice: MotionChoice) => void] {
+  const [choice, setChoice] = useState<MotionChoice>(storedMotionChoice);
+  const [system, setSystem] = useState<boolean>(systemPrefersLessMotion);
+  useEffect(() => {
+    if (choice !== "system" || typeof matchMedia !== "function") return;
+    const query = matchMedia(PREFERS_LESS_MOTION);
+    const follow = () => setSystem(query.matches);
+    follow();
+    query.addEventListener("change", follow);
+    return () => query.removeEventListener("change", follow);
+  }, [choice]);
+  const choose = useCallback((next: MotionChoice) => {
+    setChoice(next);
+    localStorage.setItem(MOTION_KEY, next);
+  }, []);
+  return [choice, choice === "reduce" || system, choose];
 }
 
 export function isChatWidth(value: unknown): value is ChatWidth {
@@ -131,7 +187,7 @@ export function useThemeMode(): [ModeChoice, ThemeMode, (choice: ModeChoice) => 
   return [choice, choice === "system" ? system : choice, choose];
 }
 
-/** The room, its light and the chat width, remembered and applied to the document.
+/** The room, its light, the chat width and motion, remembered and applied to the document.
  *
  * Both attributes go on the document element rather than on a wrapper, so a
  * dialog rendered through a portal is in the same room as everything else.
@@ -147,22 +203,27 @@ export interface Appearance {
   /** What was chosen, which may be to follow the system. */
   modeChoice: ModeChoice;
   chatWidth: ChatWidth;
+  /** What was chosen for motion, which may be to follow the computer. */
+  motionChoice: MotionChoice;
   setRoom: (room: Room) => void;
   setMode: (choice: ModeChoice) => void;
   setChatWidth: (width: ChatWidth) => void;
+  setMotion: (choice: MotionChoice) => void;
 }
 
 export function useAppearance(): Appearance {
   const [room, setRoom] = useRoom();
   const [modeChoice, mode, setMode] = useThemeMode();
   const [chatWidth, setChatWidth] = useChatWidth();
+  const [motionChoice, reducedMotion, setMotion] = useMotion();
   useEffect(() => {
     document.documentElement.dataset.room = room;
     document.documentElement.dataset.mode = mode;
     document.documentElement.dataset.chatWidth = chatWidth;
-  }, [room, mode, chatWidth]);
+    document.documentElement.dataset.motion = reducedMotion ? "reduced" : "full";
+  }, [room, mode, chatWidth, reducedMotion]);
   return useMemo(
-    () => ({ room, mode, modeChoice, chatWidth, setRoom, setMode, setChatWidth }),
-    [room, mode, modeChoice, chatWidth, setRoom, setMode, setChatWidth],
+    () => ({ room, mode, modeChoice, chatWidth, motionChoice, setRoom, setMode, setChatWidth, setMotion }),
+    [room, mode, modeChoice, chatWidth, motionChoice, setRoom, setMode, setChatWidth, setMotion],
   );
 }

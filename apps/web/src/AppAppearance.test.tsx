@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "./App";
 import { api } from "./api";
 import { CLOCK_KEY } from "./clockPreference";
-import { CHAT_WIDTH_KEY, MODE_KEY, ROOM_KEY } from "./theme";
+import { CHAT_WIDTH_KEY, MODE_KEY, MOTION_KEY, ROOM_KEY } from "./theme";
 
 vi.mock("./api", () => ({
   api: {
@@ -167,4 +167,17 @@ it("widens the chat from Settings and opens on that width next time", async () =
   renderApp();
   await screen.findByRole("button", { name: "Settings" });
   expect(document.documentElement.dataset.chatWidth).toBe("wide");
+});
+
+it("reduces motion from Settings", async () => {
+  renderApp();
+  await openSettings();
+  const motion = screen.getByRole("group", { name: "Motion" });
+  expect(within(motion).getByRole("button", { name: "Automatic" }).getAttribute("aria-pressed")).toBe("true");
+
+  fireEvent.click(within(motion).getByRole("button", { name: "Reduce" }));
+
+  expect(document.documentElement.dataset.motion).toBe("reduced");
+  expect(localStorage.getItem(MOTION_KEY)).toBe("reduce");
+  expect(within(motion).getByRole("button", { name: "Reduce" }).getAttribute("aria-pressed")).toBe("true");
 });
