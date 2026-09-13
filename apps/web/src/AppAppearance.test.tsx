@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "./App";
 import { api } from "./api";
 import { CLOCK_KEY } from "./clockPreference";
+import { SIDEBAR_COLLAPSED_KEY, SIDEBAR_WIDTH_KEY } from "./sidebarLayout";
 import { CHAT_WIDTH_KEY, MODE_KEY, MOTION_KEY, ROOM_KEY, TEXT_SIZE_KEY, THUMBNAIL_SIZE_KEY } from "./theme";
 
 vi.mock("./api", () => ({
@@ -37,6 +38,7 @@ beforeEach(() => {
   window.history.replaceState(null, "", "/");
   delete document.documentElement.dataset.mode;
   delete document.documentElement.dataset.room;
+  delete document.documentElement.dataset.sidebar;
   vi.mocked(api.setupReadiness).mockResolvedValue({ version: 2, state: "ready", roles: [] });
   vi.mocked(api.system).mockResolvedValue(null as never);
   vi.mocked(api.about).mockResolvedValue({
@@ -218,4 +220,57 @@ it("reduces motion from Settings", async () => {
   expect(document.documentElement.dataset.motion).toBe("reduced");
   expect(localStorage.getItem(MOTION_KEY)).toBe("reduce");
   expect(within(motion).getByRole("button", { name: "Reduce" }).getAttribute("aria-pressed")).toBe("true");
+});
+
+it("puts a narrowed sidebar back at its usual width from Settings", async () => {
+  renderApp();
+  const handle = await screen.findByRole("separator", { name: "Hide sidebar, or drag to resize" });
+  // Narrowed with the workspace's own handle, not by writing storage behind its back.
+  fireEvent.keyDown(handle, { key: "ArrowLeft" });
+  expect(handle).toHaveAttribute("aria-valuenow", "256");
+
+  const appearance = await openSettings();
+  const reset = within(appearance).getByRole("button", { name: "Reset sidebar" });
+  expect(reset).toHaveAccessibleDescription(/^Shown, 256 pixels wide\./);
+  expect(reset.getAttribute("aria-disabled")).toBe("false");
+
+  fireEvent.click(reset);
+
+  expect(document.documentElement.style.getPropertyValue("--sidebar-width")).toBe("272px");
+  expect(localStorage.getItem(SIDEBAR_WIDTH_KEY)).toBeNull();
+  expect(reset).toHaveAccessibleDescription(/^Shown, 272 pixels wide\./);
+  expect(reset.getAttribute("aria-disabled")).toBe("true");
+  expect(screen.getByRole("separator", { name: "Hide sidebar, or drag to resize" })).toHaveAttribute("aria-valuenow", "272");
+});
+
+it("shows a hidden sidebar again from Settings", async () => {
+  renderApp();
+  fireEvent.keyDown(await screen.findByRole("separator", { name: "Hide sidebar, or drag to resize" }), { key: "Enter" });
+  expect(document.documentElement.dataset.sidebar).toBe("collapsed");
+
+  const appearance = await openSettings();
+  const reset = within(appearance).getByRole("button", { name: "Reset sidebar" });
+  expect(reset).toHaveAccessibleDescription(/^Hidden\./);
+  expect(reset.getAttribute("aria-disabled")).toBe("false");
+
+  fireEvent.click(reset);
+
+  expect(document.documentElement.dataset.sidebar).toBe("open");
+  expect(document.documentElement.style.getPropertyValue("--sidebar-width")).toBe("272px");
+  expect(localStorage.getItem(SIDEBAR_COLLAPSED_KEY)).toBeNull();
+  expect(reset).toHaveAccessibleDescription(/^Shown, 272 pixels wide\./);
+  expect(screen.getByRole("separator", { name: "Hide sidebar, or drag to resize" })).toBeTruthy();
+});
+
+it("says the sidebar is already where it belongs, and resets nothing", async () => {
+  renderApp();
+  const appearance = await openSettings();
+  const reset = within(appearance).getByRole("button", { name: "Reset sidebar" });
+  expect(reset).toHaveAccessibleDescription(/^Shown, 272 pixels wide\./);
+  expect(reset.getAttribute("aria-disabled")).toBe("true");
+
+  const removeItem = vi.spyOn(Storage.prototype, "removeItem");
+  fireEvent.click(reset);
+  expect(removeItem).not.toHaveBeenCalledWith(SIDEBAR_WIDTH_KEY);
+  removeItem.mockRestore();
 });

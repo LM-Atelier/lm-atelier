@@ -1,6 +1,7 @@
 import { Monitor, Moon, Sun } from "lucide-react";
 import { useId } from "react";
 import { clockOptions, setClockChoice, useClockChoice, type ClockChoice } from "./clockPreference";
+import { DEFAULT_SIDEBAR_WIDTH, resetSidebarLayout, useSidebarState } from "./sidebarLayout";
 import {
   ROOMS,
   ROOM_LABELS,
@@ -47,6 +48,40 @@ const CLOCKS: readonly { value: ClockChoice; label: string }[] = [
   { value: "12", label: "12-hour" },
   { value: "24", label: "24-hour" },
 ];
+
+/** Where the sidebar has been dragged or hidden to, and a way to put it back.
+ *
+ * A sidebar dragged to its narrowest, or hidden and forgotten, is easy to lose
+ * track of, and the handle that restores it is a thin edge. This says what
+ * the sidebar is doing now and restores it in one press. It is unavailable
+ * when there is nothing to put back, so pressing it never looks like it did
+ * something it did not.
+ */
+function SidebarSetting({ id }: { id: string }) {
+  const { width, collapsed } = useSidebarState();
+  const usual = !collapsed && width === DEFAULT_SIDEBAR_WIDTH;
+  return (
+    <div className="setting-row appearance-row">
+      <span>
+        <strong id={`${id}-sidebar`}>Sidebar</strong>
+        <small id={`${id}-sidebar-help`}>
+          {collapsed ? "Hidden." : `Shown, ${width.toLocaleString()} pixels wide.`} Reset shows it again at its usual width.
+        </small>
+      </span>
+      <button
+        type="button"
+        className="secondary"
+        aria-describedby={`${id}-sidebar-help`}
+        aria-disabled={usual}
+        onClick={() => {
+          if (!usual) resetSidebarLayout();
+        }}
+      >
+        Reset sidebar
+      </button>
+    </div>
+  );
+}
 
 /** A quarter to four in the afternoon, which reads differently on every clock. */
 const SAMPLE_TIME = new Date(2026, 0, 1, 15, 45);
@@ -238,6 +273,7 @@ export function AppearanceSettings({ appearance }: { appearance: Appearance }) {
             ))}
           </div>
         </div>
+        <SidebarSetting id={id} />
       </section>
       <ClockSetting />
     </>
