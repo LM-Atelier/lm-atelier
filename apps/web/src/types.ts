@@ -797,6 +797,25 @@ export interface BackupInfo {
   media_size_bytes: number;
 }
 
+/** One empty chat, described by why it would or would not be offered, never by
+ * what anybody wrote in it. */
+export interface EmptyChatEntry {
+  id: string;
+  classification: "strict_blank" | "configured_blank" | "inconsistent";
+  created_at: string;
+  updated_at: string;
+  age_hours: number;
+  reasons: string[];
+  deletable: boolean;
+}
+
+export interface EmptyChatPage {
+  entries: EmptyChatEntry[];
+  next_cursor: string | null;
+  counts: Record<string, number>;
+  evaluated_at: string;
+}
+
 export interface ModelInstall {
   id: string;
   source_id: string | null;

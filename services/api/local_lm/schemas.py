@@ -3020,6 +3020,48 @@ class BackupInfo(ApiModel):
     media_size_bytes: int = 0
 
 
+def _utc_instant(value: datetime) -> str:
+    """SQLite keeps these naive and they are UTC; say so at the browser boundary."""
+
+    normalized = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+    return normalized.isoformat().replace("+00:00", "Z")
+
+
+class EmptyChatEntryOut(ApiModel):
+    """One empty chat, described by the decision rather than by its content.
+
+    No title, no draft text, no prompt. A maintenance list that shows titles is
+    a list of what somebody wrote, and the reasons are what the decision needs.
+    """
+
+    id: str
+    classification: Literal["strict_blank", "configured_blank", "inconsistent"]
+    created_at: datetime
+    updated_at: datetime
+    age_hours: float
+    reasons: list[str] = Field(default_factory=list)
+    #: `inconsistent` is never offered for deletion, and says so here rather
+    #: than leaving the surface to infer it from the classification.
+    deletable: bool
+
+    @field_serializer("created_at", "updated_at", when_used="json")
+    def serialize_timestamp_as_utc(self, value: datetime) -> str:
+        return _utc_instant(value)
+
+
+class EmptyChatPageOut(ApiModel):
+    entries: list[EmptyChatEntryOut] = Field(default_factory=list)
+    next_cursor: str | None = None
+    #: Of this page, not of the library. A count over everything would be a
+    #: second query answering a different question from the rows shown.
+    counts: dict[str, int] = Field(default_factory=dict)
+    evaluated_at: datetime
+
+    @field_serializer("evaluated_at", when_used="json")
+    def serialize_evaluated_at_as_utc(self, value: datetime) -> str:
+        return _utc_instant(value)
+
+
 class EventOut(ApiModel):
     sequence: int
     type: str

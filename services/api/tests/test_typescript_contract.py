@@ -56,6 +56,8 @@ CHECKED_CONTRACTS = {
     "DraftClassification": "DraftClassification",
     "DeviceInfo": "DeviceInfo",
     "EditTemplate": "EditTemplateOut",
+    "EmptyChatEntry": "EmptyChatEntryOut",
+    "EmptyChatPage": "EmptyChatPageOut",
     "EngineCapabilities": "EngineCapabilities",
     "ExchangeDeletion": "ExchangeDeletionOut",
     "Job": "JobOut",
