@@ -17,6 +17,7 @@ import type {
   ArtifactStorageInfo,
   BackupInfo,
   RetentionPolicy,
+  ThirdPartyNotices,
   EmptyChatDeletion,
   EmptyChatPage,
   EmptyChatPreview,
@@ -662,6 +663,7 @@ export const api = {
     request<ToolCapabilityProbe>("/api/engines/chat/tool-probe", { method: "POST" }),
   system: () => request<SystemInfo>("/api/system"),
   about: () => request<ApplicationInfo>("/api/about"),
+  thirdPartyNotices: () => request<ThirdPartyNotices>("/api/about/third-party-notices"),
   platforms: () => request<PlatformMatrixEntry[]>("/api/platforms"),
   createDiagnostics: () => request<{ url: string }>("/api/diagnostics", { method: "POST" }),
   credentialStatus: (provider: CredentialProvider) =>

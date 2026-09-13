@@ -1477,6 +1477,12 @@ export interface SystemInfo {
   devices: DeviceInfo[];
 }
 
+/** The third-party software a release includes; both null when not running from a release. */
+export interface ThirdPartyNotices {
+  text: string | null;
+  license_folder: string | null;
+}
+
 export interface ApplicationInfo {
   version: string;
   data_directory: string;

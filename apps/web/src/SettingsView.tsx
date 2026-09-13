@@ -26,6 +26,7 @@ import { useConfirm } from "./useConfirm";
 import { SettingsNavigation } from "./SettingsNavigation";
 import { AppearanceSettings } from "./AppearanceSettings";
 import { StorageSummary } from "./StorageSummary";
+import { ThirdPartyNotices } from "./ThirdPartyNotices";
 import { SettingDetailSetting } from "./SettingDetailSetting";
 import { storedSettingDetail } from "./settingDetail";
 import type { Appearance } from "./theme";
@@ -560,6 +561,7 @@ export function SettingsView({ engines, appearance, destinationId, onDestination
             ))}
             , each under the SIL Open Font License.
           </p>
+          <ThirdPartyNotices />
         </div>}
         {(about.error || system.error) && <ErrorCallout message="About information is unavailable." />}
       </section>
