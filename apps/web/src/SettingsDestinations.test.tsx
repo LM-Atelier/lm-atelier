@@ -64,9 +64,9 @@ it("offers every destination and announces which one you are on", () => {
 it("shows one destination at a time", () => {
   show();
 
-  // Appearance is where Settings opens, so its content is present and another
+  // General is where Settings opens, so its content is present and another
   // destination's is not - the whole point of the shell.
-  expect(screen.getByRole("heading", { name: "Light and theme" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Sending" })).toBeTruthy();
   expect(screen.queryByRole("heading", { name: "Recovery backups" })).toBeNull();
 
   fireEvent.click(rail("Data & backups"));
@@ -74,7 +74,7 @@ it("shows one destination at a time", () => {
   expect(screen.getByRole("heading", { name: "Recovery backups" })).toBeTruthy();
   // Storage is summarised on the same page, above the backups that act on it.
   expect(screen.getByRole("heading", { name: "Storage" })).toBeTruthy();
-  expect(screen.queryByRole("heading", { name: "Light and theme" })).toBeNull();
+  expect(screen.queryByRole("heading", { name: "Sending" })).toBeNull();
 });
 
 it("moves focus to the destination you chose, and not before you choose one", () => {

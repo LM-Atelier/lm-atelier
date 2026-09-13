@@ -8,6 +8,7 @@ import {
 import { MentionPicker } from "./MentionPicker";
 import { insertMention, mentionQuery, type TrackedMention } from "./mentionDraft";
 import type { ReferenceSubject } from "./types";
+import { currentSendKeyChoice, isSendKeystroke } from "./sendKey";
 
 /** The composer's text field, sized to whatever is being written in it.
  *
@@ -109,7 +110,7 @@ export function MessageField({
             setQuery(null);
             return;
           }
-          if (event.key === "Enter" && !event.shiftKey) {
+          if (isSendKeystroke(event, currentSendKeyChoice())) {
             event.preventDefault();
             onSubmit();
           }

@@ -95,6 +95,7 @@ import {
 } from "./settings";
 import { useWorkspaceChrome, type SidebarLayout } from "./sidebarLayout";
 import { prefersLessMotion } from "./theme";
+import { currentSendKeyChoice, isSendKeystroke } from "./sendKey";
 import { activeBranchMessages } from "./turnEditorContext";
 import type {
   Chat,
@@ -662,7 +663,7 @@ function PromptHelperDialog({
             rows={2}
             onChange={(event) => setInstruction(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
+              if (isSendKeystroke(event, currentSendKeyChoice())) {
                 event.preventDefault();
                 void send("text", instruction);
               }
