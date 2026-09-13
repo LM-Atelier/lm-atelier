@@ -6,8 +6,12 @@ import {
   insertedComposerDraft,
   insertionForPromptBatchItem,
   promptSourceForTurn,
+  updatedComposerDrafts,
+  withoutComposerDraft,
 } from "./composerPromptSource";
+import type { ComposerDraft } from "./composerPromptSource";
 import type { PromptBatch } from "./types";
+import { initialTurnEditorState } from "./useTurnEditorState";
 
 const batch: PromptBatch = {
   id: "prompt-batch-one",
@@ -86,6 +90,33 @@ describe("composer Prompt Library provenance", () => {
       promptSource: null,
     });
     expect(drafts["chat-two"]).toBe(EMPTY_COMPOSER_DRAFT);
+  });
+
+  it("keeps the rest of the draft when its text changes or its source detaches, and drops it all with the chat", () => {
+    const editor = initialTurnEditorState("image", { outputCount: 3 });
+    const inserted = { ...insertedComposerDraft(insertionForPromptBatchItem(batch, batch.items[0])), editor };
+
+    expect(composerDraftWithText(inserted, "A warmer reviewed portrait of Ada.").editor).toBe(editor);
+    expect(composerDraftWithText(inserted, "").editor).toBe(editor);
+    expect(detachedComposerDraft(inserted).editor).toBe(editor);
+
+    // Two changes in the same moment each read the draft as the other left it.
+    let drafts: Record<string, ComposerDraft> = { "chat-one": inserted, "chat-two": EMPTY_COMPOSER_DRAFT };
+    drafts = updatedComposerDrafts(drafts, "chat-one", (current) => ({ ...current, editor: { ...current.editor!, outputCount: 2 } }));
+    drafts = updatedComposerDrafts(drafts, "chat-one", (current) => composerDraftWithText(current, "Now with a hat"));
+    expect(drafts["chat-one"].text).toBe("Now with a hat");
+    expect(drafts["chat-one"].editor?.outputCount).toBe(2);
+    expect(drafts["chat-two"]).toBe(EMPTY_COMPOSER_DRAFT);
+
+    expect(withoutComposerDraft(drafts, "chat-one")).toEqual({ "chat-two": EMPTY_COMPOSER_DRAFT });
+  });
+
+  it("starts an untouched draft from any state the editor was opened with", () => {
+    const opened = initialTurnEditorState("video", { outputCount: 2, attachmentIntent: "inherit" });
+
+    expect(opened).toMatchObject({ mode: "video", outputCount: 2, attachmentIntent: "inherit", attachments: [], mentions: [] });
+    expect(initialTurnEditorState("image", undefined)).toMatchObject({ mode: "image", outputCount: 1, attachmentIntent: "replace" });
+    expect(opened.requestId).not.toBe(initialTurnEditorState("video", undefined).requestId);
   });
 
   it("refuses source authority with attachments, references, multiple outputs, or a non-image mode", () => {

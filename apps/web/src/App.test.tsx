@@ -5975,7 +5975,7 @@ describe("App", () => {
     expect(composer).toHaveFocus();
   });
 
-  it("isolates unsent text per chat and clears visual edit targets when switching", async () => {
+  it("isolates the unsent draft per chat, attachments included, and clears it from the other chat", async () => {
     const stamp = "2026-07-30T00:00:00Z";
     const first: Chat = {
       id: "chat-draft-first",
@@ -6061,7 +6061,7 @@ describe("App", () => {
     fireEvent.click(screen.getByText(first.title));
     expect(await screen.findByRole("heading", { name: first.title })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("Unsent first-chat draft");
-    expect(screen.queryByRole("button", { name: /Remove Generated image: sha256:synthetic/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Remove Generated image: sha256:synthetic/ })).toBeVisible();
   });
 
   it.each(["other-message", "other-revision", "target-revision"] as const)(
