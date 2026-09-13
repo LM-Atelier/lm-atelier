@@ -98,6 +98,9 @@ CHECKED_CONTRACTS = {
     "ResponseRevision": "ResponseRevisionOut",
     "RetentionPolicy": "RetentionPolicyOut",
     "ThirdPartyNotices": "ThirdPartyNoticesOut",
+    "WorkflowLoraAssetBinding": "WorkflowLoraAssetBindingOut",
+    "WorkflowLoraControlSlot": "WorkflowLoraControlSlotOut",
+    "WorkflowLoraControls": "WorkflowLoraControlsOut",
     "Run": "RunOut",
     "RuntimeStatus": "RuntimeStatus",
     "SettingField": "SettingField",
@@ -682,6 +685,9 @@ VOCABULARY_COMPONENT_EXCLUSION = "FastAPI validation models, which the applicati
 OPEN_VOCABULARY_FIELDS = {
     "JobOut.phase": "Progress labels include external filenames, hostnames and component counts",
     "WorkflowMissingNodeOut.node_type": "ComfyUI class names from user-supplied workflow graphs",
+    "WorkflowLoraControlSlotOut.loader_type": (
+        "ComfyUI class names from a revision's graph, including loaders nothing has audited"
+    ),
 }
 
 

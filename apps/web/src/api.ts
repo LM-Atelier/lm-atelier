@@ -18,6 +18,7 @@ import type {
   BackupInfo,
   RetentionPolicy,
   ThirdPartyNotices,
+  WorkflowLoraControls,
   EmptyChatDeletion,
   EmptyChatPage,
   EmptyChatPreview,
@@ -1127,6 +1128,11 @@ export const api = {
     }),
   workflowRevisionChoices: (signal?: AbortSignal) =>
     request<WorkflowRevisionChoice[]>("/api/workflow-revision-choices", { signal }),
+  /** The LoRAs a workflow revision applies, read-only. */
+  workflowLoraControls: (revisionId: string, signal?: AbortSignal) =>
+    request<WorkflowLoraControls>(
+      "/api/workflow-revisions/" + encodeURIComponent(revisionId) + "/lora-controls", { signal },
+    ),
   workflowRevisionSchema: (revisionId: string, signal?: AbortSignal) =>
     request<WorkflowRevisionSchema>(
       "/api/workflow-revisions/" + encodeURIComponent(revisionId) + "/settings-schema", { signal },

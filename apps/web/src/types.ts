@@ -1294,6 +1294,56 @@ export interface WorkflowRevisionChoice {
   version: number;
 }
 
+/** One workflow-authored LoRA's verified file, by its portable name and content digest. */
+export interface WorkflowLoraAssetBinding {
+  dependency_slot: string;
+  requirement_key: string;
+  resource_identity_sha256: string;
+  runtime_reference: string;
+  sha256: string;
+}
+
+/** One LoRA a workflow revision applies, as far as its evidence goes. */
+export interface WorkflowLoraControlSlot {
+  slot_id: string;
+  position: number;
+  loader_type: string;
+  loader_contract: string | null;
+  loader_authority_sha256: string | null;
+  editability: "editable" | "required_locked" | "detected_read_only";
+  read_only_reason: string | null;
+  dependency_required: boolean | null;
+  observed_runtime_reference: string | null;
+  asset_binding: WorkflowLoraAssetBinding | null;
+  default_enabled: boolean | null;
+  default_model_strength: number | null;
+  default_clip_strength: number | null;
+  strength_mode: "separate" | "coupled" | "model_only" | "unknown";
+  editable_fields: Array<"enabled" | "model_strength" | "clip_strength">;
+}
+
+/** The LoRAs one exact workflow revision applies, read-only. */
+export interface WorkflowLoraControls {
+  version: 1;
+  revision_scope_sha256: string;
+  api_graph_sha256: string;
+  dependency_contract_sha256: string;
+  activation_binding_sha256: string | null;
+  ordering_authority: "presentation_only";
+  evidence_gaps: Array<
+    | "dependency_contract_unavailable"
+    | "dependency_contract_invalid"
+    | "active_activation_unavailable"
+    | "active_activation_invalid"
+    | "ui_graph_provenance_unavailable"
+    | "core_runtime_evidence_unavailable"
+    | "core_graph_binding_unavailable"
+    | "package_binding_evidence_unavailable"
+    | "package_graph_binding_unavailable"
+  >;
+  slots: WorkflowLoraControlSlot[];
+}
+
 export interface WorkflowRevisionSchema {
   revision_id: string;
   workflow_id: string;

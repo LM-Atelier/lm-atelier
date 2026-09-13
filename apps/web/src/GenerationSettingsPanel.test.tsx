@@ -10,6 +10,7 @@ vi.mock("./api", () => ({
   api: {
     workflowRevisionOutputGeometry: vi.fn(),
     resolveWorkflowRevisionOutputGeometry: vi.fn(),
+    workflowLoraControls: vi.fn(),
   },
 }));
 
@@ -295,5 +296,57 @@ describe("the shape control in the panel", () => {
 
     expect(screen.queryByRole("group", { name: "Output aspect ratio" })).toBeNull();
     expect(api.workflowRevisionOutputGeometry).not.toHaveBeenCalled();
+  });
+});
+
+describe("the workflow's own LoRAs in the panel", () => {
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  it("shows the LoRAs a pinned workflow applies, though it takes no added ones", async () => {
+    vi.mocked(api.workflowRevisionOutputGeometry).mockResolvedValue(CAPABILITY);
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode("rev-1")));
+    vi.mocked(api.workflowLoraControls).mockResolvedValue({
+      version: 1,
+      revision_scope_sha256: Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join(""),
+      api_graph_sha256: "b".repeat(64),
+      dependency_contract_sha256: "c".repeat(64),
+      activation_binding_sha256: null,
+      ordering_authority: "presentation_only",
+      evidence_gaps: [],
+      slots: [{
+        slot_id: `wflora_${"d".repeat(64)}`,
+        position: 0,
+        loader_type: "LoraLoaderModelOnly",
+        loader_contract: null,
+        loader_authority_sha256: null,
+        editability: "detected_read_only",
+        read_only_reason: "missing_core_evidence",
+        dependency_required: null,
+        observed_runtime_reference: "styles/soft-light.safetensors",
+        asset_binding: null,
+        default_enabled: true,
+        default_model_strength: 0.6,
+        default_clip_strength: null,
+        strength_mode: "model_only",
+        editable_fields: [],
+      }],
+    });
+
+    render(<DimensionedPanel revisionId="rev-1" />);
+
+    const section = await screen.findByRole("region", { name: "LoRAs" });
+    expect(section).toHaveTextContent("soft-light.safetensors");
+    expect(section).toHaveTextContent("Model strength 0.6");
+    expect(api.workflowLoraControls).toHaveBeenCalledWith("rev-1", expect.anything());
+  });
+
+  it("asks nothing about a workflow's LoRAs when the turn pins no workflow", () => {
+    render(<DimensionedPanel revisionId={null} />);
+
+    expect(api.workflowLoraControls).not.toHaveBeenCalled();
+    expect(screen.queryByRole("region", { name: "LoRAs" })).toBeNull();
   });
 });
