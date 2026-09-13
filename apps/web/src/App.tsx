@@ -1,3 +1,4 @@
+import { useAppNavigation } from "./useAppNavigation";
 import { ChatWebAccess } from "./ChatWebAccess";
 import { ChatSearchConsent } from "./ChatSearchConsent";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -1108,7 +1109,10 @@ function Sidebar({
 export default function App() {
   const client = useQueryClient();
   const [turnConfirmDialog, requestTurnConfirmation] = useTurnConfirmation();
-  const [view, setView] = useState<View>("chat");
+  const { view, setView, settingsDestination, setSettingsDestination, settingsFocusRequest, mainFocusRequest } = useAppNavigation();
+  useEffect(() => {
+    if (mainFocusRequest !== undefined) document.getElementById("main-content")?.focus();
+  }, [mainFocusRequest]);
   const { appearance, sidebar } = useWorkspaceChrome();
   const [studioSource, setStudioSource] = useState<{ artifactId: string; chatId: string | null } | null>(null);
   const [modelLibraryRole, setModelLibraryRole] = useState<EngineRole>("chat");
@@ -1346,13 +1350,13 @@ export default function App() {
     setStudioSource({ artifactId, chatId: null });
     setView("studio");
     focusMainContent();
-  }, []);
+  }, [setView]);
   const allChats = useMemo(() => chats.data ?? [], [chats.data]);
   const [autoSettingsRoles, rememberSettingsRole] = useAutoSettingsRoles(chats.data);
   const allProjects = useMemo(() => projects.data ?? [], [projects.data]);
   // One place that knows what opening the library means, since three
   // different surfaces send people there.
-  const openWorkflows = () => { setView("workflows"); focusMainContent(); };
+  const openWorkflows = useCallback(() => { setView("workflows"); focusMainContent(); }, [setView]);
   const activeContent = useMemo(() => {
     if (view === "studio") {
       return (
@@ -1366,7 +1370,7 @@ export default function App() {
     }
     const topLevelView = view === "media" ? <MediaLibraryView onEditImage={openLibraryImage} /> : view === "models" ? <ModelsView key={modelLibraryRole} initialRole={modelLibraryRole} /> : view === "references" ? <ReferencesLibrary /> : view === "prompts" ? <PromptLibraryView /> : view === "workflows" ? <WorkflowsView /> : null;
     if (topLevelView) return topLevelView;
-    if (view === "settings") return <SettingsView engines={engines.data ?? []} />;
+    if (view === "settings") return <SettingsView engines={engines.data ?? []} destinationId={settingsDestination} onDestinationChange={setSettingsDestination} focusRequest={settingsFocusRequest} />;
     const displayedChat = chat.data
       ? { ...chat.data, ...(chatDrafts[chat.data.id] ?? {}) }
       : undefined;
@@ -1441,7 +1445,7 @@ export default function App() {
         send.mutate({ chatId: displayedChat.id, id: crypto.randomUUID(), text, mode, artifacts, settings, references, outputCount, promptSource });
       }
     }} />;
-  }, [studioSource, view, modelLibraryRole, engines.data, profiles.data, presets.data, applicationInfo.data, allProjects, chat.data, chatDrafts, autoSettingsRoles, rememberSettingsRole, composerDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, removeItem, forkThread, client, openLibraryImage, applyAcceptedTurn]);
+  }, [openWorkflows, studioSource, view, setView, settingsDestination, setSettingsDestination, settingsFocusRequest, modelLibraryRole, engines.data, profiles.data, presets.data, applicationInfo.data, allProjects, chat.data, chatDrafts, autoSettingsRoles, rememberSettingsRole, composerDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, removeItem, forkThread, client, openLibraryImage, applyAcceptedTurn]);
 
   if (firstRunSetup && setupReadiness.data) {
     return <FirstRunSetup report={setupReadiness.data} onExit={exitFirstRunSetup} onOpenModels={(role) => { exitFirstRunSetup(); setModelLibraryRole(role); setView("models"); }} onOpenWorkflows={() => { exitFirstRunSetup(); setView("workflows"); }} />;

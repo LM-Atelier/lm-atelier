@@ -33,7 +33,7 @@ function show(value = profile) {
   vi.mocked(api.profiles).mockResolvedValue([value]);
   vi.mocked(api.updateProfile).mockResolvedValue(value);
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
-  render(<QueryClientProvider client={client}><SettingsView engines={[]} /></QueryClientProvider>);
+  render(<QueryClientProvider client={client}><SettingsView engines={[]} destinationId="models-and-generation" onDestinationChange={() => undefined} /></QueryClientProvider>);
   return client;
 }
 

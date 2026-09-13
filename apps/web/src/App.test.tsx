@@ -1,3 +1,4 @@
+import { exerciseWorkspaceHistory } from "./workspaceHistoryAppCase.test-support";
 import { mockWorkflowReadsFromFixture, mockWorkflowConsumerReadsFromFixture } from "./workflowReadFixtures";
 import { exerciseEditedBranchNavigation } from "./editedBranchAppCase.test-support";
 import { exerciseQueuedOutputActions } from "./queuedOutputActions.test-support";
@@ -341,7 +342,9 @@ async function openSettings(destination: string) {
 }
 
 describe("App", () => {
+  it("restores workspace destinations and focus with browser history", async () => { await exerciseWorkspaceHistory(renderApp); });
   beforeEach(() => {
+    window.history.replaceState(null, "", "/");
     vi.clearAllMocks();
     clipboardWrite.mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
@@ -584,7 +587,8 @@ describe("App", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Done" }));
     expect(await screen.findByRole("region", { name: "Projects and chats" })).toBeInTheDocument();
-    expect(window.location.search).toBe("");
+    expect(new URL(window.location.href).searchParams.has("firstRunSetup")).toBe(false);
+    expect(new URL(window.location.href).searchParams.get("view")).toBe("chat");
   });
 
   it("totals live downloads into one figure with an honest optional eta", async () => {
@@ -3849,7 +3853,7 @@ describe("App", () => {
         <App />
       </QueryClientProvider>,
     );
-    fireEvent.click(await screen.findByText("Model library"));
+    fireEvent.click(await screen.findByRole("button", { name: "Model library" }));
     expect(await screen.findByRole("button", { name: "Needs vLLM" })).toBeDisabled();
 
     rendered.unmount();
@@ -3900,7 +3904,7 @@ describe("App", () => {
         <App />
       </QueryClientProvider>,
     );
-    fireEvent.click(await screen.findByText("Model library"));
+    fireEvent.click(await screen.findByRole("button", { name: "Model library" }));
     fireEvent.click(await screen.findByRole("button", { name: "Install" }));
     await waitFor(() => expect(api.catalogPreflight).toHaveBeenCalledWith(
       model.remote_id,
