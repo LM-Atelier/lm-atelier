@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import json
+from copy import deepcopy
+from types import MappingProxyType
+from typing import Any
 
 import pytest
 from httpx2 import AsyncClient
+from sqlalchemy.orm import Session
 
 from local_lm.auxiliary_assets import (
     LORA_GRAPH_TRANSFORM_VERSION,
@@ -11,6 +16,7 @@ from local_lm.auxiliary_assets import (
     detect_lora_extension,
     prompt_trigger_word_provenance,
     resolve_lora_stack,
+    resolve_lora_stack_against_graph,
     select_automatic_lora_stack,
     transform_lora_graph,
     trigger_words_to_apply,
@@ -27,6 +33,30 @@ from local_lm.models import (
     WorkflowDependencySlot,
     WorkflowRevision,
 )
+
+
+def _graph_hash(graph: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            graph,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode()
+    ).hexdigest()
+
+
+class _DictSubclass(dict[str, Any]):
+    def items(self) -> Any:
+        raise AssertionError("hostile dict methods must not be invoked")
+
+
+class _ListSubclass(list[Any]):
+    pass
+
+
+class _StringSubclass(str):
+    pass
 
 
 def _workflow(session) -> WorkflowRevision:  # type: ignore[no-untyped-def]
@@ -78,6 +108,45 @@ def _workflow(session) -> WorkflowRevision:  # type: ignore[no-untyped-def]
     session.add(revision)
     session.flush()
     definition.current_revision_id = revision.id
+    return revision
+
+
+def _model_only_workflow(session: Session) -> WorkflowRevision:
+    revision = _workflow(session)
+    graph = {
+        "161": {"class_type": "UNETLoader", "inputs": {}},
+        "145": {
+            "class_type": "ModelSamplingAuraFlow",
+            "inputs": {"model": ["161", 0]},
+        },
+        "152": {"class_type": "CFGNorm", "inputs": {"model": ["145", 0]}},
+        "153": {
+            "class_type": "LoraLoaderModelOnly",
+            "inputs": {
+                "model": ["152", 0],
+                "lora_name": "lightning.safetensors",
+            },
+        },
+        "163": {
+            "class_type": "ComfySwitchNode",
+            "inputs": {
+                "on_true": ["153", 0],
+                "on_false": ["152", 0],
+            },
+        },
+        "169": {
+            "class_type": "KSampler",
+            "inputs": {"model": ["163", 0]},
+        },
+    }
+    extension = detect_lora_extension(graph)
+    assert extension == {"mode": "model_only", "model": ["163", 0]}
+    revision.api_graph_json = graph
+    revision.dependencies_json = {
+        **revision.dependencies_json,
+        "extensions": {"lora": extension},
+    }
+    session.flush()
     return revision
 
 
@@ -217,8 +286,22 @@ async def test_lora_stack_is_validated_and_transformed_deterministically(
         )
         repeated = resolve_lora_stack(session, revision, stack)
         reversed_stack = resolve_lora_stack(session, revision, list(reversed(stack)))
+        detached = resolve_lora_stack_against_graph(
+            session,
+            revision,
+            stack,
+            base_api_graph=revision.api_graph_json,
+        )
 
+    assert (
+        resolved.graph_sha256 == "d42defa39e11215b8b8677c4682579804d771473f1b3f71a70fc909d78c0fbaa"
+    )
     assert resolved.graph_sha256 == repeated.graph_sha256
+    assert resolved.graph_sha256 == _graph_hash(transformed)
+    assert detached.graph_sha256 == resolved.graph_sha256
+    assert detached.graph == transformed
+    assert detached.settings == resolved.settings
+    assert detached.provenance == resolved.provenance
     assert reversed_stack.graph_sha256 != resolved.graph_sha256
     assert [item["asset_id"] for item in resolved.provenance] == [first.id, second.id]
     assert transformed["lma_lora_001"]["class_type"] == "LoraLoader"
@@ -226,6 +309,403 @@ async def test_lora_stack_is_validated_and_transformed_deterministically(
     assert transformed["2"]["inputs"]["clip"] == ["lma_lora_002", 1]
     assert transformed["3"]["inputs"]["model"] == ["lma_lora_002", 0]
     assert LORA_GRAPH_TRANSFORM_VERSION == "lora-graph-v2"
+
+
+async def test_detached_resolver_preserves_empty_and_disabled_stack_identity(
+    client: AsyncClient,
+) -> None:
+    del client
+    with SessionLocal() as session:
+        revision = _workflow(session)
+        asset = _asset(session, "Disabled", "c" * 64)
+        base_graph = deepcopy(revision.api_graph_json)
+        disabled_stack = [
+            {
+                "asset_id": asset.id,
+                "model_strength": 0.25,
+                "clip_strength": 0.5,
+                "enabled": False,
+            }
+        ]
+
+        legacy_empty = resolve_lora_stack(session, revision, [])
+        legacy_disabled = resolve_lora_stack(session, revision, disabled_stack)
+        empty = resolve_lora_stack_against_graph(
+            session,
+            revision,
+            [],
+            base_api_graph=base_graph,
+        )
+        disabled = resolve_lora_stack_against_graph(
+            session,
+            revision,
+            disabled_stack,
+            base_api_graph=base_graph,
+        )
+
+    expected_hash = "ad3f55f52d5efa5b2dfe90e135100e9fcae8310918980a8fcd44b9a3c58191a1"
+    assert legacy_empty.graph_sha256 == expected_hash
+    assert legacy_disabled.graph_sha256 == expected_hash
+    assert empty.graph_sha256 == expected_hash == _graph_hash(empty.graph)
+    assert disabled.graph_sha256 == expected_hash == _graph_hash(disabled.graph)
+    assert empty.graph == base_graph and empty.graph is not base_graph
+    assert disabled.graph == base_graph and disabled.graph is not base_graph
+    assert empty.settings == [] and empty.provenance == []
+    assert disabled.settings == disabled_stack
+    assert disabled.provenance[0]["enabled"] is False
+    assert "lma_lora_001" not in disabled.graph
+
+
+async def test_detached_resolver_composes_after_native_scalar_patches_without_mutation(
+    client: AsyncClient,
+) -> None:
+    del client
+    with SessionLocal() as session:
+        revision = _workflow(session)
+        authored_graph = deepcopy(revision.api_graph_json)
+        authored_graph["native"] = {
+            "class_type": "LoraLoader",
+            "inputs": {
+                "model": ["1", 0],
+                "clip": ["1", 1],
+                "lora_name": "authored.safetensors",
+                "strength_model": 0.45,
+                "strength_clip": 0.55,
+            },
+        }
+        authored_graph["2"]["inputs"]["clip"] = ["native", 1]
+        authored_graph["3"]["inputs"]["model"] = ["native", 0]
+        revision.api_graph_json = authored_graph
+        session.flush()
+
+        asset = _asset(session, "Added", "d" * 64)
+        stack = [
+            {
+                "asset_id": asset.id,
+                "model_strength": 0.8,
+                "clip_strength": 0.7,
+                "enabled": True,
+            }
+        ]
+        base_graph = deepcopy(revision.api_graph_json)
+        base_graph["native"]["inputs"]["strength_model"] = 0.27
+        base_graph["native"]["inputs"]["strength_clip"] = 0.31
+        revision_before = deepcopy(revision.api_graph_json)
+        base_before = deepcopy(base_graph)
+
+        first = resolve_lora_stack_against_graph(
+            session,
+            revision,
+            stack,
+            base_api_graph=base_graph,
+        )
+        second = resolve_lora_stack_against_graph(
+            session,
+            revision,
+            stack,
+            base_api_graph=base_graph,
+        )
+
+        assert first.graph["native"]["inputs"]["strength_model"] == 0.27
+        assert first.graph["native"]["inputs"]["strength_clip"] == 0.31
+        assert first.graph["native"]["inputs"]["model"] == ["lma_lora_001", 0]
+        assert first.graph["native"]["inputs"]["clip"] == ["lma_lora_001", 1]
+        assert first.graph["2"]["inputs"]["clip"] == ["native", 1]
+        assert first.graph["3"]["inputs"]["model"] == ["native", 0]
+        assert first.graph["lma_lora_001"]["inputs"] == {
+            "model": ["1", 0],
+            "lora_name": "Added.safetensors",
+            "strength_model": 0.8,
+            "clip": ["1", 1],
+            "strength_clip": 0.7,
+        }
+        assert first.graph_sha256 == _graph_hash(first.graph)
+        assert second.graph_sha256 == first.graph_sha256
+        assert revision.api_graph_json == revision_before
+        assert base_graph == base_before
+
+        first.graph["native"]["inputs"]["strength_model"] = 3.5
+        first.graph["lma_lora_001"]["inputs"]["model"][0] = "mutated"
+
+        assert second.graph["native"]["inputs"]["strength_model"] == 0.27
+        assert second.graph["lma_lora_001"]["inputs"]["model"] == ["1", 0]
+        assert revision.api_graph_json == revision_before
+        assert base_graph == base_before
+
+
+async def test_detached_model_only_resolution_matches_the_frozen_legacy_hash(
+    client: AsyncClient,
+) -> None:
+    del client
+    with SessionLocal() as session:
+        revision = _model_only_workflow(session)
+        first = _asset(session, "detail", "e" * 64)
+        second = _asset(session, "style", "f" * 64)
+        stack = [
+            {
+                "asset_id": first.id,
+                "model_strength": 0.8,
+                "clip_strength": 0.6,
+            },
+            {
+                "asset_id": second.id,
+                "model_strength": 1.1,
+                "clip_strength": 0.9,
+            },
+        ]
+        source_graph = deepcopy(revision.api_graph_json)
+        legacy = resolve_lora_stack(session, revision, stack)
+        resolved = resolve_lora_stack_against_graph(
+            session,
+            revision,
+            stack,
+            base_api_graph=source_graph,
+        )
+
+    expected_hash = "7e9cd73af1f088f6f4d5205cb5e02f01b516152db85ffd1352a1106c3dddd65e"
+    assert legacy.graph_sha256 == expected_hash
+    assert resolved.graph_sha256 == expected_hash == _graph_hash(resolved.graph)
+    assert resolved.settings == legacy.settings
+    assert resolved.provenance == legacy.provenance
+    assert resolved.graph["lma_lora_001"]["class_type"] == "LoraLoaderModelOnly"
+    assert resolved.graph["lma_lora_002"]["inputs"]["model"] == ["lma_lora_001", 0]
+    assert resolved.graph["169"]["inputs"]["model"] == ["lma_lora_002", 0]
+    assert "clip" not in resolved.graph["lma_lora_001"]["inputs"]
+    assert "strength_clip" not in resolved.graph["lma_lora_001"]["inputs"]
+    assert source_graph == revision.api_graph_json
+
+
+async def test_detached_resolver_uses_exact_activation_family_without_legacy_ids(
+    client: AsyncClient,
+) -> None:
+    del client
+    with SessionLocal() as session:
+        revision = _workflow(session)
+        base_id = revision.dependencies_json["model_install_ids"][0]
+        base = session.get(ModelInstall, base_id)
+        assert base
+        activation = _activation(session, revision)
+        _bind_model(session, revision, activation, base, 0)
+        revision.dependencies_json = {
+            "extensions": revision.dependencies_json["extensions"],
+        }
+        asset = _asset(session, "ActivationFamily", "1" * 64)
+        asset.family = "flux"
+        session.flush()
+        stack = [{"asset_id": asset.id}]
+
+        legacy = resolve_lora_stack(session, revision, stack)
+        omitted = resolve_lora_stack_against_graph(
+            session,
+            revision,
+            stack,
+            base_api_graph=revision.api_graph_json,
+        )
+        assert omitted.graph_sha256 == legacy.graph_sha256
+        assert omitted.settings == legacy.settings
+        assert omitted.provenance == legacy.provenance
+        assert omitted.graph["lma_lora_001"]["inputs"]["lora_name"] == (
+            "ActivationFamily.safetensors"
+        )
+
+        with pytest.raises(ValueError, match="incompatible"):
+            resolve_lora_stack_against_graph(
+                session,
+                revision,
+                stack,
+                base_api_graph=revision.api_graph_json,
+                workflow_activation_id=activation.id,
+            )
+
+        asset.family = "sdxl"
+        session.flush()
+        matching = resolve_lora_stack_against_graph(
+            session,
+            revision,
+            stack,
+            base_api_graph=revision.api_graph_json,
+            workflow_activation_id=activation.id,
+        )
+
+    assert matching.graph_sha256 == omitted.graph_sha256
+    assert matching.graph["lma_lora_001"]["inputs"]["lora_name"] == ("ActivationFamily.safetensors")
+
+
+@pytest.mark.parametrize(
+    ("failure_kind", "message"),
+    [
+        ("malformed_type", "identity is invalid"),
+        ("malformed_text", "identity is invalid"),
+        ("unavailable", "is unavailable"),
+        ("foreign_revision", "selected workflow revision"),
+        ("empty_family", "exactly one model family"),
+        ("mixed_family", "exactly one model family"),
+    ],
+)
+async def test_detached_resolver_fails_closed_on_invalid_activation_family_evidence(
+    client: AsyncClient,
+    failure_kind: str,
+    message: str,
+) -> None:
+    del client
+    with SessionLocal() as session:
+        revision = _workflow(session)
+        base_id = revision.dependencies_json["model_install_ids"][0]
+        base = session.get(ModelInstall, base_id)
+        assert base
+        activation = _activation(session, revision)
+        _bind_model(session, revision, activation, base, 0)
+        revision.dependencies_json = {
+            "extensions": revision.dependencies_json["extensions"],
+        }
+        asset = _asset(session, "ActivationEvidence", "2" * 64)
+        session.flush()
+        stack = [{"asset_id": asset.id}]
+
+        control = resolve_lora_stack_against_graph(
+            session,
+            revision,
+            stack,
+            base_api_graph=revision.api_graph_json,
+            workflow_activation_id=activation.id,
+        )
+        assert control.graph["lma_lora_001"]["inputs"]["lora_name"] == (
+            "ActivationEvidence.safetensors"
+        )
+
+        activation_id: str = activation.id
+        selected_revision = revision
+        if failure_kind == "malformed_type":
+            activation_id = _StringSubclass(activation.id)
+        elif failure_kind == "malformed_text":
+            activation_id = f" {activation.id}"
+        elif failure_kind == "unavailable":
+            activation_id = "wfact_missing"
+        elif failure_kind == "foreign_revision":
+            selected_revision = WorkflowRevision(
+                workflow_id=revision.workflow_id,
+                version=revision.version + 1,
+                engine=revision.engine,
+                api_graph_json=deepcopy(revision.api_graph_json),
+                input_schema_json=deepcopy(revision.input_schema_json),
+                dependencies_json=deepcopy(revision.dependencies_json),
+                trusted=True,
+            )
+            session.add(selected_revision)
+            session.flush()
+        elif failure_kind == "empty_family":
+            base.manifest_json = {"family": ""}
+            session.flush()
+        else:
+            other = ModelInstall(
+                name="Foreign architecture component",
+                role="image",
+                engine="comfyui",
+                local_path="C:/managed/foreign-architecture",
+                manifest_json={"family": "flux"},
+                active=True,
+            )
+            session.add(other)
+            session.flush()
+            _bind_model(session, revision, activation, other, 1)
+
+        with pytest.raises(ValueError, match=message):
+            resolve_lora_stack_against_graph(
+                session,
+                selected_revision,
+                stack,
+                base_api_graph=selected_revision.api_graph_json,
+                workflow_activation_id=activation_id,
+            )
+
+
+@pytest.mark.parametrize(
+    "hostile_kind",
+    [
+        "top_dict_subclass",
+        "nested_dict_subclass",
+        "list_subclass",
+        "tuple",
+        "mapping_proxy",
+        "non_finite",
+        "non_json_value",
+        "shared_container",
+    ],
+)
+async def test_detached_resolver_rejects_hostile_json_containers(
+    client: AsyncClient,
+    hostile_kind: str,
+) -> None:
+    del client
+    with SessionLocal() as session:
+        revision = _workflow(session)
+        graph: object = deepcopy(revision.api_graph_json)
+        assert isinstance(graph, dict)
+        if hostile_kind == "top_dict_subclass":
+            graph = _DictSubclass(graph)
+        elif hostile_kind == "nested_dict_subclass":
+            graph["3"] = _DictSubclass(graph["3"])
+        elif hostile_kind == "list_subclass":
+            graph["3"]["inputs"]["model"] = _ListSubclass(["1", 0])
+        elif hostile_kind == "tuple":
+            graph["3"]["inputs"]["model"] = ("1", 0)
+        elif hostile_kind == "mapping_proxy":
+            graph["3"]["inputs"] = MappingProxyType(graph["3"]["inputs"])
+        elif hostile_kind == "non_finite":
+            graph["3"]["inputs"]["cfg"] = float("nan")
+        elif hostile_kind == "non_json_value":
+            graph["3"]["inputs"]["cfg"] = object()
+        else:
+            shared_link = ["1", 0]
+            graph["3"]["inputs"]["model"] = shared_link
+            graph["3"]["inputs"]["also_model"] = shared_link
+
+        with pytest.raises(ValueError, match="LoRA base graph"):
+            resolve_lora_stack_against_graph(
+                session,
+                revision,
+                [],
+                base_api_graph=graph,
+            )
+
+
+@pytest.mark.parametrize(
+    "failure_kind",
+    ["changed_boundary", "reserved_node", "malformed_node"],
+)
+async def test_detached_resolver_rejects_incompatible_or_reserved_base_graphs(
+    client: AsyncClient,
+    failure_kind: str,
+) -> None:
+    del client
+    with SessionLocal() as session:
+        revision = _workflow(session)
+        base_graph = deepcopy(revision.api_graph_json)
+        if failure_kind == "changed_boundary":
+            base_graph["3"]["inputs"]["model"] = ["missing", 0]
+            message = "both model and CLIP"
+        elif failure_kind == "reserved_node":
+            base_graph["lma_lora_999"] = {
+                "class_type": "LoraLoader",
+                "inputs": {},
+            }
+            message = "reserves"
+        else:
+            base_graph["broken"] = {"class_type": "KSampler"}
+            message = "valid ComfyUI API graph"
+        revision_before = deepcopy(revision.api_graph_json)
+        base_before = deepcopy(base_graph)
+
+        with pytest.raises(ValueError, match=message):
+            resolve_lora_stack_against_graph(
+                session,
+                revision,
+                [],
+                base_api_graph=base_graph,
+            )
+
+        assert revision.api_graph_json == revision_before
+        assert base_graph == base_before
 
 
 async def test_lora_trigger_word_sources_have_stable_bounded_precedence(
@@ -508,7 +988,7 @@ def test_model_only_lora_extension_fails_closed_for_multiple_model_paths() -> No
 
 
 def test_trigger_words_apply_once_and_never_repeat_the_prompt() -> None:
-    provenance = [
+    provenance: list[dict[str, Any]] = [
         {"enabled": True, "trigger_words": ["m1ssi0nary", "soft light"]},
         {"enabled": True, "trigger_words": ["Soft Light", "film grain"]},
         {"enabled": False, "trigger_words": ["disabled-word"]},

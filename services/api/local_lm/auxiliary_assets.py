@@ -5,16 +5,23 @@ import hashlib
 import json
 import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .comfy_workflow_packages import (
+    MAX_UI_GRAPH_DEPTH,
+    MAX_UI_GRAPH_VALUES,
+    WorkflowPackageError,
+    validate_bounded_workflow_json,
+)
 from .lora_constraints import MAX_LORA_STRENGTH
 from .models import (
     ModelAssetInstall,
     ModelInstall,
     ModelProfile,
+    WorkflowActivation,
     WorkflowDependencyBinding,
     WorkflowRevision,
 )
@@ -46,6 +53,22 @@ _MODEL_SAMPLER_CLASS_TYPES = {
 class ResolvedLoraStack:
     settings: list[dict[str, Any]]
     provenance: list[dict[str, Any]]
+    graph_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedLoraGraph:
+    """One Added-LoRA resolution and its fresh detached API graph.
+
+    The dataclass contract is immutable, while the graph field is deliberately
+    a mutable, caller-owned JSON payload. Every resolution receives a fresh
+    graph so mutating it cannot affect the workflow revision, the supplied
+    base graph, or another resolution.
+    """
+
+    settings: list[dict[str, Any]]
+    provenance: list[dict[str, Any]]
+    graph: dict[str, Any]
     graph_sha256: str
 
 
@@ -89,6 +112,13 @@ def _installed_lora_trigger_words(metadata: object) -> list[str]:
             seen.add(folded)
             words.append(word)
     return words
+
+
+@dataclass(frozen=True, slots=True)
+class _NormalizedLoraStack:
+    settings: list[dict[str, Any]]
+    provenance: list[dict[str, Any]]
+    transform_items: list[dict[str, Any]]
 
 
 _LORA_MATCH_STOP_WORDS = {
@@ -380,11 +410,8 @@ def resolve_lora_stack(
     revision: WorkflowRevision,
     value: object,
 ) -> ResolvedLoraStack:
-    if not isinstance(value, list):
-        raise ValueError("LoRA stack must be a list.")
-    if len(value) > MAX_LORA_STACK_SIZE:
-        raise ValueError(f"A LoRA stack can contain at most {MAX_LORA_STACK_SIZE} assets.")
-    if not value:
+    stack = _lora_stack_items(value)
+    if not stack:
         graph_hash = _graph_hash(revision.api_graph_json)
         return ResolvedLoraStack([], [], graph_hash)
     validate_lora_workflow_contract(
@@ -396,7 +423,89 @@ def resolve_lora_stack(
     if not extension:
         raise ValueError("The selected workflow does not provide a LoRA extension point.")
 
-    base_families = _workflow_families(session, revision)
+    normalized = _normalize_lora_stack(session, revision, stack)
+    transformed = transform_lora_graph(
+        revision.api_graph_json,
+        extension,
+        normalized.transform_items,
+    )
+    return ResolvedLoraStack(
+        normalized.settings,
+        normalized.provenance,
+        _graph_hash(transformed),
+    )
+
+
+def resolve_lora_stack_against_graph(
+    session: Session,
+    revision: WorkflowRevision,
+    value: object,
+    *,
+    base_api_graph: object,
+    workflow_activation_id: str | None = None,
+) -> ResolvedLoraGraph:
+    """Apply the existing Added-LoRA transform to one caller-owned base graph.
+
+    The supplied graph may already contain authorized workflow-native scalar
+    edits. This function validates the revision's declared Added insertion
+    boundary against that exact detached graph, then performs only the existing
+    Added transform. It grants no authority to create or change the base graph.
+    """
+
+    base_graph = _detached_exact_api_graph(base_api_graph)
+    stack = _lora_stack_items(value)
+    validate_lora_workflow_contract(
+        base_graph,
+        revision.input_schema_json,
+        revision.dependencies_json,
+    )
+    if not stack:
+        return ResolvedLoraGraph([], [], base_graph, _graph_hash(base_graph))
+
+    extension = workflow_lora_extension(revision)
+    if not extension:
+        raise ValueError("The selected workflow does not provide a LoRA extension point.")
+    normalized = _normalize_lora_stack(
+        session,
+        revision,
+        stack,
+        workflow_activation_id=workflow_activation_id,
+    )
+    transformed = transform_lora_graph(
+        base_graph,
+        extension,
+        normalized.transform_items,
+    )
+    return ResolvedLoraGraph(
+        normalized.settings,
+        normalized.provenance,
+        transformed,
+        _graph_hash(transformed),
+    )
+
+
+def _lora_stack_items(value: object) -> list[object]:
+    if not isinstance(value, list):
+        raise ValueError("LoRA stack must be a list.")
+    if len(value) > MAX_LORA_STACK_SIZE:
+        raise ValueError(f"A LoRA stack can contain at most {MAX_LORA_STACK_SIZE} assets.")
+    return value
+
+
+def _normalize_lora_stack(
+    session: Session,
+    revision: WorkflowRevision,
+    value: list[object],
+    *,
+    workflow_activation_id: str | None = None,
+) -> _NormalizedLoraStack:
+    base_families = _workflow_families(
+        session,
+        revision,
+        workflow_activation_id=workflow_activation_id,
+    )
+    if workflow_activation_id is not None and not base_families:
+        raise ValueError("The workflow activation does not identify exactly one model family.")
     seen: set[str] = set()
     settings: list[dict[str, Any]] = []
     provenance: list[dict[str, Any]] = []
@@ -463,8 +572,7 @@ def resolve_lora_stack(
                     "clip_strength": clip_strength,
                 }
             )
-    transformed = transform_lora_graph(revision.api_graph_json, extension, transform_items)
-    return ResolvedLoraStack(settings, provenance, _graph_hash(transformed))
+    return _NormalizedLoraStack(settings, provenance, transform_items)
 
 
 def trigger_words_to_apply(provenance: list[dict[str, Any]], prompt: str) -> list[str]:
@@ -613,6 +721,73 @@ def _replace_links(
     return value
 
 
+def _detached_exact_api_graph(value: object) -> dict[str, Any]:
+    _validate_exact_json(value)
+    try:
+        validate_bounded_workflow_json(value)
+    except WorkflowPackageError as exc:
+        raise ValueError("The supplied LoRA base graph is not bounded canonical JSON.") from exc
+    if type(value) is not dict:
+        raise ValueError("The supplied LoRA base graph must be an exact built-in JSON object.")
+    exact_graph = cast(dict[str, Any], value)
+    for node_id, node in exact_graph.items():
+        if type(node_id) is not str or not node_id:
+            raise ValueError("The supplied LoRA base graph has an invalid node identifier.")
+        if node_id.startswith("lma_lora_"):
+            raise ValueError("The workflow reserves an LM Atelier LoRA node identifier.")
+        if (
+            type(node) is not dict
+            or type(node.get("class_type")) is not str
+            or not node["class_type"]
+            or type(node.get("inputs")) is not dict
+        ):
+            raise ValueError("The supplied LoRA base graph is not a valid ComfyUI API graph.")
+    try:
+        detached = copy.deepcopy(exact_graph)
+    except (RecursionError, TypeError, ValueError) as exc:
+        raise ValueError("The supplied LoRA base graph could not be detached.") from exc
+    return detached
+
+
+def _validate_exact_json(value: object) -> None:
+    stack = [(value, 1)]
+    seen_containers: set[int] = set()
+    values = 0
+    while stack:
+        current, depth = stack.pop()
+        values += 1
+        if values > MAX_UI_GRAPH_VALUES or depth > MAX_UI_GRAPH_DEPTH:
+            raise ValueError("The supplied LoRA base graph is not bounded canonical JSON.")
+        current_type = type(current)
+        if current_type is dict:
+            current_dict = cast(dict[object, object], current)
+            identity = id(current)
+            if identity in seen_containers:
+                raise ValueError(
+                    "The supplied LoRA base graph must not share or cycle JSON containers."
+                )
+            seen_containers.add(identity)
+            for key, child in current_dict.items():
+                if type(key) is not str:
+                    raise ValueError(
+                        "The supplied LoRA base graph must use exact built-in JSON keys."
+                    )
+                stack.append((child, depth + 1))
+        elif current_type is list:
+            current_list = cast(list[object], current)
+            identity = id(current)
+            if identity in seen_containers:
+                raise ValueError(
+                    "The supplied LoRA base graph must not share or cycle JSON containers."
+                )
+            seen_containers.add(identity)
+            stack.extend((child, depth + 1) for child in current_list)
+        elif current is not None and current_type not in {str, int, float, bool}:
+            raise ValueError(
+                "The supplied LoRA base graph must contain only exact built-in JSON values."
+            )
+
+
 def _strength(value: object, index: int, label: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"LoRA item {index} has an invalid {label} strength.")
@@ -640,10 +815,28 @@ def _workflow_families(
     """
 
     install_ids: list[str] = []
-    if workflow_activation_id:
+    if workflow_activation_id is not None:
+        if (
+            type(workflow_activation_id) is not str
+            or not workflow_activation_id.startswith("wfact_")
+            or len(workflow_activation_id) > 40
+            or len(workflow_activation_id) == len("wfact_")
+            or any(
+                not character.isascii() or (not character.isalnum() and character not in {"_", "-"})
+                for character in workflow_activation_id
+            )
+        ):
+            raise ValueError("Workflow activation identity is invalid.")
+        activation = session.get(WorkflowActivation, workflow_activation_id)
+        if activation is None:
+            raise ValueError("Workflow activation is unavailable.")
+        if activation.workflow_revision_id != revision.id:
+            raise ValueError(
+                "Workflow activation does not belong to the selected workflow revision."
+            )
         bindings = session.scalars(
             select(WorkflowDependencyBinding).where(
-                WorkflowDependencyBinding.workflow_activation_id == workflow_activation_id,
+                WorkflowDependencyBinding.workflow_activation_id == activation.id,
                 WorkflowDependencyBinding.workflow_revision_id == revision.id,
             )
         ).all()
