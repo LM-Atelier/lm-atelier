@@ -1,0 +1,202 @@
+/** A chat's unsent draft comes back whole when you return to it, and never appears in another chat. */
+
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import App from "./App";
+import { api } from "./api";
+import type { Artifact, Chat, ChatDetail, TurnAccepted } from "./types";
+
+vi.mock("./api", () => ({
+  api: {
+    searchConfiguration: vi.fn(),
+    setupReadiness: vi.fn(),
+    projects: vi.fn(),
+    chats: vi.fn(),
+    chat: vi.fn(),
+    workPlans: vi.fn(),
+    engines: vi.fn(),
+    profiles: vi.fn(),
+    presets: vi.fn(),
+    workflows: vi.fn(),
+    workflowFamilies: vi.fn(),
+    chatWorkflowSelections: vi.fn(),
+    projectWorkflowSelections: vi.fn(),
+    classifyDraft: vi.fn(),
+    about: vi.fn(),
+    jobs: vi.fn(),
+    system: vi.fn(),
+    workers: vi.fn(),
+    runtimes: vi.fn(),
+    backups: vi.fn(),
+    updateChat: vi.fn(),
+    upload: vi.fn(),
+    sendTurn: vi.fn(),
+  },
+  connectEvents: vi.fn().mockResolvedValue(() => undefined),
+}));
+
+const stamp = "2026-09-01T00:00:00Z";
+const SOURCE_URL = "https://example.test/brass-and-aluminium";
+
+const first: Chat = {
+  id: "draft-chat-first",
+  project_id: null,
+  title: "Garden sketches",
+  pinned: false,
+  archived: false,
+  routing_mode: "image",
+  confirm_uncertain_media: false,
+  active_chat_profile_id: null,
+  active_image_profile_id: null,
+  active_video_profile_id: null,
+  active_head_message_id: "draft-answer",
+  created_at: stamp,
+  updated_at: stamp,
+};
+const second: Chat = { ...first, id: "draft-chat-second", title: "Kitchen notes", routing_mode: "auto", active_head_message_id: null };
+
+const firstDetail: ChatDetail = {
+  ...first,
+  messages: [{
+    id: "draft-answer",
+    chat_id: first.id,
+    parent_id: null,
+    role: "assistant",
+    status: "complete",
+    created_at: stamp,
+    updated_at: stamp,
+    parts: [{ id: "draft-answer-text", position: 0, type: "text", text: "Here is what I found.", artifact_id: null, metadata_json: {} }],
+  }],
+  web_searches: [{
+    run_id: "draft-search", assistant_message_id: "draft-answer", job_id: null, revision: null,
+    state: "complete", query: "Compare brass and aluminium", provider: "CRW",
+    provider_endpoint: "https://search.example.test", dispatch_after: null,
+    results: [{ url: SOURCE_URL, title: "Material comparison", snippet: "A neutral summary" }],
+    result_count: 1, truncated: false, error_code: null,
+  }],
+};
+
+const sketch: Artifact = {
+  id: "sha256:draft-sketch",
+  sha256: "draft-sketch",
+  kind: "input",
+  media_type: "image/png",
+  size_bytes: 5,
+  original_name: "sketch.png",
+  metadata_json: { origin: "uploaded", uploaded: true },
+  created_at: stamp,
+  url: "/api/artifacts/sha256%3Adraft-sketch/content",
+} as Artifact;
+
+beforeEach(() => {
+  localStorage.clear();
+  sessionStorage.clear();
+  localStorage.setItem("local-lm-chat", first.id);
+  vi.mocked(api.searchConfiguration).mockResolvedValue({
+    installation_enabled: false, configured: false, provider: "CRW", provider_endpoint: null, error_code: "search_not_configured",
+  } as never);
+  vi.mocked(api.setupReadiness).mockResolvedValue({ version: 2, state: "ready", roles: [] });
+  vi.mocked(api.system).mockResolvedValue(null as never);
+  vi.mocked(api.classifyDraft).mockResolvedValue({ references_prior_visual: false });
+  vi.mocked(api.about).mockResolvedValue({
+    max_media_outputs_per_plan: 8,
+    version: "0.1.8",
+    web_access_enabled: false,
+    data_directory: "/lm-atelier/data",
+    log_directory: "/lm-atelier/data/logs",
+    artifact_directory: "/lm-atelier/data/artifacts",
+    artifact_directory_requested: null,
+  });
+  vi.mocked(api.engines).mockResolvedValue([{
+    engine: "mock", version: "1", roles: ["chat", "image", "video"], operations: ["text", "text_to_image", "text_to_video"],
+    formats: ["mock"], devices: ["cpu:0"], streaming: true, tool_calling: true, settings: [], healthy: true, details: {},
+  }] as never);
+  for (const list of [
+    api.projects, api.workPlans, api.profiles, api.presets, api.workflows, api.workflowFamilies,
+    api.chatWorkflowSelections, api.projectWorkflowSelections, api.jobs, api.workers, api.runtimes, api.backups,
+  ]) {
+    vi.mocked(list).mockResolvedValue([]);
+  }
+  vi.mocked(api.chats).mockResolvedValue([first, second]);
+  vi.mocked(api.chat).mockImplementation(async (id) => (id === first.id ? firstDetail : { ...second, messages: [] }));
+  vi.mocked(api.updateChat).mockImplementation(async (id) => (id === first.id ? first : second) as never);
+  vi.mocked(api.upload).mockResolvedValue(sketch);
+  vi.mocked(api.sendTurn).mockResolvedValue({} as TurnAccepted);
+});
+
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+});
+
+function renderApp() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}><App /></QueryClientProvider>);
+}
+
+async function attachSketch() {
+  const attach = await screen.findByRole("button", { name: "Attach file" });
+  const input = attach.parentElement?.querySelector<HTMLInputElement>('input[type="file"]');
+  fireEvent.change(input!, { target: { files: [new File(["image"], "sketch.png", { type: "image/png" })] } });
+  return screen.findByRole("button", { name: /Remove .*sketch\.png/ });
+}
+
+async function openChat(chat: Chat) {
+  fireEvent.click(screen.getByText(chat.title));
+  expect(await screen.findByRole("heading", { name: chat.title })).toBeInTheDocument();
+}
+
+function sketchAttached() {
+  return screen.queryByRole("button", { name: /Remove .*sketch\.png/ });
+}
+
+it("brings back a chat's attachment and output count with its text, and never shows them in another chat", async () => {
+  renderApp();
+  const composer = await screen.findByRole("textbox", { name: "Message" });
+  fireEvent.change(composer, { target: { value: "A wider path between the beds" } });
+  await attachSketch();
+  fireEvent.change(screen.getByRole("combobox", { name: "Number of outputs" }), { target: { value: "3" } });
+
+  await openChat(second);
+  expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
+  expect(sketchAttached()).toBeNull();
+
+  await openChat(first);
+  expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("A wider path between the beds");
+  expect(sketchAttached()).toBeVisible();
+  expect(screen.getByRole("combobox", { name: "Number of outputs" })).toHaveValue("3");
+});
+
+it("keeps the attachment when a web source is added to the message", async () => {
+  renderApp();
+  const composer = await screen.findByRole("textbox", { name: "Message" });
+  fireEvent.change(composer, { target: { value: "Compare these" } });
+  await attachSketch();
+
+  fireEvent.click(screen.getByRole("button", { name: "Add source to message" }));
+
+  expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue(`Compare these\n\n${SOURCE_URL}`);
+  expect(sketchAttached()).toBeVisible();
+  await openChat(second);
+  await openChat(first);
+  expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue(`Compare these\n\n${SOURCE_URL}`);
+  expect(sketchAttached()).toBeVisible();
+});
+
+it("leaves a sent draft empty after switching away and back", async () => {
+  renderApp();
+  const composer = await screen.findByRole("textbox", { name: "Message" });
+  fireEvent.change(composer, { target: { value: "Plant the tulips first" } });
+  await attachSketch();
+
+  fireEvent.keyDown(screen.getByRole("textbox", { name: "Message" }), { key: "Enter" });
+  await waitFor(() => expect(api.sendTurn).toHaveBeenCalled());
+  expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
+  expect(sketchAttached()).toBeNull();
+
+  await openChat(second);
+  await openChat(first);
+  expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
+  expect(sketchAttached()).toBeNull();
+});

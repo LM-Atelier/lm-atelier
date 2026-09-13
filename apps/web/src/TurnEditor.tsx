@@ -22,7 +22,7 @@ import { useDraftClassification } from "./useDraftClassification";
 import { drawerRoleView, roleForMode } from "./viewHelpers";
 import { useWorkflowRevisionSchema } from "./useWorkflowRevisionSchema";
 import { operationForTurn } from "./turnWorkflow";
-import { useTurnEditorState, type TurnEditorState } from "./useTurnEditorState";
+import { initialTurnEditorState, useTurnEditorState, type TurnEditorState } from "./useTurnEditorState";
 export type { TurnEditorState } from "./useTurnEditorState";
 import type { Artifact, ChatDetail, EngineCapabilities, EngineRole, Message, PriorTurnEditBinding, RoutingMode, WorkflowSelection } from "./types";
 export interface TurnEditorSubmission {
@@ -183,7 +183,17 @@ export function TurnEditor({
     (current) => composerDraftWithText(current, typeof next === "function" ? next(current.text) : next),
   ), [onDraftChange]);
   const detachPromptSource = useCallback(() => onDraftChange(detachedComposerDraft), [onDraftChange]);
-  const { state, updateState, setOutputCount, changeMode, currentMode, setTemplateSettings, setAttachments } = useTurnEditorState(chat.routing_mode, onMode, initialState, editorState, onEditorStateChange);
+  // Without an editor state of its own, the composer keeps it in the chat's
+  // draft beside the text, so switching chats and back restores attachments,
+  // mode and references with the words. Every change reads the draft as it
+  // stands, so a text edit and an attachment in the same moment both survive.
+  const [seededState] = useState(() => initialTurnEditorState(chat.routing_mode, initialState));
+  const setDraftEditorState = useCallback((update: SetStateAction<TurnEditorState>) => onDraftChange(
+    (current) => ({ ...current, editor: typeof update === "function" ? update(current.editor ?? seededState) : update }),
+  ), [onDraftChange, seededState]);
+  const { state, updateState, setOutputCount, changeMode, currentMode, setTemplateSettings, setAttachments } = useTurnEditorState(
+    chat.routing_mode, onMode, initialState, editorState ?? draft.editor ?? seededState, onEditorStateChange ?? setDraftEditorState,
+  );
   const { outputCount, mode, templateSettings, attachments } = state;
   const [accepting, setAccepting] = useState(false);
   const acceptancePending = useRef(false);

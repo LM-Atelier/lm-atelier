@@ -16,14 +16,12 @@ export interface TurnEditorState {
   submittedFingerprint?: string;
 }
 
-export function useTurnEditorState(
+/** A draft nobody has touched yet, in the given mode. */
+export function initialTurnEditorState(
   initialMode: RoutingMode,
-  onMode: (mode: RoutingMode) => void,
   initialState: Partial<TurnEditorState> | undefined,
-  controlledState: TurnEditorState | undefined,
-  onChange: ((update: SetStateAction<TurnEditorState>) => void) | undefined,
-) {
-  const [localState, setLocalState] = useState<TurnEditorState>(() => ({
+): TurnEditorState {
+  return {
     requestId: crypto.randomUUID(),
     mode: initialMode,
     attachments: [],
@@ -33,7 +31,17 @@ export function useTurnEditorState(
     outputCount: 1,
     templateSettings: null,
     ...initialState,
-  }));
+  };
+}
+
+export function useTurnEditorState(
+  initialMode: RoutingMode,
+  onMode: (mode: RoutingMode) => void,
+  initialState: Partial<TurnEditorState> | undefined,
+  controlledState: TurnEditorState | undefined,
+  onChange: ((update: SetStateAction<TurnEditorState>) => void) | undefined,
+) {
+  const [localState, setLocalState] = useState<TurnEditorState>(() => initialTurnEditorState(initialMode, initialState));
   const state = controlledState ?? localState;
   const updateState = onChange ?? setLocalState;
   const selectedMode = useRef(state.mode);

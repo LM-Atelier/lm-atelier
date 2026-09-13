@@ -807,7 +807,7 @@ function ChatView({
         void favoriteClient.invalidateQueries({ queryKey: ["work-plans"] });
       }}
       onUseSource={(url) => onComposerDraft((current) => ({
-        text: current.text ? current.text + "\n\n" + url : url,
+        ...current, text: current.text ? current.text + "\n\n" + url : url,
         promptSource: null,
       }))} />
   );
