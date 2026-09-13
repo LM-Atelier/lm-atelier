@@ -3,11 +3,13 @@ import {
   Eraser,
   Lasso,
   Maximize2,
+  PaintBucket,
   Redo2,
   Sparkles,
   Square,
   Type,
   Undo2,
+  Wand2,
 } from "lucide-react";
 import type { StudioToolKind } from "./studioToolState";
 import type { StudioToolCapability } from "./types";
@@ -18,6 +20,8 @@ const TOOLS: Array<{ kind: StudioToolKind; label: string; icon: typeof Brush }> 
   { kind: "eraser", label: "Erase from the selection", icon: Eraser },
   { kind: "rect", label: "Select a rectangle", icon: Square },
   { kind: "lasso", label: "Lasso a selection", icon: Lasso },
+  { kind: "bucket", label: "Fill an area of the selection", icon: PaintBucket },
+  { kind: "wand", label: "Select similar colors", icon: Wand2 },
   { kind: "enhance", label: "Enlarge and restore detail", icon: Sparkles },
   { kind: "extend", label: "Extend past the edge", icon: Maximize2 },
 ];

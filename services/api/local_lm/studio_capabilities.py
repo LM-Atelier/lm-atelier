@@ -20,17 +20,21 @@ from .outpaint_workflows import workflow_declares_outpaint
 from .studio_masks import workflow_accepts_mask
 from .upscale_workflows import workflow_declares_upscale
 
-StudioToolKind = Literal["instruct", "brush", "eraser", "rect", "lasso", "enhance", "extend"]
+StudioToolKind = Literal[
+    "instruct", "brush", "eraser", "rect", "lasso", "bucket", "wand", "enhance", "extend"
+]
 
 
 #: The tool kinds the surface offers, paired with what each needs installed.
-#: Selection tools share one class: they are four ways to draw one mask.
+#: Selection tools share one class: they are six ways to draw one mask.
 TOOL_WORKFLOW_CLASSES: dict[StudioToolKind, str] = {
     "instruct": "image_to_image",
     "brush": "inpaint",
     "eraser": "inpaint",
     "rect": "inpaint",
     "lasso": "inpaint",
+    "bucket": "inpaint",
+    "wand": "inpaint",
     "enhance": "upscale",
     "extend": "outpaint",
 }

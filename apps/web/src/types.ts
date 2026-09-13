@@ -1907,7 +1907,8 @@ export interface WorkflowResourceConsumers {
   consumers: WorkflowResourceConsumer[];
 }
 
-export type StudioToolKind = "instruct" | "brush" | "eraser" | "rect" | "lasso" | "enhance" | "extend";
+export type StudioToolKind =
+  | "instruct" | "brush" | "eraser" | "rect" | "lasso" | "bucket" | "wand" | "enhance" | "extend";
 
 export interface StudioToolCapability {
   kind: StudioToolKind;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { coverage, createMask, fillRect, isEmpty } from "./studioMasks";
-import { BrushTool, LassoTool, RectTool } from "./studioTools";
+import { BrushTool, LassoTool, magicWandTool, paintBucketTool, RectTool } from "./studioTools";
 import { defaultInstruction, initialToolState, toolUsesMask } from "./studioToolState";
 
 describe("brush tool", () => {
@@ -184,5 +184,45 @@ describe("what travels with a turn", () => {
     expect(defaultInstruction(extend)).toBe("Extend past the top, left");
 
     expect(defaultInstruction({ ...initialToolState(), kind: "instruct" as const })).toBe("");
+  });
+});
+
+describe("paint bucket and magic wand tools", () => {
+  it("select where the pointer went down, once it lifts", () => {
+    const mask = createMask(10, 10);
+    fillRect(mask, 5, 0, 6, 10);
+    const bucket = paintBucketTool(mask);
+
+    bucket.down({ x: 1, y: 1 });
+    expect(isEmpty(mask)).toBe(false);
+    expect(coverage(mask)).toBe(0.1);
+    // Lifting over the other side of the line does not move the click.
+    expect(bucket.up({ x: 8, y: 8 })).toBe(true);
+
+    expect(mask.data[1 * 10 + 1]).toBe(255);
+    expect(mask.data[8 * 10 + 8]).toBe(0);
+  });
+
+  it("apply nothing when abandoned, or lifted without a press", () => {
+    const mask = createMask(6, 6);
+    const pixels = new Uint8ClampedArray(6 * 6 * 4);
+    const wand = magicWandTool(mask, pixels, 0);
+
+    wand.down({ x: 2, y: 2 });
+    wand.cancel();
+    expect(wand.up({ x: 2, y: 2 })).toBe(false);
+    expect(isEmpty(mask)).toBe(true);
+  });
+
+  it("select by color with the wand and show no preview", () => {
+    const mask = createMask(4, 1);
+    const pixels = new Uint8ClampedArray([9, 9, 9, 255, 9, 9, 9, 255, 90, 9, 9, 255, 9, 9, 9, 255]);
+    const wand = magicWandTool(mask, pixels, 8);
+
+    wand.down({ x: 0.5, y: 0.5 });
+    expect(wand.preview()).toEqual({ kind: "none" });
+    expect(wand.up({ x: 0.5, y: 0.5 })).toBe(true);
+
+    expect(Array.from(mask.data)).toEqual([255, 255, 0, 0]);
   });
 });
