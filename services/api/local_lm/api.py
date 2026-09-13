@@ -554,6 +554,14 @@ from .web_search import WebSearchError
 from .web_search_configuration import configured_search_provider, search_provider_revision
 from .web_search_consent import SearchConsentConflict, decide_search, replace_search_proposal
 from .web_search_projection import chat_searches, search_for_run
+from .workflow_activation_requests import (
+    WorkflowActivationCreate,
+    WorkflowActivationOut,
+    WorkflowActivationSubject,
+    activate_reviewed_revision,
+    activation_subject,
+)
+from .workflow_activations import WorkflowActivationError, materialize_comfy_runtime_dependency
 from .workflow_asset_aliases import (
     WorkflowAssetAliasError,
     materialize_workflow_asset_aliases,
@@ -12267,3 +12275,72 @@ async def decide_workflow_revision_review(
                 "The exact workflow or its node code could not be verified.",
             ) from exc
         return _workflow_review_out(session, definition, revision, fresh)
+
+
+@router.get(
+    "/workflows/{workflow_id}/revisions/{revision_id}/activation",
+    response_model=WorkflowActivationSubject,
+)
+def get_workflow_activation_subject(
+    workflow_id: str, revision_id: str, session: SessionDep
+) -> WorkflowActivationSubject:
+    try:
+        return activation_subject(session, workflow_id, revision_id)
+    except (WorkflowActivationError, ValueError) as exc:
+        missing = (
+            isinstance(exc, WorkflowActivationError) and exc.code == "workflow_revision_unavailable"
+        )
+        raise api_error(
+            404 if missing else 409,
+            "workflow-activation-unavailable",
+            "The workflow or its dependencies changed. Review the workflow again.",
+        ) from exc
+
+
+@router.post(
+    "/workflows/{workflow_id}/revisions/{revision_id}/activation",
+    response_model=WorkflowActivationOut,
+)
+def create_workflow_activation(
+    workflow_id: str,
+    revision_id: str,
+    payload: WorkflowActivationCreate,
+    request: Request,
+    session: SessionDep,
+) -> WorkflowActivationOut:
+    services = _services(request)
+    provisioner = services.processes.runtimes
+    try:
+        # SQLite's legacy transaction mode does not start a transaction for a
+        # SELECT. An explicit outer transaction keeps the helper's savepoint
+        # from committing an activation before final approval is rechecked.
+        session.connection().exec_driver_sql("BEGIN")
+        result = activate_reviewed_revision(
+            session,
+            workflow_id,
+            revision_id,
+            payload,
+            runtime_materializer=(
+                lambda requirement, selection: materialize_comfy_runtime_dependency(
+                    provisioner, requirement, selection
+                )
+            )
+            if provisioner is not None
+            else None,
+            custom_node_root=services.settings.custom_node_dir,
+            registry_environment_root=registry_wheel_environment_root(
+                services.settings.registry_dir
+            ),
+        )
+        session.commit()
+        return result
+    except (WorkflowActivationError, ValueError, OSError, SQLAlchemyError) as exc:
+        session.rollback()
+        missing = (
+            isinstance(exc, WorkflowActivationError) and exc.code == "workflow_revision_unavailable"
+        )
+        raise api_error(
+            404 if missing else 409,
+            "workflow-activation-unavailable",
+            "The workflow or its dependencies changed. Review the workflow again.",
+        ) from exc
