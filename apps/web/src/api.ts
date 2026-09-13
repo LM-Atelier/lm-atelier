@@ -16,6 +16,7 @@ import type {
   ArtifactLibraryItem,
   ArtifactStorageInfo,
   BackupInfo,
+  RetentionPolicy,
   EmptyChatDeletion,
   EmptyChatPage,
   EmptyChatPreview,
@@ -932,6 +933,21 @@ export const api = {
     request<ArtifactCleanupResult>("/api/artifacts/cleanup", {
       method: "POST",
       body: JSON.stringify({ dry_run: dryRun }),
+    }),
+  retentionPolicy: () => request<RetentionPolicy>("/api/artifacts/retention"),
+  chooseRetention: (expectedRevision: number, mediaDays: number, temporaryHours: number) =>
+    request<RetentionPolicy>("/api/artifacts/retention", {
+      method: "PUT",
+      body: JSON.stringify({
+        expected_revision: expectedRevision,
+        media_days: mediaDays,
+        temporary_hours: temporaryHours,
+      }),
+    }),
+  previewRetention: (mediaDays: number, temporaryHours: number) =>
+    request<ArtifactCleanupResult>("/api/artifacts/retention/preview", {
+      method: "POST",
+      body: JSON.stringify({ media_days: mediaDays, temporary_hours: temporaryHours }),
     }),
   deleteArtifact: (artifactId: string) =>
     request<ArtifactDeleteResult>(`/api/artifacts/${encodeURIComponent(artifactId)}`, {

@@ -56,6 +56,7 @@ from .instance_identity import INSTANCE_ID_HEADER, load_or_create_instance_ident
 from .instance_lock import DataDirectoryLock
 from .orchestrator import ConversationOrchestrator
 from .processes import ProcessSupervisor
+from .retention_policy import windows_for
 from .runtime_provisioning import RuntimeProvisioner
 from .scheduler import ResourceScheduler
 from .security import (
@@ -504,8 +505,7 @@ async def sweep_artifact_retention(
             try:
                 summary = artifacts.cleanup_retention(
                     session,
-                    retention_days=settings.artifact_retention_days,
-                    temporary_hours=settings.temporary_retention_hours,
+                    windows_from=lambda held: windows_for(held, settings),
                     dry_run=False,
                     max_deletions=deletions,
                     should_stop=should_stop,

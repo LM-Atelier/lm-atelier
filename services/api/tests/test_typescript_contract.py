@@ -92,6 +92,7 @@ CHECKED_CONTRACTS = {
     "ReferenceSubject": "ReferenceSubjectOut",
     "RegistryInstall": "RegistryInstallOut",
     "ResponseRevision": "ResponseRevisionOut",
+    "RetentionPolicy": "RetentionPolicyOut",
     "Run": "RunOut",
     "RuntimeStatus": "RuntimeStatus",
     "SettingField": "SettingField",

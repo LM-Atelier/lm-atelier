@@ -776,8 +776,9 @@ class ArtifactStore:
         self,
         session: Session,
         *,
-        retention_days: int,
-        temporary_hours: int,
+        retention_days: int | None = None,
+        temporary_hours: int | None = None,
+        windows_from: Callable[[Session], tuple[int, int]] | None = None,
         dry_run: bool,
         now: datetime | None = None,
         max_deletions: int | None = None,
@@ -792,14 +793,30 @@ class ArtifactStore:
         observed immediately before an actual deletion. Metadata updates survive
         truncated passes; orphan cleanup runs only after a complete row pass.
         Callers may commit each bounded pass to preserve completed work.
+
+        The windows are given either as `retention_days` and `temporary_hours`,
+        or as `windows_from`, which returns both and is called once the writer
+        reservation is held, so a choice committed before this pass took the
+        reservation is the one it uses.
         """
 
+        if windows_from is not None:
+            if retention_days is not None or temporary_hours is not None:
+                raise TypeError("give the retention windows or windows_from, not both")
+        elif retention_days is None or temporary_hours is None:
+            raise TypeError("give both retention windows, or windows_from")
         phase: Callable[[str], None] = report_phase or (lambda _name: None)
         current = now or datetime.now(UTC)
         if not dry_run:
             phase("acquire-writer")
             begin_artifact_write_fence(session)
             phase("writer-acquired")
+        if windows_from is not None:
+            retention_days, temporary_hours = windows_from(session)
+        if retention_days is None or temporary_hours is None:
+            # Settled by the checks above; restated so the windows are known ints.
+            raise TypeError("give both retention windows, or windows_from")
+        if not dry_run:
             phase("recover-staged-deletions")
             self._recover_staged_deletions(session)
         phase("reference-snapshot")

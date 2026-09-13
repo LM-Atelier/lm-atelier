@@ -101,6 +101,15 @@ export interface ArtifactCleanupResult {
   truncated?: boolean;
 }
 
+/** The retention windows in force; revision 0 while they are the installation's own. */
+export interface RetentionPolicy {
+  media_days: number;
+  temporary_hours: number;
+  revision: number;
+  default_media_days: number;
+  default_temporary_hours: number;
+}
+
 export interface ArtifactDeleteResult {
   artifact_id: string;
   reference_count: number;

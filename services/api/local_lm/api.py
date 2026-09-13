@@ -334,6 +334,7 @@ from .reference_library import (
 )
 from .reference_review import ReviewOutcome, ReviewRefusal, ReviewRefused, review_asset
 from .references import ReferenceError, ReferenceNotFoundError
+from .retention_policy import RetentionPolicyStale, read_policy, windows_for, write_policy
 from .revision_dependency_contract import (
     declared_dependency_contract,
     declared_dependency_contract_sha256,
@@ -476,6 +477,9 @@ from .schemas import (
     ResolvedSetup,
     ResponseFeedbackOut,
     ResponseFeedbackUpdate,
+    RetentionPolicyOut,
+    RetentionPolicyWrite,
+    RetentionWindowsIn,
     RunOut,
     RuntimeStatus,
     SettingField,
@@ -5144,10 +5148,11 @@ async def artifact_storage(
     services = _services(request)
     artifacts = session.scalars(select(Artifact)).all()
     referenced = services.artifacts.referenced_artifact_ids(session)
+    windows = windows_for(session, services.settings)
     retention = services.artifacts.cleanup_retention(
         session,
-        retention_days=services.settings.artifact_retention_days,
-        temporary_hours=services.settings.temporary_retention_hours,
+        retention_days=windows.media_days,
+        temporary_hours=windows.temporary_hours,
         dry_run=True,
     )
     temporary = [
@@ -5174,8 +5179,8 @@ async def artifact_storage(
         retention_pending_count=retention.pending_count,
         disk_free_bytes=disk_free,
         warning=disk_free < services.settings.storage_warning_free_bytes,
-        retention_days=services.settings.artifact_retention_days,
-        temporary_retention_hours=services.settings.temporary_retention_hours,
+        retention_days=windows.media_days,
+        temporary_retention_hours=windows.temporary_hours,
     )
 
 
@@ -5224,8 +5229,7 @@ async def cleanup_artifacts(
             try:
                 summary = services.artifacts.cleanup_retention(
                     session,
-                    retention_days=settings.artifact_retention_days,
-                    temporary_hours=settings.temporary_retention_hours,
+                    windows_from=lambda held: windows_for(held, settings),
                     dry_run=payload.dry_run,
                     max_deletions=max_deletions,
                     should_stop=should_stop,
@@ -5249,6 +5253,73 @@ async def cleanup_artifacts(
         removed_count=cleanup.removed_count,
         reclaimed_bytes=cleanup.reclaimed_bytes,
         truncated=cleanup.truncated,
+    )
+
+
+@router.get("/artifacts/retention", response_model=RetentionPolicyOut)
+async def get_retention_policy(
+    request: Request, session: ConversationSessionDep
+) -> RetentionPolicyOut:
+    """The retention windows in force, at revision 0 while they are the installation's."""
+
+    return read_policy(session, _services(request).settings)
+
+
+@router.put("/artifacts/retention", response_model=RetentionPolicyOut)
+async def put_retention_policy(
+    payload: RetentionPolicyWrite, request: Request, session: ConversationSessionDep
+) -> RetentionPolicyOut:
+    """Choose both retention windows, refusing a choice based on an older revision.
+
+    Nothing is cleared here. The windows apply from the next clearing pass, at
+    start or from Clear now.
+    """
+
+    try:
+        chosen = write_policy(
+            session, _services(request).settings, payload.expected_revision, payload
+        )
+    except RetentionPolicyStale as stale:
+        session.rollback()
+        raise api_error(
+            409,
+            "retention-policy-stale",
+            "Retention was changed since it was read. Read it again before choosing.",
+            current_revision=stale.current_revision,
+        ) from None
+    session.commit()
+    return chosen
+
+
+@router.post("/artifacts/retention/preview", response_model=ArtifactCleanupResult)
+async def preview_retention_policy(
+    payload: RetentionWindowsIn, request: Request
+) -> ArtifactCleanupResult:
+    """What a clearing pass would clear now under proposed windows, clearing nothing.
+
+    The pass examines every stored file, so it runs off the event loop in a
+    session of its own, as Clear now does.
+    """
+
+    artifacts = _services(request).artifacts
+
+    def run() -> RetentionCleanupSummary:
+        with SessionLocal() as session:
+            return artifacts.cleanup_retention(
+                session,
+                retention_days=payload.media_days,
+                temporary_hours=payload.temporary_hours,
+                dry_run=True,
+            )
+
+    preview = await asyncio.to_thread(run)
+    return ArtifactCleanupResult(
+        dry_run=True,
+        marked_count=preview.marked_count,
+        retention_pending_count=preview.pending_count,
+        removed_count=preview.removed_count,
+        reclaimed_bytes=preview.reclaimed_bytes,
+        truncated=preview.truncated,
     )
 
 

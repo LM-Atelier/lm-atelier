@@ -234,6 +234,32 @@ class ArtifactCleanupResult(ApiModel):
     truncated: bool = False
 
 
+#: The installation settings' own bounds, so a window chosen in Settings is
+#: always one the configuration could have set.
+MAX_RETENTION_DAYS = 3650
+MAX_TEMPORARY_RETENTION_HOURS = 168
+
+
+class RetentionWindowsIn(ApiModel):
+    """How long media nothing uses is kept, and how long previews are kept."""
+
+    media_days: StrictInt = Field(ge=1, le=MAX_RETENTION_DAYS)
+    temporary_hours: StrictInt = Field(ge=1, le=MAX_TEMPORARY_RETENTION_HOURS)
+
+
+class RetentionPolicyWrite(RetentionWindowsIn):
+    expected_revision: StrictInt = Field(ge=0, le=9_223_372_036_854_775_807)
+
+
+class RetentionPolicyOut(ApiModel):
+    media_days: int
+    temporary_hours: int
+    # 0 until somebody chooses, and both windows are then the installation's.
+    revision: int = Field(ge=0)
+    default_media_days: int
+    default_temporary_hours: int
+
+
 class ArtifactDeleteResult(ApiModel):
     artifact_id: str
     reference_count: int
