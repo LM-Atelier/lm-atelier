@@ -4,6 +4,7 @@ import { BrushTool, ClickSelectTool, RectTool } from "./studioTools";
 import {
   initialToolState,
   studioToolReducer,
+  snapshotBeforeGesture,
   toolFor,
   toolUsesMask,
   type StudioToolState,
@@ -69,13 +70,13 @@ describe("studio tool state", () => {
   });
 
   it("undoes to the pre-gesture mask, not the painted one", () => {
-    // The ordering that matters: snapshot on gesture-start, mutate, then
+    // The ordering that matters: snapshot as the gesture starts, mutate, then
     // stroke-end. Snapshotting at stroke end would store the painted raster
     // and leave the first Undo doing nothing at all.
     let state = withImage();
     const tool = toolFor({ ...state, kind: "brush" })!;
 
-    state = studioToolReducer(state, { type: "gesture-start" });
+    snapshotBeforeGesture(state);
     tool.down({ x: 20, y: 20 });
     tool.up({ x: 40, y: 20 });
     state = studioToolReducer(state, { type: "stroke-end" });
@@ -140,8 +141,10 @@ describe("studio tool state", () => {
 
   it("ignores mask operations before an image is loaded", () => {
     const state = initialToolState();
-    for (const action of ["undo", "redo", "invert", "clear", "gesture-start"] as const) {
+    for (const action of ["undo", "redo", "invert", "clear"] as const) {
       expect(studioToolReducer(state, { type: action })).toBe(state);
     }
+    snapshotBeforeGesture(state);
+    expect(state.history.canUndo).toBe(false);
   });
 });
