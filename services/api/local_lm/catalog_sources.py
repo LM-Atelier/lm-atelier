@@ -1,10 +1,33 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from .schemas import CatalogPage
 from .workflow_source_candidates import catalog_host_map
+
+
+@dataclass(frozen=True)
+class WorkflowGraphArtifact:
+    """One workflow graph, as fetched, with the identity it was fetched under.
+
+    The bytes are kept beside the parsed graph on purpose. `sha256` is taken
+    over exactly what arrived, so a later step can say the thing it installed is
+    the thing it inspected; re-serializing the parsed object would produce a
+    different digest for identical content and quietly break that claim.
+
+    No filename travels. The provider's name for the file is recorded for
+    display only - where the graph is written is the server's decision, and a
+    caller-supplied name is exactly what the workflow install path must not
+    accept.
+    """
+
+    version_id: str
+    graph: dict[str, Any]
+    raw: bytes
+    sha256: str
+    provider_filename: str
 
 
 class WorkflowCatalogSource(Protocol):
@@ -36,6 +59,8 @@ class WorkflowCatalogSource(Protocol):
         limit: int = 30,
         cursor: str | None = None,
     ) -> CatalogPage: ...
+
+    async def fetch_workflow_graph(self, version_id: str) -> WorkflowGraphArtifact: ...
 
 
 class CatalogSource(Protocol):

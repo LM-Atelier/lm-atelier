@@ -31,6 +31,7 @@ from .auxiliary_assets import (
     validate_lora_workflow_contract,
 )
 from .capability_evidence import ACTIVATION_ARTIFACT_KEY, record_capability_evidence
+from .civitai_delivery import ALLOWED_DOWNLOAD_HOSTS
 from .comfy_templates import (
     COMFY_TEMPLATE_COMPILER_VERSION,
     ComfyTemplateRegistry,
@@ -116,14 +117,10 @@ if TYPE_CHECKING:
 
 _REMOTE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _CIVITAI_ID = re.compile(r"^[1-9][0-9]{0,11}$")
-# civitai.com issues the redirect, b2 serves smaller files, and anything of
-# any size comes from their Cloudflare R2 delivery domain. Without the last of
-# these every large model refused with "untrusted host" at the second hop.
-_CIVITAI_ALLOWED_DOWNLOAD_HOSTS = (
-    "civitai.com",
-    "b2.civitai.com",
-    ".r2.cloudflarestorage.com",
-)
+# The delivery-host policy moved to civitai_delivery so the workflow graph
+# reader and this transfer path cannot drift apart on a security rule. The
+# reason for each host is recorded there.
+_CIVITAI_ALLOWED_DOWNLOAD_HOSTS = ALLOWED_DOWNLOAD_HOSTS
 _TRANSFER_ATTEMPTS = 3
 # How often a running transfer records a byte sample. Must stay comfortably
 # under the five-second window `progress._byte_rate` allows between samples,

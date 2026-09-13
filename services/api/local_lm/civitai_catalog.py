@@ -15,6 +15,12 @@ import httpx
 from pydantic import ValidationError
 
 from .catalog_cache import CatalogCachePolicy, CatalogCacheStore
+from .catalog_sources import WorkflowGraphArtifact
+from .civitai_delivery import (
+    MAX_DELIVERY_HOPS,
+    carries_catalog_credentials,
+    permitted_delivery_url,
+)
 from .config import Settings
 from .network import shared_tls_context
 from .schemas import CatalogModel, CatalogPage, ContentRating
@@ -44,6 +50,11 @@ _WORKFLOW_TYPES = ("Workflows", "ComfyWorkflows")
 _MAX_RETRY_AFTER_SECONDS = 30.0
 _MAX_METADATA_VALUES = 128
 _NORMALIZATION_VERSION = 2
+# A workflow graph is JSON describing nodes, not model weights, so it gets its
+# own far smaller ceiling than a catalog response. Exceeding it is REFUSED
+# rather than truncated: a truncated graph is invalid JSON, and failing at the
+# parse would report the wrong cause.
+_MAX_WORKFLOW_GRAPH_BYTES = 2 * 1024 * 1024
 _MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 _GENERAL_LEVEL_MASK = 1 | 2
 _MATURE_LEVEL_MASK = 4 | 8 | 16 | 32
@@ -256,6 +267,112 @@ class CivitaiCatalog:
             if stale is None:
                 raise
             return stale.model_copy(update={"stale": True})
+
+    async def fetch_workflow_graph(self, version_id: str) -> WorkflowGraphArtifact:
+        """The graph for one version, bounded, with nothing named by the caller.
+
+        The version's file list is the only place that says which file is the
+        graph, and a version can carry several files - the graph itself, a
+        bundle, sample images. Exactly one candidate is required. Zero and
+        several are both REFUSED, naming what was found, because the plan's
+        one-click install pauses at a genuine ambiguity rather than guessing
+        which file somebody meant.
+
+        The download URL comes back inside a response body, so it is checked
+        the same way a pagination cursor is: it is followed only while it still
+        points at this provider over https with no credentials.
+        """
+
+        if not self.validate_item_id(version_id):
+            raise ValueError("CivitAI model version id must be a positive decimal integer")
+        payload = await self._request_json(f"/api/v1/model-versions/{version_id}")
+        files = [value for value in payload.get("files") or [] if isinstance(value, dict)]
+        candidates = [value for value in files if self._is_workflow_graph(value)]
+        if not candidates:
+            raise ValueError(
+                "This version has no workflow graph file. It carries: "
+                + (", ".join(sorted(str(value.get("name") or "?") for value in files)) or "nothing")
+            )
+        if len(candidates) > 1:
+            raise ValueError(
+                "This version carries more than one workflow graph, so which to install is "
+                "ambiguous: "
+                + ", ".join(sorted(str(value.get("name") or "?") for value in candidates))
+            )
+        selected = candidates[0]
+        url = str(selected.get("downloadUrl") or "")
+        raw = await self._bounded_bytes(url)
+        try:
+            graph = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise ValueError("The workflow graph is not valid JSON") from error
+        if not isinstance(graph, dict) or not graph:
+            raise ValueError("The workflow graph is not a JSON object")
+        return WorkflowGraphArtifact(
+            version_id=version_id,
+            graph=graph,
+            raw=raw,
+            sha256=hashlib.sha256(raw).hexdigest(),
+            provider_filename=str(selected.get("name") or ""),
+        )
+
+    @staticmethod
+    def _is_workflow_graph(value: dict[str, Any]) -> bool:
+        """The provider's own file type first, its name only as a fallback.
+
+        `type` is what CivitAI declares the file to be, so it is the better
+        signal; the suffix is checked too because the type is not guaranteed
+        present on every record and a `.json` beside a `.zip` is still the
+        graph.
+        """
+
+        if str(value.get("type") or "").casefold() == "workflow":
+            return True
+        return Path(str(value.get("name") or "")).suffix.casefold() == ".json"
+
+    async def _bounded_bytes(self, url: str) -> bytes:
+        """Read a body through the provider's delivery hop, bounded at both ends.
+
+        CivitAI answers a download with a redirect to whichever host actually
+        holds the bytes, so a reader that refuses redirects never reaches a file
+        at all. The hop is followed here rather than by the client, because the
+        client must keep `follow_redirects=False` for every other request and
+        because two things have to happen per hop that a blanket setting cannot
+        do: each destination is checked against the delivery policy, and our
+        catalog credentials are dropped the moment we leave the API host.
+
+        The signed address CivitAI issues already authorizes the file, so the
+        token buys nothing on a delivery host and sending it would disclose a
+        credential to somebody who never needed it.
+        """
+
+        async with self._request_lock:
+            target = permitted_delivery_url(url)
+            for _ in range(MAX_DELIVERY_HOPS):
+                request = self._client.build_request("GET", target)
+                if not carries_catalog_credentials(target):
+                    # Removed from the built request rather than passed as an
+                    # override: httpx rejects a None header value outright, so
+                    # a header cannot be unset by supplying one.
+                    request.headers.pop("authorization", None)
+                response = await self._client.send(request, stream=True)
+                try:
+                    if response.is_redirect:
+                        location = response.headers.get("location", "")
+                        target = permitted_delivery_url(str(response.url.join(location)))
+                        continue
+                    response.raise_for_status()
+                    body = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        body.extend(chunk)
+                        if len(body) > _MAX_WORKFLOW_GRAPH_BYTES:
+                            raise ValueError(
+                                "The workflow graph is larger than this reader accepts"
+                            )
+                    return bytes(body)
+                finally:
+                    await response.aclose()
+            raise ValueError("CivitAI redirected the workflow graph too many times")
 
     async def inspect(
         self,
