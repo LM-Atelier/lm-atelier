@@ -1086,6 +1086,15 @@ export interface CatalogPage {
   stale?: boolean;
 }
 
+/** Well-rated general-audience LoRAs for the model family a workflow runs. */
+export interface LoraSuggestions {
+  family: string | null;
+  gap: "family_unknown" | "family_unsupported" | null;
+  items: CatalogModel[];
+  next_cursor: string | null;
+  stale: boolean;
+}
+
 /** A discovered workflow's graph, to be reviewed the way an imported file is. */
 export interface WorkflowCatalogGraph {
   version_id: string;

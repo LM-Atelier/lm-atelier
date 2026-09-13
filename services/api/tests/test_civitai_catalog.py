@@ -635,3 +635,62 @@ async def test_legacy_detail_cache_cannot_restore_an_inherited_base_family(tmp_p
     assert requested_paths == ["/api/v1/model-versions/202", "/api/v1/models/101"]
     assert detail["model"]["architecture"] is None
     assert detail["files"][0]["metadata"]["base_models"] == []
+
+
+async def test_search_filters_by_base_model_and_keeps_each_filter_apart(tmp_path: Path) -> None:
+    seen: list[list[str]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.params.get_list("baseModels"))
+        assert request.url.params["types"] == "LORA"
+        assert request.url.params["nsfw"] == "false"
+        assert request.url.params["sort"] == "Highest Rated"
+        return httpx.Response(200, json={"items": [_item()], "metadata": {}})
+
+    catalog = _catalog(tmp_path, handler)
+    try:
+        await catalog.search(role="lora", sort="likes", base_models=("Flux.1 D", "Flux.1 S"))
+        await catalog.search(role="lora", sort="likes", base_models=("Flux.1 D", "Flux.1 S"))
+        await catalog.search(role="lora", sort="likes", base_models=("SDXL 1.0",))
+        await catalog.search(role="lora", sort="likes")
+    finally:
+        await catalog.close()
+
+    assert seen == [["Flux.1 D", "Flux.1 S"], ["SDXL 1.0"], []]
+
+
+async def test_a_filtered_continuation_must_keep_its_base_models(tmp_path: Path) -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("a mismatched continuation must not reach the network")
+
+    base = "https://civitai.com/api/v1/models?cursor=next&nsfw=false&primaryFileOnly=true"
+    catalog = _catalog(tmp_path, handler)
+    try:
+        with pytest.raises(ValueError, match="cursor is invalid"):
+            await catalog.search(role="lora", cursor=base, base_models=("SDXL 1.0",))
+        with pytest.raises(ValueError, match="cursor is invalid"):
+            await catalog.search(
+                role="lora", cursor=f"{base}&baseModels=SD+1.5", base_models=("SDXL 1.0",)
+            )
+        with pytest.raises(ValueError, match="cursor is invalid"):
+            await catalog.search(role="lora", cursor=f"{base}&baseModels=SDXL+1.0")
+    finally:
+        await catalog.close()
+
+
+@pytest.mark.parametrize(
+    "base_models",
+    ["SDXL 1.0", ("",), ("SDXL 1.0", "SDXL 1.0"), ("a" * 65,), ("SDXL\n1.0",), ("x",) * 9],
+)
+async def test_invalid_base_model_filters_are_refused_before_the_network(
+    tmp_path: Path, base_models: Any
+) -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("an invalid filter must not reach the network")
+
+    catalog = _catalog(tmp_path, handler)
+    try:
+        with pytest.raises(ValueError, match="base models"):
+            await catalog.search(role="lora", base_models=base_models)
+    finally:
+        await catalog.close()

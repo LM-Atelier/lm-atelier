@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -48,6 +48,11 @@ _SORTS = {
 # returns checkpoints and LoRAs as though the filter had never been applied.
 _WORKFLOW_TYPES = ("Workflows", "ComfyWorkflows")
 _MAX_RETRY_AFTER_SECONDS = 30.0
+# A base-model filter names CivitAI's own base-model labels ("SDXL 1.0",
+# "Flux.1 D"). They are sent as repeated parameters for the same reason the
+# workflow types are, and kept short and few so a filter cannot grow the URL.
+_BASE_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._+-]{0,63}$")
+_MAX_BASE_MODELS = 8
 _MAX_METADATA_VALUES = 128
 _NORMALIZATION_VERSION = 2
 # A workflow graph is JSON describing nodes, not model weights, so it gets its
@@ -105,6 +110,17 @@ class CivitaiCatalog:
     def validate_item_id(item_id: str) -> bool:
         return bool(_ITEM_ID.fullmatch(item_id))
 
+    @staticmethod
+    def _base_model_filter(base_models: Sequence[str]) -> tuple[str, ...]:
+        if isinstance(base_models, str):
+            raise ValueError("CivitAI base models must be a list of names")
+        values = tuple(base_models)
+        if len(values) > _MAX_BASE_MODELS or len(set(values)) != len(values):
+            raise ValueError("CivitAI base models are invalid")
+        if any(type(value) is not str or not _BASE_MODEL.fullmatch(value) for value in values):
+            raise ValueError("CivitAI base models are invalid")
+        return values
+
     async def search(
         self,
         *,
@@ -123,7 +139,9 @@ class CivitaiCatalog:
         max_parameters: int | None = None,
         max_size_bytes: int | None = None,
         updated_within_days: int | None = None,
+        base_models: Sequence[str] = (),
     ) -> CatalogPage:
+        base_model_filter = self._base_model_filter(base_models)
         if role in {"chat", "video"}:
             return CatalogPage(items=[])
         params: dict[str, Any] = {
@@ -137,10 +155,20 @@ class CivitaiCatalog:
             params["types"] = "Checkpoint"
         elif role == "lora":
             params["types"] = "LORA"
+        if base_model_filter:
+            params["baseModels"] = list(base_model_filter)
         url = self._validated_cursor(cursor) if cursor else "/api/v1/models"
+        if cursor and sorted(parse_qs(urlparse(url).query).get("baseModels") or []) != sorted(
+            base_model_filter
+        ):
+            # A continuation answers the question its first page asked. One
+            # that dropped or changed the base-model filter would fill a
+            # family's suggestions with LoRAs for another model.
+            raise ValueError("CivitAI catalog cursor is invalid")
         cache_path = self._cache_path(
             "search",
             url,
+            base_model_filter,
             None if cursor else params,
             role,
             compatibility,

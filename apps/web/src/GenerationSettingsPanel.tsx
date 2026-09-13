@@ -19,6 +19,7 @@ import {
   type Visibility,
 } from "./settings";
 import type { EngineCapabilities, EngineRole, GenerationPreset, SettingField } from "./types";
+import { LoraSuggestions } from "./LoraSuggestions";
 import { LorasSection } from "./WorkflowLoraRows";
 
 /** The generation settings panel and the strength control it owns.
@@ -312,6 +313,7 @@ export function GenerationSettingsPanel({
             {editSettings && <button type="button" className="secondary" onClick={() => onValues(
               { ...values, loras: effectiveValue(loraField) }, ["loras"],
             )}>Use current LoRA selection</button>}
+            {workflowRevisionId && <LoraSuggestions revisionId={workflowRevisionId} />}
           </>
         )}
       </LorasSection>
