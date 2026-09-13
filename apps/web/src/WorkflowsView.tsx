@@ -19,6 +19,9 @@ import { WorkflowFamilyDependencies } from "./WorkflowFamilyDependencies";
 import { WorkflowPackageReview } from "./WorkflowPackageReview";
 import { WorkflowRevisionReviewPanel } from "./WorkflowRevisionReviewPanel";
 import { useWorkflowPackageImport } from "./useWorkflowPackageImport";
+import { WorkflowDiscover } from "./WorkflowDiscover";
+import { WorkflowDestinations } from "./WorkflowDestinations";
+import { useWorkflowDestination } from "./useWorkflowDestination";
 import { downloadJson } from "./format";
 import {
   openWorkflowEditorPopup,
@@ -114,6 +117,7 @@ export function WorkflowsView() {
   const [archiveFamily, setArchiveFamily] = useState<WorkflowFamily | null>(null);
   const [selectedRevisionId, setSelectedRevisionId] = useState<string | null>(null);
   const [newOpen, setNewOpen] = useState(false);
+  const { destination, discoverVisited, show: showDestination } = useWorkflowDestination();
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState("Custom image workflow");
   const [description, setDescription] = useState("");
@@ -323,7 +327,11 @@ export function WorkflowsView() {
     && !retryDraft.isPending;
   return (
     <div className="page-view">
-      <header className="page-header"><div><h1>Workflows</h1></div><div className="storage-actions"><input ref={importInput} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0]); event.target.value = ""; }} /><button className="secondary" onClick={() => importInput.current?.click()}>Import bundle</button><button className="primary" onClick={openCreate}><Plus size={17} />New workflow</button></div></header>
+      <header className="page-header"><div><h1>Workflows</h1></div>
+        <WorkflowDestinations current={destination} onChoose={showDestination} />
+        {/* Library actions show the library first: a dialog under a hidden region would lock the page invisibly. */}
+        <div className="storage-actions"><input ref={importInput} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0]); event.target.value = ""; }} /><button className="secondary" onClick={() => { showDestination("library"); importInput.current?.click(); }}>Import bundle</button><button className="primary" onClick={() => { showDestination("library"); openCreate(); }}><Plus size={17} />New workflow</button></div></header>
+      <div hidden={destination !== "library"}>
       {/* A list that could not be read is not an empty list, and a family
           list that failed is not "no preferences". Both used to render as
           the unselected state, which invites the reader to pick from
@@ -476,6 +484,8 @@ export function WorkflowsView() {
           <footer><button className="secondary" onClick={() => setNewOpen(false)}>Cancel</button><button className="primary" disabled={!name.trim() || save.isPending || (editing && !selected)} onClick={() => save.mutate()}>{save.isPending ? "Saving…" : editing ? "Create revision" : "Save workflow"}</button></footer>
         </AccessibleDialog>
       )}
+      </div>
+      {discoverVisited && <div hidden={destination !== "discover"}><WorkflowDiscover /></div>}
     </div>
   );
 }
