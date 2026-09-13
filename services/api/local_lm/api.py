@@ -311,6 +311,11 @@ from .reference_library import (
 )
 from .reference_review import ReviewOutcome, ReviewRefusal, ReviewRefused, review_asset
 from .references import ReferenceError, ReferenceNotFoundError
+from .revision_dependency_contract import (
+    declared_dependency_contract,
+    declared_dependency_contract_sha256,
+    persist_dependency_contract,
+)
 from .routing import RouteConfirmationRequired
 from .runtime_config import persist_runtime_values
 from .saved_settings import normalize_saved_settings
@@ -9254,6 +9259,7 @@ async def _persist_workflow(
         workflow_video_length(payload.input_schema)
         video_length_reaches_graph(payload.api_graph, payload.input_schema)
         edit_calibration_reaches_graph(payload.api_graph, payload.input_schema)
+        declared_dependency_contract(payload.dependencies)
     except ValueError as exc:
         raise api_error(422, "workflow-invalid", str(exc)) from exc
     definition = WorkflowDefinition(
@@ -9286,6 +9292,7 @@ async def _persist_workflow(
     )
     session.add(revision)
     session.flush()
+    persist_dependency_contract(session, revision)
     definition.current_revision_id = revision.id
     ensure_workflow_family_ownership(session, definition, revision)
     session.commit()
@@ -9947,7 +9954,7 @@ def _workflow_editor_draft_matches(
         and revision.input_schema_json == dict(input_schema)
         and revision.capabilities_json == capabilities
         and revision.dependencies_json == dict(dependencies)
-        and revision.dependency_contract_sha256 is None
+        and revision.dependency_contract_sha256 == declared_dependency_contract_sha256(dependencies)
         and revision.artifact_sha256 == artifact_sha256
         and not revision.trusted
     )
@@ -10116,12 +10123,13 @@ async def create_workflow_editor_draft(
             input_schema_json=input_schema,
             capabilities_json=capabilities,
             dependencies_json=dependencies,
-            dependency_contract_sha256=None,
             trusted=False,
             artifact_sha256=artifact_sha256,
         )
         session.add(existing)
         try:
+            session.flush()
+            persist_dependency_contract(session, existing)
             session.commit()
             created = True
         except IntegrityError:
@@ -10882,6 +10890,7 @@ async def ensure_workflow_package_draft(
     )
     session.add(revision)
     session.flush()
+    persist_dependency_contract(session, revision)
     definition.current_revision_id = revision.id
     session.commit()
     return _workflow_with_revisions(session, definition.id)
@@ -11902,6 +11911,7 @@ async def _persist_workflow_revision(
         workflow_video_length(payload.input_schema)
         video_length_reaches_graph(payload.api_graph, payload.input_schema)
         edit_calibration_reaches_graph(payload.api_graph, payload.input_schema)
+        declared_dependency_contract(payload.dependencies)
     except ValueError as exc:
         raise api_error(422, "workflow-revision-invalid", str(exc)) from exc
     version = (
@@ -11934,6 +11944,7 @@ async def _persist_workflow_revision(
     )
     session.add(revision)
     session.flush()
+    persist_dependency_contract(session, revision)
     definition.current_revision_id = revision.id
     ensure_workflow_family_ownership(session, definition, revision)
     session.commit()

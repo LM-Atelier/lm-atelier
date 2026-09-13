@@ -61,25 +61,21 @@ async def created(
     with SessionLocal() as session:
         row = session.get(WorkflowRevision, revision)
         assert row is not None
-        row.dependency_contract_sha256 = digest
-        for ordinal, slot in enumerate(contract.slots):
-            session.add(
-                WorkflowDependencySlot(
-                    workflow_revision_id=revision,
-                    ordinal=ordinal,
-                    name=slot.name,
-                    resource_kind=slot.resource_kind,
-                    required=slot.required,
-                    satisfaction=slot.satisfaction,
-                    requirements_json=[
-                        {"key": item.key, "constraints": item.constraints}
-                        for item in slot.requirements
-                    ],
-                    contract_sha256=workflow_dependency_slot_sha256(slot),
-                )
-            )
+        # Creation stores the declared contract itself; nothing is seeded here.
+        assert row.dependency_contract_sha256 == digest
+        stored = session.scalars(
+            select(WorkflowDependencySlot)
+            .where(WorkflowDependencySlot.workflow_revision_id == revision)
+            .order_by(WorkflowDependencySlot.ordinal)
+        ).all()
+        # The declared names in canonical order, read from the fixture itself
+        # rather than from the parsed contract the stored rows were built from.
+        declared_names = sorted(item["name"] for item in declaration["slots"])
+        slot_digests = {slot.name: workflow_dependency_slot_sha256(slot) for slot in contract.slots}
+        assert [(item.ordinal, item.name, item.contract_sha256) for item in stored] == [
+            (ordinal, name, slot_digests[name]) for ordinal, name in enumerate(declared_names)
+        ]
         artifact = row.artifact_sha256
-        session.commit()
     review_url = f"/api/workflows/{workflow}/revisions/{revision}/review"
     preview = await client.get(review_url)
     assert preview.status_code == 200, preview.text
