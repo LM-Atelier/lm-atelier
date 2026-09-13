@@ -98,18 +98,20 @@ async def measure_video_output(content: bytes, budget: Budget) -> dict[str, Any]
         return _unmeasured("environment", "scratch_unavailable")
     try:
         started = time.monotonic()
+        allowance = min(PER_VIDEO_SECONDS, budget.video_seconds)
+        minimum_spent = 0.0
         try:
-            frame = await _first_frame(
-                executable, copy, min(PER_VIDEO_SECONDS, budget.video_seconds)
-            )
+            frame = await _first_frame(executable, copy, allowance)
         except TimeoutError:
+            # A spent deadline cannot leave a rounding remainder for another decoder.
+            minimum_spent = allowance
             return _unmeasured("budget", "over_time")
         except _Oversized:
             return _unmeasured("budget", "over_output_budget")
         except OSError:
             return _unmeasured("environment", "decoder_unavailable")
         finally:
-            budget.video_seconds -= time.monotonic() - started
+            budget.video_seconds -= max(minimum_spent, time.monotonic() - started)
     finally:
         _remove(copy)
     if frame is None:

@@ -19,6 +19,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -153,7 +154,7 @@ async def test_without_a_decoder_the_video_is_unmeasured_and_nothing_is_started(
         started.append(arguments)
         raise AssertionError("no process may start without a decoder")
 
-    monkeypatch.setattr(video_output_measurement.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
 
     record = await measure_video_output(b"anything", Budget())
@@ -179,7 +180,7 @@ async def test_the_time_allowance_is_shared_by_every_video_in_a_generation(
         launches.append(1.0)
         return _FakeProcess(stdout=_Blocking(), stderr=_Blocking())
 
-    monkeypatch.setattr(video_output_measurement.shutil, "which", lambda _name: "ffmpeg")
+    monkeypatch.setattr(shutil, "which", lambda _name: "ffmpeg")
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
     budget = Budget(video_seconds=0.2)
 
@@ -199,6 +200,71 @@ async def test_the_time_allowance_is_shared_by_every_video_in_a_generation(
 
 
 # ---- supervision of the child -----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("available", "elapsed", "remaining"),
+    [(0.2, 0.19, 0.0), (60.0, 29.99, 30.0), (60.0, 32.0, 28.0)],
+)
+async def test_a_decoder_timeout_spends_its_allowance_even_when_the_clock_returns_early(
+    monkeypatch: pytest.MonkeyPatch,
+    scratch: Path,
+    available: float,
+    elapsed: float,
+    remaining: float,
+) -> None:
+    clock = [100.0]
+    allowances: list[float] = []
+
+    async def timeout(_executable: str, _source: Path, seconds: float) -> bytes | None:
+        allowances.append(seconds)
+        clock[0] += elapsed
+        raise TimeoutError
+
+    monkeypatch.setattr(
+        video_output_measurement, "time", SimpleNamespace(monotonic=lambda: clock[0])
+    )
+    monkeypatch.setattr(video_output_measurement, "_first_frame", timeout)
+    monkeypatch.setattr(shutil, "which", lambda _name: "ffmpeg")
+    budget = Budget(video_seconds=available)
+
+    record = await measure_video_output(b"neutral", budget)
+
+    assert record["reason"] == "over_time"
+    assert allowances == [min(30.0, available)]
+    assert budget.video_seconds == pytest.approx(remaining)
+    if remaining == 0:
+        again = await measure_video_output(b"next", budget)
+        assert again["reason"] == "over_time"
+        assert len(allowances) == 1
+    assert _copies(scratch) == []
+
+
+async def test_a_decoder_that_finishes_early_leaves_time_for_the_next_video(
+    monkeypatch: pytest.MonkeyPatch, scratch: Path
+) -> None:
+    clock = [100.0]
+    allowances: list[float] = []
+
+    async def finish(_executable: str, _source: Path, seconds: float) -> bytes | None:
+        allowances.append(seconds)
+        clock[0] += 0.05
+        return None
+
+    monkeypatch.setattr(
+        video_output_measurement, "time", SimpleNamespace(monotonic=lambda: clock[0])
+    )
+    monkeypatch.setattr(video_output_measurement, "_first_frame", finish)
+    monkeypatch.setattr(shutil, "which", lambda _name: "ffmpeg")
+    budget = Budget(video_seconds=0.2)
+
+    first = await measure_video_output(b"first", budget)
+    second = await measure_video_output(b"second", budget)
+
+    assert first["reason"] == second["reason"] == "decode_failed"
+    assert allowances == pytest.approx([0.2, 0.15])
+    assert budget.video_seconds == pytest.approx(0.1)
+    assert _copies(scratch) == []
 
 
 class _Blocking:
@@ -273,7 +339,7 @@ def _replace_decoder(monkeypatch: pytest.MonkeyPatch, process: _FakeProcess) -> 
     async def create_process(*_arguments: object, **_options: object) -> _FakeProcess:
         return process
 
-    monkeypatch.setattr(video_output_measurement.shutil, "which", lambda _name: "ffmpeg")
+    monkeypatch.setattr(shutil, "which", lambda _name: "ffmpeg")
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
 
 
