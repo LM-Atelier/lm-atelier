@@ -16,6 +16,8 @@ vi.mock("./api", () => ({ api: {
   backups: vi.fn().mockResolvedValue([]),
   credentialStatus: vi.fn().mockResolvedValue({ configured: false, vault_available: true }),
   workerSettings: vi.fn().mockResolvedValue({ worker_startup_seconds: 60 }),
+  artifactStorage: vi.fn().mockResolvedValue(null),
+  modelStorage: vi.fn().mockResolvedValue(null),
 } }));
 
 const clients: QueryClient[] = [];
@@ -70,6 +72,8 @@ it("shows one destination at a time", () => {
   fireEvent.click(rail("Data & backups"));
 
   expect(screen.getByRole("heading", { name: "Recovery backups" })).toBeTruthy();
+  // Storage is summarised on the same page, above the backups that act on it.
+  expect(screen.getByRole("heading", { name: "Storage" })).toBeTruthy();
   expect(screen.queryByRole("heading", { name: "Light and theme" })).toBeNull();
 });
 

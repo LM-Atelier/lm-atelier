@@ -943,6 +943,11 @@ html[data-chat-width="full"] { --chat-column: 100%; }
 .device-list > div { display: flex; gap: 12px; align-items: center; padding: 12px; background: var(--panel); border-bottom: 1px solid var(--border); }.device-list > div:last-child { border: 0; }
 .device-list > div > span:last-child { display: flex; flex-direction: column; }.device-list small { color: var(--ink-muted); }
 .device-icon { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 10px; background: var(--panel-2); color: var(--accent-2); }
+.storage-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin: 0; }
+.storage-summary > div { display: grid; gap: 4px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); padding: 11px 12px; }
+.storage-summary dt { color: var(--muted); font-size: 11px; }
+.storage-summary dd { display: grid; gap: 4px; margin: 0; color: var(--ink-primary); }
+.storage-summary small { color: var(--muted); font-size: 11px; }
 .about-support { display: grid; gap: 12px; }
 .about-paths { display: grid; gap: 8px; }
 .about-paths > div { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); padding: 11px 12px; }
