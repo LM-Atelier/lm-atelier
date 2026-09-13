@@ -23,7 +23,11 @@ from .profile_service import AUTO_PROFILE_ID
 from .project_portability import redact_local_paths
 from .revision_dependency_contract import persist_dependency_contract
 from .saved_settings import SavedRoleSettings, normalize_saved_settings
-from .settings_registry import ROLE_SETTINGS, validate_workflow_input_schema
+from .settings_registry import (
+    ROLE_SETTINGS,
+    WORKFLOW_LORA_OVERRIDES_SETTING_KEY,
+    validate_workflow_input_schema,
+)
 from .workflow_edit_calibration import validate_workflow_edit_calibration
 from .workflow_ownership import ensure_workflow_family_ownership
 
@@ -613,6 +617,40 @@ def _revision_equal(existing: WorkflowRevision, source: PortableWorkflowRevision
 
 def _mapping(value: object) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
+
+
+def strip_workflow_lora_overrides(value: object) -> object:
+    """Return a copy of plain JSON without any saved workflow LoRA edits.
+
+    Those edits name a workflow revision and activation on this machine, so an
+    archive keeps every other setting and leaves them behind.
+    """
+
+    if isinstance(value, dict):
+        return {
+            key: strip_workflow_lora_overrides(item)
+            for key, item in value.items()
+            if key != WORKFLOW_LORA_OVERRIDES_SETTING_KEY
+        }
+    if isinstance(value, list):
+        return [strip_workflow_lora_overrides(item) for item in value]
+    return value
+
+
+def refuse_workflow_lora_overrides(value: object) -> None:
+    """Refuse plain JSON that carries saved workflow LoRA edits anywhere."""
+
+    stack = [value]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            if WORKFLOW_LORA_OVERRIDES_SETTING_KEY in current:
+                raise ValueError(
+                    "project archive contains workflow LoRA edits from another install"
+                )
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
 
 
 def _portable_mapping(value: object) -> dict[str, Any]:

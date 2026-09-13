@@ -58,6 +58,8 @@ from .project_dependencies import (
     dependency_source_index,
     install_dependency_manifest,
     parse_dependency_manifest,
+    refuse_workflow_lora_overrides,
+    strip_workflow_lora_overrides,
 )
 from .project_portability import has_local_path, redact_local_paths
 from .project_work_plans import export_work_plans, import_work_plans, validate_work_plans
@@ -344,6 +346,7 @@ class ProjectExporter:
             "dependencies": dependency_manifest,
             "auxiliary_requirements": auxiliary_requirements,
         }
+        manifest = cast(dict[str, Any], strip_workflow_lora_overrides(manifest))
         if has_local_path([record["provenance_json"] for record in run_records]):
             raise ValueError("project export contains a non-portable local path")
         with tempfile.NamedTemporaryFile(
@@ -997,6 +1000,7 @@ class ProjectExporter:
                     parse_constant=self._reject_json_constant,
                 )
                 self._validate_json_tree(manifest)
+                refuse_workflow_lora_overrides(manifest)
                 self._validate_manifest(manifest)
                 dependency_model = (
                     parse_dependency_manifest(manifest.get("dependencies"))
