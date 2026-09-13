@@ -133,6 +133,13 @@ from .domain import (
 from .downloads import DownloadManager
 from .edit_recipes import capture_recipe
 from .edited_branches import activate_edited_branch, list_edited_branches
+from .empty_chats import (
+    DEFAULT_MINIMUM_AGE_HOURS,
+    DEFAULT_PAGE_SIZE,
+    MAX_PAGE_SIZE,
+    EmptyChatClass,
+    empty_chat_page,
+)
 from .engines import (
     EngineNotConfiguredError,
     EngineRegistry,
@@ -360,6 +367,8 @@ from .schemas import (
     EditedBranchPage,
     EditTemplateCreate,
     EditTemplateOut,
+    EmptyChatEntryOut,
+    EmptyChatPageOut,
     EngineCapabilities,
     ExchangeDeletionOut,
     GenerationIdentityOut,
@@ -1006,6 +1015,61 @@ async def delete_backup(name: str, request: Request) -> Response:
     except ValueError as exc:
         raise api_error(422, "backup-invalid", str(exc)) from exc
     return Response(status_code=204)
+
+
+@router.get("/maintenance/empty-chats", response_model=EmptyChatPageOut)
+async def get_empty_chats(
+    session: SessionDep,
+    min_age_hours: Annotated[float, Query(ge=0)] = DEFAULT_MINIMUM_AGE_HOURS,
+    include_archived: bool = False,
+    include_configured: bool = False,
+    limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
+    cursor: Annotated[str | None, Query(max_length=40)] = None,
+) -> EmptyChatPageOut:
+    """Chats with nothing in them, and why each one would or would not be offered.
+
+    Read-only. The age floor is applied here rather than in the reader, because
+    it is a choice about what somebody may still be looking at.
+    """
+
+    evaluated_at = utcnow()
+    page = empty_chat_page(
+        session,
+        limit=limit,
+        after_id=cursor,
+        minimum_age_hours=min_age_hours,
+        include_archived=include_archived,
+        include_configured=include_configured,
+        now=evaluated_at,
+    )
+    counts: dict[str, int] = {}
+    entries: list[EmptyChatEntryOut] = []
+    for entry in page.entries:
+        counts[entry.classification.value] = counts.get(entry.classification.value, 0) + 1
+        # SQLite keeps timestamps naive and they are UTC. Subtracting an aware
+        # instant from a naive one raises, so the coercion is not cosmetic.
+        created = (
+            entry.created_at.replace(tzinfo=UTC)
+            if entry.created_at.tzinfo is None
+            else entry.created_at.astimezone(UTC)
+        )
+        entries.append(
+            EmptyChatEntryOut(
+                id=entry.chat_id,
+                classification=entry.classification.value,
+                created_at=entry.created_at,
+                updated_at=entry.updated_at,
+                age_hours=max(0.0, (evaluated_at - created).total_seconds() / 3600.0),
+                reasons=list(entry.reasons),
+                deletable=entry.classification is not EmptyChatClass.INCONSISTENT,
+            )
+        )
+    return EmptyChatPageOut(
+        entries=entries,
+        next_cursor=page.next_cursor,
+        counts=counts,
+        evaluated_at=evaluated_at,
+    )
 
 
 @router.get("/engines", response_model=list[EngineCapabilities])
