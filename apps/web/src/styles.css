@@ -1355,3 +1355,18 @@ h1, h2, h3 { margin: 0; }
   font-size: 12px;
   line-height: 1.4;
 }
+
+/* Discovering workflows. Appended rather than placed beside the library rules,
+   because this file is shared and an append is the edit least likely to collide
+   with somebody else's section. */
+.workflow-discover { display: flex; flex-direction: column; gap: 12px; }
+.workflow-discover-search { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 14px; }
+.workflow-discover-search label { display: flex; flex-direction: column; gap: 4px; }
+.workflow-discover-results { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+.workflow-discover-card { border: 1px solid var(--line); border-radius: 10px; padding: 12px; background: var(--surface-2); }
+.workflow-discover-card h3 { font-size: 14px; margin: 0; }
+.workflow-discover-facts { display: flex; gap: 16px; margin: 8px 0 0; }
+.workflow-discover-facts dt { font-size: 11px; color: var(--mut); }
+.workflow-discover-facts dd { margin: 0; font-weight: 600; }
+.workflow-discover-tags { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; padding: 0; margin: 10px 0 0; }
+.workflow-discover-tags li { font-size: 11px; color: var(--mut); border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; }

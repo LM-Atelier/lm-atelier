@@ -896,6 +896,24 @@ export const api = {
     request<ArtifactDeleteResult>(`/api/artifacts/${encodeURIComponent(artifactId)}`, {
       method: "DELETE",
     }),
+  /** Workflows on a remote source.
+   *
+   * Its own method rather than an option on `catalog`, because the two ask
+   * different questions: the model search carries role, quantization and
+   * parameter filters that a workflow cannot answer, and folding them together
+   * would make every caller carry parameters that mean nothing for half of
+   * them. The server draws the same line.
+   */
+  workflowCatalog: (
+    query: string,
+    sort: string,
+    cursor?: string | null,
+    source = "civitai",
+  ) => {
+    const parameters = new URLSearchParams({ query, sort, source });
+    if (cursor) parameters.set("cursor", cursor);
+    return request<CatalogPage>(`/api/workflow-catalog?${parameters.toString()}`);
+  },
   catalog: (
     query: string,
     role: string,
