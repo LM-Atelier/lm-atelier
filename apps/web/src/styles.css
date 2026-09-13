@@ -939,6 +939,8 @@ h1, h2, h3 { margin: 0; }
 .about-actions { justify-content: space-between; }
 .about-actions nav a { color: var(--accent-2); font-size: 11px; }
 .about-actions nav a:hover { color: var(--cream); }
+.about-credits { margin: 0; color: var(--muted); font-size: 11px; }
+.about-credits a { color: var(--accent-2); }
 .support-summary { display: grid; grid-template-columns: minmax(220px, 1fr) auto; gap: 16px 24px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface-1); padding: 16px; margin-bottom: 12px; }
 .support-summary.target { border-color: var(--state-success); background: var(--success-surface); }
 .support-summary.experimental { border-color: var(--warning-line); background: var(--warning-surface); }

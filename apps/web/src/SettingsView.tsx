@@ -13,7 +13,7 @@ import { RuntimeSetupCard } from "./RuntimeSetupCard";
 import { StatusDot } from "./StatusDot";
 import { WorkerLogFolderButton, WorkerStartupLimit } from "./WorkerStartupLimit";
 import { WorkerStatusCard } from "./WorkerStatusCard";
-import { downloadJson, formatBytes, formatDate, supportLinks } from "./format";
+import { FONT_CREDITS, downloadJson, formatBytes, formatDate, supportLinks } from "./format";
 import {
   resolveCapabilitySettings,
   visibilityRank,
@@ -539,6 +539,16 @@ export function SettingsView({ engines, appearance, destinationId, onDestination
               ))}
             </nav>
           </div>
+          <p className="about-credits">
+            Typefaces:{" "}
+            {FONT_CREDITS.map(({ name, licence }, index) => (
+              <span key={name}>
+                {index > 0 && (index === FONT_CREDITS.length - 1 ? " and " : ", ")}
+                <a href={licence} target="_blank" rel="noreferrer">{name}</a>
+              </span>
+            ))}
+            , each under the SIL Open Font License.
+          </p>
         </div>}
         {(about.error || system.error) && <ErrorCallout message="About information is unavailable." />}
       </section>
