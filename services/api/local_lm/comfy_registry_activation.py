@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from .comfy_registry import ComfyNodeResolution
 from .comfy_registry_archives import (
     ComfyRegistryArchiveError,
     capture_staged_comfy_registry_runtime_files,
@@ -18,6 +19,7 @@ from .comfy_registry_archives import (
 from .comfy_registry_installs import trusted_comfy_registry_launch_contract
 from .domain import utcnow
 from .models import ComfyRegistryInstall
+from .registry_trust_policy import POLICY_ID, decide_registry_trust
 from .source_omission_proof import (
     OmissionProofError,
     evidence_digest,
@@ -72,13 +74,95 @@ def review_comfy_registry_install(
         install.active = False
     reviewed_at = utcnow().isoformat()
     install.review_json = {
-        **install.review_json,
+        **_without_trust_provenance(install.review_json),
         "reviewed_at": reviewed_at,
         "trusted_by_local_user": trusted,
+        "trust_authority": "local_user",
     }
     session.commit()
     session.refresh(install)
     return _state(install)
+
+
+def record_registry_policy_trust(
+    session: Session,
+    *,
+    install_id: str,
+    resolution: ComfyNodeResolution,
+    expected_archive_sha256: str,
+    expected_manifest_sha256: str,
+    custom_node_root: Path,
+    environment_root: Path,
+    media_worker_stopped: bool,
+) -> ComfyRegistryActivationState:
+    """Record the trust the Registry policy grants, under the verification a person's grant gets.
+
+    A ComfyUI Registry package that passes the existing review installs without
+    asking. This records that grant, and nothing wider: the same
+    `_verify_install` an explicit review runs, the same stopped-worker
+    requirement, and a record that names the policy rather than a person.
+
+    Bound to exact bytes. The caller passes the archive and manifest digests it
+    verified when the package was staged; a stored install whose digests differ
+    is refused before the policy is even asked, so a stale or constructed
+    resolution cannot vouch for a different installed package.
+
+    It does not stop or start the media worker - that is the caller's lifecycle -
+    and it grants no trust to any workflow graph that uses the package.
+    """
+
+    _require_stopped(media_worker_stopped)
+    install = _install(session, install_id)
+    if (
+        install.archive_sha256 != expected_archive_sha256
+        or install.manifest_sha256 != expected_manifest_sha256
+    ):
+        raise ComfyRegistryActivationError(
+            "registry_policy_identity_mismatch",
+            "The installed Registry package is not the one that was verified",
+        )
+    decision = decide_registry_trust(resolution, install)
+    if decision.outcome == "already_trusted":
+        # Leave an existing grant - a person's or the policy's - exactly as it is.
+        return _state(install)
+    if decision.outcome != "auto_trust":
+        raise ComfyRegistryActivationError(
+            f"registry_policy_{decision.reason}",
+            decision.explanation or "This Registry package cannot be trusted automatically",
+        )
+    _verify_install(
+        session,
+        install,
+        custom_node_root=custom_node_root,
+        environment_root=environment_root,
+    )
+    install.trusted = True
+    install.review_json = {
+        **_without_trust_provenance(install.review_json),
+        "reviewed_at": utcnow().isoformat(),
+        "trusted_by_local_user": False,
+        "trust_authority": POLICY_ID,
+        "policy_notices": list(decision.notices),
+    }
+    session.commit()
+    session.refresh(install)
+    return _state(install)
+
+
+_TRUST_PROVENANCE_KEYS = frozenset({"trust_authority", "policy_notices"})
+
+
+def _without_trust_provenance(review: object) -> dict[str, Any]:
+    """The review record minus whichever authority wrote the last trust decision.
+
+    Both writers replace the authority rather than merging over it, because a
+    merge is how a revoked policy grant would go on claiming the policy trusted
+    the package.
+    """
+
+    if not isinstance(review, dict):
+        return {}
+    return {key: value for key, value in review.items() if key not in _TRUST_PROVENANCE_KEYS}
 
 
 async def activate_comfy_registry_install(
