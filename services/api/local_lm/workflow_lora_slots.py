@@ -19,7 +19,7 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from .comfy_package_widgets import (
     POWER_LORA_LOADER,
@@ -185,6 +185,39 @@ class WorkflowLoraSlotExtraction:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkflowLoraPrivateEditTarget:
+    """Server-only authority for locating one safely editable graph entry.
+
+    This is deliberately not part of the public projection. The source graph
+    digest binds the locator to the same canonical bytes that produced the
+    opaque slot identifier; callers must still copy and revalidate that graph
+    before applying an edit. ``entry_locator`` is the exact key within the
+    named node's ``inputs`` object; its versioned loader contract defines how
+    each allowed field maps around or within that entry.
+    """
+
+    slot_id: str
+    source_api_graph_sha256: str
+    source_dependency_contract_sha256: str
+    source_activation_binding_sha256: str
+    source_authority_evidence_sha256: str
+    loader_authority_sha256: str
+    asset_sha256: str
+    node_id: str
+    entry_locator: str
+    loader_contract: str
+    editable_fields: tuple[WorkflowLoraEditableField, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowLoraSlotExtractionWithPrivateTargets:
+    """One audited pass split into a public projection and private targets."""
+
+    public: WorkflowLoraSlotExtraction
+    edit_targets: tuple[WorkflowLoraPrivateEditTarget, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class _AssetEvidence:
     binding: WorkflowLoraAssetBinding
     required: bool
@@ -228,23 +261,119 @@ def extract_workflow_lora_slots(
     dropping it could make a stale activation look current.
     """
 
+    return _extract_workflow_lora_slots(
+        revision_scope=revision_scope,
+        api_graph=api_graph,
+        dependency_contract=dependency_contract,
+        activation=activation,
+        core_evidence=core_evidence,
+        package_evidence=package_evidence,
+        include_private_targets=False,
+    ).public
+
+
+def extract_workflow_lora_slots_with_private_targets(
+    *,
+    revision_scope: str,
+    api_graph: Mapping[str, Any],
+    dependency_contract: WorkflowDependencyContract,
+    activation: WorkflowActivationResolution | None = None,
+    core_evidence: Sequence[WorkflowLoraCoreEvidence] = (),
+    package_evidence: Sequence[WorkflowLoraPackageEvidence] = (),
+) -> WorkflowLoraSlotExtractionWithPrivateTargets:
+    """Return public slots and their server-private graph edit locators.
+
+    Only slots that retain ``editable`` authority receive a target. Required,
+    malformed, unbound, and otherwise read-only entries remain visible in the
+    public result but have no server-side edit target.
+    """
+
+    return _extract_workflow_lora_slots(
+        revision_scope=revision_scope,
+        api_graph=api_graph,
+        dependency_contract=dependency_contract,
+        activation=activation,
+        core_evidence=core_evidence,
+        package_evidence=package_evidence,
+        include_private_targets=True,
+    )
+
+
+def _extract_workflow_lora_slots(
+    *,
+    revision_scope: str,
+    api_graph: Mapping[str, Any],
+    dependency_contract: WorkflowDependencyContract,
+    activation: WorkflowActivationResolution | None,
+    core_evidence: Sequence[WorkflowLoraCoreEvidence],
+    package_evidence: Sequence[WorkflowLoraPackageEvidence],
+    include_private_targets: bool,
+) -> WorkflowLoraSlotExtractionWithPrivateTargets:
     if not isinstance(revision_scope, str) or not _REVISION_SCOPE.fullmatch(revision_scope):
         raise WorkflowLoraSlotError(
             "invalid_revision_scope",
             "Workflow LoRA extraction requires one stable revision scope",
         )
     graph_sha256 = _api_graph_sha256(api_graph)
+    private_graph_is_canonical = not include_private_targets or (
+        type(revision_scope) is str and _plain_json_value(api_graph)
+    )
+    graph_for_extraction = api_graph
+    if include_private_targets and private_graph_is_canonical:
+        graph_for_extraction = _private_graph_snapshot(api_graph, graph_sha256)
+
     contract = _canonical_contract(dependency_contract)
     contract_sha256 = workflow_dependency_contract_sha256(contract)
     bindings, activation_sha256 = _activation_bindings(contract, activation)
-    assets = _asset_index(contract, bindings)
-    core = _core_evidence_index(api_graph, core_evidence)
-    packages = _package_evidence_index(api_graph, package_evidence)
-    node_order = tuple(sorted(api_graph))
+    private_activation_is_canonical = not include_private_targets or (
+        _private_activation_is_canonical(activation)
+    )
+    bindings_for_extraction = bindings
+    if include_private_targets and private_activation_is_canonical:
+        bindings_for_extraction = _private_binding_snapshots(
+            contract,
+            bindings,
+            activation_sha256,
+        )
+
+    assets = _asset_index(contract, bindings_for_extraction)
+    source_core = _core_evidence_index(graph_for_extraction, core_evidence)
+    source_packages = _package_evidence_index(graph_for_extraction, package_evidence)
+    private_evidence_is_canonical = not include_private_targets or (
+        all(_private_core_evidence_is_canonical(item) for item in source_core.values())
+        and all(_private_package_evidence_is_canonical(item) for item in source_packages.values())
+    )
+    core = source_core
+    packages = source_packages
+    private_evidence_sha256: str | None = None
+    if include_private_targets and private_evidence_is_canonical:
+        private_evidence_sha256 = _private_authority_evidence_sha256(
+            source_core,
+            source_packages,
+        )
+        core = _private_core_evidence_snapshots(graph_for_extraction, source_core)
+        packages = _private_package_evidence_snapshots(
+            graph_for_extraction,
+            source_packages,
+        )
+        if _private_authority_evidence_sha256(core, packages) != private_evidence_sha256:
+            raise WorkflowLoraSlotError(
+                "changed_private_edit_source",
+                "Workflow LoRA edit evidence changed during private target extraction",
+            )
+    private_sources_are_canonical = (
+        private_graph_is_canonical
+        and private_activation_is_canonical
+        and private_evidence_is_canonical
+    )
+    if not private_sources_are_canonical:
+        private_evidence_sha256 = None
+    node_order = tuple(sorted(graph_for_extraction))
 
     slots: list[WorkflowLoraSlot] = []
+    edit_targets: list[WorkflowLoraPrivateEditTarget] = []
     for node_id in node_order:
-        node = api_graph[node_id]
+        node = graph_for_extraction[node_id]
         if not isinstance(node, Mapping):
             raise WorkflowLoraSlotError(
                 "invalid_api_graph_node",
@@ -263,10 +392,10 @@ def extract_workflow_lora_slots(
                 loader_type,
                 graph_sha256,
                 core.get(node_id),
-                bindings,
+                bindings_for_extraction,
             )
             parsed = _core_loras(
-                api_graph,
+                graph_for_extraction,
                 node_id,
                 node,
                 loader_type,
@@ -279,10 +408,10 @@ def extract_workflow_lora_slots(
                 node_id,
                 graph_sha256,
                 packages.get(node_id),
-                bindings,
+                bindings_for_extraction,
             )
             parsed = _rgthree_loras(
-                api_graph,
+                graph_for_extraction,
                 node_id,
                 node,
                 package_contract,
@@ -299,27 +428,434 @@ def extract_workflow_lora_slots(
                     "Workflow declares more embedded LoRAs than this contract can represent",
                 )
             asset = _one_asset(assets, item.runtime_reference)
-            slots.append(
-                _public_slot(
-                    revision_scope=revision_scope,
-                    graph_sha256=graph_sha256,
-                    node_id=node_id,
-                    loader_type=loader_type,
-                    parsed=item,
-                    asset=asset,
-                    position=len(slots),
-                )
+            slot = _public_slot(
+                revision_scope=revision_scope,
+                graph_sha256=graph_sha256,
+                node_id=node_id,
+                loader_type=loader_type,
+                parsed=item,
+                asset=asset,
+                position=len(slots),
             )
+            slots.append(slot)
+            if include_private_targets and slot.editability == "editable":
+                edit_targets.append(
+                    _private_edit_target(
+                        slot=slot,
+                        parsed=item,
+                        node_id=node_id,
+                        graph_sha256=graph_sha256,
+                        contract_sha256=contract_sha256,
+                        activation_sha256=activation_sha256,
+                        evidence_sha256=private_evidence_sha256,
+                        sources_are_canonical=private_sources_are_canonical,
+                    )
+                )
 
-    return WorkflowLoraSlotExtraction(
-        version=WORKFLOW_LORA_SLOT_CONTRACT_VERSION,
-        revision_scope_sha256=hashlib.sha256(revision_scope.encode("utf-8")).hexdigest(),
-        api_graph_sha256=graph_sha256,
-        dependency_contract_sha256=contract_sha256,
-        activation_binding_sha256=activation_sha256,
-        ordering_authority="presentation_only",
-        slots=tuple(slots),
+    if edit_targets:
+        _revalidate_private_edit_sources(
+            api_graph=api_graph,
+            graph_sha256=graph_sha256,
+            contract=contract,
+            contract_sha256=contract_sha256,
+            activation=activation,
+            activation_sha256=activation_sha256,
+            package_evidence=source_packages,
+            core_evidence=source_core,
+            evidence_sha256=private_evidence_sha256,
+        )
+
+    return WorkflowLoraSlotExtractionWithPrivateTargets(
+        public=WorkflowLoraSlotExtraction(
+            version=WORKFLOW_LORA_SLOT_CONTRACT_VERSION,
+            revision_scope_sha256=hashlib.sha256(revision_scope.encode("utf-8")).hexdigest(),
+            api_graph_sha256=graph_sha256,
+            dependency_contract_sha256=contract_sha256,
+            activation_binding_sha256=activation_sha256,
+            ordering_authority="presentation_only",
+            slots=tuple(slots),
+        ),
+        edit_targets=tuple(edit_targets),
     )
+
+
+def _plain_json_value(value: object) -> bool:
+    """Require inert built-in JSON containers before issuing mutation authority."""
+
+    stack = [value]
+    while stack:
+        current = stack.pop()
+        if type(current) is dict:
+            mapping = current
+            if any(type(key) is not str for key in mapping):
+                return False
+            stack.extend(mapping.values())
+        elif type(current) is list:
+            stack.extend(current)
+        elif current is None or type(current) in {str, int, float, bool}:
+            continue
+        else:
+            return False
+    return True
+
+
+def _private_graph_snapshot(
+    api_graph: Mapping[str, Any],
+    expected_sha256: str,
+) -> dict[str, Any]:
+    """Detach exact JSON bytes so source container methods cannot affect parsing."""
+
+    try:
+        encoded = canonical_graph(api_graph)
+        detached = json.loads(encoded)
+    except (RecursionError, TypeError, ValueError) as exc:
+        raise WorkflowLoraSlotError(
+            "changed_private_edit_source",
+            "Workflow LoRA edit evidence changed during private target extraction",
+        ) from exc
+    if (
+        type(detached) is not dict
+        or not _plain_json_value(detached)
+        or hashlib.sha256(encoded.encode("utf-8")).hexdigest() != expected_sha256
+    ):
+        raise WorkflowLoraSlotError(
+            "changed_private_edit_source",
+            "Workflow LoRA edit evidence changed during private target extraction",
+        )
+    return cast(dict[str, Any], detached)
+
+
+def _private_binding_snapshots(
+    contract: WorkflowDependencyContract,
+    bindings: Sequence[ResolvedWorkflowBinding],
+    expected_sha256: str | None,
+) -> tuple[ResolvedWorkflowBinding, ...]:
+    if expected_sha256 is None:
+        if bindings:
+            raise WorkflowLoraSlotError(
+                "changed_private_edit_source",
+                "Workflow LoRA edit evidence changed during private target extraction",
+            )
+        return ()
+    snapshots = tuple(
+        ResolvedWorkflowBinding(
+            slot_name=binding.slot_name,
+            requirement_key=binding.requirement_key,
+            resource_kind=binding.resource_kind,
+            identity=_private_plain_mapping_snapshot(binding.identity),
+            resource_identity_sha256=binding.resource_identity_sha256,
+            mount=_private_plain_mapping_snapshot(binding.mount),
+        )
+        for binding in bindings
+    )
+    try:
+        actual_sha256 = workflow_activation_binding_sha256(contract, snapshots)
+    except (AttributeError, RecursionError, TypeError, ValueError) as exc:
+        raise WorkflowLoraSlotError(
+            "changed_private_edit_source",
+            "Workflow LoRA edit evidence changed during private target extraction",
+        ) from exc
+    if actual_sha256 != expected_sha256:
+        raise WorkflowLoraSlotError(
+            "changed_private_edit_source",
+            "Workflow LoRA edit evidence changed during private target extraction",
+        )
+    return snapshots
+
+
+def _private_plain_mapping_snapshot(value: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        detached = json.loads(
+            json.dumps(
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            )
+        )
+    except (RecursionError, TypeError, ValueError) as exc:
+        raise WorkflowLoraSlotError(
+            "changed_private_edit_source",
+            "Workflow LoRA edit evidence changed during private target extraction",
+        ) from exc
+    if type(detached) is not dict or not _plain_json_value(detached):
+        raise WorkflowLoraSlotError(
+            "changed_private_edit_source",
+            "Workflow LoRA edit evidence changed during private target extraction",
+        )
+    return cast(dict[str, Any], detached)
+
+
+def _private_core_evidence_snapshots(
+    graph: Mapping[str, Any],
+    evidence: Mapping[str, WorkflowLoraCoreEvidence],
+) -> dict[str, WorkflowLoraCoreEvidence]:
+    snapshots = {
+        node_id: WorkflowLoraCoreEvidence(
+            api_graph_sha256=item.api_graph_sha256,
+            node_id=item.node_id,
+            loader_contract=item.loader_contract,
+            adapter_schema_sha256=item.adapter_schema_sha256,
+            core_claimed=item.core_claimed,
+            dependency_slot=item.dependency_slot,
+            requirement_key=item.requirement_key,
+            resource_identity_sha256=item.resource_identity_sha256,
+        )
+        for node_id, item in evidence.items()
+    }
+    if not all(_private_core_evidence_is_canonical(item) for item in snapshots.values()):
+        raise WorkflowLoraSlotError(
+            "changed_private_edit_source",
+            "Workflow LoRA edit evidence changed during private target extraction",
+        )
+    return _core_evidence_index(graph, tuple(snapshots.values()))
+
+
+def _private_package_evidence_snapshots(
+    graph: Mapping[str, Any],
+    evidence: Mapping[str, WorkflowLoraPackageEvidence],
+) -> dict[str, WorkflowLoraPackageEvidence]:
+    snapshots = {
+        node_id: WorkflowLoraPackageEvidence(
+            api_graph_sha256=item.api_graph_sha256,
+            node_id=item.node_id,
+            package_claim=PackageClaim(
+                registry_id=item.package_claim.registry_id,
+                repository_id=item.package_claim.repository_id,
+                revision=item.package_claim.revision,
+            ),
+            dependency_slot=item.dependency_slot,
+            requirement_key=item.requirement_key,
+            resource_identity_sha256=item.resource_identity_sha256,
+        )
+        for node_id, item in evidence.items()
+    }
+    if not all(_private_package_evidence_is_canonical(item) for item in snapshots.values()):
+        raise WorkflowLoraSlotError(
+            "changed_private_edit_source",
+            "Workflow LoRA edit evidence changed during private target extraction",
+        )
+    return _package_evidence_index(graph, tuple(snapshots.values()))
+
+
+def _private_activation_is_canonical(
+    activation: WorkflowActivationResolution | None,
+) -> bool:
+    if activation is None:
+        return True
+    return (
+        type(activation) is WorkflowActivationResolution
+        and type(activation.bindings) is tuple
+        and type(activation.issues) is tuple
+        and type(activation.missing_required_slots) is tuple
+        and type(activation.complete) is bool
+        and (activation.binding_sha256 is None or type(activation.binding_sha256) is str)
+        and all(type(value) is str for value in activation.missing_required_slots)
+        and all(type(binding) is ResolvedWorkflowBinding for binding in activation.bindings)
+        and all(
+            type(binding.slot_name) is str
+            and type(binding.requirement_key) is str
+            and type(binding.resource_kind) is str
+            and type(binding.resource_identity_sha256) is str
+            and _plain_json_value(binding.identity)
+            and _plain_json_value(binding.mount)
+            for binding in activation.bindings
+        )
+    )
+
+
+def _private_core_evidence_is_canonical(evidence: WorkflowLoraCoreEvidence) -> bool:
+    return type(evidence) is WorkflowLoraCoreEvidence and all(
+        type(value) is expected
+        for value, expected in (
+            (evidence.api_graph_sha256, str),
+            (evidence.node_id, str),
+            (evidence.loader_contract, str),
+            (evidence.adapter_schema_sha256, str),
+            (evidence.core_claimed, bool),
+            (evidence.dependency_slot, str),
+            (evidence.requirement_key, str),
+            (evidence.resource_identity_sha256, str),
+        )
+    )
+
+
+def _private_package_evidence_is_canonical(
+    evidence: WorkflowLoraPackageEvidence,
+) -> bool:
+    claim = evidence.package_claim
+    return (
+        type(evidence) is WorkflowLoraPackageEvidence
+        and type(evidence.api_graph_sha256) is str
+        and type(evidence.node_id) is str
+        and type(evidence.dependency_slot) is str
+        and type(evidence.requirement_key) is str
+        and type(evidence.resource_identity_sha256) is str
+        and type(claim) is PackageClaim
+        and (claim.registry_id is None or type(claim.registry_id) is str)
+        and (claim.repository_id is None or type(claim.repository_id) is str)
+        and type(claim.revision) is str
+    )
+
+
+def _private_edit_target(
+    *,
+    slot: WorkflowLoraSlot,
+    parsed: _ParsedLora,
+    node_id: str,
+    graph_sha256: str,
+    contract_sha256: str,
+    activation_sha256: str | None,
+    evidence_sha256: str | None,
+    sources_are_canonical: bool,
+) -> WorkflowLoraPrivateEditTarget:
+    if (
+        not sources_are_canonical
+        or type(node_id) is not str
+        or type(parsed.locator) is not str
+        or not parsed.exact
+        or type(graph_sha256) is not str
+        or _DIGEST.fullmatch(graph_sha256) is None
+        or type(contract_sha256) is not str
+        or _DIGEST.fullmatch(contract_sha256) is None
+        or type(activation_sha256) is not str
+        or _DIGEST.fullmatch(activation_sha256) is None
+        or type(evidence_sha256) is not str
+        or _DIGEST.fullmatch(evidence_sha256) is None
+        or type(slot.loader_contract) is not str
+        or type(slot.loader_authority_sha256) is not str
+        or _DIGEST.fullmatch(slot.loader_authority_sha256) is None
+        or slot.asset_binding is None
+        or type(slot.asset_binding.sha256) is not str
+        or _DIGEST.fullmatch(slot.asset_binding.sha256) is None
+        or not slot.editable_fields
+        or slot.editable_fields != parsed.editable_fields
+    ):
+        raise WorkflowLoraSlotError(
+            "noncanonical_private_edit_source",
+            "Workflow LoRA private edit authority requires canonical audited evidence",
+        )
+    return WorkflowLoraPrivateEditTarget(
+        slot_id=slot.slot_id,
+        source_api_graph_sha256=graph_sha256,
+        source_dependency_contract_sha256=contract_sha256,
+        source_activation_binding_sha256=activation_sha256,
+        source_authority_evidence_sha256=evidence_sha256,
+        loader_authority_sha256=slot.loader_authority_sha256,
+        asset_sha256=slot.asset_binding.sha256,
+        node_id=node_id,
+        entry_locator=parsed.locator,
+        loader_contract=slot.loader_contract,
+        editable_fields=slot.editable_fields,
+    )
+
+
+def _private_authority_evidence_sha256(
+    core_evidence: Mapping[str, WorkflowLoraCoreEvidence],
+    package_evidence: Mapping[str, WorkflowLoraPackageEvidence],
+) -> str:
+    """Hash the exact scalar-only authority records consumed by this pass."""
+
+    payload = {
+        "core": [
+            {
+                "node_id": node_id,
+                "api_graph_sha256": item.api_graph_sha256,
+                "evidence_node_id": item.node_id,
+                "loader_contract": item.loader_contract,
+                "adapter_schema_sha256": item.adapter_schema_sha256,
+                "core_claimed": item.core_claimed,
+                "dependency_slot": item.dependency_slot,
+                "requirement_key": item.requirement_key,
+                "resource_identity_sha256": item.resource_identity_sha256,
+            }
+            for node_id, item in sorted(core_evidence.items())
+        ],
+        "packages": [
+            {
+                "node_id": node_id,
+                "api_graph_sha256": item.api_graph_sha256,
+                "evidence_node_id": item.node_id,
+                "package_claim": {
+                    "registry_id": item.package_claim.registry_id,
+                    "repository_id": item.package_claim.repository_id,
+                    "revision": item.package_claim.revision,
+                },
+                "dependency_slot": item.dependency_slot,
+                "requirement_key": item.requirement_key,
+                "resource_identity_sha256": item.resource_identity_sha256,
+            }
+            for node_id, item in sorted(package_evidence.items())
+        ],
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _revalidate_private_edit_sources(
+    *,
+    api_graph: Mapping[str, Any],
+    graph_sha256: str,
+    contract: WorkflowDependencyContract,
+    contract_sha256: str,
+    activation: WorkflowActivationResolution | None,
+    activation_sha256: str | None,
+    core_evidence: Mapping[str, WorkflowLoraCoreEvidence],
+    package_evidence: Mapping[str, WorkflowLoraPackageEvidence],
+    evidence_sha256: str | None,
+) -> None:
+    """Refuse authority if mutable evidence drifted during the extraction pass."""
+
+    if activation is None or activation_sha256 is None or evidence_sha256 is None:
+        raise WorkflowLoraSlotError(
+            "noncanonical_private_edit_source",
+            "Workflow LoRA private edit authority requires canonical audited evidence",
+        )
+    if (
+        not _plain_json_value(api_graph)
+        or not _private_activation_is_canonical(activation)
+        or not all(_private_core_evidence_is_canonical(item) for item in core_evidence.values())
+        or not all(
+            _private_package_evidence_is_canonical(item) for item in package_evidence.values()
+        )
+    ):
+        raise WorkflowLoraSlotError(
+            "changed_private_edit_source",
+            "Workflow LoRA edit evidence changed during private target extraction",
+        )
+    try:
+        current_graph_sha256 = _api_graph_sha256(api_graph)
+        current_contract_sha256 = workflow_dependency_contract_sha256(contract)
+        current_activation_sha256 = workflow_activation_binding_sha256(
+            contract,
+            activation.bindings,
+        )
+        current_evidence_sha256 = _private_authority_evidence_sha256(
+            core_evidence,
+            package_evidence,
+        )
+    except (AttributeError, RecursionError, TypeError, ValueError) as exc:
+        raise WorkflowLoraSlotError(
+            "changed_private_edit_source",
+            "Workflow LoRA edit evidence changed during private target extraction",
+        ) from exc
+    if (
+        current_graph_sha256 != graph_sha256
+        or current_contract_sha256 != contract_sha256
+        or current_activation_sha256 != activation_sha256
+        or current_evidence_sha256 != evidence_sha256
+    ):
+        raise WorkflowLoraSlotError(
+            "changed_private_edit_source",
+            "Workflow LoRA edit evidence changed during private target extraction",
+        )
 
 
 def _api_graph_sha256(api_graph: Mapping[str, Any]) -> str:
@@ -348,6 +884,8 @@ def _canonical_contract(contract: WorkflowDependencyContract) -> WorkflowDepende
             "Workflow dependency evidence is not a typed contract",
         )
     try:
+        # Parsing round-trips every nested constraint through canonical JSON, so
+        # the extraction pass owns this copy rather than caller-owned mappings.
         return parse_workflow_dependency_contract(workflow_dependency_contract_payload(contract))
     except WorkflowDependencyError as exc:
         raise WorkflowLoraSlotError(exc.code, str(exc)) from exc
