@@ -2373,6 +2373,13 @@ class CatalogPage(ApiModel):
     stale: bool = False
 
 
+class WorkflowCatalogGraphOut(ApiModel):
+    """A discovered workflow's graph, fetched so it can be reviewed like a local file."""
+
+    version_id: str
+    ui_graph: dict[str, Any]
+
+
 class CatalogDetail(ApiModel):
     model: CatalogModel
     revision: str

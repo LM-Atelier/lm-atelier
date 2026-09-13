@@ -88,6 +88,7 @@ import type {
   WorkflowOutputGeometryCapability,
   WorkflowOutputGeometryResolution,
   WorkflowBundle,
+  WorkflowCatalogGraph,
   WorkflowAssetReview,
   WorkflowPackageAnalysis,
   WorkflowRevisionChoice,
@@ -914,6 +915,11 @@ export const api = {
     if (cursor) parameters.set("cursor", cursor);
     return request<CatalogPage>(`/api/workflow-catalog?${parameters.toString()}`);
   },
+  /** One discovered workflow's graph, for the same review an imported file gets. */
+  workflowCatalogGraph: (versionId: string, source = "civitai") =>
+    request<WorkflowCatalogGraph>(
+      `/api/workflow-catalog/versions/${encodeURIComponent(versionId)}/graph?${new URLSearchParams({ source })}`,
+    ),
   catalog: (
     query: string,
     role: string,

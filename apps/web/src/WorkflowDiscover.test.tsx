@@ -1,10 +1,18 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { WorkflowDiscover } from "./WorkflowDiscover";
-import type { CatalogModel, CatalogPage } from "./types";
+import type { CatalogModel, CatalogPage, Workflow, WorkflowPackageAnalysis } from "./types";
 
-vi.mock("./api", () => ({ api: { workflowCatalog: vi.fn() } }));
+vi.mock("./api", () => ({
+  api: {
+    workflowCatalog: vi.fn(),
+    workflowCatalogGraph: vi.fn(),
+    analyzeWorkflowPackage: vi.fn(),
+    ensureWorkflowPackageDraft: vi.fn(),
+    importWorkflowPackage: vi.fn(),
+  },
+}));
 const { api } = await import("./api");
 const workflowCatalog = api.workflowCatalog as ReturnType<typeof vi.fn>;
 
@@ -34,14 +42,40 @@ function page(overrides: Partial<CatalogPage> = {}): CatalogPage {
   return { items: [item()], next_cursor: null, stale: false, ...overrides } as CatalogPage;
 }
 
-function show() {
+function show(onImported?: () => void) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   clients.push(client);
   render(
     <QueryClientProvider client={client}>
-      <WorkflowDiscover />
+      <WorkflowDiscover onImported={onImported} />
     </QueryClientProvider>,
   );
+}
+
+const EXPORT = { nodes: [{ id: 1, type: "CheckpointLoaderSimple" }], links: [] };
+
+function readyAnalysis(): WorkflowPackageAnalysis {
+  return {
+    format_version: "0.4",
+    frontend_version: null,
+    node_count: 1,
+    link_count: 0,
+    subgraph_count: 0,
+    operation_guess: "image",
+    truncated: false,
+    required_node_types: ["CheckpointLoaderSimple"],
+    frontend_node_types: [],
+    missing_node_types: [],
+    missing_nodes: [],
+    custom_packages: [],
+    asset_references: [],
+    issues: [],
+    ready: true,
+    runtime_nodes_available: true,
+    dependencies_resolved: true,
+    node_inventory_available: true,
+    source_candidates: [],
+  };
 }
 
 it("does not claim the library is empty before anyone has searched", async () => {
@@ -136,4 +170,81 @@ it("submits the typed query only when the search is run", async () => {
   // Typing must not fire a request per keystroke at a rate-limited provider.
   expect(workflowCatalog).toHaveBeenCalledTimes(1);
   expect(workflowCatalog).toHaveBeenLastCalledWith("", "trending", null);
+});
+
+it("reviews a found workflow the way an imported file is reviewed", async () => {
+  // A published workflow is somebody else's ComfyUI export, so it gets the same
+  // review a downloaded one does, under the name it was published with.
+  workflowCatalog.mockResolvedValue(page());
+  vi.mocked(api.workflowCatalogGraph).mockResolvedValue({ version_id: "801", ui_graph: EXPORT });
+  vi.mocked(api.analyzeWorkflowPackage).mockResolvedValue(readyAnalysis());
+  show(vi.fn());
+
+  fireEvent.click(await screen.findByRole("button", { name: "Review and add" }));
+
+  const dialog = await screen.findByRole("dialog", { name: "Review workflow package" });
+  expect(api.workflowCatalogGraph).toHaveBeenCalledWith("801", "civitai");
+  expect(api.analyzeWorkflowPackage).toHaveBeenCalledWith(EXPORT);
+  expect(within(dialog).getByDisplayValue("A portrait workflow")).toBeTruthy();
+  // Nothing has been added by looking.
+  expect(api.ensureWorkflowPackageDraft).not.toHaveBeenCalled();
+  expect(api.importWorkflowPackage).not.toHaveBeenCalled();
+});
+
+it("imports the fetched graph itself and says so once it is added", async () => {
+  workflowCatalog.mockResolvedValue(page());
+  vi.mocked(api.workflowCatalogGraph).mockResolvedValue({ version_id: "801", ui_graph: EXPORT });
+  vi.mocked(api.analyzeWorkflowPackage).mockResolvedValue(readyAnalysis());
+  vi.mocked(api.ensureWorkflowPackageDraft).mockResolvedValue({
+    id: "draft-1",
+    current_revision_id: "draft-revision-1",
+  } as Workflow);
+  vi.mocked(api.importWorkflowPackage).mockResolvedValue({ id: "wf-1" } as Workflow);
+  const onImported = vi.fn();
+  show(onImported);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Review and add" }));
+  const dialog = await screen.findByRole("dialog", { name: "Review workflow package" });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Import workflow" }));
+
+  await waitFor(() => expect(onImported).toHaveBeenCalledOnce());
+  expect(vi.mocked(api.importWorkflowPackage).mock.calls[0][0]).toMatchObject({
+    ui_graph: EXPORT,
+    name: "A portrait workflow",
+  });
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
+
+it("says why a workflow could not be fetched, and opens no review", async () => {
+  workflowCatalog.mockResolvedValue(page());
+  vi.mocked(api.workflowCatalogGraph).mockRejectedValue(
+    new Error("This version carries more than one workflow graph, so which to install is ambiguous"),
+  );
+  show(vi.fn());
+
+  fireEvent.click(await screen.findByRole("button", { name: "Review and add" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(/more than one workflow graph/);
+  expect(api.analyzeWorkflowPackage).not.toHaveBeenCalled();
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
+
+it("fetches one graph at a time rather than one per click", async () => {
+  workflowCatalog.mockResolvedValue(
+    page({ items: [item(), item({ remote_id: "802", name: "Another" })] }),
+  );
+  vi.mocked(api.workflowCatalogGraph).mockReturnValue(new Promise(() => undefined));
+  show(vi.fn());
+
+  const [first, second] = await screen.findAllByRole("button", { name: "Review and add" });
+  fireEvent.click(first);
+
+  expect(await screen.findByRole("button", { name: "Fetching…" })).toBeTruthy();
+  expect(second).toHaveAttribute("aria-disabled", "true");
+  fireEvent.click(second);
+  fireEvent.click(screen.getByRole("button", { name: "Fetching…" }));
+  // A mutation reaches its request only after a turn of the event loop, so a
+  // second fetch would not have shown up in the count yet without this.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(api.workflowCatalogGraph).toHaveBeenCalledOnce();
 });

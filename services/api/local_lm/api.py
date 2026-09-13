@@ -483,6 +483,7 @@ from .schemas import (
     WorkflowAssetReviewRequest,
     WorkflowAssetSelectionIn,
     WorkflowBundle,
+    WorkflowCatalogGraphOut,
     WorkflowClone,
     WorkflowCreate,
     WorkflowDependencyImpactOut,
@@ -5331,6 +5332,60 @@ async def workflow_catalog_search(
             "catalog-unavailable",
             f"{catalog.display_name} is temporarily unavailable. Check your connection and retry.",
         ) from exc
+
+
+@router.get(
+    "/workflow-catalog/versions/{version_id}/graph",
+    response_model=WorkflowCatalogGraphOut,
+)
+async def workflow_catalog_graph(
+    request: Request,
+    version_id: str = PathParam(min_length=1, max_length=32),
+    source: str = Query(default="civitai", min_length=1, max_length=32),
+) -> WorkflowCatalogGraphOut:
+    """One discovered workflow's graph, so it can be reviewed before anything is added.
+
+    A workflow found in Discover is a ComfyUI export somebody else published,
+    which is exactly what a person can already bring in as a file. So it takes
+    the same road a file does: this hands the graph back, and the existing
+    package review analyzes it, prepares what it needs, and imports it. Nothing
+    here is stored, trusted or run, and no second install path exists for a
+    workflow that happened to come from a catalog.
+
+    Only an export is accepted. A different kind of JSON would reach the review
+    as a refusal about graph structure, which is true and does not tell anyone
+    that the file they chose is simply not a workflow this can add.
+    """
+
+    services = _services(request)
+    try:
+        catalog: CatalogSource = services.catalog_sources.get(source)
+    except CatalogSourceNotFound as exc:
+        raise api_error(404, "catalog-source-not-found", str(exc)) from exc
+    if getattr(catalog, "fetch_workflow_graph", None) is None:
+        raise api_error(
+            404,
+            "catalog-source-serves-no-workflows",
+            f"{catalog.display_name} does not offer workflows.",
+        )
+    source_with_workflows = cast(WorkflowCatalogSource, catalog)
+    try:
+        artifact = await source_with_workflows.fetch_workflow_graph(version_id)
+    except ValueError as exc:
+        raise api_error(422, "workflow-catalog-graph-unusable", str(exc)) from exc
+    except Exception as exc:
+        raise api_error(
+            503,
+            "catalog-unavailable",
+            f"{catalog.display_name} is temporarily unavailable. Check your connection and retry.",
+        ) from exc
+    if not isinstance(artifact.graph.get("nodes"), list):
+        raise api_error(
+            422,
+            "workflow-catalog-graph-not-an-export",
+            "This workflow is not published as a ComfyUI workflow export, so it cannot be added.",
+        )
+    return WorkflowCatalogGraphOut(version_id=artifact.version_id, ui_graph=artifact.graph)
 
 
 @router.get("/catalog/workflow-models", response_model=list[CatalogModel])

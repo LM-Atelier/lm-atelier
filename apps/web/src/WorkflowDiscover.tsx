@@ -1,7 +1,9 @@
-import { useInfiniteQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "./api";
 import { ErrorCallout } from "./ErrorCallout";
+import type { PackageReviewState } from "./useWorkflowPackageImport";
+import { WorkflowPackageReview } from "./WorkflowPackageReview";
 import type { CatalogModel } from "./types";
 
 /** Finding a workflow you do not have yet.
@@ -18,9 +20,24 @@ import type { CatalogModel } from "./types";
  * shared card would render blanks and read as missing information rather than
  * as information that does not apply. So this renders only the fields a
  * workflow actually has.
+ *
+ * ADDING ONE IS THE SAME REVIEW AS IMPORTING A FILE. A published workflow is a
+ * ComfyUI export somebody else made, so it goes through the package review a
+ * downloaded export would: what it needs, preparing it, then importing it.
+ * Nothing is added until that review says so.
  */
 
-function WorkflowCard({ item }: { item: CatalogModel }) {
+function WorkflowCard({
+  item,
+  fetching,
+  busy,
+  onReview,
+}: {
+  item: CatalogModel;
+  fetching: boolean;
+  busy: boolean;
+  onReview: () => void;
+}) {
   return (
     <article className="workflow-discover-card">
       <header>
@@ -48,11 +65,23 @@ function WorkflowCard({ item }: { item: CatalogModel }) {
           ))}
         </ul>
       )}
+      <button
+        type="button"
+        className="secondary"
+        aria-disabled={busy}
+        onClick={() => {
+          // aria-disabled rather than disabled: disabling the focused button
+          // would drop focus to the page while the graph is being fetched.
+          if (!busy) onReview();
+        }}
+      >
+        {fetching ? "Fetching…" : "Review and add"}
+      </button>
     </article>
   );
 }
 
-export function WorkflowDiscover() {
+export function WorkflowDiscover({ onImported }: { onImported?: () => void }) {
   const [typed, setTyped] = useState("");
   const [submitted, setSubmitted] = useState("");
   const [sort, setSort] = useState("trending");
@@ -68,6 +97,21 @@ export function WorkflowDiscover() {
   // Any stale page makes the whole list stale: a person reading it cannot tell
   // which rows came from which fetch, so the weaker claim is the honest one.
   const stale = catalog.data?.pages.some((page) => page.stale) ?? false;
+
+  const [review, setReview] = useState<PackageReviewState | null>(null);
+  const fetchReview = useMutation({
+    mutationFn: async (item: CatalogModel): Promise<PackageReviewState> => {
+      const graph = await api.workflowCatalogGraph(item.remote_id, item.provider);
+      return {
+        analysis: await api.analyzeWorkflowPackage(graph.ui_graph),
+        // The published name, not the provider's file name: the review offers
+        // it as the workflow's name, and "workflow.json" names nothing.
+        fileName: item.name,
+        uiGraph: graph.ui_graph,
+      };
+    },
+    onSuccess: setReview,
+  });
 
   return (
     <section className="workflow-discover" aria-label="Discover workflows">
@@ -107,6 +151,8 @@ export function WorkflowDiscover() {
 
       {catalog.error && <ErrorCallout message={catalog.error.message} />}
 
+      {fetchReview.error && <ErrorCallout message={fetchReview.error.message} />}
+
       {catalog.isPending && <p className="muted">Looking…</p>}
 
       {/* An empty result and a search not yet run are different states, and
@@ -122,7 +168,13 @@ export function WorkflowDiscover() {
 
       <div className="workflow-discover-results">
         {items.map((item) => (
-          <WorkflowCard key={`${item.provider}:${item.remote_id}`} item={item} />
+          <WorkflowCard
+            key={`${item.provider}:${item.remote_id}`}
+            item={item}
+            fetching={fetchReview.isPending && fetchReview.variables === item}
+            busy={fetchReview.isPending}
+            onReview={() => fetchReview.mutate(item)}
+          />
         ))}
       </div>
 
@@ -134,6 +186,19 @@ export function WorkflowDiscover() {
         >
           {catalog.isFetchingNextPage ? "Loading…" : "Show more"}
         </button>
+      )}
+
+      {review && (
+        <WorkflowPackageReview
+          analysis={review.analysis}
+          fileName={review.fileName}
+          uiGraph={review.uiGraph}
+          onImported={() => {
+            setReview(null);
+            onImported?.();
+          }}
+          onClose={() => setReview(null)}
+        />
       )}
     </section>
   );

@@ -1009,6 +1009,12 @@ export interface CatalogPage {
   stale?: boolean;
 }
 
+/** A discovered workflow's graph, to be reviewed the way an imported file is. */
+export interface WorkflowCatalogGraph {
+  version_id: string;
+  ui_graph: Record<string, unknown>;
+}
+
 export interface CatalogDetail {
   model: CatalogModel;
   revision: string;
