@@ -112,3 +112,26 @@ it("opens on the choice somebody already made, rather than resetting it", async 
   expect(screen.getByRole("button", { name: "Light" }).getAttribute("aria-pressed")).toBe("true");
   expect((screen.getByRole("combobox", { name: "Theme" }) as HTMLSelectElement).value).toBe("blue-hour");
 });
+
+it("offers System, which follows the computer's light setting", async () => {
+  vi.stubGlobal("matchMedia", () => ({
+    media: "(prefers-color-scheme: light)",
+    matches: true,
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined,
+  }));
+  localStorage.setItem(MODE_KEY, "dark");
+  try {
+    renderApp();
+    await openSettings();
+
+    fireEvent.click(screen.getByRole("button", { name: "System" }));
+
+    expect(screen.getByRole("button", { name: "System" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Dark" }).getAttribute("aria-pressed")).toBe("false");
+    expect(localStorage.getItem(MODE_KEY)).toBe("system");
+    expect(document.documentElement.dataset.mode).toBe("light");
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});

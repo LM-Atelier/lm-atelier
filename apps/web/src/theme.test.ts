@@ -1,7 +1,38 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ROOMS, ROOM_LABELS, isMode, isRoom, useAppearance, type Room } from "./theme";
+import {
+  MODE_KEY,
+  ROOMS,
+  ROOM_LABELS,
+  isMode,
+  isModeChoice,
+  isRoom,
+  useAppearance,
+  type Room,
+} from "./theme";
+
+/** An operating system whose light setting the test can switch, as a person would. */
+function systemSetTo(light: boolean) {
+  let current = light;
+  const listeners = new Set<() => void>();
+  const query = {
+    media: "(prefers-color-scheme: light)",
+    get matches() {
+      return current;
+    },
+    addEventListener: (_type: string, listener: () => void) => listeners.add(listener),
+    removeEventListener: (_type: string, listener: () => void) => listeners.delete(listener),
+  };
+  vi.stubGlobal("matchMedia", () => query);
+  return {
+    listeners,
+    switchTo(next: boolean) {
+      current = next;
+      for (const listener of listeners) listener();
+    },
+  };
+}
 
 describe("rooms and modes", () => {
   it("treats the room and the light as separate questions", () => {
@@ -48,5 +79,70 @@ describe("the appearance the workspace shares", () => {
     expect(result.current).not.toBe(first);
     expect(result.current.setMode).toBe(first.setMode);
     expect(result.current.setRoom).toBe(first.setRoom);
+  });
+});
+
+describe("following the system's light", () => {
+  beforeEach(() => localStorage.clear());
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("knows the system as a choice, and nothing else", () => {
+    expect(isModeChoice("system")).toBe(true);
+    expect(isModeChoice("dark")).toBe(true);
+    expect(isModeChoice("auto")).toBe(false);
+    expect(isMode("system")).toBe(false);
+  });
+
+  it("follows the computer while System is chosen, and is remembered as that choice", () => {
+    const system = systemSetTo(false);
+    const { result } = renderHook(() => useAppearance());
+
+    act(() => result.current.setMode("system"));
+    expect(result.current.modeChoice).toBe("system");
+    expect(result.current.mode).toBe("dark");
+    expect(localStorage.getItem(MODE_KEY)).toBe("system");
+
+    act(() => system.switchTo(true));
+    expect(result.current.mode).toBe("light");
+    expect(document.documentElement.dataset.mode).toBe("light");
+  });
+
+  it("stops listening once a fixed mode is chosen again", () => {
+    const system = systemSetTo(true);
+    const { result } = renderHook(() => useAppearance());
+    act(() => result.current.setMode("system"));
+    expect(system.listeners.size).toBe(1);
+
+    act(() => result.current.setMode("dark"));
+    expect(system.listeners.size).toBe(0);
+    act(() => system.switchTo(false));
+    act(() => system.switchTo(true));
+    expect(result.current.mode).toBe("dark");
+  });
+
+  it("without any choice, seeds once from the system and then stays put", () => {
+    // Following the system is something a person chooses. Nobody chose it here,
+    // so a later change in the computer's setting does not repaint the workspace.
+    const system = systemSetTo(true);
+    const { result } = renderHook(() => useAppearance());
+    expect(result.current.mode).toBe("light");
+    expect(result.current.modeChoice).toBe("light");
+
+    act(() => system.switchTo(false));
+    expect(result.current.mode).toBe("light");
+    expect(system.listeners.size).toBe(0);
+  });
+
+  it("opens on System when that was the remembered choice", () => {
+    localStorage.setItem(MODE_KEY, "system");
+    systemSetTo(true);
+
+    const { result } = renderHook(() => useAppearance());
+
+    expect(result.current.modeChoice).toBe("system");
+    expect(result.current.mode).toBe("light");
   });
 });

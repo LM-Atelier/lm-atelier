@@ -1,10 +1,11 @@
-import { Moon, Sun } from "lucide-react";
+import { Monitor, Moon, Sun } from "lucide-react";
 import { useId } from "react";
-import { ROOMS, ROOM_LABELS, type Appearance, type Room, type ThemeMode } from "./theme";
+import { ROOMS, ROOM_LABELS, type Appearance, type ModeChoice, type Room } from "./theme";
 
-const MODES: readonly { value: ThemeMode; label: string; Icon: typeof Sun }[] = [
+const MODES: readonly { value: ModeChoice; label: string; Icon: typeof Sun }[] = [
   { value: "light", label: "Light", Icon: Sun },
   { value: "dark", label: "Dark", Icon: Moon },
+  { value: "system", label: "System", Icon: Monitor },
 ];
 
 /** Whether the light is on, and which room you are in, as a Settings page.
@@ -21,7 +22,7 @@ const MODES: readonly { value: ThemeMode; label: string; Icon: typeof Sun }[] = 
  * single entry asks a question that has no second answer.
  */
 export function AppearanceSettings({ appearance }: { appearance: Appearance }) {
-  const { mode, setMode, room, setRoom } = appearance;
+  const { modeChoice, setMode, room, setRoom } = appearance;
   const id = useId();
   return (
     <section>
@@ -29,15 +30,17 @@ export function AppearanceSettings({ appearance }: { appearance: Appearance }) {
       <div className="setting-row appearance-row">
         <span>
           <strong id={`${id}-mode`}>Mode</strong>
-          <small id={`${id}-mode-help`}>Every theme has a light and a dark version.</small>
+          <small id={`${id}-mode-help`}>
+            Every theme has a light and a dark version. System follows your computer.
+          </small>
         </span>
         <div className="segmented" role="group" aria-labelledby={`${id}-mode`} aria-describedby={`${id}-mode-help`}>
           {MODES.map(({ value, label, Icon }) => (
             <button
               type="button"
               key={value}
-              className={mode === value ? "active" : ""}
-              aria-pressed={mode === value}
+              className={modeChoice === value ? "active" : ""}
+              aria-pressed={modeChoice === value}
               onClick={() => setMode(value)}
             >
               <Icon size={15} aria-hidden="true" />{label}

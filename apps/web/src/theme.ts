@@ -15,6 +15,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
  */
 export type ThemeMode = "light" | "dark";
 
+/** What a person chose for the light: one mode, or whatever the computer is set to. */
+export type ModeChoice = ThemeMode | "system";
+
 /** A room is a whole palette. Adding one means adding a block of custom
  * properties and a name here; no rule in the stylesheet changes. */
 export const ROOMS = ["north-light", "blue-hour"] as const;
@@ -36,23 +39,33 @@ export function isMode(value: unknown): value is ThemeMode {
   return value === "light" || value === "dark";
 }
 
+export function isModeChoice(value: unknown): value is ModeChoice {
+  return isMode(value) || value === "system";
+}
+
+const PREFERS_LIGHT = "(prefers-color-scheme: light)";
+
+/** The mode the operating system is asking for right now, dark when it cannot say. */
+function systemMode(): ThemeMode {
+  return typeof matchMedia === "function" && matchMedia(PREFERS_LIGHT).matches ? "light" : "dark";
+}
+
 export function storedRoom(): Room {
   const stored = localStorage.getItem(ROOM_KEY);
   return isRoom(stored) ? stored : "north-light";
 }
 
-/** Dark unless asked otherwise, and asked once rather than guessed each time.
+/** The remembered choice, or a mode seeded once from the system when there is none.
  *
- * The system preference seeds the first answer; after that the choice is the
- * person's, because an interface that flips itself at sunset is one that
- * changed without being asked.
+ * Without a choice the system preference seeds the first answer and it then
+ * stays put, because an interface that flips itself at sunset without being
+ * asked has changed without being asked. Following the system is still
+ * available - as a choice somebody makes, "system", rather than a default
+ * nobody did.
  */
-export function storedMode(): ThemeMode {
+export function storedModeChoice(): ModeChoice {
   const stored = localStorage.getItem(MODE_KEY);
-  if (isMode(stored)) return stored;
-  const prefersLight =
-    typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: light)").matches;
-  return prefersLight ? "light" : "dark";
+  return isModeChoice(stored) ? stored : systemMode();
 }
 
 export function useRoom(): [Room, (room: Room) => void] {
@@ -64,13 +77,28 @@ export function useRoom(): [Room, (room: Room) => void] {
   return [room, choose];
 }
 
-export function useThemeMode(): [ThemeMode, (mode: ThemeMode) => void] {
-  const [mode, setMode] = useState<ThemeMode>(storedMode);
-  const choose = useCallback((next: ThemeMode) => {
-    setMode(next);
+/** The mode choice, the mode it currently means, and a way to change the choice.
+ *
+ * "system" is the one choice whose meaning changes on its own, so only while it
+ * is chosen does this listen for the operating system switching between light
+ * and dark.
+ */
+export function useThemeMode(): [ModeChoice, ThemeMode, (choice: ModeChoice) => void] {
+  const [choice, setChoice] = useState<ModeChoice>(storedModeChoice);
+  const [system, setSystem] = useState<ThemeMode>(systemMode);
+  useEffect(() => {
+    if (choice !== "system" || typeof matchMedia !== "function") return;
+    const query = matchMedia(PREFERS_LIGHT);
+    const follow = () => setSystem(query.matches ? "light" : "dark");
+    follow();
+    query.addEventListener("change", follow);
+    return () => query.removeEventListener("change", follow);
+  }, [choice]);
+  const choose = useCallback((next: ModeChoice) => {
+    setChoice(next);
     localStorage.setItem(MODE_KEY, next);
   }, []);
-  return [mode, choose];
+  return [choice, choice === "system" ? system : choice, choose];
 }
 
 /** The room and its light, remembered and applied to the document.
@@ -84,17 +112,23 @@ export function useThemeMode(): [ThemeMode, (mode: ThemeMode) => void] {
  */
 export interface Appearance {
   room: Room;
+  /** The mode in effect: what the document is drawn in. */
   mode: ThemeMode;
+  /** What was chosen, which may be to follow the system. */
+  modeChoice: ModeChoice;
   setRoom: (room: Room) => void;
-  setMode: (mode: ThemeMode) => void;
+  setMode: (choice: ModeChoice) => void;
 }
 
 export function useAppearance(): Appearance {
   const [room, setRoom] = useRoom();
-  const [mode, setMode] = useThemeMode();
+  const [modeChoice, mode, setMode] = useThemeMode();
   useEffect(() => {
     document.documentElement.dataset.room = room;
     document.documentElement.dataset.mode = mode;
   }, [room, mode]);
-  return useMemo(() => ({ room, mode, setRoom, setMode }), [room, mode, setRoom, setMode]);
+  return useMemo(
+    () => ({ room, mode, modeChoice, setRoom, setMode }),
+    [room, mode, modeChoice, setRoom, setMode],
+  );
 }

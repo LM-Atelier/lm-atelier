@@ -32,7 +32,11 @@ const profile: ModelProfile = {
 
 // Settings needs the workspace's appearance; these cases never open that page.
 const appearance: Appearance = {
-  room: "north-light", mode: "dark", setRoom: () => undefined, setMode: () => undefined,
+  room: "north-light",
+  mode: "dark",
+  modeChoice: "dark",
+  setRoom: () => undefined,
+  setMode: () => undefined,
 };
 
 function show(value = profile) {
