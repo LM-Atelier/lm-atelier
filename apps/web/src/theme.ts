@@ -32,6 +32,7 @@ export const ROOM_KEY = "local-lm-room";
 export const MODE_KEY = "local-lm-mode";
 export const CHAT_WIDTH_KEY = "local-lm-chat-width";
 export const MOTION_KEY = "local-lm-motion";
+export const THUMBNAIL_SIZE_KEY = "local-lm-thumbnails";
 
 /** Whether the workspace animates: as the computer asks, or always as little as it can.
  *
@@ -52,6 +53,15 @@ export type MotionChoice = "system" | "reduce";
 export type ChatWidth = "standard" | "wide" | "full";
 
 export const CHAT_WIDTHS: readonly ChatWidth[] = ["standard", "wide", "full"];
+
+/** How large media previews are drawn: Media Library cards and pictures attached to a message.
+ *
+ * Medium is the size they have always been. Small fits more of a large library
+ * on screen; large makes a picture recognisable without opening it.
+ */
+export type ThumbnailSize = "small" | "medium" | "large";
+
+export const THUMBNAIL_SIZES: readonly ThumbnailSize[] = ["small", "medium", "large"];
 
 export function isRoom(value: unknown): value is Room {
   return typeof value === "string" && (ROOMS as readonly string[]).includes(value);
@@ -120,6 +130,15 @@ export function storedChatWidth(): ChatWidth {
   return isChatWidth(stored) ? stored : "standard";
 }
 
+export function isThumbnailSize(value: unknown): value is ThumbnailSize {
+  return typeof value === "string" && (THUMBNAIL_SIZES as readonly string[]).includes(value);
+}
+
+export function storedThumbnailSize(): ThumbnailSize {
+  const stored = localStorage.getItem(THUMBNAIL_SIZE_KEY);
+  return isThumbnailSize(stored) ? stored : "medium";
+}
+
 export function useChatWidth(): [ChatWidth, (width: ChatWidth) => void] {
   const [width, setWidth] = useState<ChatWidth>(storedChatWidth);
   const choose = useCallback((next: ChatWidth) => {
@@ -127,6 +146,15 @@ export function useChatWidth(): [ChatWidth, (width: ChatWidth) => void] {
     localStorage.setItem(CHAT_WIDTH_KEY, next);
   }, []);
   return [width, choose];
+}
+
+export function useThumbnailSize(): [ThumbnailSize, (size: ThumbnailSize) => void] {
+  const [size, setSize] = useState<ThumbnailSize>(storedThumbnailSize);
+  const choose = useCallback((next: ThumbnailSize) => {
+    setSize(next);
+    localStorage.setItem(THUMBNAIL_SIZE_KEY, next);
+  }, []);
+  return [size, choose];
 }
 
 const PREFERS_LIGHT = "(prefers-color-scheme: light)";
@@ -205,10 +233,12 @@ export interface Appearance {
   chatWidth: ChatWidth;
   /** What was chosen for motion, which may be to follow the computer. */
   motionChoice: MotionChoice;
+  thumbnailSize: ThumbnailSize;
   setRoom: (room: Room) => void;
   setMode: (choice: ModeChoice) => void;
   setChatWidth: (width: ChatWidth) => void;
   setMotion: (choice: MotionChoice) => void;
+  setThumbnailSize: (size: ThumbnailSize) => void;
 }
 
 export function useAppearance(): Appearance {
@@ -216,14 +246,19 @@ export function useAppearance(): Appearance {
   const [modeChoice, mode, setMode] = useThemeMode();
   const [chatWidth, setChatWidth] = useChatWidth();
   const [motionChoice, reducedMotion, setMotion] = useMotion();
+  const [thumbnailSize, setThumbnailSize] = useThumbnailSize();
   useEffect(() => {
     document.documentElement.dataset.room = room;
     document.documentElement.dataset.mode = mode;
     document.documentElement.dataset.chatWidth = chatWidth;
     document.documentElement.dataset.motion = reducedMotion ? "reduced" : "full";
-  }, [room, mode, chatWidth, reducedMotion]);
+    document.documentElement.dataset.thumbnails = thumbnailSize;
+  }, [room, mode, chatWidth, reducedMotion, thumbnailSize]);
   return useMemo(
-    () => ({ room, mode, modeChoice, chatWidth, motionChoice, setRoom, setMode, setChatWidth, setMotion }),
-    [room, mode, modeChoice, chatWidth, motionChoice, setRoom, setMode, setChatWidth, setMotion],
+    () => ({
+      room, mode, modeChoice, chatWidth, motionChoice, thumbnailSize,
+      setRoom, setMode, setChatWidth, setMotion, setThumbnailSize,
+    }),
+    [room, mode, modeChoice, chatWidth, motionChoice, thumbnailSize, setRoom, setMode, setChatWidth, setMotion, setThumbnailSize],
   );
 }

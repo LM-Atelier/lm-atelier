@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "./App";
 import { api } from "./api";
 import { CLOCK_KEY } from "./clockPreference";
-import { CHAT_WIDTH_KEY, MODE_KEY, MOTION_KEY, ROOM_KEY } from "./theme";
+import { CHAT_WIDTH_KEY, MODE_KEY, MOTION_KEY, ROOM_KEY, THUMBNAIL_SIZE_KEY } from "./theme";
 
 vi.mock("./api", () => ({
   api: {
@@ -167,6 +167,24 @@ it("widens the chat from Settings and opens on that width next time", async () =
   renderApp();
   await screen.findByRole("button", { name: "Settings" });
   expect(document.documentElement.dataset.chatWidth).toBe("wide");
+});
+
+it("sizes thumbnails from Settings and opens on that size next time", async () => {
+  renderApp();
+  await openSettings();
+  const thumbnails = screen.getByRole("group", { name: "Thumbnails" });
+  expect(within(thumbnails).getByRole("button", { name: "Medium" }).getAttribute("aria-pressed")).toBe("true");
+
+  fireEvent.click(within(thumbnails).getByRole("button", { name: "Small" }));
+
+  expect(document.documentElement.dataset.thumbnails).toBe("small");
+  expect(localStorage.getItem(THUMBNAIL_SIZE_KEY)).toBe("small");
+  expect(within(thumbnails).getByRole("button", { name: "Small" }).getAttribute("aria-pressed")).toBe("true");
+  cleanup();
+
+  renderApp();
+  await screen.findByRole("button", { name: "Settings" });
+  expect(document.documentElement.dataset.thumbnails).toBe("small");
 });
 
 it("reduces motion from Settings", async () => {
