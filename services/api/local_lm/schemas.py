@@ -439,7 +439,10 @@ class WebSearchConfiguration(ApiModel):
     configured: bool
     provider: Literal["CRW"] = "CRW"
     provider_endpoint: str | None = None
-    error_code: Literal["search_not_configured", "search_provider_invalid"] | None = None
+    error_code: (
+        Literal["search_not_configured", "search_provider_invalid", "search_credentials_invalid"]
+        | None
+    ) = None
 
 
 class ChatDetail(ChatOut):

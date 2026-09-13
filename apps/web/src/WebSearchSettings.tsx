@@ -20,6 +20,8 @@ export function WebSearchSettings() {
               ? `Search provider: CRW at ${configuration.data.provider_endpoint}`
               : configuration.data.error_code === "search_provider_invalid"
                 ? "The configured search provider address is invalid."
+                : configuration.data.error_code === "search_credentials_invalid"
+                  ? "The search token is not valid, so searches cannot be sent. It must be one line with no spaces. Replace it below, or correct LOCAL_LM_CRW_TOKEN if it is set there."
                 : "No search provider is configured."}</p>
           </>
         )}

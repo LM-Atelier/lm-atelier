@@ -238,25 +238,41 @@ async def test_imported_history_cannot_supply_an_active_link_or_command(
 
 
 @pytest.mark.parametrize(
-    "endpoint,enabled,configured,code",
+    "endpoint,token,enabled,configured,code",
     [
-        (ENDPOINT, True, True, None),
-        (None, True, False, "search_not_configured"),
-        ("https://account:secret@example.test", True, False, "search_provider_invalid"),
-        (ENDPOINT, False, True, None),
+        (ENDPOINT, "constructed-search-token", True, True, None),
+        (None, "constructed-search-token", True, False, "search_not_configured"),
+        (
+            "https://account:secret@example.test",
+            "constructed-search-token",
+            True,
+            False,
+            "search_provider_invalid",
+        ),
+        (ENDPOINT, "constructed-search-token", False, True, None),
+        # A good address with a token that has a space in it is the token's fault.
+        (ENDPOINT, "constructed-search-token ", True, False, "search_credentials_invalid"),
+        (
+            "https://account:secret@example.test",
+            "constructed-search-token ",
+            True,
+            False,
+            "search_provider_invalid",
+        ),
     ],
 )
 async def test_configuration_reports_availability_without_exposing_account_data(
     client: AsyncClient,
     app: FastAPI,
     endpoint: str | None,
+    token: str,
     enabled: bool,
     configured: bool,
     code: str | None,
 ) -> None:
     settings = app.state.services.settings
     settings.crw_endpoint = endpoint
-    settings.crw_token = "constructed-search-token"
+    settings.crw_token = token
     settings.web_access_enabled = enabled
     response = await client.get("/api/web-search/configuration")
     assert response.status_code == 200
