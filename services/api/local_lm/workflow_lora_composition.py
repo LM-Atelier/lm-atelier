@@ -35,6 +35,7 @@ from .workflow_lora_graph import (
     workflow_lora_graph_resolution_sha256,
 )
 from .workflow_lora_overrides import (
+    WORKFLOW_LORA_OVERRIDE_ORIGINS,
     WorkflowLoraOverrideCatalog,
     WorkflowLoraOverrideResolution,
     workflow_lora_override_resolution_payload,
@@ -48,17 +49,7 @@ WORKFLOW_LORA_COMPOSITION_VERSION = 1
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _SLOT_ID = re.compile(r"^wflora_[0-9a-f]{64}$")
 _FIELDS = ("enabled", "model_strength", "clip_strength")
-_ORIGINS = frozenset(
-    {
-        "profile_request",
-        "default_preset",
-        "project_preset",
-        "project",
-        "chat_preset",
-        "chat",
-        "turn",
-    }
-)
+_ORIGINS = frozenset(WORKFLOW_LORA_OVERRIDE_ORIGINS)
 
 
 class WorkflowLoraCompositionError(ValueError):

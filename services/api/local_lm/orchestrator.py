@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import json
 import logging
 import re
 import secrets
@@ -181,6 +182,7 @@ from .schemas import (
     WorkerStatus,
 )
 from .settings_registry import (
+    WORKFLOW_LORA_OVERRIDES_SETTING_KEY,
     compatible_stored_settings,
     resolve_generation_settings,
     validate_settings,
@@ -253,6 +255,39 @@ from .workflow_compatibility import (
     resolve_chat_workflow_selection,
     resolve_project_workflow_selection,
 )
+from .workflow_lora_admission import (
+    WorkflowLoraAdmission,
+    WorkflowLoraAdmissionError,
+    WorkflowLoraAdmissionLayers,
+    admit_workflow_lora_composition,
+    split_inherited_workflow_lora_setting,
+    split_workflow_lora_admission_layers,
+    workflow_lora_admission_provenance,
+    workflow_lora_admission_setting_value,
+)
+from .workflow_lora_composition import (
+    WorkflowLoraCompositionError,
+    compose_workflow_lora_graph,
+    workflow_lora_composition_added_provenance,
+    workflow_lora_composition_added_settings,
+)
+from .workflow_lora_execution import (
+    WorkflowLoraExecutionError,
+    build_workflow_lora_execution_authority,
+    detach_workflow_lora_execution_json_object,
+    parse_workflow_lora_replay_receipt,
+    verify_workflow_lora_replay_composition,
+)
+from .workflow_lora_graph import WorkflowLoraGraphError
+from .workflow_lora_overrides import (
+    WorkflowLoraOverrideError,
+    parse_workflow_lora_overrides,
+    workflow_lora_overrides_payload,
+)
+from .workflow_lora_settings import (
+    WorkflowLoraSettingsError,
+    workflow_lora_override_resolution_as_overrides,
+)
 from .workflow_node_dependencies import node_dependency_errors
 from .workflow_output_geometry import (
     executed_graph_carries_the_proof,
@@ -280,6 +315,7 @@ DURABLE_RETRY_BINDING_FIELDS = ("retry_run_id", "retry_work_plan_id", "retry_rev
 IDEMPOTENCY_CLAIM_WAIT_SECONDS = 120.0
 MAX_PENDING_WORK_PER_CHAT = 32
 MEDIA_SEED_SPACE = 2_147_483_648
+WORKFLOW_LORA_REPLAY_FAILURE = "The queued workflow LoRA configuration could not be verified."
 PENDING_OUTPUT_REFERENCE = re.compile(
     r"\b(?:"
     r"(?:that|this|it|its)(?:\s+(?:image|video|answer|response|story|result|output))?"
@@ -301,6 +337,7 @@ class _PromptBatchExecutionContext:
     shared_setting_acceptance: frozenset[str]
     lora_selection: AutomaticLoraSelection | None
     lora_resolution: ResolvedLoraStack | None
+    workflow_lora_outcome: _WorkflowLoraOutcome | None
     model_provenance: dict[str, Any] | None
     workflow_provenance: dict[str, Any]
 
@@ -409,6 +446,211 @@ def _require_consistent_workflow_witness(work_step: WorkStep, run: Run) -> None:
     witness_revision_id = witness.get("revision_id") if isinstance(witness, dict) else None
     if not (work_step.workflow_revision_id == run.workflow_revision_id == witness_revision_id):
         raise RuntimeError("Queued workflow execution identity is inconsistent.")
+
+
+_WORKFLOW_LORA_ACTIVATION_FIELDS = frozenset(
+    {"id", "resolver_version", "dependency_contract_sha256", "binding_sha256", "launch_sha256"}
+)
+_WORKFLOW_LORA_ACTIVATION_DIGESTS = (
+    "dependency_contract_sha256",
+    "binding_sha256",
+    "launch_sha256",
+)
+
+
+def _workflow_lora_inert_object(value: object, *, label: str) -> dict[str, Any]:
+    """Copy stored run JSON through a plain JSON boundary before reading any key."""
+
+    try:
+        return detach_workflow_lora_execution_json_object(value, label=label)
+    except WorkflowLoraExecutionError as exc:
+        raise RuntimeError(WORKFLOW_LORA_REPLAY_FAILURE) from exc
+
+
+@dataclass(frozen=True)
+class _WorkflowLoraReplaySources:
+    """What dispatch will use for one run: settings, receipt, activation and revision."""
+
+    settings: dict[str, Any]
+    provenance: dict[str, Any]
+    activation: object
+    revision_id: object
+    definition_id: object
+
+
+def _workflow_lora_replay_sources(
+    run: Run,
+    accepted_inputs: AcceptedContext | None,
+) -> _WorkflowLoraReplaySources:
+    """Return the detached sources dispatch will use for this run."""
+
+    provenance = _workflow_lora_inert_object(run.provenance_json, label="run provenance")
+    if accepted_inputs is not None:
+        return _WorkflowLoraReplaySources(
+            settings=_workflow_lora_inert_object(accepted_inputs.settings, label="run settings"),
+            provenance=provenance,
+            activation=copy.deepcopy(accepted_inputs.workflow_activation),
+            revision_id=accepted_inputs.workflow_revision_id,
+            definition_id=(
+                accepted_inputs.workflow.workflow_id if accepted_inputs.workflow else None
+            ),
+        )
+    workflow = provenance.get("workflow")
+    witness = workflow if type(workflow) is dict else {}
+    return _WorkflowLoraReplaySources(
+        settings=_workflow_lora_inert_object(run.settings_json, label="run settings"),
+        provenance=provenance,
+        activation=witness.get("activation"),
+        revision_id=witness.get("revision_id"),
+        definition_id=witness.get("definition_id"),
+    )
+
+
+def _workflow_lora_replay_graph(
+    session: Session,
+    sources: _WorkflowLoraReplaySources,
+    revision: WorkflowRevision | None,
+) -> dict[str, Any] | None:
+    """Rebuild the graph for a queued run's workflow LoRA edits, or None without edits.
+
+    A run records edits as a pair: the reserved setting and the receipt written
+    at admission. Only a run with neither dispatches the ordinary way. One
+    without the other is stale or corrupt, and a pair must agree exactly before
+    anything is recomposed; neither half ever lends authority to the other.
+    """
+
+    settings = sources.settings
+    provenance = sources.provenance
+    activation_snapshot = sources.activation
+    has_setting = WORKFLOW_LORA_OVERRIDES_SETTING_KEY in settings
+    has_receipt = "workflow_lora" in provenance
+    if not has_setting and not has_receipt:
+        return None
+    try:
+        if not has_setting or not has_receipt or revision is None:
+            raise WorkflowLoraExecutionError(
+                "stale_workflow_lora_replay_pair",
+                "The queued workflow LoRA setting and receipt do not form a pair",
+            )
+        if sources.revision_id != revision.id or sources.definition_id != revision.workflow_id:
+            raise WorkflowLoraExecutionError(
+                "invalid_workflow_lora_replay_revision",
+                "The queued workflow LoRA edits name another workflow revision",
+            )
+        receipt = parse_workflow_lora_replay_receipt(provenance["workflow_lora"])
+        stored = parse_workflow_lora_overrides(settings[WORKFLOW_LORA_OVERRIDES_SETTING_KEY])
+        recorded = workflow_lora_override_resolution_as_overrides(receipt.override_resolution)
+        if _workflow_lora_canonical(workflow_lora_overrides_payload(stored)) != (
+            _workflow_lora_canonical(workflow_lora_overrides_payload(recorded))
+        ):
+            raise WorkflowLoraExecutionError(
+                "stale_workflow_lora_replay_pair",
+                "The queued workflow LoRA setting does not match its receipt",
+            )
+        if (
+            type(activation_snapshot) is not dict
+            or set(activation_snapshot) != _WORKFLOW_LORA_ACTIVATION_FIELDS
+            or any(
+                type(activation_snapshot[key]) is not str or not activation_snapshot[key]
+                for key in _WORKFLOW_LORA_ACTIVATION_FIELDS
+            )
+            or any(
+                re.fullmatch(r"[0-9a-f]{64}", activation_snapshot[key]) is None
+                for key in _WORKFLOW_LORA_ACTIVATION_DIGESTS
+            )
+        ):
+            raise WorkflowLoraExecutionError(
+                "invalid_workflow_lora_replay_activation",
+                "The queued workflow activation evidence is malformed",
+            )
+        stored_revision = session.get(WorkflowRevision, revision.id)
+        if stored_revision is None or stored_revision.workflow_id != revision.workflow_id:
+            raise WorkflowLoraExecutionError(
+                "invalid_workflow_lora_replay_revision",
+                "The queued workflow LoRA revision is unavailable",
+            )
+        authority = build_workflow_lora_execution_authority(
+            session,
+            stored_revision,
+            activation_id=activation_snapshot["id"],
+        )
+        if (
+            authority.resolver_version != activation_snapshot["resolver_version"]
+            or authority.dependency_contract_sha256
+            != activation_snapshot["dependency_contract_sha256"]
+            or authority.binding_sha256 != activation_snapshot["binding_sha256"]
+            or authority.launch_sha256 != activation_snapshot["launch_sha256"]
+        ):
+            raise WorkflowLoraExecutionError(
+                "stale_workflow_lora_replay_activation",
+                "The queued workflow activation no longer matches its receipt",
+            )
+        added_loras = settings.get("loras", [])
+        composition = compose_workflow_lora_graph(
+            session,
+            stored_revision,
+            added_loras=added_loras,
+            workflow_activation_id=authority.activation_id,
+            override_catalog=authority.catalog,
+            slot_extraction=authority.slot_extraction,
+            override_resolution=receipt.override_resolution,
+        )
+        return verify_workflow_lora_replay_composition(
+            receipt,
+            composition,
+            stored_added_loras=added_loras,
+        )
+    except (
+        WorkflowLoraCompositionError,
+        WorkflowLoraExecutionError,
+        WorkflowLoraGraphError,
+        WorkflowLoraOverrideError,
+        WorkflowLoraSettingsError,
+    ) as exc:
+        raise RuntimeError(WORKFLOW_LORA_REPLAY_FAILURE) from exc
+
+
+def _workflow_lora_canonical(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+@dataclass(frozen=True)
+class _WorkflowLoraOutcome:
+    """One admitted workflow LoRA plan, shaped like the added-only resolution it replaces."""
+
+    resolution: ResolvedLoraStack
+    receipt: dict[str, object]
+    setting: dict[str, object]
+
+
+def _admit_workflow_loras(
+    session: Session,
+    revision: WorkflowRevision | None,
+    activation: dict[str, str] | None,
+    layers: WorkflowLoraAdmissionLayers,
+    added_loras: object,
+) -> _WorkflowLoraOutcome:
+    """Compose a workflow's own LoRA edits with the added stack for one output."""
+
+    if revision is None or activation is None:
+        raise WorkflowLoraAdmissionError(conflict=True)
+    admission: WorkflowLoraAdmission = admit_workflow_lora_composition(
+        session,
+        revision,
+        activation_snapshot=activation,
+        layers=layers,
+        added_loras=added_loras,
+    )
+    composition = admission.composition
+    return _WorkflowLoraOutcome(
+        resolution=ResolvedLoraStack(
+            workflow_lora_composition_added_settings(composition),
+            workflow_lora_composition_added_provenance(composition),
+            composition.effective_graph_sha256,
+        ),
+        receipt=workflow_lora_admission_provenance(admission),
+        setting=workflow_lora_admission_setting_value(admission),
+    )
 
 
 class ClaimLost(RuntimeError):
@@ -1380,30 +1622,44 @@ class ConversationOrchestrator:
             workflow_revision.input_schema_json if workflow_revision else None,
         )
         request_fields = [field for field in fields if field.scope != "load"]
+        project = session.get(Project, chat.project_id) if chat.project_id else None
+        default_preset, project_preset, chat_preset, turn_preset = self._presets_for_turn(
+            session, project, chat, plan.operation, request
+        )
+        workflow_lora_layers = self._workflow_lora_layers(
+            role,
+            profile,
+            project,
+            chat,
+            request.settings,
+            presets=(default_preset, project_preset, chat_preset, turn_preset),
+        )
         # A selection is not a tunable, so it is not in the workflow's setting
         # schema and the generic validator would refuse it as unknown - which
         # is what made every masked edit fail with "unsupported settings: mask".
         # It travels in settings because that is how it reaches the run record,
         # and it is checked against its own contract a few lines below, where
         # the workflow is known and can say whether it accepts one at all.
-        mask, tunables = split_mask_setting(request.settings)
+        mask, tunables = split_mask_setting(workflow_lora_layers.ordinary("turn"))
         request_settings = validate_settings(tunables, request_fields)
-        project = session.get(Project, chat.project_id) if chat.project_id else None
-        default_preset, project_preset, chat_preset, turn_preset = self._presets_for_turn(
-            session, project, chat, plan.operation, request
-        )
         if turn_preset is not None:
             request_settings = {
-                **compatible_stored_settings(turn_preset.settings_json, request_fields),
+                **compatible_stored_settings(
+                    workflow_lora_layers.ordinary("turn_preset"), request_fields
+                ),
                 **request_settings,
             }
         preset_layers = [
-            (scope, preset, compatible_stored_settings(preset.settings_json, request_fields))
-            for scope, preset in (
-                ("default", default_preset),
-                ("project", project_preset),
-                ("chat", chat_preset),
-                ("turn", turn_preset),
+            (
+                scope,
+                preset,
+                compatible_stored_settings(workflow_lora_layers.ordinary(origin), request_fields),
+            )
+            for scope, preset, origin in (
+                ("default", default_preset, "default_preset"),
+                ("project", project_preset, "project_preset"),
+                ("chat", chat_preset, "chat_preset"),
+                ("turn", turn_preset, "turn_preset"),
             )
             if preset
         ]
@@ -1412,16 +1668,16 @@ class ConversationOrchestrator:
             request_fields=request_fields,
             profile_defaults=(
                 profile.load_settings_json if profile else {},
-                profile.request_settings_json if profile else {},
-                default_preset.settings_json if default_preset else {},
+                workflow_lora_layers.ordinary("profile_request"),
+                workflow_lora_layers.ordinary("default_preset"),
             ),
             project_defaults=(
-                project_preset.settings_json if project_preset else {},
-                self._scoped_generation_settings(project, role),
+                workflow_lora_layers.ordinary("project_preset"),
+                workflow_lora_layers.ordinary("project"),
             ),
             chat_defaults=(
-                chat_preset.settings_json if chat_preset else {},
-                self._scoped_generation_settings(chat, role),
+                workflow_lora_layers.ordinary("chat_preset"),
+                workflow_lora_layers.ordinary("chat"),
             ),
             turn_overrides=request_settings,
         )
@@ -1453,12 +1709,12 @@ class ConversationOrchestrator:
         lora_selection = None
         lora_setting_layers = (
             profile.load_settings_json if profile else {},
-            profile.request_settings_json if profile else {},
-            default_preset.settings_json if default_preset else {},
-            project_preset.settings_json if project_preset else {},
-            self._scoped_generation_settings(project, role),
-            chat_preset.settings_json if chat_preset else {},
-            self._scoped_generation_settings(chat, role),
+            workflow_lora_layers.ordinary("profile_request"),
+            workflow_lora_layers.ordinary("default_preset"),
+            workflow_lora_layers.ordinary("project_preset"),
+            workflow_lora_layers.ordinary("project"),
+            workflow_lora_layers.ordinary("chat_preset"),
+            workflow_lora_layers.ordinary("chat"),
             request_settings,
         )
         if (
@@ -1485,22 +1741,22 @@ class ConversationOrchestrator:
                 (EditSettingSource.PROFILE_LOAD, profile.load_settings_json if profile else {}),
                 (
                     EditSettingSource.PROFILE_REQUEST,
-                    profile.request_settings_json if profile else {},
+                    workflow_lora_layers.ordinary("profile_request"),
                 ),
                 (
                     EditSettingSource.DEFAULT_PRESET,
-                    default_preset.settings_json if default_preset else {},
+                    workflow_lora_layers.ordinary("default_preset"),
                 ),
                 (
                     EditSettingSource.PROJECT_PRESET,
-                    project_preset.settings_json if project_preset else {},
+                    workflow_lora_layers.ordinary("project_preset"),
                 ),
-                (EditSettingSource.PROJECT, self._scoped_generation_settings(project, role)),
+                (EditSettingSource.PROJECT, workflow_lora_layers.ordinary("project")),
                 (
                     EditSettingSource.CHAT_PRESET,
-                    chat_preset.settings_json if chat_preset else {},
+                    workflow_lora_layers.ordinary("chat_preset"),
                 ),
-                (EditSettingSource.CHAT, self._scoped_generation_settings(chat, role)),
+                (EditSettingSource.CHAT, workflow_lora_layers.ordinary("chat")),
                 (EditSettingSource.TURN, request_settings),
             ),
             inherited_auto=inherited_image_edit_strength,
@@ -1549,7 +1805,24 @@ class ConversationOrchestrator:
                     "attach fewer."
                 )
         lora_resolution = None
-        if plan.operation != Operation.TEXT and effective_settings.get("loras"):
+        workflow_lora_outcome: _WorkflowLoraOutcome | None = None
+        workflow_loras_relevant = plan.operation != Operation.TEXT and (
+            workflow_lora_layers.relevant_to(workflow_revision)
+        )
+        if workflow_loras_relevant and (
+            prompt_batch_selection is None or effective_settings.get("loras")
+        ):
+            workflow_lora_outcome = _admit_workflow_loras(
+                session,
+                workflow_revision,
+                workflow_activation,
+                workflow_lora_layers,
+                effective_settings.get("loras", []),
+            )
+            lora_resolution = workflow_lora_outcome.resolution
+            effective_settings["loras"] = lora_resolution.settings
+            effective_settings[WORKFLOW_LORA_OVERRIDES_SETTING_KEY] = workflow_lora_outcome.setting
+        elif plan.operation != Operation.TEXT and effective_settings.get("loras"):
             if not workflow_revision:
                 raise ValueError("LoRA settings require a selected media workflow.")
             lora_resolution = resolve_lora_stack(
@@ -1560,6 +1833,7 @@ class ConversationOrchestrator:
             effective_settings["loras"] = lora_resolution.settings
         prompt_batch_lora_selections: tuple[AutomaticLoraSelection | None, ...] = ()
         prompt_batch_lora_resolutions: tuple[ResolvedLoraStack | None, ...] = ()
+        prompt_batch_workflow_lora_outcomes: tuple[_WorkflowLoraOutcome | None, ...] = ()
         if (
             prompt_batch_selection is not None
             and plan.operation == Operation.TEXT_TO_IMAGE
@@ -1569,6 +1843,7 @@ class ConversationOrchestrator:
         ):
             per_item_selections: list[AutomaticLoraSelection | None] = []
             per_item_resolutions: list[ResolvedLoraStack | None] = []
+            per_item_outcomes: list[_WorkflowLoraOutcome | None] = []
             lora_settings_in_layers = any("loras" in layer for layer in lora_setting_layers)
             for item, resources in zip(
                 prompt_batch_selection.items,
@@ -1592,15 +1867,30 @@ class ConversationOrchestrator:
                     if item_selection is not None
                     else list(resources.lora_settings or ())
                 )
+                item_outcome = (
+                    _admit_workflow_loras(
+                        session,
+                        workflow_revision,
+                        workflow_activation,
+                        workflow_lora_layers,
+                        item_settings,
+                    )
+                    if workflow_loras_relevant
+                    else None
+                )
                 item_resolution = (
-                    resolve_lora_stack(session, workflow_revision, item_settings)
+                    item_outcome.resolution
+                    if item_outcome is not None
+                    else resolve_lora_stack(session, workflow_revision, item_settings)
                     if item_settings
                     else None
                 )
                 per_item_selections.append(item_selection)
                 per_item_resolutions.append(item_resolution)
+                per_item_outcomes.append(item_outcome)
             prompt_batch_lora_selections = tuple(per_item_selections)
             prompt_batch_lora_resolutions = tuple(per_item_resolutions)
+            prompt_batch_workflow_lora_outcomes = tuple(per_item_outcomes)
         prompt_batch_execution_contexts: tuple[_PromptBatchExecutionContext, ...] = ()
         if prompt_batch_selection is not None and len(requested_resource_workflows) > 1:
             contexts: list[_PromptBatchExecutionContext] = []
@@ -2065,8 +2355,22 @@ class ConversationOrchestrator:
                     else lora_resolution
                 )
             )
+            output_workflow_lora_outcome = (
+                output_context.workflow_lora_outcome
+                if output_context is not None
+                else (
+                    prompt_batch_workflow_lora_outcomes[ordinal - 1]
+                    if prompt_batch_workflow_lora_outcomes
+                    else workflow_lora_outcome
+                )
+            )
             if output_lora_resolution is not None:
                 output_settings["loras"] = output_lora_resolution.settings
+            output_settings.pop(WORKFLOW_LORA_OVERRIDES_SETTING_KEY, None)
+            if output_workflow_lora_outcome is not None:
+                output_settings[WORKFLOW_LORA_OVERRIDES_SETTING_KEY] = copy.deepcopy(
+                    output_workflow_lora_outcome.setting
+                )
             if prompt_batch_selection is not None:
                 output_settings["seed"] = prompt_batch_seeds[ordinal - 1]
             elif (
@@ -2155,6 +2459,11 @@ class ConversationOrchestrator:
                     for scope, preset, settings in output_preset_layers
                 ],
                 "workflow": output_workflow_provenance,
+                **(
+                    {"workflow_lora": copy.deepcopy(output_workflow_lora_outcome.receipt)}
+                    if output_workflow_lora_outcome is not None
+                    else {}
+                ),
                 "resolved_settings": output_settings,
                 "generation_estimate": generation_estimate,
                 "video_length": video_length_resolution,
@@ -2558,25 +2867,41 @@ class ConversationOrchestrator:
                 workflow_revision.input_schema_json if workflow_revision else None,
             )
             request_fields = [field for field in fields if field.scope != "load"]
-            step_overrides = validate_settings(
-                step_request.settings,
-                request_fields,
-            )
             default_preset, project_preset, chat_preset, turn_preset = self._presets_for_turn(
                 session, project, chat, operation, step_request, ordered=True
             )
+            workflow_lora_layers = self._workflow_lora_layers(
+                role,
+                profile,
+                project,
+                chat,
+                step_request.settings,
+                presets=(default_preset, project_preset, chat_preset, turn_preset),
+            )
+            step_overrides = validate_settings(
+                workflow_lora_layers.ordinary("turn"),
+                request_fields,
+            )
             if turn_preset is not None:
                 step_overrides = {
-                    **compatible_stored_settings(turn_preset.settings_json, request_fields),
+                    **compatible_stored_settings(
+                        workflow_lora_layers.ordinary("turn_preset"), request_fields
+                    ),
                     **step_overrides,
                 }
             preset_layers = [
-                (scope, preset, compatible_stored_settings(preset.settings_json, request_fields))
-                for scope, preset in (
-                    ("default", default_preset),
-                    ("project", project_preset),
-                    ("chat", chat_preset),
-                    ("turn", turn_preset),
+                (
+                    scope,
+                    preset,
+                    compatible_stored_settings(
+                        workflow_lora_layers.ordinary(origin), request_fields
+                    ),
+                )
+                for scope, preset, origin in (
+                    ("default", default_preset, "default_preset"),
+                    ("project", project_preset, "project_preset"),
+                    ("chat", chat_preset, "chat_preset"),
+                    ("turn", turn_preset, "turn_preset"),
                 )
                 if preset
             ]
@@ -2585,16 +2910,16 @@ class ConversationOrchestrator:
                 request_fields=request_fields,
                 profile_defaults=(
                     profile.load_settings_json if profile else {},
-                    profile.request_settings_json if profile else {},
-                    default_preset.settings_json if default_preset else {},
+                    workflow_lora_layers.ordinary("profile_request"),
+                    workflow_lora_layers.ordinary("default_preset"),
                 ),
                 project_defaults=(
-                    project_preset.settings_json if project_preset else {},
-                    self._scoped_generation_settings(project, role),
+                    workflow_lora_layers.ordinary("project_preset"),
+                    workflow_lora_layers.ordinary("project"),
                 ),
                 chat_defaults=(
-                    chat_preset.settings_json if chat_preset else {},
-                    self._scoped_generation_settings(chat, role),
+                    workflow_lora_layers.ordinary("chat_preset"),
+                    workflow_lora_layers.ordinary("chat"),
                 ),
                 turn_overrides=step_overrides,
             )
@@ -2605,12 +2930,12 @@ class ConversationOrchestrator:
             lora_selection = None
             lora_setting_layers = (
                 profile.load_settings_json if profile else {},
-                profile.request_settings_json if profile else {},
-                default_preset.settings_json if default_preset else {},
-                project_preset.settings_json if project_preset else {},
-                self._scoped_generation_settings(project, role),
-                chat_preset.settings_json if chat_preset else {},
-                self._scoped_generation_settings(chat, role),
+                workflow_lora_layers.ordinary("profile_request"),
+                workflow_lora_layers.ordinary("default_preset"),
+                workflow_lora_layers.ordinary("project_preset"),
+                workflow_lora_layers.ordinary("project"),
+                workflow_lora_layers.ordinary("chat_preset"),
+                workflow_lora_layers.ordinary("chat"),
                 step_overrides,
             )
             if (
@@ -2640,22 +2965,22 @@ class ConversationOrchestrator:
                     ),
                     (
                         EditSettingSource.PROFILE_REQUEST,
-                        profile.request_settings_json if profile else {},
+                        workflow_lora_layers.ordinary("profile_request"),
                     ),
                     (
                         EditSettingSource.DEFAULT_PRESET,
-                        default_preset.settings_json if default_preset else {},
+                        workflow_lora_layers.ordinary("default_preset"),
                     ),
                     (
                         EditSettingSource.PROJECT_PRESET,
-                        project_preset.settings_json if project_preset else {},
+                        workflow_lora_layers.ordinary("project_preset"),
                     ),
-                    (EditSettingSource.PROJECT, self._scoped_generation_settings(project, role)),
+                    (EditSettingSource.PROJECT, workflow_lora_layers.ordinary("project")),
                     (
                         EditSettingSource.CHAT_PRESET,
-                        chat_preset.settings_json if chat_preset else {},
+                        workflow_lora_layers.ordinary("chat_preset"),
                     ),
-                    (EditSettingSource.CHAT, self._scoped_generation_settings(chat, role)),
+                    (EditSettingSource.CHAT, workflow_lora_layers.ordinary("chat")),
                     (EditSettingSource.TURN, step_overrides),
                 ),
                 inherited_auto=inherited.image_edit_strength if inherited is not None else None,
@@ -2664,7 +2989,21 @@ class ConversationOrchestrator:
                 ),
             )
             lora_resolution = None
-            if operation != Operation.TEXT and effective_settings.get("loras"):
+            workflow_lora_outcome: _WorkflowLoraOutcome | None = None
+            if operation != Operation.TEXT and workflow_lora_layers.relevant_to(workflow_revision):
+                workflow_lora_outcome = _admit_workflow_loras(
+                    session,
+                    workflow_revision,
+                    workflow_activation,
+                    workflow_lora_layers,
+                    effective_settings.get("loras", []),
+                )
+                lora_resolution = workflow_lora_outcome.resolution
+                effective_settings["loras"] = lora_resolution.settings
+                effective_settings[WORKFLOW_LORA_OVERRIDES_SETTING_KEY] = (
+                    workflow_lora_outcome.setting
+                )
+            elif operation != Operation.TEXT and effective_settings.get("loras"):
                 if not workflow_revision:
                     raise ValueError("LoRA settings require a selected media workflow.")
                 lora_resolution = resolve_lora_stack(
@@ -2708,6 +3047,7 @@ class ConversationOrchestrator:
                     "video_length": video_length_resolution,
                     "lora_resolution": lora_resolution,
                     "lora_selection": lora_selection,
+                    "workflow_lora_outcome": workflow_lora_outcome,
                 }
             )
 
@@ -2958,6 +3298,11 @@ class ConversationOrchestrator:
                         for scope, preset, preset_settings in resolved["preset_layers"]
                     ],
                     "workflow": workflow_provenance,
+                    **(
+                        {"workflow_lora": copy.deepcopy(resolved["workflow_lora_outcome"].receipt)}
+                        if resolved["workflow_lora_outcome"] is not None
+                        else {}
+                    ),
                     "resolved_settings": resolved["settings"],
                     "generation_estimate": resolved["generation_estimate"],
                     "video_length": resolved["video_length"],
@@ -3217,6 +3562,7 @@ class ConversationOrchestrator:
     def prepare_retry(self, session: Session, run: Run) -> None:
         """Reset the existing assistant slot before dispatching a retry."""
 
+        self.preflight_workflow_lora_replay(session, run)
         cancel_pending_search(session, run)
         message = session.get(Message, run.assistant_message_id)
         if not message:
@@ -3260,6 +3606,38 @@ class ConversationOrchestrator:
         session.flush()
         for artifact_id in preview_ids:
             self.artifacts.delete_temporary_preview(session, artifact_id)
+
+    @staticmethod
+    def preflight_workflow_lora_replay(session: Session, run: Run) -> None:
+        """Refuse a retry whose workflow LoRA edits no longer replay, before it changes anything."""
+
+        try:
+            provenance = _workflow_lora_inert_object(run.provenance_json, label="run provenance")
+            settings = _workflow_lora_inert_object(run.settings_json, label="run settings")
+            if WORKFLOW_LORA_OVERRIDES_SETTING_KEY not in settings and "workflow_lora" not in (
+                provenance
+            ):
+                return
+            try:
+                accepted_inputs = accepted_context(session, run)
+                revision = (
+                    resolve_accepted_workflow(session, accepted_inputs.workflow)
+                    if accepted_inputs is not None
+                    else session.get(WorkflowRevision, run.workflow_revision_id)
+                    if run.workflow_revision_id
+                    else None
+                )
+            except (LookupError, RuntimeError, ValueError) as exc:
+                raise RuntimeError(WORKFLOW_LORA_REPLAY_FAILURE) from exc
+            _workflow_lora_replay_graph(
+                session,
+                _workflow_lora_replay_sources(run, accepted_inputs),
+                revision,
+            )
+        except RuntimeError as exc:
+            if str(exc) != WORKFLOW_LORA_REPLAY_FAILURE:
+                raise
+            raise WorkflowLoraAdmissionError(conflict=True, replay=True) from exc
 
     def chat_guard(self, chat_id: str) -> asyncio.Lock:
         """Serialize turn creation, retries, and deletion for one chat."""
@@ -5585,6 +5963,8 @@ class ConversationOrchestrator:
             if run.workflow_revision_id
             else None
         )
+        replay_sources = _workflow_lora_replay_sources(run, accepted_inputs)
+        _workflow_lora_replay_graph(session, replay_sources, revision)
         if revision is None or revision.dependency_contract_sha256 is None:
             return None
         workflow = run.provenance_json.get("workflow")
@@ -5935,6 +6315,9 @@ class ConversationOrchestrator:
             )
             if revision is None and verified_review is not None:
                 raise RuntimeError("The selected media workflow is no longer available.")
+            if revision is None:
+                replay_sources = _workflow_lora_replay_sources(run, accepted_inputs)
+                _workflow_lora_replay_graph(session, replay_sources, None)
             if revision:
                 if revision.engine == "comfyui" and not revision_is_trusted(session, revision):
                     raise RuntimeError(
@@ -5949,7 +6332,11 @@ class ConversationOrchestrator:
                 if dependency_errors:
                     raise RuntimeError("; ".join(dependency_errors))
                 workflow = revision.api_graph_json
-                if execution_settings.get("loras"):
+                replay_sources = _workflow_lora_replay_sources(run, accepted_inputs)
+                replay_graph = _workflow_lora_replay_graph(session, replay_sources, revision)
+                if replay_graph is not None:
+                    workflow = replay_graph
+                elif execution_settings.get("loras"):
                     resolved_loras = resolve_lora_stack(
                         session,
                         revision,
@@ -5993,6 +6380,7 @@ class ConversationOrchestrator:
             # as an input reference: it is instruction, not content, and must
             # not appear as an attachment or count toward edit lineage.
             parameters: dict[str, Any] = copy.deepcopy(execution_settings)
+            parameters.pop(WORKFLOW_LORA_OVERRIDES_SETTING_KEY, None)
             if revision and workflow_video_length(revision.input_schema_json):
                 parameters.pop(VIDEO_DURATION_SETTING_KEY, None)
             mask_setting = execution_settings.get(MASK_SETTING_KEY)
@@ -8859,26 +9247,40 @@ class ConversationOrchestrator:
             revision.input_schema_json,
         )
         request_fields = [field for field in fields if field.scope != "load"]
-        mask, tunables = split_mask_setting(request.settings)
-        if mask is not None:
-            raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
-        request_settings = validate_settings(tunables, request_fields)
         project = session.get(Project, chat.project_id) if chat.project_id else None
         default_preset, project_preset, chat_preset, turn_preset = self._presets_for_turn(
             session, project, chat, Operation.TEXT_TO_IMAGE, request
         )
+        workflow_lora_layers = self._workflow_lora_layers(
+            role,
+            profile,
+            project,
+            chat,
+            request.settings,
+            presets=(default_preset, project_preset, chat_preset, turn_preset),
+        )
+        mask, tunables = split_mask_setting(workflow_lora_layers.ordinary("turn"))
+        if mask is not None:
+            raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
+        request_settings = validate_settings(tunables, request_fields)
         if turn_preset is not None:
             request_settings = {
-                **compatible_stored_settings(turn_preset.settings_json, request_fields),
+                **compatible_stored_settings(
+                    workflow_lora_layers.ordinary("turn_preset"), request_fields
+                ),
                 **request_settings,
             }
         preset_layers = tuple(
-            (scope, preset, compatible_stored_settings(preset.settings_json, request_fields))
-            for scope, preset in (
-                ("default", default_preset),
-                ("project", project_preset),
-                ("chat", chat_preset),
-                ("turn", turn_preset),
+            (
+                scope,
+                preset,
+                compatible_stored_settings(workflow_lora_layers.ordinary(origin), request_fields),
+            )
+            for scope, preset, origin in (
+                ("default", default_preset, "default_preset"),
+                ("project", project_preset, "project_preset"),
+                ("chat", chat_preset, "chat_preset"),
+                ("turn", turn_preset, "turn_preset"),
             )
             if preset
         )
@@ -8908,16 +9310,16 @@ class ConversationOrchestrator:
             request_fields=request_fields,
             profile_defaults=(
                 profile.load_settings_json if profile else {},
-                profile.request_settings_json if profile else {},
-                default_preset.settings_json if default_preset else {},
+                workflow_lora_layers.ordinary("profile_request"),
+                workflow_lora_layers.ordinary("default_preset"),
             ),
             project_defaults=(
-                project_preset.settings_json if project_preset else {},
-                self._scoped_generation_settings(project, role),
+                workflow_lora_layers.ordinary("project_preset"),
+                workflow_lora_layers.ordinary("project"),
             ),
             chat_defaults=(
-                chat_preset.settings_json if chat_preset else {},
-                self._scoped_generation_settings(chat, role),
+                workflow_lora_layers.ordinary("chat_preset"),
+                workflow_lora_layers.ordinary("chat"),
             ),
             turn_overrides=request_settings,
         )
@@ -8932,12 +9334,12 @@ class ConversationOrchestrator:
             )
         lora_layers = (
             profile.load_settings_json if profile else {},
-            profile.request_settings_json if profile else {},
-            default_preset.settings_json if default_preset else {},
-            project_preset.settings_json if project_preset else {},
-            self._scoped_generation_settings(project, role),
-            chat_preset.settings_json if chat_preset else {},
-            self._scoped_generation_settings(chat, role),
+            workflow_lora_layers.ordinary("profile_request"),
+            workflow_lora_layers.ordinary("default_preset"),
+            workflow_lora_layers.ordinary("project_preset"),
+            workflow_lora_layers.ordinary("project"),
+            workflow_lora_layers.ordinary("chat_preset"),
+            workflow_lora_layers.ordinary("chat"),
             request_settings,
         )
         lora_selection = None
@@ -8955,13 +9357,28 @@ class ConversationOrchestrator:
             )
             if lora_selection.settings:
                 effective_settings["loras"] = lora_selection.settings
+        workflow_lora_outcome = (
+            _admit_workflow_loras(
+                session,
+                revision,
+                activation,
+                workflow_lora_layers,
+                effective_settings.get("loras", []),
+            )
+            if workflow_lora_layers.relevant_to(revision)
+            else None
+        )
         lora_resolution = (
-            resolve_lora_stack(session, revision, effective_settings["loras"])
+            workflow_lora_outcome.resolution
+            if workflow_lora_outcome is not None
+            else resolve_lora_stack(session, revision, effective_settings["loras"])
             if effective_settings.get("loras")
             else None
         )
         if lora_resolution is not None:
             effective_settings["loras"] = lora_resolution.settings
+        if workflow_lora_outcome is not None:
+            effective_settings[WORKFLOW_LORA_OVERRIDES_SETTING_KEY] = workflow_lora_outcome.setting
         if "batch_size" in effective_settings:
             effective_settings["batch_size"] = 1
         workflow_provenance = _workflow_execution_witness(
@@ -8982,6 +9399,7 @@ class ConversationOrchestrator:
             shared_setting_acceptance=shared_setting_acceptance,
             lora_selection=lora_selection,
             lora_resolution=lora_resolution,
+            workflow_lora_outcome=workflow_lora_outcome,
             model_provenance=self._model_provenance(session, profile),
             workflow_provenance=workflow_provenance,
         )
@@ -9349,6 +9767,37 @@ class ConversationOrchestrator:
             .limit(1)
         )
 
+    @classmethod
+    def _workflow_lora_layers(
+        cls,
+        role: str,
+        profile: ModelProfile | None,
+        project: Project | None,
+        chat: Chat,
+        turn_settings: dict[str, Any],
+        *,
+        presets: tuple[
+            GenerationPreset | None,
+            GenerationPreset | None,
+            GenerationPreset | None,
+            GenerationPreset | None,
+        ],
+    ) -> WorkflowLoraAdmissionLayers:
+        """Detach the reserved workflow LoRA value from every native settings layer."""
+
+        default_preset, project_preset, chat_preset, turn_preset = presets
+        return split_workflow_lora_admission_layers(
+            role=role,
+            profile_request=profile.request_settings_json if profile else {},
+            default_preset=default_preset.settings_json if default_preset else {},
+            project_preset=project_preset.settings_json if project_preset else {},
+            project=cls._scoped_generation_settings(project, role),
+            chat_preset=chat_preset.settings_json if chat_preset else {},
+            chat=cls._scoped_generation_settings(chat, role),
+            turn_preset=turn_preset.settings_json if turn_preset else {},
+            turn=turn_settings,
+        )
+
     @staticmethod
     def _scoped_generation_settings(
         owner: Project | Chat | None,
@@ -9440,7 +9889,11 @@ class ConversationOrchestrator:
             input_schema,
         )
         request_fields = [field for field in fields if field.scope != "load"]
-        return compatible_stored_settings(values, request_fields)
+        ordinary, workflow_lora_setting = split_inherited_workflow_lora_setting(values, role=role)
+        compatible = compatible_stored_settings(ordinary, request_fields)
+        if workflow_lora_setting is not None:
+            compatible[WORKFLOW_LORA_OVERRIDES_SETTING_KEY] = workflow_lora_setting
+        return compatible
 
     @staticmethod
     def _initial_output_parts(

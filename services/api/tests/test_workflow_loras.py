@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Generator
 from copy import deepcopy
@@ -7,9 +8,10 @@ from typing import Any, Literal
 
 import pytest
 from httpx2 import AsyncClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
+from local_lm.auxiliary_assets import MAX_LORA_STRENGTH
 from local_lm.comfy_package_widgets import POWER_LORA_LOADER
 from local_lm.db import Base, SessionLocal
 from local_lm.models import (
@@ -20,6 +22,7 @@ from local_lm.models import (
     WorkflowDefinition,
     WorkflowDependencyBinding,
     WorkflowDependencySlot,
+    WorkflowFamily,
     WorkflowRevision,
 )
 from local_lm.schemas import WorkflowLoraControlsOut
@@ -33,9 +36,20 @@ from local_lm.workflow_dependencies import (
     WorkflowDependencyRequirement,
     WorkflowDependencyResourceKind,
     WorkflowDependencySlotContract,
+    canonical_workflow_dependency_json,
     workflow_dependency_contract_sha256,
     workflow_dependency_slot_payload,
     workflow_dependency_slot_sha256,
+)
+from local_lm.workflow_lora_activation import (
+    load_current_workflow_lora_activation_evidence,
+)
+from local_lm.workflow_lora_overrides import (
+    WorkflowLoraOverrideCatalog,
+    WorkflowLoraOverrideError,
+    WorkflowLoraOverrideLayer,
+    parse_workflow_lora_overrides,
+    resolve_workflow_lora_override_layers,
 )
 from local_lm.workflow_loras import workflow_lora_controls
 
@@ -298,10 +312,27 @@ def _seed_revision(
     invalid_activation: bool = False,
     mismatched_ui: bool = False,
     core_extension: CoreExtension | None = None,
+    family_id: str | None = None,
+    variant_key: str | None = None,
+    suffix_override: str | None = None,
 ) -> tuple[WorkflowDefinition, WorkflowRevision]:
-    suffix = "rgthree" if rgthree else f"core_{core_extension or 'plain'}"
+    suffix = suffix_override or ("rgthree" if rgthree else f"core_{core_extension or 'plain'}")
+    if family_id is not None:
+        session.add(
+            WorkflowFamily(
+                id=family_id,
+                name=f"LoRA family {suffix}",
+                description="",
+                use_case="",
+                tags_json=[],
+                enabled=True,
+                archived=False,
+            )
+        )
     definition = WorkflowDefinition(
         id=f"workflow_lora_{suffix}",
+        family_id=family_id,
+        variant_key=variant_key,
         name=f"LoRA projection {suffix}",
         operation="text_to_image",
     )
@@ -525,7 +556,13 @@ def test_core_projection_requires_complete_graph_runtime_and_asset_evidence(
     encoded = json.dumps(public, sort_keys=True)
     assert PRIVATE_LOADER_ID not in encoded
     assert "C:/private" not in encoded
-    assert revision.id not in encoded
+    assert public["override_contract_version"] == 1
+    assert public["strength_bounds"] == {
+        "minimum": -MAX_LORA_STRENGTH,
+        "maximum": MAX_LORA_STRENGTH,
+    }
+    assert public["override_target"]["workflow_definition_id"] == definition.id
+    assert public["override_target"]["workflow_revision_id"] == revision.id
 
 
 def test_core_ui_api_mismatch_is_visible_but_never_editable(session: Session) -> None:
@@ -540,6 +577,7 @@ def test_core_ui_api_mismatch_is_visible_but_never_editable(session: Session) ->
     assert projection.slots[0].editability == "detected_read_only"
     assert projection.slots[0].read_only_reason == "missing_core_evidence"
     assert projection.slots[0].asset_binding is not None
+    assert projection.override_target is None
 
 
 def test_core_ui_api_connection_mismatch_cannot_authorize_the_same_node_id(
@@ -744,6 +782,7 @@ def test_invalid_activation_snapshot_cannot_supply_asset_or_loader_authority(
     assert projection.activation_binding_sha256 is None
     assert projection.slots[0].editability == "detected_read_only"
     assert projection.slots[0].asset_binding is None
+    assert projection.override_target is None
 
 
 def test_slots_that_no_longer_add_up_to_the_recorded_contract_are_invalid(
@@ -825,6 +864,316 @@ def test_legacy_revision_uses_an_explicit_empty_detection_contract(session: Sess
     assert len(projection.slots) == 1
     assert projection.slots[0].editability == "detected_read_only"
     assert projection.slots[0].asset_binding is None
+    assert projection.override_target is None
+
+
+@pytest.mark.parametrize(
+    ("family_id", "variant_key"),
+    [
+        (None, None),
+        (None, "legacy-special"),
+        ("wffamily_lora_image", "image"),
+    ],
+)
+def test_override_target_preserves_exact_graph_owner_identity_and_hashes(
+    session: Session,
+    family_id: str | None,
+    variant_key: str | None,
+) -> None:
+    definition, revision = _seed_revision(
+        session,
+        family_id=family_id,
+        variant_key=variant_key,
+    )
+
+    projection = workflow_lora_controls(
+        session,
+        revision_id=revision.id,
+    )
+    evidence = load_current_workflow_lora_activation_evidence(session, revision.id)
+
+    target = projection.override_target
+    assert target is not None
+    assert target.workflow_family_id == family_id
+    assert target.workflow_definition_id == revision.workflow_id == definition.id
+    assert target.workflow_variant_key == variant_key
+    assert target.workflow_revision_id == revision.id
+    assert target.slot_contract_version == projection.version == 1
+    assert target.revision_scope_sha256 == hashlib.sha256(revision.id.encode("utf-8")).hexdigest()
+    assert target.api_graph_sha256 == projection.api_graph_sha256
+    assert target.dependency_contract_sha256 == projection.dependency_contract_sha256
+    assert target.activation_binding_sha256 == evidence.binding_sha256
+    assert target.activation_witness_sha256 == evidence.activation_witness_sha256
+
+
+def test_duplicate_legacy_definitions_receive_distinct_exact_targets(session: Session) -> None:
+    first_definition, first_revision = _seed_revision(
+        session,
+        suffix_override="legacy_first",
+    )
+    second_definition, second_revision = _seed_revision(
+        session,
+        suffix_override="legacy_second",
+    )
+
+    first = workflow_lora_controls(
+        session,
+        revision_id=first_revision.id,
+    ).override_target
+    second = workflow_lora_controls(
+        session,
+        revision_id=second_revision.id,
+    ).override_target
+
+    assert first is not None and second is not None
+    assert first.workflow_family_id is second.workflow_family_id is None
+    assert first.workflow_variant_key is second.workflow_variant_key is None
+    assert first.workflow_definition_id != second.workflow_definition_id
+    assert first.workflow_revision_id != second.workflow_revision_id
+    assert first.revision_scope_sha256 != second.revision_scope_sha256
+    assert first.activation_witness_sha256 != second.activation_witness_sha256
+
+
+def test_response_target_round_trips_the_public_override_parser_and_catalog(
+    session: Session,
+) -> None:
+    definition, revision = _seed_revision(session)
+    projection = workflow_lora_controls(
+        session,
+        revision_id=revision.id,
+    )
+    payload = WorkflowLoraControlsOut.model_validate(projection).model_dump(mode="json")
+    raw_target = payload["override_target"]
+    assert isinstance(raw_target, dict)
+    slot = projection.slots[0]
+    raw_target["overrides"] = [
+        {
+            "slot_id": slot.slot_id,
+            "loader_contract": slot.loader_contract,
+            "loader_authority_sha256": slot.loader_authority_sha256,
+            "changes": {"model_strength": 0.625},
+        }
+    ]
+    overrides = parse_workflow_lora_overrides({"version": 1, "targets": [raw_target]})
+    assert overrides.targets[0].witness == projection.override_target
+
+    resolution = resolve_workflow_lora_override_layers(
+        catalog=WorkflowLoraOverrideCatalog(projection.override_target, projection.slots),
+        layers=(WorkflowLoraOverrideLayer("turn", overrides),),
+    )
+    assert len(resolution.overrides) == 1
+    assert resolution.overrides[0].slot_id == slot.slot_id
+    assert resolution.overrides[0].changes[0].value == 0.625
+
+
+@pytest.mark.parametrize(
+    "hostile_change",
+    ["missing_required_binding", "extra_activation_details", "bad_resolver"],
+)
+def test_incomplete_or_malformed_activation_cannot_issue_edit_authority(
+    session: Session,
+    hostile_change: str,
+) -> None:
+    definition, revision = _seed_revision(session)
+    activation = session.scalar(
+        select(WorkflowActivation).where(
+            WorkflowActivation.workflow_revision_id == revision.id,
+            WorkflowActivation.is_active.is_(True),
+        )
+    )
+    assert activation is not None
+    if hostile_change == "missing_required_binding":
+        runtime_slot = session.scalar(
+            select(WorkflowDependencySlot).where(
+                WorkflowDependencySlot.workflow_revision_id == revision.id,
+                WorkflowDependencySlot.name == "comfy-runtime",
+            )
+        )
+        assert runtime_slot is not None
+        runtime_binding = session.scalar(
+            select(WorkflowDependencyBinding).where(
+                WorkflowDependencyBinding.workflow_activation_id == activation.id,
+                WorkflowDependencyBinding.workflow_dependency_slot_id == runtime_slot.id,
+            )
+        )
+        assert runtime_binding is not None
+        session.delete(runtime_binding)
+        contract = WorkflowDependencyContract(
+            version=1,
+            slots=(
+                _slot("comfy-runtime", "runtime"),
+                _slot("style", "model_asset", required=False),
+            ),
+        )
+        asset_binding = _asset_binding()
+        subset_payload = {
+            "version": 1,
+            "dependency_contract_sha256": workflow_dependency_contract_sha256(contract),
+            "bindings": [
+                {
+                    "slot": asset_binding.slot_name,
+                    "requirement": asset_binding.requirement_key,
+                    "resource_kind": asset_binding.resource_kind,
+                    "identity": asset_binding.identity,
+                    "mount": asset_binding.mount,
+                }
+            ],
+            "empty_optional_slots": [],
+        }
+        activation.binding_sha256 = hashlib.sha256(
+            canonical_workflow_dependency_json(subset_payload)
+        ).hexdigest()
+    elif hostile_change == "extra_activation_details":
+        activation.details_json = {
+            "launch_sha256": "e" * 64,
+            "unexpected": True,
+        }
+    else:
+        activation.resolver_version = "bad resolver"
+    session.commit()
+
+    projection = workflow_lora_controls(
+        session,
+        revision_id=revision.id,
+    )
+
+    assert projection.evidence_gaps == ("active_activation_invalid",)
+    assert projection.override_target is None
+    assert all(slot.editability != "editable" for slot in projection.slots)
+
+
+def test_duplicate_current_activations_cannot_issue_edit_authority(session: Session) -> None:
+    definition, revision = _seed_revision(session)
+    active = session.scalar(
+        select(WorkflowActivation).where(
+            WorkflowActivation.workflow_revision_id == revision.id,
+            WorkflowActivation.is_active.is_(True),
+        )
+    )
+    assert active is not None
+    session.execute(text("DROP INDEX uq_workflow_activation_active_revision"))
+    session.add(
+        WorkflowActivation(
+            id="wfact_lora_duplicate",
+            workflow_revision_id=revision.id,
+            resolver_version=active.resolver_version,
+            dependency_contract_sha256=active.dependency_contract_sha256,
+            binding_sha256="c" * 64,
+            state="ready",
+            is_active=True,
+            details_json={"launch_sha256": "d" * 64},
+        )
+    )
+    session.commit()
+
+    projection = workflow_lora_controls(
+        session,
+        revision_id=revision.id,
+    )
+
+    assert projection.evidence_gaps == ("active_activation_invalid",)
+    assert projection.override_target is None
+    assert all(slot.editability != "editable" for slot in projection.slots)
+
+
+def test_read_only_graph_has_no_override_target_even_with_complete_activation(
+    session: Session,
+) -> None:
+    definition, revision = _seed_revision(session, mismatched_ui=True)
+
+    projection = workflow_lora_controls(
+        session,
+        revision_id=revision.id,
+    )
+
+    assert projection.activation_binding_sha256 is not None
+    assert projection.override_target is None
+    assert projection.slots
+    assert all(slot.editability != "editable" for slot in projection.slots)
+
+
+def test_mixed_projection_authorizes_only_the_exact_editable_slot(session: Session) -> None:
+    definition, revision = _seed_revision(session)
+    changed = deepcopy(revision.api_graph_json)
+    changed["zzz-private-read-only-node"] = {
+        "class_type": "Community Lora Loader",
+        "inputs": {"lora_name": REFERENCE},
+    }
+    revision.api_graph_json = changed
+    session.flush()
+
+    projection = workflow_lora_controls(
+        session,
+        revision_id=revision.id,
+    )
+
+    assert projection.override_target is not None
+    editable = [slot for slot in projection.slots if slot.editability == "editable"]
+    read_only = [slot for slot in projection.slots if slot.editability != "editable"]
+    assert len(editable) == len(read_only) == 1
+    target_payload = WorkflowLoraControlsOut.model_validate(projection).model_dump(mode="json")[
+        "override_target"
+    ]
+    assert isinstance(target_payload, dict)
+
+    def layer_for(slot_id: str) -> WorkflowLoraOverrideLayer:
+        raw = dict(target_payload)
+        raw["overrides"] = [
+            {
+                "slot_id": slot_id,
+                "loader_contract": editable[0].loader_contract,
+                "loader_authority_sha256": editable[0].loader_authority_sha256,
+                "changes": {"model_strength": 0.5},
+            }
+        ]
+        return WorkflowLoraOverrideLayer(
+            "turn",
+            parse_workflow_lora_overrides({"version": 1, "targets": [raw]}),
+        )
+
+    catalog = WorkflowLoraOverrideCatalog(projection.override_target, projection.slots)
+    authorized = resolve_workflow_lora_override_layers(
+        catalog=catalog,
+        layers=(layer_for(editable[0].slot_id),),
+    )
+    assert [item.slot_id for item in authorized.overrides] == [editable[0].slot_id]
+    with pytest.raises(WorkflowLoraOverrideError):
+        resolve_workflow_lora_override_layers(
+            catalog=catalog,
+            layers=(layer_for(read_only[0].slot_id),),
+        )
+
+
+def test_activation_identity_change_rotates_only_the_public_witness(
+    session: Session,
+) -> None:
+    definition, revision = _seed_revision(session)
+    first = workflow_lora_controls(
+        session,
+        revision_id=revision.id,
+    )
+    active = session.scalar(
+        select(WorkflowActivation).where(
+            WorkflowActivation.workflow_revision_id == revision.id,
+            WorkflowActivation.is_active.is_(True),
+        )
+    )
+    assert first.override_target is not None and active is not None
+    active.details_json = {"launch_sha256": "d" * 64}
+    session.flush()
+
+    second = workflow_lora_controls(
+        session,
+        revision_id=revision.id,
+    )
+
+    assert second.override_target is not None
+    assert second.activation_binding_sha256 == first.activation_binding_sha256
+    assert second.api_graph_sha256 == first.api_graph_sha256
+    assert (
+        second.override_target.activation_witness_sha256
+        != first.override_target.activation_witness_sha256
+    )
 
 
 @pytest.mark.parametrize("mismatched", [False, True])
@@ -848,6 +1197,7 @@ def test_rgthree_requires_audited_ui_package_and_api_value_parity(
         assert projection.evidence_gaps == ("package_graph_binding_unavailable",)
         assert slot.editability == "detected_read_only"
         assert slot.read_only_reason == "missing_package_evidence"
+        assert projection.override_target is None
     else:
         assert projection.evidence_gaps == ()
         assert slot.editability == "editable"
@@ -855,6 +1205,7 @@ def test_rgthree_requires_audited_ui_package_and_api_value_parity(
         assert slot.default_enabled is True
         assert slot.default_model_strength == 0.8
         assert slot.default_clip_strength == 0.6
+        assert projection.override_target is not None
 
 
 @pytest.mark.asyncio
@@ -864,12 +1215,25 @@ async def test_revision_scoped_api_returns_only_public_projection(
     with SessionLocal() as session:
         _, revision = _seed_revision(session)
         revision_id = revision.id
+        workflow_id = revision.workflow_id
+        active = session.scalar(
+            select(WorkflowActivation).where(
+                WorkflowActivation.workflow_revision_id == revision.id,
+                WorkflowActivation.is_active.is_(True),
+            )
+        )
+        assert active is not None
+        activation_id = active.id
+        resolver_version = active.resolver_version
+        launch_sha256 = active.details_json["launch_sha256"]
 
     response = await client.get(f"/api/workflow-revisions/{revision_id}/lora-controls")
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["version"] == 1
+    assert payload["override_contract_version"] == 1
+    assert payload["strength_bounds"] == {"minimum": -4.0, "maximum": 4.0}
     assert payload["ordering_authority"] == "presentation_only"
     assert payload["evidence_gaps"] == []
     assert payload["slots"][0]["editability"] == "editable"
@@ -880,10 +1244,43 @@ async def test_revision_scoped_api_returns_only_public_projection(
         "runtime_reference": REFERENCE,
         "sha256": ASSET_DIGEST,
     }
+    assert payload["override_target"]["workflow_family_id"] is None
+    assert payload["override_target"]["workflow_definition_id"] == workflow_id
+    assert payload["override_target"]["workflow_variant_key"] is None
+    assert payload["override_target"]["workflow_revision_id"] == revision_id
+    assert payload["override_target"]["slot_contract_version"] == 1
+    assert (
+        payload["override_target"]["activation_binding_sha256"]
+        == payload["activation_binding_sha256"]
+    )
     encoded = response.text
     assert PRIVATE_LOADER_ID not in encoded
     assert "C:/private" not in encoded
-    assert revision_id not in encoded
+    assert activation_id not in encoded
+    assert resolver_version not in encoded
+    assert launch_sha256 not in encoded
+    forbidden_keys = {
+        "node_id",
+        "entry_locator",
+        "source_api_graph_sha256",
+        "source_dependency_contract_sha256",
+        "source_activation_binding_sha256",
+        "source_authority_evidence_sha256",
+        "activation_id",
+        "resolver_version",
+        "launch_sha256",
+        "local_path",
+        "installed_path",
+    }
+
+    def keys(value: object) -> set[str]:
+        if isinstance(value, dict):
+            return set(value) | {key for item in value.values() for key in keys(item)}
+        if isinstance(value, list):
+            return {key for item in value for key in keys(item)}
+        return set()
+
+    assert forbidden_keys.isdisjoint(keys(payload))
 
     unknown = await client.get("/api/workflow-revisions/wfrev_not_stored/lora-controls")
     assert unknown.status_code == 404

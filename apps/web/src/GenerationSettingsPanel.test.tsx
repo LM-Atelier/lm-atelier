@@ -310,6 +310,9 @@ describe("the workflow's own LoRAs in the panel", () => {
     const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode("rev-1")));
     vi.mocked(api.workflowLoraControls).mockResolvedValue({
       version: 1,
+      override_contract_version: 1,
+      strength_bounds: { minimum: -4, maximum: 4 },
+      override_target: null,
       revision_scope_sha256: Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join(""),
       api_graph_sha256: "b".repeat(64),
       dependency_contract_sha256: "c".repeat(64),

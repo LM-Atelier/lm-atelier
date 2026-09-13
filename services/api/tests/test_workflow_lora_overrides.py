@@ -16,6 +16,7 @@ from local_lm.workflow_lora_overrides import (
     MAX_WORKFLOW_LORA_OVERRIDE_TARGETS,
     MAX_WORKFLOW_LORA_OVERRIDES_PER_TARGET,
     MAX_WORKFLOW_LORA_OVERRIDES_TOTAL,
+    WORKFLOW_LORA_OVERRIDE_ORIGINS,
     WorkflowLoraOverrideCatalog,
     WorkflowLoraOverrideError,
     WorkflowLoraOverrideLayer,
@@ -648,7 +649,7 @@ def test_layer_resolution_is_field_wise_in_closed_precedence_order() -> None:
     ]
 
 
-def test_all_seven_origins_are_closed_ordered_and_field_wise() -> None:
+def test_all_eight_origins_are_closed_ordered_and_field_wise() -> None:
     witness = _parsed_target()
     catalog = WorkflowLoraOverrideCatalog(witness, (_catalog_slot(),))
     origins = (
@@ -658,8 +659,10 @@ def test_all_seven_origins_are_closed_ordered_and_field_wise() -> None:
         "project",
         "chat_preset",
         "chat",
+        "turn_preset",
         "turn",
     )
+    assert origins == WORKFLOW_LORA_OVERRIDE_ORIGINS
     layers = tuple(
         _layer(
             origin,
@@ -673,7 +676,7 @@ def test_all_seven_origins_are_closed_ordered_and_field_wise() -> None:
         layers=tuple(reversed(layers)),
     )
 
-    assert resolution.overrides[0].changes[0].value == 0.7
+    assert resolution.overrides[0].changes[0].value == 0.8
     assert resolution.overrides[0].changes[0].origin == "turn"
 
     with pytest.raises(WorkflowLoraOverrideError) as invalid:

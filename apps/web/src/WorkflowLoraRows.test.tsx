@@ -50,6 +50,9 @@ function slot(overrides: Partial<WorkflowLoraControlSlot> = {}): WorkflowLoraCon
 async function controls(slots: WorkflowLoraControlSlot[], revisionId = REVISION): Promise<WorkflowLoraControls> {
   return {
     version: 1,
+    override_contract_version: 1,
+    strength_bounds: { minimum: -4, maximum: 4 },
+    override_target: null,
     revision_scope_sha256: await scopeOf(revisionId),
     api_graph_sha256: "e".repeat(64),
     dependency_contract_sha256: "f".repeat(64),

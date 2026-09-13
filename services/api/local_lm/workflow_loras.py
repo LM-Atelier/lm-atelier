@@ -1,14 +1,14 @@
-"""Project embedded workflow LoRAs from one persisted revision, read-only.
+"""Project embedded workflow LoRAs from one persisted revision, without mutation.
 
 The UI and API graphs, the typed dependency contract, and the active binding
 snapshot are separate claims.  This service joins them only where their exact
 persisted identities agree.  Missing or contradictory authority makes a LoRA
-visible but read-only; it never becomes an inferred graph edit.
+visible but read-only. Exact authority adds only a public witness; graph
+locators and the mutation itself remain private to later admission.
 """
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, cast
@@ -28,25 +28,31 @@ from .comfy_workflow_packages import (
     WorkflowPackageError,
     analyze_comfyui_workflow_package,
 )
+from .lora_constraints import MAX_LORA_STRENGTH
 from .models import (
-    WorkflowActivation,
-    WorkflowDependencyBinding,
+    WorkflowDefinition,
     WorkflowDependencySlot,
     WorkflowRevision,
 )
-from .workflow_bindings import (
-    ResolvedWorkflowBinding,
-    WorkflowActivationResolution,
-    WorkflowBindingError,
-    workflow_activation_binding_sha256,
-)
+from .workflow_activations import WorkflowActivationError
+from .workflow_bindings import ResolvedWorkflowBinding
 from .workflow_dependencies import (
     WorkflowDependencyContract,
     WorkflowDependencyError,
-    WorkflowDependencyResourceKind,
     parse_workflow_dependency_contract,
     workflow_dependency_contract_sha256,
     workflow_dependency_slot_sha256,
+)
+from .workflow_lora_activation import (
+    WorkflowLoraActivationEvidence,
+    load_current_workflow_lora_activation_evidence,
+)
+from .workflow_lora_overrides import (
+    WORKFLOW_LORA_OVERRIDE_CONTRACT_VERSION,
+    WorkflowLoraOverrideCatalog,
+    WorkflowLoraOverrideError,
+    WorkflowLoraOverrideTargetWitness,
+    resolve_workflow_lora_override_layers,
 )
 from .workflow_lora_slots import (
     CORE_LORA_LOADER_CONTRACT,
@@ -58,8 +64,12 @@ from .workflow_lora_slots import (
     MAX_WORKFLOW_LORA_PACKAGE_EVIDENCE,
     WorkflowLoraCoreEvidence,
     WorkflowLoraPackageEvidence,
+    WorkflowLoraPrivateEditTarget,
     WorkflowLoraSlot,
+    WorkflowLoraSlotExtraction,
+    WorkflowLoraSlotExtractionWithPrivateTargets,
     extract_workflow_lora_slots,
+    extract_workflow_lora_slots_with_private_targets,
 )
 from .workflow_trust import canonical_graph
 
@@ -75,7 +85,6 @@ WorkflowLoraEvidenceGap = Literal[
     "package_graph_binding_unavailable",
 ]
 
-_DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _CORE_LOADERS = frozenset({"LoraLoader", "LoraLoaderModelOnly"})
 _EMPTY_CONTRACT = WorkflowDependencyContract(version=1, slots=())
 
@@ -89,8 +98,17 @@ class WorkflowLoraProjectionError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
+class WorkflowLoraStrengthBoundsProjection:
+    minimum: float
+    maximum: float
+
+
+@dataclass(frozen=True, slots=True)
 class WorkflowLoraControlsProjection:
     version: int
+    override_contract_version: int
+    strength_bounds: WorkflowLoraStrengthBoundsProjection
+    override_target: WorkflowLoraOverrideTargetWitness | None
     revision_scope_sha256: str
     api_graph_sha256: str
     dependency_contract_sha256: str
@@ -143,7 +161,13 @@ def workflow_lora_controls(
 
     gaps: set[WorkflowLoraEvidenceGap] = set()
     contract_snapshot = _load_contract(session, revision, gaps)
-    activation = _load_activation(session, revision, contract_snapshot, gaps)
+    activation_evidence = _load_activation_evidence(
+        session,
+        revision,
+        contract_snapshot,
+        gaps,
+    )
+    activation = activation_evidence.resolution if activation_evidence is not None else None
 
     # The first extraction validates and hashes the prompt using the pure slot
     # contract itself.  It also remains the correct result when no node-level
@@ -183,20 +207,29 @@ def workflow_lora_controls(
                     gaps,
                 )
 
-    extracted = (
-        extract_workflow_lora_slots(
-            revision_scope=revision.id,
-            api_graph=revision.api_graph_json,
-            dependency_contract=contract_snapshot.contract,
-            activation=activation,
-            core_evidence=core_evidence,
-            package_evidence=package_evidence,
-        )
-        if core_evidence or package_evidence
-        else detected
+    extraction = extract_workflow_lora_slots_with_private_targets(
+        revision_scope=revision.id,
+        api_graph=revision.api_graph_json,
+        dependency_contract=contract_snapshot.contract,
+        activation=activation,
+        core_evidence=core_evidence,
+        package_evidence=package_evidence,
+    )
+    extracted = extraction.public
+    override_target = _override_target(
+        session,
+        revision,
+        activation_evidence,
+        extraction,
     )
     return WorkflowLoraControlsProjection(
         version=extracted.version,
+        override_contract_version=WORKFLOW_LORA_OVERRIDE_CONTRACT_VERSION,
+        strength_bounds=WorkflowLoraStrengthBoundsProjection(
+            minimum=-MAX_LORA_STRENGTH,
+            maximum=MAX_LORA_STRENGTH,
+        ),
+        override_target=override_target,
         revision_scope_sha256=extracted.revision_scope_sha256,
         api_graph_sha256=extracted.api_graph_sha256,
         dependency_contract_sha256=extracted.dependency_contract_sha256,
@@ -254,95 +287,97 @@ def _load_contract(
     return _ContractSnapshot(contract, {row.id: row for row in rows}, True)
 
 
-def _load_activation(
+def _load_activation_evidence(
     session: Session,
     revision: WorkflowRevision,
     snapshot: _ContractSnapshot,
     gaps: set[WorkflowLoraEvidenceGap],
-) -> WorkflowActivationResolution | None:
+) -> WorkflowLoraActivationEvidence | None:
     if not snapshot.verified:
         return None
-    active = list(
-        session.scalars(
-            select(WorkflowActivation).where(
-                WorkflowActivation.workflow_revision_id == revision.id,
-                WorkflowActivation.is_active.is_(True),
-            )
-        ).all()
-    )
-    if not active:
-        gaps.add("active_activation_unavailable")
+    try:
+        evidence = load_current_workflow_lora_activation_evidence(session, revision.id)
+    except WorkflowActivationError as exc:
+        gaps.add(
+            "active_activation_unavailable"
+            if exc.code == "workflow_activation_unavailable"
+            else "active_activation_invalid"
+        )
         return None
-    if len(active) != 1:
+    if evidence.dependency_contract_sha256 != revision.dependency_contract_sha256:
         gaps.add("active_activation_invalid")
         return None
-    activation = active[0]
-    launch_sha256 = (
-        activation.details_json.get("launch_sha256")
-        if isinstance(activation.details_json, dict)
-        else None
-    )
+    return evidence
+
+
+def _override_target(
+    session: Session,
+    revision: WorkflowRevision,
+    activation: WorkflowLoraActivationEvidence | None,
+    extraction: WorkflowLoraSlotExtractionWithPrivateTargets,
+) -> WorkflowLoraOverrideTargetWitness | None:
+    """Issue public override authority only for one exact audited edit catalog."""
+
+    if activation is None:
+        return None
+    public = extraction.public
+    editable = tuple(slot for slot in public.slots if slot.editability == "editable")
+    private = extraction.edit_targets
     if (
-        activation.state != "ready"
-        or activation.invalidated_at is not None
-        or activation.dependency_contract_sha256 != revision.dependency_contract_sha256
-        or not isinstance(activation.binding_sha256, str)
-        or _DIGEST.fullmatch(activation.binding_sha256) is None
-        or not isinstance(launch_sha256, str)
-        or _DIGEST.fullmatch(launch_sha256) is None
+        not editable
+        or len(editable) != len(private)
+        or public.activation_binding_sha256 != activation.binding_sha256
+        or public.dependency_contract_sha256 != activation.dependency_contract_sha256
+        or any(
+            not _private_target_matches_public(slot, target, public)
+            for slot, target in zip(editable, private, strict=True)
+        )
     ):
-        gaps.add("active_activation_invalid")
         return None
 
-    rows = list(
-        session.scalars(
-            select(WorkflowDependencyBinding)
-            .where(WorkflowDependencyBinding.workflow_activation_id == activation.id)
-            .order_by(
-                WorkflowDependencyBinding.workflow_dependency_slot_id,
-                WorkflowDependencyBinding.requirement_key,
-            )
-        ).all()
-    )
-    resolved: list[ResolvedWorkflowBinding] = []
-    try:
-        for row in rows:
-            slot_row = snapshot.rows_by_id.get(row.workflow_dependency_slot_id)
-            if (
-                slot_row is None
-                or row.workflow_revision_id != revision.id
-                or row.workflow_activation_id != activation.id
-                or not isinstance(row.resource_identity_json, dict)
-                or not isinstance(row.mount_json, dict)
-            ):
-                raise ValueError("invalid activation row")
-            resolved.append(
-                ResolvedWorkflowBinding(
-                    slot_name=slot_row.name,
-                    requirement_key=row.requirement_key,
-                    resource_kind=cast(
-                        WorkflowDependencyResourceKind,
-                        slot_row.resource_kind,
-                    ),
-                    identity=dict(row.resource_identity_json),
-                    resource_identity_sha256=row.resource_identity_sha256,
-                    mount=dict(row.mount_json),
-                )
-            )
-        bindings = tuple(sorted(resolved, key=lambda item: (item.slot_name, item.requirement_key)))
-        if workflow_activation_binding_sha256(snapshot.contract, bindings) != (
-            activation.binding_sha256
-        ):
-            raise ValueError("activation digest mismatch")
-    except (AttributeError, KeyError, TypeError, ValueError, WorkflowBindingError):
-        gaps.add("active_activation_invalid")
+    definition = session.get(WorkflowDefinition, revision.workflow_id)
+    if definition is None or definition.id != revision.workflow_id:
         return None
-    return WorkflowActivationResolution(
-        bindings=bindings,
-        issues=(),
-        missing_required_slots=(),
-        complete=True,
-        binding_sha256=activation.binding_sha256,
+    witness = WorkflowLoraOverrideTargetWitness(
+        workflow_family_id=definition.family_id,
+        workflow_definition_id=revision.workflow_id,
+        workflow_variant_key=definition.variant_key,
+        workflow_revision_id=revision.id,
+        slot_contract_version=public.version,
+        revision_scope_sha256=public.revision_scope_sha256,
+        api_graph_sha256=public.api_graph_sha256,
+        dependency_contract_sha256=public.dependency_contract_sha256,
+        activation_binding_sha256=activation.binding_sha256,
+        activation_witness_sha256=activation.activation_witness_sha256,
+    )
+    try:
+        resolution = resolve_workflow_lora_override_layers(
+            catalog=WorkflowLoraOverrideCatalog(witness, public.slots),
+            layers=(),
+        )
+    except WorkflowLoraOverrideError:
+        return None
+    if resolution.target != witness or resolution.overrides or resolution.inactive_targets:
+        return None
+    return witness
+
+
+def _private_target_matches_public(
+    slot: WorkflowLoraSlot,
+    target: WorkflowLoraPrivateEditTarget,
+    public: WorkflowLoraSlotExtraction,
+) -> bool:
+    return (
+        type(target) is WorkflowLoraPrivateEditTarget
+        and target.slot_id == slot.slot_id
+        and target.source_api_graph_sha256 == public.api_graph_sha256
+        and target.source_dependency_contract_sha256 == public.dependency_contract_sha256
+        and target.source_activation_binding_sha256 == public.activation_binding_sha256
+        and target.loader_contract == slot.loader_contract
+        and target.loader_authority_sha256 == slot.loader_authority_sha256
+        and slot.asset_binding is not None
+        and target.asset_sha256 == slot.asset_binding.sha256
+        and target.editable_fields == slot.editable_fields
     )
 
 

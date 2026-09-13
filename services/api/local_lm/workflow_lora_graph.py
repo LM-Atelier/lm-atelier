@@ -20,6 +20,7 @@ from typing import Any, Literal, cast
 from .comfy_package_widgets import POWER_LORA_LOADER, POWER_LORA_LOADER_CONTRACT
 from .lora_constraints import MAX_LORA_STRENGTH
 from .workflow_lora_overrides import (
+    WORKFLOW_LORA_OVERRIDE_ORIGINS,
     ResolvedWorkflowLoraField,
     ResolvedWorkflowLoraOverride,
     WorkflowLoraOverrideCatalog,
@@ -51,17 +52,7 @@ _SLOT_ID = re.compile(r"^wflora_[0-9a-f]{64}$")
 _RGTHREE_ENTRY = re.compile(r"^lora_[1-9][0-9]*$")
 _FIELDS = frozenset({"enabled", "model_strength", "clip_strength"})
 _FIELD_ORDER = {"enabled": 0, "model_strength": 1, "clip_strength": 2}
-_ORIGINS = frozenset(
-    {
-        "profile_request",
-        "default_preset",
-        "project_preset",
-        "project",
-        "chat_preset",
-        "chat",
-        "turn",
-    }
-)
+_ORIGINS = frozenset(WORKFLOW_LORA_OVERRIDE_ORIGINS)
 
 
 class WorkflowLoraGraphError(ValueError):

@@ -532,6 +532,33 @@ def test_workflow_schema_cannot_weaken_engine_fields_or_claim_runtime_keys() -> 
             IMAGE_SETTINGS,
             {"properties": {"prompt": {"type": "string", "default": "override"}}},
         )
+    with pytest.raises(
+        ValueError,
+        match="reserved setting key workflow_lora_overrides",
+    ):
+        workflow_settings(
+            IMAGE_SETTINGS,
+            {"properties": {"workflow_lora_overrides": {"type": "object", "default": {}}}},
+        )
+
+
+def test_capability_schema_cannot_claim_workflow_lora_transport_key() -> None:
+    field = SettingField(
+        key="WORKFLOW_LORA_OVERRIDES",
+        label="Forged workflow LoRA overrides",
+        type="object",
+        default={},
+        scope="request",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="reserved setting key WORKFLOW_LORA_OVERRIDES",
+    ):
+        capability_settings_for_role(
+            _media_capabilities(image=[field], video=[]),
+            "image",
+        )
 
 
 def test_video_role_offers_cfg_under_the_shared_runtime_name() -> None:

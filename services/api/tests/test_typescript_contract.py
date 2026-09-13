@@ -101,6 +101,8 @@ CHECKED_CONTRACTS = {
     "WorkflowLoraAssetBinding": "WorkflowLoraAssetBindingOut",
     "WorkflowLoraControlSlot": "WorkflowLoraControlSlotOut",
     "WorkflowLoraControls": "WorkflowLoraControlsOut",
+    "WorkflowLoraOverrideTargetWitness": "WorkflowLoraOverrideTargetWitnessOut",
+    "WorkflowLoraStrengthBounds": "WorkflowLoraStrengthBoundsOut",
     "Run": "RunOut",
     "RuntimeStatus": "RuntimeStatus",
     "SettingField": "SettingField",
