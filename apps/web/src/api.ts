@@ -1038,7 +1038,7 @@ export const api = {
   // choice means instead of working them out itself.
   resolveWorkflowRevisionOutputGeometry: (
     revisionId: string,
-    geometry: { mode: "image"; size_mode: "preset"; preset_id: OutputRatioPresetId },
+    geometry: { mode: "image" | "video"; size_mode: "preset"; preset_id: OutputRatioPresetId },
   ) =>
     request<WorkflowOutputGeometryResolution>(
       `/api/workflow-revisions/${encodeURIComponent(revisionId)}/output-geometry/resolve`,

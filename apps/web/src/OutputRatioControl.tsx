@@ -87,8 +87,10 @@ export function OutputRatioControl({
     setPending(preset);
     setRefused(null);
     try {
+      // The mode is the revision's, not the panel's: a video revision proves
+      // video sizes, and asking it for a picture would be refused.
       const answer = await api.resolveWorkflowRevisionOutputGeometry(revisionId, {
-        mode: "image",
+        mode: capability.operation === "text_to_image" ? "image" : "video",
         size_mode: "preset",
         preset_id: preset,
       });
