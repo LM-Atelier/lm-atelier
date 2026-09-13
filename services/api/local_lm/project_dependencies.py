@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from .model_planner import workflow_artifact_contract
 from .models import (
     Chat,
     GenerationPreset,
@@ -441,6 +442,16 @@ def install_dependency_manifest(
                     dependencies_json=source_revision.dependencies,
                     # Trust is local security state and never crosses an archive boundary.
                     trusted=False,
+                    # Identity does cross it: activation binds a reviewed revision
+                    # by what it executes, so a revision imported without this can
+                    # be reviewed and still never run.
+                    artifact_sha256=workflow_artifact_contract(
+                        operation=workflow_source.operation,
+                        engine=source_revision.engine,
+                        api_graph=source_revision.api_graph,
+                        input_schema=source_revision.input_schema,
+                        dependencies=source_revision.dependencies,
+                    ),
                 )
                 session.add(revision)
                 session.flush()
