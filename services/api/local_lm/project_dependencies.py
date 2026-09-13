@@ -20,6 +20,7 @@ from .models import (
 )
 from .profile_service import AUTO_PROFILE_ID
 from .project_portability import redact_local_paths
+from .revision_dependency_contract import persist_dependency_contract
 from .saved_settings import SavedRoleSettings, normalize_saved_settings
 from .settings_registry import ROLE_SETTINGS, validate_workflow_input_schema
 from .workflow_edit_calibration import validate_workflow_edit_calibration
@@ -443,6 +444,7 @@ def install_dependency_manifest(
                 )
                 session.add(revision)
                 session.flush()
+                persist_dependency_contract(session, revision)
                 matched_revisions[source_revision.source_id] = revision
             definition.current_revision_id = matched_revisions[
                 workflow_source.current_revision_source_id

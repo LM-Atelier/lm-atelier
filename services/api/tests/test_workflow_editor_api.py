@@ -1156,3 +1156,78 @@ async def test_editor_draft_version_conflict_keeps_receipt_retryable(
     )
     assert retry.status_code == 200
     assert retry.json()["created"]
+
+
+async def test_an_editor_draft_of_a_declared_workflow_owns_its_own_contract_rows(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A draft inherits the base's declaration and gets rows of its own.
+
+    Sharing or moving the base's rows would make the two revisions' identities
+    depend on each other, so the draft is checked for equal identity and
+    disjoint rows.
+    """
+
+    from sqlalchemy import select
+
+    from local_lm.db import SessionLocal
+    from local_lm.models import WorkflowDependencySlot, WorkflowRevision
+
+    declared = {
+        "version": 1,
+        "slots": [
+            {
+                "name": "editor-nodes",
+                "resource_kind": "custom_node",
+                "required": True,
+                "satisfaction": "all_of",
+                "requirements": [{"key": "k", "constraints": {}}],
+            }
+        ],
+    }
+    _ready_editor(app, monkeypatch)
+    workflow = await _create_workflow(client, dependencies=declared)
+    started = (await client.post(f"/api/workflows/{workflow['id']}/editor-sessions")).json()
+    consumed = await client.post(
+        f"/api/workflows/{workflow['id']}/editor-sessions/{started['id']}/consume",
+        json={
+            "nonce": started["nonce"],
+            "base_revision_id": started["base_revision_id"],
+            "ui_graph": _edited_ui_graph(),
+            "api_prompt": _edited_api_graph(),
+        },
+    )
+    assert consumed.status_code == 200, consumed.text
+    created = await client.post(
+        f"/api/workflows/{workflow['id']}/editor-drafts",
+        json={"validated_return_id": consumed.json()["validated_return_id"]},
+    )
+    assert created.status_code == 200, created.text
+    draft_id = created.json()["draft_revision_id"]
+    base_id = workflow["current_revision_id"]
+
+    def identity(revision_id: str) -> tuple[str | None, list[tuple[str, str, str]]]:
+        with SessionLocal() as session:
+            revision = session.get(WorkflowRevision, revision_id)
+            assert revision is not None
+            rows = session.scalars(
+                select(WorkflowDependencySlot)
+                .where(WorkflowDependencySlot.workflow_revision_id == revision_id)
+                .order_by(WorkflowDependencySlot.ordinal)
+            ).all()
+            return revision.dependency_contract_sha256, [
+                (row.id, row.name, row.contract_sha256) for row in rows
+            ]
+
+    base_digest, base_rows = identity(base_id)
+    draft_digest, draft_rows = identity(draft_id)
+    assert base_digest is not None
+    assert draft_digest == base_digest
+    assert [(name, digest) for _, name, digest in draft_rows] == [
+        (name, digest) for _, name, digest in base_rows
+    ]
+    assert {row_id for row_id, _, _ in draft_rows}.isdisjoint(
+        {row_id for row_id, _, _ in base_rows}
+    )

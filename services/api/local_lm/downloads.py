@@ -100,6 +100,7 @@ from .profile_service import (
 )
 from .profile_use_cases import normalize_provider_use_case_metadata
 from .progress import completed_progress, update_job_progress
+from .revision_dependency_contract import persist_dependency_contract
 from .scheduler import ResourceScheduler
 from .schemas import DownloadRequest
 from .subprocess_env import subprocess_environment
@@ -2537,6 +2538,7 @@ class DownloadManager:
         )
         session.add(revision)
         session.flush()
+        persist_dependency_contract(session, revision)
         definition.current_revision_id = revision.id
         ensure_workflow_family_ownership(session, definition, revision)
         return revision
