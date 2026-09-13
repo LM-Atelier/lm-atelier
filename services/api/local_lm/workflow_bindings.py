@@ -281,7 +281,7 @@ def resolve_workflow_activation(
     resolved.sort(key=lambda item: (item.slot_name, item.requirement_key))
     issues.sort(key=lambda item: (item.slot_name, item.requirement_key or "", item.code))
     complete = not issues and not missing_required
-    binding_sha256 = _workflow_activation_binding_sha256(contract, resolved) if complete else None
+    binding_sha256 = workflow_activation_binding_sha256(contract, resolved) if complete else None
     return WorkflowActivationResolution(
         tuple(resolved),
         tuple(issues),
@@ -313,6 +313,15 @@ def workflow_resource_identity_sha256(
         "identity": portable,
     }
     return hashlib.sha256(canonical_workflow_dependency_json(payload)).hexdigest()
+
+
+def workflow_activation_binding_sha256(
+    contract: WorkflowDependencyContract,
+    bindings: Sequence[ResolvedWorkflowBinding],
+) -> str:
+    """Validate and hash one complete resolved dependency binding snapshot."""
+
+    return _workflow_activation_binding_sha256(contract, bindings)
 
 
 def _workflow_activation_binding_sha256(
@@ -822,6 +831,12 @@ def _runtime_reference(value: object) -> str:
             "invalid_dependency_identity", "Model component runtime reference is invalid"
         )
     return value
+
+
+def validate_workflow_runtime_reference(value: object) -> str:
+    """Return one portable runtime loader name or raise the binding contract error."""
+
+    return _runtime_reference(value)
 
 
 def _canonical_github_repository(value: object) -> str:
