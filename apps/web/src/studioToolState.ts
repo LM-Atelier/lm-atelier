@@ -5,6 +5,8 @@
  * testable without a DOM. The load-bearing rule lives here: a gesture
  * snapshots the mask BEFORE its first mutation, because snapshotting after
  * would store the already-painted raster and make the first Undo a no-op.
+ * That snapshot is `snapshotBeforeGesture`, called as the gesture starts,
+ * not a reducer action: see its note for why.
  */
 
 import {
@@ -61,7 +63,6 @@ export type StudioToolAction =
   | { type: "set-margin"; side: "top" | "right" | "bottom" | "left"; fraction: number }
   | { type: "clear-margins" }
   | { type: "image-changed"; width: number; height: number }
-  | { type: "gesture-start" }
   | { type: "stroke-end" }
   | { type: "invert" }
   | { type: "feather" }
@@ -111,12 +112,6 @@ export function studioToolReducer(
         maskVersion: state.maskVersion + 1,
         history: new MaskHistory(),
       };
-    }
-    case "gesture-start": {
-      if (!state.mask) return state;
-      // Snapshot the pre-gesture raster: this is the state Undo restores.
-      state.history.push(state.mask);
-      return state;
     }
     case "stroke-end":
       return { ...state, maskVersion: state.maskVersion + 1 };
@@ -198,6 +193,18 @@ export function toolFor(state: StudioToolState): PointerTool | null {
     case "extend":
       return null;
   }
+}
+
+/** Snapshot the selection before a gesture changes it: the state Undo returns to.
+ *
+ * Called at the moment the gesture starts rather than dispatched. React runs
+ * a dispatched action when it next renders, which is after the event handler
+ * that started the gesture has finished, and a brush stamps its first dab in
+ * that same handler. A dispatched snapshot therefore already held that dab,
+ * and Undo left the start of every brush stroke behind.
+ */
+export function snapshotBeforeGesture(state: StudioToolState): void {
+  if (state.mask) state.history.push(state.mask);
 }
 
 function clamp(value: number, low: number, high: number): number {

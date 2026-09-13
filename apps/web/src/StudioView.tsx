@@ -16,6 +16,7 @@ import { coverage, encodeMaskPng, isEmpty } from "./studioMasks";
 import {
   initialToolState,
   defaultInstruction,
+  snapshotBeforeGesture,
   studioToolReducer,
   toolFor,
   toolUsesMask,
@@ -226,7 +227,7 @@ export function StudioView({
               mask={tools.mask}
               tool={pointerTool}
               maskVersion={tools.maskVersion}
-              onGestureStart={() => dispatch({ type: "gesture-start" })}
+              onGestureStart={() => snapshotBeforeGesture(tools)}
               onStrokeEnd={() => dispatch({ type: "stroke-end" })}
             />
           ) : (
