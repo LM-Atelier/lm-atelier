@@ -14,7 +14,14 @@ import {
   MaskHistory,
   type MaskRaster,
 } from "./studioMasks";
-import { BrushTool, LassoTool, RectTool, type PointerTool } from "./studioTools";
+import {
+  BrushTool,
+  LassoTool,
+  magicWandTool,
+  paintBucketTool,
+  RectTool,
+  type PointerTool,
+} from "./studioTools";
 
 import type { StudioToolKind } from "./types";
 
@@ -33,6 +40,8 @@ const MASK_TOOLS: ReadonlySet<StudioToolKind> = new Set<StudioToolKind>([
   "eraser",
   "rect",
   "lasso",
+  "bucket",
+  "wand",
 ]);
 
 export function toolUsesMask(kind: StudioToolKind): boolean {
@@ -43,6 +52,10 @@ export type StudioToolState = {
   readonly kind: StudioToolKind;
   readonly brushRadius: number;
   readonly featherPx: number;
+  /** Whether the paint bucket and the magic wand add to the selection or take away from it. */
+  readonly selectionMode: "add" | "remove";
+  /** How far a color may differ from the clicked one and still join the wand's selection. */
+  readonly colorTolerance: number;
   /** How much larger Enhance should make the picture. */
   readonly upscaleFactor: number;
   /** How far past each edge to paint, as a fraction of the picture. */
@@ -57,6 +70,8 @@ export type StudioToolAction =
   | { type: "select-tool"; kind: StudioToolKind }
   | { type: "set-brush-radius"; radius: number }
   | { type: "set-feather"; px: number }
+  | { type: "set-selection-mode"; mode: "add" | "remove" }
+  | { type: "set-color-tolerance"; tolerance: number }
   | { type: "set-upscale-factor"; factor: number }
   | { type: "set-margin"; side: "top" | "right" | "bottom" | "left"; fraction: number }
   | { type: "clear-margins" }
@@ -74,6 +89,8 @@ export function initialToolState(): StudioToolState {
     kind: "instruct",
     brushRadius: 24,
     featherPx: 4,
+    selectionMode: "add",
+    colorTolerance: 32,
     upscaleFactor: 2,
     margins: { top: 0, right: 0, bottom: 0, left: 0 },
     mask: null,
@@ -93,6 +110,10 @@ export function studioToolReducer(
       return { ...state, brushRadius: clamp(action.radius, 1, 512) };
     case "set-feather":
       return { ...state, featherPx: clamp(action.px, 0, 128) };
+    case "set-selection-mode":
+      return { ...state, selectionMode: action.mode };
+    case "set-color-tolerance":
+      return { ...state, colorTolerance: clamp(action.tolerance, 0, 255) };
     case "set-upscale-factor":
       return { ...state, upscaleFactor: clamp(action.factor, 1, 8) };
     case "set-margin":
@@ -174,9 +195,18 @@ export function defaultInstruction(state: StudioToolState): string {
   return "";
 }
 
-/** The pointer tool for the current state, or null for text-only modes. */
-export function toolFor(state: StudioToolState): PointerTool | null {
+/** The pointer tool for the current state, or null for text-only modes.
+ *
+ * `pixels` is the picture as RGBA bytes, needed only by the magic wand. Without
+ * them the wand has nothing to compare, so it gives no tool rather than one
+ * that selects by guesswork.
+ */
+export function toolFor(
+  state: StudioToolState,
+  pixels: Uint8ClampedArray | null = null,
+): PointerTool | null {
   if (!state.mask) return null;
+  const selected = state.selectionMode === "add" ? 255 : 0;
   switch (state.kind) {
     case "brush":
       return new BrushTool(state.mask, state.brushRadius);
@@ -186,6 +216,10 @@ export function toolFor(state: StudioToolState): PointerTool | null {
       return new RectTool(state.mask);
     case "lasso":
       return new LassoTool(state.mask);
+    case "bucket":
+      return paintBucketTool(state.mask, selected);
+    case "wand":
+      return pixels ? magicWandTool(state.mask, pixels, state.colorTolerance, selected) : null;
     case "instruct":
       return null;
     // Enhance points at nothing: the whole picture is the subject and the only

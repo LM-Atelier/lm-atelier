@@ -132,6 +132,106 @@ export function fillPolygon(
   }
 }
 
+/** Fill the connected region under a point with `value`.
+ *
+ * Neighbours are the four pixels sharing an edge, and `inRegion` decides
+ * which pixels belong, always judged against pixels not yet visited. The walk
+ * fills whole runs of a row and remembers only where a run starts on the rows
+ * above and below, so even a region covering the largest supported picture
+ * never recurses and never queues one entry per pixel. Returns whether any
+ * coverage actually changed.
+ */
+function fillConnected(
+  mask: MaskRaster,
+  x: number,
+  y: number,
+  inRegion: (index: number) => boolean,
+  value: number,
+): boolean {
+  const { width, height, data } = mask;
+  const column = Math.floor(x);
+  const row = Math.floor(y);
+  if (!(column >= 0 && row >= 0 && column < width && row < height)) return false;
+  const seed = row * width + column;
+  if (!inRegion(seed)) return false;
+  const visited = new Uint8Array(width * height);
+  const pending = [seed];
+  let changed = false;
+  while (pending.length > 0) {
+    const start = pending.pop()!;
+    if (visited[start]) continue;
+    const rowStart = start - (start % width);
+    let left = start;
+    while (left > rowStart && !visited[left - 1] && inRegion(left - 1)) left -= 1;
+    let right = start;
+    while (right < rowStart + width - 1 && !visited[right + 1] && inRegion(right + 1)) right += 1;
+    for (let index = left; index <= right; index += 1) {
+      visited[index] = 1;
+      if (data[index] !== value) {
+        data[index] = value;
+        changed = true;
+      }
+    }
+    for (const offset of [-width, width]) {
+      if (rowStart + offset < 0 || rowStart + offset >= data.length) continue;
+      let open = false;
+      for (let index = left + offset; index <= right + offset; index += 1) {
+        const joins = !visited[index] && inRegion(index);
+        if (joins && !open) pending.push(index);
+        open = joins;
+      }
+    }
+  }
+  return changed;
+}
+
+/** The paint bucket: fill the evenly covered region under a point.
+ *
+ * The region is every connected pixel with exactly the coverage of the one
+ * clicked, so clicking inside an outline fills the inside and stops at the
+ * outline, and clicking a selected area with `value` 0 removes that area.
+ */
+export function fillRegion(mask: MaskRaster, x: number, y: number, value = 255): boolean {
+  const column = Math.floor(x);
+  const row = Math.floor(y);
+  if (!(column >= 0 && row >= 0 && column < mask.width && row < mask.height)) return false;
+  const seedCoverage = mask.data[row * mask.width + column];
+  if (seedCoverage === value) return false;
+  return fillConnected(mask, x, y, (index) => mask.data[index] === seedCoverage, value);
+}
+
+/** The magic wand: select the connected pixels close in color to the one under a point.
+ *
+ * `pixels` is the picture as RGBA bytes at the mask's own size; anything else
+ * is refused rather than read out of step. Closeness is the largest difference
+ * in any color channel or in alpha, so a tolerance of 0 takes only the exact color.
+ */
+export function selectSimilarColor(
+  mask: MaskRaster,
+  pixels: Uint8ClampedArray,
+  x: number,
+  y: number,
+  tolerance: number,
+  value = 255,
+): boolean {
+  if (pixels.length !== mask.width * mask.height * 4) {
+    throw new Error("the picture's pixels do not match the selection's size");
+  }
+  const column = Math.floor(x);
+  const row = Math.floor(y);
+  if (!(column >= 0 && row >= 0 && column < mask.width && row < mask.height)) return false;
+  const seed = (row * mask.width + column) * 4;
+  const reach = Math.max(0, Math.min(255, Math.round(tolerance)));
+  const close = (index: number) => {
+    const at = index * 4;
+    return Math.abs(pixels[at] - pixels[seed]) <= reach
+      && Math.abs(pixels[at + 1] - pixels[seed + 1]) <= reach
+      && Math.abs(pixels[at + 2] - pixels[seed + 2]) <= reach
+      && Math.abs(pixels[at + 3] - pixels[seed + 3]) <= reach;
+  };
+  return fillConnected(mask, x, y, close, value);
+}
+
 export function invert(mask: MaskRaster): void {
   for (let index = 0; index < mask.data.length; index += 1) {
     mask.data[index] = 255 - mask.data[index];

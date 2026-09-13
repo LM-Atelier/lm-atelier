@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { coverage, isEmpty, fillRect } from "./studioMasks";
-import { BrushTool, RectTool } from "./studioTools";
+import { BrushTool, ClickSelectTool, RectTool } from "./studioTools";
 import {
   initialToolState,
   studioToolReducer,
   toolFor,
+  toolUsesMask,
   type StudioToolState,
 } from "./studioToolState";
 
@@ -30,6 +31,41 @@ describe("studio tool state", () => {
     expect(toolFor({ ...base, kind: "eraser" })).toBeInstanceOf(BrushTool);
     expect(toolFor({ ...base, kind: "rect" })).toBeInstanceOf(RectTool);
     expect(toolFor({ ...base, kind: "instruct" })).toBeNull();
+  });
+
+  it("gives the paint bucket its click, and the wand one only with the picture's pixels", () => {
+    const base = withImage(4, 4);
+    const pixels = new Uint8ClampedArray(4 * 4 * 4);
+    expect(toolFor({ ...base, kind: "bucket" })).toBeInstanceOf(ClickSelectTool);
+    expect(toolFor({ ...base, kind: "wand" }, pixels)).toBeInstanceOf(ClickSelectTool);
+    expect(toolFor({ ...base, kind: "wand" }, null)).toBeNull();
+    // Both draw the mask the apply sends, like every other selection.
+    expect(toolUsesMask("bucket")).toBe(true);
+    expect(toolUsesMask("wand")).toBe(true);
+  });
+
+  it("adds with the bucket and the wand by default, and takes away when asked", () => {
+    let state = withImage(4, 4);
+    const pixels = new Uint8ClampedArray(4 * 4 * 4);
+    const wand = toolFor({ ...state, kind: "wand" }, pixels)!;
+    wand.down({ x: 1, y: 1 });
+    wand.up({ x: 1, y: 1 });
+    expect(coverage(state.mask!)).toBe(1);
+
+    state = studioToolReducer(state, { type: "set-selection-mode", mode: "remove" });
+    const bucket = toolFor({ ...state, kind: "bucket" })!;
+    bucket.down({ x: 2, y: 2 });
+    bucket.up({ x: 2, y: 2 });
+    expect(isEmpty(state.mask!)).toBe(true);
+  });
+
+  it("keeps the color tolerance within a byte", () => {
+    let state = initialToolState();
+    expect(state.colorTolerance).toBe(32);
+    state = studioToolReducer(state, { type: "set-color-tolerance", tolerance: 400 });
+    expect(state.colorTolerance).toBe(255);
+    state = studioToolReducer(state, { type: "set-color-tolerance", tolerance: -3 });
+    expect(state.colorTolerance).toBe(0);
   });
 
   it("undoes to the pre-gesture mask, not the painted one", () => {

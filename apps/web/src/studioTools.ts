@@ -10,6 +10,8 @@
 import {
   fillPolygon,
   fillRect,
+  fillRegion,
+  selectSimilarColor,
   strokeSegment,
   type MaskRaster,
 } from "./studioMasks";
@@ -178,4 +180,54 @@ export class LassoTool implements PointerTool {
       ? { kind: "lasso", points: [...this.points] }
       : { kind: "none" };
   }
+}
+
+/** A one-click selection: the paint bucket and the magic wand.
+ *
+ * It selects where the pointer went down, and commits when it lifts, like the
+ * rectangle and the lasso. A slip of the pointer between press and release
+ * does not move the click, and a keyboard press starts at the caret and
+ * finishes on the next press, exactly as the other selections do.
+ */
+export class ClickSelectTool implements PointerTool {
+  readonly appliesWhileMoving = false;
+  private pressed: ImagePoint | null = null;
+
+  constructor(private readonly select: (point: ImagePoint) => boolean) {}
+
+  down(point: ImagePoint): void {
+    this.pressed = point;
+  }
+
+  move(): void {}
+
+  up(): boolean {
+    const at = this.pressed;
+    this.pressed = null;
+    return at ? this.select(at) : false;
+  }
+
+  cancel(): void {
+    this.pressed = null;
+  }
+
+  preview(): ToolPreview {
+    return { kind: "none" };
+  }
+}
+
+/** Fill the evenly covered region under the click; `value` 0 removes it. */
+export function paintBucketTool(mask: MaskRaster, value = 255): PointerTool {
+  return new ClickSelectTool((point) => fillRegion(mask, point.x, point.y, value));
+}
+
+/** Select the connected pixels close in color to the clicked one; `value` 0 removes them. */
+export function magicWandTool(
+  mask: MaskRaster,
+  pixels: Uint8ClampedArray,
+  tolerance: number,
+  value = 255,
+): PointerTool {
+  return new ClickSelectTool((point) =>
+    selectSimilarColor(mask, pixels, point.x, point.y, tolerance, value));
 }

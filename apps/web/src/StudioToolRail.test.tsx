@@ -34,6 +34,8 @@ describe("StudioToolRail", () => {
       "Erase from the selection",
       "Select a rectangle",
       "Lasso a selection",
+      "Fill an area of the selection",
+      "Select similar colors",
     ]) {
       expect(screen.getByRole("button", { name })).toBeInTheDocument();
     }

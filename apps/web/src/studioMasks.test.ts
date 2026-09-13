@@ -9,9 +9,11 @@ import {
   feather,
   fillPolygon,
   fillRect,
+  fillRegion,
   invert,
   isEmpty,
   MaskHistory,
+  selectSimilarColor,
   stampCircle,
   strokeSegment,
   toAlphaImageData,
@@ -226,5 +228,131 @@ describe("mask history", () => {
 
     history.push(current);
     expect(history.canRedo).toBe(false);
+  });
+});
+
+/** A picture of `width` by `height`, every pixel the given RGBA, with `paint` changing some. */
+function picture(
+  width: number,
+  height: number,
+  rgba: [number, number, number, number],
+  paint: (x: number, y: number) => [number, number, number, number] | null = () => null,
+): Uint8ClampedArray {
+  const pixels = new Uint8ClampedArray(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      pixels.set(paint(x, y) ?? rgba, (y * width + x) * 4);
+    }
+  }
+  return pixels;
+}
+
+function selectedAt(mask: ReturnType<typeof createMask>, x: number, y: number): number {
+  return mask.data[y * mask.width + x];
+}
+
+describe("paint bucket", () => {
+  it("fills the inside of an outline and stops at the outline", () => {
+    const mask = createMask(20, 20);
+    // A hollow square: selected border, unselected inside.
+    fillRect(mask, 4, 4, 16, 16);
+    fillRect(mask, 6, 6, 14, 14, 0);
+
+    expect(fillRegion(mask, 10, 10)).toBe(true);
+
+    expect(selectedAt(mask, 10, 10)).toBe(255);
+    expect(selectedAt(mask, 6, 13)).toBe(255);
+    // Outside the outline is untouched.
+    expect(selectedAt(mask, 1, 1)).toBe(0);
+    expect(selectedAt(mask, 18, 10)).toBe(0);
+  });
+
+  it("does not leak through a corner, only through a shared edge", () => {
+    const mask = createMask(3, 3);
+    // Selected cells on the diagonal split the unselected ones into two corners.
+    mask.data.set([0, 255, 255, 255, 0, 255, 255, 255, 0]);
+
+    fillRegion(mask, 0, 0);
+
+    expect(selectedAt(mask, 0, 0)).toBe(255);
+    expect(selectedAt(mask, 1, 1)).toBe(0);
+    expect(selectedAt(mask, 2, 2)).toBe(0);
+  });
+
+  it("removes a selected area when filling with nothing", () => {
+    const mask = createMask(10, 10);
+    fillRect(mask, 0, 0, 5, 10);
+    fillRect(mask, 7, 0, 10, 10);
+
+    expect(fillRegion(mask, 1, 1, 0)).toBe(true);
+
+    expect(selectedAt(mask, 4, 9)).toBe(0);
+    // The other selected band does not touch the first, so it stays.
+    expect(selectedAt(mask, 8, 5)).toBe(255);
+  });
+
+  it("changes nothing when the area already has that coverage or the point is off the picture", () => {
+    const mask = createMask(8, 8);
+    fillRect(mask, 0, 0, 8, 8);
+
+    expect(fillRegion(mask, 3, 3)).toBe(false);
+    expect(fillRegion(createMask(8, 8), -1, 3)).toBe(false);
+    expect(fillRegion(createMask(8, 8), 3, 8)).toBe(false);
+  });
+
+  it("fills a large region without running out of stack", () => {
+    const mask = createMask(2048, 2048);
+
+    expect(fillRegion(mask, 1000, 1000)).toBe(true);
+
+    expect(coverage(mask)).toBe(1);
+  });
+});
+
+describe("magic wand", () => {
+  it("selects the connected pixels within the tolerance of the clicked color", () => {
+    const mask = createMask(6, 1);
+    const pixels = picture(6, 1, [100, 100, 100, 255], (x) =>
+      [null, [110, 95, 100, 255], [111, 100, 100, 255], null, null, null][x] as
+        [number, number, number, number] | null);
+
+    expect(selectSimilarColor(mask, pixels, 0, 0, 10)).toBe(true);
+
+    // 10 away in one channel joins; 11 away does not, and nothing past it is reached.
+    expect(Array.from(mask.data)).toEqual([255, 255, 0, 0, 0, 0]);
+  });
+
+  it("compares alpha as well as color", () => {
+    const mask = createMask(2, 1);
+    const pixels = picture(2, 1, [50, 50, 50, 255], (x) => (x === 1 ? [50, 50, 50, 0] : null));
+
+    selectSimilarColor(mask, pixels, 0, 0, 20);
+
+    expect(Array.from(mask.data)).toEqual([255, 0]);
+  });
+
+  it("takes only the exact color at tolerance zero, and only where it connects", () => {
+    const mask = createMask(5, 1);
+    const pixels = picture(5, 1, [0, 0, 0, 255], (x) => (x === 2 ? [1, 0, 0, 255] : null));
+
+    selectSimilarColor(mask, pixels, 0, 0, 0);
+
+    // The same black on the far side of the one different pixel is not connected.
+    expect(Array.from(mask.data)).toEqual([255, 255, 0, 0, 0]);
+  });
+
+  it("removes the similar pixels from the selection when selecting with nothing", () => {
+    const mask = createMask(4, 1);
+    fillRect(mask, 0, 0, 4, 1);
+    const pixels = picture(4, 1, [200, 0, 0, 255], (x) => (x >= 2 ? [0, 0, 200, 255] : null));
+
+    expect(selectSimilarColor(mask, pixels, 3, 0, 5, 0)).toBe(true);
+
+    expect(Array.from(mask.data)).toEqual([255, 255, 0, 0]);
+  });
+
+  it("refuses pixels that are not the selection's size", () => {
+    expect(() => selectSimilarColor(createMask(4, 4), new Uint8ClampedArray(4 * 3 * 4), 1, 1, 8))
+      .toThrow("do not match");
   });
 });

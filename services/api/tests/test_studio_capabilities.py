@@ -74,8 +74,9 @@ def test_one_mask_capable_workflow_enables_every_selection_tool() -> None:
     # Four ways to draw one mask: they stand or fall together.
     tools = _by_kind([PLAIN_SCHEMA, MASK_SCHEMA])
 
-    assert all(tools[kind].available for kind in ("brush", "eraser", "rect", "lasso"))
-    assert all(tools[kind].reason is None for kind in ("brush", "eraser", "rect", "lasso"))
+    selections = ("brush", "eraser", "rect", "lasso", "bucket", "wand")
+    assert all(tools[kind].available for kind in selections)
+    assert all(tools[kind].reason is None for kind in selections)
 
 
 def test_capability_follows_the_declaration_rather_than_the_shape() -> None:

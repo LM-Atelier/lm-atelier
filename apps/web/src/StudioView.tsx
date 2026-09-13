@@ -8,11 +8,13 @@ import { ErrorCallout } from "./ErrorCallout";
 import { StudioCanvas } from "./StudioCanvas";
 import { StudioExtendHandles } from "./StudioExtendHandles";
 import { StudioRecipes } from "./StudioRecipes";
+import { StudioSelectionTool } from "./StudioSelectionTool";
 import { StudioToolGuidance } from "./StudioToolGuidance";
 import { StudioToolRail } from "./StudioToolRail";
 import { StudioWorkflowSelector } from "./StudioWorkflowSelector";
 import { artifactSource } from "./messageMedia";
 import { coverage, encodeMaskPng, isEmpty } from "./studioMasks";
+import { readSourcePixels } from "./studioSourcePixels";
 import {
   initialToolState,
   defaultInstruction,
@@ -86,13 +88,6 @@ export function StudioView({
     ));
   }, [sessionId]);
   const [tools, dispatch] = useReducer(studioToolReducer, undefined, initialToolState);
-  // The pointer tool is rebuilt whenever the mode or brush changes; each one
-  // is a cheap wrapper over the shared raster, never a copy of it.
-  const pointerTool = useMemo(
-    () => toolFor(tools),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tools.kind, tools.brushRadius, tools.mask],
-  );
   const selectionCoverage = tools.mask ? coverage(tools.mask) : 0;
   // Asked once per visit rather than per apply: installing a workflow is not
   // something that happens while a picture is open.
@@ -127,6 +122,16 @@ export function StudioView({
     },
   });
   const { bitmap, error: imageError, reload } = useStudioImage(currentArtifactId);
+  // Read for the wand only, from the picture on the canvas, and again for each new one.
+  const readsColors = tools.kind === "wand";
+  const sourcePixels = useMemo(() => (readsColors && bitmap ? readSourcePixels(bitmap) : null), [readsColors, bitmap]);
+  // The pointer tool is rebuilt whenever the mode or brush changes; each one
+  // is a cheap wrapper over the shared raster, never a copy of it.
+  const pointerTool = useMemo(
+    () => toolFor(tools, sourcePixels),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tools.kind, tools.brushRadius, tools.mask, tools.selectionMode, tools.colorTolerance, sourcePixels],
+  );
   useEffect(() => {
     if (bitmap) {
       dispatch({ type: "image-changed", width: bitmap.width, height: bitmap.height });
@@ -255,17 +260,7 @@ export function StudioView({
           )}
           {tools.kind !== "instruct" && (
             <div className="studio-selection-controls">
-              <label>
-                Brush size
-                <input
-                  type="range"
-                  min={1}
-                  max={200}
-                  value={tools.brushRadius}
-                  onChange={(event) =>
-                    dispatch({ type: "set-brush-radius", radius: Number(event.target.value) })}
-                />
-              </label>
+              <StudioSelectionTool tools={tools} dispatch={dispatch} colorsUnreadable={readsColors && Boolean(bitmap) && !sourcePixels} />
               <div className="row-actions">
                 <button
                   className="secondary compact-button"
