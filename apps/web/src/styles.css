@@ -412,7 +412,11 @@ h1, h2, h3 { margin: 0; }
 .icon-button { width: 34px; height: 34px; display: inline-grid; place-items: center; border: 0; border-radius: 10px; background: transparent; color: var(--ink-secondary); cursor: pointer; }
 .icon-button:hover { background: var(--panel-3); color: var(--ink-primary); }
 .icon-button:disabled { opacity: .45; cursor: default; }
-.messages { overflow-y: auto; padding: 36px max(24px, calc((100% - 860px) / 2)) 190px; scroll-behavior: smooth; }
+/* The column the conversation and its composer share. Standard is the fallback;
+   Appearance can widen it, and full leaves only the gutters. */
+html[data-chat-width="wide"] { --chat-column: 1180px; }
+html[data-chat-width="full"] { --chat-column: 100%; }
+.messages { overflow-y: auto; padding: 36px max(24px, calc((100% - var(--chat-column, 860px)) / 2)) 190px; scroll-behavior: smooth; }
 .media-output-plan { margin: 0 0 22px 50px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
 .media-output-plan > summary { display: flex; justify-content: space-between; gap: 12px; cursor: pointer; padding: 10px 12px; color: var(--ink-primary); font-size: 12px; }
 .media-output-plan > summary small { color: var(--muted); }
@@ -494,7 +498,7 @@ h1, h2, h3 { margin: 0; }
    images a stacking order, and this had none - so a picture scrolled up over
    the box being typed into. Below the jobs panel and the light toggle, which
    float over everything including this. */
-.composer-wrap { --composer-inline-padding: max(24px, calc((100% - 860px) / 2)); z-index: 2; position: absolute; isolation: isolate; bottom: 0; left: 0; right: 0; padding: 35px var(--composer-inline-padding) 18px; background: transparent; }
+.composer-wrap { --composer-inline-padding: max(24px, calc((100% - var(--chat-column, 860px)) / 2)); z-index: 2; position: absolute; isolation: isolate; bottom: 0; left: 0; right: 0; padding: 35px var(--composer-inline-padding) 18px; background: transparent; }
 .composer-wrap::before { content: ""; position: absolute; z-index: -1; inset: 0 var(--composer-inline-padding); background: linear-gradient(transparent, var(--bg) 28%); pointer-events: none; }
 .composer { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 12px 13px 10px; box-shadow: 0 16px 50px #0007; }
 .composer:focus-within { border-color: var(--accent); box-shadow: 0 16px 50px #0007, 0 0 0 2px #315a9a26; }

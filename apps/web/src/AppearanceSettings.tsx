@@ -1,12 +1,18 @@
 import { Monitor, Moon, Sun } from "lucide-react";
 import { useId } from "react";
 import { clockOptions, setClockChoice, useClockChoice, type ClockChoice } from "./clockPreference";
-import { ROOMS, ROOM_LABELS, type Appearance, type ModeChoice, type Room } from "./theme";
+import { ROOMS, ROOM_LABELS, type Appearance, type ChatWidth, type ModeChoice, type Room } from "./theme";
 
 const MODES: readonly { value: ModeChoice; label: string; Icon: typeof Sun }[] = [
   { value: "light", label: "Light", Icon: Sun },
   { value: "dark", label: "Dark", Icon: Moon },
   { value: "system", label: "System", Icon: Monitor },
+];
+
+const CHAT_WIDTH_OPTIONS: readonly { value: ChatWidth; label: string }[] = [
+  { value: "standard", label: "Standard" },
+  { value: "wide", label: "Wide" },
+  { value: "full", label: "Full width" },
 ];
 
 const CLOCKS: readonly { value: ClockChoice; label: string }[] = [
@@ -68,7 +74,7 @@ function ClockSetting() {
  * single entry asks a question that has no second answer.
  */
 export function AppearanceSettings({ appearance }: { appearance: Appearance }) {
-  const { modeChoice, setMode, room, setRoom } = appearance;
+  const { modeChoice, setMode, room, setRoom, chatWidth, setChatWidth } = appearance;
   const id = useId();
   return (
     <>
@@ -115,6 +121,30 @@ export function AppearanceSettings({ appearance }: { appearance: Appearance }) {
             </select>
           </div>
         )}
+      </section>
+      <section>
+        <div className="detail-title"><div><h2>Layout</h2><p>Saved in this browser.</p></div></div>
+        <div className="setting-row appearance-row">
+          <span>
+            <strong id={`${id}-width`}>Chat width</strong>
+            <small id={`${id}-width-help`}>
+              Standard keeps lines short enough to read comfortably. Wider leaves more room for tables, code and images.
+            </small>
+          </span>
+          <div className="segmented" role="group" aria-labelledby={`${id}-width`} aria-describedby={`${id}-width-help`}>
+            {CHAT_WIDTH_OPTIONS.map(({ value, label }) => (
+              <button
+                type="button"
+                key={value}
+                className={chatWidth === value ? "active" : ""}
+                aria-pressed={chatWidth === value}
+                onClick={() => setChatWidth(value)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
       </section>
       <ClockSetting />
     </>

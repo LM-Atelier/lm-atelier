@@ -108,6 +108,19 @@ describe("style contract", () => {
     expect(settings).toMatch(/on\("appearance"\) && <AppearanceSettings /);
   });
 
+  it("lets the conversation and its composer share one column whose width Appearance chooses", () => {
+    // Both measure the same column, so they widen together: a wider transcript
+    // over a composer still at the old width would misalign every message with
+    // the box that sends the next one.
+    const css = readFileSync(STYLESHEET, "utf8");
+    const column = /calc\(\(100% - var\(--chat-column, 860px\)\) \/ 2\)/;
+    expect(css).toMatch(new RegExp(`\\.messages \\{[^}]*${column.source}`));
+    expect(css).toMatch(new RegExp(`\\.composer-wrap \\{[^}]*${column.source}`));
+    expect(css).not.toMatch(/calc\(\(100% - 860px\) \/ 2\)/);
+    expect(css).toMatch(/html\[data-chat-width="wide"\] \{ --chat-column: \d+px; \}/);
+    expect(css).toMatch(/html\[data-chat-width="full"\] \{ --chat-column: 100%; \}/);
+  });
+
   it("gives the studio both a mark and an export, not one word for two acts", () => {
     // "Save" was one download link, which is export. Marking a picture in the
     // library is a different act with a different result, and collapsing them

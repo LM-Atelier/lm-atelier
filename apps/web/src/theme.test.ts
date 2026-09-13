@@ -2,9 +2,11 @@ import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  CHAT_WIDTH_KEY,
   MODE_KEY,
   ROOMS,
   ROOM_LABELS,
+  isChatWidth,
   isMode,
   isModeChoice,
   isRoom,
@@ -79,6 +81,47 @@ describe("the appearance the workspace shares", () => {
     expect(result.current).not.toBe(first);
     expect(result.current.setMode).toBe(first.setMode);
     expect(result.current.setRoom).toBe(first.setRoom);
+  });
+});
+
+describe("how wide the chat reads", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    delete document.documentElement.dataset.chatWidth;
+  });
+  afterEach(cleanup);
+
+  it("starts at the standard column, and says so on the document", () => {
+    const { result } = renderHook(() => useAppearance());
+
+    expect(result.current.chatWidth).toBe("standard");
+    expect(document.documentElement.dataset.chatWidth).toBe("standard");
+  });
+
+  it("applies and remembers a wider column, and a new identity only when it changes", () => {
+    const { result } = renderHook(() => useAppearance());
+    const first = result.current;
+
+    act(() => first.setChatWidth("full"));
+
+    expect(document.documentElement.dataset.chatWidth).toBe("full");
+    expect(localStorage.getItem(CHAT_WIDTH_KEY)).toBe("full");
+    expect(result.current).not.toBe(first);
+    expect(result.current.setChatWidth).toBe(first.setChatWidth);
+    // The width is its own question: the light and the room stayed where they were.
+    expect(result.current.mode).toBe(first.mode);
+    expect(result.current.room).toBe(first.room);
+  });
+
+  it("opens on the remembered width, and on standard for anything it does not offer", () => {
+    localStorage.setItem(CHAT_WIDTH_KEY, "wide");
+    expect(renderHook(() => useAppearance()).result.current.chatWidth).toBe("wide");
+    cleanup();
+
+    localStorage.setItem(CHAT_WIDTH_KEY, "enormous");
+    expect(renderHook(() => useAppearance()).result.current.chatWidth).toBe("standard");
+    expect(["standard", "wide", "full"].every(isChatWidth)).toBe(true);
+    expect(isChatWidth("enormous")).toBe(false);
   });
 });
 

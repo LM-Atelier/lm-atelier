@@ -30,6 +30,18 @@ export const ROOM_LABELS: Record<Room, string> = {
 
 export const ROOM_KEY = "local-lm-room";
 export const MODE_KEY = "local-lm-mode";
+export const CHAT_WIDTH_KEY = "local-lm-chat-width";
+
+/** How much of the window the conversation and its composer may use.
+ *
+ * Standard is the column the workspace has always used, narrow enough that a
+ * line of prose stays readable. Wide and full give tables, code and side-by-side
+ * media room on a large screen, for somebody who would rather have that than
+ * short lines.
+ */
+export type ChatWidth = "standard" | "wide" | "full";
+
+export const CHAT_WIDTHS: readonly ChatWidth[] = ["standard", "wide", "full"];
 
 export function isRoom(value: unknown): value is Room {
   return typeof value === "string" && (ROOMS as readonly string[]).includes(value);
@@ -41,6 +53,24 @@ export function isMode(value: unknown): value is ThemeMode {
 
 export function isModeChoice(value: unknown): value is ModeChoice {
   return isMode(value) || value === "system";
+}
+
+export function isChatWidth(value: unknown): value is ChatWidth {
+  return typeof value === "string" && (CHAT_WIDTHS as readonly string[]).includes(value);
+}
+
+export function storedChatWidth(): ChatWidth {
+  const stored = localStorage.getItem(CHAT_WIDTH_KEY);
+  return isChatWidth(stored) ? stored : "standard";
+}
+
+export function useChatWidth(): [ChatWidth, (width: ChatWidth) => void] {
+  const [width, setWidth] = useState<ChatWidth>(storedChatWidth);
+  const choose = useCallback((next: ChatWidth) => {
+    setWidth(next);
+    localStorage.setItem(CHAT_WIDTH_KEY, next);
+  }, []);
+  return [width, choose];
 }
 
 const PREFERS_LIGHT = "(prefers-color-scheme: light)";
@@ -101,7 +131,7 @@ export function useThemeMode(): [ModeChoice, ThemeMode, (choice: ModeChoice) => 
   return [choice, choice === "system" ? system : choice, choose];
 }
 
-/** The room and its light, remembered and applied to the document.
+/** The room, its light and the chat width, remembered and applied to the document.
  *
  * Both attributes go on the document element rather than on a wrapper, so a
  * dialog rendered through a portal is in the same room as everything else.
@@ -116,19 +146,23 @@ export interface Appearance {
   mode: ThemeMode;
   /** What was chosen, which may be to follow the system. */
   modeChoice: ModeChoice;
+  chatWidth: ChatWidth;
   setRoom: (room: Room) => void;
   setMode: (choice: ModeChoice) => void;
+  setChatWidth: (width: ChatWidth) => void;
 }
 
 export function useAppearance(): Appearance {
   const [room, setRoom] = useRoom();
   const [modeChoice, mode, setMode] = useThemeMode();
+  const [chatWidth, setChatWidth] = useChatWidth();
   useEffect(() => {
     document.documentElement.dataset.room = room;
     document.documentElement.dataset.mode = mode;
-  }, [room, mode]);
+    document.documentElement.dataset.chatWidth = chatWidth;
+  }, [room, mode, chatWidth]);
   return useMemo(
-    () => ({ room, mode, modeChoice, setRoom, setMode }),
-    [room, mode, modeChoice, setRoom, setMode],
+    () => ({ room, mode, modeChoice, chatWidth, setRoom, setMode, setChatWidth }),
+    [room, mode, modeChoice, chatWidth, setRoom, setMode, setChatWidth],
   );
 }
