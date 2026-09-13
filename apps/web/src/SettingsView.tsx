@@ -8,6 +8,7 @@ import { SettingControl } from "./SettingControl";
 import { WebSearchSettings } from "./WebSearchSettings";
 import { CredentialSettingsCard } from "./CredentialSettingsCard";
 import { DownloadDiagnosticsButton } from "./DownloadDiagnosticsButton";
+import { EmptyChatMaintenance } from "./EmptyChatMaintenance";
 import { ErrorCallout } from "./ErrorCallout";
 import { RuntimeSetupCard } from "./RuntimeSetupCard";
 import { StatusDot } from "./StatusDot";
@@ -424,6 +425,7 @@ export function SettingsView({ engines, appearance, destinationId, onDestination
           message={(loadChat.error || startMedia.error || stopWorker.error)?.message}
         />
       </section>
+      <EmptyChatMaintenance />
       </>)}
       {on("data-and-backups") && (<>
       <section>
