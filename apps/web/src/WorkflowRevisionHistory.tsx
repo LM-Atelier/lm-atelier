@@ -1,8 +1,10 @@
 import { useState } from "react";
+import { clockOptions, useClockChoice } from "./clockPreference";
 import type { Workflow } from "./types";
 import "./WorkflowRevisionHistory.css";
 
 function CreationDate({ value }: { value: string }) {
+  const clock = useClockChoice();
   // Stored workflow dates are UTC even when SQLite omits their timezone.
   const timestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value)
     ? `${value}Z` : value;
@@ -10,6 +12,7 @@ function CreationDate({ value }: { value: string }) {
   if (!value || !Number.isFinite(date.getTime())) return <small>Creation date unavailable</small>;
   return <time dateTime={timestamp}>{date.toLocaleString(undefined, {
     year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+    ...clockOptions(clock),
   })}</time>;
 }
 

@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Archive, ArchiveRestore, BookOpen, Copy, History, Pencil, Plus, Trash2 } from "lucide-react";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { api, ApiError } from "./api";
+import { clockOptions, useClockChoice } from "./clockPreference";
 import { EmptyState } from "./EmptyState";
 import { ErrorCallout } from "./ErrorCallout";
 import { useConfirm } from "./useConfirm";
@@ -627,6 +628,7 @@ function resourceSummary(policy: PromptTemplateResourcePolicy): string {
 
 export function PromptLibraryView() {
   const client = useQueryClient();
+  const clock = useClockChoice();
   const [confirmDialog, confirm] = useConfirm();
   const [includeArchived, setIncludeArchived] = useState(false);
   const [offset, setOffset] = useState(0);
@@ -760,7 +762,7 @@ export function PromptLibraryView() {
           <section className="prompt-template-body"><h3>Template body</h3><pre>{selected.current_revision.contract_json.body}</pre></section>
           <section className="prompt-template-slots"><h3>Slots</h3>{currentSlots.length ? <dl>{currentSlots.map((slot) => <div key={slot.name}><dt><code>{`{{${slot.name}}}`}</code><span className="badge">{slot.mode}</span><span className="badge">{slot.variation_scope}</span></dt><dd>{slot.mode === "choice" ? slot.choices.join(" · ") : slot.mode === "model" ? slot.guidance : slot.mode === "fixed" ? slot.fixed_value : "Provided when the template is used."}</dd></div>)}</dl> : <p className="muted">This template has no variable slots.</p>}</section>
           <p className="prompt-resource-summary">{resourceSummary(selected.current_revision.contract_json.resource_policy)}</p>
-          <details className="prompt-template-history" open><summary><History size={14} />Revision history</summary>{revisions.data?.map((revision) => <div className="prompt-history-row" key={revision.id}><span><strong>Revision {revision.version}</strong><small>{new Date(revision.created_at).toLocaleString()}</small></span>{revision.id !== selected.current_revision_id && <button className="secondary compact-button" disabled={busy} onClick={() => restore.mutate({ template: selected, revisionId: revision.id })}>Restore</button>}</div>)}</details>
+          <details className="prompt-template-history" open><summary><History size={14} />Revision history</summary>{revisions.data?.map((revision) => <div className="prompt-history-row" key={revision.id}><span><strong>Revision {revision.version}</strong><small>{new Date(revision.created_at).toLocaleString(undefined, clockOptions(clock))}</small></span>{revision.id !== selected.current_revision_id && <button className="secondary compact-button" disabled={busy} onClick={() => restore.mutate({ template: selected, revisionId: revision.id })}>Restore</button>}</div>)}</details>
         </>}
       </section>
     </div>}

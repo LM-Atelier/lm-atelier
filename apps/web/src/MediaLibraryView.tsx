@@ -8,6 +8,7 @@ import {
   type ArtifactLibraryFilters,
   type ArtifactLibraryKind,
 } from "./artifactLibraryPage";
+import { clockOptions, useClockChoice } from "./clockPreference";
 import { EmptyState } from "./EmptyState";
 import { ErrorCallout } from "./ErrorCallout";
 import { formatBytes } from "./format";
@@ -42,6 +43,7 @@ export function MediaLibraryView({
     favorite: false,
   });
   const [epoch, setEpoch] = useState(0);
+  const clock = useClockChoice();
   const [favoriteFailed, setFavoriteFailed] = useState(false);
 
   const replaceFilters = (next: ArtifactLibraryFilters) => {
@@ -158,7 +160,7 @@ export function MediaLibraryView({
                   )}
                   <div>
                     <strong>{entry.display_name}</strong>
-                    <small>{formatBytes(entry.size_bytes)} · Added {new Date(Math.floor(entry.created_at_epoch_micros / 1000)).toLocaleString()}</small>
+                    <small>{formatBytes(entry.size_bytes)} · Added {new Date(Math.floor(entry.created_at_epoch_micros / 1000)).toLocaleString(undefined, clockOptions(clock))}</small>
                     <span>
                       <button
                         className={`icon-button ${entry.favorite ? "favorite-active" : ""}`}
