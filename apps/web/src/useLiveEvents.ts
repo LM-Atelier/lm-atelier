@@ -3,6 +3,7 @@ import type { Dispatch, SetStateAction } from "react";
 import type { QueryClient } from "@tanstack/react-query";
 import { connectEvents } from "./api";
 import type { AppEvent, Job, JobActivity, WorkPlan, WorkPlanStatus, WorkStepStatus } from "./types";
+import { notifyRunFinished } from "./completionNotifications";
 
 const AUTHORITATIVE_QUERY_ROOTS = new Set([
   "about",
@@ -268,6 +269,7 @@ export function useLiveEvents(
           void client.invalidateQueries({ queryKey: ["artifacts"] });
           void client.invalidateQueries({ queryKey: ["artifact-storage"] });
           window.setTimeout(() => setLiveText({}), 200);
+          notifyRunFinished(event);
         }
       },
       setConnected,
