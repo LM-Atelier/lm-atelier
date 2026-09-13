@@ -64,9 +64,48 @@ async function open(browser: Browser, size: string, viewport: { width: number; h
   return { context, page };
 }
 
+/** Every visible piece of the page that runs past the side of the window.
+ *
+ * The workspace's main region clips its overflow, so its own scroll width
+ * never grows and cannot tell a page that fits from one that does not. Each
+ * element is measured against the window instead. Content inside a nested
+ * container that scrolls or clips and itself fits - a wide table, a code block,
+ * a moving progress bar in its track - is reachable or deliberately hidden, so
+ * only that container is held to the window.
+ */
+async function pastTheEdge(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const width = window.innerWidth;
+    const pageLevel = (node: HTMLElement) =>
+      node.id === "main-content" || node.classList.contains("page-view") || node.tagName === "MAIN" || node === document.body;
+    const found: string[] = [];
+    for (const element of Array.from(document.querySelectorAll<HTMLElement>("#main-content *"))) {
+      const rect = element.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0 || getComputedStyle(element).visibility === "hidden") continue;
+      // Something in motion, like a loading bar sweeping across, is not laid out past the edge.
+      if (element.getAnimations().some((animation) => animation.playState === "running")) continue;
+      let scroller = element.parentElement;
+      let contained = false;
+      while (scroller && !pageLevel(scroller)) {
+        const overflow = getComputedStyle(scroller).overflowX;
+        if (overflow !== "visible") {
+          const bounds = scroller.getBoundingClientRect();
+          contained = bounds.right <= width + 1 && bounds.left >= -1;
+          break;
+        }
+        scroller = scroller.parentElement;
+      }
+      if (contained) continue;
+      if (rect.right > width + 1 || rect.left < -1) {
+        found.push(`${element.tagName.toLowerCase()}.${Array.from(element.classList).join(".")} ${Math.round(rect.left)}-${Math.round(rect.right)}`);
+      }
+    }
+    return found;
+  });
+}
+
 async function mainFits(page: Page) {
-  const fits = await page.locator("#main-content").evaluate((element) => element.scrollWidth <= element.clientWidth);
-  expect(fits, "nothing may spill past the side of the workspace").toBe(true);
+  expect(await pastTheEdge(page), "nothing may spill past the side of the window").toEqual([]);
 }
 
 for (const [size, expected] of Object.entries(SIZES)) {

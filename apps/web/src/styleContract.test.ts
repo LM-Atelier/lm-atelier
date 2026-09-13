@@ -304,9 +304,11 @@ describe("typography", () => {
 });
 
 describe("scale and rhythm", () => {
+  // A size is its Standard value, whether written bare or multiplied by the
+  // text scale, so the scale checks keep reading the design's own steps.
   function stepsOf(property: string): number[] {
     const css = readFileSync(STYLESHEET, "utf8");
-    const found = [...css.matchAll(new RegExp(`\\b${property}:\\s*(\\d+)px;`, "g"))];
+    const found = [...css.matchAll(new RegExp(`\\b${property}:\\s*(?:calc\\()?(\\d+)px(?: \\* var\\(--text-scale, 1\\)\\))?;`, "g"))];
     return [...new Set(found.map((match) => Number(match[1])))].sort((a, b) => a - b);
   }
 
@@ -328,12 +330,31 @@ describe("scale and rhythm", () => {
     // nothing. Without this the Setup button grows to 46px while the Settings
     // button directly beneath it stays 42px.
     const rule = /\.setup-nav-state\s*\{[^}]*\}/.exec(css)?.[0] ?? "";
-    expect(rule).toMatch(/line-height:\s*12px/);
+    // It grows with the text it belongs to, or larger text would overlap itself.
+    expect(rule).toMatch(/line-height:\s*calc\(12px \* var\(--text-scale, 1\)\)/);
   });
 
   it("leaves the density floor alone", () => {
     // Small labels remain legible without changing the larger type scale.
     expect(Math.min(...stepsOf("font-size"))).toBe(11);
+  });
+
+  it("enlarges all text from one scale, and leaves Standard exactly as it was", () => {
+    // A size that ignores the scale would stay small while everything around
+    // it grows, and a bare multiplier on Standard would move every size for
+    // somebody who never chose anything.
+    const css = readFileSync(STYLESHEET, "utf8");
+    const sizes = [...css.matchAll(/\bfont-size:\s*([^;}]+)/g)].map((match) => match[1].trim());
+    const unscaled = sizes.filter((value) => /\dpx/.test(value) && !value.endsWith("* var(--text-scale, 1))"));
+    expect(sizes.length).toBeGreaterThan(100);
+    expect(unscaled).toEqual([]);
+    const shorthands = [...css.matchAll(/\bfont:\s*([^;}]+)/g)].map((match) => match[1].trim());
+    expect(shorthands.filter((value) => /(^|[\s(])\d+px/.test(value) && !/calc\(\d+px \* var\(--text-scale, 1\)\)/.test(value))).toEqual([]);
+    // Text that names no size inherits the root, so the root moves by the same amount.
+    expect(css).toMatch(/html\[data-text-size="large"\] \{ --text-scale: 1\.125; font-size: 112\.5%; \}/);
+    expect(css).toMatch(/html\[data-text-size="larger"\] \{ --text-scale: 1\.25; font-size: 125%; \}/);
+    expect(css).not.toMatch(/html\[data-text-size="standard"\]/);
+    expect(css).not.toMatch(/--text-scale:\s*(0|1)\s*;/);
   });
 });
 

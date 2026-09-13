@@ -7,12 +7,14 @@ import {
   MOTION_KEY,
   ROOMS,
   ROOM_LABELS,
+  TEXT_SIZE_KEY,
   THUMBNAIL_SIZE_KEY,
   isChatWidth,
   isMode,
   isModeChoice,
   isMotionChoice,
   isRoom,
+  isTextSize,
   isThumbnailSize,
   prefersLessMotion,
   useAppearance,
@@ -133,6 +135,45 @@ describe("how wide the chat reads", () => {
     expect(renderHook(() => useAppearance()).result.current.chatWidth).toBe("standard");
     expect(["standard", "wide", "full"].every(isChatWidth)).toBe(true);
     expect(isChatWidth("enormous")).toBe(false);
+  });
+});
+
+describe("how large text is", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    delete document.documentElement.dataset.textSize;
+  });
+  afterEach(cleanup);
+
+  it("starts at standard, the size text has always been, and says so on the document", () => {
+    const { result } = renderHook(() => useAppearance());
+
+    expect(result.current.textSize).toBe("standard");
+    expect(document.documentElement.dataset.textSize).toBe("standard");
+  });
+
+  it("applies and remembers a larger size without moving anything else", () => {
+    const { result } = renderHook(() => useAppearance());
+    const first = result.current;
+
+    act(() => first.setTextSize("larger"));
+
+    expect(document.documentElement.dataset.textSize).toBe("larger");
+    expect(localStorage.getItem(TEXT_SIZE_KEY)).toBe("larger");
+    expect(result.current.setTextSize).toBe(first.setTextSize);
+    expect(result.current.thumbnailSize).toBe(first.thumbnailSize);
+    expect(result.current.chatWidth).toBe(first.chatWidth);
+  });
+
+  it("opens on the remembered size, and on standard for anything it does not offer", () => {
+    localStorage.setItem(TEXT_SIZE_KEY, "large");
+    expect(renderHook(() => useAppearance()).result.current.textSize).toBe("large");
+    cleanup();
+
+    localStorage.setItem(TEXT_SIZE_KEY, "gigantic");
+    expect(renderHook(() => useAppearance()).result.current.textSize).toBe("standard");
+    expect(["standard", "large", "larger"].every(isTextSize)).toBe(true);
+    expect(isTextSize("gigantic")).toBe(false);
   });
 });
 
