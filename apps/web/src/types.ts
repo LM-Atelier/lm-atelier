@@ -194,6 +194,43 @@ export interface Chat {
   updated_at: string;
 }
 
+/** One file attached to an unsent draft, as the workspace keeps it. */
+export interface ChatComposerDraftAttachment {
+  artifact_id: string;
+  kind: "image" | "video";
+  origin: "uploaded" | "generated" | "edited";
+}
+
+/** One Reference mentioned in an unsent draft, and the text that names it. */
+export interface ChatComposerDraftMention {
+  reference_subject_id: string;
+  mention_slug: string;
+}
+
+/** The one-click edit template applied to an unsent draft. */
+export interface ChatComposerDraftTemplate {
+  name: string;
+  settings: Record<string, unknown>;
+}
+
+/** Everything an unsent message would be sent with, as the workspace stores it. */
+export interface ChatComposerDraftInput {
+  text: string;
+  prompt_source: ComposerPromptSource | null;
+  mode: RoutingMode;
+  output_count: number;
+  attachments: ChatComposerDraftAttachment[];
+  mentions: ChatComposerDraftMention[];
+  template_settings: ChatComposerDraftTemplate | null;
+}
+
+/** A chat's stored draft. Revision 0 means it has none. */
+export interface ChatComposerDraft extends ChatComposerDraftInput {
+  chat_id: string;
+  revision: number;
+  updated_at: string | null;
+}
+
 export interface ChatDetail extends Chat {
   messages: Message[];
   web_searches?: WebSearch[];

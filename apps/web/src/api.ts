@@ -32,6 +32,8 @@ import type {
   CatalogPreflight,
   CatalogVersions,
   Chat,
+  ChatComposerDraft,
+  ChatComposerDraftInput,
   ChatItemRemovalExecution,
   ChatItemRemovalImpact,
   ContentRating,
@@ -352,6 +354,15 @@ export const api = {
     }),
   updateChat: (id: string, values: Partial<Chat>) =>
     request<Chat>(`/api/chats/${id}`, { method: "PATCH", body: JSON.stringify(values) }),
+  /** The chat's unsent draft as the workspace keeps it; revision 0 when it has none. */
+  composerDraft: (chatId: string) =>
+    request<ChatComposerDraft>(`/api/chats/${encodeURIComponent(chatId)}/composer-draft`),
+  /** Replace the chat's stored draft, refused if another save came first. */
+  saveComposerDraft: (chatId: string, expectedRevision: number, draft: ChatComposerDraftInput) =>
+    request<ChatComposerDraft>(`/api/chats/${encodeURIComponent(chatId)}/composer-draft`, {
+      method: "PUT",
+      body: JSON.stringify({ expected_revision: expectedRevision, draft }),
+    }),
   deleteChat: (id: string, deleteGeneratedMedia = false) => {
     const parameters = new URLSearchParams({
       delete_generated_media: String(deleteGeneratedMedia),
