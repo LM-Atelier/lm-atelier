@@ -38,6 +38,10 @@ MAX_INFLATE_INPUT: Final = 64 * 1024 * 1024
 #: declare far more than this; the declaration is checked against what is left
 #: before a decompressor is built, so an absurd claim costs one comparison.
 MAX_DECODED: Final = 288 * 1024 * 1024
+#: Wall-clock seconds every video in one generation may spend being decoded for
+#: measurement, together. Shared so that many videos cannot each take a fresh
+#: allowance; see video_output_measurement.py.
+MAX_VIDEO_SECONDS: Final = 90.0
 
 _SLICE: Final = 64 * 1024
 _PNG_MAGIC: Final = b"\x89PNG\r\n\x1a\n"
@@ -64,10 +68,12 @@ class Budget:
         steps: int = MAX_STEPS,
         inflate_input: int = MAX_INFLATE_INPUT,
         decoded: int = MAX_DECODED,
+        video_seconds: float = MAX_VIDEO_SECONDS,
     ) -> None:
         self.steps = steps
         self.inflate_input = inflate_input
         self.decoded = decoded
+        self.video_seconds = video_seconds
 
 
 class _Stop(Exception):

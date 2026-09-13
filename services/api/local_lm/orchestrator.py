@@ -205,6 +205,7 @@ from .video_length import (
     resolve_video_length_settings,
     workflow_video_length,
 )
+from .video_output_measurement import measure_video_output
 from .vision import PreparedVisualContext, VisionContextService, VisionInputError
 from .visual_prompt_compiler import (
     compilation_provenance,
@@ -5697,11 +5698,16 @@ class ConversationOrchestrator:
 
         This never sees the run, the workflow, or the size that was asked for,
         so it cannot agree with the request by construction.
+
+        A video is measured by decoding its first frame, which is a supervised
+        child process rather than a thread hop, and it draws on the same budget.
         """
 
         budget = Budget()
         return [
-            await asyncio.to_thread(measure_output, generated.content, budget)
+            await measure_video_output(generated.content, budget)
+            if generated.kind == "video"
+            else await asyncio.to_thread(measure_output, generated.content, budget)
             for generated in completed_assets
         ]
 
