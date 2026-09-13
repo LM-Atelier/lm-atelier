@@ -21,7 +21,7 @@ export const SETTINGS_DESTINATIONS: readonly SettingsDestination[] = [
   {
     id: "general",
     label: "General",
-    summary: "Which key sends a message.",
+    summary: "Which key sends a message, and whether finished work is announced.",
   },
   {
     id: "appearance",
