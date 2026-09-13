@@ -533,6 +533,7 @@ from .schemas import (
     WorkflowFamilyVariantOut,
     WorkflowInstallOfferCreate,
     WorkflowInstallOfferOut,
+    WorkflowLoraControlsOut,
     WorkflowMissingNodeOut,
     WorkflowOpenTarget,
     WorkflowOut,
@@ -662,6 +663,8 @@ from .workflow_library import (
     workflow_resource_consumers,
     workflow_resource_name,
 )
+from .workflow_lora_slots import WorkflowLoraSlotError
+from .workflow_loras import WorkflowLoraProjectionError, workflow_lora_controls
 from .workflow_node_dependencies import node_dependency_errors
 from .workflow_output_geometry import (
     WorkflowOutputGeometryResult,
@@ -9636,6 +9639,34 @@ async def workflow_revision_settings_schema(
     if schema is None:
         raise api_error(404, "workflow-revision-not-found", "Workflow revision not found.")
     return schema
+
+
+@router.get(
+    "/workflow-revisions/{revision_id}/lora-controls",
+    response_model=WorkflowLoraControlsOut,
+)
+def get_workflow_lora_controls(revision_id: str, session: SessionDep) -> WorkflowLoraControlsOut:
+    """Project embedded LoRAs without exposing or changing workflow graph locations."""
+
+    try:
+        projection = workflow_lora_controls(session, revision_id=revision_id)
+    except WorkflowLoraProjectionError as exc:
+        if exc.code == "workflow_revision_not_found":
+            raise api_error(
+                404, "workflow-revision-not-found", "Workflow revision not found."
+            ) from exc
+        raise api_error(
+            409,
+            "workflow-lora-controls-unavailable",
+            "Workflow LoRA controls cannot be derived from this stored revision.",
+        ) from exc
+    except WorkflowLoraSlotError as exc:
+        raise api_error(
+            409,
+            "workflow-lora-controls-unavailable",
+            "Workflow LoRA controls cannot be derived from this stored revision.",
+        ) from exc
+    return WorkflowLoraControlsOut.model_validate(projection)
 
 
 @router.get("/workflows/{workflow_id}", response_model=WorkflowOut)

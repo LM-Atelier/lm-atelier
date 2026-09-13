@@ -19,6 +19,7 @@ import {
   type Visibility,
 } from "./settings";
 import type { EngineCapabilities, EngineRole, GenerationPreset, SettingField } from "./types";
+import { LorasSection } from "./WorkflowLoraRows";
 
 /** The generation settings panel and the strength control it owns.
  *
@@ -300,10 +301,9 @@ export function GenerationSettingsPanel({
         ))}
         {!engine && <p className="muted">No {role} engine is configured.</p>}
       </div>
-      {loraField && (
-        <section className="settings-section" aria-label="LoRAs">
-          <h4>LoRAs</h4>
-          <div className="settings-list">
+      <LorasSection revisionId={workflowRevisionId}>
+        {loraField && (
+          <>
             <SettingControl
               field={loraField}
               value={effectiveValue(loraField)}
@@ -312,9 +312,9 @@ export function GenerationSettingsPanel({
             {editSettings && <button type="button" className="secondary" onClick={() => onValues(
               { ...values, loras: effectiveValue(loraField) }, ["loras"],
             )}>Use current LoRA selection</button>}
-          </div>
-        </section>
-      )}
+          </>
+        )}
+      </LorasSection>
       <div className="generation-settings-actions">
         <button className="secondary" type="button" onClick={onReset}>{resetLabel}</button>
       </div>

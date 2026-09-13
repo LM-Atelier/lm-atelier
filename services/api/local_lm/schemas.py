@@ -1787,6 +1787,69 @@ class WorkflowRevisionSchemaOut(ApiModel):
     input_schema_json: dict[str, Any]
 
 
+WorkflowLoraEditability = Literal[
+    "editable",
+    "required_locked",
+    "detected_read_only",
+]
+WorkflowLoraStrengthMode = Literal["separate", "coupled", "model_only", "unknown"]
+WorkflowLoraEditableField = Literal["enabled", "model_strength", "clip_strength"]
+WorkflowLoraEvidenceGap = Literal[
+    "dependency_contract_unavailable",
+    "dependency_contract_invalid",
+    "active_activation_unavailable",
+    "active_activation_invalid",
+    "ui_graph_provenance_unavailable",
+    "core_runtime_evidence_unavailable",
+    "core_graph_binding_unavailable",
+    "package_binding_evidence_unavailable",
+    "package_graph_binding_unavailable",
+]
+
+
+class WorkflowLoraAssetBindingOut(ApiModel):
+    dependency_slot: str = Field(min_length=1, max_length=100)
+    requirement_key: str = Field(min_length=1, max_length=100)
+    resource_identity_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    runtime_reference: str = Field(min_length=1, max_length=1_000)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class WorkflowLoraControlSlotOut(ApiModel):
+    slot_id: str = Field(pattern=r"^wflora_[0-9a-f]{64}$")
+    position: int = Field(ge=0, lt=64)
+    loader_type: str = Field(min_length=1, max_length=200)
+    loader_contract: str | None = Field(default=None, max_length=200)
+    loader_authority_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    editability: WorkflowLoraEditability
+    read_only_reason: str | None = Field(default=None, max_length=100)
+    dependency_required: bool | None
+    observed_runtime_reference: str | None = Field(default=None, max_length=1_000)
+    asset_binding: WorkflowLoraAssetBindingOut | None
+    default_enabled: bool | None
+    default_model_strength: float | None
+    default_clip_strength: float | None
+    strength_mode: WorkflowLoraStrengthMode
+    editable_fields: list[WorkflowLoraEditableField] = Field(max_length=3)
+
+
+class WorkflowLoraControlsOut(ApiModel):
+    version: Literal[1]
+    revision_scope_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    api_graph_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    dependency_contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    activation_binding_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    ordering_authority: Literal["presentation_only"]
+    evidence_gaps: list[WorkflowLoraEvidenceGap] = Field(max_length=9)
+    slots: list[WorkflowLoraControlSlotOut] = Field(max_length=64)
+
+
 class WorkflowOut(ApiModel):
     id: str
     family_id: str | None = None
