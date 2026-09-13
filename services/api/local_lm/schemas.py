@@ -2936,6 +2936,12 @@ class ApplicationInfo(ApiModel):
     web_access_enabled: bool = False
 
 
+class ThirdPartyNoticesOut(ApiModel):
+    # Both null when not running from a release, which carries them.
+    text: str | None
+    license_folder: str | None
+
+
 class WorkerStatus(ApiModel):
     name: Literal["chat", "media"]
     state: Literal["stopped", "starting", "ready", "exited"] = "stopped"

@@ -53,3 +53,11 @@ it("links the licence and credits each typeface with the licence it ships under"
   expect(within(credits).getByRole("link", { name: "Source Serif 4" }).getAttribute("href"))
     .toBe("/fonts/OFL-SourceSerif4.txt");
 });
+
+it("offers the third-party notices beside the credits", async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}><About /></QueryClientProvider>);
+
+  const summary = await screen.findByText("Third-party notices", { selector: "summary" });
+  expect(summary.closest("details")).not.toHaveAttribute("open");
+});

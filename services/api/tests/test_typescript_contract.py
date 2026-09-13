@@ -97,6 +97,7 @@ CHECKED_CONTRACTS = {
     "RegistryInstall": "RegistryInstallOut",
     "ResponseRevision": "ResponseRevisionOut",
     "RetentionPolicy": "RetentionPolicyOut",
+    "ThirdPartyNotices": "ThirdPartyNoticesOut",
     "Run": "RunOut",
     "RuntimeStatus": "RuntimeStatus",
     "SettingField": "SettingField",

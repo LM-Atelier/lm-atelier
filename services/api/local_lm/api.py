@@ -334,6 +334,7 @@ from .reference_library import (
 )
 from .reference_review import ReviewOutcome, ReviewRefusal, ReviewRefused, review_asset
 from .references import ReferenceError, ReferenceNotFoundError
+from .release_notices import read_third_party_notices, release_bundle_root
 from .retention_policy import RetentionPolicyStale, read_policy, windows_for, write_policy
 from .revision_dependency_contract import (
     declared_dependency_contract,
@@ -490,6 +491,7 @@ from .schemas import (
     StudioSessionCreate,
     StudioToolCapability,
     SystemInfo,
+    ThirdPartyNoticesOut,
     ToolCapabilityProbe,
     TrustDerivation,
     TurnAccepted,
@@ -1007,6 +1009,14 @@ async def application_info(request: Request) -> ApplicationInfo:
         max_media_outputs_per_plan=settings.max_media_outputs_per_plan,
         web_access_enabled=settings.web_access_enabled,
     )
+
+
+@router.get("/about/third-party-notices", response_model=ThirdPartyNoticesOut)
+async def third_party_notices() -> ThirdPartyNoticesOut:
+    """The third-party software this release includes, and where its license texts are."""
+
+    notices = await asyncio.to_thread(read_third_party_notices, release_bundle_root())
+    return ThirdPartyNoticesOut(text=notices.text, license_folder=notices.license_folder)
 
 
 @router.get("/platforms", response_model=list[PlatformMatrixEntry])
