@@ -12,7 +12,7 @@ import re
 import shutil
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
-from contextlib import suppress
+from contextlib import AsyncExitStack, suppress
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
@@ -138,7 +138,15 @@ from .empty_chats import (
     DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
     EmptyChatClass,
+    EmptyChatDeletionResult,
+    EmptyChatExecuteError,
+    EmptyChatExecuteRefusal,
+    EmptyChatSelectionFilters,
     empty_chat_page,
+    execute_deletion,
+    issue_preview,
+    preview_selection,
+    recorded_deletion,
 )
 from .engines import (
     EngineNotConfiguredError,
@@ -372,8 +380,13 @@ from .schemas import (
     EditedBranchPage,
     EditTemplateCreate,
     EditTemplateOut,
+    EmptyChatConflictOut,
+    EmptyChatDeletionOut,
     EmptyChatEntryOut,
+    EmptyChatExecuteIn,
     EmptyChatPageOut,
+    EmptyChatPreviewIn,
+    EmptyChatPreviewOut,
     EngineCapabilities,
     ExchangeDeletionOut,
     GenerationIdentityOut,
@@ -1075,6 +1088,125 @@ async def get_empty_chats(
         counts=counts,
         evaluated_at=evaluated_at,
     )
+
+
+def _empty_chat_filters(payload: EmptyChatPreviewIn) -> EmptyChatSelectionFilters:
+    return EmptyChatSelectionFilters(
+        minimum_age_hours=payload.min_age_hours,
+        include_archived=payload.include_archived,
+        include_configured=payload.include_configured,
+    )
+
+
+@router.post("/maintenance/empty-chats/preview", response_model=EmptyChatPreviewOut)
+async def preview_empty_chats(
+    payload: EmptyChatPreviewIn, session: SessionDep
+) -> EmptyChatPreviewOut:
+    """Bind a chosen set of empty chats to a digest and a short deadline.
+
+    Nothing is deleted. The preview says which of the chosen chats still belong
+    to the selection and why the rest do not, and it is the only thing a
+    deletion may be spent against.
+    """
+
+    evaluated_at = utcnow()
+    preview = preview_selection(
+        session,
+        chat_ids=payload.chat_ids,
+        filters=_empty_chat_filters(payload),
+        now=evaluated_at,
+    )
+    preview_id, expires_at = issue_preview(
+        session, digest=preview.digest, chat_states=preview.chat_states, now=evaluated_at
+    )
+    session.commit()
+    return EmptyChatPreviewOut(
+        preview_id=preview_id,
+        digest=preview.digest,
+        expires_at=expires_at,
+        strict_count=preview.strict_count,
+        configured_count=preview.configured_count,
+        conflicts=[
+            EmptyChatConflictOut(chat_id=entry.chat_id, reason=entry.reason)
+            for entry in preview.conflicts
+        ],
+    )
+
+
+_EMPTY_CHAT_REFUSALS: dict[EmptyChatExecuteRefusal, tuple[int, str]] = {
+    EmptyChatExecuteRefusal.PREVIEW_UNKNOWN: (
+        409,
+        "That cleanup was not previewed. Preview the selection again.",
+    ),
+    EmptyChatExecuteRefusal.PREVIEW_EXPIRED: (
+        409,
+        "That preview has expired. Preview the selection again.",
+    ),
+    EmptyChatExecuteRefusal.SELECTION_DRIFTED: (
+        409,
+        "Some of the selected chats changed since the preview. Nothing was deleted.",
+    ),
+    EmptyChatExecuteRefusal.COUNT_MISMATCH: (
+        422,
+        "The confirmed number of chats does not match the preview. Nothing was deleted.",
+    ),
+    EmptyChatExecuteRefusal.CONFIGURED_NOT_ACKNOWLEDGED: (
+        422,
+        "The selection includes chats with settings of their own. Confirm those too.",
+    ),
+}
+
+
+def _empty_chat_deletion_out(result: EmptyChatDeletionResult) -> EmptyChatDeletionOut:
+    return EmptyChatDeletionOut(
+        operation_id=result.operation_id,
+        deleted_ids=list(result.deleted_ids),
+        deleted_at=result.deleted_at,
+        replayed=result.replayed,
+    )
+
+
+@router.post("/maintenance/empty-chats/execute", response_model=EmptyChatDeletionOut)
+async def execute_empty_chat_deletion(
+    payload: EmptyChatExecuteIn, request: Request, session: ConversationSessionDep
+) -> EmptyChatDeletionOut:
+    """Delete a previewed selection of empty chats, all of them or none.
+
+    Each chosen chat's lifecycle guard is held, in a stable order, from before
+    the selection is revalidated until the deletion commits, so no turn can
+    start in one of them in between. The guard is taken WITHOUT cancelling
+    anything: a chat that gained work since the preview is refused as drift,
+    and the work somebody just started is left running.
+    """
+
+    replay = recorded_deletion(session, payload.operation_id)
+    if replay is not None:
+        return _empty_chat_deletion_out(replay)
+    orchestrator = _services(request).orchestrator
+    async with AsyncExitStack() as guards:
+        for chat_id in sorted(set(payload.chat_ids)):
+            await guards.enter_async_context(orchestrator.chat_guard(chat_id))
+        session.expire_all()
+        try:
+            result = execute_deletion(
+                session,
+                operation_id=payload.operation_id,
+                preview_id=payload.preview_id,
+                digest=payload.digest,
+                acknowledged_count=payload.acknowledged_count,
+                acknowledged_configured=payload.acknowledged_configured,
+                chat_ids=payload.chat_ids,
+                filters=_empty_chat_filters(payload),
+                now=utcnow(),
+            )
+        except EmptyChatExecuteError as refusal:
+            session.rollback()
+            status_code, message = _EMPTY_CHAT_REFUSALS[refusal.refusal]
+            raise api_error(
+                status_code, refusal.refusal.value, message, chat_ids=list(refusal.chat_ids)
+            ) from refusal
+        session.commit()
+    return _empty_chat_deletion_out(result)
 
 
 @router.get("/engines", response_model=list[EngineCapabilities])

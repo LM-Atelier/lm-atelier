@@ -816,6 +816,37 @@ export interface EmptyChatPage {
   evaluated_at: string;
 }
 
+/** Why a chosen chat no longer belongs to a cleanup it was chosen for. */
+export interface EmptyChatConflict {
+  chat_id: string;
+  reason:
+    | "missing"
+    | "out_of_scope"
+    | "not_empty"
+    | "too_young"
+    | "archived_excluded"
+    | "inconsistent"
+    | "filtered_out";
+}
+
+/** A chosen set of empty chats bound to a digest and a short deadline. */
+export interface EmptyChatPreview {
+  preview_id: string;
+  digest: string;
+  expires_at: string;
+  strict_count: number;
+  configured_count: number;
+  conflicts: EmptyChatConflict[];
+}
+
+/** What one cleanup deleted, or the earlier result a retry returned. */
+export interface EmptyChatDeletion {
+  operation_id: string;
+  deleted_ids: string[];
+  deleted_at: string;
+  replayed: boolean;
+}
+
 export interface ModelInstall {
   id: string;
   source_id: string | null;
