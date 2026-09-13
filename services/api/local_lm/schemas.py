@@ -875,6 +875,63 @@ class TurnRequest(ApiModel):
         return self.model_copy(update=values)
 
 
+#: How much a draft's template settings may hold. A template's settings are a
+#: handful of numbers and names; this bounds a stored draft, not a real template.
+MAX_DRAFT_TEMPLATE_SETTINGS = 64
+MAX_DRAFT_TEMPLATE_SETTINGS_BYTES = 64_000
+
+
+class ChatComposerDraftAttachmentIn(ApiModel):
+    """One file attached to an unsent draft, as the composer shows it."""
+
+    artifact_id: str = Field(min_length=1, max_length=80)
+    kind: Literal["image", "video"]
+    origin: Literal["uploaded", "generated", "edited"]
+
+
+class ChatComposerDraftMentionIn(ApiModel):
+    """One Reference mentioned in an unsent draft, and the text that names it."""
+
+    reference_subject_id: str = Field(min_length=1, max_length=80)
+    mention_slug: str = Field(min_length=1, max_length=80)
+
+
+class ChatComposerDraftTemplateIn(ApiModel):
+    """The one-click edit template applied to an unsent draft."""
+
+    name: str = Field(min_length=1, max_length=240)
+    settings: dict[str, Any] = Field(default_factory=dict, max_length=MAX_DRAFT_TEMPLATE_SETTINGS)
+
+
+class ChatComposerDraftIn(ApiModel):
+    """Everything an unsent message would be sent with, bounded like the send itself."""
+
+    text: str = Field(default="", max_length=200_000)
+    prompt_source: PromptComposerSourceIn | None = None
+    mode: RoutingMode = RoutingMode.AUTO
+    output_count: int = Field(default=1, ge=1, le=16)
+    attachments: list[ChatComposerDraftAttachmentIn] = Field(default_factory=list, max_length=16)
+    mentions: list[ChatComposerDraftMentionIn] = Field(
+        default_factory=list, max_length=MAX_REFERENCES_PER_TURN
+    )
+    template_settings: ChatComposerDraftTemplateIn | None = None
+
+
+class ChatComposerDraftWrite(ApiModel):
+    """Replace a chat's draft, but only if it is still the revision the writer read."""
+
+    expected_revision: int = Field(ge=0)
+    draft: ChatComposerDraftIn
+
+
+class ChatComposerDraftOut(ChatComposerDraftIn):
+    """A chat's unsent draft. Revision 0 means the chat has never had one."""
+
+    chat_id: str
+    revision: int
+    updated_at: datetime | None = None
+
+
 class PriorTurnEditRequest(TurnRequest):
     """An exact retryable edit; omitted collection fields inherit the source."""
 

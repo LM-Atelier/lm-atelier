@@ -32,6 +32,7 @@ from .models import (
     Artifact,
     ArtifactLibraryEntry,
     Chat,
+    ChatComposerDraftAttachment,
     ComfyRegistrySourceArtifactReview,
     Job,
     MessagePart,
@@ -666,6 +667,7 @@ def referenced_artifact_ids(
         RunContextArtifact,
         WorkStep,
         Chat,
+        ChatComposerDraftAttachment,
         Job,
     )
     row_count = 0
@@ -687,6 +689,8 @@ def referenced_artifact_ids(
         SetupVerification.input_artifact_id,
         ArtifactLibraryEntry.artifact_id,
         ComfyRegistrySourceArtifactReview.artifact_id,
+        # A file attached to an unsent draft is held until the draft lets go.
+        ChatComposerDraftAttachment.artifact_id,
     )
     for column in direct_columns:
         retain({value for value in session.scalars(select(column)) if value})

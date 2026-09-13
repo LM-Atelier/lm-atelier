@@ -1,11 +1,12 @@
 """Which chats are empty, and which of those are safe to offer for deletion.
 
 Emptiness is settled by enumeration rather than by judgement. Every table with a
-foreign key to `chats.id` is listed in `WORK_PRODUCERS`, a chat with no real row
-in any of them has no transcript and no work, and that is the entire test. A
-structural test reads the list back off the schema, so a table added later that
-references a chat fails a test instead of silently widening what this tool is
-willing to offer.
+foreign key to `chats.id` is listed in `WORK_PRODUCERS` or `CONFIGURATION_TABLES`.
+A chat with no real row in the first has no transcript and no work, and that is
+the entire test; a row in the second is somebody's decision about the chat and
+makes it configured rather than busy. A structural test reads both lists back
+off the schema, so a table added later that references a chat fails a test
+instead of silently widening what this tool is willing to offer.
 
 `TurnCreationClaim` is the one a title heuristic would never find. A turn can be
 claimed and in flight with nothing written yet, so a chat can look blank in
@@ -39,9 +40,11 @@ from sqlalchemy import inspect as sqlalchemy_inspect
 from sqlalchemy.orm import InstrumentedAttribute, Session
 
 from .artifact_library import begin_artifact_write_fence
+from .chat_composer_drafts import has_content as composer_draft_has_content
 from .domain import JobKind, RoutingMode
 from .models import (
     Chat,
+    ChatComposerDraft,
     ChatItemRemovalReceipt,
     ChatWorkflowSelection,
     EmptyChatDeletion,
@@ -100,7 +103,8 @@ class EmptyChat:
     updated_at: datetime
 
 
-#: Every table with a foreign key to `chats.id`. Enforced structurally by
+#: Every table with a foreign key to `chats.id` whose rows are work, alongside
+#: `CONFIGURATION_TABLES`. Enforced structurally by
 #: `test_every_chat_reference_is_an_audited_producer`.
 WORK_PRODUCERS = (
     Message,
@@ -111,6 +115,12 @@ WORK_PRODUCERS = (
     PromptExpansionBatch,
     ChatWorkflowSelection,
 )
+
+#: Tables with a foreign key to `chats.id` whose rows are not work: nothing was
+#: sent or ran. An unsent composer draft is text and attachments somebody left
+#: there, so it makes an otherwise empty chat configured (`has_draft`), which is
+#: listed but never selected for deletion without acknowledgement.
+CONFIGURATION_TABLES = (ChatComposerDraft,)
 
 #: Old enough that a chat opened and abandoned minutes ago is not offered while
 #: the person who opened it may still be looking at it. That is a choice about
@@ -299,7 +309,11 @@ def configured_reasons(session: Session, chat: Chat) -> tuple[str, ...]:
         found.append("pinned")
     if chat.archived:
         found.append("archived")
-    if chat.draft_prompt.strip():
+    # Either kind of unsent text: a prompt helper's draft, or whatever is waiting
+    # in the composer, including only an attachment.
+    if chat.draft_prompt.strip() or composer_draft_has_content(
+        session.get(ChatComposerDraft, chat.id)
+    ):
         found.append("has_draft")
     if chat.routing_mode != RoutingMode.AUTO.value:
         found.append("routing_chosen")
@@ -493,6 +507,20 @@ def chat_state_fingerprint(session: Session, row: Chat) -> str:
             .where(and_(Chat.id != row.id, or_(forked == row.id, opened == row.id)))
             .order_by(Chat.id)
         )
+    )
+    # The unsent draft lives on its own row. All of it is covered, not just its
+    # revision, so the fingerprint does not depend on how revisions are counted.
+    draft = session.get(ChatComposerDraft, row.id)
+    state["composer_draft"] = (
+        None
+        if draft is None
+        else {
+            **{
+                attribute.key: getattr(draft, attribute.key)
+                for attribute in sqlalchemy_inspect(ChatComposerDraft).column_attrs
+            },
+            "attachments": [attachment.artifact_id for attachment in draft.attachments],
+        }
     )
     canonical = json.dumps(
         state, default=_jsonable, ensure_ascii=True, sort_keys=True, separators=(",", ":")

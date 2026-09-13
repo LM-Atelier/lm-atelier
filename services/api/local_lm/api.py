@@ -57,6 +57,14 @@ from .auxiliary_assets import AUXILIARY_ASSET_KINDS, validate_lora_workflow_cont
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
 from .capability_probe import probe_structured_tools
 from .catalog_sources import CatalogSource, CatalogSourceNotFound, WorkflowCatalogSource
+from .chat_composer_drafts import (
+    DraftAttachmentUnavailable,
+    DraftRevisionStale,
+    DraftSettingsUnsupported,
+)
+from .chat_composer_drafts import discard_draft as discard_composer_draft
+from .chat_composer_drafts import read_draft as read_composer_draft
+from .chat_composer_drafts import write_draft as write_composer_draft
 from .chat_deletion import (
     ExchangeBusy,
     ExchangeHasReplies,
@@ -358,6 +366,8 @@ from .schemas import (
     CatalogPreflightRequest,
     CatalogVersionRow,
     CatalogVersions,
+    ChatComposerDraftOut,
+    ChatComposerDraftWrite,
     ChatCreate,
     ChatDetail,
     ChatItemRemovalExecute,
@@ -3515,6 +3525,81 @@ async def delete_chat(
         session.flush()
         services.artifacts.delete_generated_media_artifacts(session, artifact_ids)
         session.commit()
+    return Response(status_code=204)
+
+
+def _standard_chat_or_404(session: Session, chat_id: str) -> Chat:
+    chat = session.get(Chat, chat_id)
+    if not chat or chat.scope != STANDARD_CHAT_SCOPE:
+        raise api_error(404, "chat-not-found", "chat not found")
+    return chat
+
+
+@router.get("/chats/{chat_id}/composer-draft", response_model=ChatComposerDraftOut)
+async def get_chat_composer_draft(
+    chat_id: str, session: ConversationSessionDep
+) -> ChatComposerDraftOut:
+    """The chat's unsent draft, or an empty draft at revision 0 if it never had one."""
+
+    _standard_chat_or_404(session, chat_id)
+    return read_composer_draft(session, chat_id)
+
+
+@router.put("/chats/{chat_id}/composer-draft", response_model=ChatComposerDraftOut)
+async def put_chat_composer_draft(
+    chat_id: str, payload: ChatComposerDraftWrite, session: ConversationSessionDep
+) -> ChatComposerDraftOut:
+    """Replace the chat's draft, refusing a write based on an older revision."""
+
+    _standard_chat_or_404(session, chat_id)
+    try:
+        stored = write_composer_draft(session, chat_id, payload.expected_revision, payload.draft)
+    except DraftRevisionStale as stale:
+        session.rollback()
+        raise api_error(
+            409,
+            "chat-draft-revision-stale",
+            "The draft changed since it was read. Read it again before saving.",
+            current_revision=stale.current_revision,
+        ) from None
+    except DraftAttachmentUnavailable:
+        session.rollback()
+        raise api_error(
+            422,
+            "chat-draft-attachment-unavailable",
+            "A draft attachment is missing or is not a picture or video.",
+        ) from None
+    except DraftSettingsUnsupported:
+        session.rollback()
+        raise api_error(
+            422,
+            "chat-draft-settings-unsupported",
+            "The draft's template settings cannot be kept with a draft.",
+        ) from None
+    session.commit()
+    return stored
+
+
+@router.delete("/chats/{chat_id}/composer-draft", status_code=204)
+async def delete_chat_composer_draft(
+    chat_id: str,
+    session: ConversationSessionDep,
+    expected_revision: int = Query(ge=1),
+) -> Response:
+    """Empty the chat's draft under its next revision, releasing the files it held."""
+
+    _standard_chat_or_404(session, chat_id)
+    try:
+        discard_composer_draft(session, chat_id, expected_revision)
+    except DraftRevisionStale as stale:
+        session.rollback()
+        raise api_error(
+            409,
+            "chat-draft-revision-stale",
+            "The draft changed since it was read. Read it again before saving.",
+            current_revision=stale.current_revision,
+        ) from None
+    session.commit()
     return Response(status_code=204)
 
 

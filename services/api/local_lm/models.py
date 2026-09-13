@@ -2642,3 +2642,65 @@ class EmptyChatDeletion(TimestampMixin, Base):
     deleted_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
     deleted_count: Mapped[int] = mapped_column(Integer)
     deleted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ChatComposerDraft(TimestampMixin, Base):
+    """What somebody was writing in one chat and has not sent yet, stored so a restart keeps it.
+
+    One row per chat, deleted with the chat. The revision is the whole
+    concurrency story: every write names the revision it read, and a write
+    against an older one is refused rather than merged, so two windows editing
+    the same chat cannot silently undo each other.
+
+    Everything that would change what a send does is here: the words, the
+    Prompt Library item they came from, the mode, the references, how many
+    outputs, and the template settings. Attachments are rows of their own
+    below, because they name stored files.
+
+    The mode is enforced where it is written, like every other stored
+    vocabulary here.
+    """
+
+    __tablename__ = "chat_composer_drafts"
+
+    chat_id: Mapped[str] = mapped_column(
+        ForeignKey("chats.id", ondelete="CASCADE"), primary_key=True
+    )
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    text: Mapped[str] = mapped_column(Text, default="")
+    prompt_source_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    mode: Mapped[str] = mapped_column(String(16), default=RoutingMode.AUTO.value)
+    output_count: Mapped[int] = mapped_column(Integer, default=1)
+    mentions_json: Mapped[list[dict[str, str]]] = mapped_column(JSON, default=list)
+    template_settings_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+    attachments: Mapped[list[ChatComposerDraftAttachment]] = relationship(
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="ChatComposerDraftAttachment.position",
+    )
+
+
+class ChatComposerDraftAttachment(Base):
+    """One file attached to an unsent draft, holding that file until the draft lets go.
+
+    A foreign key to the artifact, not an id copied into JSON, so the database
+    itself refuses to delete a file a draft still holds, and retention counts it
+    like any other reference. Replacing the draft's attachments, discarding the
+    draft, or deleting the chat removes these rows, and with them the hold.
+    """
+
+    __tablename__ = "chat_composer_draft_attachments"
+    __table_args__ = (
+        UniqueConstraint("chat_id", "artifact_id", name="uq_chat_composer_draft_attachment"),
+    )
+
+    chat_id: Mapped[str] = mapped_column(
+        ForeignKey("chat_composer_drafts.chat_id", ondelete="CASCADE"), primary_key=True
+    )
+    position: Mapped[int] = mapped_column(Integer, primary_key=True)
+    artifact_id: Mapped[str] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="RESTRICT"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(16))
+    origin: Mapped[str] = mapped_column(String(16))
