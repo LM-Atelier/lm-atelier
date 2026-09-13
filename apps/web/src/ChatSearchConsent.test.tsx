@@ -229,3 +229,70 @@ it.each(["\u0915\u093f\u0924\u093e\u092c", "\u05e9\u05b8\u05c1\u05dc\u05d5\u05b9
     expect(screen.queryByRole("region", { name: "Query formatting" })).not.toBeInTheDocument();
   },
 );
+
+type StopCode = NonNullable<WebSearch["error_code"]>;
+const STOP_CODES = Object.keys({
+  search_provider_invalid: true, search_query_invalid: true, search_credentials_refused: true,
+  search_redirect_refused: true, search_rate_limited: true, search_unavailable: true,
+  search_timeout: true, search_response_invalid: true, search_response_too_large: true,
+  search_dispatch_uncertain: true, search_permission_revoked: true, search_provider_changed: true,
+  search_work_unavailable: true,
+} satisfies Record<StopCode, true>) as StopCode[];
+
+function shownReason(search: WebSearch): string {
+  mount(search);
+  const card = screen.getByRole("region", { name: "Web search" });
+  const reason = Array.from(card.querySelectorAll("p")).find((paragraph) =>
+    !paragraph.classList.contains("chat-search-provider") && !paragraph.classList.contains("chat-search-query-text"));
+  cleanup();
+  return reason?.textContent ?? "";
+}
+
+it("says why a search stopped in words, never as a code", () => {
+  mount({ ...pending, state: "failed", job_id: null, revision: null, error_code: "search_credentials_refused" });
+
+  expect(screen.getByText(
+    "The search provider refused the saved token. Replace it in Settings > Advanced > Web search.",
+  )).toBeVisible();
+  expect(screen.getByRole("region", { name: "Web search" })).not.toHaveTextContent("search_credentials_refused");
+});
+
+it("gives every stop its own reason", () => {
+  const reasons = STOP_CODES.map((code) =>
+    shownReason({ ...pending, state: "failed", job_id: null, revision: null, error_code: code }));
+
+  expect(reasons.every((reason) => reason.length > 0 && !reason.includes("search_"))).toBe(true);
+  expect(new Set(reasons).size).toBe(STOP_CODES.length);
+});
+
+it("tells a changed provider apart while waiting and after it stopped the search", () => {
+  mount({ ...pending, error_code: "search_provider_changed" });
+  expect(screen.getByText(
+    "The search provider changed since this query was proposed. Check the provider above before searching.",
+  )).toBeVisible();
+  expect(screen.getByRole("button", { name: "Search" })).toBeVisible();
+  cleanup();
+
+  mount({ ...pending, state: "cancelled", job_id: null, revision: null, error_code: "search_provider_changed" });
+  expect(screen.getByText("The search provider changed after this query was approved, so it was not sent.")).toBeVisible();
+});
+
+it("explains an interrupted search next to the promise not to resend it", () => {
+  mount({ ...pending, state: "uncertain", job_id: null, revision: null, error_code: "search_dispatch_uncertain" });
+
+  expect(screen.getByText("LM Atelier stopped while sending this query, so it may have reached the provider.")).toBeVisible();
+  expect(screen.getByText("The previous request will not be sent again automatically.")).toBeVisible();
+});
+
+it("adds nothing when a search has no reason to give", () => {
+  mount({ ...pending, state: "complete", job_id: null, revision: null });
+
+  expect(shownReasonText()).toEqual([]);
+});
+
+function shownReasonText(): string[] {
+  const card = screen.getByRole("region", { name: "Web search" });
+  return Array.from(card.querySelectorAll("p"))
+    .map((paragraph) => paragraph.textContent ?? "")
+    .filter((text) => /search provider|LM Atelier stopped|Web access was turned off|request stopped/.test(text));
+}

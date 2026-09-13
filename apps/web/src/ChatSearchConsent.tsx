@@ -30,6 +30,44 @@ const headings: Record<WebSearch["state"], string> = {
   uncertain: "Search was interrupted",
 };
 
+const WHERE_TO_FIX = "Settings > Advanced > Web search";
+
+/** Why a search stopped, or what changed while it waited, in words a person can act on. */
+function stopReason(search: WebSearch): string | null {
+  switch (search.error_code) {
+    case null:
+      return null;
+    case "search_provider_invalid":
+      return `The search provider address is not valid, so the query was not sent. Check it in ${WHERE_TO_FIX}.`;
+    case "search_query_invalid":
+      return "The search provider cannot take this query as written.";
+    case "search_credentials_refused":
+      return `The search provider refused the saved token. Replace it in ${WHERE_TO_FIX}.`;
+    case "search_redirect_refused":
+      return "The search provider tried to send the query to another address, which is not followed.";
+    case "search_rate_limited":
+      return "The search provider is turning requests away for now. Try again later.";
+    case "search_unavailable":
+      return "The search provider could not be reached, or could not answer.";
+    case "search_timeout":
+      return "The search provider took too long to answer.";
+    case "search_response_invalid":
+      return "The search provider's answer could not be read.";
+    case "search_response_too_large":
+      return "The search provider's answer was too large to use.";
+    case "search_dispatch_uncertain":
+      return "LM Atelier stopped while sending this query, so it may have reached the provider.";
+    case "search_permission_revoked":
+      return "Web access was turned off before the query was sent, so it was not sent.";
+    case "search_provider_changed":
+      return search.state === "awaiting_approval"
+        ? "The search provider changed since this query was proposed. Check the provider above before searching."
+        : "The search provider changed after this query was approved, so it was not sent.";
+    case "search_work_unavailable":
+      return "The request stopped before the query was sent, so it was not sent.";
+  }
+}
+
 export function ChatSearchConsent({ search, onChanged, onUseSource }: Props) {
   const [draft, setDraft] = useState({ revision: search.revision, value: search.query });
   const query = draft.revision === search.revision ? draft.value : search.query;
@@ -47,6 +85,7 @@ export function ChatSearchConsent({ search, onChanged, onUseSource }: Props) {
       if (error instanceof ApiError && error.status === 409) onChanged();
     },
   });
+  const reason = stopReason(search);
   const actionable = search.job_id !== null && search.revision !== null;
   const waiting = actionable && search.state === "awaiting_approval";
   const cancellable = actionable && ["scheduled", "approved"].includes(search.state);
@@ -66,6 +105,7 @@ export function ChatSearchConsent({ search, onChanged, onUseSource }: Props) {
     <section className="chat-search-consent" aria-label="Web search" aria-busy={mutation.isPending}>
       <strong role="status">{headings[search.state]}</strong>
       <p className="chat-search-provider">Provider: {search.provider} at {search.provider_endpoint}</p>
+      {reason && <p>{reason}</p>}
       {waiting ? (
         <label className="chat-search-query">
           Exact query
