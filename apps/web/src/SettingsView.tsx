@@ -22,6 +22,7 @@ import {
 import { useConfirm } from "./useConfirm";
 import { SettingsNavigation } from "./SettingsNavigation";
 import { AppearanceSettings } from "./AppearanceSettings";
+import { StorageSummary } from "./StorageSummary";
 import type { Appearance } from "./theme";
 import {
   settingsDestinationFor,
@@ -426,6 +427,7 @@ export function SettingsView({ engines, appearance, destinationId, onDestination
       </section>
       </>)}
       {on("data-and-backups") && (<>
+      <StorageSummary />
       <section>
         <div className="detail-title storage-actions">
           <div><h2>Recovery backups</h2></div>
