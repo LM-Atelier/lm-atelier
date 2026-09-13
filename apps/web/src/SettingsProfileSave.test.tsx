@@ -38,11 +38,13 @@ const appearance: Appearance = {
   chatWidth: "standard",
   motionChoice: "system",
   thumbnailSize: "medium",
+  textSize: "standard",
   setRoom: () => undefined,
   setMode: () => undefined,
   setChatWidth: () => undefined,
   setMotion: () => undefined,
   setThumbnailSize: () => undefined,
+  setTextSize: () => undefined,
 };
 
 function show(value = profile) {

@@ -33,6 +33,7 @@ export const MODE_KEY = "local-lm-mode";
 export const CHAT_WIDTH_KEY = "local-lm-chat-width";
 export const MOTION_KEY = "local-lm-motion";
 export const THUMBNAIL_SIZE_KEY = "local-lm-thumbnails";
+export const TEXT_SIZE_KEY = "local-lm-text-size";
 
 /** Whether the workspace animates: as the computer asks, or always as little as it can.
  *
@@ -62,6 +63,16 @@ export const CHAT_WIDTHS: readonly ChatWidth[] = ["standard", "wide", "full"];
 export type ThumbnailSize = "small" | "medium" | "large";
 
 export const THUMBNAIL_SIZES: readonly ThumbnailSize[] = ["small", "medium", "large"];
+
+/** How large text is drawn throughout the workspace.
+ *
+ * Standard is the size text has always been. Large and larger enlarge every
+ * size by the same proportion, so headings stay larger than the text beneath
+ * them, without scaling the rest of the interface the way browser zoom does.
+ */
+export type TextSize = "standard" | "large" | "larger";
+
+export const TEXT_SIZES: readonly TextSize[] = ["standard", "large", "larger"];
 
 export function isRoom(value: unknown): value is Room {
   return typeof value === "string" && (ROOMS as readonly string[]).includes(value);
@@ -139,6 +150,15 @@ export function storedThumbnailSize(): ThumbnailSize {
   return isThumbnailSize(stored) ? stored : "medium";
 }
 
+export function isTextSize(value: unknown): value is TextSize {
+  return typeof value === "string" && (TEXT_SIZES as readonly string[]).includes(value);
+}
+
+export function storedTextSize(): TextSize {
+  const stored = localStorage.getItem(TEXT_SIZE_KEY);
+  return isTextSize(stored) ? stored : "standard";
+}
+
 export function useChatWidth(): [ChatWidth, (width: ChatWidth) => void] {
   const [width, setWidth] = useState<ChatWidth>(storedChatWidth);
   const choose = useCallback((next: ChatWidth) => {
@@ -153,6 +173,15 @@ export function useThumbnailSize(): [ThumbnailSize, (size: ThumbnailSize) => voi
   const choose = useCallback((next: ThumbnailSize) => {
     setSize(next);
     localStorage.setItem(THUMBNAIL_SIZE_KEY, next);
+  }, []);
+  return [size, choose];
+}
+
+export function useTextSize(): [TextSize, (size: TextSize) => void] {
+  const [size, setSize] = useState<TextSize>(storedTextSize);
+  const choose = useCallback((next: TextSize) => {
+    setSize(next);
+    localStorage.setItem(TEXT_SIZE_KEY, next);
   }, []);
   return [size, choose];
 }
@@ -234,11 +263,13 @@ export interface Appearance {
   /** What was chosen for motion, which may be to follow the computer. */
   motionChoice: MotionChoice;
   thumbnailSize: ThumbnailSize;
+  textSize: TextSize;
   setRoom: (room: Room) => void;
   setMode: (choice: ModeChoice) => void;
   setChatWidth: (width: ChatWidth) => void;
   setMotion: (choice: MotionChoice) => void;
   setThumbnailSize: (size: ThumbnailSize) => void;
+  setTextSize: (size: TextSize) => void;
 }
 
 export function useAppearance(): Appearance {
@@ -247,18 +278,20 @@ export function useAppearance(): Appearance {
   const [chatWidth, setChatWidth] = useChatWidth();
   const [motionChoice, reducedMotion, setMotion] = useMotion();
   const [thumbnailSize, setThumbnailSize] = useThumbnailSize();
+  const [textSize, setTextSize] = useTextSize();
   useEffect(() => {
     document.documentElement.dataset.room = room;
     document.documentElement.dataset.mode = mode;
     document.documentElement.dataset.chatWidth = chatWidth;
     document.documentElement.dataset.motion = reducedMotion ? "reduced" : "full";
     document.documentElement.dataset.thumbnails = thumbnailSize;
-  }, [room, mode, chatWidth, reducedMotion, thumbnailSize]);
+    document.documentElement.dataset.textSize = textSize;
+  }, [room, mode, chatWidth, reducedMotion, thumbnailSize, textSize]);
   return useMemo(
     () => ({
-      room, mode, modeChoice, chatWidth, motionChoice, thumbnailSize,
-      setRoom, setMode, setChatWidth, setMotion, setThumbnailSize,
+      room, mode, modeChoice, chatWidth, motionChoice, thumbnailSize, textSize,
+      setRoom, setMode, setChatWidth, setMotion, setThumbnailSize, setTextSize,
     }),
-    [room, mode, modeChoice, chatWidth, motionChoice, thumbnailSize, setRoom, setMode, setChatWidth, setMotion, setThumbnailSize],
+    [room, mode, modeChoice, chatWidth, motionChoice, thumbnailSize, textSize, setRoom, setMode, setChatWidth, setMotion, setThumbnailSize, setTextSize],
   );
 }

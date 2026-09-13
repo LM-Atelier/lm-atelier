@@ -9,6 +9,7 @@ import {
   type ModeChoice,
   type MotionChoice,
   type Room,
+  type TextSize,
   type ThumbnailSize,
 } from "./theme";
 
@@ -22,6 +23,12 @@ const CHAT_WIDTH_OPTIONS: readonly { value: ChatWidth; label: string }[] = [
   { value: "standard", label: "Standard" },
   { value: "wide", label: "Wide" },
   { value: "full", label: "Full width" },
+];
+
+const TEXT_SIZE_OPTIONS: readonly { value: TextSize; label: string }[] = [
+  { value: "standard", label: "Standard" },
+  { value: "large", label: "Large" },
+  { value: "larger", label: "Larger" },
 ];
 
 const THUMBNAILS: readonly { value: ThumbnailSize; label: string }[] = [
@@ -96,6 +103,7 @@ function ClockSetting() {
 export function AppearanceSettings({ appearance }: { appearance: Appearance }) {
   const {
     modeChoice, setMode, room, setRoom, chatWidth, setChatWidth, motionChoice, setMotion, thumbnailSize, setThumbnailSize,
+    textSize, setTextSize,
   } = appearance;
   const id = useId();
   return (
@@ -146,6 +154,27 @@ export function AppearanceSettings({ appearance }: { appearance: Appearance }) {
       </section>
       <section>
         <div className="detail-title"><div><h2>Layout</h2><p>Saved in this browser.</p></div></div>
+        <div className="setting-row appearance-row">
+          <span>
+            <strong id={`${id}-text-size`}>Text size</strong>
+            <small id={`${id}-text-size-help`}>
+              Enlarges all text together, headings included. Browser zoom still enlarges everything else too.
+            </small>
+          </span>
+          <div className="segmented" role="group" aria-labelledby={`${id}-text-size`} aria-describedby={`${id}-text-size-help`}>
+            {TEXT_SIZE_OPTIONS.map(({ value, label }) => (
+              <button
+                type="button"
+                key={value}
+                className={textSize === value ? "active" : ""}
+                aria-pressed={textSize === value}
+                onClick={() => setTextSize(value)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
         <div className="setting-row appearance-row">
           <span>
             <strong id={`${id}-width`}>Chat width</strong>
