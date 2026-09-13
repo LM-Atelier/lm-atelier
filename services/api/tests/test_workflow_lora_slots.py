@@ -7,7 +7,12 @@ from typing import Any
 
 import pytest
 
-from local_lm.comfy_package_widgets import POWER_LORA_LOADER, PackageClaim
+import local_lm.workflow_lora_slots as workflow_lora_slots_module
+from local_lm.comfy_package_widgets import (
+    POWER_LORA_LOADER,
+    POWER_LORA_LOADER_CONTRACT,
+    PackageClaim,
+)
 from local_lm.workflow_bindings import (
     ResolvedWorkflowBinding,
     WorkflowActivationResolution,
@@ -26,11 +31,11 @@ from local_lm.workflow_lora_slots import (
     CORE_MODEL_ONLY_LORA_LOADER_SCHEMA_SHA256,
     CORE_RUNTIME_ADAPTER_CONTRACT_VERSION,
     MAX_WORKFLOW_LORA_SLOTS,
-    POWER_LORA_LOADER_CONTRACT,
     WorkflowLoraCoreEvidence,
     WorkflowLoraPackageEvidence,
     WorkflowLoraSlotError,
     extract_workflow_lora_slots,
+    extract_workflow_lora_slots_with_private_targets,
 )
 from local_lm.workflow_trust import canonical_graph
 
@@ -1471,3 +1476,716 @@ def test_binding_order_does_not_change_slot_identity_or_activation_identity() ->
 
     assert first.activation_binding_sha256 == second.activation_binding_sha256
     assert first.slots[0].slot_id == second.slots[0].slot_id
+
+
+def test_private_core_target_is_frozen_graph_bound_and_public_compatible() -> None:
+    graph, contract, activation, evidence = _core_evidence(required=False)
+    original = deepcopy(graph)
+    existing_public = extract_workflow_lora_slots(
+        revision_scope="wfrev_private_core",
+        api_graph=graph,
+        dependency_contract=contract,
+        activation=activation,
+        core_evidence=(evidence,),
+    )
+
+    extracted = extract_workflow_lora_slots_with_private_targets(
+        revision_scope="wfrev_private_core",
+        api_graph=graph,
+        dependency_contract=contract,
+        activation=activation,
+        core_evidence=(evidence,),
+    )
+
+    assert graph == original
+    assert extracted.public == existing_public
+    assert not hasattr(extracted.public, "edit_targets")
+    assert len(extracted.edit_targets) == 1
+    target = extracted.edit_targets[0]
+    assert target.slot_id == extracted.public.slots[0].slot_id
+    assert target.source_api_graph_sha256 == extracted.public.api_graph_sha256
+    assert target.source_dependency_contract_sha256 == extracted.public.dependency_contract_sha256
+    assert target.source_activation_binding_sha256 == extracted.public.activation_binding_sha256
+    assert len(target.source_authority_evidence_sha256) == 64
+    assert target.loader_authority_sha256 == extracted.public.slots[0].loader_authority_sha256
+    assert target.asset_sha256 == "a" * 64
+    assert target.node_id == "loader-node-that-must-stay-private"
+    assert target.entry_locator == "lora_name"
+    assert target.loader_contract == CORE_LORA_LOADER_CONTRACT
+    assert target.editable_fields == ("model_strength", "clip_strength")
+    assert target.node_id not in repr(extracted.public)
+    for digest in (
+        target.source_api_graph_sha256,
+        target.source_dependency_contract_sha256,
+        target.source_activation_binding_sha256,
+        target.source_authority_evidence_sha256,
+        target.loader_authority_sha256,
+        target.asset_sha256,
+    ):
+        assert len(digest) == 64
+        assert digest == digest.lower()
+        assert set(digest) <= set("0123456789abcdef")
+    with pytest.raises(FrozenInstanceError):
+        target.__setattr__("node_id", "changed")
+
+
+def test_private_model_only_target_has_only_the_audited_model_field() -> None:
+    graph, contract, activation, evidence = _core_evidence(
+        required=False,
+        loader_type="LoraLoaderModelOnly",
+    )
+
+    extracted = extract_workflow_lora_slots_with_private_targets(
+        revision_scope="wfrev_private_model_only",
+        api_graph=graph,
+        dependency_contract=contract,
+        activation=activation,
+        core_evidence=(evidence,),
+    )
+
+    target = extracted.edit_targets[0]
+    assert target.loader_contract == CORE_MODEL_ONLY_LORA_LOADER_CONTRACT
+    assert target.entry_locator == "lora_name"
+    assert target.editable_fields == ("model_strength",)
+
+
+@pytest.mark.parametrize(
+    ("separate_clip", "editable_fields"),
+    [
+        (0.6, ("enabled", "model_strength", "clip_strength")),
+        (None, ("enabled", "model_strength")),
+    ],
+)
+def test_private_rgthree_target_preserves_exact_separate_and_coupled_locators(
+    separate_clip: float | None,
+    editable_fields: tuple[str, ...],
+) -> None:
+    graph, contract, activation, evidence = _rgthree_evidence(separate_clip=separate_clip)
+
+    extracted = extract_workflow_lora_slots_with_private_targets(
+        revision_scope="wfrev_private_rgthree",
+        api_graph=graph,
+        dependency_contract=contract,
+        activation=activation,
+        package_evidence=(evidence,),
+    )
+
+    target = extracted.edit_targets[0]
+    assert target.slot_id == extracted.public.slots[0].slot_id
+    assert target.node_id == "power-node-that-must-stay-private"
+    assert target.entry_locator == "lora_1"
+    assert target.loader_contract == POWER_LORA_LOADER_CONTRACT
+    assert target.editable_fields == editable_fields
+
+
+def test_private_targets_correspond_one_to_one_in_public_slot_order() -> None:
+    graph = _rgthree_graph(runtime_reference="styles/first.safetensors")
+    graph["power-node-that-must-stay-private"]["inputs"]["lora_2"] = {
+        "on": False,
+        "lora": "styles/second.safetensors",
+        "strength": 0.4,
+    }
+    contract = _contract(
+        _slot("rgthree", "registry_package"),
+        _slot(
+            "styles",
+            "model_asset",
+            required=False,
+            satisfaction="all_of",
+            requirement_keys=("first", "second"),
+        ),
+    )
+    package = _package_binding()
+    activation = _activation(
+        contract,
+        package,
+        _asset_binding(
+            "styles",
+            "styles/first.safetensors",
+            requirement_key="first",
+        ),
+        _asset_binding(
+            "styles",
+            "styles/second.safetensors",
+            requirement_key="second",
+            sha256="b" * 64,
+        ),
+    )
+    evidence = WorkflowLoraPackageEvidence(
+        api_graph_sha256=_graph_sha256(graph),
+        node_id="power-node-that-must-stay-private",
+        package_claim=PackageClaim(
+            registry_id="rgthree-comfy",
+            repository_id="rgthree/rgthree-comfy",
+            revision=_RGTHREE_REVISION,
+        ),
+        dependency_slot="rgthree",
+        requirement_key="default",
+        resource_identity_sha256=package.resource_identity_sha256,
+    )
+
+    extracted = extract_workflow_lora_slots_with_private_targets(
+        revision_scope="wfrev_private_correspondence",
+        api_graph=graph,
+        dependency_contract=contract,
+        activation=activation,
+        package_evidence=(evidence,),
+    )
+
+    assert [target.slot_id for target in extracted.edit_targets] == [
+        slot.slot_id for slot in extracted.public.slots if slot.editability == "editable"
+    ]
+    assert [target.entry_locator for target in extracted.edit_targets] == [
+        "lora_1",
+        "lora_2",
+    ]
+
+
+@pytest.mark.parametrize("loader_family", ["core", "rgthree"])
+def test_required_slots_never_receive_private_targets(loader_family: str) -> None:
+    if loader_family == "core":
+        graph, contract, activation, core_evidence = _core_evidence(required=True)
+        extracted = extract_workflow_lora_slots_with_private_targets(
+            revision_scope="wfrev_private_required_core",
+            api_graph=graph,
+            dependency_contract=contract,
+            activation=activation,
+            core_evidence=(core_evidence,),
+        )
+    else:
+        graph, contract, activation, package_evidence = _rgthree_evidence(required=True)
+        extracted = extract_workflow_lora_slots_with_private_targets(
+            revision_scope="wfrev_private_required_rgthree",
+            api_graph=graph,
+            dependency_contract=contract,
+            activation=activation,
+            package_evidence=(package_evidence,),
+        )
+
+    assert extracted.public.slots[0].editability == "required_locked"
+    assert extracted.edit_targets == ()
+
+
+@pytest.mark.parametrize("loader_family", ["core", "rgthree"])
+def test_unauthorized_slots_never_receive_private_targets(loader_family: str) -> None:
+    if loader_family == "core":
+        graph, contract, activation, _ = _core_evidence(required=False)
+    else:
+        graph, contract, activation, _ = _rgthree_evidence(required=False)
+
+    extracted = extract_workflow_lora_slots_with_private_targets(
+        revision_scope=f"wfrev_private_unauthorized_{loader_family}",
+        api_graph=graph,
+        dependency_contract=contract,
+        activation=activation,
+    )
+
+    assert extracted.public.slots[0].editability == "detected_read_only"
+    assert extracted.edit_targets == ()
+
+
+@pytest.mark.parametrize("loader_family", ["core", "rgthree"])
+def test_malformed_slots_never_receive_private_targets(loader_family: str) -> None:
+    if loader_family == "core":
+        graph, contract, activation, core_evidence = _core_evidence(required=False)
+        graph["loader-node-that-must-stay-private"]["inputs"]["strength_model"] = "bad"
+        core_evidence = replace(core_evidence, api_graph_sha256=_graph_sha256(graph))
+        extracted = extract_workflow_lora_slots_with_private_targets(
+            revision_scope="wfrev_private_malformed_core",
+            api_graph=graph,
+            dependency_contract=contract,
+            activation=activation,
+            core_evidence=(core_evidence,),
+        )
+    else:
+        graph, contract, activation, package_evidence = _rgthree_evidence(required=False)
+        graph["power-node-that-must-stay-private"]["inputs"]["lora_1"]["strength"] = "bad"
+        package_evidence = replace(package_evidence, api_graph_sha256=_graph_sha256(graph))
+        extracted = extract_workflow_lora_slots_with_private_targets(
+            revision_scope="wfrev_private_malformed_rgthree",
+            api_graph=graph,
+            dependency_contract=contract,
+            activation=activation,
+            package_evidence=(package_evidence,),
+        )
+
+    assert {slot.editability for slot in extracted.public.slots} == {"detected_read_only"}
+    assert extracted.edit_targets == ()
+
+
+def test_private_target_slot_id_is_stable_across_authority_repair() -> None:
+    graph, contract, activation, evidence = _core_evidence(required=False)
+
+    unauthorized = extract_workflow_lora_slots_with_private_targets(
+        revision_scope="wfrev_private_stable_id",
+        api_graph=graph,
+        dependency_contract=contract,
+        activation=activation,
+    )
+    authorized = extract_workflow_lora_slots_with_private_targets(
+        revision_scope="wfrev_private_stable_id",
+        api_graph=graph,
+        dependency_contract=contract,
+        activation=activation,
+        core_evidence=(evidence,),
+    )
+
+    assert unauthorized.edit_targets == ()
+    assert unauthorized.public.slots[0].slot_id == authorized.edit_targets[0].slot_id
+
+
+def test_private_target_binds_loader_authority_and_asset_content_drift() -> None:
+    first_graph, first_contract, first_activation, first_evidence = _rgthree_evidence()
+    authority_graph, authority_contract, authority_activation, authority_evidence = (
+        _rgthree_evidence(revision="1.0.2605082257")
+    )
+    changed_asset = _asset_binding(
+        "style",
+        "styles/power.safetensors",
+        sha256="b" * 64,
+    )
+    asset_activation = _activation(
+        first_contract,
+        first_activation.bindings[0],
+        changed_asset,
+    )
+
+    first = extract_workflow_lora_slots_with_private_targets(
+        revision_scope="wfrev_private_drift",
+        api_graph=first_graph,
+        dependency_contract=first_contract,
+        activation=first_activation,
+        package_evidence=(first_evidence,),
+    )
+    authority_changed = extract_workflow_lora_slots_with_private_targets(
+        revision_scope="wfrev_private_drift",
+        api_graph=authority_graph,
+        dependency_contract=authority_contract,
+        activation=authority_activation,
+        package_evidence=(authority_evidence,),
+    )
+    asset_changed = extract_workflow_lora_slots_with_private_targets(
+        revision_scope="wfrev_private_drift",
+        api_graph=first_graph,
+        dependency_contract=first_contract,
+        activation=asset_activation,
+        package_evidence=(first_evidence,),
+    )
+
+    first_target = first.edit_targets[0]
+    authority_target = authority_changed.edit_targets[0]
+    asset_target = asset_changed.edit_targets[0]
+    assert first_target.slot_id == authority_target.slot_id == asset_target.slot_id
+    assert first_target.loader_authority_sha256 != authority_target.loader_authority_sha256
+    assert first_target.asset_sha256 == authority_target.asset_sha256 == "a" * 64
+    assert first_target.loader_authority_sha256 == asset_target.loader_authority_sha256
+    assert first_target.asset_sha256 == "a" * 64
+    assert asset_target.asset_sha256 == "b" * 64
+    assert (
+        first_target.source_activation_binding_sha256
+        != authority_target.source_activation_binding_sha256
+    )
+    assert (
+        first_target.source_activation_binding_sha256
+        != asset_target.source_activation_binding_sha256
+    )
+    for digest in (
+        first_target.loader_authority_sha256,
+        authority_target.loader_authority_sha256,
+    ):
+        assert len(digest) == 64
+        assert digest == digest.lower()
+        assert set(digest) <= set("0123456789abcdef")
+
+
+def test_private_extraction_preserves_the_existing_slot_bound() -> None:
+    graph: dict[str, Any] = {"source": _source()}
+    for index in range(MAX_WORKFLOW_LORA_SLOTS + 1):
+        graph[f"loader-{index:03d}"] = {
+            "class_type": "LoraLoaderModelOnly",
+            "inputs": {
+                "model": ["source", 0],
+                "lora_name": f"styles/{index:03d}.safetensors",
+                "strength_model": 1,
+            },
+        }
+
+    with pytest.raises(WorkflowLoraSlotError) as raised:
+        extract_workflow_lora_slots_with_private_targets(
+            revision_scope="wfrev_private_too_many",
+            api_graph=graph,
+            dependency_contract=_contract(),
+        )
+
+    assert raised.value.code == "too_many_workflow_loras"
+
+
+def test_private_target_refuses_graph_digest_drift_during_extraction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graph, contract, activation, evidence = _core_evidence(required=False)
+    original_graph_sha256 = workflow_lora_slots_module._api_graph_sha256
+    calls = 0
+
+    def drifting_graph_sha256(value: Any) -> str:
+        nonlocal calls
+        calls += 1
+        digest = original_graph_sha256(value)
+        return digest if calls == 1 else "f" * 64
+
+    monkeypatch.setattr(
+        workflow_lora_slots_module,
+        "_api_graph_sha256",
+        drifting_graph_sha256,
+    )
+
+    with pytest.raises(WorkflowLoraSlotError) as raised:
+        extract_workflow_lora_slots_with_private_targets(
+            revision_scope="wfrev_private_graph_drift",
+            api_graph=graph,
+            dependency_contract=contract,
+            activation=activation,
+            core_evidence=(evidence,),
+        )
+
+    assert calls == 2
+    assert raised.value.code == "changed_private_edit_source"
+
+
+def test_private_target_refuses_activation_digest_drift_during_extraction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graph, contract, activation, evidence = _core_evidence(required=False)
+    original_binding_sha256 = workflow_activation_binding_sha256
+    calls = 0
+
+    def drifting_binding_sha256(*args: Any, **kwargs: Any) -> str:
+        nonlocal calls
+        calls += 1
+        digest = original_binding_sha256(*args, **kwargs)
+        return digest if calls <= 2 else "f" * 64
+
+    monkeypatch.setattr(
+        workflow_lora_slots_module,
+        "workflow_activation_binding_sha256",
+        drifting_binding_sha256,
+    )
+
+    with pytest.raises(WorkflowLoraSlotError) as raised:
+        extract_workflow_lora_slots_with_private_targets(
+            revision_scope="wfrev_private_activation_drift",
+            api_graph=graph,
+            dependency_contract=contract,
+            activation=activation,
+            core_evidence=(evidence,),
+        )
+
+    assert calls == 3
+    assert raised.value.code == "changed_private_edit_source"
+
+
+def test_private_target_refuses_same_json_graph_subclass_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SpoofedInputs(dict[str, Any]):
+        def get(self, key: str, default: Any = None) -> Any:
+            if key == "strength_model":
+                return 9.5
+            return super().get(key, default)
+
+    graph, contract, activation, evidence = _core_evidence(required=False)
+    original_evidence_sha256 = workflow_lora_slots_module._private_authority_evidence_sha256
+
+    def drift_after_graph_snapshot(*args: Any, **kwargs: Any) -> str:
+        inputs = graph["loader-node-that-must-stay-private"]["inputs"]
+        graph["loader-node-that-must-stay-private"]["inputs"] = SpoofedInputs(inputs)
+        return original_evidence_sha256(*args, **kwargs)
+
+    monkeypatch.setattr(
+        workflow_lora_slots_module,
+        "_private_authority_evidence_sha256",
+        drift_after_graph_snapshot,
+    )
+
+    with pytest.raises(WorkflowLoraSlotError) as raised:
+        extract_workflow_lora_slots_with_private_targets(
+            revision_scope="wfrev_private_same_json_graph_drift",
+            api_graph=graph,
+            dependency_contract=contract,
+            activation=activation,
+            core_evidence=(evidence,),
+        )
+
+    drifted_inputs = graph["loader-node-that-must-stay-private"]["inputs"]
+    assert drifted_inputs["strength_model"] == 0.75
+    assert drifted_inputs.get("strength_model") == 9.5
+    assert raised.value.code == "changed_private_edit_source"
+
+
+def test_private_target_refuses_same_json_activation_subclass_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SameJsonStringSubclass(str):
+        pass
+
+    graph, contract, activation, evidence = _core_evidence(required=False)
+    original_evidence_sha256 = workflow_lora_slots_module._private_authority_evidence_sha256
+
+    def drift_after_binding_snapshot(*args: Any, **kwargs: Any) -> str:
+        asset_identity = activation.bindings[1].identity
+        asset_identity["sha256"] = SameJsonStringSubclass(asset_identity["sha256"])
+        return original_evidence_sha256(*args, **kwargs)
+
+    monkeypatch.setattr(
+        workflow_lora_slots_module,
+        "_private_authority_evidence_sha256",
+        drift_after_binding_snapshot,
+    )
+
+    with pytest.raises(WorkflowLoraSlotError) as raised:
+        extract_workflow_lora_slots_with_private_targets(
+            revision_scope="wfrev_private_same_json_activation_drift",
+            api_graph=graph,
+            dependency_contract=contract,
+            activation=activation,
+            core_evidence=(evidence,),
+        )
+
+    assert raised.value.code == "changed_private_edit_source"
+
+
+def test_private_extraction_owns_a_deep_detached_dependency_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graph, contract, activation, evidence = _core_evidence(required=False)
+    source_constraints = contract.slots[1].requirements[0].constraints
+    original_private_edit_target = workflow_lora_slots_module._private_edit_target
+
+    def mutate_source_contract_after_normalization(**kwargs: Any) -> Any:
+        source_constraints["late_source_mutation"] = ["caller-owned"]
+        return original_private_edit_target(**kwargs)
+
+    monkeypatch.setattr(
+        workflow_lora_slots_module,
+        "_private_edit_target",
+        mutate_source_contract_after_normalization,
+    )
+
+    extracted = extract_workflow_lora_slots_with_private_targets(
+        revision_scope="wfrev_private_detached_contract",
+        api_graph=graph,
+        dependency_contract=contract,
+        activation=activation,
+        core_evidence=(evidence,),
+    )
+
+    assert source_constraints == {"late_source_mutation": ["caller-owned"]}
+    assert (
+        extracted.edit_targets[0].source_dependency_contract_sha256
+        == extracted.public.dependency_contract_sha256
+    )
+
+
+def test_private_target_refuses_core_evidence_drift_during_extraction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SameJsonStringSubclass(str):
+        pass
+
+    graph, contract, activation, evidence = _core_evidence(required=False)
+    original_private_edit_target = workflow_lora_slots_module._private_edit_target
+
+    def mutate_core_evidence_after_target(**kwargs: Any) -> Any:
+        target = original_private_edit_target(**kwargs)
+        object.__setattr__(
+            evidence,
+            "loader_contract",
+            SameJsonStringSubclass(evidence.loader_contract),
+        )
+        return target
+
+    monkeypatch.setattr(
+        workflow_lora_slots_module,
+        "_private_edit_target",
+        mutate_core_evidence_after_target,
+    )
+
+    with pytest.raises(WorkflowLoraSlotError) as raised:
+        extract_workflow_lora_slots_with_private_targets(
+            revision_scope="wfrev_private_core_evidence_drift",
+            api_graph=graph,
+            dependency_contract=contract,
+            activation=activation,
+            core_evidence=(evidence,),
+        )
+
+    assert raised.value.code == "changed_private_edit_source"
+
+
+def test_private_target_refuses_nested_package_claim_drift_during_extraction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SameJsonStringSubclass(str):
+        pass
+
+    graph, contract, activation, evidence = _rgthree_evidence(required=False)
+    original_private_edit_target = workflow_lora_slots_module._private_edit_target
+
+    def mutate_package_claim_after_target(**kwargs: Any) -> Any:
+        target = original_private_edit_target(**kwargs)
+        object.__setattr__(
+            evidence.package_claim,
+            "revision",
+            SameJsonStringSubclass(evidence.package_claim.revision),
+        )
+        return target
+
+    monkeypatch.setattr(
+        workflow_lora_slots_module,
+        "_private_edit_target",
+        mutate_package_claim_after_target,
+    )
+
+    with pytest.raises(WorkflowLoraSlotError) as raised:
+        extract_workflow_lora_slots_with_private_targets(
+            revision_scope="wfrev_private_package_evidence_drift",
+            api_graph=graph,
+            dependency_contract=contract,
+            activation=activation,
+            package_evidence=(evidence,),
+        )
+
+    assert raised.value.code == "changed_private_edit_source"
+
+
+def test_private_target_refuses_graph_container_subclasses() -> None:
+    class GraphSubclass(dict[str, Any]):
+        pass
+
+    graph, contract, activation, evidence = _core_evidence(required=False)
+    subclassed_graph = GraphSubclass(graph)
+    assert (
+        extract_workflow_lora_slots(
+            revision_scope="wfrev_private_graph_subclass",
+            api_graph=subclassed_graph,
+            dependency_contract=contract,
+            activation=activation,
+            core_evidence=(evidence,),
+        )
+        .slots[0]
+        .editability
+        == "editable"
+    )
+
+    with pytest.raises(WorkflowLoraSlotError) as raised:
+        extract_workflow_lora_slots_with_private_targets(
+            revision_scope="wfrev_private_graph_subclass",
+            api_graph=subclassed_graph,
+            dependency_contract=contract,
+            activation=activation,
+            core_evidence=(evidence,),
+        )
+
+    assert raised.value.code == "noncanonical_private_edit_source"
+
+
+def test_private_target_refuses_revision_scope_subclasses() -> None:
+    class RevisionScopeSubclass(str):
+        pass
+
+    graph, contract, activation, evidence = _core_evidence(required=False)
+
+    with pytest.raises(WorkflowLoraSlotError) as raised:
+        extract_workflow_lora_slots_with_private_targets(
+            revision_scope=RevisionScopeSubclass("wfrev_private_scope_subclass"),
+            api_graph=graph,
+            dependency_contract=contract,
+            activation=activation,
+            core_evidence=(evidence,),
+        )
+
+    assert raised.value.code == "noncanonical_private_edit_source"
+
+
+def test_private_target_refuses_authority_evidence_subclasses() -> None:
+    class CoreEvidenceSubclass(WorkflowLoraCoreEvidence):
+        pass
+
+    graph, contract, activation, evidence = _core_evidence(required=False)
+    subclassed = CoreEvidenceSubclass(
+        evidence.api_graph_sha256,
+        evidence.node_id,
+        evidence.loader_contract,
+        evidence.adapter_schema_sha256,
+        evidence.core_claimed,
+        evidence.dependency_slot,
+        evidence.requirement_key,
+        evidence.resource_identity_sha256,
+    )
+    assert (
+        extract_workflow_lora_slots(
+            revision_scope="wfrev_private_evidence_subclass",
+            api_graph=graph,
+            dependency_contract=contract,
+            activation=activation,
+            core_evidence=(subclassed,),
+        )
+        .slots[0]
+        .editability
+        == "editable"
+    )
+
+    with pytest.raises(WorkflowLoraSlotError) as raised:
+        extract_workflow_lora_slots_with_private_targets(
+            revision_scope="wfrev_private_evidence_subclass",
+            api_graph=graph,
+            dependency_contract=contract,
+            activation=activation,
+            core_evidence=(subclassed,),
+        )
+
+    assert raised.value.code == "noncanonical_private_edit_source"
+
+
+def test_private_target_refuses_resolved_binding_subclasses() -> None:
+    class BindingSubclass(ResolvedWorkflowBinding):
+        pass
+
+    graph, contract, activation, evidence = _core_evidence(required=False)
+    asset = activation.bindings[1]
+    subclassed_asset = BindingSubclass(
+        asset.slot_name,
+        asset.requirement_key,
+        asset.resource_kind,
+        asset.identity,
+        asset.resource_identity_sha256,
+        asset.mount,
+    )
+    subclassed_activation = _activation(
+        contract,
+        activation.bindings[0],
+        subclassed_asset,
+    )
+    assert (
+        extract_workflow_lora_slots(
+            revision_scope="wfrev_private_binding_subclass",
+            api_graph=graph,
+            dependency_contract=contract,
+            activation=subclassed_activation,
+            core_evidence=(evidence,),
+        )
+        .slots[0]
+        .editability
+        == "editable"
+    )
+
+    with pytest.raises(WorkflowLoraSlotError) as raised:
+        extract_workflow_lora_slots_with_private_targets(
+            revision_scope="wfrev_private_binding_subclass",
+            api_graph=graph,
+            dependency_contract=contract,
+            activation=subclassed_activation,
+            core_evidence=(evidence,),
+        )
+
+    assert raised.value.code == "noncanonical_private_edit_source"
