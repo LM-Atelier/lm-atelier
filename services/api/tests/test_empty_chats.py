@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from local_lm.db import Base
 from local_lm.domain import JobKind, Operation
 from local_lm.empty_chats import (
+    CONFIGURATION_TABLES,
     CONFIGURED_REASONS,
     MAX_PAGE_SIZE,
     WORK_PRODUCERS,
@@ -379,7 +380,7 @@ def test_every_chat_reference_is_an_audited_producer() -> None:
     work.
     """
 
-    audited = {model.__tablename__ for model in WORK_PRODUCERS}
+    audited = {model.__tablename__ for model in (*WORK_PRODUCERS, *CONFIGURATION_TABLES)}
     referencing = {
         table.name
         for table in Base.metadata.tables.values()
