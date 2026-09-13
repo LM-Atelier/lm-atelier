@@ -38,7 +38,7 @@ function stopReason(search: WebSearch): string | null {
     case null:
       return null;
     case "search_provider_invalid":
-      return `The search provider address is not valid, so the query was not sent. Check it in ${WHERE_TO_FIX}.`;
+      return `The search provider settings are not valid, so the query was not sent. Check them in ${WHERE_TO_FIX}.`;
     case "search_query_invalid":
       return "The search provider cannot take this query as written.";
     case "search_credentials_refused":

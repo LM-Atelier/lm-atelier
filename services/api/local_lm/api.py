@@ -588,7 +588,7 @@ from .user_queue_activity import (
 )
 from .verified_setup import build_verified_setup, resolve_verified_setup
 from .video_length import video_length_reaches_graph, workflow_video_length
-from .web_search import WebSearchError
+from .web_search import CrwSearchProvider, WebSearchError
 from .web_search_configuration import configured_search_provider, search_provider_revision
 from .web_search_consent import SearchConsentConflict, decide_search, replace_search_proposal
 from .web_search_projection import chat_searches, search_for_run
@@ -867,6 +867,23 @@ async def delete_credential(provider: str, request: Request) -> CredentialStatus
     return _credential_status(selected, request)
 
 
+def _refused_search_configuration(
+    settings: Settings,
+) -> Literal["search_provider_invalid", "search_credentials_invalid"]:
+    """Which part of a refused search configuration is at fault.
+
+    The provider refuses a bad address and a malformed token alike, which left
+    Settings blaming the address for a token with a stray space in it. Checking
+    the address on its own tells the two apart.
+    """
+
+    try:
+        CrwSearchProvider(settings.crw_endpoint or "")
+    except WebSearchError:
+        return "search_provider_invalid"
+    return "search_credentials_invalid"
+
+
 @router.get("/web-search/configuration", response_model=WebSearchConfiguration)
 async def web_search_configuration(request: Request) -> WebSearchConfiguration:
     settings = _services(request).settings
@@ -876,7 +893,7 @@ async def web_search_configuration(request: Request) -> WebSearchConfiguration:
         return WebSearchConfiguration(
             installation_enabled=settings.web_access_enabled,
             configured=False,
-            error_code="search_provider_invalid",
+            error_code=_refused_search_configuration(settings),
         )
     return WebSearchConfiguration(
         installation_enabled=settings.web_access_enabled,

@@ -2169,5 +2169,5 @@ export interface WebSearchConfiguration {
   configured: boolean;
   provider: "CRW";
   provider_endpoint: string | null;
-  error_code: "search_not_configured" | "search_provider_invalid" | null;
+  error_code: "search_not_configured" | "search_provider_invalid" | "search_credentials_invalid" | null;
 }
