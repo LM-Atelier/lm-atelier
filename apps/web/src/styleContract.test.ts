@@ -168,8 +168,18 @@ describe("contrast and state", () => {
 
 
 
+  it("reduces motion through one rule that the computer and Appearance both reach", () => {
+    // The document is marked when either asks. A second, media-query copy of
+    // these declarations would be a place for the two to drift apart.
+    expect(css).not.toMatch(/@media \(prefers-reduced-motion/);
+    const rule = /html\[data-motion="reduced"\] \*, html\[data-motion="reduced"\] \*::before, html\[data-motion="reduced"\] \*::after \{([^}]*)\}/.exec(css)?.[1] ?? "";
+    expect(rule).toMatch(/scroll-behavior: auto !important/);
+    expect(rule).toMatch(/animation: none !important/);
+    expect(rule).toMatch(/transition: none !important/);
+  });
+
   it("does not leave an indeterminate bar parked at a false percentage", () => {
-    const reducedMotion = css.slice(css.indexOf("@media (prefers-reduced-motion"));
+    const reducedMotion = css.slice(css.indexOf('html[data-motion="reduced"]'));
     expect(reducedMotion).toMatch(/\.indeterminate\s*\{[^}]*width:\s*100%/);
   });
 

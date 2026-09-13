@@ -36,9 +36,11 @@ const appearance: Appearance = {
   mode: "dark",
   modeChoice: "dark",
   chatWidth: "standard",
+  motionChoice: "system",
   setRoom: () => undefined,
   setMode: () => undefined,
   setChatWidth: () => undefined,
+  setMotion: () => undefined,
 };
 
 function show(value = profile) {

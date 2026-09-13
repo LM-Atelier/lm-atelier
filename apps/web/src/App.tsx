@@ -94,6 +94,7 @@ import {
   resolveCapabilitySettings,
 } from "./settings";
 import { useWorkspaceChrome, type SidebarLayout } from "./sidebarLayout";
+import { prefersLessMotion } from "./theme";
 import { activeBranchMessages } from "./turnEditorContext";
 import type {
   Chat,
@@ -786,7 +787,7 @@ function ChatView({
       followMessages.current = true;
     }
     if (followMessages.current && typeof endRef.current?.scrollIntoView === "function") {
-      endRef.current.scrollIntoView({ behavior: "smooth" });
+      endRef.current.scrollIntoView({ behavior: prefersLessMotion() ? "auto" : "smooth" });
     }
   }, [chat?.id, chat?.messages, liveText, pendingTurns]);
   const trackMessageScroll = () => {

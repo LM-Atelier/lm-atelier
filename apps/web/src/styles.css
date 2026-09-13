@@ -1060,17 +1060,17 @@ html[data-chat-width="full"] { --chat-column: 100%; }
 .toast.error { background: var(--danger-surface); border: 1px solid var(--state-danger); color: var(--danger-ink-on-surface); }
 .muted { color: var(--muted); }
 
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
-    scroll-behavior: auto !important;
-    animation: none !important;
-    transition: none !important;
-  }
-  /* This bar is 34% wide and slides across; without its keyframe it parks
-     at 34% and reads as real progress for an operation whose progress is
-     unknown. Full width says "working" without claiming a number. */
-  .progress-track > div.indeterminate { width: 100% !important; opacity: .55; }
+/* Less motion. The document says "reduced" when the computer asks for it or
+   Appearance is set to reduce it, so both reasons take this one path. */
+html[data-motion="reduced"] *, html[data-motion="reduced"] *::before, html[data-motion="reduced"] *::after {
+  scroll-behavior: auto !important;
+  animation: none !important;
+  transition: none !important;
 }
+/* This bar is 34% wide and slides across; without its keyframe it parks
+   at 34% and reads as real progress for an operation whose progress is
+   unknown. Full width says "working" without claiming a number. */
+html[data-motion="reduced"] .progress-track > div.indeterminate { width: 100% !important; opacity: .55; }
 
 @media (max-width: 900px) {
   .app-shell { grid-template-columns: 220px 1fr; }

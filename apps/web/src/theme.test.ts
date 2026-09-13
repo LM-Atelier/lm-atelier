@@ -4,12 +4,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CHAT_WIDTH_KEY,
   MODE_KEY,
+  MOTION_KEY,
   ROOMS,
   ROOM_LABELS,
   isChatWidth,
   isMode,
   isModeChoice,
+  isMotionChoice,
   isRoom,
+  prefersLessMotion,
   useAppearance,
   type Room,
 } from "./theme";
@@ -26,7 +29,13 @@ function systemSetTo(light: boolean) {
     addEventListener: (_type: string, listener: () => void) => listeners.add(listener),
     removeEventListener: (_type: string, listener: () => void) => listeners.delete(listener),
   };
-  vi.stubGlobal("matchMedia", () => query);
+  // Only the light query is this one. A real browser answers each media query
+  // with its own object, so another query's listeners must not count as these.
+  vi.stubGlobal("matchMedia", (media: string) =>
+    media === query.media
+      ? query
+      : { media, matches: false, addEventListener: () => undefined, removeEventListener: () => undefined },
+  );
   return {
     listeners,
     switchTo(next: boolean) {
@@ -187,5 +196,85 @@ describe("following the system's light", () => {
 
     expect(result.current.modeChoice).toBe("system");
     expect(result.current.mode).toBe("light");
+  });
+});
+
+/** A computer whose reduced-motion setting the test can switch; every other query answers no. */
+function motionSetTo(reduced: boolean) {
+  let current = reduced;
+  const listeners = new Set<() => void>();
+  vi.stubGlobal("matchMedia", (media: string) => ({
+    media,
+    get matches() {
+      return media === "(prefers-reduced-motion: reduce)" && current;
+    },
+    addEventListener: (_type: string, listener: () => void) => listeners.add(listener),
+    removeEventListener: (_type: string, listener: () => void) => listeners.delete(listener),
+  }));
+  return {
+    listeners,
+    switchTo(next: boolean) {
+      current = next;
+      for (const listener of listeners) listener();
+    },
+  };
+}
+
+describe("reducing motion", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    delete document.documentElement.dataset.motion;
+  });
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("follows the computer's setting while Automatic, including when it changes", () => {
+    const computer = motionSetTo(false);
+    const { result } = renderHook(() => useAppearance());
+    expect(result.current.motionChoice).toBe("system");
+    expect(document.documentElement.dataset.motion).toBe("full");
+
+    act(() => computer.switchTo(true));
+
+    expect(document.documentElement.dataset.motion).toBe("reduced");
+    expect(prefersLessMotion()).toBe(true);
+  });
+
+  it("reduces whatever the computer says once Reduce is chosen, and remembers it", () => {
+    const computer = motionSetTo(false);
+    const { result } = renderHook(() => useAppearance());
+
+    act(() => result.current.setMotion("reduce"));
+
+    expect(document.documentElement.dataset.motion).toBe("reduced");
+    expect(localStorage.getItem(MOTION_KEY)).toBe("reduce");
+    expect(computer.listeners.size).toBe(0);
+    expect(prefersLessMotion()).toBe(true);
+    // The light and the width are separate questions and did not move.
+    expect(document.documentElement.dataset.chatWidth).toBe("standard");
+  });
+
+  it("answers from the choice and the computer before any hook has run", () => {
+    // A scroll can happen in an effect that runs before the one that marks the
+    // document, so the answer cannot depend on that mark.
+    motionSetTo(false);
+    expect(prefersLessMotion()).toBe(false);
+    localStorage.setItem(MOTION_KEY, "reduce");
+    expect(prefersLessMotion()).toBe(true);
+    localStorage.setItem(MOTION_KEY, "system");
+    motionSetTo(true);
+    expect(prefersLessMotion()).toBe(true);
+    expect(document.documentElement.dataset.motion).toBeUndefined();
+  });
+
+  it("knows only Automatic and Reduce as choices", () => {
+    expect(isMotionChoice("system")).toBe(true);
+    expect(isMotionChoice("reduce")).toBe(true);
+    expect(isMotionChoice("none")).toBe(false);
+    localStorage.setItem(MOTION_KEY, "none");
+    motionSetTo(false);
+    expect(renderHook(() => useAppearance()).result.current.motionChoice).toBe("system");
   });
 });
