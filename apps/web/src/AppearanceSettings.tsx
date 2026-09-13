@@ -9,6 +9,7 @@ import {
   type ModeChoice,
   type MotionChoice,
   type Room,
+  type ThumbnailSize,
 } from "./theme";
 
 const MODES: readonly { value: ModeChoice; label: string; Icon: typeof Sun }[] = [
@@ -21,6 +22,12 @@ const CHAT_WIDTH_OPTIONS: readonly { value: ChatWidth; label: string }[] = [
   { value: "standard", label: "Standard" },
   { value: "wide", label: "Wide" },
   { value: "full", label: "Full width" },
+];
+
+const THUMBNAILS: readonly { value: ThumbnailSize; label: string }[] = [
+  { value: "small", label: "Small" },
+  { value: "medium", label: "Medium" },
+  { value: "large", label: "Large" },
 ];
 
 const MOTIONS: readonly { value: MotionChoice; label: string }[] = [
@@ -87,8 +94,9 @@ function ClockSetting() {
  * single entry asks a question that has no second answer.
  */
 export function AppearanceSettings({ appearance }: { appearance: Appearance }) {
-  const { modeChoice, setMode, room, setRoom, chatWidth, setChatWidth, motionChoice, setMotion } =
-    appearance;
+  const {
+    modeChoice, setMode, room, setRoom, chatWidth, setChatWidth, motionChoice, setMotion, thumbnailSize, setThumbnailSize,
+  } = appearance;
   const id = useId();
   return (
     <>
@@ -153,6 +161,27 @@ export function AppearanceSettings({ appearance }: { appearance: Appearance }) {
                 className={chatWidth === value ? "active" : ""}
                 aria-pressed={chatWidth === value}
                 onClick={() => setChatWidth(value)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="setting-row appearance-row">
+          <span>
+            <strong id={`${id}-thumbnails`}>Thumbnails</strong>
+            <small id={`${id}-thumbnails-help`}>
+              How large pictures are drawn in the Media Library and when attached to a message.
+            </small>
+          </span>
+          <div className="segmented" role="group" aria-labelledby={`${id}-thumbnails`} aria-describedby={`${id}-thumbnails-help`}>
+            {THUMBNAILS.map(({ value, label }) => (
+              <button
+                type="button"
+                key={value}
+                className={thumbnailSize === value ? "active" : ""}
+                aria-pressed={thumbnailSize === value}
+                onClick={() => setThumbnailSize(value)}
               >
                 {label}
               </button>

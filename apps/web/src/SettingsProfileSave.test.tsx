@@ -37,10 +37,12 @@ const appearance: Appearance = {
   modeChoice: "dark",
   chatWidth: "standard",
   motionChoice: "system",
+  thumbnailSize: "medium",
   setRoom: () => undefined,
   setMode: () => undefined,
   setChatWidth: () => undefined,
   setMotion: () => undefined,
+  setThumbnailSize: () => undefined,
 };
 
 function show(value = profile) {

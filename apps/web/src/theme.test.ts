@@ -7,11 +7,13 @@ import {
   MOTION_KEY,
   ROOMS,
   ROOM_LABELS,
+  THUMBNAIL_SIZE_KEY,
   isChatWidth,
   isMode,
   isModeChoice,
   isMotionChoice,
   isRoom,
+  isThumbnailSize,
   prefersLessMotion,
   useAppearance,
   type Room,
@@ -131,6 +133,45 @@ describe("how wide the chat reads", () => {
     expect(renderHook(() => useAppearance()).result.current.chatWidth).toBe("standard");
     expect(["standard", "wide", "full"].every(isChatWidth)).toBe(true);
     expect(isChatWidth("enormous")).toBe(false);
+  });
+});
+
+describe("how large thumbnails are", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    delete document.documentElement.dataset.thumbnails;
+  });
+  afterEach(cleanup);
+
+  it("starts at medium, the size they have always been, and says so on the document", () => {
+    const { result } = renderHook(() => useAppearance());
+
+    expect(result.current.thumbnailSize).toBe("medium");
+    expect(document.documentElement.dataset.thumbnails).toBe("medium");
+  });
+
+  it("applies and remembers a size without moving anything else", () => {
+    const { result } = renderHook(() => useAppearance());
+    const first = result.current;
+
+    act(() => first.setThumbnailSize("large"));
+
+    expect(document.documentElement.dataset.thumbnails).toBe("large");
+    expect(localStorage.getItem(THUMBNAIL_SIZE_KEY)).toBe("large");
+    expect(result.current.setThumbnailSize).toBe(first.setThumbnailSize);
+    expect(result.current.chatWidth).toBe(first.chatWidth);
+    expect(result.current.mode).toBe(first.mode);
+  });
+
+  it("opens on the remembered size, and on medium for anything it does not offer", () => {
+    localStorage.setItem(THUMBNAIL_SIZE_KEY, "small");
+    expect(renderHook(() => useAppearance()).result.current.thumbnailSize).toBe("small");
+    cleanup();
+
+    localStorage.setItem(THUMBNAIL_SIZE_KEY, "huge");
+    expect(renderHook(() => useAppearance()).result.current.thumbnailSize).toBe("medium");
+    expect(["small", "medium", "large"].every(isThumbnailSize)).toBe(true);
+    expect(isThumbnailSize("huge")).toBe(false);
   });
 });
 

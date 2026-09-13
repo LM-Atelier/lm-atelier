@@ -121,6 +121,30 @@ describe("style contract", () => {
     expect(css).toMatch(/html\[data-chat-width="full"\] \{ --chat-column: 100%; \}/);
   });
 
+  it("draws media previews at the size Appearance chooses, and at today's sizes otherwise", () => {
+    // Medium is the fallback in every rule, so nobody who never opens the
+    // setting sees a thumbnail move. Small and large set all four sizes
+    // together, so a Media Library card and an attached picture never disagree.
+    const css = readFileSync(STYLESHEET, "utf8");
+    const rule = (selector: string) => {
+      const at = css.indexOf(`\n${selector} {`);
+      return at < 0 ? "" : css.slice(at, css.indexOf("}", at));
+    };
+    // A minimum wider than the grid would push its only column past the edge
+    // of a phone, so the card never asks for more than the grid has.
+    expect(rule(".media-grid")).toContain("minmax(min(var(--thumbnail-card-min, 250px), 100%), 1fr)");
+    expect(rule(".gallery-card > img, .gallery-card > video")).toContain("height: var(--thumbnail-height, 210px)");
+    expect(rule(".attachment-card")).toContain("grid-template-columns: var(--attachment-thumbnail-width, 58px) minmax(0, 1fr) auto");
+    expect(rule(".attachment-preview")).toContain("width: var(--attachment-thumbnail-width, 58px); height: var(--attachment-thumbnail-height, 48px)");
+    for (const size of ["small", "large"]) {
+      const tokens = rule(`html[data-thumbnails="${size}"]`);
+      for (const token of ["--thumbnail-card-min", "--thumbnail-height", "--attachment-thumbnail-width", "--attachment-thumbnail-height"]) {
+        expect(tokens, `${size} sets ${token}`).toMatch(new RegExp(`${token}: \\d+px;`));
+      }
+    }
+    expect(css).not.toMatch(/html\[data-thumbnails="medium"\]/);
+  });
+
   it("gives the studio both a mark and an export, not one word for two acts", () => {
     // "Save" was one download link, which is export. Marking a picture in the
     // library is a different act with a different result, and collapsing them

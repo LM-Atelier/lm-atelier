@@ -416,6 +416,10 @@ h1, h2, h3 { margin: 0; }
    Appearance can widen it, and full leaves only the gutters. */
 html[data-chat-width="wide"] { --chat-column: 1180px; }
 html[data-chat-width="full"] { --chat-column: 100%; }
+/* Media previews: Media Library cards and the pictures attached to a message.
+   Medium is the fallback, the size they have always been; Appearance can shrink or enlarge them. */
+html[data-thumbnails="small"] { --thumbnail-card-min: 180px; --thumbnail-height: 150px; --attachment-thumbnail-width: 44px; --attachment-thumbnail-height: 36px; }
+html[data-thumbnails="large"] { --thumbnail-card-min: 340px; --thumbnail-height: 290px; --attachment-thumbnail-width: 88px; --attachment-thumbnail-height: 72px; }
 .messages { overflow-y: auto; padding: 36px max(24px, calc((100% - var(--chat-column, 860px)) / 2)) 190px; scroll-behavior: smooth; }
 .media-output-plan { margin: 0 0 22px 50px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
 .media-output-plan > summary { display: flex; justify-content: space-between; gap: 12px; cursor: pointer; padding: 10px 12px; color: var(--ink-primary); font-size: 12px; }
@@ -523,8 +527,8 @@ html[data-chat-width="full"] { --chat-column: 100%; }
 .composer-workflow-selector .workflow-selector select { width: clamp(130px, 22vw, 210px); height: 32px; padding-block: 0; text-overflow: ellipsis; }
 .composer-workflow-selector .workflow-selector small { max-width: 210px; overflow-wrap: anywhere; }
 .attachment-strip { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 8px 8px; }
-.attachment-card { width: min(100%, 360px); min-width: 0; display: grid; grid-template-columns: 58px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 6px; background: var(--panel-3); border: 1px solid var(--border); border-radius: 10px; }
-.attachment-preview { width: 58px; height: 48px; display: block; overflow: hidden; border-radius: 6px; background: var(--surface-0); outline: 1px solid #ffffff12; }
+.attachment-card { width: min(100%, 360px); min-width: 0; display: grid; grid-template-columns: var(--attachment-thumbnail-width, 58px) minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 6px; background: var(--panel-3); border: 1px solid var(--border); border-radius: 10px; }
+.attachment-preview { width: var(--attachment-thumbnail-width, 58px); height: var(--attachment-thumbnail-height, 48px); display: block; overflow: hidden; border-radius: 6px; background: var(--surface-0); outline: 1px solid #ffffff12; }
 .attachment-preview:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .attachment-preview img, .attachment-preview video { width: 100%; height: 100%; display: block; object-fit: cover; }
 .attachment-summary { min-width: 0; display: grid; gap: 2px; font-size: 11px; }
@@ -1036,9 +1040,9 @@ html[data-chat-width="full"] { --chat-column: 100%; }
 .artifact-storage-summary strong { color: var(--ink-primary); font-size: 14px; }.artifact-storage-summary small { color: var(--muted); font-size: 11px; }
 .media-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) 190px; gap: 12px; margin-bottom: 15px; }
 .media-toolbar .workspace-search { margin: 0; }.media-toolbar select { color: var(--ink); border: 1px solid var(--border); border-radius: 10px; background: var(--panel); padding: 9px; }
-.media-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
+.media-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(var(--thumbnail-card-min, 250px), 100%), 1fr)); gap: 12px; }
 .gallery-card { min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: var(--cut); background: var(--panel); box-shadow: var(--lift); }
-.gallery-card > img, .gallery-card > video { width: 100%; height: 210px; display: block; object-fit: contain; background: var(--surface-0); }
+.gallery-card > img, .gallery-card > video { width: 100%; height: var(--thumbnail-height, 210px); display: block; object-fit: contain; background: var(--surface-0); }
 .gallery-card > div { display: grid; gap: 4px; padding: 11px; }.gallery-card strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }.gallery-card small { color: var(--muted); font-size: 11px; }
 .gallery-card span { display: flex; align-items: center; gap: 8px; }.gallery-card a { color: var(--accent-2); font-size: 11px; }.gallery-card code { color: var(--muted); font-size: 11px; margin-right: auto; }
 .generation-identity { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 7px; margin: 0; color: var(--muted); font-size: 11px; }
