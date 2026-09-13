@@ -16,6 +16,9 @@ import type {
   ArtifactLibraryItem,
   ArtifactStorageInfo,
   BackupInfo,
+  EmptyChatDeletion,
+  EmptyChatPage,
+  EmptyChatPreview,
   ReferenceAsset,
   ReferenceAssetAttached,
   ReferenceAssetReview,
@@ -756,6 +759,43 @@ export const api = {
   workerLogTail: (name: "chat" | "media") =>
     request<WorkerLogTail>(`/api/workers/${name}/log-tail`),
   workerLogLocation: () => request<WorkerLogLocation>("/api/workers/log-location"),
+  // Empty-chat cleanup. The list and the check only read; the delete spends a
+  // check and is refused whole if anything it bound has changed.
+  emptyChats: (options: {
+    include_archived?: boolean;
+    include_configured?: boolean;
+    cursor?: string;
+  } = {}) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined) query.set(key, String(value));
+    }
+    const suffix = query.toString();
+    return request<EmptyChatPage>(`/api/maintenance/empty-chats${suffix ? `?${suffix}` : ""}`);
+  },
+  previewEmptyChats: (body: {
+    chat_ids: string[];
+    include_archived: boolean;
+    include_configured: boolean;
+  }) =>
+    request<EmptyChatPreview>("/api/maintenance/empty-chats/preview", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  deleteEmptyChats: (body: {
+    operation_id: string;
+    preview_id: string;
+    digest: string;
+    acknowledged_count: number;
+    acknowledged_configured: boolean;
+    chat_ids: string[];
+    include_archived: boolean;
+    include_configured: boolean;
+  }) =>
+    request<EmptyChatDeletion>("/api/maintenance/empty-chats/execute", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   backups: () => request<BackupInfo[]>("/api/backups"),
   createBackup: (includeMedia = false) =>
     request<BackupInfo>(`/api/backups?${new URLSearchParams({ include_media: String(includeMedia) })}`, { method: "POST" }),

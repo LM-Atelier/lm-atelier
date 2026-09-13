@@ -895,6 +895,17 @@ html[data-chat-width="full"] { --chat-column: 100%; }
 .setting-row.appearance-row { grid-template-columns: minmax(0, 1fr) auto; }
 .appearance-row .segmented button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 7px 14px; }
 .appearance-row select { width: auto; }
+/* Empty-chat cleanup. Rows are described by why they are listed, so each is a
+   selection box beside a kind and a line of reasons; the list scrolls inside the
+   page rather than pushing the actions off screen. */
+.empty-chat-filters { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 12px; }
+.empty-chat-filters label, .empty-chat-acknowledgement { display: inline-flex; align-items: center; gap: 6px; }
+.empty-chat-list { list-style: none; margin: 0; padding: 0; max-height: min(50vh, 420px); overflow-y: auto; border: 1px solid var(--border); border-radius: 10px; }
+.empty-chat-row { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.empty-chat-row:last-child { border-bottom: 0; }
+.empty-chat-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.empty-chat-copy small { color: var(--muted); overflow-wrap: anywhere; }
+.empty-chat-actions { justify-content: flex-start; flex-wrap: wrap; margin-top: 12px; }
 
 .settings-page section { margin: 35px 0; }
 .settings-page section > h2 { font-size: 16px; margin-bottom: 13px; }
