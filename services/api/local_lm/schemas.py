@@ -1623,6 +1623,7 @@ class WorkflowRevisionOut(ApiModel):
 # The ratio presets a chat can offer. The ids are the ratios they name, and the
 # workflow decides which of them it can express exactly.
 WorkflowOutputGeometryPresetId = Literal["1:1", "3:4", "2:3", "9:16", "4:3", "3:2", "16:9"]
+WorkflowOutputGeometryOperation = Literal["text_to_image", "text_to_video", "image_to_video"]
 
 
 class WorkflowOutputGeometryBindingOut(ApiModel):
@@ -1642,7 +1643,7 @@ class WorkflowOutputGeometryCapabilityOut(ApiModel):
     revision_id: str | None
     workflow_id: str | None
     artifact_sha256: str | None
-    operation: Literal["text_to_image"] | None
+    operation: WorkflowOutputGeometryOperation | None
     engine: Literal["comfyui"] | None
     size_modes: list[Literal["exact", "preset"]]
     preset_ids: list[WorkflowOutputGeometryPresetId]
@@ -1662,9 +1663,9 @@ class WorkflowOutputGeometryResolutionOut(ApiModel):
     workflow_id: str
     revision_id: str
     artifact_sha256: str
-    operation: Literal["text_to_image"]
+    operation: WorkflowOutputGeometryOperation
     engine: Literal["comfyui"]
-    mode: Literal["image"]
+    mode: Literal["image", "video"]
     size_mode: Literal["exact", "preset"]
     preset_id: WorkflowOutputGeometryPresetId | None
     width: int

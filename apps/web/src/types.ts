@@ -1217,6 +1217,9 @@ export interface Workflow {
  */
 export type OutputRatioPresetId = "1:1" | "3:4" | "2:3" | "9:16" | "4:3" | "3:2" | "16:9";
 
+/** The operations a size can be proven for: a picture, or a MiniMax H3 video. */
+export type WorkflowOutputGeometryOperation = "text_to_image" | "text_to_video" | "image_to_video";
+
 export interface WorkflowOutputGeometryBinding {
   key: "width" | "height";
   node_id: string;
@@ -1247,7 +1250,7 @@ export interface WorkflowOutputGeometryCapability {
   revision_id: string | null;
   workflow_id: string | null;
   artifact_sha256: string | null;
-  operation: "text_to_image" | null;
+  operation: WorkflowOutputGeometryOperation | null;
   engine: "comfyui" | null;
   size_modes: ("exact" | "preset")[];
   preset_ids: OutputRatioPresetId[];
@@ -1263,9 +1266,9 @@ export interface WorkflowOutputGeometryResolution {
   workflow_id: string;
   revision_id: string;
   artifact_sha256: string;
-  operation: "text_to_image";
+  operation: WorkflowOutputGeometryOperation;
   engine: "comfyui";
-  mode: "image";
+  mode: "image" | "video";
   size_mode: "exact" | "preset";
   preset_id: OutputRatioPresetId | null;
   width: number;

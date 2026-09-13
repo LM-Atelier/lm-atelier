@@ -351,6 +351,30 @@ describe("OutputRatioControl", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "16:9 Wide" })).toBeTruthy());
     expect(screen.queryByRole("alert")).toBeNull();
   });
+
+  it("asks a video revision for a video size, not a picture one", async () => {
+    // A revision proven for video only resolves video requests. Asking it for a
+    // picture would be refused, and the button would appear to do nothing.
+    vi.mocked(api.workflowRevisionOutputGeometry).mockResolvedValue(
+      capability({ operation: "text_to_video" }),
+    );
+    vi.mocked(api.resolveWorkflowRevisionOutputGeometry).mockResolvedValue(
+      resolution({ operation: "text_to_video", mode: "video", preset_id: "9:16", width: 864, height: 1536 }),
+    );
+    const onDimensions = vi.fn();
+
+    renderControl({ onDimensions });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "9:16 Tall" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "9:16 Tall" }));
+
+    await waitFor(() => expect(onDimensions).toHaveBeenCalledWith({ width: 864, height: 1536 }));
+    expect(api.resolveWorkflowRevisionOutputGeometry).toHaveBeenCalledWith("rev-1", {
+      mode: "video",
+      size_mode: "preset",
+      preset_id: "9:16",
+    });
+  });
 });
 
 describe("a workflow that decides its own size", () => {

@@ -4,6 +4,11 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Final, Literal, Never, cast
 
+from .h3_video_output_chain_v1 import (
+    H3VideoOutputChain,
+    H3VideoOutputChainError,
+    recognize_h3_video_output_chain,
+)
 from .model_planner import workflow_artifact_contract
 from .output_geometry import (
     MAX_DIMENSION,
@@ -16,7 +21,8 @@ from .output_geometry import (
     output_geometry_capability_payload,
     resolve_output_geometry,
 )
-from .settings_registry import IMAGE_SETTINGS, workflow_settings
+from .settings_registry import IMAGE_SETTINGS, VIDEO_SETTINGS, workflow_settings
+from .video_length import VIDEO_LENGTH_SCHEMA_KEY
 
 WORKFLOW_OUTPUT_GEOMETRY_VERSION: Literal[1] = 1
 WORKFLOW_OUTPUT_GEOMETRY_UNAVAILABLE = "unsupported_workflow_geometry"
@@ -29,6 +35,17 @@ _MAX_TEXT_LENGTH = 100_000
 _MAX_IDENTIFIER_LENGTH = 256
 _SHA256_CHARS = frozenset("0123456789abcdef")
 _LATENT_ROOTS = frozenset({"EmptyLatentImage", "EmptySD3LatentImage"})
+
+#: What a proof can be about. A picture is proven through the image output chain,
+#: a video through the MiniMax H3 chain; nothing else has a proof at all.
+GeometryOperation = Literal["text_to_image", "text_to_video", "image_to_video"]
+_VIDEO_OPERATIONS: Final = frozenset({"text_to_video", "image_to_video"})
+
+#: The size grid of an H3 root. Each root declares width and height in steps of
+#: 32, and builds a latent of height // 16 by width // 16 - so on this grid the
+#: frames decode to exactly the size the root declares, and off it the division
+#: would silently round a requested size down to a different one.
+_H3_DIMENSION_STEP: Final = 32
 _PROOF_TOKEN = object()
 _RESOLUTION_TOKEN = object()
 
@@ -52,12 +69,15 @@ class WorkflowOutputGeometryProof:
     workflow_id: str
     revision_id: str
     artifact_sha256: str
-    operation: Literal["text_to_image"]
+    operation: GeometryOperation
     engine: Literal["comfyui"]
     latent_node_id: str
     sampler_node_ids: tuple[str, ...]
     decode_node_ids: tuple[str, ...]
     save_node_ids: tuple[str, ...]
+    #: The whole recognized chain for a video, including the nodes the flat id
+    #: lists above have no place for; None for a picture.
+    video_chain: H3VideoOutputChain | None
     width: WorkflowGeometryInputBinding
     height: WorkflowGeometryInputBinding
     capability: OutputGeometryCapability
@@ -95,7 +115,7 @@ class WorkflowOutputGeometryResolution:
     workflow_id: str
     revision_id: str
     artifact_sha256: str
-    operation: Literal["text_to_image"]
+    operation: GeometryOperation
     engine: Literal["comfyui"]
     geometry: ResolvedOutputGeometry
     graph_binding_verified: Literal[True] = field(default=True, init=False)
@@ -128,6 +148,11 @@ def prove_workflow_output_geometry(
     trusted: object,
 ) -> WorkflowOutputGeometryResult:
     """Prove exact width/height support for one stored trusted ComfyUI revision.
+
+    A text-to-image revision is proven through its image output chain, and a
+    text-to-video or image-to-video revision through the MiniMax H3 video chain.
+    The operation decides which chain is required, so a graph of one kind never
+    earns a proof under the other's name.
 
     Refusal is deliberately non-diagnostic. The graph may be user-authored, and
     capability discovery must not turn its contents into an error oracle.
@@ -181,6 +206,14 @@ def executed_graph_carries_the_proof(proof: object, executed_graph: object) -> b
         return False
     if type(executed_graph) is not dict:
         return False
+    if proof.video_chain is not None:
+        # The whole chain, not the flat id lists: sound decoded from another
+        # sampling pass, or a second video mux, can leave those lists unchanged
+        # while the run is no longer the one that was proven.
+        try:
+            return recognize_h3_video_output_chain(executed_graph) == proof.video_chain
+        except H3VideoOutputChainError:
+            return False
     try:
         binding = _graph_binding(cast(dict[str, Any], executed_graph))
     except WorkflowOutputGeometryError:
@@ -315,7 +348,13 @@ def workflow_output_geometry_resolution_payload(
 def _prove(**values: object) -> WorkflowOutputGeometryProof:
     workflow_id = _identifier(values["workflow_id"])
     revision_id = _identifier(values["revision_id"])
-    if values["operation"] != "text_to_image" or type(values["operation"]) is not str:
+    if type(values["operation"]) is not str:
+        _refuse()
+    if values["operation"] == "text_to_image":
+        operation: GeometryOperation = "text_to_image"
+    elif values["operation"] in _VIDEO_OPERATIONS:
+        operation = cast(GeometryOperation, values["operation"])
+    else:
         _refuse()
     if values["engine"] != "comfyui" or type(values["engine"]) is not str:
         _refuse()
@@ -331,8 +370,10 @@ def _prove(**values: object) -> WorkflowOutputGeometryProof:
         or type(dependencies) is not dict
     ):
         _refuse()
+    # The operation is part of what the digest covers, so a revision stored as
+    # a picture workflow cannot be re-proven as a video one, or the reverse.
     calculated = workflow_artifact_contract(
-        operation="text_to_image",
+        operation=operation,
         engine="comfyui",
         api_graph=api_graph,
         input_schema=input_schema,
@@ -341,13 +382,37 @@ def _prove(**values: object) -> WorkflowOutputGeometryProof:
     if calculated != artifact_sha256:
         _refuse()
 
-    width, height, capability = _schema_capability(input_schema)
-    (
-        latent_node_id,
-        sampler_node_ids,
-        decode_node_ids,
-        save_node_ids,
-    ) = _graph_binding(api_graph)
+    video_chain: H3VideoOutputChain | None = None
+    if operation == "text_to_image":
+        width, height, capability = _schema_capability(input_schema, "image")
+        (
+            latent_node_id,
+            sampler_node_ids,
+            decode_node_ids,
+            save_node_ids,
+        ) = _graph_binding(api_graph)
+    else:
+        width, height, capability = _schema_capability(input_schema, "video")
+        # The chain is H3's own vocabulary, so the size grid is too: a workflow
+        # that admits sizes off the root's grid would be offering pixels the
+        # root cannot deliver exactly.
+        if width.multiple_of % _H3_DIMENSION_STEP or height.multiple_of % _H3_DIMENSION_STEP:
+            _refuse()
+        try:
+            chain = recognize_h3_video_output_chain(api_graph)
+        except H3VideoOutputChainError:
+            _refuse()
+        video_chain = chain
+        latent_node_id = chain.root_id
+        sampler_node_ids = (chain.sampler_id,)
+        decode_node_ids = tuple(
+            sorted(
+                node_id
+                for node_id in (chain.video_decode_id, chain.audio_decode_id)
+                if node_id is not None
+            )
+        )
+        save_node_ids = chain.save_ids
     width = WorkflowGeometryInputBinding(
         "width",
         latent_node_id,
@@ -372,12 +437,13 @@ def _prove(**values: object) -> WorkflowOutputGeometryProof:
     object.__setattr__(proof, "workflow_id", workflow_id)
     object.__setattr__(proof, "revision_id", revision_id)
     object.__setattr__(proof, "artifact_sha256", artifact_sha256)
-    object.__setattr__(proof, "operation", "text_to_image")
+    object.__setattr__(proof, "operation", operation)
     object.__setattr__(proof, "engine", "comfyui")
     object.__setattr__(proof, "latent_node_id", latent_node_id)
     object.__setattr__(proof, "sampler_node_ids", sampler_node_ids)
     object.__setattr__(proof, "decode_node_ids", decode_node_ids)
     object.__setattr__(proof, "save_node_ids", save_node_ids)
+    object.__setattr__(proof, "video_chain", video_chain)
     object.__setattr__(proof, "width", width)
     object.__setattr__(proof, "height", height)
     object.__setattr__(proof, "capability", capability)
@@ -421,14 +487,20 @@ _UNDERSTOOD_SCHEMA_KEYWORDS: Final = frozenset(
 
 def _schema_capability(
     schema: dict[str, Any],
+    mode: Literal["image", "video"],
 ) -> tuple[WorkflowGeometryInputBinding, WorkflowGeometryInputBinding, OutputGeometryCapability]:
     if schema.get("type") != "object" or type(schema.get("properties")) is not dict:
         _refuse()
     # Anything at the top level that is not understood can narrow width or height
     # without changing their own bounds - a composition, or a whole-object const
     # or enum - so the advertised range would stop being a subset of what the
-    # workflow accepts.
-    if set(schema) - _UNDERSTOOD_SCHEMA_KEYWORDS - _HARMLESS_ANNOTATION_KEYWORDS:
+    # workflow accepts. A video's length contract is the one addition: it names
+    # the frame and rate inputs and constrains nothing about the frame size, and
+    # its contents are still validated when the settings are read below.
+    understood = _UNDERSTOOD_SCHEMA_KEYWORDS | (
+        {VIDEO_LENGTH_SCHEMA_KEY} if mode == "video" else set()
+    )
+    if set(schema) - understood - _HARMLESS_ANNOTATION_KEYWORDS:
         _refuse()
     properties = cast(dict[str, object], schema["properties"])
     for key in ("width", "height"):
@@ -448,7 +520,7 @@ def _schema_capability(
         if unevaluated - _HARMLESS_ANNOTATION_KEYWORDS:
             _refuse()
     try:
-        fields = workflow_settings(IMAGE_SETTINGS, schema)
+        fields = workflow_settings(IMAGE_SETTINGS if mode == "image" else VIDEO_SETTINGS, schema)
     except ValueError:
         _refuse()
     by_key = {field.key: field for field in fields}
@@ -458,7 +530,7 @@ def _schema_capability(
     if width.default * height.default > max_pixels:
         _refuse()
     bounds: dict[str, object] = {
-        "mode": "image",
+        "mode": mode,
         "min_width": width.minimum,
         "max_width": width.maximum,
         "min_height": height.minimum,
@@ -487,7 +559,7 @@ def _schema_capability(
     sizes = declare_output_geometry(
         {
             "version": 1,
-            "allowed_modes": ["image"],
+            "allowed_modes": [mode],
             "allowed_preset_ids": [],
             "combinations": [exact],
         }
@@ -504,7 +576,7 @@ def _schema_capability(
         with_presets = declare_output_geometry(
             {
                 "version": 1,
-                "allowed_modes": ["image"],
+                "allowed_modes": [mode],
                 "allowed_preset_ids": sorted(presets),
                 "combinations": [
                     exact,
