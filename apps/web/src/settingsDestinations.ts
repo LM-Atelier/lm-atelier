@@ -26,7 +26,7 @@ export const SETTINGS_DESTINATIONS: readonly SettingsDestination[] = [
   {
     id: "appearance",
     label: "Appearance",
-    summary: "Light or dark, theme, chat width, motion and the clock.",
+    summary: "Light or dark, theme, chat width, motion, the sidebar and the clock.",
   },
   {
     id: "models-and-generation",
