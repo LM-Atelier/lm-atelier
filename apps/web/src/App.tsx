@@ -64,6 +64,7 @@ import { SidebarFooter } from "./SidebarFooter";
 import { SidebarResizer } from "./SidebarResizer";
 import { StudioView } from "./StudioView";
 import { TurnEditor } from "./TurnEditor";
+import { WorkspaceComposerDraft } from "./WorkspaceComposerDraft";
 import { WorkflowsView } from "./WorkflowsView";
 import { api } from "./api";
 import type { ChatViewProps, PendingTurn } from "./chatComposerContracts";
@@ -1000,6 +1001,7 @@ function ChatView({
         engines={engines} profiles={profiles} presets={presets}
         maxMediaOutputsPerPlan={maxMediaOutputsPerPlan} PromptHelper={PromptHelperDialog}
         onAccepted={onEditAccepted} onClose={() => setEditMessageId(null)} />}
+      <WorkspaceComposerDraft chatId={chat.id} draft={composerDraft} onDraft={onComposerDraft} />
       <TurnEditor PromptHelper={PromptHelperDialog} chat={chat} engines={engines} profiles={profiles} stoppable={stoppable} settings={settings} onSettings={onSettings} settingsRole={settingsRole} onSettingsRole={onSettingsRole} presets={presets} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} onStopAndSend={onStopAndSend} maxMediaOutputsPerPlan={maxMediaOutputsPerPlan} project={project} visualTarget={visualTarget} quoteTarget={quoteTarget} draft={composerDraft} onDraftChange={onComposerDraft} />
     </div>
   );
