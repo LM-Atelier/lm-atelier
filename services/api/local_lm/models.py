@@ -2704,3 +2704,21 @@ class ChatComposerDraftAttachment(Base):
     )
     kind: Mapped[str] = mapped_column(String(16))
     origin: Mapped[str] = mapped_column(String(16))
+
+
+class RetentionPolicy(TimestampMixin, Base):
+    """How long retention keeps media nothing uses, once somebody has chosen.
+
+    At most one row, keyed by what it governs. Until it exists the installation's
+    configuration decides both windows; once it does, it decides them for every
+    clearing pass, whether at start or from Clear now. Kept in the workspace
+    database rather than the installation's configuration, so a choice travels
+    with the workspace's backups.
+    """
+
+    __tablename__ = "retention_policies"
+
+    scope: Mapped[str] = mapped_column(String(16), primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    media_days: Mapped[int] = mapped_column(Integer)
+    temporary_hours: Mapped[int] = mapped_column(Integer)

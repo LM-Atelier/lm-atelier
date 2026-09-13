@@ -3,6 +3,7 @@ import { api } from "./api";
 import { ClearReadyMedia } from "./ClearReadyMedia";
 import { ErrorCallout } from "./ErrorCallout";
 import { formatBytes } from "./format";
+import { RetentionChoices } from "./RetentionChoices";
 
 function count(value: number, one: string, many: string): string {
   return `${value.toLocaleString()} ${value === 1 ? one : many}`;
@@ -105,6 +106,7 @@ export function StorageSummary() {
         )}
       </dl>
       {(media.error || models.error) && <ErrorCallout message="Storage figures are unavailable right now." />}
+      {media.data && <RetentionChoices />}
     </section>
   );
 }

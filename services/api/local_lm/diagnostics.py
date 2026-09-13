@@ -17,6 +17,7 @@ from .domain import ArtifactKind, utcnow
 from .hardware import collect_system_info
 from .models import Artifact, Chat, Job, ModelInstall, Project, Run, WorkflowDefinition
 from .processes import ProcessSupervisor
+from .retention_policy import windows_for
 
 
 class DiagnosticBundleBuilder:
@@ -34,6 +35,8 @@ class DiagnosticBundleBuilder:
         model_rows = session.execute(select(ModelInstall.role, ModelInstall.engine)).all()
         workflow_engines = Counter(session.scalars(select(WorkflowDefinition.operation)).all())
         job_statuses = Counter(session.scalars(select(Job.status)).all())
+        # The windows retention actually uses, which Settings may have changed.
+        retention = windows_for(session, self.settings)
         log_files = [path for path in self.settings.log_dir.iterdir() if path.is_file()]
         payload = {
             "format": "lm-atelier-diagnostics",
@@ -51,8 +54,8 @@ class DiagnosticBundleBuilder:
                 "media_engine": self.settings.media_engine,
                 "auto_unload_chat_for_media": self.settings.auto_unload_chat_for_media,
                 "comfy_inactivity_seconds": self.settings.comfy_inactivity_seconds,
-                "artifact_retention_days": self.settings.artifact_retention_days,
-                "temporary_retention_hours": self.settings.temporary_retention_hours,
+                "artifact_retention_days": retention.media_days,
+                "temporary_retention_hours": retention.temporary_hours,
                 "backup_daily_count": self.settings.backup_daily_count,
                 "backup_weekly_count": self.settings.backup_weekly_count,
             },
