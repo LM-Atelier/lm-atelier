@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { SettingsView } from "./SettingsView";
 import { SETTINGS_DESTINATIONS, settingsDestinationFor } from "./settingsDestinations";
+import { useAppearance } from "./theme";
 
 vi.mock("./api", () => ({ api: {
   system: vi.fn().mockResolvedValue(null),
@@ -20,7 +21,8 @@ vi.mock("./api", () => ({ api: {
 const clients: QueryClient[] = [];
 function NavigationSettings() {
   const navigation = useAppNavigation();
-  return <SettingsView engines={[]} destinationId={navigation.settingsDestination}
+  const appearance = useAppearance();
+  return <SettingsView engines={[]} appearance={appearance} destinationId={navigation.settingsDestination}
     onDestinationChange={navigation.setSettingsDestination} focusRequest={navigation.settingsFocusRequest} />;
 }
 beforeEach(() => {
@@ -60,15 +62,15 @@ it("offers every destination and announces which one you are on", () => {
 it("shows one destination at a time", () => {
   show();
 
-  // Models & generation is where Settings opens, so its content is present and
-  // another destination's is not - the whole point of the shell.
-  expect(screen.getByRole("heading", { name: "Generation presets" })).toBeTruthy();
+  // Appearance is where Settings opens, so its content is present and another
+  // destination's is not - the whole point of the shell.
+  expect(screen.getByRole("heading", { name: "Light and theme" })).toBeTruthy();
   expect(screen.queryByRole("heading", { name: "Recovery backups" })).toBeNull();
 
   fireEvent.click(rail("Data & backups"));
 
   expect(screen.getByRole("heading", { name: "Recovery backups" })).toBeTruthy();
-  expect(screen.queryByRole("heading", { name: "Generation presets" })).toBeNull();
+  expect(screen.queryByRole("heading", { name: "Light and theme" })).toBeNull();
 });
 
 it("moves focus to the destination you chose, and not before you choose one", () => {

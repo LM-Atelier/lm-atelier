@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 /** Which room you are working in, and whether its light is on.
  *
@@ -57,30 +57,30 @@ export function storedMode(): ThemeMode {
 
 export function useRoom(): [Room, (room: Room) => void] {
   const [room, setRoom] = useState<Room>(storedRoom);
-  return [
-    room,
-    (next) => {
-      setRoom(next);
-      localStorage.setItem(ROOM_KEY, next);
-    },
-  ];
+  const choose = useCallback((next: Room) => {
+    setRoom(next);
+    localStorage.setItem(ROOM_KEY, next);
+  }, []);
+  return [room, choose];
 }
 
 export function useThemeMode(): [ThemeMode, (mode: ThemeMode) => void] {
   const [mode, setMode] = useState<ThemeMode>(storedMode);
-  return [
-    mode,
-    (next) => {
-      setMode(next);
-      localStorage.setItem(MODE_KEY, next);
-    },
-  ];
+  const choose = useCallback((next: ThemeMode) => {
+    setMode(next);
+    localStorage.setItem(MODE_KEY, next);
+  }, []);
+  return [mode, choose];
 }
 
 /** The room and its light, remembered and applied to the document.
  *
  * Both attributes go on the document element rather than on a wrapper, so a
  * dialog rendered through a portal is in the same room as everything else.
+ *
+ * The returned object keeps its identity until the room or the light changes.
+ * Settings renders inside a memoized view, and an object rebuilt on every
+ * render would rebuild that view on every render too.
  */
 export interface Appearance {
   room: Room;
@@ -96,5 +96,5 @@ export function useAppearance(): Appearance {
     document.documentElement.dataset.room = room;
     document.documentElement.dataset.mode = mode;
   }, [room, mode]);
-  return { room, mode, setRoom, setMode };
+  return useMemo(() => ({ room, mode, setRoom, setMode }), [room, mode, setRoom, setMode]);
 }

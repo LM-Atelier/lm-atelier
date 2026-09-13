@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { api } from "./api";
 import { SettingsView } from "./SettingsView";
+import type { Appearance } from "./theme";
 import type { ModelProfile } from "./types";
 
 vi.mock("./api", () => ({ api: {
@@ -29,11 +30,16 @@ const profile: ModelProfile = {
   is_default: false,
 };
 
+// Settings needs the workspace's appearance; these cases never open that page.
+const appearance: Appearance = {
+  room: "north-light", mode: "dark", setRoom: () => undefined, setMode: () => undefined,
+};
+
 function show(value = profile) {
   vi.mocked(api.profiles).mockResolvedValue([value]);
   vi.mocked(api.updateProfile).mockResolvedValue(value);
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
-  render(<QueryClientProvider client={client}><SettingsView engines={[]} destinationId="models-and-generation" onDestinationChange={() => undefined} /></QueryClientProvider>);
+  render(<QueryClientProvider client={client}><SettingsView engines={[]} appearance={appearance} destinationId="models-and-generation" onDestinationChange={() => undefined} /></QueryClientProvider>);
   return client;
 }
 
