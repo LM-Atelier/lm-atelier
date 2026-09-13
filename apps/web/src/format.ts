@@ -76,5 +76,18 @@ export function supportLinks(version: string): [string, string][] {
     ["Security", docsLink(version, "SECURITY.md")],
     ["Support", docsLink(version, "SUPPORT.md")],
     ["Privacy", docsLink(version, "docs/PRIVACY.md")],
+    ["License", docsLink(version, "LICENSE")],
   ];
 }
+
+/** The typefaces the workspace ships, each with the licence it ships under.
+ *
+ * The files sit beside the fonts in the web app, so these links work offline
+ * and always describe the fonts actually installed, not whatever a website
+ * currently hosts.
+ */
+export const FONT_CREDITS: readonly { name: string; licence: string }[] = [
+  { name: "Inter", licence: "/fonts/OFL-Inter.txt" },
+  { name: "Source Serif 4", licence: "/fonts/OFL-SourceSerif4.txt" },
+  { name: "JetBrains Mono", licence: "/fonts/OFL-JetBrainsMono.txt" },
+];
