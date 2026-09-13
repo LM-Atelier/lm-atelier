@@ -19,24 +19,33 @@ chat in its payload; both mean the chat did work. A fork records the chat it
 was forked from, and a studio session the chat it was opened from, each in its
 origin; either means another chat still points at this one.
 
-This module only reads. Nothing here deletes a chat.
+Reading is most of this module. Deleting happens in one place,
+`execute_deletion`, and only for a selection a preview bound moments earlier and
+that still classifies exactly as it did then.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+import hashlib
+import json
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from typing import Literal, get_args
 
-from sqlalchemy import ColumnElement, and_, exists, func, or_, select
+from sqlalchemy import ColumnElement, and_, delete, exists, func, or_, select
+from sqlalchemy import inspect as sqlalchemy_inspect
 from sqlalchemy.orm import InstrumentedAttribute, Session
 
+from .artifact_library import begin_artifact_write_fence
 from .domain import JobKind, RoutingMode
 from .models import (
     Chat,
     ChatItemRemovalReceipt,
     ChatWorkflowSelection,
+    EmptyChatDeletion,
+    EmptyChatPreviewRecord,
     Job,
     Message,
     PromptExpansionBatch,
@@ -386,3 +395,396 @@ def classify(session: Session, chat: Chat) -> EmptyChat:
     reasons = configured_reasons(session, chat)
     classification = EmptyChatClass.CONFIGURED_BLANK if reasons else EmptyChatClass.STRICT_BLANK
     return EmptyChat(chat.id, classification, reasons, chat.created_at, chat.updated_at)
+
+
+# ---- binding a selection, and deleting it once --------------------------------------
+
+
+#: How long a preview may be spent. Short, because the whole point of the digest
+#: is that the world moves underneath it.
+PREVIEW_LIFETIME = timedelta(minutes=10)
+
+#: How long an expired issuance is kept before it is swept. Long enough that a
+#: caller who lapsed is told their preview expired rather than that it never
+#: existed, which are different problems with different fixes.
+PREVIEW_RETENTION = timedelta(days=1)
+
+
+@dataclass(frozen=True)
+class EmptyChatSelectionFilters:
+    """The filter state a selection was chosen under, bound into its digest."""
+
+    minimum_age_hours: float
+    include_archived: bool
+    include_configured: bool
+
+
+#: Why a chosen chat is no longer part of the selection, as stable slugs.
+ConflictReason = Literal[
+    "missing",
+    "out_of_scope",
+    "not_empty",
+    "too_young",
+    "archived_excluded",
+    "inconsistent",
+    "filtered_out",
+]
+CONFLICT_REASONS: tuple[ConflictReason, ...] = get_args(ConflictReason)
+
+
+@dataclass(frozen=True)
+class EmptyChatConflictEntry:
+    chat_id: str
+    reason: ConflictReason
+
+
+@dataclass(frozen=True)
+class EmptyChatPreview:
+    digest: str
+    strict_count: int
+    configured_count: int
+    conflicts: tuple[EmptyChatConflictEntry, ...]
+    #: Each bound chat's state fingerprint, by id. Kept with the issuance on the
+    #: server and never sent to the caller; see `chat_state_fingerprint`.
+    chat_states: Mapping[str, str]
+
+
+def _as_utc(value: datetime) -> datetime:
+    """SQLite keeps these naive and they are UTC, as the serializers assume."""
+
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def _jsonable(value: object) -> object:
+    if isinstance(value, datetime):
+        return _as_utc(value).isoformat()
+    if isinstance(value, StrEnum):
+        return value.value
+    raise TypeError(f"no canonical form for {type(value).__name__}")
+
+
+def chat_state_fingerprint(session: Session, row: Chat) -> str:
+    """A hash of everything a chat currently is, so any change to it is noticed.
+
+    The classification and its reasons say what KIND of chat a preview bound,
+    and a chat can change without changing kind: a configured chat whose title is
+    edited or whose draft is rewritten is still configured, for the same reasons,
+    and a deletion confirmed against the old version would remove something
+    nobody was shown. So every column of the chat is covered, not a chosen list
+    of them, which also keeps a column added later from being silently left out.
+    The chats that name this one as their source are covered by id, because
+    they live on other rows.
+
+    Nothing readable leaves the server. The fingerprint is kept only with the
+    issuance it belongs to - never in the caller's digest, and never in the
+    record of a completed deletion - so a deleted chat's title or draft cannot
+    be recovered by guessing at a stored hash after the chat is gone.
+    """
+
+    state = {
+        attribute.key: getattr(row, attribute.key)
+        for attribute in sqlalchemy_inspect(Chat).column_attrs
+    }
+    forked = func.json_extract(Chat.origin_json, "$.forked_from_chat_id")
+    opened = func.json_extract(Chat.origin_json, "$.source_chat_id")
+    state["named_as_source_by"] = list(
+        session.scalars(
+            select(Chat.id)
+            .where(and_(Chat.id != row.id, or_(forked == row.id, opened == row.id)))
+            .order_by(Chat.id)
+        )
+    )
+    canonical = json.dumps(
+        state, default=_jsonable, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(canonical.encode("ascii")).hexdigest()
+
+
+def selection_digest(entries: Iterable[EmptyChat], filters: EmptyChatSelectionFilters) -> str:
+    """A digest over what the answer was computed from, not over the ids alone.
+
+    Binding ids alone would still match after a chat changed kind - somebody
+    opens it in another window, types a draft, picks a workflow - and the delete
+    would proceed on a classification nobody saw. Covering each classification
+    and its reasons means that drift is refused instead of confirmed.
+
+    The filter state is bound too, because the same ids chosen with configured
+    chats included describe a different decision from the same ids chosen
+    without them.
+
+    A change that keeps a chat's kind is caught by its state fingerprint, which
+    is bound to the issuance on the server rather than folded in here: this
+    digest goes back to the caller and into the record of a deletion.
+    """
+
+    payload = {
+        "filters": {
+            "minimum_age_hours": filters.minimum_age_hours,
+            "include_archived": filters.include_archived,
+            "include_configured": filters.include_configured,
+        },
+        "entries": [
+            {
+                "id": entry.chat_id,
+                "classification": entry.classification.value,
+                "reasons": sorted(entry.reasons),
+            }
+            for entry in sorted(entries, key=lambda item: item.chat_id)
+        ],
+    }
+    canonical = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("ascii")).hexdigest()
+
+
+def preview_selection(
+    session: Session,
+    *,
+    chat_ids: Iterable[str],
+    filters: EmptyChatSelectionFilters,
+    now: datetime | None = None,
+) -> EmptyChatPreview:
+    """Bind a selection, and name every member that no longer belongs to it.
+
+    **Every predicate the page applied is applied again here.** Binding a filter
+    value into a digest does not establish that the rows satisfy it: the digest
+    proves what the answer was computed from, and this is what computes it. So a
+    chat younger than the floor, or archived with archived excluded, is a
+    conflict here even though the same filter state is hashed.
+
+    The age cutoff is taken from one evaluation instant, so two members of the
+    same selection are never judged against different moments.
+    """
+
+    moment = now or datetime.now(UTC)
+    cutoff = moment - timedelta(hours=filters.minimum_age_hours)
+    wanted = sorted(set(chat_ids))
+    rows = {row.id: row for row in session.scalars(select(Chat).where(Chat.id.in_(wanted)))}
+    empty = set(
+        session.scalars(select(Chat.id).where(and_(Chat.id.in_(wanted), ~_has_work(Chat.id))))
+    )
+
+    conflicts: list[EmptyChatConflictEntry] = []
+    bound: list[EmptyChat] = []
+    states: dict[str, str] = {}
+    for chat_id in wanted:
+        row = rows.get(chat_id)
+        if row is None:
+            conflicts.append(EmptyChatConflictEntry(chat_id, "missing"))
+            continue
+        if row.scope != STANDARD_CHAT_SCOPE:
+            # The page never offers another scope, so one arriving here was not
+            # chosen from this surface.
+            conflicts.append(EmptyChatConflictEntry(chat_id, "out_of_scope"))
+            continue
+        if chat_id not in empty:
+            conflicts.append(EmptyChatConflictEntry(chat_id, "not_empty"))
+            continue
+        if filters.minimum_age_hours > 0 and _as_utc(row.created_at) > cutoff:
+            conflicts.append(EmptyChatConflictEntry(chat_id, "too_young"))
+            continue
+        # Judged before the configured classification, because an archived chat
+        # is configured too: deciding it by classification would let including
+        # configured chats admit one the archived switch excluded.
+        if row.archived and not filters.include_archived:
+            conflicts.append(EmptyChatConflictEntry(chat_id, "archived_excluded"))
+            continue
+        entry = classify(session, row)
+        if entry.classification is EmptyChatClass.INCONSISTENT:
+            conflicts.append(EmptyChatConflictEntry(chat_id, "inconsistent"))
+            continue
+        if (
+            entry.classification is EmptyChatClass.CONFIGURED_BLANK
+            and not filters.include_configured
+        ):
+            conflicts.append(EmptyChatConflictEntry(chat_id, "filtered_out"))
+            continue
+        bound.append(entry)
+        states[chat_id] = chat_state_fingerprint(session, row)
+
+    return EmptyChatPreview(
+        digest=selection_digest(bound, filters),
+        strict_count=sum(
+            1 for entry in bound if entry.classification is EmptyChatClass.STRICT_BLANK
+        ),
+        configured_count=sum(
+            1 for entry in bound if entry.classification is EmptyChatClass.CONFIGURED_BLANK
+        ),
+        conflicts=tuple(conflicts),
+        chat_states=states,
+    )
+
+
+def issue_preview(
+    session: Session, *, digest: str, chat_states: Mapping[str, str], now: datetime
+) -> tuple[str, datetime]:
+    """Record one issuance, and return the id and deadline that belong to it.
+
+    The bound chats' state fingerprints are recorded with it, so a deletion can
+    tell whether any of them changed since, without the caller ever holding them.
+
+    A new row every time, never an update: a second preview of the same selection
+    must not move the first one's deadline. Long-expired rows are swept on the
+    way past, well after expiry, so a preview that has only just lapsed still
+    refuses as expired rather than as one that never existed.
+    """
+
+    expires_at = now + PREVIEW_LIFETIME
+    record = EmptyChatPreviewRecord(
+        digest=digest,
+        chat_states_json=dict(chat_states),
+        evaluated_at=now,
+        expires_at=expires_at,
+    )
+    session.add(record)
+    session.execute(
+        delete(EmptyChatPreviewRecord)
+        .where(EmptyChatPreviewRecord.expires_at < now - PREVIEW_RETENTION)
+        # Decided by the database alone. Evaluating the condition against rows
+        # already loaded in this session would compare SQLite's naive stored
+        # instants with an aware one and fail; a swept row is long expired and
+        # nothing in the session has any use for it.
+        .execution_options(synchronize_session=False)
+    )
+    session.flush()
+    return record.id, expires_at
+
+
+class EmptyChatExecuteRefusal(StrEnum):
+    """Every way a deletion is refused, as the stable code the surface returns."""
+
+    #: The preview's deadline has passed.
+    PREVIEW_EXPIRED = "empty-chat-preview-expired"
+    #: No preview was issued with this id and digest. Distinct from expiry on
+    #: purpose: "your preview is too old" and "you did not preview this" call for
+    #: different things from the caller.
+    PREVIEW_UNKNOWN = "empty-chat-preview-unknown"
+    SELECTION_DRIFTED = "empty-chat-selection-drifted"
+    COUNT_MISMATCH = "empty-chat-count-mismatch"
+    CONFIGURED_NOT_ACKNOWLEDGED = "empty-chat-configured-not-acknowledged"
+
+
+class EmptyChatExecuteError(Exception):
+    """A refusal raised before anything is deleted, naming ids and never content."""
+
+    def __init__(self, refusal: EmptyChatExecuteRefusal, chat_ids: Iterable[str] = ()) -> None:
+        self.refusal = refusal
+        self.chat_ids = tuple(sorted(chat_ids))
+        super().__init__(refusal.value)
+
+
+@dataclass(frozen=True)
+class EmptyChatDeletionResult:
+    operation_id: str
+    deleted_ids: tuple[str, ...]
+    deleted_at: datetime
+    replayed: bool
+
+
+def recorded_deletion(session: Session, operation_id: str) -> EmptyChatDeletionResult | None:
+    """The result an operation id already settled, returned exactly as it was."""
+
+    existing = session.scalar(
+        select(EmptyChatDeletion).where(EmptyChatDeletion.operation_id == operation_id)
+    )
+    if existing is None:
+        return None
+    return EmptyChatDeletionResult(
+        operation_id=existing.operation_id,
+        deleted_ids=tuple(existing.deleted_ids_json),
+        # Normalized, because SQLite returns it naive and a replay must report
+        # the same instant the first call returned.
+        deleted_at=_as_utc(existing.deleted_at),
+        replayed=True,
+    )
+
+
+def execute_deletion(
+    session: Session,
+    *,
+    operation_id: str,
+    preview_id: str,
+    digest: str,
+    acknowledged_count: int,
+    acknowledged_configured: bool,
+    chat_ids: Iterable[str],
+    filters: EmptyChatSelectionFilters,
+    now: datetime | None = None,
+) -> EmptyChatDeletionResult:
+    """Delete a previewed selection once, however many times it is asked for.
+
+    The caller holds every selected chat's lifecycle guard, so no turn can be
+    created in one of them while this runs. This takes the database's writer
+    reservation before its first read, so the revalidation and the deletion
+    observe one state and a competing writer waits rather than interleaving.
+
+    Every refusal happens before anything is deleted, and nothing is ever
+    half-deleted. The order of the checks is chosen for what the caller should
+    hear: a replay first, then an unknown or expired preview, then drift, and
+    only then the acknowledgements - a caller whose selection drifted should be
+    told that, not that its count is wrong, because the count was right for what
+    it was shown.
+
+    **The retry guard is a unique constraint, not a check.** A repeated
+    operation id returns the recorded result unchanged, including when the
+    world has moved on since: what it reports is what that operation did.
+    """
+
+    moment = now or datetime.now(UTC)
+    begin_artifact_write_fence(session)
+    replay = recorded_deletion(session, operation_id)
+    if replay is not None:
+        return replay
+
+    issued = session.scalar(
+        select(EmptyChatPreviewRecord).where(
+            EmptyChatPreviewRecord.id == preview_id,
+            # Both must agree. The id names an issuance and the digest says what
+            # was selected; a pair that disagrees is not a preview of anything.
+            EmptyChatPreviewRecord.digest == digest,
+        )
+    )
+    if issued is None:
+        raise EmptyChatExecuteError(EmptyChatExecuteRefusal.PREVIEW_UNKNOWN)
+    if moment > _as_utc(issued.expires_at):
+        raise EmptyChatExecuteError(EmptyChatExecuteRefusal.PREVIEW_EXPIRED)
+
+    wanted = sorted(set(chat_ids))
+    current = preview_selection(session, chat_ids=wanted, filters=filters, now=moment)
+    issued_states = issued.chat_states_json if isinstance(issued.chat_states_json, dict) else {}
+    # A chat that kept its kind but not its state: an edited title, a rewritten
+    # draft. Named by id like any other drift, and never by what changed.
+    changed = {
+        chat_id
+        for chat_id in wanted
+        if chat_id in current.chat_states
+        and current.chat_states[chat_id] != issued_states.get(chat_id)
+    }
+    if current.digest != digest or current.conflicts or changed:
+        raise EmptyChatExecuteError(
+            EmptyChatExecuteRefusal.SELECTION_DRIFTED,
+            changed | {entry.chat_id for entry in current.conflicts},
+        )
+    if acknowledged_count != current.strict_count + current.configured_count:
+        raise EmptyChatExecuteError(EmptyChatExecuteRefusal.COUNT_MISMATCH)
+    if current.configured_count > 0 and not acknowledged_configured:
+        raise EmptyChatExecuteError(EmptyChatExecuteRefusal.CONFIGURED_NOT_ACKNOWLEDGED)
+
+    for row in session.scalars(select(Chat).where(Chat.id.in_(wanted)).order_by(Chat.id)):
+        session.delete(row)
+    session.flush()
+    session.add(
+        EmptyChatDeletion(
+            operation_id=operation_id,
+            digest=digest,
+            deleted_ids_json=list(wanted),
+            deleted_count=len(wanted),
+            deleted_at=moment,
+        )
+    )
+    session.flush()
+    return EmptyChatDeletionResult(
+        operation_id=operation_id,
+        deleted_ids=tuple(wanted),
+        deleted_at=moment,
+        replayed=False,
+    )

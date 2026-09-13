@@ -3069,6 +3069,72 @@ class EmptyChatPageOut(ApiModel):
         return _utc_instant(value)
 
 
+#: The most chats one cleanup may name: a page's worth, so a selection is always
+#: something a person could have looked at.
+EMPTY_CHAT_SELECTION_LIMIT = 200
+
+
+class EmptyChatPreviewIn(ApiModel):
+    """The exact ids chosen, and the filter state they were chosen under."""
+
+    chat_ids: list[Annotated[str, Field(min_length=1, max_length=40)]] = Field(
+        min_length=1, max_length=EMPTY_CHAT_SELECTION_LIMIT
+    )
+    min_age_hours: Annotated[float, Field(ge=0)] = 24.0
+    include_archived: bool = False
+    include_configured: bool = False
+
+
+class EmptyChatConflictOut(ApiModel):
+    chat_id: str
+    reason: Literal[
+        "missing",
+        "out_of_scope",
+        "not_empty",
+        "too_young",
+        "archived_excluded",
+        "inconsistent",
+        "filtered_out",
+    ]
+
+
+class EmptyChatPreviewOut(ApiModel):
+    #: Names this issuance. Deleting must send it back, because the deadline
+    #: below belongs to this preview and not to the selection in general.
+    preview_id: str
+    digest: str
+    expires_at: datetime
+    strict_count: int
+    configured_count: int
+    conflicts: list[EmptyChatConflictOut] = Field(default_factory=list)
+
+    @field_serializer("expires_at", when_used="json")
+    def serialize_expires_at_as_utc(self, value: datetime) -> str:
+        return _utc_instant(value)
+
+
+class EmptyChatExecuteIn(EmptyChatPreviewIn):
+    #: Client-generated before asking, and the same across a retry of one
+    #: decision, so a repeat returns the first result instead of deleting again.
+    operation_id: str = Field(min_length=1, max_length=80)
+    preview_id: str = Field(min_length=1, max_length=64)
+    digest: str = Field(min_length=64, max_length=64)
+    acknowledged_count: Annotated[int, Field(ge=0)]
+    acknowledged_configured: bool = False
+
+
+class EmptyChatDeletionOut(ApiModel):
+    operation_id: str
+    deleted_ids: list[str] = Field(default_factory=list)
+    deleted_at: datetime
+    #: True when this returned an earlier operation's result rather than deleting now.
+    replayed: bool
+
+    @field_serializer("deleted_at", when_used="json")
+    def serialize_deleted_at_as_utc(self, value: datetime) -> str:
+        return _utc_instant(value)
+
+
 class EventOut(ApiModel):
     sequence: int
     type: str

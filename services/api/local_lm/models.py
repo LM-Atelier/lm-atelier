@@ -2583,3 +2583,62 @@ class WebSearchProposal(TimestampMixin, Base):
     dispatch_attempt: Mapped[int | None] = mapped_column(Integer, nullable=True)
     result_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+
+
+class EmptyChatPreviewRecord(TimestampMixin, Base):
+    """One preview of an empty-chat cleanup the server issued, and when it stops being spendable.
+
+    The deadline lives here rather than in the request because a client-supplied
+    instant is not a fact the server can check: the digest algorithm is not a
+    secret, so a caller could mint any evaluation time it liked and hash a
+    matching digest around it. Binding the deadline to a row the server wrote
+    makes expiry something the server knows rather than something it is told.
+
+    One row per issuance, and its deadline is never rewritten. Keying rows by
+    digest, so that previewing the same selection again refreshed one shared
+    row, would let a second preview push the first one's deadline past the
+    instant the first response named. A deadline another request can move is
+    not a deadline.
+
+    Nothing here is readable: the digest is a hash, and each bound chat is
+    recorded only as a fingerprint of its state, by id. The fingerprints live
+    here and nowhere else - not in the digest the caller holds and not in a
+    completed deletion's record - and go when the row is swept.
+    """
+
+    __tablename__ = "empty_chat_previews"
+
+    id: Mapped[str] = mapped_column(
+        String(64), primary_key=True, default=lambda: new_id("emptyprev")
+    )
+    digest: Mapped[str] = mapped_column(String(64), index=True)
+    chat_states_json: Mapped[dict[str, str]] = mapped_column(JSON)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class EmptyChatDeletion(TimestampMixin, Base):
+    """One completed empty-chat cleanup, kept so a retry cannot delete twice.
+
+    The client generates `operation_id` before it asks. A repeat of the same id
+    returns this row unchanged rather than deleting again: the client cannot tell
+    a lost response from a lost request, and the difference between them is a
+    second deletion.
+
+    `deleted_ids_json` holds ids only. The feature is about chats somebody may
+    not want, so its durable record is the wrong place to keep anything they
+    wrote.
+    """
+
+    __tablename__ = "empty_chat_deletions"
+
+    id: Mapped[str] = mapped_column(
+        String(64), primary_key=True, default=lambda: new_id("emptydel")
+    )
+    #: Client-generated idempotency key; unique, so the retry guard is the
+    #: constraint rather than a read that two concurrent retries could both pass.
+    operation_id: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    digest: Mapped[str] = mapped_column(String(64))
+    deleted_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    deleted_count: Mapped[int] = mapped_column(Integer)
+    deleted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
