@@ -32,7 +32,7 @@ export const SETTINGS_DESTINATIONS: readonly SettingsDestination[] = [
   {
     id: "models-and-generation",
     label: "Models & generation",
-    summary: "Model profiles and generation presets.",
+    summary: "Model profiles, generation presets, and how much detail their editors open with.",
   },
   {
     id: "model-sources",

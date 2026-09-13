@@ -24,6 +24,8 @@ import { useConfirm } from "./useConfirm";
 import { SettingsNavigation } from "./SettingsNavigation";
 import { AppearanceSettings } from "./AppearanceSettings";
 import { StorageSummary } from "./StorageSummary";
+import { SettingDetailSetting } from "./SettingDetailSetting";
+import { storedSettingDetail } from "./settingDetail";
 import type { Appearance } from "./theme";
 import {
   settingsDestinationFor,
@@ -98,7 +100,7 @@ function ProfileEditor({
   const [isDefault, setIsDefault] = useState(profile.is_default);
   const [loadSettings, setLoadSettings] = useState(profile.load_settings_json);
   const [requestSettings, setRequestSettings] = useState(profile.request_settings_json);
-  const [visibility, setVisibility] = useState<Visibility>("basic");
+  const [visibility, setVisibility] = useState<Visibility>(storedSettingDetail);
   const refresh = () => {
     void client.invalidateQueries({ queryKey: ["profiles"] });
     void client.invalidateQueries({ queryKey: ["workflow-families"] });
@@ -183,7 +185,7 @@ function PresetEditor({
   const [name, setName] = useState(preset.name);
   const [isDefault, setIsDefault] = useState(preset.is_default);
   const [settings, setSettings] = useState(preset.settings_json);
-  const [visibility, setVisibility] = useState<Visibility>("basic");
+  const [visibility, setVisibility] = useState<Visibility>(storedSettingDetail);
   const refresh = () => void client.invalidateQueries({ queryKey: ["presets"] });
   const save = useMutation({ mutationFn: () => api.updatePreset(preset.id, { name, is_default: isDefault, settings }), onSuccess: () => { refresh(); onClose(); } });
   const clone = useMutation({ mutationFn: () => api.clonePreset(preset.id), onSuccess: () => { refresh(); onClose(); } });
@@ -387,6 +389,7 @@ export function SettingsView({ engines, appearance, destinationId, onDestination
       <section><h2>Machine</h2>{system.data && <div className="metric-grid"><div className="cpu-metric"><Cpu /><span><strong>{system.data.cpu_model}</strong><small>CPU model</small></span></div><div><HardDrive /><span><strong>{formatBytes(system.data.disk_free_bytes)}</strong> disk free</span></div></div>}<div className="device-list">{system.data?.devices.filter((device) => device.kind !== "cpu").map((device) => <div key={device.id}><span className="device-icon"><Cpu size={18} /></span><span><strong>{device.name}</strong><small>{device.backend}</small></span></div>)}</div></section>
       </>)}
       {on("models-and-generation") && (<>
+      <SettingDetailSetting />
       <section>
         <div className="detail-title"><div><h2>Model profiles</h2></div><button className="secondary" onClick={() => profileImport.current?.click()}>Import profile</button></div>
         <input ref={profileImport} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0], "profile"); event.target.value = ""; }} />
