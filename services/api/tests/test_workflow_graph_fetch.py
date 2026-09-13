@@ -219,8 +219,8 @@ async def test_the_provider_delivery_hop_is_followed(tmp_path: Path, status: int
     """The normal path, not an edge case.
 
     CivitAI does not serve the file from the address you ask for. A reader that
-    refuses this redirect reaches no file at all, which is what the first
-    version of this did.
+    refuses this redirect reaches no file at all, so the hop has to be followed
+    for any graph to arrive.
     """
 
     delivery = "https://b2.civitai.com/neutral/workflow.json"
