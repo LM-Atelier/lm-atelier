@@ -18,6 +18,7 @@ vi.mock("./api", () => ({ api: {
   workerSettings: vi.fn().mockResolvedValue({ worker_startup_seconds: 60 }),
   artifactStorage: vi.fn().mockResolvedValue(null),
   modelStorage: vi.fn().mockResolvedValue(null),
+  projects: vi.fn().mockResolvedValue([]),
 } }));
 
 const clients: QueryClient[] = [];
@@ -72,6 +73,7 @@ it("shows one destination at a time", () => {
   fireEvent.click(rail("Data & backups"));
 
   expect(screen.getByRole("heading", { name: "Recovery backups" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Project archives" })).toBeTruthy();
   // Storage is summarised on the same page, above the backups that act on it.
   expect(screen.getByRole("heading", { name: "Storage" })).toBeTruthy();
   expect(screen.queryByRole("heading", { name: "Sending" })).toBeNull();
