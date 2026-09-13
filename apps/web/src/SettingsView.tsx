@@ -21,6 +21,8 @@ import {
 } from "./settings";
 import { useConfirm } from "./useConfirm";
 import { SettingsNavigation } from "./SettingsNavigation";
+import { AppearanceSettings } from "./AppearanceSettings";
+import type { Appearance } from "./theme";
 import {
   settingsDestinationFor,
 } from "./settingsDestinations";
@@ -207,8 +209,9 @@ function PresetEditor({
   );
 }
 
-export function SettingsView({ engines, destinationId, onDestinationChange, focusRequest }: {
+export function SettingsView({ engines, appearance, destinationId, onDestinationChange, focusRequest }: {
   engines: EngineCapabilities[];
+  appearance: Appearance;
   destinationId: string;
   onDestinationChange: (id: string) => void;
   focusRequest?: number;
@@ -359,6 +362,7 @@ export function SettingsView({ engines, destinationId, onDestinationChange, focu
       <SettingsNavigation current={destination} onSelect={choose} />
       <div className="settings-destination" role="region" tabIndex={-1} ref={destinationRef}
         aria-label={settingsDestinationFor(destination).label}>
+      {on("appearance") && <AppearanceSettings appearance={appearance} />}
       {on("model-sources") && (<>
       <CredentialSettingsCard
         provider="huggingface"

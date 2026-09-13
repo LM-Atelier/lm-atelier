@@ -2578,7 +2578,7 @@ describe("App", () => {
         <App />
       </QueryClientProvider>,
     );
-    fireEvent.click(await screen.findByText("Settings"));
+    await openSettings("Models & generation");
     expect(await screen.findByText(/Local chat.*default/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Edit profile: Local chat" }));
     expect(await screen.findByText("Edit profile")).toBeInTheDocument();
@@ -4555,7 +4555,7 @@ describe("App", () => {
       </QueryClientProvider>,
     );
 
-    fireEvent.click(await screen.findByText("Settings"));
+    await openSettings("Models & generation");
     await screen.findByText("Image profile");
     fireEvent.click(screen.getByRole("button", { name: "Edit profile: Image profile" }));
     expect(await screen.findByText("Negative prompt")).toBeInTheDocument();
@@ -4589,7 +4589,7 @@ describe("App", () => {
       </QueryClientProvider>,
     );
 
-    fireEvent.click(await screen.findByText("Settings"));
+    await openSettings("Models & generation");
     await screen.findByText("Chat preset");
     fireEvent.click(screen.getByRole("button", { name: "Edit preset: Chat preset" }));
     expect(await screen.findByText("Maximum output")).toBeInTheDocument();

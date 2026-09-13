@@ -63,7 +63,6 @@ import { FirstRunSetup } from "./SetupWizard";
 import { SidebarFooter } from "./SidebarFooter";
 import { SidebarResizer } from "./SidebarResizer";
 import { StudioView } from "./StudioView";
-import { ThemeToggle } from "./ThemeToggle";
 import { TurnEditor } from "./TurnEditor";
 import { WorkflowsView } from "./WorkflowsView";
 import { api } from "./api";
@@ -1370,7 +1369,7 @@ export default function App() {
     }
     const topLevelView = view === "media" ? <MediaLibraryView onEditImage={openLibraryImage} /> : view === "models" ? <ModelsView key={modelLibraryRole} initialRole={modelLibraryRole} /> : view === "references" ? <ReferencesLibrary /> : view === "prompts" ? <PromptLibraryView /> : view === "workflows" ? <WorkflowsView /> : null;
     if (topLevelView) return topLevelView;
-    if (view === "settings") return <SettingsView engines={engines.data ?? []} destinationId={settingsDestination} onDestinationChange={setSettingsDestination} focusRequest={settingsFocusRequest} />;
+    if (view === "settings") return <SettingsView engines={engines.data ?? []} appearance={appearance} destinationId={settingsDestination} onDestinationChange={setSettingsDestination} focusRequest={settingsFocusRequest} />;
     const displayedChat = chat.data
       ? { ...chat.data, ...(chatDrafts[chat.data.id] ?? {}) }
       : undefined;
@@ -1445,7 +1444,7 @@ export default function App() {
         send.mutate({ chatId: displayedChat.id, id: crypto.randomUUID(), text, mode, artifacts, settings, references, outputCount, promptSource });
       }
     }} />;
-  }, [openWorkflows, studioSource, view, setView, settingsDestination, setSettingsDestination, settingsFocusRequest, modelLibraryRole, engines.data, profiles.data, presets.data, applicationInfo.data, allProjects, chat.data, chatDrafts, autoSettingsRoles, rememberSettingsRole, composerDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, removeItem, forkThread, client, openLibraryImage, applyAcceptedTurn]);
+  }, [openWorkflows, studioSource, view, setView, appearance, settingsDestination, setSettingsDestination, settingsFocusRequest, modelLibraryRole, engines.data, profiles.data, presets.data, applicationInfo.data, allProjects, chat.data, chatDrafts, autoSettingsRoles, rememberSettingsRole, composerDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, removeItem, forkThread, client, openLibraryImage, applyAcceptedTurn]);
 
   if (firstRunSetup && setupReadiness.data) {
     return <FirstRunSetup report={setupReadiness.data} onExit={exitFirstRunSetup} onOpenModels={(role) => { exitFirstRunSetup(); setModelLibraryRole(role); setView("models"); }} onOpenWorkflows={() => { exitFirstRunSetup(); setView("workflows"); }} />;
@@ -1455,7 +1454,6 @@ export default function App() {
       <a className="skip-link" href="#main-content">Skip to main content</a>
       <Sidebar projects={allProjects} chats={allChats} engines={engines.data ?? []} presets={presets.data ?? []} currentChatId={activeChatId} view={view} setupState={setupReadiness.data?.state} onSetup={() => setSetupOpen(true)} onChat={(id) => { setCurrentChatId(id); localStorage.setItem(CURRENT_CHAT_KEY, id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={(name) => createProject.mutate(name)} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} sidebar={sidebar} />
       <main id="main-content" tabIndex={-1}>{activeContent}</main>
-      <ThemeToggle appearance={appearance} />
       <SetupSurface
         open={setupOpen}
         visible={setupVisible}

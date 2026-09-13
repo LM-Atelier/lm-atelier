@@ -5,13 +5,15 @@
  * component would make every consumer import a component to ask a question that
  * needs no rendered tree.
  *
- * TWO OF THE APPROVED SEVEN ARE NOT HERE YET, and their absence is deliberate
- * rather than an oversight. General and Appearance are destinations for
- * behaviour the product does not have - startup destination, reopen behaviour,
- * theme room, density, text size - so shipping them now would be five useful
- * pages and two empty ones. They arrive with their content, which is what
- * "separately reviewable changes" was asked for. The ids below do not shift
- * when they do: a destination is identified by its own id, never by position.
+ * GENERAL IS NOT HERE YET, and its absence is deliberate rather than an
+ * oversight. It is a destination for behaviour the product does not have -
+ * startup destination, reopen behaviour, send-key behaviour - so shipping it now
+ * would add an empty page. It arrives with its content. The ids below do not
+ * shift when it does: a destination is identified by its own id, never by
+ * position.
+ *
+ * Settings opens on the first entry, so the order also decides where a person
+ * lands. General takes the first place when it exists.
  */
 
 export interface SettingsDestination {
@@ -22,6 +24,11 @@ export interface SettingsDestination {
 }
 
 export const SETTINGS_DESTINATIONS: readonly SettingsDestination[] = [
+  {
+    id: "appearance",
+    label: "Appearance",
+    summary: "Light or dark, and which theme.",
+  },
   {
     id: "models-and-generation",
     label: "Models & generation",
