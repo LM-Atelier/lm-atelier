@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MediaLibraryView } from "./MediaLibraryView";
 import { api } from "./api";
 import { parseArtifactLibraryPage, type ArtifactLibraryFilters } from "./artifactLibraryPage";
+import { CLOCK_KEY } from "./clockPreference";
 
 vi.mock("./api", () => ({
   api: { artifactLibrary: vi.fn(), favoriteArtifact: vi.fn() },
@@ -192,4 +193,18 @@ describe("EntryV1 Media Library feed", () => {
     expect(screen.queryByText("Item a")).toBeNull();
     expect(screen.queryByText("Item b")).toBeNull();
   });
+});
+
+it("writes when an item was added on the chosen clock", async () => {
+  localStorage.setItem(CLOCK_KEY, "24");
+  try {
+    vi.mocked(api.artifactLibrary).mockResolvedValue(parsedPage([rawItem("b")]));
+    renderLibrary();
+
+    const added = await screen.findByText(/Added /);
+    expect(added.textContent).toMatch(/\d{1,2}:\d{2}/);
+    expect(added.textContent).not.toMatch(/\b(AM|PM)\b/i);
+  } finally {
+    localStorage.removeItem(CLOCK_KEY);
+  }
 });

@@ -1,8 +1,9 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "./App";
 import { api } from "./api";
+import { CLOCK_KEY } from "./clockPreference";
 import { MODE_KEY, ROOM_KEY } from "./theme";
 
 vi.mock("./api", () => ({
@@ -134,4 +135,18 @@ it("offers System, which follows the computer's light setting", async () => {
   } finally {
     vi.unstubAllGlobals();
   }
+});
+
+it("writes times on the clock chosen in Settings, and shows how they will look", async () => {
+  renderApp();
+  await openSettings();
+  const clock = screen.getByRole("group", { name: "Clock" });
+  expect(within(clock).getByRole("button", { name: "Automatic" }).getAttribute("aria-pressed")).toBe("true");
+
+  fireEvent.click(within(clock).getByRole("button", { name: "24-hour" }));
+
+  expect(localStorage.getItem(CLOCK_KEY)).toBe("24");
+  expect(within(clock).getByRole("button", { name: "24-hour" }).getAttribute("aria-pressed")).toBe("true");
+  expect(within(clock).getByRole("button", { name: "Automatic" }).getAttribute("aria-pressed")).toBe("false");
+  expect(screen.getByText(/Times look like 15:45\./)).toBeTruthy();
 });

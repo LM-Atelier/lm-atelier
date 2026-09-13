@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { JobsPanel } from "./JobsPanel";
 import { api } from "./api";
+import { CLOCK_KEY } from "./clockPreference";
 import type { QueueActivityItem, QueueActivityPage } from "./types";
 
 vi.mock("./api", async (importOriginal) => ({ ...(await importOriginal<typeof import("./api")>()), api: {
@@ -168,4 +169,23 @@ it("cancels an in-flight step read when its disclosure closes", async () => {
   expect(signal?.aborted).toBe(true);
   await act(async () => finish(steps("plan")));
   expect(screen.queryByRole("region", { name: "Steps for Example plan" })).not.toBeInTheDocument();
+});
+
+it("writes accepted and checked times on the chosen clock", async () => {
+  localStorage.setItem(CLOCK_KEY, "24");
+  try {
+    vi.mocked(api.queueActivity).mockResolvedValue(page([item("plan")]));
+    open(); fireEvent.click(await screen.findByRole("button", { name: "View accepted work" }));
+    await screen.findByText("Example plan");
+    const small = (label: RegExp) => screen.getByText((_, element) =>
+      element?.tagName === "SMALL" && label.test(element.textContent ?? ""));
+    const accepted = small(/^Accepted /);
+    const checked = small(/Last checked /);
+    for (const text of [accepted.textContent ?? "", checked.textContent ?? ""]) {
+      expect(text).toMatch(/\d{1,2}:\d{2}/);
+      expect(text).not.toMatch(/\b(AM|PM)\b/i);
+    }
+  } finally {
+    localStorage.removeItem(CLOCK_KEY);
+  }
 });

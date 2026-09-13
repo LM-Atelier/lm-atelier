@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { api } from "./api";
+import { clockOptions, useClockChoice } from "./clockPreference";
 import { QueuePlanControls } from "./QueuePlanControls";
 import { GenerationQueueControls } from "./GenerationQueueControls";
 import { QueuePlanSteps } from "./QueuePlanSteps";
@@ -12,6 +13,7 @@ type Lane = QueueActivityItem["lane"];
 
 export function QueueActivityDialog({ onClose }: { onClose: () => void }) {
   const client = useQueryClient();
+  const clock = useClockChoice();
   const [lane, setLane] = useState<Lane | "all">("all");
   const queryKey = ["jobs", "queue", lane] as const;
   const activity = useInfiniteQuery({
@@ -76,7 +78,7 @@ export function QueueActivityDialog({ onClose }: { onClose: () => void }) {
                   <span className="queue-activity-status">{item.status}</span>
                 </div>
                 {item.chat_title && <span>{item.label}</span>}
-                <small>Accepted {new Date(item.created_at).toLocaleString()}</small>
+                <small>Accepted {new Date(item.created_at).toLocaleString(undefined, clockOptions(clock))}</small>
                 {item.owner_type === "work_plan" ? (
                   <>
                     <span>{item.completed_steps} of {item.step_count} steps complete</span>
@@ -103,7 +105,7 @@ export function QueueActivityDialog({ onClose }: { onClose: () => void }) {
             </button>
           )}
           <small className="queue-activity-updated">
-            Last checked {new Date(first.observed_at).toLocaleTimeString()}. Updates every five seconds.
+            Last checked {new Date(first.observed_at).toLocaleTimeString(undefined, clockOptions(clock))}. Updates every five seconds.
           </small>
         </>
       )}

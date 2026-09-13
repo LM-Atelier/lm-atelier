@@ -1,5 +1,6 @@
 import { Monitor, Moon, Sun } from "lucide-react";
 import { useId } from "react";
+import { clockOptions, setClockChoice, useClockChoice, type ClockChoice } from "./clockPreference";
 import { ROOMS, ROOM_LABELS, type Appearance, type ModeChoice, type Room } from "./theme";
 
 const MODES: readonly { value: ModeChoice; label: string; Icon: typeof Sun }[] = [
@@ -7,6 +8,51 @@ const MODES: readonly { value: ModeChoice; label: string; Icon: typeof Sun }[] =
   { value: "dark", label: "Dark", Icon: Moon },
   { value: "system", label: "System", Icon: Monitor },
 ];
+
+const CLOCKS: readonly { value: ClockChoice; label: string }[] = [
+  { value: "system", label: "Automatic" },
+  { value: "12", label: "12-hour" },
+  { value: "24", label: "24-hour" },
+];
+
+/** A quarter to four in the afternoon, which reads differently on every clock. */
+const SAMPLE_TIME = new Date(2026, 0, 1, 15, 45);
+
+function ClockSetting() {
+  const clock = useClockChoice();
+  const id = useId();
+  const sample = SAMPLE_TIME.toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+    ...clockOptions(clock),
+  });
+  return (
+    <section>
+      <div className="detail-title"><div><h2>Times</h2><p>Saved in this browser.</p></div></div>
+      <div className="setting-row appearance-row">
+        <span>
+          <strong id={`${id}-clock`}>Clock</strong>
+          <small id={`${id}-clock-help`}>
+            Automatic writes times the way your computer&apos;s language does. Times look like {sample}.
+          </small>
+        </span>
+        <div className="segmented" role="group" aria-labelledby={`${id}-clock`} aria-describedby={`${id}-clock-help`}>
+          {CLOCKS.map(({ value, label }) => (
+            <button
+              type="button"
+              key={value}
+              className={clock === value ? "active" : ""}
+              aria-pressed={clock === value}
+              onClick={() => setClockChoice(value)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
 
 /** Whether the light is on, and which room you are in, as a Settings page.
  *
@@ -25,49 +71,52 @@ export function AppearanceSettings({ appearance }: { appearance: Appearance }) {
   const { modeChoice, setMode, room, setRoom } = appearance;
   const id = useId();
   return (
-    <section>
-      <div className="detail-title"><div><h2>Light and theme</h2><p>Saved in this browser.</p></div></div>
-      <div className="setting-row appearance-row">
-        <span>
-          <strong id={`${id}-mode`}>Mode</strong>
-          <small id={`${id}-mode-help`}>
-            Every theme has a light and a dark version. System follows your computer.
-          </small>
-        </span>
-        <div className="segmented" role="group" aria-labelledby={`${id}-mode`} aria-describedby={`${id}-mode-help`}>
-          {MODES.map(({ value, label, Icon }) => (
-            <button
-              type="button"
-              key={value}
-              className={modeChoice === value ? "active" : ""}
-              aria-pressed={modeChoice === value}
-              onClick={() => setMode(value)}
-            >
-              <Icon size={15} aria-hidden="true" />{label}
-            </button>
-          ))}
-        </div>
-      </div>
-      {ROOMS.length > 1 && (
+    <>
+      <section>
+        <div className="detail-title"><div><h2>Light and theme</h2><p>Saved in this browser.</p></div></div>
         <div className="setting-row appearance-row">
           <span>
-            <strong id={`${id}-theme`}>Theme</strong>
-            <small id={`${id}-theme-help`}>A whole palette, changed everywhere at once.</small>
+            <strong id={`${id}-mode`}>Mode</strong>
+            <small id={`${id}-mode-help`}>
+              Every theme has a light and a dark version. System follows your computer.
+            </small>
           </span>
-          <select
-            aria-labelledby={`${id}-theme`}
-            aria-describedby={`${id}-theme-help`}
-            value={room}
-            onChange={(event) => setRoom(event.target.value as Room)}
-          >
-            {ROOMS.map((value) => (
-              <option key={value} value={value}>
-                {ROOM_LABELS[value]}
-              </option>
+          <div className="segmented" role="group" aria-labelledby={`${id}-mode`} aria-describedby={`${id}-mode-help`}>
+            {MODES.map(({ value, label, Icon }) => (
+              <button
+                type="button"
+                key={value}
+                className={modeChoice === value ? "active" : ""}
+                aria-pressed={modeChoice === value}
+                onClick={() => setMode(value)}
+              >
+                <Icon size={15} aria-hidden="true" />{label}
+              </button>
             ))}
-          </select>
+          </div>
         </div>
-      )}
-    </section>
+        {ROOMS.length > 1 && (
+          <div className="setting-row appearance-row">
+            <span>
+              <strong id={`${id}-theme`}>Theme</strong>
+              <small id={`${id}-theme-help`}>A whole palette, changed everywhere at once.</small>
+            </span>
+            <select
+              aria-labelledby={`${id}-theme`}
+              aria-describedby={`${id}-theme-help`}
+              value={room}
+              onChange={(event) => setRoom(event.target.value as Room)}
+            >
+              {ROOMS.map((value) => (
+                <option key={value} value={value}>
+                  {ROOM_LABELS[value]}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+      </section>
+      <ClockSetting />
+    </>
   );
 }
