@@ -308,7 +308,7 @@ describe("scale and rhythm", () => {
   // text scale, so the scale checks keep reading the design's own steps.
   function stepsOf(property: string): number[] {
     const css = readFileSync(STYLESHEET, "utf8");
-    const found = [...css.matchAll(new RegExp(`\\b${property}:\\s*(?:calc\\()?(\\d+)px(?: \\* var\\(--text-scale, 1\\)\\))?;`, "g"))];
+    const found = [...css.matchAll(new RegExp(`\\b${property}:\\s*(?:calc\\()?(\\d+)px(?: \\* var\\(--(?:text|spacing)-scale, 1\\)\\))?;`, "g"))];
     return [...new Set(found.map((match) => Number(match[1])))].sort((a, b) => a - b);
   }
 

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useInterfaceDensity } from "./densityPreference";
 
 /** Which room you are working in, and whether its light is on.
  *
@@ -273,6 +274,7 @@ export interface Appearance {
 }
 
 export function useAppearance(): Appearance {
+  const density = useInterfaceDensity();
   const [room, setRoom] = useRoom();
   const [modeChoice, mode, setMode] = useThemeMode();
   const [chatWidth, setChatWidth] = useChatWidth();
@@ -286,7 +288,8 @@ export function useAppearance(): Appearance {
     document.documentElement.dataset.motion = reducedMotion ? "reduced" : "full";
     document.documentElement.dataset.thumbnails = thumbnailSize;
     document.documentElement.dataset.textSize = textSize;
-  }, [room, mode, chatWidth, reducedMotion, thumbnailSize, textSize]);
+    document.documentElement.dataset.density = density;
+  }, [room, mode, chatWidth, reducedMotion, thumbnailSize, textSize, density]);
   return useMemo(
     () => ({
       room, mode, modeChoice, chatWidth, motionChoice, thumbnailSize, textSize,

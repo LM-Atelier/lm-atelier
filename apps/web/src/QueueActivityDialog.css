@@ -3,17 +3,17 @@
   min-width: 0;
 }
 .queue-activity-intro { line-height: 1.5; }
-.queue-activity-toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; }
-.queue-activity-toolbar label { display: grid; gap: 5px; flex: 1; min-width: 0; }
+.queue-activity-toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: calc(12px * var(--spacing-scale, 1)); }
+.queue-activity-toolbar label { display: grid; gap: calc(5px * var(--spacing-scale, 1)); flex: 1; min-width: 0; }
 .queue-activity-toolbar select { width: 100%; min-width: 0; }
 .queue-activity-counts, .queue-activity-updated { color: var(--muted); }
 .queue-activity-updated { display: block; margin-top: 12px; }
-.queue-activity-items { list-style: none; padding: 0; display: grid; gap: 12px; }
+.queue-activity-items { list-style: none; padding: 0; display: grid; gap: calc(12px * var(--spacing-scale, 1)); }
 .queue-activity-items li {
-  display: grid; gap: 5px; padding: 12px; border: 1px solid var(--border);
+  display: grid; gap: calc(5px * var(--spacing-scale, 1)); padding: calc(12px * var(--spacing-scale, 1)); border: 1px solid var(--border);
   border-radius: 10px; min-width: 0; overflow-wrap: anywhere;
 }
-.queue-activity-item-heading { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; }
+.queue-activity-item-heading { display: flex; flex-wrap: wrap; justify-content: space-between; gap: calc(8px * var(--spacing-scale, 1)); }
 .queue-activity-item-heading strong { min-width: 0; }
 .queue-activity-status { text-transform: capitalize; color: var(--muted); }
 .queue-activity-error { margin-top: 12px; color: var(--danger); }
@@ -22,10 +22,10 @@
 .queue-activity-entry-idle { position: fixed; right: 16px; bottom: 68px; z-index: 15; max-width: calc(100vw - 32px); }
 
 .queue-plan-steps { margin-top: 5px; }
-.queue-step-list { list-style: none; padding: 0; display: grid; gap: 7px; }
-.queue-activity-items .queue-step-list li { padding: 8px; gap: 3px; }
+.queue-step-list { list-style: none; padding: 0; display: grid; gap: calc(7px * var(--spacing-scale, 1)); }
+.queue-activity-items .queue-step-list li { padding: calc(8px * var(--spacing-scale, 1)); gap: calc(3px * var(--spacing-scale, 1)); }
 
-.queue-plan-step-details { display: grid; gap: 7px; min-width: 0; }
+.queue-plan-step-details { display: grid; gap: calc(7px * var(--spacing-scale, 1)); min-width: 0; }
 
 .queue-plan-controls { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
 .queue-plan-controls p { flex-basis: 100%; margin: 0; overflow-wrap: anywhere; }
