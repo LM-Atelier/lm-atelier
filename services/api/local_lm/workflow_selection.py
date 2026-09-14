@@ -26,6 +26,7 @@ from .workflow_revision_reviews import review_is_current
 WorkflowSelectorCapability = Literal["chat", "vision", "image", "video"]
 WorkflowSelectionMode = Literal["explicit", "default", "automatic"]
 LegacyRevisionResolver = Callable[[Session, ModelProfile, Operation], WorkflowRevision | None]
+RevisionPreference = Callable[[WorkflowRevision], bool]
 
 _CAPABILITY_ROLE: dict[WorkflowSelectorCapability, str] = {
     "chat": "chat",
@@ -201,8 +202,14 @@ def resolve_workflow_family(
     engine: str | None = None,
     required_capabilities: Iterable[str] = (),
     legacy_revision_resolver: LegacyRevisionResolver | None = None,
+    preferred_revision: RevisionPreference | None = None,
 ) -> ResolvedWorkflowFamily:
-    """Resolve one broad selector to an exact operation variant without guessing."""
+    """Resolve one broad selector to an exact operation variant without guessing.
+
+    `preferred_revision` orders automatic candidates it accepts ahead of the
+    rest, before any other ranking. It never touches an explicit or default
+    choice, and it never makes an unready workflow eligible.
+    """
 
     if operation not in _CAPABILITY_OPERATIONS[capability]:
         raise _error(capability, operation, "selector_operation_mismatch", workflow_family_id)
@@ -291,6 +298,11 @@ def resolve_workflow_family(
         raise _error(capability, operation, "no_ready_workflow")
     candidates.sort(
         key=lambda item: (
+            not (
+                preferred_revision is not None
+                and item.revision is not None
+                and preferred_revision(item.revision)
+            ),
             -item.score,
             not item.preference.is_default,
             item.preference.sort_order,

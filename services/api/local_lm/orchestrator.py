@@ -88,9 +88,12 @@ from .generation_offers import (
     routing_plan_for_offer,
     should_extract_generation_offer,
 )
+from .image_edit_kind import image_edit_kind
 from .image_edit_strength import (
+    EditScope,
     EditSettingSource,
     ImageEditStrengthResolution,
+    estimate_image_edit_strength,
     resolve_image_edit_strength,
 )
 from .image_edit_verification import (
@@ -318,6 +321,7 @@ from .workflow_review_runtime import (
 from .workflow_revision_reviews import revision_is_trusted
 from .workflow_selection import (
     ResolvedWorkflowFamily,
+    RevisionPreference,
     WorkflowFamilySelectionError,
     WorkflowSelectionMode,
     resolve_exact_workflow_revision,
@@ -9723,6 +9727,7 @@ class ConversationOrchestrator:
                 prompt=prompt,
                 engine=engine,
                 legacy_revision_resolver=legacy_revision,
+                preferred_revision=self._instruction_edit_preference(operation, prompt),
             )
         except WorkflowFamilySelectionError as exc:
             # A missing workflow default during the additive compatibility
@@ -9754,6 +9759,37 @@ class ConversationOrchestrator:
                 return None
             raise
         return self._resolved_family_execution(session, resolved, prompt=prompt)
+
+    @staticmethod
+    def _instruction_edit_preference(
+        operation: Operation, prompt: str
+    ) -> RevisionPreference | None:
+        """Rank instruction-edit workflows first when Auto picks one for an edit.
+
+        A strength edit redraws the source by denoise, so a small, specific change
+        may not take; an instruction edit reads the words beside the picture. A
+        request to transform the whole picture keeps the ordinary ranking, where
+        a strength edit is a fair choice. The resolver applies the preference only
+        to automatic choices, so a workflow someone chose is never reordered.
+        """
+
+        if operation != Operation.IMAGE_TO_IMAGE:
+            return None
+        if estimate_image_edit_strength(prompt).scope == EditScope.GLOBAL:
+            return None
+
+        def instruction_edit(revision: WorkflowRevision) -> bool:
+            return (
+                image_edit_kind(
+                    operation.value,
+                    revision.ui_graph_json,
+                    revision.api_graph_json,
+                    revision.input_schema_json,
+                )
+                == "instruction"
+            )
+
+        return instruction_edit
 
     @classmethod
     def _resolved_family_execution(
