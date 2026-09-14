@@ -1337,6 +1337,32 @@ def test_the_ffmpeg_fetch_waits_long_enough_for_a_real_outage() -> None:
     assert waits == sorted(waits), "back off progressively rather than hammering the feed"
 
 
+def test_verification_has_room_to_finish_inside_the_merge_queue_window() -> None:
+    """Each platform job's limit sits between what the suite needs and what the queue allows.
+
+    Passing Windows runs took up to 41 minutes and one change needed about 49,
+    and a passing Ubuntu run was cancelled at 45 on a busy runner, so a limit
+    below 50 cancels real verification. The queue waits at most its check
+    response timeout for every required check, and the plan job runs first, so a
+    limit that does not fit inside it dequeues the change instead.
+    """
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    plan = workflow.split("  verification-plan:", 1)[1].split("  compatibility:", 1)[0]
+    ubuntu = workflow.split("  compatibility:", 1)[1].split("  merge-gate:", 1)[0]
+    windows = workflow.split("  windows-compatibility:", 1)[1].split("  scheduled-audit:", 1)[0]
+    ruleset = json.loads((ROOT / ".github/rulesets/public-develop-queue.json").read_text())
+    queue = next(rule for rule in ruleset["rules"] if rule["type"] == "merge_queue")
+
+    def limit(job: str) -> int:
+        found = re.search(r"^    timeout-minutes: (\d+)$", job, re.MULTILINE)
+        assert found, "the job no longer declares its own timeout"
+        return int(found.group(1))
+
+    for job in (ubuntu, windows):
+        assert limit(job) >= 50
+        assert limit(plan) + limit(job) <= queue["parameters"]["check_response_timeout_minutes"]
+
+
 def test_ci_workflow_retains_required_check_for_every_pr_scope() -> None:
     workflow = (ROOT / ".github/workflows/ci.yml").read_text()
     plan = workflow.split("  verification-plan:", 1)[1].split("  compatibility:", 1)[0]
