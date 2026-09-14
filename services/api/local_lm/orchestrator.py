@@ -119,6 +119,7 @@ from .models import (
     Job,
     Message,
     MessagePart,
+    ModelAssetInstall,
     ModelInstall,
     ModelProfile,
     ModelSource,
@@ -207,6 +208,16 @@ from .studio_region_edit import (
     RegionEditError,
     blend_through_selection,
     prepare_selection,
+)
+from .studio_relight import (
+    RELIGHT_SETTING_KEY,
+    RelightContractError,
+    RelightFinish,
+    finish_relight,
+    is_lighting_adapter,
+    parse_relight_setting,
+    require_relight_turn,
+    split_relight_setting,
 )
 from .turn_inheritance import TurnInheritance, TurnSourceResolver, inherited_profile_configuration
 from .video_length import (
@@ -1648,6 +1659,8 @@ class ConversationOrchestrator:
         # and it is checked against its own contract a few lines below, where
         # the workflow is known and can say whether it accepts one at all.
         mask, tunables = split_mask_setting(workflow_lora_layers.ordinary("turn"))
+        # A relight request is not a workflow field either, for the same reason.
+        relight, tunables = split_relight_setting(tunables)
         request_settings = validate_settings(tunables, request_fields)
         if turn_preset is not None:
             request_settings = {
@@ -1713,6 +1726,8 @@ class ConversationOrchestrator:
         # to the resolved settings rather than to the layers being resolved.
         if mask is not None:
             effective_settings[MASK_SETTING_KEY] = mask
+        if relight is not None:
+            effective_settings[RELIGHT_SETTING_KEY] = relight
         lora_selection = None
         lora_setting_layers = (
             profile.load_settings_json if profile else {},
@@ -1783,6 +1798,21 @@ class ConversationOrchestrator:
                     source_count=len(resolved_input_ids),
                 )
             except MaskContractError as exc:
+                raise ValueError(str(exc)) from exc
+        # Checked here for the same reason as the selection: a relight that
+        # cannot run is refused before the turn exists, not after a generation.
+        if plan.operation != Operation.TEXT and RELIGHT_SETTING_KEY in effective_settings:
+            try:
+                relight_setting = parse_relight_setting(effective_settings)
+                if relight_setting is not None:
+                    require_relight_turn(
+                        relight_setting,
+                        operation=plan.operation.value,
+                        source_count=len(resolved_input_ids),
+                        loras=effective_settings.get("loras"),
+                        adapter_asset_ids=self.installed_lighting_adapter_ids(session),
+                    )
+            except RelightContractError as exc:
                 raise ValueError(str(exc)) from exc
         # Margins reach here as an ordinary object setting, and the schema
         # layer only bounds a value's size and nesting - it has no opinion
@@ -6078,39 +6108,52 @@ class ConversationOrchestrator:
         return executed_graph_carries_the_proof(proven.proof, executed_graph)
 
     @staticmethod
-    async def _region_blended_outputs(
-        completed_assets: Sequence[GeneratedAsset], region_edit: RegionEdit, media_engine: str
+    async def _studio_finished_outputs(
+        completed_assets: Sequence[GeneratedAsset],
+        *,
+        relight: RelightFinish | None,
+        region_edit: RegionEdit | None,
+        media_engine: str,
     ) -> list[GeneratedAsset]:
-        """Each kept picture placed back into its source through the selection.
+        """Each kept picture finished against its source, in one fixed order.
 
-        A preview a workflow wrote for itself, and any video, pass through as
-        produced: neither is the edit the selection was drawn for. Each blend
-        is its own thread hop, for the same reason each measurement is.
+        Relight first, because its mix and grade are about the whole picture
+        and its source. The selection blend second, so a selection keeps
+        everything outside it as the source, including from the relight. Each
+        step writes its own record. A preview a workflow wrote for itself, and
+        any video, pass through as produced: neither is the edit that was asked
+        for. Each step is its own thread hop, for the same reason each
+        measurement is.
         """
 
-        blended: list[GeneratedAsset] = []
+        finished: list[GeneratedAsset] = []
         for generated in completed_assets:
             if generated.kind != "image" or names_a_preview(
                 record_for(generated.origin, media_engine)
             ):
-                blended.append(generated)
+                finished.append(generated)
                 continue
+            content = generated.content
+            records: dict[str, Any] = {}
             try:
-                result = await asyncio.to_thread(
-                    blend_through_selection, region_edit, generated.content
-                )
+                if relight is not None:
+                    relit = await asyncio.to_thread(finish_relight, relight, content)
+                    content, records["relight"] = relit.content, relit.record
+                if region_edit is not None:
+                    blended = await asyncio.to_thread(blend_through_selection, region_edit, content)
+                    content, records["region_edit"] = blended.content, blended.record
             except RegionEditError as exc:
                 raise RuntimeError(str(exc)) from exc
-            blended.append(
+            finished.append(
                 replace(
                     generated,
-                    content=result.content,
-                    media_type=result.media_type,
+                    content=content,
+                    media_type="image/png",
                     name=f"{PurePosixPath(generated.name).stem or 'edited'}.png",
-                    metadata={**generated.metadata, "region_edit": result.record},
+                    metadata={**generated.metadata, **records},
                 )
             )
-        return blended
+        return finished
 
     async def _measured_outputs(
         self, completed_assets: Sequence[GeneratedAsset]
@@ -6432,6 +6475,34 @@ class ConversationOrchestrator:
                 parameters.pop(VIDEO_DURATION_SETTING_KEY, None)
             mask_setting = execution_settings.get(MASK_SETTING_KEY)
             region_edit: RegionEdit | None = None
+            relight_finish: RelightFinish | None = None
+            if RELIGHT_SETTING_KEY in execution_settings:
+                # The workflow never reads this: it says how the relit result is
+                # finished against its source once the workflow is done.
+                parameters.pop(RELIGHT_SETTING_KEY, None)
+                try:
+                    relight_setting = parse_relight_setting(execution_settings)
+                except RelightContractError as exc:
+                    raise RuntimeError(str(exc)) from exc
+                if (
+                    relight_setting is None
+                    or execution_operation != Operation.IMAGE_TO_IMAGE.value
+                    or len(input_ids) != 2
+                    or len(input_paths) != 2
+                ):
+                    raise RuntimeError(
+                        "Relighting needs the picture and its light map, and nothing else."
+                    )
+                relight_source = session.get(Artifact, input_ids[0])
+                if relight_source is None:
+                    raise RuntimeError("The picture being relit is unavailable.")
+                relight_finish = RelightFinish(
+                    setting=relight_setting,
+                    source_artifact_id=relight_source.id,
+                    source=self.artifacts.verified_bytes(
+                        relight_source, maximum_bytes=MAX_BLEND_READ_BYTES
+                    ),
+                )
             if isinstance(mask_setting, dict):
                 mask_artifact = session.get(Artifact, str(mask_setting.get("artifact_id") or ""))
                 if not mask_artifact:
@@ -6648,11 +6719,14 @@ class ConversationOrchestrator:
             # ended this execution; the shared bounded close does both.
             await close_iterator(producer)
 
-        if region_edit is not None:
+        if relight_finish is not None or region_edit is not None:
             # Before measurement, so the measurement, the library, provenance
             # and verification all describe the picture that is kept.
-            completed_assets = await self._region_blended_outputs(
-                completed_assets, region_edit, media_engine
+            completed_assets = await self._studio_finished_outputs(
+                completed_assets,
+                relight=relight_finish,
+                region_edit=region_edit,
+                media_engine=media_engine,
             )
         media_capabilities = (
             await self._successful_media_capabilities() if completed_assets else None
@@ -6838,6 +6912,13 @@ class ConversationOrchestrator:
                         **(
                             {"region_edit": generated.metadata["region_edit"]}
                             if region_edit is not None and "region_edit" in generated.metadata
+                            else {}
+                        ),
+                        # How the relit picture was finished against its source,
+                        # present only when it was.
+                        **(
+                            {"relight": generated.metadata["relight"]}
+                            if relight_finish is not None and "relight" in generated.metadata
                             else {}
                         ),
                     }
@@ -7397,6 +7478,10 @@ class ConversationOrchestrator:
         # picture instead of the part that was selected.
         if MASK_SETTING_KEY in source_settings:
             settings[MASK_SETTING_KEY] = copy.deepcopy(source_settings[MASK_SETTING_KEY])
+        # The relight request is dropped by the same filter, independently of
+        # the selection, and without it a retry would store the raw relit result.
+        if RELIGHT_SETTING_KEY in source_settings:
+            settings[RELIGHT_SETTING_KEY] = copy.deepcopy(source_settings[RELIGHT_SETTING_KEY])
         verification_job_id = image_edit_verification_job_id(source_run_id)
 
         async def resolve_retry_source(
@@ -9406,7 +9491,8 @@ class ConversationOrchestrator:
             presets=(default_preset, project_preset, chat_preset, turn_preset),
         )
         mask, tunables = split_mask_setting(workflow_lora_layers.ordinary("turn"))
-        if mask is not None:
+        relight, tunables = split_relight_setting(tunables)
+        if mask is not None or relight is not None:
             raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
         request_settings = validate_settings(tunables, request_fields)
         if turn_preset is not None:
@@ -10280,6 +10366,50 @@ class ConversationOrchestrator:
                 continue
             generic.append(revision)
         return generic[0] if generic else None
+
+    def installed_lighting_adapter_ids(self, session: Session) -> list[str]:
+        """Installed, verified LoRAs that are exactly the declared lighting adapter."""
+
+        assets = session.scalars(
+            select(ModelAssetInstall)
+            .where(ModelAssetInstall.kind == "lora", ModelAssetInstall.active.is_(True))
+            .order_by(ModelAssetInstall.id)
+        ).all()
+        matched: list[str] = []
+        for asset in assets:
+            if not asset.verified_at or not asset.source_id:
+                continue
+            source = session.get(ModelSource, asset.source_id)
+            if source is not None and is_lighting_adapter(
+                provider=source.provider,
+                remote_id=source.remote_id,
+                revision=source.revision,
+                manifest=asset.manifest_json,
+            ):
+                matched.append(asset.id)
+        return matched
+
+    def installed_relight_workflow_ids(self, session: Session) -> list[str]:
+        """Edit workflows that take a second picture and let a LoRA be added."""
+
+        definitions = session.scalars(
+            select(WorkflowDefinition)
+            .where(WorkflowDefinition.operation == Operation.IMAGE_TO_IMAGE.value)
+            .order_by(WorkflowDefinition.id)
+        ).all()
+        revision_ids: list[str] = []
+        for definition in definitions:
+            if not definition.current_revision_id:
+                continue
+            revision = session.get(WorkflowRevision, definition.current_revision_id)
+            if (
+                revision is not None
+                and self._workflow_matches_engine(revision)
+                and workflow_lora_extension(revision) is not None
+                and exceeds_capacity(revision.api_graph_json, 2) is None
+            ):
+                revision_ids.append(revision.id)
+        return revision_ids
 
     def installed_edit_input_schemas(self, session: Session) -> list[dict[str, Any] | None]:
         """Input schemas of every edit workflow this engine could actually run.

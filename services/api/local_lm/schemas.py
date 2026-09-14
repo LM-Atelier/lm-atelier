@@ -1686,6 +1686,8 @@ class StudioToolCapability(ApiModel):
     workflow_class: str
     available: bool
     reason: str | None
+    workflow_revision_id: str | None = None
+    adapter_asset_id: str | None = None
 
 
 class StudioCapabilityReport(ApiModel):

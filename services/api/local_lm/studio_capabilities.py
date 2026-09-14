@@ -13,6 +13,7 @@ it is still cheap to hear.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -21,7 +22,17 @@ from .studio_masks import workflow_accepts_mask
 from .upscale_workflows import workflow_declares_upscale
 
 StudioToolKind = Literal[
-    "instruct", "brush", "eraser", "rect", "lasso", "bucket", "wand", "enhance", "extend", "text"
+    "instruct",
+    "brush",
+    "eraser",
+    "rect",
+    "lasso",
+    "bucket",
+    "wand",
+    "enhance",
+    "extend",
+    "text",
+    "relight",
 ]
 
 
@@ -40,6 +51,7 @@ TOOL_WORKFLOW_CLASSES: dict[StudioToolKind, str] = {
     "enhance": "upscale",
     "extend": "outpaint",
     "text": "image_to_image",
+    "relight": "relight",
 }
 
 _CLASS_GUIDANCE = {
@@ -47,7 +59,12 @@ _CLASS_GUIDANCE = {
     "inpaint": "Install an inpainting workflow to edit part of a picture.",
     "upscale": "Install an upscaling workflow to enlarge a picture.",
     "outpaint": "Install an outpainting workflow to extend a picture past its edge.",
+    "relight": (
+        "Install an image editing workflow that takes a second picture and a LoRA to relight "
+        "a picture."
+    ),
 }
+_NO_LIGHTING_ADAPTER = "Install the Qwen Multi-Angle Lighting LoRA to relight a picture."
 
 
 @dataclass(frozen=True)
@@ -58,11 +75,17 @@ class ToolCapability:
     workflow_class: str
     available: bool
     reason: str | None
+    #: The one workflow this tool runs on, when the report can name exactly one.
+    workflow_revision_id: str | None = None
+    #: The installed LoRA this tool applies, when it needs one.
+    adapter_asset_id: str | None = None
 
 
 def tool_capabilities(
     *,
     edit_input_schemas: list[dict[str, Any] | None],
+    relight_workflow_ids: Sequence[str] = (),
+    lighting_adapter_ids: Sequence[str] = (),
 ) -> list[ToolCapability]:
     """Judge every tool from the schemas of the installed edit workflows.
 
@@ -80,16 +103,32 @@ def tool_capabilities(
         "inpaint": can_mask,
         "upscale": can_upscale,
         "outpaint": can_outpaint,
+        # Relight needs both halves: a workflow that can take the light map and
+        # a LoRA, and the one adapter whose behaviour was checked.
+        "relight": bool(relight_workflow_ids) and bool(lighting_adapter_ids),
     }
     capabilities = []
     for kind, workflow_class in TOOL_WORKFLOW_CLASSES.items():
         ready = available[workflow_class]
+        reason = None if ready else _CLASS_GUIDANCE[workflow_class]
+        if workflow_class == "relight" and relight_workflow_ids and not lighting_adapter_ids:
+            reason = _NO_LIGHTING_ADAPTER
         capabilities.append(
             ToolCapability(
                 kind=kind,
                 workflow_class=workflow_class,
                 available=ready,
-                reason=None if ready else _CLASS_GUIDANCE[workflow_class],
+                reason=reason,
+                workflow_revision_id=(
+                    relight_workflow_ids[0]
+                    if workflow_class == "relight" and len(relight_workflow_ids) == 1
+                    else None
+                ),
+                adapter_asset_id=(
+                    lighting_adapter_ids[0]
+                    if workflow_class == "relight" and lighting_adapter_ids
+                    else None
+                ),
             )
         )
     return capabilities

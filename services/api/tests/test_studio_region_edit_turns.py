@@ -258,7 +258,9 @@ async def test_video_output_passes_through_unblended() -> None:
         mask=_mask(),
     )
 
-    result = await ConversationOrchestrator._region_blended_outputs([video], edit, "comfyui")
+    result = await ConversationOrchestrator._studio_finished_outputs(
+        [video], relight=None, region_edit=edit, media_engine="comfyui"
+    )
 
     assert result == [video]
 

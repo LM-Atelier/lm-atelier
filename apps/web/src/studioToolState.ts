@@ -25,6 +25,7 @@ import {
   type PointerTool,
 } from "./studioTools";
 
+import type { LightDirection } from "./studioLightMap";
 import type { StudioToolKind } from "./types";
 
 export type { StudioToolKind } from "./types";
@@ -69,6 +70,12 @@ export type StudioToolState = {
   readonly currentWords: string;
   /** The words that should read there instead. */
   readonly newWords: string;
+  /** Where the relight tool's light comes from. */
+  readonly lightDirection: LightDirection;
+  /** How much of the relit picture is kept, from a quarter to all of it. */
+  readonly lightIntensity: number;
+  /** The light's colour temperature in kelvin, or null for no warmth grade. */
+  readonly lightKelvin: number | null;
   readonly mask: MaskRaster | null;
   /** Bumped whenever the raster changes so the canvas repaints its tint. */
   readonly maskVersion: number;
@@ -86,6 +93,9 @@ export type StudioToolAction =
   | { type: "clear-margins" }
   | { type: "set-current-words"; words: string }
   | { type: "set-new-words"; words: string }
+  | { type: "set-light-direction"; direction: LightDirection }
+  | { type: "set-light-intensity"; intensity: number }
+  | { type: "set-light-kelvin"; kelvin: number | null }
   | { type: "image-changed"; width: number; height: number }
   | { type: "stroke-end" }
   | { type: "invert" }
@@ -105,6 +115,9 @@ export function initialToolState(): StudioToolState {
     margins: { top: 0, right: 0, bottom: 0, left: 0 },
     currentWords: "",
     newWords: "",
+    lightDirection: "left",
+    lightIntensity: 0.5,
+    lightKelvin: null,
     mask: null,
     maskVersion: 0,
     history: new MaskHistory(),
@@ -139,6 +152,17 @@ export function studioToolReducer(
       return { ...state, currentWords: action.words };
     case "set-new-words":
       return { ...state, newWords: action.words };
+    case "set-light-direction":
+      return { ...state, lightDirection: action.direction };
+    case "set-light-intensity":
+      return {
+        ...state,
+        lightIntensity: Number.isFinite(action.intensity)
+          ? Math.min(1, Math.max(0.25, action.intensity))
+          : state.lightIntensity,
+      };
+    case "set-light-kelvin":
+      return { ...state, lightKelvin: action.kelvin };
     case "image-changed": {
       // A new image invalidates the mask entirely; carrying it over would
       // silently apply a selection drawn on different pixels.
@@ -197,6 +221,11 @@ export function studioToolReducer(
 export function defaultInstruction(state: StudioToolState): string {
   if (state.kind === "enhance") return `Enhance to ${state.upscaleFactor}x`;
   if (state.kind === "text") return replaceWordsInstruction(state);
+  // The lighting adapter reads its two pictures as figures, and the direction
+  // in words must agree with the map or it follows the words.
+  if (state.kind === "relight") {
+    return `Relight Figure 1 using the luminance map from Figure 2 (light source from the ${state.lightDirection}).`;
+  }
   if (state.kind === "extend") {
     const edges = Object.entries(state.margins)
       .filter(([, value]) => value)
@@ -242,6 +271,9 @@ export function toolFor(
     // Words sit in a line, so a box is the natural way to point at them.
     case "text":
       return new RectTool(state.mask);
+    // The light comes from a side of the whole picture, chosen in the panel.
+    case "relight":
+      return null;
     case "lasso":
       return new LassoTool(state.mask);
     case "bucket":

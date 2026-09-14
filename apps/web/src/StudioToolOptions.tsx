@@ -60,6 +60,53 @@ export function StudioToolOptions({
       </label>
     );
   }
+  if (tools.kind === "relight") {
+    return (
+      <div className="studio-tool-options">
+        <div className="segmented" role="group" aria-label="Light from">
+          {(["left", "top", "right"] as const).map((direction) => (
+            <button
+              key={direction}
+              type="button"
+              aria-pressed={tools.lightDirection === direction}
+              className={tools.lightDirection === direction ? "active" : ""}
+              onClick={() => dispatch({ type: "set-light-direction", direction })}
+            >
+              {direction === "left" ? "Left" : direction === "top" ? "Top" : "Right"}
+            </button>
+          ))}
+        </div>
+        <label>
+          <span>
+            <strong>Strength</strong> {Math.round(tools.lightIntensity * 100)}%
+          </span>
+          <input
+            type="range"
+            min={25}
+            max={100}
+            step={5}
+            value={Math.round(tools.lightIntensity * 100)}
+            onChange={(event) =>
+              dispatch({ type: "set-light-intensity", intensity: Number(event.target.value) / 100 })
+            }
+          />
+        </label>
+        <div className="segmented" role="group" aria-label="Warmth">
+          {([["Neutral", null], ["Warm", 4500], ["Cool", 7500]] as const).map(([label, kelvin]) => (
+            <button
+              key={label}
+              type="button"
+              aria-pressed={tools.lightKelvin === kelvin}
+              className={tools.lightKelvin === kelvin ? "active" : ""}
+              onClick={() => dispatch({ type: "set-light-kelvin", kelvin })}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
   if (tools.kind === "text") {
     return (
       <div className="studio-tool-options">

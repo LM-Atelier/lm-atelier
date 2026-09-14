@@ -79,12 +79,14 @@ describe("StudioToolRail", () => {
         canUndo={false}
         canRedo={false}
         capabilities={[
-          { kind: "instruct", workflow_class: "image_to_image", available: true, reason: null },
+          { kind: "instruct", workflow_class: "image_to_image", available: true, reason: null, workflow_revision_id: null, adapter_asset_id: null },
           {
             kind: "brush",
             workflow_class: "inpaint",
             available: false,
             reason: "Install an inpainting workflow to edit part of a picture.",
+            workflow_revision_id: null,
+            adapter_asset_id: null,
           },
         ]}
       />,
@@ -108,7 +110,7 @@ describe("StudioToolRail", () => {
         canUndo={false}
         canRedo={false}
         capabilities={[
-          { kind: "enhance", workflow_class: "upscale", available: true, reason: null },
+          { kind: "enhance", workflow_class: "upscale", available: true, reason: null, workflow_revision_id: null, adapter_asset_id: null },
         ]}
       />,
     );
@@ -132,6 +134,8 @@ describe("StudioToolRail", () => {
             workflow_class: "upscale",
             available: false,
             reason: "Install an upscaling workflow to enlarge a picture.",
+            workflow_revision_id: null,
+            adapter_asset_id: null,
           },
         ]}
       />,

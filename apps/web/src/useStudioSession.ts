@@ -32,6 +32,9 @@ type StudioApply = {
   /** The workflow a recipe recorded, so applying one reproduces its run
    * rather than running its words against whatever is current. */
   workflowRevisionId?: string;
+  /** A picture the tool made for this edit, sent after the source: the
+   * relight tool's light map. */
+  secondPicture?: Blob;
 };
 
 export type StudioStep = {
@@ -112,6 +115,7 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
       mask,
       settings,
       workflowRevisionId,
+      secondPicture,
     }: StudioApply) => {
       // Refused rather than raced. Between switching pictures and the new
       // session opening there is no session for what is on screen, and the
@@ -126,11 +130,16 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
         ...settings,
         ...(mask ? { mask: await uploadMask(mask) } : {}),
       };
+      // Unlike a selection, this is content the workflow reads as a picture, so
+      // it goes in the inputs, after the source it belongs to.
+      const second = secondPicture
+        ? await api.upload(new File([secondPicture], "studio-light-map.png", { type: "image/png" }))
+        : null;
       return api.sendTurn(
         sessionId,
         instruction,
         "image",
-        [artifactId],
+        second ? [artifactId, second.id] : [artifactId],
         turnSettings,
         undefined,
         undefined,
@@ -160,9 +169,10 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
       settings?: Record<string, unknown>,
       workflowRevisionId?: string,
       onAccepted?: () => void,
+      secondPicture?: Blob,
     ) =>
       apply.mutate(
-        { instruction, artifactId, mask, settings, workflowRevisionId },
+        { instruction, artifactId, mask, settings, workflowRevisionId, secondPicture },
         { onSuccess: onAccepted },
       ),
   };

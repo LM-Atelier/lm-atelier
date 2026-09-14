@@ -91,13 +91,12 @@ def prepare_selection(edit: RegionEdit) -> PreparedSelection:
     Checked ahead of generation so a selection drawn on another picture, or one
     that covers nothing, costs no model time.
     """
-    decoded_source = _decode(edit.source, "source")
-    source_image = _oriented(decoded_source)
+    source = load_source(edit.source)
     alpha = _selection_alpha(
-        _decode(edit.mask, "selection"),
-        source_image.size,
+        decode_picture(edit.mask, "selection"),
+        source.image.size,
         invert=edit.selection.invert,
-        orientation=_orientation(decoded_source),
+        orientation=source.orientation,
     )
     return alpha.prepared
 
@@ -108,38 +107,22 @@ def blend_through_selection(edit: RegionEdit, result: bytes) -> RegionBlend:
     PNG because it is lossless: re-encoding as JPEG would change the pixels
     outside the selection, which is the one thing this promises not to do.
     """
-    decoded_source = _decode(edit.source, "source")
-    icc_profile = decoded_source.info.get("icc_profile")
-    source_image = _oriented(decoded_source)
+    source = load_source(edit.source)
     alpha = _selection_alpha(
-        _decode(edit.mask, "selection"),
-        source_image.size,
+        decode_picture(edit.mask, "selection"),
+        source.image.size,
         invert=edit.selection.invert,
-        orientation=_orientation(decoded_source),
+        orientation=source.orientation,
     )
-    edited = _decode(result, "edited picture")
-    source_ratio = source_image.width / source_image.height
-    result_ratio = edited.width / edited.height
-    if abs(result_ratio - source_ratio) > MAX_SHAPE_DRIFT * source_ratio:
-        raise RegionEditError(
-            "region-result-reshaped",
-            "The edited picture came back in a different shape, so it cannot be placed "
-            "back into the selection.",
-        )
-    base = _composable(source_image)
-    fitted = edited.convert("RGB").resize(source_image.size, Image.Resampling.LANCZOS)
-    if base.mode == "RGBA":
-        # The edit has no transparency of its own; the source's decides it, so a
-        # cut-out stays cut out wherever the words changed.
-        fitted.putalpha(base.getchannel("A"))
-    blended = Image.composite(fitted, base, alpha.image)
-    buffer = io.BytesIO()
-    options: dict[str, Any] = {"format": "PNG"}
-    if isinstance(icc_profile, bytes):
-        options["icc_profile"] = icc_profile
-    blended.save(buffer, **options)
+    edited, fitted = fit_result(
+        source,
+        result,
+        "The edited picture came back in a different shape, so it cannot be placed "
+        "back into the selection.",
+    )
+    blended = Image.composite(fitted, source.image, alpha.image)
     return RegionBlend(
-        content=buffer.getvalue(),
+        content=encode_png(blended, source.icc_profile),
         media_type=BLEND_MEDIA_TYPE,
         record={
             "mode": "blend",
@@ -151,10 +134,59 @@ def blend_through_selection(edit: RegionEdit, result: bytes) -> RegionBlend:
             "result_width": edited.width,
             "result_height": edited.height,
             "result_resampler": RESULT_RESAMPLER,
-            "width": source_image.width,
-            "height": source_image.height,
+            "width": source.image.width,
+            "height": source.image.height,
         },
     )
+
+
+@dataclass(frozen=True)
+class SourcePicture:
+    """The source as the person saw it, ready to composite over."""
+
+    #: Upright, in RGB, or RGBA when the source has transparency.
+    image: Image.Image
+    orientation: int
+    icc_profile: bytes | None
+
+
+def load_source(payload: bytes) -> SourcePicture:
+    decoded = decode_picture(payload, "source")
+    icc_profile = decoded.info.get("icc_profile")
+    return SourcePicture(
+        image=_composable(_oriented(decoded)),
+        orientation=_orientation(decoded),
+        icc_profile=icc_profile if isinstance(icc_profile, bytes) else None,
+    )
+
+
+def fit_result(
+    source: SourcePicture, result: bytes, reshaped_message: str
+) -> tuple[Image.Image, Image.Image]:
+    """The decoded result, and a copy resized to the source in the source's mode.
+
+    A result whose shape drifted past MAX_SHAPE_DRIFT is refused rather than
+    stretched. The result has no transparency of its own, so for a source with
+    transparency the source's alpha decides it: a cut-out stays cut out.
+    """
+    edited = decode_picture(result, "edited picture")
+    source_ratio = source.image.width / source.image.height
+    result_ratio = edited.width / edited.height
+    if abs(result_ratio - source_ratio) > MAX_SHAPE_DRIFT * source_ratio:
+        raise RegionEditError("region-result-reshaped", reshaped_message)
+    fitted = edited.convert("RGB").resize(source.image.size, Image.Resampling.LANCZOS)
+    if source.image.mode == "RGBA":
+        fitted.putalpha(source.image.getchannel("A"))
+    return edited, fitted
+
+
+def encode_png(image: Image.Image, icc_profile: bytes | None) -> bytes:
+    buffer = io.BytesIO()
+    options: dict[str, Any] = {"format": "PNG"}
+    if icc_profile is not None:
+        options["icc_profile"] = icc_profile
+    image.save(buffer, **options)
+    return buffer.getvalue()
 
 
 @dataclass(frozen=True)
@@ -163,7 +195,7 @@ class _Alpha:
     prepared: PreparedSelection
 
 
-def _decode(payload: bytes, label: str) -> Image.Image:
+def decode_picture(payload: bytes, label: str) -> Image.Image:
     try:
         with warnings.catch_warnings():
             # Between Pillow's pixel limit and twice it, a crafted header only
