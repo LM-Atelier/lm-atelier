@@ -17,7 +17,16 @@ from .comfy_workflow_packages import (
     analyze_comfyui_workflow_package,
 )
 
-_SUPPORTED_WIDGET_TYPES = frozenset({"BOOLEAN", "COMBO", "FLOAT", "INT", "STRING"})
+_SUPPORTED_WIDGET_TYPES = frozenset(
+    {"BOOLEAN", "COMBO", "FLOAT", "INT", "STRING", "COMFY_DYNAMICCOMBO_V3"}
+)
+# Inputs that ComfyUI's newer node schema grows at run time. A dynamic combo's
+# chosen option brings inputs of its own; an autogrow input stands for a row of
+# sockets made from one template. Both reach the runtime under dotted names,
+# "combo.input" and "group.socket", which is also how the editor saves them.
+_DYNAMIC_COMBO = "COMFY_DYNAMICCOMBO_V3"
+_AUTOGROW = "COMFY_AUTOGROW_V3"
+_DYNAMIC_SEPARATOR = "."
 _CONTROL_AFTER_GENERATE = frozenset({"decrement", "fixed", "increment", "randomize"})
 _CONTROL_WIDGET = "control_after_generate"
 # Subgraph expansion prefixes an inner node id with the instance it came from,
@@ -93,6 +102,9 @@ class _InputDefinition:
     name: str
     spec: Sequence[object]
     required: bool
+    # An autogrow socket takes a link only, even when its template is a widget
+    # kind, because the runtime forces the template to be an input.
+    socket_only: bool = False
 
 
 def compile_comfyui_ui_graph(
@@ -829,7 +841,10 @@ def _compile_node_inputs(
     definitions = _input_definitions(str(node["type"]), node_info)
     by_name = {definition.name: definition for definition in definitions}
     slots_by_name = {str(slot["name"]): slot for slot in input_slots}
-    unknown_slots = set(slots_by_name) - set(by_name)
+    # A dotted slot under a dynamic input is judged once that input has grown.
+    unknown_slots = {
+        name for name in set(slots_by_name) - set(by_name) if not _grows_from(name, by_name)
+    }
     if unknown_slots:
         name = sorted(unknown_slots, key=str.casefold)[0]
         raise WorkflowCompilationError(
@@ -855,10 +870,19 @@ def _compile_node_inputs(
     cursor = 0
     taken: set[str] = set()
     result: dict[str, object] = {}
-    for definition in definitions:
+    pending = list(definitions)
+    position = 0
+    while position < len(pending):
+        definition = pending[position]
+        position += 1
+        if definition.spec[0] == _AUTOGROW:
+            grown = _autogrow_inputs(node_id, definition)
+            pending[position:position] = grown
+            by_name.update((item.name, item) for item in grown)
+            continue
         key = (node_id, definition.name)
         connected = key in connections
-        if not _is_widget_spec(definition.spec):
+        if definition.socket_only or not _is_widget_spec(definition.spec):
             slot = slots_by_name.get(definition.name)
             if slot is not None and slot.get("widget") is not None:
                 raise WorkflowCompilationError(
@@ -889,6 +913,11 @@ def _compile_node_inputs(
             result[definition.name] = _serialize_widget_value(
                 node_id, definition.name, definition.spec, selected
             )
+            if definition.spec[0] == _DYNAMIC_COMBO:
+                # Saved straight after the choice, so they are read next.
+                grown = _dynamic_combo_inputs(node_id, definition, result[definition.name])
+                pending[position:position] = grown
+                by_name.update((item.name, item) for item in grown)
         elif definition.required and not connected:
             raise WorkflowCompilationError(
                 "missing_required_input",
@@ -925,6 +954,12 @@ def _compile_node_inputs(
         control = values[cursor]
         if isinstance(control, str) and control.casefold() in _CONTROL_AFTER_GENERATE:
             cursor += 1
+    unknown_slots = set(slots_by_name) - set(by_name)
+    if unknown_slots:
+        name = sorted(unknown_slots, key=str.casefold)[0]
+        raise WorkflowCompilationError(
+            "unknown_input_slot", f"node {node_id} uses unknown input {name}"
+        )
     if named is not None:
         unread = {name: named[name] for name in sorted(set(named) - taken, key=str.casefold)}
         if unread:
@@ -1055,6 +1090,129 @@ def _input_definitions(
     return tuple(result)
 
 
+def _grows_from(name: str, definitions: Mapping[str, _InputDefinition]) -> bool:
+    """Whether a dotted input name sits under a dynamic input of this node."""
+
+    head, separator, _ = name.partition(_DYNAMIC_SEPARATOR)
+    parent = definitions.get(head)
+    return bool(separator) and parent is not None and parent.spec[0] in {_DYNAMIC_COMBO, _AUTOGROW}
+
+
+def _dynamic_combo_inputs(
+    node_id: str, definition: _InputDefinition, selected: object
+) -> list[_InputDefinition]:
+    """The inputs the chosen option of a dynamic combo brings, in declared order."""
+
+    option = next(
+        (item for item in _dynamic_combo_options(definition) if item.get("key") == selected),
+        None,
+    )
+    if option is None:
+        raise WorkflowCompilationError(
+            "invalid_widget_choice", f"node {node_id} has invalid value for {definition.name}"
+        )
+    inputs = option.get("inputs", {})
+    if not isinstance(inputs, Mapping):
+        raise WorkflowCompilationError(
+            "invalid_node_definition",
+            f"ComfyUI definition for input {definition.name} has an invalid option",
+        )
+    grown: list[_InputDefinition] = []
+    for section, required in (("required", True), ("optional", False)):
+        values = inputs.get(section, {})
+        if not isinstance(values, Mapping):
+            raise WorkflowCompilationError(
+                "invalid_node_definition",
+                f"ComfyUI definition for input {definition.name} has an invalid option",
+            )
+        for name, spec in values.items():
+            if not isinstance(spec, Sequence) or isinstance(spec, str | bytes) or not spec:
+                raise WorkflowCompilationError(
+                    "invalid_node_definition",
+                    f"ComfyUI definition for input {definition.name}.{name} is invalid",
+                )
+            grown.append(
+                _InputDefinition(f"{definition.name}{_DYNAMIC_SEPARATOR}{name}", spec, required)
+            )
+    return grown
+
+
+def _dynamic_combo_options(definition: _InputDefinition) -> tuple[Mapping[str, object], ...]:
+    options = _widget_options(definition.spec).get("options")
+    if (
+        not isinstance(options, Sequence)
+        or isinstance(options, str | bytes)
+        or not options
+        or any(not isinstance(item, Mapping) for item in options)
+    ):
+        raise WorkflowCompilationError(
+            "invalid_node_definition",
+            f"ComfyUI definition for input {definition.name} has invalid options",
+        )
+    return tuple(item for item in options if isinstance(item, Mapping))
+
+
+def _autogrow_inputs(node_id: str, definition: _InputDefinition) -> list[_InputDefinition]:
+    """The sockets an autogrow input stands for, as the runtime names them.
+
+    The template names them either by a prefix and a count or by an explicit
+    list. The first `min` of them are required when the template's own input
+    is required; the rest are optional.
+    """
+
+    template = _widget_options(definition.spec).get("template")
+    invalid = WorkflowCompilationError(
+        "invalid_node_definition",
+        f"ComfyUI definition for input {definition.name} has an invalid template",
+    )
+    if not isinstance(template, Mapping):
+        raise invalid
+    sections = template.get("input")
+    if not isinstance(sections, Mapping):
+        raise invalid
+    socket: Sequence[object] | None = None
+    socket_required = True
+    for section in ("required", "optional"):
+        values = sections.get(section, {})
+        if not isinstance(values, Mapping):
+            raise invalid
+        if values:
+            candidate = next(iter(values.values()))
+            if (
+                not isinstance(candidate, Sequence)
+                or isinstance(candidate, str | bytes)
+                or not candidate
+            ):
+                raise invalid
+            socket, socket_required = candidate, section == "required"
+            break
+    minimum = template.get("min", 1)
+    if socket is None or isinstance(minimum, bool) or not isinstance(minimum, int) or minimum < 0:
+        raise invalid
+    names = template.get("names")
+    prefix = template.get("prefix")
+    if names is not None:
+        if not isinstance(names, Sequence) or isinstance(names, str | bytes):
+            raise invalid
+        labels = [str(name) for name in names]
+    elif isinstance(prefix, str):
+        maximum = template.get("max")
+        if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 1:
+            raise invalid
+        labels = [f"{prefix}{index}" for index in range(maximum)]
+    else:
+        raise invalid
+    return [
+        _InputDefinition(
+            f"{definition.name}{_DYNAMIC_SEPARATOR}{label}",
+            socket,
+            socket_required and index < minimum,
+            socket_only=True,
+        )
+        for index, label in enumerate(labels)
+    ]
+
+
 def _is_widget_spec(spec: Sequence[object]) -> bool:
     kind = spec[0]
     if isinstance(kind, Sequence) and not isinstance(kind, str | bytes):
@@ -1076,6 +1234,9 @@ def _widget_default(spec: Sequence[object]) -> tuple[object | None, bool]:
     if "default" in options:
         return options["default"], True
     choices = options.get("options")
+    if kind == _DYNAMIC_COMBO and isinstance(choices, Sequence) and choices:
+        first = choices[0]
+        return (first.get("key"), True) if isinstance(first, Mapping) else (None, False)
     if kind == "COMBO" and isinstance(choices, Sequence) and not isinstance(choices, str | bytes):
         return (choices[0], True) if choices else (None, False)
     return None, False
@@ -1095,6 +1256,10 @@ def _serialize_widget_value(
         candidate = _widget_options(spec).get("options")
         if isinstance(candidate, Sequence) and not isinstance(candidate, str | bytes):
             choices = candidate
+    elif kind == _DYNAMIC_COMBO:
+        candidate = _widget_options(spec).get("options")
+        if isinstance(candidate, Sequence) and not isinstance(candidate, str | bytes):
+            choices = [item.get("key") for item in candidate if isinstance(item, Mapping)]
     if choices is not None and value not in choices:
         raise WorkflowCompilationError(
             "invalid_widget_choice", f"node {node_id} has invalid value for {name}"
