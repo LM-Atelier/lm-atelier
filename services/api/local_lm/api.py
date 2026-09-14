@@ -567,6 +567,7 @@ from .schemas import (
 )
 from .security import SessionSecurity
 from .settings_registry import (
+    WORKFLOW_LORA_OVERRIDES_SETTING_KEY,
     defaults,
     validate_settings,
     validate_workflow_input_schema,
@@ -666,6 +667,13 @@ from .workflow_library import (
     workflow_resource_name,
 )
 from .workflow_lora_admission import WorkflowLoraAdmissionError
+from .workflow_lora_overrides import WorkflowLoraOverrideError, WorkflowLoraOverrides
+from .workflow_lora_settings import (
+    WorkflowLoraSettingsError,
+    overlay_workflow_lora_overrides,
+    split_workflow_lora_overrides_setting,
+    workflow_lora_overrides_setting_value,
+)
 from .workflow_lora_slots import WorkflowLoraSlotError
 from .workflow_loras import WorkflowLoraProjectionError, workflow_lora_controls
 from .workflow_node_dependencies import node_dependency_errors
@@ -1942,6 +1950,47 @@ def _validate_project_workflow_pins(session: Session, values: dict[str, Any]) ->
             )
 
 
+def _split_workflow_lora_setting_or_422(
+    settings: Mapping[str, Any] | None,
+    *,
+    role: str,
+    code: str,
+) -> tuple[WorkflowLoraOverrides | None, dict[str, Any]]:
+    """Separate a saved layer's workflow LoRA edits, refusing them without echoing them."""
+
+    try:
+        return split_workflow_lora_overrides_setting(settings, role=role)
+    except (WorkflowLoraOverrideError, WorkflowLoraSettingsError) as exc:
+        raise api_error(422, code, "The workflow LoRA settings are invalid.") from exc
+
+
+def _with_workflow_lora_setting(
+    ordinary: dict[str, Any],
+    overrides: WorkflowLoraOverrides | None,
+) -> dict[str, Any]:
+    if overrides is None:
+        return ordinary
+    return {
+        **ordinary,
+        WORKFLOW_LORA_OVERRIDES_SETTING_KEY: workflow_lora_overrides_setting_value(overrides),
+    }
+
+
+def _without_workflow_lora_setting(settings: object) -> dict[str, Any]:
+    if not isinstance(settings, dict):
+        return {}
+    return {
+        key: value for key, value in settings.items() if key != WORKFLOW_LORA_OVERRIDES_SETTING_KEY
+    }
+
+
+def _refuse_imported_workflow_lora_setting(settings: Mapping[str, Any], *, code: str) -> None:
+    # Workflow LoRA edits name a revision and activation on this machine, so a
+    # bundle from anywhere else cannot carry them truthfully.
+    if WORKFLOW_LORA_OVERRIDES_SETTING_KEY in settings:
+        raise api_error(422, code, "Imported settings cannot include workflow LoRA edits.")
+
+
 async def _validate_generation_defaults(
     request: Request,
     session: Session,
@@ -1959,9 +2008,15 @@ async def _validate_generation_defaults(
                     "generation-defaults-too-large",
                     f"{role} generation defaults are too large",
                 )
-            request_settings = settings
-            if STRENGTH_MODE_PARAMETER in settings:
-                mode = settings[STRENGTH_MODE_PARAMETER]
+            workflow_lora_overrides, ordinary = _split_workflow_lora_setting_or_422(
+                settings,
+                role=role,
+                code="generation-defaults-invalid",
+            )
+            scoped[role] = _with_workflow_lora_setting(ordinary, workflow_lora_overrides)
+            request_settings = ordinary
+            if STRENGTH_MODE_PARAMETER in ordinary:
+                mode = ordinary[STRENGTH_MODE_PARAMETER]
                 if role != ModelRole.IMAGE.value or mode not in {"auto", "manual"}:
                     raise api_error(
                         422,
@@ -1969,7 +2024,7 @@ async def _validate_generation_defaults(
                         "image edit strength mode must be auto or manual for image defaults",
                     )
                 request_settings = {
-                    key: value for key, value in settings.items() if key != STRENGTH_MODE_PARAMETER
+                    key: value for key, value in ordinary.items() if key != STRENGTH_MODE_PARAMETER
                 }
             fields = await _engine_role_fields(request, role)
             request_fields = [field for field in fields if field.scope != "load"]
@@ -8307,12 +8362,25 @@ async def _create_profile(
             select(ModelProfile).where(ModelProfile.role == payload.role)
         ).all():
             profile.is_default = False
+    _, load_ordinary = _split_workflow_lora_setting_or_422(
+        payload.load_settings,
+        role="load",
+        code="profile-settings-invalid",
+    )
+    request_overrides, request_ordinary = _split_workflow_lora_setting_or_422(
+        payload.request_settings,
+        role=payload.role,
+        code="profile-settings-invalid",
+    )
     try:
         load_settings = validate_settings(
-            payload.load_settings, [field for field in fields if field.scope == "load"]
+            load_ordinary, [field for field in fields if field.scope == "load"]
         )
-        request_settings = validate_settings(
-            payload.request_settings, [field for field in fields if field.scope != "load"]
+        request_settings = _with_workflow_lora_setting(
+            validate_settings(
+                request_ordinary, [field for field in fields if field.scope != "load"]
+            ),
+            request_overrides,
         )
     except ValueError as exc:
         raise api_error(422, "profile-settings-invalid", str(exc)) from exc
@@ -8371,18 +8439,31 @@ async def update_profile(
                 sibling.is_default = False
         profile.is_default = is_default
     if "load_settings" in values:
+        _, load_ordinary = _split_workflow_lora_setting_or_422(
+            values.pop("load_settings") or {},
+            role="load",
+            code="profile-load-settings-invalid",
+        )
         try:
             profile.load_settings_json = validate_settings(
-                values.pop("load_settings") or {},
+                load_ordinary,
                 [field for field in fields if field.scope == "load"],
             )
         except ValueError as exc:
             raise api_error(422, "profile-load-settings-invalid", str(exc)) from exc
     if "request_settings" in values:
+        request_overrides, request_ordinary = _split_workflow_lora_setting_or_422(
+            values.pop("request_settings") or {},
+            role=profile.role,
+            code="profile-request-settings-invalid",
+        )
         try:
-            profile.request_settings_json = validate_settings(
-                normalize_saved_settings(values.pop("request_settings") or {}, profile.role),
-                [field for field in fields if field.scope != "load"],
+            profile.request_settings_json = _with_workflow_lora_setting(
+                validate_settings(
+                    normalize_saved_settings(request_ordinary, profile.role),
+                    [field for field in fields if field.scope != "load"],
+                ),
+                request_overrides,
             )
         except ValueError as exc:
             raise api_error(422, "profile-request-settings-invalid", str(exc)) from exc
@@ -8479,8 +8560,8 @@ async def export_profile(profile_id: str, session: SessionDep) -> ModelProfileBu
         role=cast(Literal["chat", "image", "video"], profile.role),
         engine=profile.engine,
         model_install_id=profile.model_install_id,
-        load_settings=profile.load_settings_json,
-        request_settings=profile.request_settings_json,
+        load_settings=_without_workflow_lora_setting(profile.load_settings_json),
+        request_settings=_without_workflow_lora_setting(profile.request_settings_json),
     )
 
 
@@ -8490,6 +8571,10 @@ async def import_profile(
     request: Request,
     session: SessionDep,
 ) -> ModelProfile:
+    _refuse_imported_workflow_lora_setting(payload.load_settings, code="profile-settings-invalid")
+    _refuse_imported_workflow_lora_setting(
+        payload.request_settings, code="profile-settings-invalid"
+    )
     return await _create_profile(
         ModelProfileCreate(
             name=payload.name,
@@ -8521,10 +8606,18 @@ async def create_preset(
     session: SessionDep,
 ) -> GenerationPreset:
     fields = await _engine_role_fields(request, payload.role)
+    overrides, ordinary = _split_workflow_lora_setting_or_422(
+        payload.settings,
+        role=payload.role,
+        code="preset-invalid",
+    )
     try:
-        values = validate_settings(
-            payload.settings,
-            [field for field in fields if field.scope != "load"],
+        values = _with_workflow_lora_setting(
+            validate_settings(
+                ordinary,
+                [field for field in fields if field.scope != "load"],
+            ),
+            overrides,
         )
     except ValueError as exc:
         raise api_error(422, "preset-invalid", str(exc)) from exc
@@ -8558,10 +8651,18 @@ async def update_preset(
     values = payload.model_dump(exclude_unset=True)
     if "settings" in values:
         fields = await _engine_role_fields(request, preset.role)
+        overrides, ordinary = _split_workflow_lora_setting_or_422(
+            values.pop("settings") or {},
+            role=preset.role,
+            code="preset-invalid",
+        )
         try:
-            preset.settings_json = validate_settings(
-                normalize_saved_settings(values.pop("settings") or {}, preset.role),
-                [field for field in fields if field.scope != "load"],
+            preset.settings_json = _with_workflow_lora_setting(
+                validate_settings(
+                    normalize_saved_settings(ordinary, preset.role),
+                    [field for field in fields if field.scope != "load"],
+                ),
+                overrides,
             )
         except ValueError as exc:
             raise api_error(422, "preset-invalid", str(exc)) from exc
@@ -8603,10 +8704,32 @@ async def delete_preset(preset_id: str, session: SessionDep) -> Response:
             else {}
         )
         direct = scoped.get(preset.role)
-        scoped[preset.role] = {
+        merged = {
             **normalize_saved_settings(preset.settings_json, preset.role),
             **normalize_saved_settings(direct if isinstance(direct, dict) else {}, preset.role),
         }
+        # The preset's workflow LoRA edits sat below the chat's or project's own,
+        # field by field; folding them in keeps that order instead of letting one
+        # side replace the other wholesale.
+        merged.pop(WORKFLOW_LORA_OVERRIDES_SETTING_KEY, None)
+        try:
+            preset_overrides, _ = split_workflow_lora_overrides_setting(
+                preset.settings_json, role=preset.role
+            )
+            direct_overrides, _ = split_workflow_lora_overrides_setting(
+                direct if isinstance(direct, dict) else {}, role=preset.role
+            )
+            if preset_overrides is not None or direct_overrides is not None:
+                merged[WORKFLOW_LORA_OVERRIDES_SETTING_KEY] = workflow_lora_overrides_setting_value(
+                    overlay_workflow_lora_overrides(preset_overrides, direct_overrides)
+                )
+        except (WorkflowLoraOverrideError, WorkflowLoraSettingsError) as exc:
+            raise api_error(
+                409,
+                "workflow-lora-settings-stale",
+                "The workflow LoRA settings no longer match the selected workflow.",
+            ) from exc
+        scoped[preset.role] = merged
         owner.generation_preset_ids_json = bindings
         owner.generation_settings_json = scoped
     session.delete(preset)
@@ -8654,7 +8777,7 @@ async def export_preset(preset_id: str, session: SessionDep) -> PresetBundle:
     return PresetBundle(
         name=preset.name,
         role=cast(Literal["chat", "image", "video"], preset.role),
-        settings=preset.settings_json,
+        settings=_without_workflow_lora_setting(preset.settings_json),
     )
 
 
@@ -8664,6 +8787,7 @@ async def import_preset(
     request: Request,
     session: SessionDep,
 ) -> GenerationPreset:
+    _refuse_imported_workflow_lora_setting(payload.settings, code="preset-invalid")
     return await create_preset(
         PresetCreate(name=payload.name, role=payload.role, settings=payload.settings),
         request,
