@@ -294,3 +294,50 @@ def test_fractional_dimensions_remain_literal_without_poisoning_pixel_settings(
         assert dispatched["2"]["inputs"] == {"width": 1024, "height": 768}
     else:
         assert all(field.key not in {"width", "height"} for field in fields)
+
+
+def _sampling_mode() -> list[Any]:
+    return [
+        "COMFY_DYNAMICCOMBO_V3",
+        {
+            "options": [
+                {
+                    "key": "on",
+                    "inputs": {
+                        "required": {
+                            "temperature": ["FLOAT", {"default": 0.7}],
+                            "seed": ["INT", {"default": 0, "control_after_generate": True}],
+                        },
+                        "optional": {"top_p": ["FLOAT", {"default": 0.95}]},
+                    },
+                },
+                {"key": "off", "inputs": {"required": {}}},
+            ]
+        },
+    ]
+
+
+def test_a_dynamic_combo_sends_its_chosen_options_widgets_under_its_name() -> None:
+    # The chosen option's widgets are saved straight after the choice, so a
+    # widget declared after the combo must not take one of their values.
+    graph, _ = _compile(
+        {"sampling_mode": _sampling_mode(), "thinking": ["BOOLEAN", {"default": False}]},
+        ["on", 0.4, 7, "fixed", 0.9, True],
+    )
+
+    assert graph["1"]["inputs"] == {
+        "sampling_mode": "on",
+        "sampling_mode.temperature": 0.4,
+        "sampling_mode.seed": 7,
+        "sampling_mode.top_p": 0.9,
+        "thinking": True,
+    }
+
+
+def test_a_dynamic_combo_option_without_widgets_leaves_the_next_value_alone() -> None:
+    graph, _ = _compile(
+        {"sampling_mode": _sampling_mode(), "thinking": ["BOOLEAN", {"default": False}]},
+        ["off", True],
+    )
+
+    assert graph["1"]["inputs"] == {"sampling_mode": "off", "thinking": True}

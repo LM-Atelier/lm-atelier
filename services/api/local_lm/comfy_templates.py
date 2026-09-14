@@ -45,7 +45,7 @@ _RUNTIME_PARAMETERS = {
 _SUPPRESSED_RUNTIME_NAMES = frozenset({"motion_strength"})
 _PRIMITIVE_WIDGET_TYPES = {"BOOLEAN", "COMBO", "COMFY_DYNAMICCOMBO_V3", "FLOAT", "INT", "STRING"}
 _CONTROL_AFTER_GENERATE = {"decrement", "fixed", "increment", "randomize"}
-COMFY_TEMPLATE_COMPILER_VERSION = 21
+COMFY_TEMPLATE_COMPILER_VERSION = 22
 DEFAULT_IMAGE_EDIT_DENOISE = 0.9
 _ADAPTIVE_CHECKPOINT_PREFIX = "lma_image_checkpoint_v1_"
 _ADAPTIVE_CHECKPOINT_PLACEHOLDER = "__LM_ATELIER_CHECKPOINT__"
@@ -1929,6 +1929,48 @@ def _widget_values(
         values = []
     result: dict[str, Any] = {}
     cursor = 0
+
+    def take(name: str, spec: list[Any]) -> None:
+        nonlocal cursor
+        if cursor < len(values):
+            selected = values[cursor]
+            choices = _widget_choices(spec)
+            if (
+                validate_model_choices
+                and isinstance(choices, list)
+                and choices
+                and selected not in choices
+                and name not in (runtime_input_names or set())
+            ):
+                raise ValueError(
+                    f"ComfyUI does not advertise the template value for {name}: {selected}"
+                )
+            result[name] = selected
+            cursor += 1
+        else:
+            default = _widget_default(spec)
+            if default is not None:
+                result[name] = default
+        options = spec[1] if len(spec) > 1 else {}
+        if (
+            isinstance(options, dict)
+            and options.get("control_after_generate")
+            and cursor < len(values)
+            and str(values[cursor]).lower() in _CONTROL_AFTER_GENERATE
+        ):
+            cursor += 1
+        # A dynamic combo's chosen option brings its own widgets, saved right
+        # after the choice and sent to the runtime under the combo's name.
+        if spec[0] == "COMFY_DYNAMICCOMBO_V3" and isinstance(options, dict):
+            for option in options.get("options") or []:
+                if isinstance(option, dict) and option.get("key") == result.get(name):
+                    nested = option.get("inputs") or {}
+                    for nested_section in ("required", "optional"):
+                        for nested_name, nested_spec in (nested.get(nested_section) or {}).items():
+                            if _is_widget_spec(nested_spec):
+                                take(f"{name}.{nested_name}", cast(list[Any], nested_spec))
+                    break
+
     input_info = node_info.get("input") or {}
     input_order = node_info.get("input_order") or {}
     for section in ("required", "optional"):
@@ -1936,36 +1978,8 @@ def _widget_values(
         names = input_order.get(section) or list(definitions)
         for name in names:
             spec = definitions.get(name)
-            if not _is_widget_spec(spec):
-                continue
-            spec = cast(list[Any], spec)
-            if cursor < len(values):
-                selected = values[cursor]
-                choices = _widget_choices(spec)
-                if (
-                    validate_model_choices
-                    and isinstance(choices, list)
-                    and choices
-                    and selected not in choices
-                    and str(name) not in (runtime_input_names or set())
-                ):
-                    raise ValueError(
-                        f"ComfyUI does not advertise the template value for {name}: {selected}"
-                    )
-                result[str(name)] = selected
-                cursor += 1
-            else:
-                default = _widget_default(spec)
-                if default is not None:
-                    result[str(name)] = default
-            options = spec[1] if isinstance(spec, list) and len(spec) > 1 else {}
-            if (
-                isinstance(options, dict)
-                and options.get("control_after_generate")
-                and cursor < len(values)
-                and str(values[cursor]).lower() in _CONTROL_AFTER_GENERATE
-            ):
-                cursor += 1
+            if _is_widget_spec(spec):
+                take(str(name), cast(list[Any], spec))
     return result
 
 
