@@ -29,6 +29,9 @@ import { useStudioSession, type StudioStep } from "./useStudioSession";
 import { useConfirm } from "./useConfirm";
 import type { EditTemplate, GenerationIdentity } from "./types";
 
+const SELECTION_NOT_PREPARED =
+  "The selection could not be prepared, so nothing was sent. Try again, or clear the selection to edit the whole picture.";
+
 /** The Image Studio: a canvas-first editing surface, not a conversation.
  *
  * The center is the current result at zoom; the filmstrip below is the edit
@@ -67,6 +70,7 @@ export function StudioView({
   const client = useQueryClient();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [instruction, setInstruction] = useState("");
+  const [selectionError, setSelectionError] = useState<string | null>(null);
   // The recipe an apply should run under. Cleared whenever the instruction is
   // edited by hand: at that point the words are no longer the recipe's, and
   // running its workflow would attribute a result to something it did not do.
@@ -212,6 +216,7 @@ export function StudioView({
       {(error || keep.error) && (
         <ErrorCallout message={((error ?? keep.error) as Error).message} />
       )}
+      {selectionError && <ErrorCallout message={selectionError} />}
       <div className="studio-layout">
         <StudioToolRail
           active={tools.kind}
@@ -396,8 +401,14 @@ export function StudioView({
                   },
                 );
               };
-              if (selection) void encodeMaskPng(selection).then(send);
-              else send(null);
+              setSelectionError(null);
+              // A selection that cannot be encoded is refused, never sent as an
+              // edit of the whole picture it was drawn to protect.
+              if (selection) {
+                void encodeMaskPng(selection).then((mask) =>
+                  mask ? send(mask) : setSelectionError(SELECTION_NOT_PREPARED),
+                );
+              } else send(null);
             }}
           >
             {busy
