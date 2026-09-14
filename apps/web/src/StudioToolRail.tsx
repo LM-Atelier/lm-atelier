@@ -8,6 +8,7 @@ import {
   Redo2,
   Sparkles,
   Square,
+  SunMedium,
   Type,
   Undo2,
   Wand2,
@@ -26,6 +27,7 @@ const TOOLS: Array<{ kind: StudioToolKind; label: string; icon: typeof Brush }> 
   { kind: "enhance", label: "Enlarge and restore detail", icon: Sparkles },
   { kind: "extend", label: "Extend past the edge", icon: Maximize2 },
   { kind: "text", label: "Replace words in the picture", icon: LetterText },
+  { kind: "relight", label: "Relight from a direction", icon: SunMedium },
 ];
 
 /** The studio's left rail: pick how you point at the image.

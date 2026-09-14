@@ -2372,6 +2372,11 @@ async def studio_capabilities(
 
     orchestrator: ConversationOrchestrator = _services(request).orchestrator
     schemas = orchestrator.installed_edit_input_schemas(session)
+    capabilities = tool_capabilities(
+        edit_input_schemas=schemas,
+        relight_workflow_ids=orchestrator.installed_relight_workflow_ids(session),
+        lighting_adapter_ids=orchestrator.installed_lighting_adapter_ids(session),
+    )
     return StudioCapabilityReport(
         tools=[
             StudioToolCapability(
@@ -2379,8 +2384,10 @@ async def studio_capabilities(
                 workflow_class=capability.workflow_class,
                 available=capability.available,
                 reason=capability.reason,
+                workflow_revision_id=capability.workflow_revision_id,
+                adapter_asset_id=capability.adapter_asset_id,
             )
-            for capability in tool_capabilities(edit_input_schemas=schemas)
+            for capability in capabilities
         ]
     )
 

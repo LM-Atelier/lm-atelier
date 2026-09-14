@@ -2006,13 +2006,15 @@ export interface WorkflowResourceConsumers {
 
 export type StudioToolKind =
   | "instruct" | "brush" | "eraser" | "rect" | "lasso" | "bucket" | "wand" | "enhance" | "extend"
-  | "text";
+  | "text" | "relight";
 
 export interface StudioToolCapability {
   kind: StudioToolKind;
   workflow_class: string;
   available: boolean;
   reason: string | null;
+  workflow_revision_id: string | null;
+  adapter_asset_id: string | null;
 }
 
 export interface StudioCapabilityReport {

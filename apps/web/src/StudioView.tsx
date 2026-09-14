@@ -15,10 +15,11 @@ import { StudioToolRail } from "./StudioToolRail";
 import { StudioWorkflowSelector } from "./StudioWorkflowSelector";
 import { artifactSource } from "./messageMedia";
 import { cloneMask, coverage, encodeMaskPng, feather, isEmpty, type MaskRaster } from "./studioMasks";
+import { studioApplyPlan } from "./studioApplyPlan";
+import { renderLightMap } from "./studioLightMap";
 import { readSourcePixels } from "./studioSourcePixels";
 import {
   initialToolState,
-  defaultInstruction,
   snapshotBeforeGesture,
   studioToolReducer,
   toolFor,
@@ -32,6 +33,8 @@ import type { EditTemplate, GenerationIdentity } from "./types";
 
 const SELECTION_NOT_PREPARED =
   "The selection could not be prepared, so nothing was sent. Try again, or clear the selection to edit the whole picture.";
+const LIGHT_MAP_NOT_PREPARED =
+  "The light map could not be drawn in this browser, so nothing was sent.";
 
 /** The Image Studio: a canvas-first editing surface, not a conversation.
  *
@@ -265,7 +268,7 @@ export function StudioView({
           ) : (
             <StudioWorkflowOpening selectorId={workflowSelectorId} />
           )}
-          {tools.kind !== "instruct" && (
+          {tools.kind !== "instruct" && tools.kind !== "relight" && (
             <div className="studio-selection-controls">
               <StudioSelectionTool tools={tools} dispatch={dispatch} colorsUnreadable={readsColors && Boolean(bitmap) && !sourcePixels} />
               <div className="row-actions">
@@ -325,56 +328,54 @@ export function StudioView({
             disabled={
               (tools.kind === "extend" && !Object.values(tools.margins).some(Boolean)) ||
               (tools.kind === "text" && (!tools.newWords.trim() || selectionCoverage === 0)) ||
-              (tools.kind !== "enhance" && tools.kind !== "extend" && tools.kind !== "text"
-                && !instruction.trim()) ||
+              (!["enhance", "extend", "text", "relight"].includes(tools.kind) && !instruction.trim()) ||
               busy ||
               !current ||
               Boolean(unavailable) ||
-              Boolean(workflowUnavailable && !recipe?.workflow_revision_id)
+              Boolean(
+                workflowUnavailable &&
+                  !recipe?.workflow_revision_id &&
+                  !(tools.kind === "relight" && activeTool?.workflow_revision_id),
+              )
             }
             onClick={() => {
               if (!current) return;
               const selection = toolUsesMask(tools.kind) && tools.mask && !isEmpty(tools.mask)
                 ? tools.mask
                 : null;
-              // Enhance and Extend ask for no words, and the turn requires
-              // some: both were reaching the server and being refused before
-              // anything ran. The user's words win whenever there are any.
-              const replacingWords = tools.kind === "text";
-              const words = replacingWords
-                ? defaultInstruction(tools)
-                : instruction.trim() || defaultInstruction(tools);
-              const send = (mask: Blob | null) => {
+              const plan = studioApplyPlan(tools, instruction, recipe, activeTool);
+              const send = (mask: Blob | null, secondPicture?: Blob) => {
                 apply(
-                  words,
+                  plan.words,
                   current.artifactId,
                   mask
                     ? {
                         blob: mask,
                         featherPx: tools.featherPx,
                         invert: false,
-                        ...(replacingWords ? { apply: "blend" as const } : {}),
+                        ...(plan.blendSelection ? { apply: "blend" as const } : {}),
                       }
                     : undefined,
-                  tools.kind === "enhance"
-                    ? { upscale_factor: tools.upscaleFactor }
-                    : tools.kind === "extend"
-                      ? { outpaint_margins: tools.margins }
-                      : recipe
-                        ? recipe.settings_json
-                        : undefined,
-                  recipe?.workflow_revision_id ?? undefined,
+                  plan.settings,
+                  plan.workflowRevisionId,
                   () => {
                     setInstruction("");
                     setSelectedId(null);
                   },
+                  secondPicture,
                 );
               };
               setSelectionError(null);
-              // A selection that cannot be encoded is refused, never sent as an
-              // edit of the whole picture it was drawn to protect.
-              if (selection) {
-                void encodeMaskPng(replacingWords ? softened(selection, tools.featherPx) : selection).then(
+              if (plan.sendsLightMap) {
+                // Drawn at the picture's own size, so the map and the picture line up.
+                if (!bitmap) return;
+                void renderLightMap(bitmap.width, bitmap.height, tools.lightDirection).then(
+                  (map) => (map ? send(null, map) : setSelectionError(LIGHT_MAP_NOT_PREPARED)),
+                );
+              } else if (selection) {
+                // A selection that cannot be encoded is refused, never sent as an
+                // edit of the whole picture it was drawn to protect.
+                void encodeMaskPng(plan.blendSelection ? softened(selection, tools.featherPx) : selection).then(
                   (mask) => (mask ? send(mask) : setSelectionError(SELECTION_NOT_PREPARED)),
                 );
               } else send(null);
@@ -386,6 +387,8 @@ export function StudioView({
                 ? "Extend"
                 : tools.kind === "text"
                   ? "Replace words"
+                : tools.kind === "relight"
+                  ? "Relight"
                 : tools.kind === "enhance"
                   ? `Enlarge ${tools.upscaleFactor}x`
                 : tools.kind !== "instruct" && selectionCoverage > 0
