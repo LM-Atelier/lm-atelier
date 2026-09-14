@@ -28,7 +28,9 @@ export function RuntimeSetupCard({
           : "Not installed";
   const detail = runtime.security_status === "blocked"
     ? `${runtime.license} · ${runtime.security_message || runtime.message}`
-    : runtime.engine === "comfyui"
+    : runtime.installed_release
+      ? runtime.message
+      : runtime.engine === "comfyui"
       ? `${runtime.license} · downloaded separately`
       : runtime.message;
   const transfer = structured?.rate_bytes_per_second && progressSampleIsFresh(structured)

@@ -37,6 +37,12 @@ logger = logging.getLogger(__name__)
 RuntimeName = Literal["llama.cpp", "vllm", "comfyui"]
 RUNTIME_NAMES: tuple[RuntimeName, ...] = ("llama.cpp", "vllm", "comfyui")
 _MANAGED_MARKER = ".lm-atelier-runtime.json"
+_RELEASE_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}")
+_ENGINE_LABELS: dict[RuntimeName, str] = {
+    "llama.cpp": "llama.cpp",
+    "vllm": "vLLM",
+    "comfyui": "ComfyUI",
+}
 _RUNTIME_PROBE_SENTINEL = "LM_ATELIER_RUNTIME_PROBE:"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MAX_RUNTIME_FILES = 250_000
@@ -964,7 +970,7 @@ class RuntimeProvisioner:
                 continue
             ready, paths = self._configured_paths(engine)
             configured_managed = ready and any(
-                self._is_inside_runtime_root(path.expanduser()) for path in paths
+                self._is_managed_location(engine, definition, path.expanduser()) for path in paths
             )
             final = self._installation_path(engine, definition)
             if not configured_managed and not self._managed_marker_owned(final, engine, definition):
@@ -991,15 +997,7 @@ class RuntimeProvisioner:
                     cancel_requested=self._restore_cancel.is_set,
                 )
                 if not matched:
-                    self._states[engine] = self._status(
-                        engine,
-                        definition,
-                        state="missing",
-                        supported=True,
-                        size_bytes=int(asset["size_bytes"]),
-                        message="Managed runtime verification failed; reinstall it to repair.",
-                        asset=asset,
-                    )
+                    self._states[engine] = self._unverified_status(engine, definition, asset)
                     logger.warning(
                         "Managed %s runtime failed startup integrity verification",
                         engine,
@@ -1023,16 +1021,83 @@ class RuntimeProvisioner:
             except RuntimeVerificationCancelled:
                 return
             except (OSError, RuntimeProvisioningError):
-                self._states[engine] = self._status(
-                    engine,
-                    definition,
-                    state="missing",
-                    supported=True,
-                    size_bytes=int(asset["size_bytes"]),
-                    message="Managed runtime verification failed; reinstall it to repair.",
-                    asset=asset,
-                )
+                self._states[engine] = self._unverified_status(engine, definition, asset)
                 logger.warning("Ignored incomplete managed %s runtime at %s", engine, final)
+
+    def _unverified_status(
+        self,
+        engine: RuntimeName,
+        definition: dict[str, Any],
+        asset: dict[str, Any],
+    ) -> RuntimeStatus:
+        """What to say when this build's pinned runtime did not verify at startup.
+
+        Usually the pinned install is damaged. But the configuration may still
+        point at another version's managed install, which launches as before;
+        calling that "missing" would be untrue, so it is named instead, and
+        installing the pinned release remains the offered action.
+        """
+        other = self._configured_other_release(engine, definition)
+        if other is None:
+            message = "Managed runtime verification failed; reinstall it to repair."
+        else:
+            message = (
+                f"{_ENGINE_LABELS[engine]} {other}, installed by another version of LM Atelier,"
+                f" is still in use. This version uses {definition['pinned_release']}."
+                " Install it to switch."
+            )
+        status = self._status(
+            engine,
+            definition,
+            state="missing",
+            supported=True,
+            size_bytes=int(asset["size_bytes"]),
+            message=message,
+            asset=asset,
+        )
+        return status.model_copy(update={"installed_release": other})
+
+    def _configured_other_release(
+        self,
+        engine: RuntimeName,
+        definition: Mapping[str, Any],
+    ) -> str | None:
+        """The release of another build's managed install that the configuration uses.
+
+        Every configured path must sit inside one release folder of this
+        engine, other than the pinned one, whose own marker names that same
+        release. Anything less certain is not given a name.
+        """
+        ready, paths = self._configured_paths(engine)
+        if not ready or not paths:
+            return None
+        root = self.runtime_root.resolve()
+        try:
+            relative = paths[0].expanduser().resolve().relative_to(root)
+        except (OSError, ValueError):
+            return None
+        if len(relative.parts) < 2 or not _RELEASE_LABEL.fullmatch(relative.parts[1]):
+            return None
+        release = relative.parts[1]
+        folder = root / self._safe_component(engine) / release
+        if release == definition["pinned_release"] or not all(
+            self._is_inside(path.expanduser(), folder) for path in paths
+        ):
+            return None
+        marker_path = folder / _MANAGED_MARKER
+        if marker_path.is_symlink():
+            return None
+        try:
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if (
+            not isinstance(marker, dict)
+            or marker.get("engine") != engine
+            or marker.get("release") != release
+        ):
+            return None
+        return release
 
     def _cleanup_completed_archives(self) -> None:
         for engine in RUNTIME_NAMES:
@@ -1112,7 +1177,9 @@ class RuntimeProvisioner:
         ready, paths = self._configured_paths(engine)
         if not ready:
             return None
-        managed = any(self._is_inside_runtime_root(item.expanduser()) for item in paths)
+        managed = any(
+            self._is_managed_location(engine, definition, item.expanduser()) for item in paths
+        )
         asset: dict[str, Any] | None = None
         if managed:
             asset = self._asset(engine, definition)
@@ -1157,6 +1224,33 @@ class RuntimeProvisioner:
             )
             paths = [item for item in (executable, directory) if item]
         return ready, paths
+
+    def _is_managed_location(
+        self,
+        engine: RuntimeName,
+        definition: Mapping[str, Any],
+        path: Path,
+    ) -> bool:
+        """Whether a configured path is somewhere this application installs runtimes.
+
+        That is the pinned release's folder, or a release folder under the
+        runtimes folder that holds a managed marker or is still being staged.
+        A runtime someone placed anywhere else, including elsewhere under the
+        runtimes folder, is an ordinary configured runtime: where its folder
+        happens to be says nothing about who installed it.
+        """
+        root = self.runtime_root.resolve()
+        try:
+            relative = path.resolve().relative_to(root)
+        except (OSError, ValueError):
+            return False
+        if self._is_inside(path, self._installation_path(engine, definition)):
+            return True
+        if len(relative.parts) < 2:
+            return True
+        release = root / relative.parts[0] / relative.parts[1]
+        marker = release / _MANAGED_MARKER
+        return relative.parts[1].startswith(".") or marker.is_symlink() or marker.exists()
 
     def _asset(
         self,
@@ -1711,9 +1805,6 @@ class RuntimeProvisioner:
             / self._safe_component(engine)
             / self._safe_component(str(definition["pinned_release"]))
         )
-
-    def _is_inside_runtime_root(self, path: Path) -> bool:
-        return self._is_inside(path, self.runtime_root)
 
     @staticmethod
     def _is_inside(path: Path, root: Path) -> bool:

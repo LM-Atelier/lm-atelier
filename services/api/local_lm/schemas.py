@@ -3119,6 +3119,9 @@ class RuntimeStatus(ApiModel):
     security_status: Literal["checksum-pinned", "blocked"] = "checksum-pinned"
     security_message: str = ""
     message: str = ""
+    #: Another version's managed release that the configuration still uses, when
+    #: this build's pinned release is not installed.
+    installed_release: str | None = None
 
 
 SetupReadinessCode = Literal[
@@ -3143,6 +3146,7 @@ SetupReadinessCode = Literal[
     "runtime_failed",
     "runtime_installing",
     "runtime_missing",
+    "runtime_other_version",
     "runtime_ready",
     "runtime_unsupported",
     "worker_failed",

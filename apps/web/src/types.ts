@@ -751,6 +751,7 @@ export interface RuntimeStatus {
   security_status?: "checksum-pinned" | "blocked";
   security_message?: string;
   message: string;
+  installed_release?: string | null;
 }
 
 export type SetupReadinessCode =
@@ -775,6 +776,7 @@ export type SetupReadinessCode =
   | "runtime_failed"
   | "runtime_installing"
   | "runtime_missing"
+  | "runtime_other_version"
   | "runtime_ready"
   | "runtime_unsupported"
   | "worker_failed"

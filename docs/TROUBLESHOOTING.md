@@ -14,6 +14,12 @@ means:
   the first time it is needed; **Install runtime** starts it now. Confirm free
   disk space first: ComfyUI needs about 2 GB to download and 8 GB free to
   install.
+- **The runtime installed by another version of LM Atelier is still in use.
+  Install this version's runtime to switch.** Another version of LM Atelier
+  installed a different runtime release, and this version still launches it, so
+  generation keeps working. **Install runtime** downloads the release this
+  version was tested with and switches to it. The runtime card in the
+  **Engines** section of **Settings > Advanced** names both releases.
 - **The required runtime did not start or install.** The download or extraction
   failed. Retry it. If it keeps failing, check free disk space and confirm that
   security software is not quarantining the extracted files.
@@ -199,12 +205,13 @@ visible change. Give it time before assuming it has hung.
 | Code | What you were shown |
 |---|---|
 | `runtime_missing` | The required runtime is not installed. |
+| `runtime_other_version` | The runtime installed by another version of LM Atelier is still in use. Install this version's runtime to switch. |
 | `runtime_failed` | The required runtime did not start or install. |
 | `runtime_unsupported` | Automatic setup for the required runtime is unavailable on this machine. |
 
-`runtime_missing` and `runtime_failed` both offer a button that installs or
-retries; a failed install is safe to retry, and a partial download is discarded
-rather than reused.
+`runtime_missing`, `runtime_other_version` and `runtime_failed` offer a button
+that installs or retries; a failed install is safe to retry, and a partial
+download is discarded rather than reused.
 
 `runtime_unsupported` deliberately offers **no** action. It means this machine
 cannot run that runtime - not that something went wrong - and the message
