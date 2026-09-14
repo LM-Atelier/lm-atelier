@@ -1,8 +1,8 @@
-.workflow-family-browser { min-width: 0; padding: 12px; border-right: 1px solid var(--border); }
-.workflow-family-filters { display: grid; gap: 10px; margin-bottom: 18px; }
-.workflow-family-filters label { display: grid; gap: 5px; color: var(--ink-secondary); font-size: 12px; }
-.workflow-family-filters input[type="search"], .workflow-family-filters select { width: 100%; min-width: 0; color: var(--ink-primary); border: 1px solid var(--line-control); border-radius: 8px; background: var(--panel-2); padding: 8px; }
-.workflow-family-filters .workflow-family-checkbox { display: flex; align-items: center; gap: 8px; }
+.workflow-family-browser { min-width: 0; padding: calc(12px * var(--spacing-scale, 1)); border-right: 1px solid var(--border); }
+.workflow-family-filters { display: grid; gap: calc(10px * var(--spacing-scale, 1)); margin-bottom: 18px; }
+.workflow-family-filters label { display: grid; gap: calc(5px * var(--spacing-scale, 1)); color: var(--ink-secondary); font-size: 12px; }
+.workflow-family-filters input[type="search"], .workflow-family-filters select { width: 100%; min-width: 0; color: var(--ink-primary); border: 1px solid var(--line-control); border-radius: 8px; background: var(--panel-2); padding: calc(8px * var(--spacing-scale, 1)); }
+.workflow-family-filters .workflow-family-checkbox { display: flex; align-items: center; gap: calc(8px * var(--spacing-scale, 1)); }
 .workflow-family-checkbox input { margin: 0; accent-color: var(--atelier); }
 .workflow-family-browser section + section { margin-top: 18px; }
 .workflow-family-browser h3 { margin: 0 0 6px; font-size: 14px; overflow-wrap: anywhere; }
@@ -16,4 +16,4 @@
 }
 
 .workflow-family-variant { min-width: 0; }
-.workflow-family-browser .workflow-list .workflow-family-install-action { width: calc(100% - 20px); margin: 0 10px 8px; padding: 7px 10px; justify-content: center; border: 1px solid var(--line-control); background: var(--panel-2); color: var(--ink-primary); font-size: 12px; }
+.workflow-family-browser .workflow-list .workflow-family-install-action { width: calc(100% - 20px); margin: 0 10px 8px; padding: calc(7px * var(--spacing-scale, 1)) calc(10px * var(--spacing-scale, 1)); justify-content: center; border: 1px solid var(--line-control); background: var(--panel-2); color: var(--ink-primary); font-size: 12px; }

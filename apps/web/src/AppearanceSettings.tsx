@@ -1,6 +1,7 @@
 import { Monitor, Moon, Sun } from "lucide-react";
 import { useId } from "react";
 import { clockOptions, setClockChoice, useClockChoice, type ClockChoice } from "./clockPreference";
+import { InterfaceDensitySetting } from "./InterfaceDensitySetting";
 import { DEFAULT_SIDEBAR_WIDTH, resetSidebarLayout, useSidebarState } from "./sidebarLayout";
 import {
   ROOMS,
@@ -189,6 +190,7 @@ export function AppearanceSettings({ appearance }: { appearance: Appearance }) {
       </section>
       <section>
         <div className="detail-title"><div><h2>Layout</h2><p>Saved in this browser.</p></div></div>
+        <InterfaceDensitySetting />
         <div className="setting-row appearance-row">
           <span>
             <strong id={`${id}-text-size`}>Text size</strong>

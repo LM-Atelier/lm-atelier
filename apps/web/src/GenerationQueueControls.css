@@ -2,9 +2,9 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
+  gap: calc(12px * var(--spacing-scale, 1));
   margin-block: 12px;
-  padding: 12px;
+  padding: calc(12px * var(--spacing-scale, 1));
   border: 1px solid var(--border);
   border-radius: 12px;
 }
