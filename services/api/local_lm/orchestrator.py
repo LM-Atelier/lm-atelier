@@ -9076,6 +9076,44 @@ class ConversationOrchestrator:
             "fallback": score == 0,
         }
 
+    def _profile_bound_by_revision(
+        self,
+        session: Session,
+        operation: Operation,
+        revision_id: str,
+    ) -> str | None:
+        """The model a turn naming only a model-bound revision must run with.
+
+        A revision that declares its model cannot run on whatever the chat
+        would otherwise pick, so the chat's default is not asked: the one ready
+        model the revision accepts is used. No match, or several, refuses
+        rather than letting ranking or recency decide.
+
+        None leaves selection to the chat, for a revision that declares no model.
+        """
+        revision = session.get(WorkflowRevision, revision_id)
+        if revision is None or not self._revision_declares_a_model(revision):
+            return None
+        role = self._role_for_operation(operation)
+        ready: list[str] = []
+        for profile in session.scalars(
+            select(ModelProfile).where(ModelProfile.role == role).order_by(ModelProfile.id)
+        ).all():
+            if not profile.model_install_id or profile.engine != revision.engine:
+                continue
+            install = session.get(ModelInstall, profile.model_install_id)
+            if install is None or not install.active or install.engine != profile.engine:
+                continue
+            if self._revision_accepts_install(session, revision, install.id):
+                ready.append(profile.id)
+        if len(ready) == 1:
+            return ready[0]
+        if not ready:
+            raise ValueError("No ready model can run the selected workflow revision.")
+        raise ValueError(
+            "More than one ready model can run the selected workflow revision. Choose one."
+        )
+
     def _profile_and_workflow_for_operation(
         self,
         session: Session,
@@ -9087,6 +9125,10 @@ class ConversationOrchestrator:
         preferred_profile_id: str | None = None,
         workflow_choice: TurnWorkflowSelectionIn | None = None,
     ) -> tuple[ModelProfile | None, dict[str, Any], WorkflowRevision | None]:
+        if preferred_revision_id is not None and preferred_profile_id is None:
+            preferred_profile_id = self._profile_bound_by_revision(
+                session, operation, preferred_revision_id
+            )
         if preferred_profile_id is not None:
             selected = session.get(ModelProfile, preferred_profile_id)
             if selected is None:
