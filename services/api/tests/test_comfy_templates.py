@@ -2496,3 +2496,145 @@ def test_video_workflow_without_binding_hides_each_unsupported_control() -> None
     keys = {field.key for field in workflow_settings(VIDEO_SETTINGS, schema)}
     assert "steps" in keys
     assert keys.isdisjoint({"cfg", "guidance", "codec", "motion_strength"})
+
+
+def _wiring_object_info() -> dict[str, Any]:
+    return {
+        "LoadImage": {
+            "input": {"required": {"image": [["source.png"], {"image_upload": True}]}},
+            "input_order": {"required": ["image"]},
+        },
+        "ImageScale": {
+            "input": {"required": {"image": ["IMAGE"], "scale": ["FLOAT", {"default": 1.0}]}},
+            "input_order": {"required": ["image", "scale"]},
+        },
+        "Finish": {
+            "input": {
+                "required": {"image": ["IMAGE"], "blend": ["FLOAT", {"default": 1.0}]},
+                "optional": {"reference": ["IMAGE"]},
+            },
+            "input_order": {"required": ["image", "blend"], "optional": ["reference"]},
+        },
+    }
+
+
+def _loader(node_id: int, links: list[int], **extra: Any) -> dict[str, Any]:
+    return {
+        "id": node_id,
+        "type": "LoadImage",
+        "inputs": [],
+        "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": links}],
+        "widgets_values": ["source.png", "image"],
+        **extra,
+    }
+
+
+def _finish(image_link: int | None, reference_link: int | None = None) -> dict[str, Any]:
+    return {
+        "id": 3,
+        "type": "Finish",
+        "inputs": [
+            {"name": "image", "type": "IMAGE", "link": image_link},
+            {"name": "blend", "type": "FLOAT", "widget": {"name": "blend"}, "link": None},
+            {"name": "reference", "type": "IMAGE", "link": reference_link},
+        ],
+        "outputs": [],
+        "widgets_values": [1.0],
+    }
+
+
+def _links_to_missing_nodes(graph: dict[str, Any]) -> list[tuple[str, str]]:
+    return [
+        (node_id, name)
+        for node_id, node in graph.items()
+        for name, value in node["inputs"].items()
+        if isinstance(value, list) and len(value) == 2 and str(value[0]) not in graph
+    ]
+
+
+def test_a_reroute_chain_carries_the_connection_that_feeds_it() -> None:
+    reroute = {"type": "Reroute", "outputs": [{"name": "", "type": "*"}]}
+    ui_graph = {
+        "nodes": [
+            _loader(1, [1]),
+            {**reroute, "id": 5, "inputs": [{"name": "", "type": "*", "link": 1}]},
+            {**reroute, "id": 6, "inputs": [{"name": "", "type": "*", "link": 2}]},
+            _finish(3),
+        ],
+        "links": [[1, 1, 0, 5, 0, "IMAGE"], [2, 5, 0, 6, 0, "IMAGE"], [3, 6, 0, 3, 0, "IMAGE"]],
+    }
+
+    graph, _ = _compile_ui_graph(ui_graph, _wiring_object_info(), operation="text_to_image")
+
+    assert set(graph) == {"1", "3"}
+    assert graph["3"]["inputs"]["image"] == ["1", 0]
+
+
+def test_a_bypassed_node_passes_its_matching_input_through() -> None:
+    ui_graph = {
+        "nodes": [
+            _loader(1, [1]),
+            {
+                "id": 2,
+                "type": "ImageScale",
+                "mode": 4,
+                "inputs": [
+                    {"name": "image", "type": "IMAGE", "link": 1},
+                    {"name": "scale", "type": "FLOAT", "widget": {"name": "scale"}, "link": None},
+                ],
+                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [2]}],
+                "widgets_values": [0.5],
+            },
+            _finish(2),
+        ],
+        "links": [[1, 1, 0, 2, 0, "IMAGE"], [2, 2, 0, 3, 0, "IMAGE"]],
+    }
+
+    graph, _ = _compile_ui_graph(ui_graph, _wiring_object_info(), operation="text_to_image")
+
+    assert set(graph) == {"1", "3"}
+    assert graph["3"]["inputs"]["image"] == ["1", 0]
+
+
+@pytest.mark.parametrize("mode", [2, 4], ids=["muted", "bypassed"])
+def test_an_input_fed_by_a_node_that_does_not_run_is_left_out(mode: int) -> None:
+    # The second loader has nothing a bypass could pass through, and a muted
+    # node passes nothing at all, so the optional input goes unconnected.
+    ui_graph = {
+        "nodes": [_loader(1, [1]), _loader(4, [2], mode=mode), _finish(1, 2)],
+        "links": [[1, 1, 0, 3, 0, "IMAGE"], [2, 4, 0, 3, 2, "IMAGE"]],
+    }
+
+    graph, _ = _compile_ui_graph(ui_graph, _wiring_object_info(), operation="text_to_image")
+
+    assert "4" not in graph
+    assert "reference" not in graph["3"]["inputs"]
+    assert graph["3"]["inputs"]["image"] == ["1", 0]
+    assert _links_to_missing_nodes(graph) == []
+
+
+def test_a_primitive_node_puts_its_value_into_the_widget_it_drives() -> None:
+    finish = _finish(1)
+    finish["inputs"][1]["link"] = 2
+    ui_graph = {
+        "nodes": [
+            _loader(1, [1]),
+            {
+                "id": 7,
+                "type": "PrimitiveNode",
+                "inputs": [],
+                "outputs": [
+                    {"name": "FLOAT", "type": "FLOAT", "widget": {"name": "blend"}, "links": [2]}
+                ],
+                "widgets_values": [0.35, "fixed"],
+            },
+            finish,
+        ],
+        "links": [[1, 1, 0, 3, 0, "IMAGE"], [2, 7, 0, 3, 1, "FLOAT"]],
+    }
+
+    graph, _ = _compile_ui_graph(ui_graph, _wiring_object_info(), operation="text_to_image")
+
+    assert set(graph) == {"1", "3"}
+    assert graph["3"]["inputs"]["blend"] == 0.35
+    assert _links_to_missing_nodes(graph) == []

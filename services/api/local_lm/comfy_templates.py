@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, cast
 from urllib.parse import unquote, urlparse
 
+from .comfy_subgraphs import BYPASS_MODE, _bypass_source, _Link, _slot_types
 from .comfy_workflow_packages import FRONTEND_SYSTEM_NODE_TYPES
 from .config import Settings
 from .schemas import SettingField
@@ -44,7 +45,7 @@ _RUNTIME_PARAMETERS = {
 _SUPPRESSED_RUNTIME_NAMES = frozenset({"motion_strength"})
 _PRIMITIVE_WIDGET_TYPES = {"BOOLEAN", "COMBO", "COMFY_DYNAMICCOMBO_V3", "FLOAT", "INT", "STRING"}
 _CONTROL_AFTER_GENERATE = {"decrement", "fixed", "increment", "randomize"}
-COMFY_TEMPLATE_COMPILER_VERSION = 20
+COMFY_TEMPLATE_COMPILER_VERSION = 21
 DEFAULT_IMAGE_EDIT_DENOISE = 0.9
 _ADAPTIVE_CHECKPOINT_PREFIX = "lma_image_checkpoint_v1_"
 _ADAPTIVE_CHECKPOINT_PLACEHOLDER = "__LM_ATELIER_CHECKPOINT__"
@@ -1658,6 +1659,7 @@ def _compile_ui_graph(
                 links.append((*resolved_origin, inner_target, inner_slot))
         else:
             links.append((*resolved_origin, target, target_slot))
+    links, primitive_values = _route_links_as_queued(flat_nodes, links)
 
     linked_inputs: dict[tuple[str, str], list[Any]] = {}
     for origin, origin_slot, target, target_slot in links:
@@ -1717,6 +1719,10 @@ def _compile_ui_graph(
             validate_model_choices=validate_model_choices,
             runtime_input_names={"image"} if node_id in source_indices else set(),
         )
+        node_inputs = node.get("inputs") or []
+        for (target_id, target_slot), value in primitive_values.items():
+            if target_id == node_id and target_slot < len(node_inputs):
+                inputs[str(node_inputs[target_slot].get("name") or "")] = value
         for (target_id, input_name), connection in linked_inputs.items():
             if target_id == node_id:
                 inputs[input_name] = connection
@@ -1780,6 +1786,12 @@ def _compile_ui_graph(
                 "title": str(node.get("title") or node_info.get("display_name") or class_type)
             },
         }
+    # The frontend drops an input still linked to a node it does not queue, such
+    # as a muted one. The runtime rejects a link to a node the graph lacks.
+    for compiled in api_graph.values():
+        for input_name, value in list(compiled["inputs"].items()):
+            if isinstance(value, list) and len(value) == 2 and str(value[0]) not in api_graph:
+                del compiled["inputs"][input_name]
     for runtime_name in sorted(
         set(_RUNTIME_PARAMETERS.values()) | _SUPPRESSED_RUNTIME_NAMES | {"negative_prompt"}
     ):
@@ -1795,6 +1807,62 @@ def _compile_ui_graph(
             prop["maximum"] = min(prop["maximum"], field.maximum)
     _resolve_widget_defaults(fields, schema_properties, default_candidates)
     return api_graph, {"type": "object", "properties": schema_properties}
+
+
+def _route_links_as_queued(
+    nodes: dict[str, dict[str, Any]],
+    links: list[tuple[str, int, str, int]],
+) -> tuple[list[tuple[str, int, str, int]], dict[tuple[str, int], Any]]:
+    """Resolve the connections the ComfyUI frontend resolves before it queues a graph.
+
+    A reroute carries whatever feeds it. A bypassed node passes each output
+    through from the input the frontend picks for it, the same rule subgraph
+    expansion uses, and an output with no such input simply ends. A primitive
+    node puts its own value into the widget it drives. Unresolved, each of these
+    would reach the runtime as a link to a node the compiled graph does not
+    hold, and the runtime refuses such a graph outright.
+
+    Returns the routed links, and each primitive's value by the target node and
+    input slot it fills.
+    """
+
+    feeding: dict[tuple[str, int], _Link] = {
+        (target, target_slot): _Link("", origin, origin_slot, target, target_slot, None)
+        for origin, origin_slot, target, target_slot in links
+    }
+    routed: list[tuple[str, int, str, int]] = []
+    primitive_values: dict[tuple[str, int], Any] = {}
+    for origin, origin_slot, target, target_slot in links:
+        current: tuple[str, int] | None = (origin, origin_slot)
+        visited: set[tuple[str, int]] = set()
+        while current is not None and current[0] in nodes:
+            carrier = nodes[current[0]]
+            if str(carrier.get("type")) == "Reroute":
+                source = feeding.get((current[0], 0))
+            elif carrier.get("mode") == BYPASS_MODE:
+                source = _bypass_source(
+                    _slot_types(carrier.get("inputs")),
+                    {slot: link for (fed, slot), link in feeding.items() if fed == current[0]},
+                    _slot_types(carrier.get("outputs")).get(current[1]),
+                    current[1],
+                )
+            else:
+                break
+            if current in visited:
+                raise ValueError(
+                    f"ComfyUI template routes a connection through node {current[0]} in a loop"
+                )
+            visited.add(current)
+            current = None if source is None else (source.origin_id, source.origin_slot)
+        if current is None:
+            continue
+        if str(nodes.get(current[0], {}).get("type")) == "PrimitiveNode":
+            values = nodes[current[0]].get("widgets_values")
+            if isinstance(values, list) and values:
+                primitive_values[(target, target_slot)] = values[0]
+            continue
+        routed.append((current[0], current[1], target, target_slot))
+    return routed, primitive_values
 
 
 def _source_reaches_conditioning(
