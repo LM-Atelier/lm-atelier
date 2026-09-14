@@ -45,7 +45,7 @@ _RUNTIME_PARAMETERS = {
 _SUPPRESSED_RUNTIME_NAMES = frozenset({"motion_strength"})
 _PRIMITIVE_WIDGET_TYPES = {"BOOLEAN", "COMBO", "COMFY_DYNAMICCOMBO_V3", "FLOAT", "INT", "STRING"}
 _CONTROL_AFTER_GENERATE = {"decrement", "fixed", "increment", "randomize"}
-COMFY_TEMPLATE_COMPILER_VERSION = 22
+COMFY_TEMPLATE_COMPILER_VERSION = 23
 DEFAULT_IMAGE_EDIT_DENOISE = 0.9
 _ADAPTIVE_CHECKPOINT_PREFIX = "lma_image_checkpoint_v1_"
 _ADAPTIVE_CHECKPOINT_PLACEHOLDER = "__LM_ATELIER_CHECKPOINT__"
@@ -1588,6 +1588,7 @@ def _compile_ui_graph(
     links: list[tuple[str, int, str, int]] = []
     group_inputs: dict[str, dict[int, list[tuple[str, int, str, str]]]] = {}
     group_outputs: dict[str, dict[int, tuple[str, int]]] = {}
+    instance_slots: dict[str, dict[int, int]] = {}
     parameter_overrides: dict[tuple[str, str], str] = {}
 
     for node in ui_graph.get("nodes", []):
@@ -1626,6 +1627,14 @@ def _compile_ui_graph(
             if not isinstance(inner, dict) or inner.get("id") in {-10, -20, "-10", "-20"}:
                 continue
             flat_nodes[f"{node_id}:{inner['id']}"] = inner
+        # An instance lists only the inputs it shows as sockets, so its slot
+        # numbers need not match the definition's. The name is what they share.
+        declared = {str(item.get("name")): index for index, item in enumerate(subgraph_inputs)}
+        instance_slots[node_id] = {
+            slot: declared[str(item.get("name"))]
+            for slot, item in enumerate(node.get("inputs") or [])
+            if isinstance(item, dict) and str(item.get("name")) in declared
+        }
         group_inputs[node_id] = subgraph_input_targets
         group_outputs[node_id] = outputs
         for targets in subgraph_input_targets.values():
@@ -1655,7 +1664,8 @@ def _compile_ui_graph(
         origin, origin_slot, target, target_slot = normalized
         resolved_origin = group_outputs.get(origin, {}).get(origin_slot, (origin, origin_slot))
         if target in group_inputs:
-            for inner_target, inner_slot, _, _ in group_inputs[target].get(target_slot, []):
+            declared_slot = instance_slots[target].get(target_slot, target_slot)
+            for inner_target, inner_slot, _, _ in group_inputs[target].get(declared_slot, []):
                 links.append((*resolved_origin, inner_target, inner_slot))
         else:
             links.append((*resolved_origin, target, target_slot))

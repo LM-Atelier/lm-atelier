@@ -2638,3 +2638,74 @@ def test_a_primitive_node_puts_its_value_into_the_widget_it_drives() -> None:
     assert set(graph) == {"1", "3"}
     assert graph["3"]["inputs"]["blend"] == 0.35
     assert _links_to_missing_nodes(graph) == []
+
+
+def test_a_subgraph_instance_input_feeds_the_definition_input_of_the_same_name() -> None:
+    # The instance shows only the image socket; the definition declares the
+    # loader's model name first. Matching slot numbers would feed the picture
+    # to the loader.
+    ui_graph = {
+        "nodes": [
+            _loader(1, [1]),
+            {
+                "id": 10,
+                "type": "edit-subgraph",
+                "inputs": [{"name": "image", "type": "IMAGE", "link": 1}],
+                "outputs": [],
+                "widgets_values": [],
+            },
+        ],
+        "links": [[1, 1, 0, 10, 0, "IMAGE"]],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": "edit-subgraph",
+                    "inputs": [
+                        {"name": "model_name", "type": "COMBO"},
+                        {"name": "image", "type": "IMAGE"},
+                    ],
+                    "nodes": [
+                        {
+                            "id": 2,
+                            "type": "ModelLoader",
+                            "inputs": [
+                                {
+                                    "name": "model_name",
+                                    "type": "COMBO",
+                                    "widget": {"name": "model_name"},
+                                }
+                            ],
+                            "outputs": [],
+                            "widgets_values": ["model.safetensors"],
+                        },
+                        {
+                            "id": 3,
+                            "type": "ImageScale",
+                            "inputs": [
+                                {"name": "image", "type": "IMAGE"},
+                                {"name": "scale", "type": "FLOAT", "widget": {"name": "scale"}},
+                            ],
+                            "outputs": [],
+                            "widgets_values": [0.5],
+                        },
+                    ],
+                    "links": [
+                        [20, -10, 0, 2, 0, "COMBO"],
+                        [21, -10, 1, 3, 0, "IMAGE"],
+                    ],
+                }
+            ]
+        },
+    }
+    object_info = {
+        **_wiring_object_info(),
+        "ModelLoader": {
+            "input": {"required": {"model_name": [["model.safetensors"]]}},
+            "input_order": {"required": ["model_name"]},
+        },
+    }
+
+    graph, _ = _compile_ui_graph(ui_graph, object_info, operation="text_to_image")
+
+    assert graph["10:3"]["inputs"]["image"] == ["1", 0]
+    assert graph["10:2"]["inputs"]["model_name"] == "model.safetensors"
