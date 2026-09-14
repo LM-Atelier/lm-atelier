@@ -623,3 +623,72 @@ def test_whether_an_unwired_input_matters_is_left_to_the_declaration() -> None:
 
     inner = next(node for node in expanded["nodes"] if node["type"] == "CLIPTextEncode")
     assert not [link for link in expanded["links"] if str(link[3]) == str(inner["id"])]
+
+
+def _named(*pairs: tuple[str, str]) -> list[dict[str, str]]:
+    return [{"name": name, "type": kind} for name, kind in pairs]
+
+
+def _socket_subset_workflow(*, mode: int) -> dict[str, Any]:
+    """An instance that shows only its image socket.
+
+    Its definition declares a model name first, so the instance's one socket is
+    slot 0 while the image is definition slot 1.
+    """
+
+    return {
+        "nodes": [
+            _node(1, "LoadImage", outputs=_slots("IMAGE")),
+            _node(
+                2,
+                "Edit",
+                mode=mode,
+                inputs=_named(("image", "IMAGE")),
+                outputs=_named(("IMAGE", "IMAGE")),
+            ),
+            _node(3, "SaveImage", inputs=_slots("IMAGE")),
+        ],
+        "links": [[10, 1, 0, 2, 0, "IMAGE"], [11, 2, 0, 3, 0, "IMAGE"]],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": "Edit",
+                    "inputs": _named(("model_name", "COMBO"), ("image", "IMAGE")),
+                    "outputs": _named(("IMAGE", "IMAGE")),
+                    "nodes": [
+                        _node(7, "ModelLoader", inputs=_named(("model_name", "COMBO"))),
+                        _node(
+                            8,
+                            "ImageSharpen",
+                            inputs=_named(("image", "IMAGE")),
+                            outputs=_slots("IMAGE"),
+                        ),
+                    ],
+                    "links": [
+                        [70, "-10", 0, 7, 0, "COMBO"],
+                        [71, "-10", 1, 8, 0, "IMAGE"],
+                        [72, 8, 0, "-20", 0, "IMAGE"],
+                    ],
+                }
+            ]
+        },
+    }
+
+
+def test_an_instance_socket_feeds_the_definition_input_of_the_same_name() -> None:
+    expanded = expand_workflow(_socket_subset_workflow(mode=0))
+    links = {(str(link[1]), str(link[3]), link[4]) for link in expanded["links"]}
+
+    assert ("1", "2:8", 0) in links
+    assert not any(target == "2:7" for _, target, _ in links)
+
+
+def test_a_bypassed_instance_passes_through_the_input_of_the_same_name() -> None:
+    workflow = _socket_subset_workflow(mode=4)
+    definition = workflow["definitions"]["subgraphs"][0]
+    definition["nodes"] = []
+    definition["links"] = [[73, "-10", 1, "-20", 0, "IMAGE"]]
+
+    expanded = expand_workflow(workflow)
+
+    assert {(str(link[1]), str(link[3])) for link in expanded["links"]} == {("1", "3")}
