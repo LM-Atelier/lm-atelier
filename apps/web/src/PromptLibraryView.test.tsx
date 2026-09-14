@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, configure, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ApiError, api } from "./api";
 import { CLOCK_KEY } from "./clockPreference";
@@ -36,6 +36,17 @@ vi.mock("./api", async (importOriginal) => {
     },
   };
 });
+
+// Every wait here is for a render that follows mocked queries, and the pool
+// editors draw thousands of LoRA options, so the time is CPU work rather than
+// anything the test is waiting on. Run about twenty times slower than a quiet
+// machine, as a busy shared runner can be, the first render misses the
+// one-second default wait, ordinary cases take up to 4.7 s against the
+// five-second default, and the sixty-four LoRA case runs past 15 s. These
+// limits leave room for that and still fail a render that never arrives.
+configure({ asyncUtilTimeout: 5_000 });
+const CASE_TIMEOUT_MS = 20_000;
+const SIXTY_FOUR_LORA_TIMEOUT_MS = 60_000;
 
 const stamp = "2026-08-20T12:00:00Z";
 function readyVariant(name: string, revisionId: string) {
@@ -189,7 +200,7 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("Prompt Library", () => {
+describe("Prompt Library", { timeout: CASE_TIMEOUT_MS }, () => {
   it("starts each new template unnamed and requires an intentional name", async () => {
     renderLibrary();
     await screen.findByRole("heading", { name: "Portrait variants" });
@@ -719,7 +730,7 @@ describe("Prompt Library", () => {
     fireEvent.change(ninth, { target: { value: "fixed" } });
     expect(ninth).toHaveValue("inherited_auto");
     expect(screen.getByText("9 options · 64 paired LoRAs of 64")).toBeInTheDocument();
-  }, 15_000);
+  }, SIXTY_FOUR_LORA_TIMEOUT_MS);
 
   it("keeps the pool between two and sixteen options and offers no nested LoRA pool", async () => {
     renderLibrary();
