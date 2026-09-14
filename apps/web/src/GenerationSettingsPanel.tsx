@@ -302,7 +302,22 @@ export function GenerationSettingsPanel({
         ))}
         {!engine && <p className="muted">No {role} engine is configured.</p>}
       </div>
-      <LorasSection revisionId={workflowRevisionId}>
+      <LorasSection
+        revisionId={workflowRevisionId}
+        editing={{
+          layers: [
+            profileValues,
+            defaultPreset?.settings_json,
+            inheritedPreset?.settings_json,
+            inheritedValues,
+            selectedPreset?.settings_json,
+            values,
+          ],
+          values,
+          onValues,
+          clearLabel: editSettings ? "Clear LoRA changes for this workflow" : "Clear chat overrides for current workflow",
+        }}
+      >
         {loraField && (
           <>
             <SettingControl
