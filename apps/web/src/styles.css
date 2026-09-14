@@ -598,6 +598,7 @@ html[data-text-size="larger"] { --text-scale: 1.25; font-size: 125%; }
 .lora-stack-item label { display: grid; gap: 4px; color: var(--muted); font-size: calc(11px * var(--text-scale, 1)); }
 .lora-stack-item .lora-enabled { display: flex; align-items: center; align-self: center; }
 .lora-stack-item > small { grid-column: 1 / -1; }
+.workflow-lora-fields { grid-column: 2 / -1; display: flex; flex-wrap: wrap; gap: 6px; align-items: end; }
 .toggle-row input { width: 38px; height: 20px; accent-color: var(--accent); justify-self: end; }
 .secondary.compact-button { border-color: transparent; background: transparent; color: var(--ink-secondary); }
 .secondary.compact-button:hover { background: var(--surface-2); color: var(--ink-primary); }
@@ -1150,7 +1151,7 @@ html[data-motion="reduced"] .progress-track > div.indeterminate { width: 100% !i
   .project-defaults-heading .compact-button { white-space: nowrap; }
   .project-generation-defaults .setting-row { grid-template-columns: minmax(0, 1fr) 96px; }
   .lora-stack-item { grid-template-columns: 1fr 1fr; }
-  .lora-stack-item > select, .lora-stack-item > .row-actions { grid-column: 1 / -1; }
+  .lora-stack-item > select, .lora-stack-item > .row-actions, .lora-stack-item > .workflow-lora-fields { grid-column: 1 / -1; }
 }
 
 .callout.error { display: flex; align-items: center; gap: 12px; }
