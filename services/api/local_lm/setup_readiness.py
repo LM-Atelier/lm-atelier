@@ -418,6 +418,16 @@ def _runtime_check(runtime: RuntimeStatus) -> SetupReadinessCheck:
         if detail:
             message = f"{message} {detail}"
         return _check("runtime_unsupported", "fail", message[:240])
+    if runtime.state == "missing" and runtime.installed_release:
+        # Setup still asks for this build's runtime, but must not claim that
+        # nothing is installed while another version's runtime is in use.
+        return _check(
+            "runtime_other_version",
+            "fail",
+            "The runtime installed by another version of LM Atelier is still in use."
+            " Install this version's runtime to switch.",
+            "install_runtime",
+        )
     return _check(
         "runtime_missing",
         "fail",
