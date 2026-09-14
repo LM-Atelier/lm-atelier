@@ -4120,16 +4120,16 @@ describe("App", () => {
     expect(screen.getByText("blocked")).toBeInTheDocument();
     expect(api.importWorkflow).not.toHaveBeenCalled();
 
-    // An unresolved package with one pinned version can be prepared safely.
     vi.mocked(api.ensureWorkflowPackageDraft).mockResolvedValue({ id: "draft-1", current_revision_id: "draft-revision-1" } as never);
     vi.mocked(api.prepareWorkflowPackage).mockResolvedValue({ id: "job-prep" } as never);
-    fireEvent.click(screen.getByRole("button", { name: "Prepare 1.2.3" }));
+    expect(screen.getByText(/Registry releases can run automatically/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Install and enable 1.2.3" }));
     await waitFor(() =>
       // The original graph travels with the selection so the API can derive
       // the package's exact node closure independently.
       expect(api.prepareWorkflowPackage).toHaveBeenCalledWith("rgthree-comfy", "1.2.3", graph, "draft-revision-1"),
     );
-    expect(await screen.findByText(/stays inactive and untrusted/)).toBeInTheDocument();
+    expect(await screen.findByText(/Extension setup queued/)).toBeInTheDocument();
   });
 
   it("still imports LM Atelier bundles directly", async () => {

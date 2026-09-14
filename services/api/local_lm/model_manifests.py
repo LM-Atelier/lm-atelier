@@ -529,6 +529,7 @@ def _target_folder(path: str, role: str) -> str:
 
 
 _COMFY_FOLDER_BY_KIND = {
+    "background_removal": "background_removal",
     "checkpoint": "checkpoints",
     "diffusion_model": "diffusion_models",
     "text_encoder": "text_encoders",
@@ -563,6 +564,7 @@ def _kind_from_comfy_folder(folder: str) -> str | None:
     """Recover a component role from a verified ComfyUI component folder."""
 
     return {
+        "background_removal": "background_removal",
         "diffusion_models": "diffusion_model",
         "text_encoders": "text_encoder",
         "vae": "vae",

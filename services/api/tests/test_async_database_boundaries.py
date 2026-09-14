@@ -27,6 +27,11 @@ AUDITED_AWAITS = {
         "prepare_workflow_package",
         "renew_comfy_registry_install_environment",
     ),
+    # Preparation commits before its consumer runs. Policy recording and
+    # activation commit before worker startup; the writer case in
+    # test_workflow_package_completion.py proves another connection commits
+    # while that startup is awaited.
+    ("workflow_package_preparation.py", "prepare_workflow_package", "on_prepared"),
 }
 
 

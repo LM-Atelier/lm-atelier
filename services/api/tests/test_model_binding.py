@@ -36,6 +36,7 @@ def _unique() -> str:
 
 def test_comfy_model_folder_contract_has_one_complete_source() -> None:
     expected = {
+        "background_removal": "background_removal",
         "checkpoint": "checkpoints",
         "diffusion_model": "diffusion_models",
         "text_encoder": "text_encoders",
@@ -67,6 +68,21 @@ def test_standalone_auxiliary_kinds_do_not_enable_every_workflow_component() -> 
 def test_repository_paths_recognize_every_canonical_comfy_folder() -> None:
     for folder in COMFY_MODEL_FOLDERS:
         assert manifests_module._target_folder(f"bundle/{folder}/weights.bin", "image") == folder
+
+
+def test_declared_background_removal_folder_refines_unknown_safe_weights() -> None:
+    path = "models/birefnet.safetensors"
+    header = b"{}"
+    inspection = inspect_repository_metadata(
+        {path: len(header).to_bytes(8, "little") + header},
+        [path],
+        role="image",
+        component_folders={path: "background_removal"},
+    )
+
+    assert [(item.kind, item.target_folder) for item in inspection.components] == [
+        ("background_removal", "background_removal")
+    ]
 
 
 def _install(session, suffix: str, components: list[tuple[str, str]]) -> ModelInstall:  # type: ignore[no-untyped-def]

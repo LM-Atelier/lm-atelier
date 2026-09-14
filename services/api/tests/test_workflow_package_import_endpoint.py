@@ -8,7 +8,7 @@ import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
 
-from local_lm import api as api_module
+from local_lm import workflow_package_drafts
 from local_lm.db import SessionLocal
 from local_lm.models import WorkflowRevision
 
@@ -426,8 +426,8 @@ async def test_a_draft_identity_collision_refuses_instead_of_reusing_another_gra
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        api_module,
-        "_workflow_package_draft_identity",
+        workflow_package_drafts,
+        "workflow_package_draft_identity",
         lambda _canonical: ("wfpkgdraft_collision", "wfpkgdrev_collision", "a" * 64),
     )
     first = await client.post(

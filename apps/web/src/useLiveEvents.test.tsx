@@ -348,3 +348,34 @@ describe("web search state refresh", () => {
     }
   });
 });
+
+describe("workflow installation refresh", () => {
+  it.each(["workflow.install.completed", "workflow.install.attention", "download.paused", "download.cancelled", "download.completed"])(
+    "refreshes installation history and readiness after %s", async (type) => {
+      handlers.length = 0;
+      const client = new QueryClient();
+      const keys = [["workflow-install-progress", "offer"], ["workflow-families", "library"],
+        ["workflow-family", "family"], ["workflows", "detail", "workflow"], ["studio-capabilities"]];
+      keys.forEach(key => client.setQueryData(key, {}));
+      const hook = renderHook(() => useLiveEvents(client, vi.fn()));
+      try {
+        await act(async () => { await Promise.resolve(); });
+        act(() => handlers[0]!({ sequence: 1, type, entity_id: "offer", payload: {}, created_at: "2026-09-13T00:00:00Z" }));
+        keys.forEach(key => expect(client.getQueryState(key)?.isInvalidated).toBe(true));
+      } finally { hook.unmount(); client.clear(); }
+    },
+  );
+  it("refreshes installation and capability snapshots after a replay gap", async () => {
+    vi.useFakeTimers(); handlers.length = 0;
+    const client = new QueryClient();
+    const keys = [["workflow-install-progress", "offer"], ["workflow-families"], ["workflow-family"], ["studio-capabilities"]];
+    keys.forEach(key => client.setQueryData(key, {}));
+    const hook = renderHook(() => useLiveEvents(client, vi.fn()));
+    try {
+      await act(async () => { await Promise.resolve(); });
+      act(() => handlers[0]!({ sequence: 1, type: "events.replay_gap", entity_id: null, payload: {}, created_at: "2026-09-13T00:00:00Z" }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      keys.forEach(key => expect(client.getQueryState(key)?.isInvalidated).toBe(true));
+    } finally { hook.unmount(); client.clear(); vi.useRealTimers(); }
+  });
+});

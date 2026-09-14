@@ -1702,6 +1702,7 @@ class WorkflowRevisionOut(ApiModel):
     api_graph_json: dict[str, Any]
     input_schema_json: dict[str, Any]
     dependencies_json: dict[str, Any]
+    dependency_contract_sha256: str | None = None
     trusted: bool
     created_at: datetime
 
@@ -1921,6 +1922,7 @@ class WorkflowFamilyVariantOut(ApiModel):
     readiness_reason: str | None = None
     setup_resolution: Literal["reviewed_download_available", "attention_required"] | None = None
     install_offer: WorkflowInstallOfferOut | None = None
+    install_progress: WorkflowInstallProgressOut | None = None
 
 
 class WorkflowFamilyPreferenceOut(ApiModel):
@@ -2268,6 +2270,53 @@ class WorkflowAssetReviewOut(ApiModel):
     total_bytes: int
 
 
+WorkflowInstallStatus = Literal["ready", "queued", "invalidated", "completed", "expired"]
+WorkflowInstallAttentionCode = Literal[
+    "download-acceptance-unavailable",
+    "download-acceptance-changed",
+    "download-result-unavailable",
+    "download-result-changed",
+    "download-plan-changed",
+    "workflow-download-failed",
+    "workflow-dependencies-need-selection",
+    "download-results-need-binding",
+    "workflow-install-offer-changed",
+    "workflow-review-required",
+    "workflow-completion-unavailable",
+    "workflow-runtime-plan-unavailable",
+    "workflow-runtime-plan-changed",
+    "workflow-extension-review-required",
+    "workflow-media-restore-failed",
+]
+
+
+WorkflowInstallPhase = Literal[
+    "ready",
+    "downloading",
+    "paused",
+    "verifying",
+    "needs_attention",
+    "completed",
+    "invalidated",
+    "expired",
+]
+
+
+class WorkflowInstallProgressOut(ApiModel):
+    id: str
+    workflow_revision_id: str
+    status: WorkflowInstallStatus
+    phase: WorkflowInstallPhase
+    total_downloads: int
+    completed_downloads: int
+    failed_downloads: int
+    cancelled_downloads: int
+    paused_downloads: int
+    pending_downloads: int
+    unavailable_downloads: int
+    attention_code: WorkflowInstallAttentionCode | None
+
+
 class WorkflowInstallOfferCreate(ApiModel):
     """Explicit plan choices for one persisted workflow revision."""
 
@@ -2306,6 +2355,9 @@ class WorkflowPackageImportRequest(ApiModel):
     name: str = Field(min_length=1, max_length=240)
     operation: Operation
     description: str = Field(default="", max_length=10_000)
+    # Only an explicit portable declaration supplies dependency slots. An
+    # omitted contract remains unknown rather than declaring no dependencies.
+    dependencies: dict[str, Any] = Field(default_factory=dict)
     # A package that needed preparation is first persisted as a deliberately
     # non-executable revision. Supplying both identities lets import finalize
     # that exact draft instead of creating a second, unrelated workflow.

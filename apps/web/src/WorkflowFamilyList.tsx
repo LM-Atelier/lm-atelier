@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { WorkflowInstallStatus } from "./WorkflowInstallStatus";
 import "./WorkflowFamilyList.css";
 import { availableWorkflowInstallOffer, workflowVariantReadinessLabel } from "./workflowVariantSetup";
 import type { WorkflowSummary, WorkflowFamily, WorkflowVariantReadiness, WorkflowInstallOffer } from "./types";
@@ -146,6 +147,9 @@ export function WorkflowFamilyList({
                         <span className="badge">{workflowVariantReadinessLabel(variant)}</span>
                       </span>
                     </button>
+                    <WorkflowInstallStatus progress={variant.install_progress} workflowName={variant.name}
+                      revisionId={variant.current_revision_id}
+                      onReviewSetup={selectable ? () => onSelect(workflow) : undefined} />
                     {offer && onReviewInstall && <button className="workflow-family-install-action"
                       aria-label={`Review downloads for ${variant.name}`}
                       onClick={() => onReviewInstall(offer, variant.name)}>Review downloads</button>}

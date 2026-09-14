@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 import httpx
 from fastapi import (
     APIRouter,
+    BackgroundTasks,
     Depends,
     File,
     HTTPException,
@@ -84,7 +85,7 @@ from .chat_item_removal import (
 )
 from .civitai_catalog import CivitaiCatalog
 from .comfy_editor_bridge import ComfyEditorBridgeError
-from .comfy_registry import ComfyRegistryClient
+from .comfy_registry import ComfyNodeResolution, ComfyRegistryClient
 from .comfy_registry_activation import (
     ComfyRegistryActivationError,
     activate_comfy_registry_install,
@@ -95,6 +96,7 @@ from .comfy_registry_closure_driver import ComfyRegistryWheelMetadataClient
 from .comfy_registry_downloads import ComfyRegistryArchiveDownloader
 from .comfy_registry_installs import installed_comfy_registry_versions
 from .comfy_registry_interpreter import probe_comfy_registry_runtime_target
+from .comfy_registry_lifecycle import ComfyRegistryPreparation
 from .comfy_registry_paths import registry_wheel_environment_root
 from .comfy_registry_reconciliation import (
     ComfyRegistryReconciliationError,
@@ -227,6 +229,8 @@ from .models import (
     WorkflowDefinition,
     WorkflowFamily,
     WorkflowInstallOffer,
+    WorkflowInstallOfferPackage,
+    WorkflowPackageInstallPlan,
     WorkflowPreference,
     WorkflowProfileCompatibility,
     WorkflowRevision,
@@ -535,6 +539,7 @@ from .schemas import (
     WorkflowFamilyVariantOut,
     WorkflowInstallOfferCreate,
     WorkflowInstallOfferOut,
+    WorkflowInstallProgressOut,
     WorkflowLoraControlsOut,
     WorkflowMissingNodeOut,
     WorkflowOpenTarget,
@@ -602,6 +607,10 @@ from .web_search import CrwSearchProvider, WebSearchError
 from .web_search_configuration import configured_search_provider, search_provider_revision
 from .web_search_consent import SearchConsentConflict, decide_search, replace_search_proposal
 from .web_search_projection import chat_searches, search_for_run
+from .workflow_activation_preparation import (
+    WorkflowActivationPreparation,
+    prepare_workflow_activation,
+)
 from .workflow_activation_requests import (
     WorkflowActivationCreate,
     WorkflowActivationOut,
@@ -633,6 +642,13 @@ from .workflow_compatibility import (
     reconcile_legacy_workflow_compatibility,
     retire_legacy_profile_workflow,
 )
+from .workflow_completion_jobs import (
+    cancel_workflow_completion,
+    retry_workflow_completion,
+    workflow_completion_offer,
+    workflow_download_jobs,
+)
+from .workflow_dependencies import workflow_dependency_contract_payload
 from .workflow_edit_calibration import (
     edit_calibration_reaches_graph,
     validate_workflow_edit_calibration,
@@ -653,12 +669,14 @@ from .workflow_editor_shell import (
 from .workflow_family_dependencies import workflow_family_dependency_summaries
 from .workflow_install_offers import (
     WorkflowInstallOfferError,
+    bind_workflow_offer_downloads,
     create_workflow_install_offer,
     current_reviewed_workflow_install_offer,
     invalidate_workflow_install_offer,
     mark_workflow_install_offer_queued,
     revalidate_workflow_install_offer,
 )
+from .workflow_install_progress import latest_workflow_install_progress, workflow_install_progress
 from .workflow_library import (
     WorkflowFamilyRemovalImpact,
     workflow_family_removal_impact,
@@ -685,20 +703,44 @@ from .workflow_output_geometry import (
     workflow_output_geometry_resolution_payload,
 )
 from .workflow_ownership import ensure_workflow_family_ownership
+from .workflow_package_acceptance import (
+    accept_workflow_package_install_plan,
+    source_workflow_install_offer,
+)
+from .workflow_package_activation import (
+    WorkflowPackageActivation,
+    activate_prepared_workflow_package,
+)
 from .workflow_package_drafts import (
+    WorkflowPackageDraftError,
+    canonical_package_graph,
     is_workflow_package_draft,
+    stage_workflow_package_draft,
     workflow_package_draft_dependencies,
 )
+from .workflow_package_drafts import (
+    workflow_package_draft_identity as _workflow_package_draft_identity,
+)
+from .workflow_package_extension_preflight import preflight_workflow_extensions
 from .workflow_package_inputs import (
     WorkflowPackageInputError,
     prepare_workflow_package_compilation,
     prepare_workflow_revision_compilation,
+)
+from .workflow_package_install_plans import (
+    WorkflowPackageInstallPlanError,
+    WorkflowPackageInstallPlanOut,
+    WorkflowPackageInstallPlanRequest,
+    create_workflow_package_install_plan,
+    load_stored_workflow_package_install_plan,
+    revalidate_workflow_package_install_plan,
 )
 from .workflow_package_preparation import (
     PreparationContext,
     WorkflowPackagePreparationError,
     prepare_workflow_package,
 )
+from .workflow_package_runtime import workflow_package_runtime
 from .workflow_review_runtime import review_runtime_object_info, verify_reviewed_packages
 from .workflow_revision_reviews import (
     ReviewSnapshot as WorkflowReviewSnapshot,
@@ -718,6 +760,9 @@ from .workflow_revision_reviews import (
 from .workflow_revision_reviews import (
     review_is_current as workflow_review_is_current,
 )
+from .workflow_revision_writes import stage_workflow_revision
+from .workflow_runtime_nodes import preflight_workflow_runtime_nodes
+from .workflow_runtime_targets import preflight_workflow_runtime_plan
 from .workflow_source_candidates import collect_source_candidates
 from .workflow_summary_reads import (
     list_workflow_revision_choices,
@@ -4703,7 +4748,32 @@ async def cancel_job(
         and isinstance(job.payload_json.get("setup_verification_id"), str)
         else None
     )
-    if job.kind == JobKind.DOWNLOAD.value:
+    if job.kind == JobKind.WORKFLOW_INSTALL.value:
+        try:
+            session.execute(text("UPDATE workflow_install_offers SET status = status WHERE 0"))
+            session.expire_all()
+            offer = workflow_completion_offer(session, job_id)
+            cancelled = cancel_workflow_completion(
+                session,
+                offer,
+                media_worker_stopped=_media_worker_truly_stopped(_services(request)),
+            )
+            download_ids = [item.id for item in workflow_download_jobs(session, offer)]
+            cancelled_offer_id = offer.id
+            session.commit()
+        except ValueError as exc:
+            session.rollback()
+            raise api_error(
+                409, "job-not-cancellable", "Workflow installation cannot be cancelled."
+            ) from exc
+        changed = cancelled is not None
+        if changed:
+            for download_id in download_ids:
+                await _services(request).downloads.cancel(
+                    download_id, cancelled_offer_id=cancelled_offer_id
+                )
+            await _services(request).scheduler.publish_job(job_id)
+    elif job.kind == JobKind.DOWNLOAD.value:
         changed = await _services(request).downloads.cancel(job_id)
     elif job.kind == JobKind.REGISTRY_PREPARE.value:
         changed = await _cancel_registry_preparation(job_id)
@@ -4916,6 +4986,27 @@ async def retry_job(
         raise api_error(
             409, "job-not-retryable-state", "only terminal unsuccessful jobs can be retried"
         )
+    if job.kind == JobKind.WORKFLOW_INSTALL.value:
+        try:
+            session.execute(text("UPDATE workflow_install_offers SET status = status WHERE 0"))
+            session.expire_all()
+            offer = workflow_completion_offer(session, job_id)
+            job, downloads = retry_workflow_completion(session, offer)
+            source_offer_id = offer.id
+            session.commit()
+        except ValueError as exc:
+            session.rollback()
+            raise api_error(
+                409,
+                "workflow-installation-not-retryable",
+                "Workflow installation cannot be retried.",
+            ) from exc
+        manager = _services(request).downloads
+        for download in downloads:
+            if download.status == JobStatus.QUEUED.value:
+                manager.start(download.id)
+        manager.start_workflow_installation(source_offer_id)
+        return job
     if job.kind == JobKind.DOWNLOAD.value:
         job.status = "queued"
         job.progress = 0
@@ -9224,6 +9315,9 @@ def _workflow_family_variant_out(
         readiness_reason=reason,
         setup_resolution=setup_resolution,
         install_offer=install_offer,
+        install_progress=latest_workflow_install_progress(session, revision.id)
+        if revision
+        else None,
     )
 
 
@@ -11207,36 +11301,11 @@ def _analyzed_package_node_types(
     return _prepared_node_types(list(requirement.node_types))
 
 
-#: A comparison is only worth doing if it is bounded; a graph larger than this
-#: is refused rather than serialized twice to find out it did not match.
-MAX_COMPARED_GRAPH_CHARACTERS = 8_000_000
-
-
 def _canonical_graph(graph: dict[str, Any]) -> str:
-    """One bounded string for a graph, so two of them can be compared exactly.
-
-    Node-type names alone are not the graph. Two workflows can require the
-    same class names while declaring different packages, versions, or links -
-    which is exactly the substitution this comparison exists to catch.
-    """
-    encoded = json.dumps(
-        graph, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
-    )
-    if len(encoded) > MAX_COMPARED_GRAPH_CHARACTERS:
-        raise api_error(
-            422,
-            "workflow-graph-too-large",
-            "That workflow is too large to compare against the stored revision.",
-        )
-    return encoded
-
-
-def _workflow_package_draft_identity(canonical_graph: str) -> tuple[str, str, str]:
-    """Return stable local identities for one exact source graph."""
-
-    digest = hashlib.sha256(canonical_graph.encode("utf-8")).hexdigest()
-    short = digest[:24]
-    return f"wfpkgdraft_{short}", f"wfpkgdrev_{short}", digest
+    try:
+        return canonical_package_graph(graph)
+    except WorkflowPackageDraftError as exc:
+        raise api_error(exc.status_code, exc.code, str(exc)) from exc
 
 
 def _workflow_with_revisions(session: Session, workflow_id: str) -> WorkflowDefinition:
@@ -11363,26 +11432,45 @@ async def _run_workflow_package_preparation(
 
     try:
         async with services.scheduler.job_lease(job_id, resource="media_compute", group="primary"):
-            media_stopped = _media_worker_truly_stopped(services)
-            # The composition opens its session only around the atomic
-            # prepare step; resolution and closure run session-free.
-            preparation = await prepare_workflow_package(
-                SessionLocal,
-                package_id=package_id,
-                version=version,
-                node_types=node_types,
-                context=PreparationContext.from_settings(services.settings),
-                media_worker_stopped=media_stopped,
-                interpreter_probe=probe_comfy_registry_runtime_target,
-                registry_client=ComfyRegistryClient(),
-                project_client=ComfyRegistryWheelProjectClient(),
-                metadata_client=ComfyRegistryWheelMetadataClient(),
-                archive_downloader=ComfyRegistryArchiveDownloader(),
-                wheel_downloader=ComfyRegistryWheelDownloader(),
-                phase=report,
-                renew_install_id=renew_install_id,
-                authorized_workflow=authorized_workflow,
-            )
+            context = PreparationContext.from_settings(services.settings)
+            activation_result: WorkflowPackageActivation | None = None
+
+            async def finish_preparation(
+                session: Session,
+                preparation: ComfyRegistryPreparation,
+                resolution: ComfyNodeResolution,
+            ) -> None:
+                nonlocal activation_result
+                activation_result = await activate_prepared_workflow_package(
+                    session,
+                    preparation,
+                    resolution,
+                    context=context,
+                    processes=services.processes,
+                )
+
+            async with workflow_package_runtime(services.processes, context):
+                media_stopped = _media_worker_truly_stopped(services)
+                # The composition opens its session only around the atomic
+                # prepare step; resolution and closure run session-free.
+                preparation = await prepare_workflow_package(
+                    SessionLocal,
+                    package_id=package_id,
+                    version=version,
+                    node_types=node_types,
+                    context=context,
+                    media_worker_stopped=media_stopped,
+                    interpreter_probe=probe_comfy_registry_runtime_target,
+                    registry_client=ComfyRegistryClient(),
+                    project_client=ComfyRegistryWheelProjectClient(),
+                    metadata_client=ComfyRegistryWheelMetadataClient(),
+                    archive_downloader=ComfyRegistryArchiveDownloader(),
+                    wheel_downloader=ComfyRegistryWheelDownloader(),
+                    phase=report,
+                    renew_install_id=renew_install_id,
+                    authorized_workflow=authorized_workflow,
+                    on_prepared=finish_preparation if renew_install_id is None else None,
+                )
             with SessionLocal() as session:
                 job = session.get(Job, job_id)
                 if job and job.status != JobStatus.CANCELLED.value:
@@ -11400,12 +11488,19 @@ async def _run_workflow_package_preparation(
                             "reused_wheel_environment": preparation.reused_wheel_environment,
                         },
                     }
+                    if activation_result is not None:
+                        job.payload_json = {
+                            **job.payload_json,
+                            "activation": activation_result.payload(),
+                        }
                     update_job_progress(
                         job,
                         stage=(
                             "Dependencies refreshed; trust unchanged"
                             if renew_install_id is not None
-                            else "Prepared, inactive and untrusted"
+                            else "Extension installed and active"
+                            if activation_result is not None and activation_result.state == "active"
+                            else "Extension prepared; review required"
                         ),
                     )
                 session.commit()
@@ -11490,67 +11585,11 @@ async def ensure_workflow_package_draft(
     """Persist an exact package graph without making it executable."""
 
     try:
-        analyze_comfyui_workflow_package(payload.ui_graph)
+        definition, _revision = stage_workflow_package_draft(session, payload)
     except WorkflowPackageError as exc:
         raise api_error(422, exc.code, str(exc)) from exc
-    canonical = _canonical_graph(payload.ui_graph)
-    workflow_id, revision_id, digest = _workflow_package_draft_identity(canonical)
-    definition = session.get(WorkflowDefinition, workflow_id)
-    revision = session.get(WorkflowRevision, revision_id)
-    if bool(definition) != bool(revision):
-        raise api_error(
-            409,
-            "workflow-package-draft-collision",
-            "The workflow draft identity is already in use.",
-        )
-    if definition and revision:
-        if (
-            revision.workflow_id != definition.id
-            or revision.dependencies_json != workflow_package_draft_dependencies(digest)
-            or _canonical_graph(revision.ui_graph_json) != canonical
-        ):
-            raise api_error(
-                409,
-                "workflow-package-draft-collision",
-                "The workflow draft identity is already in use.",
-            )
-        # Metadata remains editable while the graph is still only a draft.
-        if definition.current_revision_id == revision.id:
-            definition.name = payload.name
-            definition.description = payload.description
-            session.commit()
-        return _workflow_with_revisions(session, definition.id)
-
-    dependencies = workflow_package_draft_dependencies(digest)
-    definition = WorkflowDefinition(
-        id=workflow_id,
-        name=payload.name,
-        operation=payload.operation.value,
-        description=payload.description,
-    )
-    session.add(definition)
-    revision = WorkflowRevision(
-        id=revision_id,
-        workflow_id=workflow_id,
-        version=1,
-        engine="comfyui",
-        ui_graph_json=payload.ui_graph,
-        api_graph_json={},
-        input_schema_json={},
-        dependencies_json=dependencies,
-        trusted=False,
-        artifact_sha256=workflow_artifact_contract(
-            operation=payload.operation.value,
-            engine="comfyui",
-            api_graph={},
-            input_schema={},
-            dependencies=dependencies,
-        ),
-    )
-    session.add(revision)
-    session.flush()
-    persist_dependency_contract(session, revision)
-    definition.current_revision_id = revision.id
+    except WorkflowPackageDraftError as exc:
+        raise api_error(exc.status_code, exc.code, str(exc)) from exc
     session.commit()
     return _workflow_with_revisions(session, definition.id)
 
@@ -11559,7 +11598,7 @@ async def ensure_workflow_package_draft(
 async def prepare_workflow_package_endpoint(
     payload: WorkflowPackagePrepareRequest, request: Request, session: SessionDep
 ) -> Job:
-    """Queue one package preparation; the result stays inactive and untrusted."""
+    """Queue verified extension setup and retain any required review."""
 
     services = _services(request)
     # Re-analyze the source graph before judging the machine. The package name,
@@ -11773,6 +11812,28 @@ def _queue_registry_install_renewal(
     )
 
 
+def _waiting_source_registry_reviews(session: Session, install_id: str) -> list[str]:
+    return list(
+        session.scalars(
+            select(WorkflowInstallOffer.id)
+            .join(
+                WorkflowInstallOfferPackage,
+                WorkflowInstallOfferPackage.offer_id == WorkflowInstallOffer.id,
+            )
+            .join(Job, Job.id == WorkflowInstallOffer.completion_job_id)
+            .where(
+                WorkflowInstallOfferPackage.registry_install_id == install_id,
+                WorkflowInstallOffer.status == "queued",
+                WorkflowInstallOffer.source_plan_id.is_not(None),
+                WorkflowInstallOffer.completion_error_code == "workflow-extension-review-required",
+                Job.kind == "workflow_install",
+                Job.status == "paused",
+            )
+            .distinct()
+        )
+    )
+
+
 @router.post(
     "/workflows/packages/installs/{install_id}/review",
     response_model=RegistryInstallOut,
@@ -11789,16 +11850,26 @@ async def review_registry_install(
     context = _registry_activation_context(services)
     async with services.scheduler.lease("primary"):
         try:
-            review_comfy_registry_install(
-                session,
-                install_id=install_id,
-                trusted=payload.trusted,
-                custom_node_root=context.custom_node_root,
-                environment_root=registry_wheel_environment_root(context.state_root),
-                media_worker_stopped=_media_worker_truly_stopped(services),
-            )
+            async with AsyncExitStack() as temporary:
+                if payload.trusted and _waiting_source_registry_reviews(session, install_id):
+                    await temporary.enter_async_context(
+                        workflow_package_runtime(services.processes, context)
+                    )
+                review_comfy_registry_install(
+                    session,
+                    install_id=install_id,
+                    trusted=payload.trusted,
+                    custom_node_root=context.custom_node_root,
+                    environment_root=registry_wheel_environment_root(context.state_root),
+                    media_worker_stopped=_media_worker_truly_stopped(services),
+                )
         except ComfyRegistryActivationError as exc:
             raise _registry_activation_failure(exc) from exc
+        except WorkflowPackagePreparationError as exc:
+            raise api_error(409, exc.code, str(exc)) from exc
+    if payload.trusted:
+        for offer_id in _waiting_source_registry_reviews(session, install_id):
+            services.downloads.start_workflow_installation(offer_id)
     install = _loaded_registry_install(session, install_id)
     return _registry_install_out(install, _registry_install_disk_state(services, install))
 
@@ -12030,6 +12101,110 @@ async def _workflow_install_inventory(
     )
 
 
+async def _workflow_package_plan_inventory(
+    request: Request, session: Session
+) -> tuple[set[str] | None, set[str], dict[str, set[str]]]:
+    try:
+        return await _workflow_install_inventory(request, session)
+    except ApiError as exc:
+        if exc.status_code != 503:
+            raise
+        return None, _local_asset_filenames(session), _installed_package_versions(session)
+
+
+@router.post(
+    "/workflows/packages/install-plans",
+    response_model=WorkflowPackageInstallPlanOut,
+    status_code=201,
+)
+async def preflight_workflow_package_installation(
+    payload: WorkflowPackageInstallPlanRequest, request: Request, session: SessionDep
+) -> WorkflowPackageInstallPlanOut:
+    """Save a source and dependency preview without creating an executable workflow."""
+
+    nodes, assets, packages = await _workflow_package_plan_inventory(request, session)
+    try:
+        declared = declared_dependency_contract(payload.dependencies)
+        if payload.dependencies and declared is None:
+            raise ValueError("The dependency declaration must use the version 1 contract.")
+        services = _services(request)
+        runtime_plan = await preflight_workflow_runtime_plan(services.runtimes)
+        runtime_nodes = await preflight_workflow_runtime_nodes(services.runtimes, runtime_plan)
+        execution = await preflight_workflow_extensions(
+            payload.ui_graph,
+            services.settings,
+            runtimes=services.runtimes,
+            runtime_plan=runtime_plan,
+        )
+        if await preflight_workflow_runtime_plan(services.runtimes) != runtime_plan:
+            raise WorkflowPackageInstallPlanError(
+                "workflow-package-install-plan-changed", "The runtime setup changed during preview."
+            )
+        result = create_workflow_package_install_plan(
+            session,
+            payload,
+            available_node_types=nodes,
+            available_asset_filenames=assets,
+            installed_package_versions=packages,
+            extension_execution=execution,
+            runtime_plan=runtime_plan,
+            runtime_node_inventory=runtime_nodes,
+        )
+    except ValueError as exc:
+        raise api_error(
+            422,
+            getattr(exc, "code", "workflow-package-install-plan-invalid"),
+            "The workflow installation plan could not be prepared.",
+        ) from exc
+    session.commit()
+    return result
+
+
+@router.get(
+    "/workflows/packages/install-plans/{plan_id}", response_model=WorkflowPackageInstallPlanOut
+)
+async def get_workflow_package_install_plan(
+    plan_id: str, request: Request, session: SessionDep
+) -> WorkflowPackageInstallPlanOut:
+    """Revalidate the stored source and download identities before showing the plan."""
+
+    nodes, assets, packages = await _workflow_package_plan_inventory(request, session)
+    try:
+        record, _saved = load_stored_workflow_package_install_plan(session, plan_id)
+        payload = WorkflowPackageInstallPlanRequest.model_validate(record.request_json)
+        services = _services(request)
+        runtime_plan = await preflight_workflow_runtime_plan(services.runtimes)
+        runtime_nodes = await preflight_workflow_runtime_nodes(services.runtimes, runtime_plan)
+        execution = await preflight_workflow_extensions(
+            payload.ui_graph,
+            services.settings,
+            runtimes=services.runtimes,
+            runtime_plan=runtime_plan,
+        )
+        if await preflight_workflow_runtime_plan(services.runtimes) != runtime_plan:
+            raise WorkflowPackageInstallPlanError(
+                "workflow-package-install-plan-changed", "The runtime setup changed during preview."
+            )
+        session.expire_all()
+        return revalidate_workflow_package_install_plan(
+            session,
+            plan_id,
+            available_node_types=nodes,
+            available_asset_filenames=assets,
+            installed_package_versions=packages,
+            extension_execution=execution,
+            runtime_plan=runtime_plan,
+            runtime_node_inventory=runtime_nodes,
+        )
+    except ValueError as exc:
+        code = getattr(exc, "code", "workflow-package-install-plan-invalid")
+        raise api_error(
+            404 if code == "workflow-package-install-plan-not-found" else 409,
+            code,
+            "The workflow installation plan is unavailable or has changed.",
+        ) from exc
+
+
 @router.post("/workflows/packages/assets/review", response_model=WorkflowAssetReviewOut)
 async def review_workflow_assets(
     payload: WorkflowAssetReviewRequest, session: SessionDep
@@ -12119,6 +12294,20 @@ async def review_workflow_install_offer(
     return _workflow_install_offer_out(offer)
 
 
+@router.get(
+    "/workflow-install-offers/{offer_id}/progress", response_model=WorkflowInstallProgressOut
+)
+async def get_workflow_install_progress(
+    offer_id: str, session: SessionDep
+) -> WorkflowInstallProgressOut:
+    offer = source_workflow_install_offer(session, offer_id)
+    if offer is None:
+        raise api_error(
+            404, "workflow-install-offer-not-found", "Workflow installation is unavailable."
+        )
+    return workflow_install_progress(session, offer)
+
+
 @router.post(
     "/workflow-install-offers/{offer_id}/install",
     response_model=list[JobOut],
@@ -12130,6 +12319,50 @@ async def install_workflow_offer(
     session: SessionDep,
 ) -> list[Job]:
     """Queue only an opaque offer after rebuilding every server-owned identity."""
+
+    existing = source_workflow_install_offer(session, offer_id)
+    source_plan_id = existing.source_plan_id if existing is not None else None
+    if source_plan_id is None and session.get(WorkflowPackageInstallPlan, offer_id) is not None:
+        source_plan_id = offer_id
+    manager: DownloadManager = _services(request).downloads
+    if source_plan_id is not None:
+        nodes, assets, packages = await _workflow_package_plan_inventory(request, session)
+        try:
+            runtime_plan = (
+                await preflight_workflow_runtime_plan(_services(request).runtimes)
+                if existing is None
+                else None
+            )
+            runtime_nodes = await preflight_workflow_runtime_nodes(
+                _services(request).runtimes, runtime_plan
+            )
+            _accepted, jobs = accept_workflow_package_install_plan(
+                session,
+                source_plan_id,
+                manager,
+                available_node_types=nodes,
+                available_asset_filenames=assets,
+                installed_package_versions=packages,
+                runtime_plan=runtime_plan,
+                runtime_node_inventory=runtime_nodes,
+            )
+            session.commit()
+        except ValueError as exc:
+            session.rollback()
+            raise api_error(
+                409,
+                getattr(exc, "code", "workflow-package-installation-refused"),
+                "The workflow installation is unavailable or has changed.",
+            ) from exc
+        if _accepted.status == "queued":
+            for job in jobs:
+                if job.kind == JobKind.DOWNLOAD.value and job.status in {
+                    JobStatus.QUEUED.value,
+                    JobStatus.RUNNING.value,
+                }:
+                    manager.start(job.id)
+            manager.start_workflow_installation(_accepted.id)
+        return jobs
 
     node_types, asset_filenames, package_versions = await _workflow_install_inventory(
         request,
@@ -12147,7 +12380,6 @@ async def install_workflow_offer(
         session.commit()
         raise api_error(422, exc.code, str(exc)) from exc
 
-    manager: DownloadManager = _services(request).downloads
     try:
         validated = [manager.validated_request(session, download) for download in downloads]
     except ValueError as exc:
@@ -12158,9 +12390,13 @@ async def install_workflow_offer(
         )
         session.commit()
         raise api_error(422, "asset-download-refused", str(exc)) from exc
-    jobs = [manager.create(session, download) for download in validated]
+    jobs = [manager.stage(session, download) for download in validated]
+    bind_workflow_offer_downloads(session, offer, jobs)
     mark_workflow_install_offer_queued(offer)
     session.commit()
+    for job in jobs:
+        if job.status != JobStatus.PAUSED.value:
+            manager.start(job.id)
     return jobs
 
 
@@ -12176,6 +12412,15 @@ async def import_workflow_package(
     behavior silently.
     """
 
+    try:
+        declared = declared_dependency_contract(payload.dependencies)
+        if payload.dependencies and declared is None:
+            raise ValueError("Imported dependency declarations must use the version 1 contract.")
+        dependencies = (
+            workflow_dependency_contract_payload(declared) if declared is not None else {}
+        )
+    except ValueError as exc:
+        raise api_error(422, "workflow-invalid", str(exc)) from exc
     draft = _validated_workflow_package_draft(session, payload)
     services = _services(request)
     describe_nodes = getattr(services.engines.media, "object_info", None)
@@ -12332,6 +12577,7 @@ async def import_workflow_package(
                 != _canonical_graph(payload.ui_graph)
                 or current_revision.api_graph_json != compiled_api_graph
                 or current_revision.input_schema_json != input_schema
+                or current_revision.dependencies_json != dependencies
             ):
                 raise api_error(
                     409,
@@ -12358,6 +12604,7 @@ async def import_workflow_package(
                 ui_graph=payload.ui_graph,
                 api_graph=compiled_api_graph,
                 input_schema=input_schema,
+                dependencies=dependencies,
             ),
             session,
         )
@@ -12371,6 +12618,7 @@ async def import_workflow_package(
             ui_graph=payload.ui_graph,
             api_graph=compiled_api_graph,
             input_schema=input_schema,
+            dependencies=dependencies,
         ),
         session,
     )
@@ -12560,52 +12808,9 @@ async def _persist_workflow_revision(
     if not definition:
         raise api_error(404, "workflow-not-found", "workflow not found")
     try:
-        validate_lora_workflow_contract(
-            payload.api_graph,
-            payload.input_schema,
-            payload.dependencies,
-        )
-        validate_workflow_edit_calibration(payload.input_schema)
-        validate_workflow_input_schema(payload.input_schema)
-        workflow_video_length(payload.input_schema)
-        video_length_reaches_graph(payload.api_graph, payload.input_schema)
-        edit_calibration_reaches_graph(payload.api_graph, payload.input_schema)
-        declared_dependency_contract(payload.dependencies)
+        revision = stage_workflow_revision(session, definition, payload, trusted=trusted)
     except ValueError as exc:
         raise api_error(422, "workflow-revision-invalid", str(exc)) from exc
-    version = (
-        session.scalar(
-            select(func.max(WorkflowRevision.version)).where(
-                WorkflowRevision.workflow_id == workflow_id
-            )
-        )
-        or 0
-    )
-    current = session.get(WorkflowRevision, definition.current_revision_id)
-    engine = current.engine if current else "comfyui"
-    revision = WorkflowRevision(
-        workflow_id=workflow_id,
-        version=version + 1,
-        engine=engine,
-        engine_version=payload.engine_version,
-        ui_graph_json=payload.ui_graph,
-        api_graph_json=payload.api_graph,
-        input_schema_json=payload.input_schema,
-        dependencies_json=payload.dependencies,
-        trusted=trusted,
-        artifact_sha256=workflow_artifact_contract(
-            operation=definition.operation,
-            engine=engine,
-            api_graph=payload.api_graph,
-            input_schema=payload.input_schema,
-            dependencies=payload.dependencies,
-        ),
-    )
-    session.add(revision)
-    session.flush()
-    persist_dependency_contract(session, revision)
-    definition.current_revision_id = revision.id
-    ensure_workflow_family_ownership(session, definition, revision)
     session.commit()
     session.refresh(revision)
     return revision
@@ -12976,6 +13181,7 @@ def create_workflow_activation(
     revision_id: str,
     payload: WorkflowActivationCreate,
     request: Request,
+    background_tasks: BackgroundTasks,
     session: SessionDep,
 ) -> WorkflowActivationOut:
     services = _services(request)
@@ -13003,9 +13209,45 @@ def create_workflow_activation(
             ),
         )
         session.commit()
+        background_tasks.add_task(
+            services.downloads.reconcile_workflow_install_offers,
+            workflow_revision_id=revision_id,
+        )
         return result
     except (WorkflowActivationError, ValueError, OSError, SQLAlchemyError) as exc:
         session.rollback()
+        missing = (
+            isinstance(exc, WorkflowActivationError) and exc.code == "workflow_revision_unavailable"
+        )
+        raise api_error(
+            404 if missing else 409,
+            "workflow-activation-unavailable",
+            "The workflow or its dependencies changed. Review the workflow again.",
+        ) from exc
+
+
+@router.get(
+    "/workflows/{workflow_id}/revisions/{revision_id}/activation/prepare",
+    response_model=WorkflowActivationPreparation,
+)
+def get_workflow_activation_preparation(
+    workflow_id: str, revision_id: str, request: Request, session: SessionDep
+) -> WorkflowActivationPreparation:
+    provisioner = _services(request).processes.runtimes
+    try:
+        return prepare_workflow_activation(
+            session,
+            workflow_id,
+            revision_id,
+            runtime_materializer=(
+                lambda requirement, selection: materialize_comfy_runtime_dependency(
+                    provisioner, requirement, selection
+                )
+            )
+            if provisioner is not None
+            else None,
+        )
+    except (WorkflowActivationError, ValueError, OSError, SQLAlchemyError) as exc:
         missing = (
             isinstance(exc, WorkflowActivationError) and exc.code == "workflow_revision_unavailable"
         )

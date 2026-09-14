@@ -98,6 +98,9 @@ class ComfyRegistryPreparation:
     reused_wheel_environment: bool
 
 
+PreparationRecorder = Callable[[Session, ComfyRegistryPreparation], None]
+
+
 @dataclass(frozen=True)
 class ComfyRegistryStagedArchive:
     installed_path: str
@@ -180,6 +183,7 @@ async def prepare_comfy_registry_install(
     staged_archive: ComfyRegistryStagedArchive | None = None,
     environment_assembler: EnvironmentAssembler = assemble_comfy_registry_wheel_environment,
     pending_omission: PendingOmission | None = None,
+    record_preparation: PreparationRecorder | None = None,
 ) -> ComfyRegistryPreparation:
     """Prepare one exact Registry package without trusting or activating it.
 
@@ -289,9 +293,7 @@ async def prepare_comfy_registry_install(
             raise ComfyRegistryLifecycleError(
                 "binding_incomplete", "Registry package environment binding is incomplete"
             )
-        session.commit()
-        session.refresh(install)
-        return ComfyRegistryPreparation(
+        preparation = ComfyRegistryPreparation(
             install.id,
             install.installed_path,
             install.wheel_environment_path,
@@ -301,6 +303,10 @@ async def prepare_comfy_registry_install(
             install.wheel_environment_sha256,
             reused,
         )
+        if record_preparation is not None:
+            record_preparation(session, preparation)
+        session.commit()
+        return preparation
     except (Exception, asyncio.CancelledError):
         session.rollback()
         await _remove_tree(wheel_destination, staging_root)

@@ -94,6 +94,24 @@ describe("RegistryInstallsPanel", () => {
     await waitFor(() => expect(api.reviewRegistryInstall).toHaveBeenCalledWith("install-1", true));
   });
 
+  it("keeps a slow trust approval visible and prevents a second submission", async () => {
+    let finish!: (value: RegistryInstall) => void;
+    vi.mocked(api.reviewRegistryInstall).mockImplementation(() => new Promise((resolve) => {
+      finish = resolve;
+    }));
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "Trust package" }));
+    fireEvent.click(screen.getByRole("button", { name: "I reviewed this package - trust it" }));
+    const saving = await screen.findByRole("button", { name: "Saving trust…" });
+    expect(saving).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByText(/A waiting workflow installation continues after approval/)).toBeInTheDocument();
+    fireEvent.click(saving);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(api.reviewRegistryInstall).toHaveBeenCalledTimes(1);
+    finish(install({ trusted: true }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Saving trust…" })).not.toBeInTheDocument());
+  });
+
   it("shows what there is to review before asking whether it was reviewed", async () => {
     vi.mocked(api.registryInstalls).mockResolvedValue([
       install({

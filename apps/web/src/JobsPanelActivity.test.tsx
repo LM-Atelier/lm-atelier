@@ -34,6 +34,18 @@ function open() {
 }
 
 describe("active jobs stay visible independently of recent history", () => {
+  it("names workflow installation and retries its durable job", async () => {
+    const failed: Job = { ...job("workflow-install", "failed"), kind: "workflow_install" };
+    vi.mocked(api.jobActivity).mockResolvedValue({ active: [], active_count: 0, recent_issues: [failed] });
+    vi.mocked(api.retryJob).mockResolvedValue({ ...failed, status: "queued" });
+    open();
+    expect(await screen.findByText("Workflow installation · failed")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry workflow installation" }));
+    await waitFor(() => expect(api.retryJob).toHaveBeenCalledOnce());
+    expect(vi.mocked(api.retryJob).mock.calls[0][0]).toBe("workflow-install");
+    expect(screen.queryByText("workflow_install")).not.toBeInTheDocument();
+  });
+
   it("shows old active work and keeps its existing cancel action", async () => {
     vi.mocked(api.jobActivity).mockResolvedValue({ active: [job("old-active")], active_count: 1, recent_issues: [] });
     vi.mocked(api.cancelJob).mockResolvedValue(job("old-active", "cancelled"));

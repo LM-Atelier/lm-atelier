@@ -2,9 +2,9 @@
 
 The composition is resolver -> closure driver -> atomic preparation, each a
 frozen contract with typed refusals; nothing here re-implements any of their
-semantics. Success is always committed inactive and untrusted - reviewing,
-trusting, and activating what the recorded identities describe are separate
-explicit steps.
+semantics. Preparation commits an inactive, untrusted package. A supplied
+consumer may then apply the existing trust and activation checks against that
+exact result while the caller retains its runtime lease.
 """
 
 from __future__ import annotations
@@ -35,6 +35,8 @@ from .comfy_registry_lifecycle import (
     ComfyRegistryLifecycleError,
     ComfyRegistryPreparation,
     ComfyRegistryStagedArchive,
+    PreparationRecorder,
+    RegistryArchiveDownloader,
     discard_comfy_registry_staged_archive,
     prepare_comfy_registry_install,
     renew_comfy_registry_install_environment,
@@ -48,6 +50,11 @@ from .config import Settings
 from .models import ComfyRegistryInstall
 from .package_sources import partition_unpinned_sources
 from .source_omission_proof import PendingOmission, pending_omission_requirement
+from .workflow_package_execution_plan import (
+    PlannedArchiveDownloader,
+    WorkflowPackageExecutionPlan,
+    WorkflowPackageExecutionPlanError,
+)
 
 # One target interpreter probe: markers, wheel tags, and installed distributions for the
 # managed ComfyUI python. Owned as its own contract because target-binding
@@ -66,6 +73,9 @@ InterpreterProbe = Callable[
 ]
 
 PreparationPhase = Callable[[str, int | None, int | None], None]
+PreparationConsumer = Callable[
+    [Session, ComfyRegistryPreparation, ComfyNodeResolution], Awaitable[None]
+]
 
 
 class WorkflowPackagePreparationError(ValueError):
@@ -172,6 +182,9 @@ async def prepare_workflow_package(
     phase: PreparationPhase | None = None,
     renew_install_id: str | None = None,
     authorized_workflow: tuple[str, tuple[str, ...]] | None = None,
+    on_prepared: PreparationConsumer | None = None,
+    expected_plan: WorkflowPackageExecutionPlan | None = None,
+    record_preparation: PreparationRecorder | None = None,
 ) -> ComfyRegistryPreparation:
     """Resolve, close, and prepare one package; refuse with the source's code.
 
@@ -185,7 +198,14 @@ async def prepare_workflow_package(
         if phase is not None:
             phase(name, done, total)
 
+    if expected_plan is not None:
+        expected_plan.verify_requested(package_id, version, node_types)
     _phase("Resolving the package")
+    if record_preparation is not None and renew_install_id is not None:
+        raise WorkflowPackagePreparationError(
+            "workflow-package-result-renewal-unsupported",
+            "An accepted installation cannot replace an existing dependency environment.",
+        )
     requirement = WorkflowPackageRequirement(
         package_id=package_id,
         versions=(version,) if version else (),
@@ -202,6 +222,15 @@ async def prepare_workflow_package(
             getattr(exc, "code", "registry_resolution_failed"), str(exc)
         ) from exc
     resolution = registry.packages[0]
+    bound_downloader: RegistryArchiveDownloader = archive_downloader
+    if expected_plan is not None:
+        expected_plan.verify_resolution(resolution)
+        if renew_install_id is not None:
+            raise WorkflowPackagePreparationError(
+                "workflow-package-plan-renewal-unsupported",
+                "An extension installation plan cannot authorize a dependency renewal.",
+            )
+        bound_downloader = PlannedArchiveDownloader(archive_downloader, expected_plan)
     if resolution.error_code:
         raise WorkflowPackagePreparationError(
             resolution.error_code,
@@ -248,6 +277,8 @@ async def prepare_workflow_package(
     async def _archive_progress(downloaded: int, total: int | None) -> None:
         _phase("Downloading the node archive", downloaded, total)
 
+    if expected_plan is not None:
+        expected_plan.verify_target(marker_environment, supported_tags)
     staged_archive: ComfyRegistryStagedArchive | None = None
     effective_resolution = resolution
     # Only a staged commit-pinned package states dependencies inside its own
@@ -275,7 +306,7 @@ async def prepare_workflow_package(
         try:
             staged_archive = await stage_comfy_registry_install_archive(
                 resolution=resolution,
-                archive_downloader=archive_downloader,
+                archive_downloader=bound_downloader,
                 custom_node_root=context.custom_node_root,
                 media_worker_stopped=media_worker_stopped,
                 archive_progress=_archive_progress,
@@ -358,6 +389,8 @@ async def prepare_workflow_package(
         while True:
             try:
                 closure_result = await _resolve_closure(effective_resolution)
+                if expected_plan is not None:
+                    expected_plan.verify_closure(closure_result.closure)
                 break
             except ComfyRegistryWheelClosureDriverError as exc:
                 withdrawn = (
@@ -387,7 +420,7 @@ async def prepare_workflow_package(
                 custom_node_root=context.custom_node_root,
             )
         raise
-    except ComfyRegistryWheelClosureDriverError as exc:
+    except (ComfyRegistryWheelClosureDriverError, WorkflowPackageExecutionPlanError) as exc:
         if staged_archive is not None:
             await discard_comfy_registry_staged_archive(
                 resolution=resolution,
@@ -428,7 +461,7 @@ async def prepare_workflow_package(
                     session,
                     resolution=effective_resolution,
                     closure=closure_result.closure,
-                    archive_downloader=archive_downloader,
+                    archive_downloader=bound_downloader,
                     wheel_downloader=wheel_downloader,
                     python_executable=context.python_executable,
                     custom_node_root=context.custom_node_root,
@@ -438,6 +471,7 @@ async def prepare_workflow_package(
                     wheel_progress=_wheel_progress,
                     staged_archive=staged_archive,
                     pending_omission=pending_omission,
+                    record_preparation=record_preparation,
                 )
             else:
                 preparation = await renew_comfy_registry_install_environment(
@@ -453,8 +487,13 @@ async def prepare_workflow_package(
                     wheel_progress=_wheel_progress,
                 )
             staged_archive = None
+            if on_prepared is not None:
+                # The lifecycle committed preparation before returning. The
+                # consumer commits its trust and activation writes before
+                # awaiting the worker, keeping other database writers free.
+                await on_prepared(session, preparation, effective_resolution)
             return preparation
-    except ComfyRegistryLifecycleError as exc:
+    except (ComfyRegistryLifecycleError, WorkflowPackageExecutionPlanError) as exc:
         if staged_archive is not None:
             await discard_comfy_registry_staged_archive(
                 resolution=resolution,

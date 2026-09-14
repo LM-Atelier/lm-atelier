@@ -18,3 +18,17 @@ it("queues only the encoded server offer identity without browser plan or graph 
   expect(fetchMock.mock.calls[1][1]?.method).toBe("POST");
   expect(fetchMock.mock.calls[1][1]?.body).toBeUndefined();
 });
+
+it("reads encoded installation progress with cancellation and no mutation", async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ id: "offer" }), { status: 200 }));
+  vi.stubGlobal("fetch", fetchMock);
+  const { api } = await import("./api");
+  const controller = new AbortController();
+  await expect(api.workflowInstallProgress("offer/one?candidate", controller.signal)).resolves.toEqual({ id: "offer" });
+  expect(fetchMock.mock.calls[1][0]).toBe("/api/workflow-install-offers/offer%2Fone%3Fcandidate/progress");
+  expect(fetchMock.mock.calls[1][1]?.body).toBeUndefined();
+  expect(fetchMock.mock.calls[1][1]?.signal).toBe(controller.signal);
+  expect(fetchMock.mock.calls[1][1]?.method ?? "GET").toBe("GET");
+});

@@ -107,7 +107,9 @@ describe("WorkflowPackageReview import", () => {
       }],
     }));
 
-    fireEvent.click(screen.getByRole("button", { name: "Prepare 1.2.3" }));
+    expect(screen.getByText(/Registry releases can run automatically/)).toBeInTheDocument();
+    expect(api.prepareWorkflowPackage).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Install and enable 1.2.3" }));
 
     await waitFor(() => expect(api.ensureWorkflowPackageDraft).toHaveBeenCalledWith({
       ui_graph: { nodes: [] },

@@ -8,12 +8,9 @@ import { formatBytes } from "./format";
 import { activationErrorDescription } from "./registryPreparationErrors";
 import type { RegistryInstall, RegistryInstallReview } from "./types";
 
-/** Prepared Registry packages and the two decisions each one waits for.
- *
- * Preparation only stages files; nothing here runs until the exact package is
- * explicitly trusted, and nothing loads into ComfyUI until it is separately
- * activated. Revoking trust also deactivates. Every action needs the media
- * worker stopped, and the server refuses with a stable code when it is not.
+/** Review prepared packages and manage their trust and activation.
+ * A paused workflow installation manages its worker during approval and resumes
+ * afterward. Standalone trust and activation changes require a stopped worker.
  */
 export function RegistryInstallsPanel() {
   const client = useQueryClient();
@@ -59,8 +56,10 @@ export function RegistryInstallsPanel() {
         <div>
           <h2>Prepared packages</h2>
           <p>
-            Prepared code stays inert until you trust the exact package, and inactive until you
-            activate it. Stop the media worker before changing either.
+            Verified Registry releases can be enabled during installation. Other code stays
+            inactive until you trust the exact package. A waiting workflow
+            installation continues after approval. For other trust or activation changes,
+            stop the media worker first.
           </p>
         </div>
       </div>
@@ -95,13 +94,15 @@ export function RegistryInstallsPanel() {
               {(install.trusted || install.disk_status === "ready") && (
                 <button
                   className="secondary compact-button"
-                  onClick={() =>
-                    install.trusted
-                      ? review.mutate({ id: install.id, trusted: false })
-                      : setTrusting(install)
-                  }
+                  aria-disabled={review.isPending}
+                  onClick={() => {
+                    if (review.isPending) return;
+                    if (install.trusted) review.mutate({ id: install.id, trusted: false });
+                    else setTrusting(install);
+                  }}
                 >
-                  {install.trusted ? "Revoke trust" : "Trust package"}
+                  {review.isPending && review.variables?.id === install.id
+                    ? "Saving trust…" : install.trusted ? "Revoke trust" : "Trust package"}
                 </button>
               )}
               {install.trusted && !install.active && install.disk_status === "ready" && (

@@ -31,6 +31,7 @@ TYPES_FILE = REPOSITORY / "apps" / "web" / "src" / "types.ts"
 # Server-only models (requests, bundles the browser posts blindly) and
 # browser-only view models are deliberately absent.
 CHECKED_CONTRACTS = {
+    "WorkflowInstallProgress": "WorkflowInstallProgressOut",
     "WorkflowSummary": "WorkflowSummaryOut",
     "WorkflowRevisionChoice": "WorkflowRevisionChoiceOut",
     "WorkflowRevisionSchema": "WorkflowRevisionSchemaOut",

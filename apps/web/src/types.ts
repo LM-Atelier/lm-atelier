@@ -9,6 +9,7 @@ export type JobKind =
   | "activate"
   | "download"
   | "registry_prepare"
+  | "workflow_install"
   | "export";
 export type JobStatus =
   | "queued"
@@ -916,6 +917,7 @@ export interface ModelInstall {
 }
 
 export type InstalledAssetKind =
+  | "background_removal"
   | "checkpoint"
   | "clip_vision"
   | "controlnet"
@@ -1192,7 +1194,13 @@ export interface CatalogPreflight {
   checks: CatalogPreflightCheck[];
 }
 
-export type BoundWorkflowAssetKind = "checkpoint" | "embedding" | "lora" | "upscaler" | "vae";
+export type BoundWorkflowAssetKind =
+  | "background_removal"
+  | "checkpoint"
+  | "embedding"
+  | "lora"
+  | "upscaler"
+  | "vae";
 export type WorkflowAssetKind = BoundWorkflowAssetKind | "configuration";
 
 /** One missing workflow file bound to an exact plan artifact. */
@@ -1280,7 +1288,57 @@ export interface WorkflowRevision {
   input_schema_json: Record<string, unknown>;
   dependencies_json: Record<string, unknown>;
   trusted: boolean;
+  dependency_contract_sha256?: string | null;
   created_at: string;
+}
+
+export interface WorkflowActivationSelection {
+  slot_name: string;
+  requirement_key: string;
+  local_kind: WorkflowDependencyResourceKind;
+  local_id: string;
+  recorded_resource_identity_sha256: string | null;
+  mount: Record<string, unknown>;
+}
+
+export interface WorkflowActivationChoice {
+  name: string;
+  selection: WorkflowActivationSelection;
+}
+
+export interface WorkflowActivationSlotChoices {
+  name: string;
+  resource_kind: WorkflowDependencyResourceKind;
+  required: boolean;
+  satisfaction: "all_of" | "any_of";
+  requirement_keys: string[];
+  choices: WorkflowActivationChoice[];
+}
+
+export interface WorkflowActivationPreparation {
+  workflow_revision_id: string;
+  workflow_artifact_sha256: string;
+  dependency_contract_sha256: string;
+  state: "prepared" | "needs_attention";
+  selections: WorkflowActivationSelection[] | null;
+  slots: WorkflowActivationSlotChoices[];
+  issues: { code: "missing_required_dependency" | "ambiguous_dependency_binding"; slot_name: string }[];
+}
+
+export interface WorkflowActivationRequest {
+  workflow_artifact_sha256: string;
+  dependency_contract_sha256: string;
+  selections: WorkflowActivationSelection[];
+}
+
+export interface WorkflowActivation {
+  id: string;
+  workflow_revision_id: string;
+  dependency_contract_sha256: string;
+  binding_sha256: string;
+  launch_sha256: string;
+  state: "ready";
+  is_active: true;
 }
 
 export interface WorkflowSummary {
@@ -1828,6 +1886,37 @@ export type WorkflowSelectionMode =
   | "revision"
   | "legacy";
 
+export interface WorkflowInstallProgress {
+  id: string;
+  workflow_revision_id: string;
+  status: "ready" | "queued" | "invalidated" | "completed" | "expired";
+  phase: "ready" | "downloading" | "paused" | "verifying" | "needs_attention" | "completed" | "invalidated" | "expired";
+  total_downloads: number;
+  completed_downloads: number;
+  failed_downloads: number;
+  cancelled_downloads: number;
+  paused_downloads: number;
+  pending_downloads: number;
+  unavailable_downloads: number;
+  attention_code:
+    | "download-acceptance-unavailable"
+    | "download-acceptance-changed"
+    | "download-result-unavailable"
+    | "download-result-changed"
+    | "download-plan-changed"
+    | "workflow-download-failed"
+    | "workflow-dependencies-need-selection"
+    | "download-results-need-binding"
+    | "workflow-install-offer-changed"
+    | "workflow-review-required"
+    | "workflow-completion-unavailable"
+    | "workflow-runtime-plan-unavailable"
+    | "workflow-runtime-plan-changed"
+    | "workflow-extension-review-required"
+    | "workflow-media-restore-failed"
+    | null;
+}
+
 export interface WorkflowInstallOffer {
   id: string;
   workflow_revision_id: string;
@@ -1860,6 +1949,7 @@ export interface WorkflowFamilyVariant {
   readiness_reason: string | null;
   setup_resolution?: "reviewed_download_available" | "attention_required" | null;
   install_offer?: WorkflowInstallOffer | null;
+  install_progress?: WorkflowInstallProgress | null;
 }
 
 export interface WorkflowFamilyPreference {
