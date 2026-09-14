@@ -9914,6 +9914,35 @@ async def create_workflow(payload: WorkflowCreate, session: SessionDep) -> Workf
 async def _persist_workflow(
     payload: WorkflowCreate, session: Session, *, trusted: bool
 ) -> WorkflowDefinition:
+    return await _run_workflow_write(
+        lambda: _persist_workflow_sync(payload, session, trusted=trusted)
+    )
+
+
+async def _run_workflow_write[T: (WorkflowDefinition, WorkflowRevision)](
+    operation: Callable[[], T],
+) -> T:
+    task = asyncio.create_task(asyncio.to_thread(operation))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        # The request owns the session until its worker finishes. Repeated
+        # cancellation must not close it while SQLite uses it.
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        with suppress(Exception):
+            task.result()
+        raise
+
+
+def _persist_workflow_sync(
+    payload: WorkflowCreate, session: Session, *, trusted: bool
+) -> WorkflowDefinition:
     try:
         validate_lora_workflow_contract(
             payload.api_graph,
@@ -12563,6 +12592,16 @@ async def create_workflow_revision(
 async def _persist_workflow_revision(
     workflow_id: str, payload: WorkflowRevisionCreate, session: Session, *, trusted: bool
 ) -> WorkflowRevision:
+    return await _run_workflow_write(
+        lambda: _persist_workflow_revision_sync(workflow_id, payload, session, trusted=trusted)
+    )
+
+
+def _persist_workflow_revision_sync(
+    workflow_id: str, payload: WorkflowRevisionCreate, session: Session, *, trusted: bool
+) -> WorkflowRevision:
+    session.execute(text("UPDATE workflow_revisions SET version = version WHERE 0"))
+    session.expire_all()
     definition = session.get(WorkflowDefinition, workflow_id)
     if not definition:
         raise api_error(404, "workflow-not-found", "workflow not found")
