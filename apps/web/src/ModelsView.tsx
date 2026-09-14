@@ -16,6 +16,7 @@ import { RecipeCard } from "./RecipeCard";
 import { VersionChooser } from "./VersionChooser";
 import { WorkflowConsumers } from "./WorkflowConsumers";
 import { api } from "./api";
+import { catalogUnavailableMessage } from "./catalogSourceMessages";
 import { formatBytes } from "./format";
 import type {
   CatalogModel,
@@ -464,7 +465,7 @@ export function ModelsView({ initialRole }: { initialRole: EngineRole }) {
         </div>
       )}
       <ErrorCallout message={catalog.error?.message} action={<button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Retry</button>} />
-      {catalogIsStale && !catalog.error && <div className="callout warning action-callout" role="status"><span>Showing saved results while Hugging Face is unavailable.</span><button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Refresh</button></div>}
+      {catalogIsStale && !catalog.error && <div className="callout warning action-callout" role="status"><span>{catalogUnavailableMessage(catalogSource)}</span><button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Refresh</button></div>}
       <div className={`model-grid ${catalog.isFetching && !catalog.isFetchingNextPage ? "superseded" : ""}`}>{catalogItems.map((model) => <ModelCard key={model.remote_id} model={model} role={role} runtime={runtimeFor(model)} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} onChooseVersion={model.provider === "civitai" && model.parent_model_id ? () => setChoosingVersions(model) : undefined} />)}</div>
       {choosingVersions?.parent_model_id && (
         <VersionChooser modelId={choosingVersions.parent_model_id} modelName={choosingVersions.parent_model_name ?? choosingVersions.name}
