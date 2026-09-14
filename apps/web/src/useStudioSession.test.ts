@@ -166,4 +166,20 @@ describe("studio mask upload", () => {
     upload.mockRestore();
     sendTurn.mockRestore();
   });
+
+  it("says when a selection is placed back after the edit rather than given to the workflow", async () => {
+    const { api } = await import("./api");
+    const upload = vi.spyOn(api, "upload").mockResolvedValue({ id: "sha256:mask" } as never);
+
+    const { uploadMaskForTest } = await import("./useStudioSession");
+    const setting = await uploadMaskForTest({
+      blob: new Blob([new Uint8Array([1, 2])], { type: "image/png" }),
+      featherPx: 4,
+      invert: false,
+      apply: "blend",
+    });
+
+    expect(setting).toEqual({ artifact_id: "sha256:mask", feather_px: 4, invert: false, apply: "blend" });
+    upload.mockRestore();
+  });
 });

@@ -21,12 +21,14 @@ from .studio_masks import workflow_accepts_mask
 from .upscale_workflows import workflow_declares_upscale
 
 StudioToolKind = Literal[
-    "instruct", "brush", "eraser", "rect", "lasso", "bucket", "wand", "enhance", "extend"
+    "instruct", "brush", "eraser", "rect", "lasso", "bucket", "wand", "enhance", "extend", "text"
 ]
 
 
 #: The tool kinds the surface offers, paired with what each needs installed.
-#: Selection tools share one class: they are six ways to draw one mask.
+#: Selection tools share one class: they are six ways to draw one mask. Text
+#: draws a selection too, but the selection is placed back after a whole-picture
+#: edit rather than given to the workflow, so any edit workflow can run it.
 TOOL_WORKFLOW_CLASSES: dict[StudioToolKind, str] = {
     "instruct": "image_to_image",
     "brush": "inpaint",
@@ -37,6 +39,7 @@ TOOL_WORKFLOW_CLASSES: dict[StudioToolKind, str] = {
     "wand": "inpaint",
     "enhance": "upscale",
     "extend": "outpaint",
+    "text": "image_to_image",
 }
 
 _CLASS_GUIDANCE = {

@@ -168,6 +168,21 @@ describe("what travels with a turn", () => {
     expect(toolUsesMask("enhance")).toBe(false);
     expect(toolUsesMask("extend")).toBe(false);
     expect(toolUsesMask("instruct")).toBe(false);
+    // The box around the words is what keeps the rest of the picture as it was.
+    expect(toolUsesMask("text")).toBe(true);
+  });
+
+  it("says which words to replace, and with what, once there are new words", () => {
+    const text = { ...initialToolState(), kind: "text" as const };
+    expect(defaultInstruction(text)).toBe("");
+    expect(defaultInstruction({ ...text, currentWords: "  ", newWords: " " })).toBe("");
+
+    expect(defaultInstruction({ ...text, newWords: " Open late " })).toBe(
+      'Replace the text with "Open late". Keep the same font, color, size and position, and leave everything else unchanged.',
+    );
+    expect(defaultInstruction({ ...text, currentWords: "Open daily", newWords: "Open late" })).toBe(
+      'Replace the text "Open daily" with "Open late". Keep the same font, color, size and position, and leave everything else unchanged.',
+    );
   });
 
   it("gives the wordless tools something true to say", () => {

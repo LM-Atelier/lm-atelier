@@ -10,10 +10,11 @@ import { StudioExtendHandles } from "./StudioExtendHandles";
 import { StudioRecipes } from "./StudioRecipes";
 import { StudioSelectionTool } from "./StudioSelectionTool";
 import { StudioToolGuidance } from "./StudioToolGuidance";
+import { StudioToolOptions } from "./StudioToolOptions";
 import { StudioToolRail } from "./StudioToolRail";
 import { StudioWorkflowSelector } from "./StudioWorkflowSelector";
 import { artifactSource } from "./messageMedia";
-import { coverage, encodeMaskPng, isEmpty } from "./studioMasks";
+import { cloneMask, coverage, encodeMaskPng, feather, isEmpty, type MaskRaster } from "./studioMasks";
 import { readSourcePixels } from "./studioSourcePixels";
 import {
   initialToolState,
@@ -294,60 +295,15 @@ export function StudioView({
               </small>
             </div>
           )}
-          {tools.kind === "extend" ? (
-            <div className="studio-tool-options">
-              <span>
-                <strong>Extend by</strong>
-              </span>
-              <small>
-                {Object.values(tools.margins).some(Boolean)
-                  ? (["top", "right", "bottom", "left"] as const)
-                      .filter((side) => tools.margins[side] > 0)
-                      .map((side) => `${side} ${Math.round(tools.margins[side] * 100)}%`)
-                      .join(", ")
-                  : "Drag an edge of the picture outward, or use the arrow keys on one."}
-              </small>
-              <button
-                className="secondary compact-button"
-                onClick={() => dispatch({ type: "clear-margins" })}
-              >
-                Reset edges
-              </button>
-            </div>
-          ) : tools.kind === "enhance" ? (
-            <label>
-              <span>
-                <strong>Enlarge by</strong> {tools.upscaleFactor}x
-              </span>
-              <input
-                type="range"
-                min={1}
-                max={8}
-                step={1}
-                value={tools.upscaleFactor}
-                onChange={(event) =>
-                  dispatch({ type: "set-upscale-factor", factor: Number(event.target.value) })
-                }
-              />
-            </label>
-          ) : (
-            <label>
-              <span>
-                <strong>
-                  {tools.kind === "instruct" ? "Describe the edit" : "Describe the change here"}
-                </strong>
-              </span>
-              <textarea
-                rows={4}
-                value={instruction}
-                placeholder="e.g. make it a watercolor painting"
-                onChange={(event) => {
-                  setInstruction(event.target.value);
-                  setRecipe(null);
-                }}
-              />
-            </label>
-          )}
+          <StudioToolOptions
+            tools={tools}
+            dispatch={dispatch}
+            instruction={instruction}
+            onInstructionChange={(value) => {
+              setInstruction(value);
+              setRecipe(null);
+            }}
+          />
           <StudioRecipes
             disabled={busy || !current}
             onApply={(chosen) => {
@@ -364,10 +320,13 @@ export function StudioView({
           <button
             className="primary"
             // Enhance asks for no words: the whole picture is the subject and
-            // the size is the whole instruction.
+            // the size is the whole instruction. Text takes its words from its
+            // own fields, and without a box it would change the whole picture.
             disabled={
               (tools.kind === "extend" && !Object.values(tools.margins).some(Boolean)) ||
-              (tools.kind !== "enhance" && tools.kind !== "extend" && !instruction.trim()) ||
+              (tools.kind === "text" && (!tools.newWords.trim() || selectionCoverage === 0)) ||
+              (tools.kind !== "enhance" && tools.kind !== "extend" && tools.kind !== "text"
+                && !instruction.trim()) ||
               busy ||
               !current ||
               Boolean(unavailable) ||
@@ -381,12 +340,22 @@ export function StudioView({
               // Enhance and Extend ask for no words, and the turn requires
               // some: both were reaching the server and being refused before
               // anything ran. The user's words win whenever there are any.
-              const words = instruction.trim() || defaultInstruction(tools);
+              const replacingWords = tools.kind === "text";
+              const words = replacingWords
+                ? defaultInstruction(tools)
+                : instruction.trim() || defaultInstruction(tools);
               const send = (mask: Blob | null) => {
                 apply(
                   words,
                   current.artifactId,
-                  mask ? { blob: mask, featherPx: tools.featherPx, invert: false } : undefined,
+                  mask
+                    ? {
+                        blob: mask,
+                        featherPx: tools.featherPx,
+                        invert: false,
+                        ...(replacingWords ? { apply: "blend" as const } : {}),
+                      }
+                    : undefined,
                   tools.kind === "enhance"
                     ? { upscale_factor: tools.upscaleFactor }
                     : tools.kind === "extend"
@@ -405,8 +374,8 @@ export function StudioView({
               // A selection that cannot be encoded is refused, never sent as an
               // edit of the whole picture it was drawn to protect.
               if (selection) {
-                void encodeMaskPng(selection).then((mask) =>
-                  mask ? send(mask) : setSelectionError(SELECTION_NOT_PREPARED),
+                void encodeMaskPng(replacingWords ? softened(selection, tools.featherPx) : selection).then(
+                  (mask) => (mask ? send(mask) : setSelectionError(SELECTION_NOT_PREPARED)),
                 );
               } else send(null);
             }}
@@ -415,6 +384,8 @@ export function StudioView({
               ? "Applying…"
               : tools.kind === "extend"
                 ? "Extend"
+                : tools.kind === "text"
+                  ? "Replace words"
                 : tools.kind === "enhance"
                   ? `Enlarge ${tools.upscaleFactor}x`
                 : tools.kind !== "instruct" && selectionCoverage > 0
@@ -430,6 +401,17 @@ export function StudioView({
       />
     </div>
   );
+}
+
+/** A copy of the selection with softened edges, leaving the one on the canvas as drawn.
+ *
+ * Text is placed back through its box, and a hard edge would show wherever the
+ * edited picture differs slightly from the source just outside the words.
+ */
+function softened(mask: MaskRaster, featherPx: number): MaskRaster {
+  const copy = cloneMask(mask);
+  if (featherPx > 0) feather(copy, featherPx);
+  return copy;
 }
 
 function StudioGenerationPreview({ artifactId }: { artifactId: string }) {

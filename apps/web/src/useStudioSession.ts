@@ -18,6 +18,9 @@ export type StudioMaskUpload = {
   blob: Blob;
   featherPx: number;
   invert: boolean;
+  /** Placed back over the source after a whole-picture edit, rather than
+   * handed to the workflow's own mask input. */
+  apply?: "blend";
 };
 
 type StudioApply = {
@@ -174,6 +177,7 @@ async function uploadMask(mask: StudioMaskUpload) {
     artifact_id: artifact.id,
     feather_px: mask.featherPx,
     invert: mask.invert,
+    ...(mask.apply ? { apply: mask.apply } : {}),
   };
 }
 

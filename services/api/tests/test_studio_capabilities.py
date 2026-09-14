@@ -70,6 +70,14 @@ def test_a_plain_editor_runs_instruct_but_not_a_selection() -> None:
     assert "inpainting" in (tools["brush"].reason or "")
 
 
+def test_replacing_words_needs_an_edit_workflow_but_no_mask_input() -> None:
+    """The selection is placed back after the edit, so the workflow never takes one."""
+    assert _by_kind([PLAIN_SCHEMA])["text"].available is True
+    assert _by_kind([PLAIN_SCHEMA])["text"].workflow_class == "image_to_image"
+    assert _by_kind([])["text"].available is False
+    assert "image editing workflow" in (_by_kind([])["text"].reason or "")
+
+
 def test_one_mask_capable_workflow_enables_every_selection_tool() -> None:
     # Four ways to draw one mask: they stand or fall together.
     tools = _by_kind([PLAIN_SCHEMA, MASK_SCHEMA])
