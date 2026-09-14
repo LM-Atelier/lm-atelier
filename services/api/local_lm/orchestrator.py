@@ -11,9 +11,9 @@ import shutil
 import time
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, cast
 from urllib.parse import urlparse
 
@@ -200,6 +200,13 @@ from .studio_masks import (
     MaskContractError,
     parse_mask_setting,
     split_mask_setting,
+)
+from .studio_region_edit import (
+    MAX_BLEND_READ_BYTES,
+    RegionEdit,
+    RegionEditError,
+    blend_through_selection,
+    prepare_selection,
 )
 from .turn_inheritance import TurnInheritance, TurnSourceResolver, inherited_profile_configuration
 from .video_length import (
@@ -1769,7 +1776,12 @@ class ConversationOrchestrator:
             if not workflow_revision:
                 raise ValueError("A selection requires a media workflow that accepts one.")
             try:
-                parse_mask_setting(effective_settings, workflow_revision.input_schema_json)
+                parse_mask_setting(
+                    effective_settings,
+                    workflow_revision.input_schema_json,
+                    operation=plan.operation.value,
+                    source_count=len(resolved_input_ids),
+                )
             except MaskContractError as exc:
                 raise ValueError(str(exc)) from exc
         # Margins reach here as an ordinary object setting, and the schema
@@ -6065,6 +6077,41 @@ class ConversationOrchestrator:
             return False
         return executed_graph_carries_the_proof(proven.proof, executed_graph)
 
+    @staticmethod
+    async def _region_blended_outputs(
+        completed_assets: Sequence[GeneratedAsset], region_edit: RegionEdit, media_engine: str
+    ) -> list[GeneratedAsset]:
+        """Each kept picture placed back into its source through the selection.
+
+        A preview a workflow wrote for itself, and any video, pass through as
+        produced: neither is the edit the selection was drawn for. Each blend
+        is its own thread hop, for the same reason each measurement is.
+        """
+
+        blended: list[GeneratedAsset] = []
+        for generated in completed_assets:
+            if generated.kind != "image" or names_a_preview(
+                record_for(generated.origin, media_engine)
+            ):
+                blended.append(generated)
+                continue
+            try:
+                result = await asyncio.to_thread(
+                    blend_through_selection, region_edit, generated.content
+                )
+            except RegionEditError as exc:
+                raise RuntimeError(str(exc)) from exc
+            blended.append(
+                replace(
+                    generated,
+                    content=result.content,
+                    media_type=result.media_type,
+                    name=f"{PurePosixPath(generated.name).stem or 'edited'}.png",
+                    metadata={**generated.metadata, "region_edit": result.record},
+                )
+            )
+        return blended
+
     async def _measured_outputs(
         self, completed_assets: Sequence[GeneratedAsset]
     ) -> list[dict[str, Any]]:
@@ -6384,18 +6431,49 @@ class ConversationOrchestrator:
             if revision and workflow_video_length(revision.input_schema_json):
                 parameters.pop(VIDEO_DURATION_SETTING_KEY, None)
             mask_setting = execution_settings.get(MASK_SETTING_KEY)
+            region_edit: RegionEdit | None = None
             if isinstance(mask_setting, dict):
                 mask_artifact = session.get(Artifact, str(mask_setting.get("artifact_id") or ""))
                 if not mask_artifact:
                     raise RuntimeError("The selection for this edit is no longer stored.")
-                parameters[MASK_SETTING_KEY] = {
-                    **mask_setting,
-                    "path": str(
-                        self.artifacts.verified_path(mask_artifact)
-                        if accepted_inputs is not None
-                        else self.artifacts.resolve(mask_artifact)
-                    ),
-                }
+                if "apply" in mask_setting:
+                    # A blend selection never reaches the workflow: it edits the
+                    # whole picture, and the selection decides afterwards which
+                    # of its pixels are kept. Checked again against the inputs
+                    # this execution resolved, because those are what the
+                    # result is placed back into.
+                    parameters.pop(MASK_SETTING_KEY, None)
+                    try:
+                        selection = parse_mask_setting(
+                            execution_settings,
+                            None,
+                            operation=execution_operation,
+                            source_count=len(input_ids) if len(input_paths) == 1 else 0,
+                        )
+                    except MaskContractError as exc:
+                        raise RuntimeError(str(exc)) from exc
+                    source_artifact = session.get(Artifact, input_ids[0])
+                    if selection is None or source_artifact is None:
+                        raise RuntimeError("The picture this edit selects from is unavailable.")
+                    region_edit = RegionEdit(
+                        selection=selection,
+                        source_artifact_id=source_artifact.id,
+                        source=self.artifacts.verified_bytes(
+                            source_artifact, maximum_bytes=MAX_BLEND_READ_BYTES
+                        ),
+                        mask=self.artifacts.verified_bytes(
+                            mask_artifact, maximum_bytes=MAX_BLEND_READ_BYTES
+                        ),
+                    )
+                else:
+                    parameters[MASK_SETTING_KEY] = {
+                        **mask_setting,
+                        "path": str(
+                            self.artifacts.verified_path(mask_artifact)
+                            if accepted_inputs is not None
+                            else self.artifacts.resolve(mask_artifact)
+                        ),
+                    }
             request = MediaRequest(
                 run_id=run.id,
                 operation=execution_operation,
@@ -6408,6 +6486,14 @@ class ConversationOrchestrator:
                 scope_id=self.scope_id,
             )
             assistant_id = run.assistant_message_id
+
+        if region_edit is not None:
+            # Before any model time is spent: a selection drawn on another
+            # picture, or one covering nothing, cannot be placed back.
+            try:
+                await asyncio.to_thread(prepare_selection, region_edit)
+            except RegionEditError as exc:
+                raise RuntimeError(str(exc)) from exc
 
         completed_assets = []
         preview_artifact_id: str | None = None
@@ -6562,6 +6648,12 @@ class ConversationOrchestrator:
             # ended this execution; the shared bounded close does both.
             await close_iterator(producer)
 
+        if region_edit is not None:
+            # Before measurement, so the measurement, the library, provenance
+            # and verification all describe the picture that is kept.
+            completed_assets = await self._region_blended_outputs(
+                completed_assets, region_edit, media_engine
+            )
         media_capabilities = (
             await self._successful_media_capabilities() if completed_assets else None
         )
@@ -6741,6 +6833,13 @@ class ConversationOrchestrator:
                         # The durable half: this run's own judgement, kept where
                         # nothing another run does can reach it.
                         "output_size_agreement": agreement,
+                        # How a selection placed this picture back into its
+                        # source, present only when one did.
+                        **(
+                            {"region_edit": generated.metadata["region_edit"]}
+                            if region_edit is not None and "region_edit" in generated.metadata
+                            else {}
+                        ),
                     }
                 )
                 parts.append(
@@ -7293,6 +7392,11 @@ class ConversationOrchestrator:
         if not verification_job or verification_job.status == JobStatus.CANCELLED.value:
             raise asyncio.CancelledError
         settings[decision.parameter] = decision.value_after
+        # A selection is not a workflow field, so the stored-settings filter
+        # above drops it, and a retry without it would change the whole
+        # picture instead of the part that was selected.
+        if MASK_SETTING_KEY in source_settings:
+            settings[MASK_SETTING_KEY] = copy.deepcopy(source_settings[MASK_SETTING_KEY])
         verification_job_id = image_edit_verification_job_id(source_run_id)
 
         async def resolve_retry_source(

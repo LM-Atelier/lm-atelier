@@ -2,6 +2,7 @@ import {
   Brush,
   Eraser,
   Lasso,
+  LetterText,
   Maximize2,
   PaintBucket,
   Redo2,
@@ -24,6 +25,7 @@ const TOOLS: Array<{ kind: StudioToolKind; label: string; icon: typeof Brush }> 
   { kind: "wand", label: "Select similar colors", icon: Wand2 },
   { kind: "enhance", label: "Enlarge and restore detail", icon: Sparkles },
   { kind: "extend", label: "Extend past the edge", icon: Maximize2 },
+  { kind: "text", label: "Replace words in the picture", icon: LetterText },
 ];
 
 /** The studio's left rail: pick how you point at the image.

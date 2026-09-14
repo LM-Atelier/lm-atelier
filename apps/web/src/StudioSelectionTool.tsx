@@ -17,6 +17,8 @@ export function StudioSelectionTool({
   dispatch: Dispatch<StudioToolAction>;
   colorsUnreadable: boolean;
 }) {
+  // The words tool draws a box, which has no size to set.
+  if (tools.kind === "text") return null;
   if (tools.kind !== "bucket" && tools.kind !== "wand") {
     return (
       <label>

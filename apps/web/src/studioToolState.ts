@@ -36,6 +36,8 @@ export type { StudioToolKind } from "./types";
  * instruct tool" instead meant a selection drawn with the brush, left on the
  * canvas, travelled with an Enhance or an Extend that never asked for one -
  * a mask the reader had stopped thinking about, silently narrowing the work.
+ * Text is among them: the box around the words is what keeps the rest of the
+ * picture as it was.
  */
 const MASK_TOOLS: ReadonlySet<StudioToolKind> = new Set<StudioToolKind>([
   "brush",
@@ -44,6 +46,7 @@ const MASK_TOOLS: ReadonlySet<StudioToolKind> = new Set<StudioToolKind>([
   "lasso",
   "bucket",
   "wand",
+  "text",
 ]);
 
 export function toolUsesMask(kind: StudioToolKind): boolean {
@@ -62,6 +65,10 @@ export type StudioToolState = {
   readonly upscaleFactor: number;
   /** How far past each edge to paint, as a fraction of the picture. */
   readonly margins: { top: number; right: number; bottom: number; left: number };
+  /** The words as they read in the picture now, when the reader gives them. */
+  readonly currentWords: string;
+  /** The words that should read there instead. */
+  readonly newWords: string;
   readonly mask: MaskRaster | null;
   /** Bumped whenever the raster changes so the canvas repaints its tint. */
   readonly maskVersion: number;
@@ -77,6 +84,8 @@ export type StudioToolAction =
   | { type: "set-upscale-factor"; factor: number }
   | { type: "set-margin"; side: "top" | "right" | "bottom" | "left"; fraction: number }
   | { type: "clear-margins" }
+  | { type: "set-current-words"; words: string }
+  | { type: "set-new-words"; words: string }
   | { type: "image-changed"; width: number; height: number }
   | { type: "stroke-end" }
   | { type: "invert" }
@@ -94,6 +103,8 @@ export function initialToolState(): StudioToolState {
     colorTolerance: 32,
     upscaleFactor: 2,
     margins: { top: 0, right: 0, bottom: 0, left: 0 },
+    currentWords: "",
+    newWords: "",
     mask: null,
     maskVersion: 0,
     history: new MaskHistory(),
@@ -124,6 +135,10 @@ export function studioToolReducer(
       };
     case "clear-margins":
       return { ...state, margins: { top: 0, right: 0, bottom: 0, left: 0 } };
+    case "set-current-words":
+      return { ...state, currentWords: action.words };
+    case "set-new-words":
+      return { ...state, newWords: action.words };
     case "image-changed": {
       // A new image invalidates the mask entirely; carrying it over would
       // silently apply a selection drawn on different pixels.
@@ -181,6 +196,7 @@ export function studioToolReducer(
  */
 export function defaultInstruction(state: StudioToolState): string {
   if (state.kind === "enhance") return `Enhance to ${state.upscaleFactor}x`;
+  if (state.kind === "text") return replaceWordsInstruction(state);
   if (state.kind === "extend") {
     const edges = Object.entries(state.margins)
       .filter(([, value]) => value)
@@ -188,6 +204,20 @@ export function defaultInstruction(state: StudioToolState): string {
     return edges.length ? `Extend past the ${edges.join(", ")}` : "Extend the picture";
   }
   return "";
+}
+
+/** The words for a text replacement, or nothing until there are new words.
+ *
+ * The edit runs on the whole picture, so the model is told which words to
+ * change when the reader says, and to keep their look; the selection then
+ * keeps everything outside the box as it was.
+ */
+function replaceWordsInstruction(state: StudioToolState): string {
+  const replacement = state.newWords.trim();
+  if (!replacement) return "";
+  const current = state.currentWords.trim();
+  const target = current ? `the text "${current}"` : "the text";
+  return `Replace ${target} with "${replacement}". Keep the same font, color, size and position, and leave everything else unchanged.`;
 }
 
 /** The pointer tool for the current state, or null for text-only modes.
@@ -208,6 +238,9 @@ export function toolFor(
     case "eraser":
       return new BrushTool(state.mask, state.brushRadius, 0);
     case "rect":
+      return new RectTool(state.mask);
+    // Words sit in a line, so a box is the natural way to point at them.
+    case "text":
       return new RectTool(state.mask);
     case "lasso":
       return new LassoTool(state.mask);

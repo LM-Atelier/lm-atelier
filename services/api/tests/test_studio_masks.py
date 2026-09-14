@@ -55,6 +55,60 @@ def test_a_valid_selection_normalizes_its_defaults() -> None:
     assert softened.invert is True
 
 
+def test_a_blend_selection_needs_no_mask_input() -> None:
+    selection = parse_mask_setting(
+        {"mask": {"artifact_id": ARTIFACT, "feather_px": 4, "apply": "blend"}},
+        {"properties": {}},
+        operation="image_to_image",
+        source_count=1,
+    )
+
+    assert selection is not None
+    assert selection.blend is True
+    assert selection.as_dict() == {
+        "artifact_id": ARTIFACT,
+        "feather_px": 4,
+        "invert": False,
+        "apply": "blend",
+    }
+
+
+def test_an_ordinary_selection_records_no_apply() -> None:
+    selection = parse_mask_setting({"mask": {"artifact_id": ARTIFACT}}, MASK_SCHEMA)
+
+    assert selection is not None
+    assert selection.blend is False
+    assert "apply" not in selection.as_dict()
+
+
+@pytest.mark.parametrize(
+    ("operation", "source_count"),
+    [("text_to_image", 0), ("image_to_image", 0), ("image_to_image", 2), ("image_to_video", 1)],
+)
+def test_a_blend_selection_needs_exactly_one_picture_being_edited(
+    operation: str, source_count: int
+) -> None:
+    with pytest.raises(MaskContractError) as raised:
+        parse_mask_setting(
+            {"mask": {"artifact_id": ARTIFACT, "apply": "blend"}},
+            MASK_SCHEMA,
+            operation=operation,
+            source_count=source_count,
+        )
+    assert raised.value.code == "mask-blend-needs-one-source"
+
+
+def test_an_unknown_apply_refuses() -> None:
+    with pytest.raises(MaskContractError) as raised:
+        parse_mask_setting(
+            {"mask": {"artifact_id": ARTIFACT, "apply": "somehow"}},
+            MASK_SCHEMA,
+            operation="image_to_image",
+            source_count=1,
+        )
+    assert raised.value.code == "mask-apply-invalid"
+
+
 @pytest.mark.parametrize(
     ("payload", "code"),
     [
