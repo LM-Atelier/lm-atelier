@@ -33,10 +33,13 @@ interface Props {
   onIncludeArchivedChange: (include: boolean) => void;
   loading: boolean;
   onReviewInstall?: (offer: WorkflowInstallOffer, workflowName: string) => void;
+  /** The workflow whose installation the details panel shows in full. */
+  installationInDetails?: string | null;
 }
 
 export function WorkflowFamilyList({
   families, workflows, selectedId, onSelect, includeArchived, onIncludeArchivedChange, loading, onReviewInstall,
+  installationInDetails,
 }: Props) {
   const [search, setSearch] = useState("");
   const [operation, setOperation] = useState("");
@@ -148,7 +151,7 @@ export function WorkflowFamilyList({
                       </span>
                     </button>
                     <WorkflowInstallStatus progress={variant.install_progress} workflowName={variant.name}
-                      revisionId={variant.current_revision_id}
+                      revisionId={variant.current_revision_id} summary={variant.id === installationInDetails}
                       onReviewSetup={selectable ? () => onSelect(workflow) : undefined} />
                     {offer && onReviewInstall && <button className="workflow-family-install-action"
                       aria-label={`Review downloads for ${variant.name}`}

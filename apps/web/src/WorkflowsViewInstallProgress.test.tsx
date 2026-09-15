@@ -79,6 +79,24 @@ it.each([
   expect(api.installWorkflowOffer).not.toHaveBeenCalled();
 });
 
+it("announces one installation once where the list, its variants and its details all show it", async () => {
+  arrange(progress("downloading"));
+  show();
+  await screen.findByRole("heading", { name: "Detail collection" });
+  const card = screen.getByRole("region", { name: "Installation for Detail variant" });
+  fireEvent.click(within(card).getByRole("button", { name: "Review workflow setup" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Show operation variants" }));
+  await screen.findByRole("heading", { name: "Detail variant" });
+  await waitFor(() => expect(screen.getAllByText("Downloading workflow files")).toHaveLength(3));
+  const regions = screen.getAllByRole("region", { name: "Installation for Detail variant" });
+  expect(regions).toHaveLength(1);
+  expect(regions[0]).not.toBe(card);
+  expect(regions[0].closest(".workflow-detail")).not.toBeNull();
+  expect(screen.getAllByRole("status").filter(status => status.textContent === "Downloading workflow files")).toHaveLength(1);
+  expect(screen.getAllByRole("button", { name: "Refresh installation status" })).toHaveLength(1);
+  expect(screen.getAllByText("1 of 2 downloads finished")).toHaveLength(3);
+});
+
 it("keeps an installed workflow completed while explaining a worker restoration failure", async () => {
   arrange({ ...progress("completed"), attention_code: "workflow-media-restore-failed" });
   show();

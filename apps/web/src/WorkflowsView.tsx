@@ -104,6 +104,12 @@ function WorkflowRevisionActivation({ workflowId, revision, current, available }
     workflowId={workflowId} revisionId={revision.id} contractSha256={contract} />;
 }
 
+// The details announce the installation they show, and the family list then summarizes it.
+function installationInDetails(family: WorkflowFamily | undefined, workflowId?: string, revisionId?: string) {
+  const progress = family?.variants.find((variant) => variant.id === workflowId)?.install_progress;
+  return { progress, workflowId: progress && progress.workflow_revision_id === revisionId ? workflowId : null };
+}
+
 export function WorkflowsView() {
   const client = useQueryClient();
   const [includeArchived, setIncludeArchived] = useState(false);
@@ -327,6 +333,7 @@ export function WorkflowsView() {
   const selectedRevision = selected?.revisions.find((revision) => revision.id === selectedRevisionId) ?? selected?.revisions.find((revision) => revision.id === selected.current_revision_id) ?? selected?.revisions.at(-1);
   const currentRevision = selected?.revisions.find((revision) => revision.id === selected.current_revision_id);
   const viewingCurrentRevision = Boolean(currentRevision && selectedRevision?.id === currentRevision.id);
+  const detailInstall = installationInDetails(selectedFamily, selected?.id, selectedRevision?.id);
   // The endpoint validates the current revision and returns its identity.
   const verdict = viewingCurrentRevision && validate.variables === selected?.id
     && validate.data?.revision_id === selectedRevision?.id ? validate.data : null;
@@ -452,10 +459,11 @@ export function WorkflowsView() {
           onIncludeArchivedChange={setIncludeArchived}
           loading={families.isPending || workflows.isPending}
           onReviewInstall={reviewInstall}
+          installationInDetails={detailInstall.workflowId}
         />
         <div className="workflow-detail">{selected && selectedRevision ? <><div className="detail-title"><div><small>{selected.operation}</small><h2>{selected.name}</h2><p>{selected.description}</p></div><div className="row-actions"><button className="secondary compact-button" onClick={openEdit}>New revision</button><button className="secondary compact-button" onClick={() => clone.mutate(selected.id)}>Duplicate</button><button className="secondary compact-button" onClick={() => exportBundle.mutate(selected.id)}>Export</button><button className="secondary compact-button" disabled={!viewingCurrentRevision || validate.isPending} onClick={() => validate.mutate(selected.id)}>{validate.isPending ? "Validating..." : "Validate"}</button></div></div><div className="workflow-revision-bar"><label>Revision<select value={selectedRevision.id} onChange={(event) => setSelectedRevisionId(event.target.value)}>{[...selected.revisions].sort((a, b) => b.version - a.version).map((revision) => <option key={revision.id} value={revision.id}>v{revision.version}{revision.id === selected.current_revision_id ? " · current" : ""}</option>)}</select></label>{selectedRevision.id !== selected.current_revision_id && <button className="secondary compact-button" onClick={() => restore.mutate({ id: selected.id, revisionId: selectedRevision.id })}>Restore as new revision</button>}<span className={`badge ${selectedRevision.trusted ? "likely" : "advanced_import"}`}>{selectedRevision.trusted ? "Trusted" : "Untrusted"}</span></div>
           <WorkflowInstallStatus
-            progress={selectedFamily?.variants.find(variant => variant.id === selected.id)?.install_progress}
+            progress={detailInstall.progress}
             workflowName={selected.name} revisionId={selectedRevision.id} />
           <WorkflowRevisionHistory key={selected.id} workflow={selected}
             selectedRevisionId={selectedRevision.id} onInspect={setSelectedRevisionId} />
