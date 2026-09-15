@@ -2289,6 +2289,7 @@ WorkflowInstallAttentionCode = Literal[
     "workflow-runtime-plan-changed",
     "workflow-extension-review-required",
     "workflow-media-restore-failed",
+    "workflow-install-cancelled",
 ]
 
 
@@ -2317,6 +2318,8 @@ class WorkflowInstallProgressOut(ApiModel):
     pending_downloads: int
     unavailable_downloads: int
     attention_code: WorkflowInstallAttentionCode | None
+    # The stopped installation job a retry would resume, when there is one.
+    retry_job_id: str | None = None
 
 
 class WorkflowInstallOfferCreate(ApiModel):

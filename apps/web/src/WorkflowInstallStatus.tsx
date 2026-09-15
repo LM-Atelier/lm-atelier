@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import type { WorkflowInstallProgress } from "./types";
 import "./WorkflowInstallStatus.css";
@@ -24,17 +24,20 @@ function validProgress(value: WorkflowInstallProgress, id: string, revision: str
     && (value.phase === "completed") === (value.status === "completed")
     && Number.isSafeInteger(value.total_downloads) && value.total_downloads >= 0
     && value.total_downloads <= 64
+    && (value.retry_job_id === null || (typeof value.retry_job_id === "string" && value.retry_job_id !== ""))
     && countFields.every(field => Number.isSafeInteger(value[field]) && value[field] >= 0)
     && countFields.reduce((sum, field) => sum + value[field], 0) <= value.total_downloads);
 }
 
 function heading(progress: WorkflowInstallProgress): string {
+  if (progress.attention_code === "workflow-install-cancelled") return "Installation cancelled";
   return progress.attention_code === "workflow-extension-review-required" ? "Review extension code" : labels[progress.phase];
 }
 
 function guidance(progress: WorkflowInstallProgress): string {
   if (progress.phase === "completed" && progress.attention_code === "workflow-media-restore-failed") return "The workflow was installed, but the previous media setup could not be restored. Check worker status in Settings before generating.";
-  if (progress.attention_code === "workflow-extension-review-required") return "Review the extension code in Extensions. Installation continues after approval.";
+  if (progress.attention_code === "workflow-extension-review-required") return "Review the extension code in Prepared packages. Installation continues after approval.";
+  if (progress.attention_code === "workflow-install-cancelled") return "The installation was cancelled. Retry it to continue where it stopped.";
   if (progress.phase === "downloading") return "You can continue working while the files download.";
   if (progress.phase === "paused") return "Resume the paused downloads in Jobs.";
   if (progress.phase === "verifying") return "Downloads finished. The installed files are being checked.";
@@ -47,7 +50,9 @@ function guidance(progress: WorkflowInstallProgress): string {
   if (progress.attention_code === "workflow-review-required") return "Review this workflow again before continuing setup.";
   if (progress.attention_code === "workflow-runtime-plan-changed") return "The media runtime changed. Review workflow setup before continuing.";
   if (progress.attention_code === "workflow-runtime-plan-unavailable") return "The media runtime is unavailable. Open workflow setup to check it.";
-  if (progress.attention_code === "workflow-download-failed") return "A download stopped. Use Jobs to retry it.";
+  if (progress.attention_code === "workflow-download-failed") {
+    return progress.retry_job_id ? "A download stopped. Retry the installation to download it again." : "A download stopped. Use Jobs to retry it.";
+  }
   return "Review workflow setup to resolve the installation problem.";
 }
 
@@ -83,6 +88,13 @@ function BoundInstallStatus({ snapshot, revisionId, workflowName, onReviewSetup,
     initialData: validProgress(snapshot, snapshot.id, revisionId) ? snapshot : undefined,
     retry: false,
     refetchInterval: query => !query.state.error && query.state.data?.status === "queued" ? 3_000 : false,
+  });
+  const retry = useMutation({
+    mutationFn: (jobId: string) => api.retryJob(jobId),
+    onSettled: () => {
+      void query.refetch();
+      void client.invalidateQueries({ queryKey: ["jobs"] });
+    },
   });
   const previousPhase = useRef(snapshot.phase);
   useEffect(() => {
@@ -125,11 +137,16 @@ function BoundInstallStatus({ snapshot, revisionId, workflowName, onReviewSetup,
           </>}
         </>
       ) : <p role="status">Checking installation status…</p>}
+      {retry.error && <p role="alert">{retry.error.message}</p>}
       <div className="workflow-install-status-actions">
         <button className="secondary compact-button" aria-label="Refresh installation status"
           aria-disabled={query.isFetching} onClick={() => {
             if (!query.isFetching) void query.refetch();
           }}>Refresh</button>
+        {current?.retry_job_id && <button className="secondary compact-button" aria-disabled={retry.isPending}
+          onClick={() => {
+            if (!retry.isPending && current.retry_job_id) retry.mutate(current.retry_job_id);
+          }}>Retry installation</button>}
         {onReviewSetup && <button className="secondary compact-button" onClick={onReviewSetup}>
           Review workflow setup
         </button>}

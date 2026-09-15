@@ -21,6 +21,7 @@ function progress(phase: WorkflowInstallProgress["phase"]): WorkflowInstallProgr
     pending_downloads: phase === "downloading" ? 1 : 0,
     paused_downloads: 0, failed_downloads: 0, cancelled_downloads: 0, unavailable_downloads: 0,
     attention_code: phase === "needs_attention" ? "workflow-dependencies-need-selection" : null,
+    retry_job_id: null,
   };
 }
 

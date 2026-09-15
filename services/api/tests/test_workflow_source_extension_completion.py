@@ -502,6 +502,15 @@ async def test_source_extensions_finish_or_pause_without_partial_workflow_activa
         assert services.runtimes.preflight("comfyui").operation == "reuse_managed"
         assert runtime_config_path(services.settings.data_dir).is_file()
         context = PreparationContext.from_settings(services.settings)
+    progress = await client.get(f"/api/workflow-install-offers/{offer_id}/progress")
+    assert progress.status_code == 200, progress.text
+    if mode.startswith("cancel-") or mode == "trust-cancelled":
+        # A cancelled installation says so and names the job a retry resumes.
+        assert progress.json()["phase"] == "needs_attention"
+        assert progress.json()["attention_code"] == "workflow-install-cancelled"
+        assert progress.json()["retry_job_id"] == completion_id
+    elif mode.startswith("retry-") or mode == "complete":
+        assert progress.json()["retry_job_id"] is None
     with SessionLocal() as session:
         offer = session.get(models.WorkflowInstallOffer, offer_id)
         job = session.get(models.Job, completion_id)

@@ -55,6 +55,22 @@ def workflow_install_progress(
         if offer.completion_error_code
         else None
     )
+    completion = (
+        session.get(Job, offer.completion_job_id) if offer.completion_job_id is not None else None
+    )
+    if completion is not None and completion.kind != "workflow_install":
+        completion = None
+    retry_job_id = (
+        completion.id
+        if completion is not None
+        and offer.status == "queued"
+        and offer.source_plan_id is not None
+        and completion.status in {"failed", "cancelled", "interrupted"}
+        else None
+    )
+    if retry_job_id is not None and completion is not None and completion.status == "cancelled":
+        # Cancelling records the completion as unavailable; say what actually happened.
+        code = "workflow-install-cancelled"
     phase: WorkflowInstallPhase
     if offer.status == "completed":
         # Historical completion is not a claim that an activation is still usable.
@@ -68,9 +84,7 @@ def workflow_install_progress(
         unavailable = 0
     elif (
         code == "workflow-extension-review-required"
-        and offer.completion_job_id is not None
-        and (completion := session.get(Job, offer.completion_job_id)) is not None
-        and completion.kind == "workflow_install"
+        and completion is not None
         and completion.status == "paused"
     ):
         phase = "paused"
@@ -107,6 +121,7 @@ def workflow_install_progress(
         pending_downloads=counts["queued"] + counts["running"],
         unavailable_downloads=unavailable,
         attention_code=code,
+        retry_job_id=retry_job_id,
     )
 
 
