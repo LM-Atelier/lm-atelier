@@ -23,7 +23,7 @@ for (const cause of ["manual", "automatic"] as const) {
     const setup = page.getByRole("dialog", { name: "Set up LM Atelier" });
     await expect(setup).toBeVisible();
     await setup.getByRole("button", { name: "Not now" }).click();
-    await page.getByRole("button", { name: "View accepted work", exact: true }).click();
+    await page.getByRole("button", { name: "Accepted work", exact: true }).click();
     await expect(page.getByText("No active accepted work in this category.")).toBeVisible();
     const refresh = page.getByRole("button", { name: /^Refresh(?:ing)? accepted work$/ });
     await page.getByRole("combobox", { name: "Work category" }).focus();
@@ -44,6 +44,6 @@ for (const cause of ["manual", "automatic"] as const) {
     expect(requests).toBe(2);
     await page.keyboard.press("Escape");
     await expect(page.getByRole("dialog", { name: "Accepted work", exact: true })).toBeHidden();
-    await expect(page.getByRole("button", { name: "View accepted work", exact: true })).toBeFocused();
+    await expect(page.getByRole("button", { name: "Accepted work", exact: true })).toBeFocused();
   });
 }

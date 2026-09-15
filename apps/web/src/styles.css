@@ -310,8 +310,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .skip-link { position: fixed; left: 12px; top: -60px; z-index: 100; border-radius: 10px; padding: calc(9px * var(--spacing-scale, 1)) calc(12px * var(--spacing-scale, 1)); background: var(--cream); color: var(--bg); }
 .skip-link:focus { top: 12px; }
 
-/* Reserve room for the floating workspace controls below the content. */
-.app-shell { display: grid; grid-template-columns: var(--sidebar-width, 272px) auto 1fr; height: 100%; padding-bottom: 96px; }
+.app-shell { display: grid; grid-template-columns: var(--sidebar-width, 272px) auto 1fr; height: 100%; }
 /* A real edge between the sidebar and the work: draggable, focusable, and
    wide enough to grab without being wide enough to notice. */
 .sidebar-resizer { width: 5px; cursor: col-resize; background: transparent; border-left: 1px solid var(--line); }

@@ -52,7 +52,7 @@ for (const firstToFinish of ["plan-a", "plan-b"]) {
     const setup = page.getByRole("dialog", { name: "Set up LM Atelier" });
     await expect(setup).toBeVisible();
     await setup.getByRole("button", { name: "Not now" }).click();
-    await page.getByRole("button", { name: "View accepted work", exact: true }).click();
+    await page.getByRole("button", { name: "Accepted work", exact: true }).click();
     const first = page.getByRole("button", { name: /^(Hold|Saving hold for) First landscape$/ });
     const second = page.getByRole("button", { name: /^(Hold|Saving hold for) Second landscape$/ });
     await first.focus();

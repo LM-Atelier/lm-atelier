@@ -108,6 +108,17 @@ describe("style contract", () => {
     expect(settings).toMatch(/on\("appearance"\) && <AppearanceSettings /);
   });
 
+  it("gives the workspace the full height of the window", () => {
+    // The shell once reserved a band beneath every view so a button floating
+    // in the corner would not cover the composer. That button lives in the
+    // sidebar now, and a band kept for a control that is not there only takes
+    // room from the work.
+    const css = readFileSync(STYLESHEET, "utf8");
+    const shells = [...css.matchAll(/\.app-shell \{([^}]*)\}/g)].map((rule) => rule[1]);
+    expect(shells.some((rule) => /height: 100%/.test(rule))).toBe(true);
+    expect(shells.filter((rule) => /padding/.test(rule))).toEqual([]);
+  });
+
   it("lets the conversation and its composer share one column whose width Appearance chooses", () => {
     // Both measure the same column, so they widen together: a wider transcript
     // over a composer still at the old width would misalign every message with

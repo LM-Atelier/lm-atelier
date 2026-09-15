@@ -39,7 +39,10 @@ for (const width of [1280, 390]) {
     const setup = page.getByRole("dialog", { name: "Set up LM Atelier" });
     await expect(setup).toBeVisible();
     await setup.getByRole("button", { name: "Not now" }).click();
-    await page.getByRole("button", { name: "View accepted work", exact: true }).click();
+    // At phone width accepted work sits in the sidebar, behind the navigation menu.
+    const menu = page.getByRole("button", { name: "Toggle navigation" });
+    if (await menu.isVisible()) await menu.click();
+    await page.getByRole("button", { name: "Accepted work", exact: true }).click();
     const pause = page.getByRole("button", { name: "Pause generation after current work", exact: true });
     await pause.focus();
     await page.keyboard.press("Enter");
@@ -79,6 +82,6 @@ for (const width of [1280, 390]) {
     expect(requests[1].command.idempotency_key).not.toBe(requests[0].command.idempotency_key);
     await page.keyboard.press("Escape");
     await expect(page.getByRole("dialog", { name: "Accepted work", exact: true })).toBeHidden();
-    await expect(page.getByRole("button", { name: "View accepted work", exact: true })).toBeFocused();
+    await expect(page.getByRole("button", { name: "Accepted work", exact: true })).toBeFocused();
   });
 }
