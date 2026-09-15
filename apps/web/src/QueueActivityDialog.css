@@ -17,10 +17,6 @@
 .queue-activity-item-heading strong { min-width: 0; }
 .queue-activity-status { text-transform: capitalize; color: var(--muted); }
 .queue-activity-error { margin-top: 12px; color: var(--danger); }
-.queue-activity-entry { margin: 8px 0; }
-
-.queue-activity-entry-idle { position: fixed; right: 16px; bottom: 68px; z-index: 15; max-width: calc(100vw - 32px); }
-
 .queue-plan-steps { margin-top: 5px; }
 .queue-step-list { list-style: none; padding: 0; display: grid; gap: calc(7px * var(--spacing-scale, 1)); }
 .queue-activity-items .queue-step-list li { padding: calc(8px * var(--spacing-scale, 1)); gap: calc(3px * var(--spacing-scale, 1)); }

@@ -90,3 +90,15 @@ describe("active jobs stay visible independently of recent history", () => {
     expect(await screen.findByText("1 active job")).toBeInTheDocument();
   });
 });
+
+describe("an idle workspace", () => {
+  it("leaves nothing floating over the work", async () => {
+    // With no active jobs and no issues to report, anything this panel drew
+    // would sit over the composer; accepted work opens from the sidebar.
+    vi.mocked(api.jobActivity).mockResolvedValue({ active: [], active_count: 0, recent_issues: [] });
+    const client = open();
+    await waitFor(() => expect(client.getQueryState(["jobs", "activity", 100])?.status).toBe("success"));
+    expect(screen.queryByLabelText("Jobs")).not.toBeInTheDocument();
+    expect(screen.queryAllByRole("button")).toEqual([]);
+  });
+});

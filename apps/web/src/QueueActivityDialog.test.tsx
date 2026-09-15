@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { AcceptedWorkEntry } from "./AcceptedWorkEntry";
 import { JobsPanel } from "./JobsPanel";
 import { api } from "./api";
 import { CLOCK_KEY } from "./clockPreference";
@@ -35,14 +36,14 @@ afterEach(() => { cleanup(); clients.splice(0).forEach((client) => client.clear(
 function open() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   clients.push(client);
-  render(<QueryClientProvider client={client}><JobsPanel /></QueryClientProvider>);
+  render(<QueryClientProvider client={client}><AcceptedWorkEntry /><JobsPanel /></QueryClientProvider>);
   return client;
 }
 
 it("opens grouped accepted work even when no standalone jobs are visible and restores focus", async () => {
   vi.mocked(api.queueActivity).mockResolvedValue(page([item("plan")]));
   open();
-  const trigger = await screen.findByRole("button", { name: "View accepted work" });
+  const trigger = await screen.findByRole("button", { name: "Accepted work" });
   expect(api.queueActivity).not.toHaveBeenCalled();
   trigger.focus(); fireEvent.click(trigger);
   const dialog = await screen.findByRole("dialog", { name: "Accepted work" });
@@ -63,7 +64,7 @@ it("pages without duplicating owners and starts a fresh query when changing lane
       step_count: 0, completed_steps: 0, blocked_steps: 0, progress: 0.25 }]);
     return cursor ? page([item("first"), item("second")], null, 2) : page([item("first")], "next", 2);
   });
-  open(); fireEvent.click(await screen.findByRole("button", { name: "View accepted work" }));
+  open(); fireEvent.click(await screen.findByRole("button", { name: "Accepted work" }));
   expect(await screen.findByText("Showing 1 of 2 active items")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Load more accepted work" }));
   expect(await screen.findByText("Showing 2 of 2 active items")).toBeInTheDocument();
@@ -78,7 +79,7 @@ it("pages without duplicating owners and starts a fresh query when changing lane
 
 it("keeps a failed read distinct from an empty queue and retries from the first page", async () => {
   vi.mocked(api.queueActivity).mockRejectedValue(new Error("Accepted work is unavailable"));
-  open(); fireEvent.click(await screen.findByRole("button", { name: "View accepted work" }));
+  open(); fireEvent.click(await screen.findByRole("button", { name: "Accepted work" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("Accepted work is unavailable");
   expect(screen.queryByText("No active accepted work in this category.")).not.toBeInTheDocument();
   vi.mocked(api.queueActivity).mockResolvedValue(page([]));
@@ -96,7 +97,7 @@ it("keeps the open category when the last job completes", async () => {
   vi.mocked(api.queueActivity).mockResolvedValue(page([item("plan")]));
   const client = open();
   await screen.findByText("1 active job");
-  fireEvent.click(screen.getByRole("button", { name: "View accepted work" }));
+  fireEvent.click(screen.getByRole("button", { name: "Accepted work" }));
   const dialog = await screen.findByRole("dialog", { name: "Accepted work" });
   fireEvent.change(screen.getByRole("combobox", { name: "Work category" }), { target: { value: "transfer" } });
   await screen.findByText("Example plan");
@@ -107,7 +108,7 @@ it("keeps the open category when the last job completes", async () => {
   expect(screen.getByRole("dialog", { name: "Accepted work" })).toBe(dialog);
   expect(screen.getByRole("combobox", { name: "Work category" })).toHaveValue("transfer");
   fireEvent.keyDown(dialog, { key: "Escape" });
-  expect(screen.getByRole("button", { name: "View accepted work" })).toHaveFocus();
+  expect(screen.getByRole("button", { name: "Accepted work" })).toHaveFocus();
 });
 
 function steps(planId: string, offset = 0, total = 101, ordinalStart = 0) {
@@ -125,7 +126,7 @@ function steps(planId: string, offset = 0, total = 101, ordinalStart = 0) {
 it.each([0, 1, 7])("numbers paged steps by position when stored ordinals start at %s", async (ordinalStart) => {
   vi.mocked(api.queueActivity).mockResolvedValue(page([{ ...item("plan"), step_count: 101 }]));
   vi.mocked(api.queuePlanSteps).mockImplementation(async (id, offset) => steps(id, offset, 101, ordinalStart));
-  open(); fireEvent.click(await screen.findByRole("button", { name: "View accepted work" }));
+  open(); fireEvent.click(await screen.findByRole("button", { name: "Accepted work" }));
   const expand = await screen.findByRole("button", { name: "Show steps for Example plan" });
   expect(api.queuePlanSteps).not.toHaveBeenCalled();
   fireEvent.click(expand);
@@ -148,7 +149,7 @@ it.each([0, 1, 7])("numbers paged steps by position when stored ordinals start a
 it("retries a failed step read without treating it as an empty plan", async () => {
   vi.mocked(api.queueActivity).mockResolvedValue(page([item("plan")]));
   vi.mocked(api.queuePlanSteps).mockRejectedValue(new Error("Step details unavailable"));
-  open(); fireEvent.click(await screen.findByRole("button", { name: "View accepted work" }));
+  open(); fireEvent.click(await screen.findByRole("button", { name: "Accepted work" }));
   fireEvent.click(await screen.findByRole("button", { name: "Show steps for Example plan" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("Step details unavailable");
   expect(screen.queryByText("No steps recorded for this plan.")).not.toBeInTheDocument();
@@ -161,7 +162,7 @@ it("cancels an in-flight step read when its disclosure closes", async () => {
   vi.mocked(api.queueActivity).mockResolvedValue(page([item("plan")]));
   let finish!: (value: ReturnType<typeof steps>) => void;
   vi.mocked(api.queuePlanSteps).mockImplementation(async () => new Promise(resolve => { finish = resolve; }));
-  open(); fireEvent.click(await screen.findByRole("button", { name: "View accepted work" }));
+  open(); fireEvent.click(await screen.findByRole("button", { name: "Accepted work" }));
   fireEvent.click(await screen.findByRole("button", { name: "Show steps for Example plan" }));
   await waitFor(() => expect(api.queuePlanSteps).toHaveBeenCalledOnce());
   const signal = vi.mocked(api.queuePlanSteps).mock.calls[0][2];
@@ -175,7 +176,7 @@ it("writes accepted and checked times on the chosen clock", async () => {
   localStorage.setItem(CLOCK_KEY, "24");
   try {
     vi.mocked(api.queueActivity).mockResolvedValue(page([item("plan")]));
-    open(); fireEvent.click(await screen.findByRole("button", { name: "View accepted work" }));
+    open(); fireEvent.click(await screen.findByRole("button", { name: "Accepted work" }));
     await screen.findByText("Example plan");
     const small = (label: RegExp) => screen.getByText((_, element) =>
       element?.tagName === "SMALL" && label.test(element.textContent ?? ""));
