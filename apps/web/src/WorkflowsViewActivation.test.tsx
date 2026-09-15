@@ -122,12 +122,28 @@ it("never duplicates preparation or activation during a pending click", async ()
   expect(api.activateWorkflowRevision).toHaveBeenCalledTimes(1);
 });
 
+it("keeps keyboard focus on a pending activation and ignores presses until it finishes", async () => {
+  let finish!: (value: WorkflowActivationPreparation) => void;
+  vi.mocked(api.prepareWorkflowActivation).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  await open();
+  const button = activate();
+  button.focus(); fireEvent.click(button);
+  expect(button).toHaveAttribute("aria-disabled", "true");
+  expect(button).not.toBeDisabled();
+  expect(button).toHaveFocus();
+  fireEvent.click(screen.getByRole("button", { name: "Choose dependencies" }));
+  expect(api.prepareWorkflowActivation).toHaveBeenCalledTimes(1);
+  await act(async () => finish(prepared()));
+  await screen.findByText("Dependencies activated.");
+  expect(button).toHaveFocus();
+});
+
 it("presents ambiguous matches by name and activates only the explicit choice", async () => {
   vi.mocked(api.prepareWorkflowActivation).mockResolvedValue(ambiguous());
   await open(); fireEvent.click(activate());
   await screen.findByRole("combobox", { name: "style" });
   expect(api.activateWorkflowRevision).not.toHaveBeenCalled();
-  expect(activate()).toBeDisabled();
+  expect(activate()).toHaveAttribute("aria-disabled", "true");
   selectNamed("style", "Second");
   fireEvent.click(activate());
   await screen.findByText("Dependencies activated.");
@@ -141,10 +157,10 @@ it("cannot activate a missing required resource and refresh never grants activat
   vi.mocked(api.prepareWorkflowActivation).mockResolvedValue(missing);
   await open(); fireEvent.click(activate());
   await screen.findByText("No matching installed resource. Install the required dependency, then refresh.");
-  expect(activate()).toBeDisabled();
+  expect(activate()).toHaveAttribute("aria-disabled", "true");
   vi.mocked(api.prepareWorkflowActivation).mockResolvedValue(prepared());
   fireEvent.click(screen.getByRole("button", { name: "Refresh dependencies" }));
-  await waitFor(() => expect(activate()).toBeEnabled());
+  await waitFor(() => expect(activate()).toHaveAttribute("aria-disabled", "false"));
   expect(api.activateWorkflowRevision).not.toHaveBeenCalled();
   fireEvent.click(activate());
   await screen.findByText("Dependencies activated.");
@@ -175,7 +191,8 @@ it("requires every member of an enabled optional all-of slot", async () => {
   vi.mocked(api.prepareWorkflowActivation).mockResolvedValue(optional);
   await open(); await choose();
   fireEvent.click(screen.getByRole("checkbox", { name: "Use style" }));
-  expect(activate()).toBeDisabled();
+  expect(activate()).toHaveAttribute("aria-disabled", "true");
+  fireEvent.click(activate());
   expect(api.activateWorkflowRevision).not.toHaveBeenCalled();
 });
 

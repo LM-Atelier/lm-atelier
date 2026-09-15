@@ -39,6 +39,7 @@ export function WorkflowActivationPanel({
   useEffect(() => () => { request.current?.abort(); }, [workflowId, revisionId, contractSha256]);
 
   const selected = snapshot ? selectedActivationDependencies(snapshot, choices, optional) : null;
+  const activationUnavailable = pending || (snapshot !== null && selected === null);
 
   async function run(mode: "inspect" | "activate") {
     if (request.current || (mode === "activate" && snapshot && selected === null)) return;
@@ -144,11 +145,11 @@ export function WorkflowActivationPanel({
         </fieldset>
       ))}
       <div className="row-actions">
-        <button type="button" className="primary compact-button"
-          disabled={pending || (snapshot !== null && selected === null)}
-          onClick={() => { void run("activate"); }}>Activate dependencies</button>
-        <button type="button" className="secondary compact-button" disabled={pending}
-          onClick={() => { void run("inspect"); }}>
+        {/* aria-disabled keeps keyboard focus on a pressed button while its work runs. */}
+        <button type="button" className="primary compact-button" aria-disabled={activationUnavailable}
+          onClick={() => { if (!activationUnavailable) void run("activate"); }}>Activate dependencies</button>
+        <button type="button" className="secondary compact-button" aria-disabled={pending}
+          onClick={() => { if (!pending) void run("inspect"); }}>
           {snapshot ? "Refresh dependencies" : "Choose dependencies"}
         </button>
       </div>
