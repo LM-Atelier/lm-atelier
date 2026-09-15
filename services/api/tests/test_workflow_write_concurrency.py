@@ -74,7 +74,7 @@ async def test_workflow_writes_allow_the_event_loop_to_release_another_writer(
 @pytest.mark.parametrize("revision", [False, True], ids=["workflow", "revision"])
 @pytest.mark.parametrize("fail", [False, True], ids=["commit", "rollback"])
 async def test_cancelling_a_workflow_write_keeps_its_session_until_the_worker_finishes(
-    client: AsyncClient, monkeypatch: pytest.MonkeyPatch, revision: bool, fail: bool
+    client: AsyncClient, revision: bool, fail: bool
 ) -> None:
     payload = WorkflowCreate(
         name="Cancelled request",
@@ -91,9 +91,14 @@ async def test_cancelling_a_workflow_write_keeps_its_session_until_the_worker_fi
     closed = asyncio.Event()
     release = threading.Event()
     finished = threading.Event()
-    original_contract = api.workflow_artifact_contract
+    writes: list[str] = []
 
-    def contract(**kwargs):
+    # Hold the write at SQLite itself, so the test keeps reaching it wherever
+    # the revision is assembled.
+    def before_write(conn, cursor, statement, parameters, context, executemany):
+        if writes or not statement.startswith("INSERT INTO workflow_revisions "):
+            return
+        writes.append(statement)
         loop.call_soon_threadsafe(entered.set)
         assert threading.get_ident() != event_loop_thread, "workflow writes block the event loop"
         try:
@@ -101,11 +106,8 @@ async def test_cancelling_a_workflow_write_keeps_its_session_until_the_worker_fi
             assert not closed.is_set(), "the request closed a session still used by its writer"
             if fail:
                 raise ValueError("Neutral workflow write failure")
-            return original_contract(**kwargs)
         finally:
             finished.set()
-
-    monkeypatch.setattr(api, "workflow_artifact_contract", contract)
 
     async def request():
         with SessionLocal() as session:
@@ -120,6 +122,8 @@ async def test_cancelling_a_workflow_write_keeps_its_session_until_the_worker_fi
 
     with SessionLocal() as session:
         count = session.scalar(select(func.count()).select_from(WorkflowRevision))
+        engine = session.get_bind()
+    event.listen(engine, "before_cursor_execute", before_write)
     task = asyncio.create_task(request())
     try:
         await asyncio.wait_for(entered.wait(), timeout=10)
@@ -139,6 +143,7 @@ async def test_cancelling_a_workflow_write_keeps_its_session_until_the_worker_fi
     finally:
         release.set()
         await asyncio.gather(task, return_exceptions=True)
+        event.remove(engine, "before_cursor_execute", before_write)
 
 
 async def test_concurrent_revision_writes_choose_distinct_versions(
