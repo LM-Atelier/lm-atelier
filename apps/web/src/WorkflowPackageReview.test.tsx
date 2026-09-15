@@ -108,6 +108,7 @@ describe("WorkflowPackageReview import", () => {
     }));
 
     expect(screen.getByText(/Registry releases can run automatically/)).toBeInTheDocument();
+    expect(screen.getByText(/stops the media worker, and restarts it with its current setup/)).toBeInTheDocument();
     expect(api.prepareWorkflowPackage).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Install and enable 1.2.3" }));
 
