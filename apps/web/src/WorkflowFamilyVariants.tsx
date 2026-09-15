@@ -33,7 +33,7 @@ export function WorkflowFamilyVariants({ family, onReviewInstall }: {
             <span className="badge">{workflowVariantReadinessLabel(variant)}</span>
             <p>{variant.readiness === "ready" ? "Ready to run." : readinessReason(variant)}</p>
             <WorkflowInstallStatus progress={variant.install_progress} workflowName={variant.name}
-              revisionId={variant.current_revision_id} />
+              revisionId={variant.current_revision_id} summary />
             {onReviewInstall && availableWorkflowInstallOffer(family, variant) && (
               <button className="secondary compact-button" aria-label={`Review downloads for ${variant.name}`}
                 onClick={() => {

@@ -28,6 +28,10 @@ function validProgress(value: WorkflowInstallProgress, id: string, revision: str
     && countFields.reduce((sum, field) => sum + value[field], 0) <= value.total_downloads);
 }
 
+function heading(progress: WorkflowInstallProgress): string {
+  return progress.attention_code === "workflow-extension-review-required" ? "Review extension code" : labels[progress.phase];
+}
+
 function guidance(progress: WorkflowInstallProgress): string {
   if (progress.phase === "completed" && progress.attention_code === "workflow-media-restore-failed") return "The workflow was installed, but the previous media setup could not be restored. Check worker status in Settings before generating.";
   if (progress.attention_code === "workflow-extension-review-required") return "Review the extension code in Extensions. Installation continues after approval.";
@@ -52,6 +56,8 @@ interface Props {
   workflowName: string;
   revisionId: string | null;
   onReviewSetup?: () => void;
+  /** Another view of this installation announces it and offers its actions. */
+  summary?: boolean;
 }
 
 export function WorkflowInstallStatus(props: Props) {
@@ -59,11 +65,12 @@ export function WorkflowInstallStatus(props: Props) {
   if (!progress || !revisionId || progress.workflow_revision_id !== revisionId) return null;
   return <BoundInstallStatus key={progress.id + ":" + revisionId}
     snapshot={progress} revisionId={revisionId} workflowName={props.workflowName}
-    onReviewSetup={props.onReviewSetup} />;
+    onReviewSetup={props.onReviewSetup} summary={props.summary} />;
 }
 
-function BoundInstallStatus({ snapshot, revisionId, workflowName, onReviewSetup }: {
+function BoundInstallStatus({ snapshot, revisionId, workflowName, onReviewSetup, summary }: {
   snapshot: WorkflowInstallProgress; revisionId: string; workflowName: string; onReviewSetup?: () => void;
+  summary?: boolean;
 }) {
   const client = useQueryClient();
   const query = useQuery({
@@ -88,11 +95,28 @@ function BoundInstallStatus({ snapshot, revisionId, workflowName, onReviewSetup 
     if (phase) previousPhase.current = phase;
   }, [client, query.data?.phase]);
   const current = query.error ? undefined : query.data;
+  if (summary) {
+    // The same installation can show in the family list, its variants and the
+    // workflow details at once. Only one of them is a live region with a
+    // Refresh control, so a change is announced once and each control is unique.
+    return (
+      <div className="workflow-install-status">
+        {query.error ? <p>Installation status is unavailable.</p> : current ? (
+          <>
+            <p><strong>{heading(current)}</strong></p>
+            <p>{guidance(current)}</p>
+            {current.total_downloads > 0
+              && <small>{current.completed_downloads} of {current.total_downloads} downloads finished</small>}
+          </>
+        ) : <p>Checking installation status…</p>}
+      </div>
+    );
+  }
   return (
     <section className="workflow-install-status" aria-label={"Installation for " + workflowName}>
       {query.error ? <p role="alert">Installation status is unavailable. Refresh to try again.</p> : current ? (
         <>
-          <p role="status"><strong>{current.attention_code === "workflow-extension-review-required" ? "Review extension code" : labels[current.phase]}</strong></p>
+          <p role="status"><strong>{heading(current)}</strong></p>
           <p>{guidance(current)}</p>
           {current.total_downloads > 0 && <>
             <progress aria-label={"Downloads for " + workflowName}
