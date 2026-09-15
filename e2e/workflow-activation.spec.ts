@@ -66,6 +66,7 @@ for (const width of [1280, 375]) {
     const activate = panel.getByRole("button", { name: "Activate dependencies" });
     await activate.click();
     await expect(activate).toBeDisabled();
+    await expect(activate).toBeFocused();
     expect(submissions).toEqual([]);
     const choice = panel.getByRole("combobox", { name: "image style" });
     await choice.selectOption({ label: "Detailed texture" });
@@ -76,6 +77,7 @@ for (const width of [1280, 375]) {
     });
     await activate.click();
     await expect(panel.getByRole("status")).toHaveText("Dependencies activated.");
+    await expect(activate).toBeFocused();
     expect(preparations).toBe(2);
     expect(submissions).toEqual([{
       workflow_artifact_sha256: artifact, dependency_contract_sha256: contract,
