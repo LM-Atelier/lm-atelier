@@ -31,8 +31,9 @@ The installation then verifies its exact Registry identity, archive, files,
 and dependency environment before recording trust and enabling eligible
 releases. Unknown warnings, unreviewed commit sources, and an explicit trust
 revocation require review; installation never silently overrides them.
-Preparation needs the media worker stopped. A workflow installation manages
-that stop and restoration; a standalone preparation refuses a running worker.
+Preparation needs the media worker stopped, so every preparation waits for
+current media work, stops a running worker, and restarts it with its previous
+setup when preparation ends.
 
 ## Trusting and activating
 

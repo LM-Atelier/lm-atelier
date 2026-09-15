@@ -172,7 +172,8 @@ export function WorkflowPackageReview({
           <p>
             Install and enable downloads this exact version and its dependencies. Verified
             Registry releases can run automatically; other code stays inactive until you
-            review it in Prepared packages.
+            review it in Prepared packages. Installing waits for current media work, stops
+            the media worker, and restarts it with its current setup afterwards.
           </p>
           <ul>
             {analysis.custom_packages.map((pkg) => (
