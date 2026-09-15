@@ -1916,7 +1916,9 @@ export interface WorkflowInstallProgress {
     | "workflow-runtime-plan-changed"
     | "workflow-extension-review-required"
     | "workflow-media-restore-failed"
+    | "workflow-install-cancelled"
     | null;
+  retry_job_id: string | null;
 }
 
 export interface WorkflowInstallOffer {

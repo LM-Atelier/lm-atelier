@@ -8,7 +8,7 @@ import type { Workflow, WorkflowFamily, WorkflowInstallProgress } from "./types"
 
 vi.mock("./api", () => ({ api: {
   workflows: vi.fn(), workflowSummaries: vi.fn(), workflow: vi.fn(), workflowFamilies: vi.fn(),
-  workflowInstallProgress: vi.fn(), installWorkflowOffer: vi.fn(),
+  workflowInstallProgress: vi.fn(), installWorkflowOffer: vi.fn(), retryJob: vi.fn(),
 } }));
 vi.mock("./CustomNodesPanel", () => ({ CustomNodesPanel: () => null }));
 vi.mock("./RegistryInstallsPanel", () => ({ RegistryInstallsPanel: () => null }));
@@ -32,7 +32,7 @@ function progress(phase: WorkflowInstallProgress["phase"] = "downloading"): Work
     phase, total_downloads: 2, completed_downloads: phase === "completed" || phase === "verifying" ? 2 : 1,
     failed_downloads: 0, cancelled_downloads: 0, paused_downloads: phase === "paused" ? 1 : 0,
     pending_downloads: phase === "downloading" ? 1 : 0, unavailable_downloads: 0,
-    attention_code: phase === "needs_attention" ? "workflow-dependencies-need-selection" : null };
+    attention_code: phase === "needs_attention" ? "workflow-dependencies-need-selection" : null, retry_job_id: null };
 }
 function family(snapshot: WorkflowInstallProgress): WorkflowFamily {
   return { id: "collection", name: "Detail collection", description: "", use_case: "", tags: [],
@@ -175,7 +175,7 @@ it("does not attach old-revision progress to a new current revision", async () =
 it.each([
   ["workflow-runtime-plan-changed", "The media runtime changed. Review workflow setup before continuing."],
   ["workflow-runtime-plan-unavailable", "The media runtime is unavailable. Open workflow setup to check it."],
-  ["workflow-extension-review-required", "Review the extension code in Extensions. Installation continues after approval."],
+  ["workflow-extension-review-required", "Review the extension code in Prepared packages. Installation continues after approval."],
 ] as const)("explains %s without showing its internal code", async (code, message) => {
   arrange({ ...progress("needs_attention"), attention_code: code });
   show();
@@ -184,6 +184,42 @@ it.each([
   expect(panel).toHaveTextContent(message);
   expect(panel).not.toHaveTextContent(code);
   expect(api.installWorkflowOffer).not.toHaveBeenCalled();
+});
+
+it("retries a cancelled installation from its status and shows the resumed progress", async () => {
+  arrange({ ...progress("needs_attention"), attention_code: "workflow-install-cancelled", retry_job_id: "completion-job" });
+  vi.mocked(api.retryJob).mockResolvedValue({ id: "completion-job" } as never);
+  show();
+  await screen.findByRole("heading", { name: "Detail collection" });
+  const panel = screen.getByRole("region", { name: "Installation for Detail variant" });
+  expect(within(panel).getByRole("status")).toHaveTextContent("Installation cancelled");
+  expect(panel).toHaveTextContent("The installation was cancelled. Retry it to continue where it stopped.");
+  expect(panel).not.toHaveTextContent("completion-job");
+  await waitFor(() => expect(api.workflowInstallProgress).toHaveBeenCalled());
+  vi.mocked(api.workflowInstallProgress).mockResolvedValue(progress("downloading"));
+  fireEvent.click(within(panel).getByRole("button", { name: "Retry installation" }));
+  await waitFor(() => expect(within(panel).getByRole("status")).toHaveTextContent("Downloading workflow files"));
+  expect(api.retryJob).toHaveBeenCalledExactlyOnceWith("completion-job");
+  expect(within(panel).queryByRole("button", { name: "Retry installation" })).not.toBeInTheDocument();
+  expect(api.installWorkflowOffer).not.toHaveBeenCalled();
+});
+
+it("points a stopped download at installation retry only when the installation can resume", async () => {
+  const stopped = { ...progress("needs_attention"), attention_code: "workflow-download-failed" as const,
+    failed_downloads: 1, pending_downloads: 0 };
+  arrange({ ...stopped, retry_job_id: "completion-job" });
+  show();
+  await screen.findByRole("heading", { name: "Detail collection" });
+  const panel = screen.getByRole("region", { name: "Installation for Detail variant" });
+  expect(panel).toHaveTextContent("A download stopped. Retry the installation to download it again.");
+  expect(within(panel).getByRole("button", { name: "Retry installation" })).toBeInTheDocument();
+  cleanup();
+  arrange(stopped);
+  show();
+  await screen.findByRole("heading", { name: "Detail collection" });
+  const plain = screen.getByRole("region", { name: "Installation for Detail variant" });
+  expect(plain).toHaveTextContent("A download stopped. Use Jobs to retry it.");
+  expect(within(plain).queryByRole("button", { name: "Retry installation" })).not.toBeInTheDocument();
 });
 
 it.each(["verifying", "needs_attention", "completed"] as const)(

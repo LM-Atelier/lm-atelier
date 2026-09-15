@@ -468,6 +468,7 @@ async def test_accepted_download_completes_offer_and_activates_exact_installed_d
         "pending_downloads",
         "unavailable_downloads",
         "attention_code",
+        "retry_job_id",
     }
     # Reading progress must not retry a download, invoke verification or mutate history.
     with monkeypatch.context() as reading:
