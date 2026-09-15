@@ -95,6 +95,35 @@ def record_registry_policy_trust(
     environment_root: Path,
     media_worker_stopped: bool,
 ) -> ComfyRegistryActivationState:
+    """Commit the exact Registry policy grant after stopped-worker verification."""
+    _require_stopped(media_worker_stopped)
+    already_trusted = _install(session, install_id).trusted
+    state = stage_registry_policy_trust(
+        session,
+        install_id=install_id,
+        resolution=resolution,
+        expected_archive_sha256=expected_archive_sha256,
+        expected_manifest_sha256=expected_manifest_sha256,
+        custom_node_root=custom_node_root,
+        environment_root=environment_root,
+        media_worker_stopped=media_worker_stopped,
+    )
+    if not already_trusted:
+        session.commit()
+    return state
+
+
+def stage_registry_policy_trust(
+    session: Session,
+    *,
+    install_id: str,
+    resolution: ComfyNodeResolution,
+    expected_archive_sha256: str,
+    expected_manifest_sha256: str,
+    custom_node_root: Path,
+    environment_root: Path,
+    media_worker_stopped: bool,
+) -> ComfyRegistryActivationState:
     """Record the trust the Registry policy grants, under the verification a person's grant gets.
 
     A ComfyUI Registry package that passes the existing review installs without
@@ -107,8 +136,8 @@ def record_registry_policy_trust(
     is refused before the policy is even asked, so a stale or constructed
     resolution cannot vouch for a different installed package.
 
-    It does not stop or start the media worker - that is the caller's lifecycle -
-    and it grants no trust to any workflow graph that uses the package.
+    The caller commits the grant. This does not stop or start the media worker
+    and grants no trust to any workflow graph that uses the package.
     """
 
     _require_stopped(media_worker_stopped)
@@ -144,8 +173,6 @@ def record_registry_policy_trust(
         "trust_authority": POLICY_ID,
         "policy_notices": list(decision.notices),
     }
-    session.commit()
-    session.refresh(install)
     return _state(install)
 
 

@@ -15,7 +15,7 @@ from .auxiliary_assets import AUXILIARY_ASSET_KINDS
 from .comfy_templates import COMFY_TEMPLATE_COMPILER_VERSION
 from .domain import new_id
 from .install_plan_types import InstallPlanFailureCode
-from .model_manifests import ModelManifestInspection, comfy_folder_for_kind
+from .model_manifests import InspectedComponent, ModelManifestInspection, comfy_folder_for_kind
 from .models import InstallPlan, ModelComponentManifest
 from .profile_use_cases import merge_provider_use_case_metadata
 
@@ -24,6 +24,7 @@ ACTIVATION_PROBE_VERSION = "activation-probe-v2"
 LAUNCH_CONTRACT_VERSION = "worker-launch-v1"
 
 _WORKFLOW_COMPONENT_KINDS = {
+    "background_removal": "background_removal",
     "checkpoints": "checkpoint",
     "diffusion_models": "diffusion_model",
     "unet": "diffusion_model",
@@ -37,6 +38,7 @@ _WORKFLOW_COMPONENT_KINDS = {
     "ipadapter": "ip_adapter",
 }
 _WORKFLOW_REFERENCE_ARTIFACT_KINDS: dict[str, frozenset[str]] = {
+    "background_removal": frozenset({"background_removal"}),
     "checkpoint": frozenset(
         {
             "checkpoint",
@@ -54,6 +56,7 @@ _WORKFLOW_REFERENCE_ARTIFACT_KINDS: dict[str, frozenset[str]] = {
     "vae": frozenset({"vae"}),
 }
 _WORKFLOW_ARTIFACT_TARGET_FOLDERS: dict[str, frozenset[str]] = {
+    "background_removal": frozenset({"background_removal"}),
     "checkpoint": frozenset({"checkpoints"}),
     "clip_vision": frozenset({"clip_vision"}),
     "controlnet": frozenset({"controlnet"}),
@@ -408,6 +411,20 @@ def resolve_install_plan(
             )
         )
     }
+    if workflow_reference_kind and not workflow_template_id:
+        workflow_contracts.update(
+            {
+                path: contract
+                for item in selected_files
+                if (
+                    contract := _workflow_reference_component_contract(
+                        workflow_reference_kind,
+                        path := str(item["filename"]),
+                        metadata_by_path[path],
+                    )
+                )
+            }
+        )
     artifacts = tuple(
         PlannedArtifact(
             path=str(item["filename"]),
@@ -687,6 +704,22 @@ def _workflow_component_contract(
         return None
     folder = folders[0]
     return _WORKFLOW_COMPONENT_KINDS[folder], folder
+
+
+def _workflow_reference_component_contract(
+    reference_kind: str,
+    path: str,
+    inspected: InspectedComponent,
+) -> tuple[str, str] | None:
+    """Refine one filename-only utility weight from its exact workflow use."""
+
+    if (
+        reference_kind == "background_removal"
+        and path.casefold().endswith(".safetensors")
+        and inspected.kind in {"checkpoint", "unknown_safetensors"}
+    ):
+        return "background_removal", "background_removal"
+    return None
 
 
 def persist_install_plan(session: Session, resolved: ResolvedInstallPlan) -> InstallPlan:

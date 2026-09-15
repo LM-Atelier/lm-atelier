@@ -483,6 +483,46 @@ def test_workflow_owned_encoder_stays_one_inert_exact_component() -> None:
     }
 
 
+def test_background_removal_reference_refines_filename_only_safe_weights() -> None:
+    inspection = ModelManifestInspection(
+        architecture=None,
+        family=None,
+        components=(
+            InspectedComponent(
+                path="birefnet.safetensors",
+                kind="checkpoint",
+                target_folder="checkpoints",
+            ),
+        ),
+        metadata_files=(),
+    )
+
+    plan = resolve_install_plan(
+        remote_id="synthetic/background-removal",
+        revision="2" * 40,
+        role="image",
+        engine="comfyui",
+        selected_files=[
+            {
+                "filename": "birefnet.safetensors",
+                "size": 2_048,
+                "sha256": "3" * 64,
+            }
+        ],
+        inspection=inspection,
+        workflow_reference_kind="background_removal",
+    )
+
+    assert plan.compatibility == "supported"
+    assert [(item.kind, item.target_folder) for item in plan.artifacts] == [
+        ("background_removal", "background_removal")
+    ]
+    assert plan.runtime_contract["workflow_asset_kind"] == "background_removal"
+    assert plan.runtime_contract["comfy_paths"] == {"background_removal": "."}
+    assert plan.activation_probe["kind"] == "workflow_asset"
+    assert plan.activation_probe["required"] is False
+
+
 def test_workflow_owned_lora_does_not_become_a_standalone_auxiliary() -> None:
     inspection = ModelManifestInspection(
         architecture=None,

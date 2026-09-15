@@ -223,6 +223,61 @@ def test_official_workflow_staging_honors_declared_safe_component_contracts() ->
         )
 
 
+def test_background_removal_staging_requires_explicit_workflow_ownership() -> None:
+    artifact = {
+        "path": "birefnet.safetensors",
+        "kind": "background_removal",
+        "target_folder": "background_removal",
+        "required": True,
+    }
+    inspection = ModelManifestInspection(
+        architecture=None,
+        family=None,
+        components=(
+            InspectedComponent(
+                path="birefnet.safetensors",
+                kind="unknown_safetensors",
+                target_folder="checkpoints",
+            ),
+        ),
+        metadata_files=(),
+    )
+    hashes = {"birefnet.safetensors": "4" * 64}
+    workflow_asset = InstallPlan(
+        family=None,
+        role="image",
+        artifacts_json=[artifact],
+        runtime_contract_json={
+            "auxiliary_kind": None,
+            "workflow_asset_kind": "background_removal",
+            "workflow_template_id": None,
+        },
+    )
+
+    DownloadManager._validate_staged_plan(
+        workflow_asset,
+        inspection,
+        hashes,
+    )
+
+    template_only = InstallPlan(
+        family=None,
+        role="image",
+        artifacts_json=[artifact],
+        runtime_contract_json={
+            "auxiliary_kind": None,
+            "workflow_asset_kind": None,
+            "workflow_template_id": "utility-looking-template",
+        },
+    )
+    with pytest.raises(ValueError, match="no primary generation model"):
+        DownloadManager._validate_staged_plan(
+            template_only,
+            inspection,
+            hashes,
+        )
+
+
 async def test_planned_chat_activation_requires_completion_and_records_evidence(
     settings: Settings,
 ) -> None:

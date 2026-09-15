@@ -58,7 +58,7 @@ from .worker_failures import (
 if TYPE_CHECKING:
     from .comfy_registry_installs import ComfyRegistryLaunchContract
     from .runtime_provisioning import RuntimeProvisioner
-    from .workflow_activations import WorkflowActivationLaunchScope
+    from .workflow_activations import WorkflowMediaLaunchScope
 
 
 STATE_REFUSED = "LM Atelier's state folder may not be a filesystem link"
@@ -670,8 +670,10 @@ class ProcessSupervisor:
         provisional_model_paths: tuple[Path, dict[str, str]] | None = None,
         *,
         phase_callback: Callable[[str], Awaitable[None]] | None = None,
-        activation_scope: WorkflowActivationLaunchScope | None = None,
+        activation_scope: WorkflowMediaLaunchScope | None = None,
     ) -> WorkerStatus:
+        from .workflow_activations import WorkflowSourceLaunchScope
+
         async def report_phase(phase: str) -> None:
             if phase_callback is None:
                 return
@@ -687,6 +689,7 @@ class ProcessSupervisor:
 
         if provisional_model_paths is not None and activation_scope is not None:
             raise ValueError("Provisional model paths cannot broaden an activation-scoped launch")
+        await self._revalidate_source_media_scope(activation_scope)
         if (
             not self.settings.comfy_executable
             or not self.settings.comfy_executable.is_file()
@@ -708,6 +711,7 @@ class ProcessSupervisor:
         await report_phase("Validating media dependencies")
         custom_node_types: tuple[str, ...] = ()
         if activation_scope is None:
+            await self._clear_cancelled_workflow_activations()
             trusted_custom_nodes = await self._trusted_comfy_node_folders()
             registry_contract = await asyncio.to_thread(self._trusted_comfy_registry_contract)
         else:
@@ -811,6 +815,11 @@ class ProcessSupervisor:
         await report_phase("Starting media runtime")
         if activation_scope is not None:
             expected_node_types = tuple(sorted({*custom_node_types, *registry_contract.node_types}))
+            source_checks: dict[str, Any] = {}
+            if isinstance(activation_scope, WorkflowSourceLaunchScope):
+                source_checks["prestart_check"] = lambda: self._revalidate_source_media_scope(
+                    activation_scope
+                )
             await self._replace(
                 "media",
                 command,
@@ -823,6 +832,7 @@ class ProcessSupervisor:
                 ),
                 launch_scope_sha256=activation_scope.launch_sha256,
                 editor_bridge_support=editor_bridge_support,
+                **source_checks,
             )
         elif registry_contract.site_packages:
             await self._replace(
@@ -842,8 +852,87 @@ class ProcessSupervisor:
             )
         return self.statuses()[1]
 
+    async def _clear_cancelled_workflow_activations(self) -> None:
+        from .db import SessionLocal
+        from .workflow_completion_jobs import (
+            cancelled_workflow_activation_packages,
+            deactivate_cancelled_workflow_activations,
+        )
+        from .workflow_package_activation import media_worker_stopped
+
+        def pending() -> bool:
+            with SessionLocal() as session:
+                return bool(cancelled_workflow_activation_packages(session))
+
+        def clear() -> None:
+            with SessionLocal() as session:
+                deactivate_cancelled_workflow_activations(session)
+                session.commit()
+
+        if not await asyncio.to_thread(pending):
+            return
+        async with self._locks["media"]:
+            if not await asyncio.to_thread(pending):
+                return
+            await self._stop_unlocked("media")
+            remaining = await asyncio.to_thread(self._matching_worker_processes, "media")
+            if not media_worker_stopped(self) or remaining:
+                raise RuntimeError(
+                    "The media worker must stop before cancelled extensions can be disabled."
+                )
+            cleanup = asyncio.create_task(asyncio.to_thread(clear))
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+                with contextlib.suppress(Exception):
+                    cleanup.result()
+                raise
+
+    async def _revalidate_source_media_scope(self, scope: WorkflowMediaLaunchScope | None) -> None:
+        from .db import SessionLocal
+        from .workflow_activations import (
+            WorkflowSourceLaunchScope,
+            materialize_comfy_runtime_dependency,
+        )
+        from .workflow_package_preparation import PreparationContext
+        from .workflow_source_launch import revalidate_workflow_source_launch_scope
+
+        if not isinstance(scope, WorkflowSourceLaunchScope):
+            return
+        executable = self.settings.comfy_executable
+        directory = self.settings.comfy_directory
+        provisioner = self.runtimes
+        if (
+            executable is None
+            or not executable.is_file()
+            or directory is None
+            or not (directory / "main.py").is_file()
+            or provisioner is None
+        ):
+            raise WorkerStartRefused("The accepted workflow runtime is unavailable.")
+        await asyncio.to_thread(
+            revalidate_workflow_source_launch_scope,
+            SessionLocal,
+            scope,
+            context=PreparationContext(
+                executable,
+                self.settings.custom_node_dir,
+                self.settings.registry_dir,
+            ),
+            runtime_materializer=lambda requirement, selection: (
+                materialize_comfy_runtime_dependency(provisioner, requirement, selection)
+            ),
+        )
+
     def _scoped_comfy_registry_contract(
-        self, scope: WorkflowActivationLaunchScope
+        self, scope: WorkflowMediaLaunchScope
     ) -> ComfyRegistryLaunchContract:
         from .comfy_registry_installs import scoped_comfy_registry_launch_contract
         from .db import SessionLocal
@@ -1061,7 +1150,7 @@ class ProcessSupervisor:
         return [install.installed_path for install in installs]
 
     async def _scoped_comfy_node_folders(
-        self, scope: WorkflowActivationLaunchScope
+        self, scope: WorkflowMediaLaunchScope
     ) -> tuple[list[str], tuple[str, ...]]:
         from .custom_nodes import CustomNodeManager
         from .db import SessionLocal
@@ -1113,7 +1202,7 @@ class ProcessSupervisor:
             await manager.verify(install)
         return [install.installed_path for install in installs], tuple(sorted(node_types))
 
-    def _write_scoped_comfy_model_paths(self, scope: WorkflowActivationLaunchScope) -> Path:
+    def _write_scoped_comfy_model_paths(self, scope: WorkflowMediaLaunchScope) -> Path:
         if not re.fullmatch(r"[0-9a-f]{64}", scope.launch_sha256):
             raise ValueError("Workflow activation launch identity is invalid")
         if tuple(item.model_install_id for item in scope.models) != scope.model_install_ids:
@@ -1244,12 +1333,15 @@ class ProcessSupervisor:
         ready_check: Callable[[], Awaitable[None]] | None = None,
         launch_scope_sha256: str | None = None,
         editor_bridge_support: ComfyEditorBridgeSupport | None = None,
+        prestart_check: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         if launch_scope_sha256 is not None and not re.fullmatch(
             r"[0-9a-f]{64}", launch_scope_sha256
         ):
             raise ValueError("Worker launch scope identity is invalid")
         async with self._locks[name]:
+            if prestart_check is not None:
+                await prestart_check()
             current = self._workers.get(name)
             if (
                 launch_scope_sha256 is not None
@@ -1266,6 +1358,8 @@ class ProcessSupervisor:
             await self._stop_unlocked(name)
             await self._reclaim_port_from_our_own_children(name, health_url)
             await self._ensure_port_available(name, health_url)
+            if prestart_check is not None:
+                await prestart_check()
             startup_started_at = time.perf_counter()
             log_path = self.settings.log_dir / f"{name}-worker.log"
             worker_log = _RotatingWorkerLog(log_path)

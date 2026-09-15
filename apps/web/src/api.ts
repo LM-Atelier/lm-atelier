@@ -105,6 +105,9 @@ import type {
   WorkflowSummary,
   WorkflowRevision,
   WorkflowRevisionReview,
+  WorkflowActivation,
+  WorkflowActivationPreparation,
+  WorkflowActivationRequest,
   WorkflowEditorDraft,
   WorkflowEditorReturn,
   WorkflowEditorSession,
@@ -119,6 +122,7 @@ import type {
   WorkStep,
   WorkflowDependencyResourceKind,
   WorkflowFamily,
+  WorkflowInstallProgress,
   WorkflowFamilyPreference,
   WorkflowFamilyPreferenceUpdate,
   WorkflowFamilyRemovalImpact,
@@ -1211,6 +1215,10 @@ export const api = {
     request<WorkflowRevision>(`/api/workflows/${id}/revisions`, { method: "POST", body: JSON.stringify(payload) }),
   restoreWorkflowRevision: (id: string, revisionId: string) =>
     request<WorkflowRevision>(`/api/workflows/${id}/revisions/${revisionId}/restore`, { method: "POST" }),
+  prepareWorkflowActivation: (id: string, revisionId: string, signal?: AbortSignal) =>
+    request<WorkflowActivationPreparation>(`/api/workflows/${encodeURIComponent(id)}/revisions/${encodeURIComponent(revisionId)}/activation/prepare`, { signal }),
+  activateWorkflowRevision: (id: string, revisionId: string, payload: WorkflowActivationRequest, signal?: AbortSignal) =>
+    request<WorkflowActivation>(`/api/workflows/${encodeURIComponent(id)}/revisions/${encodeURIComponent(revisionId)}/activation`, { method: "POST", body: JSON.stringify(payload), signal }),
   previewWorkflowRevisionReview: (id: string, revisionId: string) =>
     request<WorkflowRevisionReview>(`/api/workflows/${encodeURIComponent(id)}/revisions/${encodeURIComponent(revisionId)}/review`),
   decideWorkflowRevisionReview: (id: string, revisionId: string, payload: { action: "approve" | "revoke"; subject_sha256: string }) =>
@@ -1320,6 +1328,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ ui_graph: uiGraph, selections }),
     }),
+  workflowInstallProgress: (offerId: string, signal?: AbortSignal) =>
+    request<WorkflowInstallProgress>(`/api/workflow-install-offers/${encodeURIComponent(offerId)}/progress`, { signal }),
   installWorkflowOffer: (offerId: string) =>
     request<Job[]>(`/api/workflow-install-offers/${encodeURIComponent(offerId)}/install`, { method: "POST" }),
   installWorkflowAssets: (
@@ -1344,6 +1354,7 @@ export const api = {
     name: string;
     operation: string;
     description?: string;
+    dependencies?: Record<string, unknown>;
     draft_workflow_id?: string;
     draft_revision_id?: string;
   }) =>

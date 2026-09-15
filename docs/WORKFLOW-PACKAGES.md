@@ -2,9 +2,10 @@
 
 A ComfyUI workflow shared as a package can name custom nodes and Python
 dependencies that this machine has never seen. LM Atelier will fetch and stage
-all of it for you, but it never lets any of it run on someone else's say-so:
-what a package needs is shown before anything downloads, and downloaded code
-stays inert until you explicitly trust it and separately activate it.
+all of it for you. What a package needs is shown before anything downloads.
+Installing and enabling a verified ComfyUI Registry release can record trust
+and activate it automatically. Code that needs review stays inactive until
+you approve the exact package in **Prepared packages**.
 
 ## Reviewing before anything lands
 
@@ -12,27 +13,31 @@ Importing a workflow bundle opens a review of what the package needs: the
 nodes it uses, the model files it references, the custom node packages it
 depends on, and any findings that block an import outright - links that
 connect to nothing, references that reach outside the model folders, formats
-the app never loads. Nothing is installed, executed, or trusted from this
-dialog.
+the app never loads. Opening the review changes nothing; installation starts
+only when you choose **Install and enable** for a pinned package or approve
+the model files it needs.
 
 ## Preparing an exact version
 
 When a needed package is not installed and pins exactly one version, the
-review offers **Prepare**. Preparation is a normal job: it resolves the
+review offers **Install and enable**. Installation is a normal job: it resolves the
 package against the ComfyUI Registry, downloads the archive and every wheel
 its dependencies need, verifies hashes end to end, and assembles an offline
 environment. Progress shows in the jobs panel stage by stage, and the job can
 be cancelled at any point.
 
-A successful preparation is always committed **inactive and untrusted**.
-Preparation needs the media worker stopped; a running worker refuses the job
-rather than racing it.
+Preparation first commits the downloaded package inactive and untrusted.
+The installation then verifies its exact Registry identity, archive, files,
+and dependency environment before recording trust and enabling eligible
+releases. Unknown warnings, unreviewed commit sources, and an explicit trust
+revocation require review; installation never silently overrides them.
+Preparation needs the media worker stopped. A workflow installation manages
+that stop and restoration; a standalone preparation refuses a running worker.
 
 ## Trusting and activating
 
 Prepared packages appear in the **Prepared packages** panel on the Workflows
-page, each showing its identity hashes and the two decisions it is waiting
-for:
+page, each showing its identity hashes, current state, and any remaining decisions:
 
 - **Trust** is a statement about you, not the package: that you reviewed this
   exact code and accept it running inside ComfyUI. Granting it re-verifies the

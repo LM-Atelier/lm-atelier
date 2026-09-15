@@ -30,6 +30,10 @@ const AUTHORITATIVE_QUERY_ROOTS = new Set([
   "system",
   "workers",
   "workflow-catalog-models",
+  "workflow-families",
+  "workflow-family",
+  "workflow-install-progress",
+  "studio-capabilities",
   "workflows",
 ]);
 
@@ -251,6 +255,12 @@ export function useLiveEvents(
         if (event.type === "message.updated") {
           void client.invalidateQueries({ queryKey: ["chat"] });
           void client.invalidateQueries({ queryKey: ["artifacts"] });
+        }
+        if (event.type.startsWith("workflow.install.")
+            || ["download.completed", "download.failed", "download.cancelled", "download.paused", "download.retrying"].includes(event.type)) {
+          for (const key of ["workflow-install-progress", "workflow-families", "workflow-family", "workflows", "studio-capabilities"]) {
+            void client.invalidateQueries({ queryKey: [key] });
+          }
         }
         if (event.type === "download.completed") {
           void client.invalidateQueries({ queryKey: ["models"] });

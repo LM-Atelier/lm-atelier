@@ -11,6 +11,7 @@ const DISMISSED_JOB_ISSUES_KEY = "lm-atelier-dismissed-job-issues-before";
 function jobDisplayName(kind: string): string {
   if (kind === "edit_verify") return "Image edit check";
   if (kind === "registry_prepare") return "Package preparation";
+  if (kind === "workflow_install") return "Workflow installation";
   return kind;
 }
 
@@ -165,7 +166,7 @@ export function JobsPanel() {
           <span className="job-actions">
             <button
               className="icon-button"
-              aria-label={`Retry ${job.kind} job`}
+              aria-label={job.kind === "workflow_install" ? "Retry workflow installation" : `Retry ${job.kind} job`}
               disabled={retry.isPending && retry.variables === job.id}
               onClick={() => retry.mutate(job.id)}
             >

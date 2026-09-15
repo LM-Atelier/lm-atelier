@@ -24,6 +24,20 @@ _PACKAGE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
 _SEMANTIC_VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
 
 InstallKind = Literal["already_installed", "git_commit", "registry_archive"]
+RegistryResolutionErrorCode = Literal[
+    "invalid_package_id",
+    "unversioned_custom_node_package",
+    "conflicting_custom_node_versions",
+    "unsupported_package_version",
+    "registry_package_not_found",
+    "registry_package_inactive",
+    "unsupported_package_repository",
+    "registry_version_not_found",
+    "registry_identity_mismatch",
+    "registry_version_inactive",
+    "registry_security_warning",
+    "invalid_registry_metadata",
+]
 
 
 @dataclass(frozen=True)
@@ -37,7 +51,7 @@ class ComfyNodeResolution:
     download_url: str | None = None
     pip_dependencies: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
-    error_code: str | None = None
+    error_code: RegistryResolutionErrorCode | None = None
 
     @property
     def resolved(self) -> bool:
@@ -96,7 +110,7 @@ class ComfyRegistryClient:
         if not _PACKAGE_ID.fullmatch(package_id):
             return self._error(requirement, "invalid_package_id")
         if len(requirement.versions) != 1:
-            code = (
+            code: RegistryResolutionErrorCode = (
                 "unversioned_custom_node_package"
                 if not requirement.versions
                 else "conflicting_custom_node_versions"
@@ -232,7 +246,7 @@ class ComfyRegistryClient:
     @staticmethod
     def _error(
         requirement: WorkflowPackageRequirement,
-        code: str,
+        code: RegistryResolutionErrorCode,
     ) -> ComfyNodeResolution:
         version = requirement.versions[0] if len(requirement.versions) == 1 else None
         return ComfyNodeResolution(

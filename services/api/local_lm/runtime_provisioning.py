@@ -17,6 +17,8 @@ import time
 import zipfile
 from collections.abc import Callable, Mapping, MutableMapping
 from contextlib import suppress
+from copy import deepcopy
+from dataclasses import asdict
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, cast
 from urllib.parse import urlparse
@@ -29,6 +31,7 @@ from .filesystem_links import is_link_or_reparse
 from .network import shared_tls_context
 from .progress import reduce_progress
 from .runtime_config import persist_runtime_values
+from .runtime_provisioning_plans import RuntimeProvisioningPlan
 from .schemas import ProgressV2, RuntimeStatus
 from .subprocess_env import subprocess_environment
 
@@ -275,10 +278,143 @@ class RuntimeProvisioner:
             return await existing
         return await self.provision(engine)
 
-    async def provision(self, engine: RuntimeName) -> RuntimeStatus:
-        definition = self._definition(engine)
+    def _provisioning_inputs(self, engine: RuntimeName) -> dict[str, Any]:
+        definition = deepcopy(self._definition(engine))
+        _ready, paths = self._configured_paths(engine)
+        return {
+            "engine": engine,
+            "platform": self._platform_keys[engine],
+            "definition": {
+                key: value for key, value in definition.items() if key != "runtime_assets"
+            },
+            "asset": deepcopy(self._asset(engine, definition)),
+            "configured_paths": [str(path.expanduser().absolute()) for path in paths],
+            "runtime_root": str(self.runtime_root.absolute()),
+            "archive_root": str(self.archive_root.absolute()),
+            "allowed_download_hosts": sorted(self.allowed_download_hosts),
+        }
+
+    def preflight(self, engine: RuntimeName) -> RuntimeProvisioningPlan:
+        """Describe reuse or installation without starting downloads or changing configuration."""
+        return self._preflight_snapshot(engine)[0]
+
+    def _preflight_snapshot(
+        self, engine: RuntimeName
+    ) -> tuple[
+        RuntimeProvisioningPlan, dict[str, Any], RuntimeStatus | None, dict[str, Any] | None
+    ]:
+        inputs = self._provisioning_inputs(engine)
+        asset = cast(dict[str, Any] | None, inputs["asset"])
+        definition = {
+            **inputs["definition"],
+            "runtime_assets": {inputs["platform"]: asset},
+        }
+        configured = self._configured_status(engine, definition)
+        if configured is None:
+            if self._security_blocked(definition, asset):
+                raise RuntimeProvisioningError(self._security_message(definition, asset))
+            if asset is None:
+                raise RuntimeProvisioningError("Automatic setup is not available for this machine.")
+        operation: Literal["reuse_configured", "reuse_managed", "install_managed"] = (
+            "reuse_managed"
+            if configured and configured.managed
+            else "reuse_configured"
+            if configured
+            else "install_managed"
+        )
+        files: dict[str, str] = {}
+        try:
+            for raw in inputs["configured_paths"]:
+                path = Path(raw)
+                if path.is_dir() and engine == "comfyui":
+                    path = path / "main.py"
+                if path.is_file():
+                    files[str(path)] = self._sha256_file(path)
+        except OSError:
+            raise RuntimeProvisioningError(
+                "The configured runtime could not be inspected."
+            ) from None
+        if inputs != self._provisioning_inputs(engine):
+            raise RuntimeProvisioningError("The runtime setup changed during its preview.")
+        download_bytes = 0
+        required_free_bytes = 0
+        if configured is None and asset is not None:
+            download_bytes = int(asset["size_bytes"]) + sum(
+                int(overlay["size_bytes"]) for overlay in self._security_overlays(asset)
+            )
+            required_free_bytes = int(asset.get("required_free_bytes", asset["size_bytes"] * 2))
+        plan = RuntimeProvisioningPlan(
+            engine=engine,
+            operation=operation,
+            release=str(definition["pinned_release"]) if operation != "reuse_configured" else None,
+            license=str(definition["license"]),
+            download_bytes=download_bytes,
+            required_free_bytes=required_free_bytes,
+            inputs_sha256=self._json_sha256(inputs),
+            plan_sha256=self._json_sha256(
+                {"inputs": inputs, "operation": operation, "files": files}
+            ),
+        )
+        return plan, definition, configured, asset
+
+    def _require_provisioning_plan(
+        self, engine: RuntimeName, expected: RuntimeProvisioningPlan | None
+    ) -> None:
+        if expected is not None and self.preflight(engine) != expected:
+            raise RuntimeProvisioningError("The approved runtime setup changed. Preview it again.")
+
+    def _require_provisioning_inputs(
+        self, engine: RuntimeName, expected: RuntimeProvisioningPlan | None
+    ) -> None:
+        if (
+            expected is not None
+            and self._json_sha256(self._provisioning_inputs(engine)) != expected.inputs_sha256
+        ):
+            raise RuntimeProvisioningError("The approved runtime setup changed. Preview it again.")
+
+    async def provision(
+        self, engine: RuntimeName, *, expected_plan: RuntimeProvisioningPlan | None = None
+    ) -> RuntimeStatus:
         async with self._locks[engine]:
-            configured = self._configured_status(engine, definition)
+            if expected_plan is not None:
+                from .runtime_provisioning_recovery import recover_approved_runtime
+
+                recovered = await asyncio.to_thread(
+                    recover_approved_runtime, self, engine, expected_plan
+                )
+                if recovered is not None:
+                    if (
+                        self._json_sha256(self._provisioning_inputs(engine))
+                        != recovered.current_inputs_sha256
+                    ):
+                        raise RuntimeProvisioningError(
+                            "The approved runtime setup changed. Preview it again."
+                        )
+                    self._apply_configuration(engine, recovered.installed, persist=True)
+                    status = self._status(
+                        engine,
+                        recovered.definition,
+                        state="ready",
+                        supported=True,
+                        managed=True,
+                        progress=1,
+                        message="Ready.",
+                        asset=recovered.asset,
+                    )
+                    self._states[engine] = status
+                    return status
+                current, definition, configured, asset = await asyncio.to_thread(
+                    self._preflight_snapshot, engine
+                )
+                if current != expected_plan:
+                    raise RuntimeProvisioningError(
+                        "The approved runtime setup changed. Preview it again."
+                    )
+                self._require_provisioning_inputs(engine, expected_plan)
+            else:
+                definition = deepcopy(self._definition(engine))
+                configured = self._configured_status(engine, definition)
+                asset = self._asset(engine, definition)
             if configured:
                 self._states[engine] = configured
                 return configured
@@ -292,7 +428,6 @@ class RuntimeProvisioner:
                 )
                 self._states[engine] = status
                 raise RuntimeProvisioningError(status.message)
-            asset = self._asset(engine, definition)
             if self._security_blocked(definition, asset):
                 status = self._status(
                     engine,
@@ -326,18 +461,27 @@ class RuntimeProvisioner:
             try:
                 self._check_disk_space(asset)
                 archive = await self._download(engine, definition, asset)
-                overlays = [
-                    (overlay, await self._download(engine, definition, overlay))
-                    for overlay in self._security_overlays(asset)
-                ]
-                installed = await asyncio.to_thread(
-                    self._install_archive,
-                    engine,
-                    definition,
-                    asset,
-                    archive,
-                    overlays,
-                )
+                if expected_plan is not None:
+                    await asyncio.to_thread(self._require_provisioning_plan, engine, expected_plan)
+                overlays = []
+                for overlay in self._security_overlays(asset):
+                    overlay_archive = await self._download(engine, definition, overlay)
+                    if expected_plan is not None:
+                        await asyncio.to_thread(
+                            self._require_provisioning_plan, engine, expected_plan
+                        )
+                    overlays.append((overlay, overlay_archive))
+
+                def install() -> dict[str, Path]:
+                    self._require_provisioning_plan(engine, expected_plan)
+                    return self._install_archive(
+                        engine, definition, asset, archive, overlays, approved_plan=expected_plan
+                    )
+
+                installed = await asyncio.to_thread(install)
+                # Installation creates the planned files, so only its immutable
+                # inputs must still match before the resulting configuration is saved.
+                self._require_provisioning_inputs(engine, expected_plan)
                 self._apply_configuration(engine, installed, persist=True)
                 configured_status = self._status(
                     engine,
@@ -509,6 +653,8 @@ class RuntimeProvisioner:
         asset: dict[str, Any],
         archive: Path,
         overlays: list[tuple[dict[str, Any], Path]],
+        *,
+        approved_plan: RuntimeProvisioningPlan | None = None,
     ) -> dict[str, Path]:
         release = self._safe_component(str(definition["pinned_release"]))
         parent = self.runtime_root / self._safe_component(engine)
@@ -587,6 +733,12 @@ class RuntimeProvisioner:
                 "runtime_contract_sha256": self._runtime_contract_sha256(asset),
                 "files": file_hashes,
             }
+            if approved_plan is not None:
+                self._require_provisioning_plan(engine, approved_plan)
+                marker["approved_setup"] = {
+                    "plan": asdict(approved_plan),
+                    "configured_paths": self._provisioning_inputs(engine)["configured_paths"],
+                }
             (staging / _MANAGED_MARKER).write_text(
                 json.dumps(marker, indent=2) + "\n",
                 encoding="utf-8",

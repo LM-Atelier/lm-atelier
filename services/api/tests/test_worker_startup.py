@@ -18,7 +18,10 @@ def worker_services(settings, processes):  # type: ignore[no-untyped-def]
         settings=settings,
         processes=processes,
         scheduler=ResourceScheduler(),
-        downloads=SimpleNamespace(refresh_installed_media_workflows=AsyncMock(return_value=0)),
+        downloads=SimpleNamespace(
+            refresh_installed_media_workflows=AsyncMock(return_value=0),
+            reconcile_workflow_install_offers=AsyncMock(),
+        ),
     )
 
 
@@ -72,6 +75,7 @@ async def test_configured_workers_provision_and_restore_with_last_chat_profile(
 
     processes.start_media.assert_awaited_once_with()
     services.downloads.refresh_installed_media_workflows.assert_awaited_once_with()
+    services.downloads.reconcile_workflow_install_offers.assert_awaited_once_with()
     restored_profile, restored_install = processes.load_chat.await_args.args
     assert restored_profile.id == profile.id
     assert restored_install.id == install.id
@@ -95,6 +99,7 @@ async def test_fresh_workspace_does_not_download_unused_worker_runtimes(
     processes.start_media.assert_not_awaited()
     processes.load_chat.assert_not_awaited()
     services.downloads.refresh_installed_media_workflows.assert_not_awaited()
+    services.downloads.reconcile_workflow_install_offers.assert_not_awaited()
 
 
 async def test_worker_restore_failure_does_not_prevent_other_worker(

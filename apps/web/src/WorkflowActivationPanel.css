@@ -1,0 +1,8 @@
+.workflow-activation fieldset { min-width: 0; margin: 12px 0; padding: 10px; border: 1px solid var(--border); border-radius: 8px; }
+.workflow-activation legend { padding: 0 4px; color: var(--ink-secondary); font-size: 12px; font-weight: 600; text-transform: capitalize; }
+.workflow-activation fieldset > div + div { margin-top: 10px; }
+.workflow-activation label { display: grid; gap: 5px; min-width: 0; font-size: 12px; }
+.workflow-activation select { width: 100%; min-width: 0; padding: 8px; border: 1px solid var(--line-control); border-radius: 8px; background: var(--panel-2); color: var(--ink-primary); font: inherit; text-overflow: ellipsis; }
+.workflow-activation .workflow-activation-optional { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.workflow-activation p { overflow-wrap: anywhere; }
+.workflow-activation select:focus-visible { outline: 2px solid var(--atelier); outline-offset: 2px; }

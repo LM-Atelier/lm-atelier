@@ -217,6 +217,46 @@ def test_missing_supported_asset_blocks_readiness() -> None:
     assert not analysis.ready
 
 
+def test_exact_background_removal_loader_declares_a_utility_asset() -> None:
+    analysis = analyze_comfyui_workflow_package(
+        workflow(
+            nodes=[
+                node(
+                    1,
+                    "LoadBackgroundRemovalModel",
+                    package="comfy-core",
+                    widgets=["birefnet.safetensors"],
+                )
+            ]
+        ),
+        available_node_types={"LoadBackgroundRemovalModel"},
+    )
+
+    assert [(item.filename, item.kind) for item in analysis.asset_references] == [
+        ("birefnet.safetensors", "background_removal")
+    ]
+
+
+def test_similarly_named_nodes_do_not_gain_the_utility_asset_contract() -> None:
+    analysis = analyze_comfyui_workflow_package(
+        workflow(
+            nodes=[
+                node(
+                    1,
+                    "LoadBackgroundModel",
+                    package="example-pack",
+                    version="1.0.0",
+                    widgets=["background.safetensors"],
+                )
+            ]
+        ),
+        available_node_types={"LoadBackgroundModel"},
+        installed_package_versions={"example-pack": {"1.0.0"}},
+    )
+
+    assert analysis.asset_references[0].kind == "checkpoint"
+
+
 def test_unversioned_custom_package_is_reported() -> None:
     analysis = analyze_comfyui_workflow_package(
         workflow(nodes=[node(1, "CustomNode", package="example-pack")]),

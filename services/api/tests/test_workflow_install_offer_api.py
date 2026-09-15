@@ -150,7 +150,7 @@ async def test_create_and_queue_offer_uses_only_the_opaque_offer_id(
     await _install_node_inventory(app, monkeypatch)
     captured: list[DownloadRequest] = []
 
-    def create(
+    def stage(
         _manager: DownloadManager,
         session: Session,
         request: DownloadRequest,
@@ -166,7 +166,8 @@ async def test_create_and_queue_offer_uses_only_the_opaque_offer_id(
         session.flush()
         return job
 
-    monkeypatch.setattr(DownloadManager, "create", create)
+    monkeypatch.setattr(DownloadManager, "stage", stage)
+    monkeypatch.setattr(DownloadManager, "start", lambda _manager, _job_id: None)
     created = await client.post(
         f"/api/workflows/{workflow_id}/revisions/{revision_id}/install-offers",
         json=_offer_payload(plan_id),
@@ -238,7 +239,7 @@ async def test_stale_offer_refuses_before_any_download_job_starts(
     def must_not_create(*_args: object, **_kwargs: object) -> Job:
         raise AssertionError("a stale offer must not create a download")
 
-    monkeypatch.setattr(DownloadManager, "create", must_not_create)
+    monkeypatch.setattr(DownloadManager, "stage", must_not_create)
     refused = await client.post(f"/api/workflow-install-offers/{offer_id}/install")
 
     assert refused.status_code == 422

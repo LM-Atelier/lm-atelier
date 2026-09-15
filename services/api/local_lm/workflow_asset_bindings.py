@@ -21,6 +21,7 @@ _IMMUTABLE_REVISION = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64}|[1-9][0-9]{0,19
 _PLAN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")
 
 _REFERENCE_ARTIFACT_KINDS: dict[str, frozenset[InstalledAssetKind]] = {
+    "background_removal": frozenset({"background_removal"}),
     "checkpoint": frozenset(
         {
             "checkpoint",
@@ -39,6 +40,7 @@ _REFERENCE_ARTIFACT_KINDS: dict[str, frozenset[InstalledAssetKind]] = {
 }
 
 _ARTIFACT_TARGET_FOLDERS: dict[InstalledAssetKind, frozenset[str]] = {
+    "background_removal": frozenset({"background_removal"}),
     "checkpoint": frozenset({"checkpoints"}),
     "clip_vision": frozenset({"clip_vision"}),
     "controlnet": frozenset({"controlnet"}),

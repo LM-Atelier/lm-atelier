@@ -1668,3 +1668,35 @@ it("transports branch pagination and explicit activation with a guarded head", a
   expect(JSON.parse(fetchMock.mock.calls[2][1]?.body as string)).toEqual({ expected_active_head_message_id: null });
   expect(fetchMock.mock.calls[2][1]?.method).toBe("POST");
 });
+
+
+it("prepares and activates an exact workflow revision through the bound API routes", async () => {
+  const preparation = {
+    workflow_revision_id: "revision/a", workflow_artifact_sha256: "a".repeat(64),
+    dependency_contract_sha256: "b".repeat(64), state: "prepared", selections: [], slots: [], issues: [],
+  };
+  const activation = {
+    id: "activation", workflow_revision_id: "revision/a", dependency_contract_sha256: "b".repeat(64),
+    binding_sha256: "c".repeat(64), launch_sha256: "d".repeat(64), state: "ready", is_active: true,
+  };
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify(preparation), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify(activation), { status: 200 }));
+  vi.stubGlobal("fetch", fetchMock);
+  const { api } = await import("./api");
+  const controller = new AbortController();
+  await expect(api.prepareWorkflowActivation("workflow/a", "revision/a", controller.signal)).resolves.toEqual(preparation);
+  const payload = {
+    workflow_artifact_sha256: preparation.workflow_artifact_sha256,
+    dependency_contract_sha256: preparation.dependency_contract_sha256, selections: [],
+  };
+  await expect(api.activateWorkflowRevision("workflow/a", "revision/a", payload, controller.signal)).resolves.toEqual(activation);
+  expect(fetchMock.mock.calls[1][0]).toBe("/api/workflows/workflow%2Fa/revisions/revision%2Fa/activation/prepare");
+  expect(fetchMock.mock.calls[1][1]?.method).toBeUndefined();
+  expect(fetchMock.mock.calls[1][1]?.signal).toBe(controller.signal);
+  expect(fetchMock.mock.calls[2][0]).toBe("/api/workflows/workflow%2Fa/revisions/revision%2Fa/activation");
+  expect(fetchMock.mock.calls[2][1]?.method).toBe("POST");
+  expect(JSON.parse(fetchMock.mock.calls[2][1]?.body as string)).toEqual(payload);
+  expect(fetchMock.mock.calls[2][1]?.signal).toBe(controller.signal);
+});

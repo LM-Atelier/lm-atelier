@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { WorkflowInstallStatus } from "./WorkflowInstallStatus";
 import type { WorkflowFamily, WorkflowInstallOffer } from "./types";
 import "./WorkflowFamilyVariants.css";
 import { availableWorkflowInstallOffer, workflowVariantReadinessLabel } from "./workflowVariantSetup";
@@ -31,6 +32,8 @@ export function WorkflowFamilyVariants({ family, onReviewInstall }: {
               ? "No current revision" : `Current revision: v${variant.current_revision_version}`}</small>
             <span className="badge">{workflowVariantReadinessLabel(variant)}</span>
             <p>{variant.readiness === "ready" ? "Ready to run." : readinessReason(variant)}</p>
+            <WorkflowInstallStatus progress={variant.install_progress} workflowName={variant.name}
+              revisionId={variant.current_revision_id} />
             {onReviewInstall && availableWorkflowInstallOffer(family, variant) && (
               <button className="secondary compact-button" aria-label={`Review downloads for ${variant.name}`}
                 onClick={() => {

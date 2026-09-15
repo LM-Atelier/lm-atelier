@@ -47,13 +47,7 @@ const INVENTORY_DEPENDENT_ISSUES = new Set([
   "custom_node_package_awaiting_review",
 ]);
 
-/** Review a raw ComfyUI package before anything is imported or trusted.
- *
- * Everything shown comes from the analyzer report; the only gate this surface
- * obeys is `dependencies_resolved`, computed server-side. Nothing here can
- * install, trust, or activate - the report has to be resolved first, and
- * resolution lives in a later backend step, not in this dialog.
- */
+/** Review dependencies and install exact packages before importing a workflow. */
 export function WorkflowPackageReview({
   analysis,
   fileName,
@@ -175,6 +169,11 @@ export function WorkflowPackageReview({
       {analysis.custom_packages.length > 0 && (
         <section>
           <h3>Custom node packages</h3>
+          <p>
+            Install and enable downloads this exact version and its dependencies. Verified
+            Registry releases can run automatically; other code stays inactive until you
+            review it in Prepared packages.
+          </p>
           <ul>
             {analysis.custom_packages.map((pkg) => (
               <li key={pkg.package_id}>
@@ -189,7 +188,7 @@ export function WorkflowPackageReview({
                 </span>
                 {uiGraph && !pkg.locally_resolved && pkg.versions.length === 1 && (
                   queuedPackages.includes(pkg.package_id)
-                    ? <small>Preparation queued - progress shows in the jobs panel. The result stays inactive and untrusted until reviewed.</small>
+                    ? <small>Extension setup queued. Progress and any required review appear in Jobs.</small>
                     : (
                       <button
                         type="button"
@@ -201,7 +200,7 @@ export function WorkflowPackageReview({
                           sourceGraph: uiGraph,
                         })}
                       >
-                        Prepare {pkg.versions[0]}
+                        Install and enable {pkg.versions[0]}
                       </button>
                     )
                 )}

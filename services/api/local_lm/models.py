@@ -2441,6 +2441,24 @@ class MessageReference(TimestampMixin, Base):
     artifact_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
 
 
+class WorkflowPackageInstallPlan(TimestampMixin, Base):
+    """One immutable source and dependency preview, before installation approval."""
+
+    __tablename__ = "workflow_package_install_plans"
+    __table_args__ = (
+        UniqueConstraint("plan_sha256", name="uq_workflow_package_install_plan_sha256"),
+        CheckConstraint(
+            _lowercase_sha256_check("plan_sha256"),
+            name="ck_workflow_package_install_plan_sha256",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    plan_sha256: Mapped[str] = mapped_column(String(64))
+    request_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    preflight_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
 class WorkflowInstallOffer(TimestampMixin, Base):
     """One reviewed, content-bound way to make a workflow locally installable."""
 
@@ -2466,8 +2484,15 @@ class WorkflowInstallOffer(TimestampMixin, Base):
             "status IN ('ready', 'queued', 'invalidated', 'completed', 'expired')",
             name="ck_workflow_install_offer_status",
         ),
-        CheckConstraint("plan_count > 0", name="ck_workflow_install_offer_plan_count"),
-        CheckConstraint("total_bytes > 0", name="ck_workflow_install_offer_total_bytes"),
+        CheckConstraint(
+            "plan_count >= 0 AND (source_plan_id IS NOT NULL OR plan_count > 0)",
+            name="ck_workflow_install_offer_plan_count",
+        ),
+        CheckConstraint(
+            "total_bytes >= 0 AND (source_plan_id IS NOT NULL OR total_bytes > 0)",
+            name="ck_workflow_install_offer_total_bytes",
+        ),
+        UniqueConstraint("source_plan_id", name="uq_workflow_install_offer_source_plan_id"),
         Index(
             "ix_workflow_install_offer_revision_status",
             "workflow_revision_id",
@@ -2483,6 +2508,12 @@ class WorkflowInstallOffer(TimestampMixin, Base):
     dependency_contract_sha256: Mapped[str] = mapped_column(String(64))
     binding_plan_sha256: Mapped[str] = mapped_column(String(64))
     offer_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    source_plan_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workflow_package_install_plans.id", ondelete="RESTRICT"), nullable=True
+    )
+    completion_job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("jobs.id", ondelete="RESTRICT"), nullable=True, unique=True
+    )
     selections_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     assets_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     plan_count: Mapped[int] = mapped_column(Integer)
@@ -2495,6 +2526,47 @@ class WorkflowInstallOffer(TimestampMixin, Base):
     invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     invalidation_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
     invalidation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    completion_error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+
+
+class WorkflowInstallOfferDownload(TimestampMixin, Base):
+    """The accepted download request and its durable job for one workflow offer."""
+
+    __tablename__ = "workflow_install_offer_downloads"
+    __table_args__ = (UniqueConstraint("offer_id", "request_sha256"),)
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("wfdl"))
+    offer_id: Mapped[str] = mapped_column(
+        ForeignKey("workflow_install_offers.id", ondelete="CASCADE"), index=True
+    )
+    offer_sha256: Mapped[str] = mapped_column(String(64))
+    job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    request_sha256: Mapped[str] = mapped_column(String(64))
+    request_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class WorkflowInstallOfferPackage(TimestampMixin, Base):
+    """Keep the accepted extension plan and its exact durable preparation result."""
+
+    __tablename__ = "workflow_install_offer_packages"
+    __table_args__ = (UniqueConstraint("offer_id", "package_id"),)
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("wfpkg"))
+    offer_id: Mapped[str] = mapped_column(
+        ForeignKey("workflow_install_offers.id", ondelete="CASCADE"), index=True
+    )
+    offer_sha256: Mapped[str] = mapped_column(String(64))
+    package_id: Mapped[str] = mapped_column(String(100))
+    execution_plan_sha256: Mapped[str] = mapped_column(String(64))
+    job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    registry_install_id: Mapped[str | None] = mapped_column(
+        ForeignKey("comfy_registry_installs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    preparation_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
 class Job(TimestampMixin, Base):

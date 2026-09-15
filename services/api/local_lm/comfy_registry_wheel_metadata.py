@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from email import policy
 from email.parser import BytesParser
+from typing import Literal
 
 from packaging.markers import Marker
 from packaging.requirements import InvalidRequirement, Requirement
@@ -74,7 +75,7 @@ class ComfyRegistryWheelMetadataFrontier:
     sources: tuple[str, ...]
     requested_extras: tuple[str, ...]
     locked_version: str | None
-    status: str
+    status: Literal["resolve", "satisfied", "conflict"]
 
 
 @dataclass(frozen=True)
@@ -536,7 +537,7 @@ def _frontier(
         locked_version = locked.get(name)
         if locked_version is None:
             locked_version = runtime_distributions.get(name)
-        status = "resolve"
+        status: Literal["resolve", "satisfied", "conflict"] = "resolve"
         if locked_version is not None:
             version = Version(locked_version)
             status = (

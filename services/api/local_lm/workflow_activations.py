@@ -148,6 +148,27 @@ class WorkflowActivationLaunchScope:
     runtimes: tuple[WorkflowRuntimeLaunchBinding, ...]
 
 
+@dataclass(frozen=True)
+class WorkflowSourceLaunchScope:
+    offer_id: str
+    plan_sha256: str
+    binding_sha256: str
+    launch_sha256: str
+    model_install_ids: tuple[str, ...]
+    model_asset_install_ids: tuple[str, ...]
+    custom_node_install_ids: tuple[str, ...]
+    registry_install_ids: tuple[str, ...]
+    runtime_keys: tuple[str, ...]
+    models: tuple[WorkflowModelLaunchBinding, ...]
+    assets: tuple[WorkflowAssetLaunchBinding, ...]
+    custom_nodes: tuple[WorkflowCustomNodeLaunchBinding, ...]
+    registry_packages: tuple[WorkflowRegistryLaunchBinding, ...]
+    runtimes: tuple[WorkflowRuntimeLaunchBinding, ...]
+
+
+WorkflowMediaLaunchScope = WorkflowActivationLaunchScope | WorkflowSourceLaunchScope
+
+
 WorkflowRuntimeMaterializer = Callable[
     [WorkflowDependencyRequirement, WorkflowBindingSelection],
     MaterializedWorkflowDependency | None,
@@ -201,7 +222,7 @@ def activate_workflow_revision(
     revision_row = _revision_row(session, revision)
     contract, slots = _hydrate_contract(session, revision_row)
     version = _resolver_version(resolver_version)
-    resolution = _resolve(
+    resolution = resolve_workflow_dependencies(
         session,
         contract,
         selections,
@@ -307,7 +328,7 @@ def revalidate_workflow_activation(
                 "workflow_contract_drift", "Workflow activation contract identity has changed"
             )
         selections = _stored_selections(session, activation_row)
-        resolution = _resolve(
+        resolution = resolve_workflow_dependencies(
             session,
             contract,
             selections,
@@ -421,13 +442,15 @@ def _hydrate_contract(
     return contract, {row.name: row for row in rows}
 
 
-def _resolve(
+def resolve_workflow_dependencies(
     session: Session,
     contract: WorkflowDependencyContract,
     selections: Sequence[WorkflowBindingSelection],
     *,
     runtime_materializer: WorkflowRuntimeMaterializer | None,
 ) -> WorkflowActivationResolution:
+    """Resolve selected resource metadata; launch verification remains separate."""
+
     def materialize(
         requirement: WorkflowDependencyRequirement,
         selection: WorkflowBindingSelection,
