@@ -110,7 +110,9 @@ export function WorkflowActivationPanel({
     <section className="workflow-input-section workflow-activation" aria-label="Workflow dependencies">
       <h3>Installed dependencies</h3>
       <p>Activate this reviewed workflow with matching resources already installed on this computer.</p>
-      {pending && <p role="status">Checking dependencies…</p>}
+      {/* Activation stays pending while the views that read it refresh, but
+          it has already succeeded, so only that outcome is announced. */}
+      {pending && !activated && <p role="status">Checking dependencies…</p>}
       {error && <ErrorCallout message={error} />}
       {activated && <p role="status">Dependencies activated.</p>}
       {snapshot && snapshot.slots.map(slot => (

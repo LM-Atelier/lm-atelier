@@ -100,6 +100,17 @@ it("activates a reviewed current revision with one click and refreshes readiness
   expect(screen.queryByText(digest)).not.toBeInTheDocument();
 });
 
+it("reports only the activation while readiness consumers refresh", async () => {
+  await open();
+  // Hold the refresh that follows activation open, as a slow response would.
+  vi.mocked(api.workflowSummaries).mockImplementation(() => new Promise(() => {}));
+  vi.mocked(api.workflow).mockImplementation(() => new Promise(() => {}));
+  fireEvent.click(activate());
+  await screen.findByText("Dependencies activated.");
+  const panel = screen.getByRole("region", { name: "Workflow dependencies" });
+  expect(within(panel).getAllByRole("status").map(status => status.textContent)).toEqual(["Dependencies activated."]);
+});
+
 it("never duplicates preparation or activation during a pending click", async () => {
   let finish!: (value: WorkflowActivationPreparation) => void;
   vi.mocked(api.prepareWorkflowActivation).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
