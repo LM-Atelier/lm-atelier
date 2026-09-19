@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import struct
 from dataclasses import replace
+from typing import cast
 
 import pytest
 
 from local_lm.db import SessionLocal
+from local_lm.install_plan_types import InstallPlanFailureCode
 from local_lm.model_manifests import (
     MAX_METADATA_BYTES,
     InspectedComponent,
@@ -847,7 +849,12 @@ async def test_a_stored_plan_stops_quoting_a_reason_that_no_longer_applies(clien
     first = replace(
         resolved, failure_code="preflight_blocked", failure_reason="Choose one or the other."
     )
-    second = replace(resolved, failure_code="disk_full", failure_reason="Not enough room for this.")
+    # Preserve a historical code outside the current vocabulary in this stored-row fixture.
+    second = replace(
+        resolved,
+        failure_code=cast(InstallPlanFailureCode, "disk_full"),
+        failure_reason="Not enough room for this.",
+    )
     assert first.plan_hash == second.plan_hash
 
     with SessionLocal() as session:
@@ -892,7 +899,12 @@ async def test_a_plan_being_downloaded_is_not_rewritten_underneath_the_transfer(
 
     with SessionLocal() as session:
         again = persist_install_plan(
-            session, replace(resolved, failure_code="late", failure_reason="arrived mid-transfer")
+            session,
+            replace(
+                resolved,
+                failure_code=cast(InstallPlanFailureCode, "late"),
+                failure_reason="arrived mid-transfer",
+            ),
         )
         session.commit()
 
