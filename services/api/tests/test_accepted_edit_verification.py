@@ -67,22 +67,28 @@ async def test_image_edit_verification_uses_accepted_configuration(
         result = await original_capabilities(adapter)
         return result.model_copy(update={"input_modalities": ["text", "image"]})
 
+    # The three answers the review asks for, in order: what is in the source,
+    # what is in the result, and which listed difference the request asked for.
+    # A case that expects a retry is one where nothing was seen to change.
+    # A case that expects a retry is one where the square changed, but not the
+    # way the request asked for.
+    seen_after = (
+        '[{"subject": "square", "appearance": "green"}]'
+        if later_change.startswith("retry_")
+        else '[{"subject": "square", "appearance": "blue"}]'
+    )
+    attribution = (
+        '{"subject_present": true, "operation": "change", "requested": [0], "as_asked": false}'
+        if later_change.startswith("retry_")
+        else '{"subject_present": true, "operation": "change", "requested": [0], "as_asked": true}'
+    )
+    answers = ('[{"subject": "square", "appearance": "red"}]', seen_after, attribution)
+
     async def assessment(
         adapter: MockChatAdapter, request: ChatRequest
     ) -> AsyncIterator[ChatEvent]:
         captured.append(request)
-        yield ChatEvent(
-            type="delta",
-            text=json.dumps(
-                {
-                    "requested_change_visible": not later_change.startswith("retry_"),
-                    "unrelated_content_preserved": True,
-                    "retry_recommended": later_change.startswith("retry_"),
-                    "direction": "increase" if later_change.startswith("retry_") else "none",
-                    "confidence": 0.94,
-                }
-            ),
-        )
+        yield ChatEvent(type="delta", text=answers[min(len(captured) - 1, len(answers) - 1)])
         yield ChatEvent(type="complete", data={"finish_reason": "stop"})
 
     async def media(adapter: MockMediaAdapter, request: MediaRequest) -> AsyncIterator[MediaEvent]:
@@ -242,16 +248,27 @@ async def test_image_edit_verification_uses_accepted_configuration(
     if later_change in {"inactive", "install_manifest"}:
         assert result["result_json"]["reason"] == "vision_profile_unavailable"
         assert captured == []
-    else:
+    elif later_change.startswith("retry_"):
         assert result["result_json"]["status"] == "complete", result["result_json"]
-        assert len(captured) == 1
-        rendered = json.dumps(captured[0].messages)
+        # One question about each picture, then one about the two lists.
+        assert len(captured) == 3
+        rendered = json.dumps([message.messages for message in captured])
         assert "Make the square green." in rendered
         assert "Make the square blue instead." not in rendered
         assert verified_settings == [{"context_length": 4096}]
-        assert result["result_json"]["automatic_retry_executed"] is later_change.startswith(
-            "retry_"
-        )
+        assert result["result_json"]["automatic_retry_executed"] is True
+    else:
+        # The readings agree, which is not a pass: nothing here can show that
+        # the rest of the picture stayed as it was, so the review ends without
+        # a verdict and without a retry, having used the accepted settings.
+        assert result["result_json"]["status"] == "skipped", result["result_json"]
+        assert result["result_json"]["reason"] == "change_unaccounted"
+        assert result["result_json"]["automatic_retry_executed"] is False
+        assert len(captured) == 3
+        rendered = json.dumps([message.messages for message in captured])
+        assert "Make the square green." in rendered
+        assert "Make the square blue instead." not in rendered
+        assert verified_settings == [{"context_length": 4096}]
     if later_change.startswith("retry_"):
         from local_lm.accepted_turn_context import accepted_context
 
@@ -357,6 +374,7 @@ async def test_image_edit_verification_uses_accepted_configuration(
             job = session.get(Job, image_edit_verification_job_id(edited_run_id))
             assert job is not None
             assert job.payload_json["vision_profile_id"] == "profile_accepted_verifier"
-            assert job.result_json["status"] == "complete"
-        assert len(captured) == 1
+            assert job.result_json["status"] == "skipped"
+            assert job.result_json["reason"] == "change_unaccounted"
+        assert len(captured) == 3
         assert verified_settings == [{"context_length": 4096}]

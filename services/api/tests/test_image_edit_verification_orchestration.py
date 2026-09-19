@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -744,10 +745,22 @@ async def test_automatic_retry_reuses_source_turn_as_a_response_revision() -> No
     }
 
 
+_SAW_THE_CHANGE = (
+    '[{"subject": "mug", "appearance": "blue"}]',
+    '[{"subject": "mug", "appearance": "green"}]',
+    '{"subject_present": true, "operation": "change", "requested": [0], "as_asked": true}',
+)
+_SAW_NO_CHANGE = (
+    '[{"subject": "mug", "appearance": "blue"}]',
+    '[{"subject": "mug", "appearance": "blue"}]',
+    '{"subject_present": true, "operation": "change", "requested": []}',
+)
+
+
 def _verification_world(  # type: ignore[no-untyped-def]
     *,
     lose_at: str,
-    answer: str = "{}",
+    answers: tuple[str, ...] = _SAW_THE_CHANGE,
     mask: dict[str, object] | None = None,
     settings: dict[str, object] | None = None,
     workflow_schema: dict[str, object] | None = None,
@@ -757,7 +770,10 @@ def _verification_world(  # type: ignore[no-untyped-def]
     ownership probe stops answering for the test claim once ``lose_at`` is
     reached: "preparation", "stop", "workers", "assessment" or "restore".
     ``mask`` becomes the source run's selection setting, and a stored mask
-    artifact named "artifact-mask" answers for it. ``settings`` are further
+    artifact named "artifact-mask" answers for it. ``answers`` are the replies
+    to the three questions the review asks, in order: what is in the source, what
+    is in the result, and which listed difference the request asked for.
+    ``settings`` are further
     settings of the source run, and ``workflow_schema`` makes the source run's
     workflow revision answer with that input schema. Returns (job,
     orchestrator, world)."""
@@ -800,7 +816,7 @@ def _verification_world(  # type: ignore[no-untyped-def]
     profile = SimpleNamespace(id="profile-vision", model_install_id=install.id)
     previous = SimpleNamespace(id="profile-chat", model_install_id="install-chat")
     previous_install = SimpleNamespace(id="install-chat", active=True)
-    world = {"owned": True, "lost_at": None}
+    world: dict[str, Any] = {"owned": True, "lost_at": None}
 
     class FakeSession:
         def __enter__(self):  # type: ignore[no-untyped-def]
@@ -894,11 +910,13 @@ def _verification_world(  # type: ignore[no-untyped-def]
     orchestrator._release_deferred_media_restart = Mock()  # type: ignore[method-assign]
     orchestrator._persist_image_edit_verification = Mock(return_value=True)  # type: ignore[method-assign]
 
-    async def prepare(*_args: object, **_kwargs: object) -> object:
+    async def prepare(artifacts: list[object], **_kwargs: object) -> object:
         if lose_at == "preparation":
             world["owned"] = False
             world["lost_at"] = "preparation"
-        return SimpleNamespace(inspected_artifact_ids=[source.id, result.id])
+        # Each picture is prepared on its own now, so the stub answers for
+        # whichever one it was handed.
+        return SimpleNamespace(inspected_artifact_ids=[item.id for item in artifacts])
 
     orchestrator.vision = SimpleNamespace(  # type: ignore[assignment]
         prepare=AsyncMock(side_effect=prepare),
@@ -911,9 +929,15 @@ def _verification_world(  # type: ignore[no-untyped-def]
     orchestrator.engines.chat_capabilities = chat_capabilities  # type: ignore[attr-defined]
     consumed: list[str] = []
 
-    async def stream(_request):  # type: ignore[no-untyped-def]
+    asked: list[str] = []
+    questions: list[str] = []
+
+    async def stream(request):  # type: ignore[no-untyped-def]
         from local_lm.adapters.base import ChatEvent
 
+        questions.append(str(request.messages[-1]["content"]))
+        answer = answers[min(len(asked), len(answers) - 1)]
+        asked.append(answer)
         consumed.append("first")
         yield ChatEvent(type="delta", text=answer[:1], data={})
         if lose_at == "assessment":
@@ -926,6 +950,8 @@ def _verification_world(  # type: ignore[no-untyped-def]
 
     orchestrator.engines.chat.stream = stream  # type: ignore[attr-defined]
     world["consumed"] = consumed
+    world["asked"] = asked
+    world["questions"] = questions
     return job, orchestrator, world
 
 
@@ -1145,11 +1171,14 @@ def _picture(recolour: tuple[int, int, int, int] | None) -> bytes:
     ("patch", "reason"),
     [
         (None, "no_measurable_change"),
-        ((16, 16, 48, 48), "accepted"),
+        # A change the pixels agree with ends the review without a retry, and
+        # without a pass: two readings that name the same things cannot show
+        # that nothing else moved, so the review says it could not tell.
+        ((16, 16, 48, 48), "change_unaccounted"),
         # A sixty-fourth and a thousandth of the picture: each averages under
         # the threshold over the whole picture, and each is a real change.
-        ((28, 28, 36, 36), "accepted"),
-        ((30, 30, 32, 32), "accepted"),
+        ((28, 28, 36, 36), "change_unaccounted"),
+        ((30, 30, 32, 32), "change_unaccounted"),
     ],
 )
 async def test_a_confident_yes_does_not_accept_a_picture_whose_pixels_did_not_change(
@@ -1160,11 +1189,7 @@ async def test_a_confident_yes_does_not_accept_a_picture_whose_pixels_did_not_ch
     and a small real change is not mistaken for none."""
     recoloured = patch is not None
 
-    confident_yes = (
-        '{"requested_change_visible": true, "unrelated_content_preserved": true, '
-        '"retry_recommended": false, "direction": "none", "confidence": 0.95}'
-    )
-    job, orchestrator, _world = _verification_world(lose_at="never", answer=confident_yes)
+    job, orchestrator, _world = _verification_world(lose_at="never", answers=_SAW_THE_CHANGE)
     pictures = {"artifact-source": _picture(None), "artifact-result": _picture(patch)}
     orchestrator.artifacts.verified_bytes = Mock(  # type: ignore[method-assign]
         side_effect=lambda artifact, *, maximum_bytes: pictures[artifact.id]
@@ -1180,11 +1205,13 @@ async def test_a_confident_yes_does_not_accept_a_picture_whose_pixels_did_not_ch
     assert record["reason"] == reason
     assert record["difference"]["comparable"] is True
     assert record["difference"]["changed"] is recoloured
-    assert record["assessment"]["requested_change_visible"] is True
     if recoloured:
+        # The pixels agree with the answers, and agreement is not a pass: the
+        # review reaches no verdict, records what it measured, retries nothing.
+        assert "assessment" not in record
         orchestrator._create_image_edit_verification_retry.assert_not_awaited()
-        assert record["retry"] is False
     else:
+        assert record["assessment"]["requested_change_visible"] is False
         decision = orchestrator._create_image_edit_verification_retry.await_args.args[2]
         assert (decision.retry, decision.value_before, decision.value_after) == (True, 0.5, 0.62)
         assert record["automatic_retry_executed"] is True
@@ -1208,22 +1235,18 @@ def _selection(box: tuple[int, int, int, int]) -> bytes:
         # Inverted, the selection is everything but the centre: a change only
         # there left the selection as it was.
         ((24, 24, 40, 40), True, "no_measurable_change"),
-        ((2, 2, 10, 10), True, "accepted"),
+        ((2, 2, 10, 10), True, "change_unaccounted"),
         # A selection whose mask is no longer stored measures nothing, so the
         # assessment decides.
-        (None, False, "accepted"),
+        (None, False, "change_unaccounted"),
     ],
 )
 async def test_a_selection_is_measured_where_it_selects_through_the_real_check(
     patch: tuple[int, int, int, int] | None, stored: bool, reason: str
 ) -> None:
-    confident_yes = (
-        '{"requested_change_visible": true, "unrelated_content_preserved": true, '
-        '"retry_recommended": false, "direction": "none", "confidence": 0.95}'
-    )
     selection = {"artifact_id": "artifact-mask" if stored else "artifact-gone", "invert": True}
     job, orchestrator, _world = _verification_world(
-        lose_at="never", answer=confident_yes, mask=selection
+        lose_at="never", answers=_SAW_THE_CHANGE, mask=selection
     )
     pictures = {
         "artifact-source": _picture(None),
@@ -1260,6 +1283,45 @@ def _calibrated_schema(*, steps_default: int = 4) -> dict[str, object]:
     }
 
 
+async def test_the_review_asks_about_one_picture_at_a_time_then_about_the_lists() -> None:
+    """Three bounded questions replace the one that asked for a verdict.
+
+    Each picture is prepared and asked about on its own, and which difference
+    the request asked for is settled from the two lists with no picture
+    attached, because that is the question a vision model answers dependably.
+    """
+
+    job, orchestrator, world = _verification_world(lose_at="never", answers=_SAW_THE_CHANGE)
+    pictures = {"artifact-source": _picture(None), "artifact-result": _picture((16, 16, 48, 48))}
+    orchestrator.artifacts.verified_bytes = Mock(  # type: ignore[method-assign]
+        side_effect=lambda artifact, *, maximum_bytes: pictures[artifact.id]
+    )
+
+    await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
+
+    prepared: list[list[Any]] = [
+        list(call.args[0]) for call in orchestrator.vision.prepare.await_args_list
+    ]
+    assert [[item.id for item in group] for group in prepared] == [
+        ["artifact-source"],
+        ["artifact-result"],
+    ]
+    questions: list[str] = world["questions"]
+    assert len(questions) == 3
+    assert questions[0] == questions[1] and "attached picture" in questions[0]
+    assert "no picture is attached" in questions[2]
+    assert "make the mug green" in questions[2]
+    # The verdict is the product's, worked out from those answers: the three
+    # readings agree with each other and with the pixels, and that is still not
+    # a pass, because a bounded list cannot show that nothing else moved. So
+    # the review records that it could not tell, and asks for no retry.
+    record = orchestrator._persist_image_edit_verification.call_args.args[2]
+    assert record["status"] == "skipped"
+    assert record["reason"] == "change_unaccounted"
+    assert record["automatic_retry_executed"] is False
+    assert "assessment" not in record
+
+
 @pytest.mark.parametrize(
     ("settings", "schema", "after"),
     [
@@ -1278,14 +1340,13 @@ async def test_a_retry_steps_by_the_schedule_the_source_ran_with(
 ) -> None:
     job, orchestrator, _world = _verification_world(
         lose_at="never",
-        answer=(
-            '{"requested_change_visible": false, "unrelated_content_preserved": true, '
-            '"retry_recommended": true, "direction": "increase", "confidence": 0.95}'
-        ),
+        answers=_SAW_NO_CHANGE,
         settings=settings,
         workflow_schema=schema,
     )
-    pictures = {"artifact-source": _picture(None), "artifact-result": _picture((16, 16, 48, 48))}
+    # Nothing was seen to change and nothing measurably did: the two signals
+    # agree, which is the edit that earns the one stronger retry.
+    pictures = {"artifact-source": _picture(None), "artifact-result": _picture(None)}
     orchestrator.artifacts.verified_bytes = Mock(  # type: ignore[method-assign]
         side_effect=lambda artifact, *, maximum_bytes: pictures[artifact.id]
     )

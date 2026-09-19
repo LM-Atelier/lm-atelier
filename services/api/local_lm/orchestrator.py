@@ -10,7 +10,7 @@ import re
 import secrets
 import shutil
 import time
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Coroutine, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -100,15 +100,20 @@ from .image_edit_strength import (
 )
 from .image_edit_verification import (
     MAX_ASSESSMENT_CHARACTERS,
+    MAX_INVENTORY_CHARACTERS,
     VERIFICATION_VERSION,
     ImageEditRetryDecision,
     ImageEditVerificationJobPayload,
     VerificationReason,
-    build_image_edit_verification_prompt,
+    assess_from_inventories,
+    build_change_attribution_prompt,
+    build_image_inventory_prompt,
+    compare_inventories,
     decide_image_edit_retry,
     image_edit_verification_eligibility,
     image_edit_verification_job_id,
-    parse_image_edit_verification_assessment,
+    parse_change_attribution,
+    parse_image_inventory,
 )
 from .media_references import exceeds_capacity
 from .message_references import (
@@ -7305,23 +7310,32 @@ class ConversationOrchestrator:
         *,
         job_status: str = JobStatus.COMPLETE.value,
         claim: JobClaim | None = None,
+        difference: ImageDifference | None = None,
     ) -> bool:
         """Skipped-verification terminal write, bound to the presented claim.
 
         Returns whether the write landed: with a claim the transition is the
         conditional write and a refusal persists nothing, so the caller must
         not commit as if it had.
+
+        A review that got as far as comparing the two pictures records what it
+        measured even when it reaches no verdict, because "the picture did
+        change" is worth saying on its own and is the same measurement either
+        way.
         """
 
+        record: dict[str, Any] = {
+            "version": VERIFICATION_VERSION,
+            "status": "skipped",
+            "reason": reason.value,
+            "automatic_retry_executed": False,
+        }
+        if difference is not None:
+            record["difference"] = difference.provenance()
         return self._persist_image_edit_verification(
             session,
             job,
-            {
-                "version": VERIFICATION_VERSION,
-                "status": "skipped",
-                "reason": reason.value,
-                "automatic_retry_executed": False,
-            },
+            record,
             job_status=job_status,
             claim=claim,
         )
@@ -7736,6 +7750,74 @@ class ConversationOrchestrator:
             session.expunge(install)
         return profile, install
 
+    def _abandon_image_edit_verification(
+        self,
+        job_id: str,
+        reason: VerificationReason,
+        claim: JobClaim,
+        difference: ImageDifference | None = None,
+    ) -> None:
+        """Record why this verification could not reach a verdict, and leave it there."""
+
+        with self.session_factory() as session:
+            job = session.get(Job, job_id)
+            if not job:
+                return
+            if self._finish_image_edit_verification(
+                session, job, reason, claim=claim, difference=difference
+            ):
+                session.commit()
+            else:
+                session.rollback()
+
+    async def _vision_answer(
+        self,
+        job_id: str,
+        claim: JobClaim,
+        messages: list[dict[str, Any]],
+        *,
+        snapshot: AcceptedContext | None,
+        limit: int,
+    ) -> str:
+        """One bounded answer from the vision worker, consumed while this row is owned."""
+
+        raw = ""
+        complete = False
+        async with asyncio.timeout(180):
+            async for event in self.engines.chat.stream(
+                ChatRequest(
+                    run_id=job_id,
+                    messages=messages,
+                    settings={
+                        "temperature": 0,
+                        "max_tokens": min(
+                            256,
+                            snapshot.vision_bridge_max_tokens
+                            if snapshot is not None
+                            else self.engines.settings.vision_bridge_max_tokens,
+                        ),
+                    },
+                    persistence_scope=self.persistence_scope,
+                    scope_id=self.scope_id,
+                )
+            ):
+                # Every event of the assessment is this execution's to
+                # consume only while it owns the row.
+                self._require_ownership(job_id, claim, "mid-assessment")
+                if event.type == "delta":
+                    raw += event.text
+                    if len(raw) > limit:
+                        raise ValueError("vision assessment exceeded its safety limit")
+                elif event.type == "error":
+                    raise RuntimeError(str(event.data.get("error") or "vision assessment failed"))
+                elif event.type == "cancelled":
+                    raise asyncio.CancelledError
+                elif event.type == "complete":
+                    complete = True
+        if not complete:
+            raise RuntimeError("vision assessment did not complete")
+        return raw
+
     async def _execute_image_edit_verification(self, job_id: str, claim: JobClaim) -> None:
         media_stopped_for_verification = False
         # `restore_profile` says who to put back IF this execution displaces
@@ -7846,17 +7928,23 @@ class ConversationOrchestrator:
                 )
                 session.commit()
 
-            try:
-                visual = await self.vision.prepare(
-                    [source, result],
-                    strict_artifact_ids={source.id, result.id},
+            def one_picture(artifact: Artifact) -> Coroutine[Any, Any, PreparedVisualContext]:
+                # A picture at a time: the questions below ask what is in one
+                # picture, which is what a vision model answers dependably.
+                return self.vision.prepare(
+                    [artifact],
+                    strict_artifact_ids={artifact.id},
                     vision_settings=settings,
                     sampling_policy=(
-                        snapshot.vision_sampling.model_copy(update={"max_images": 2})
+                        snapshot.vision_sampling.model_copy(update={"max_images": 1})
                         if snapshot is not None
                         else None
                     ),
                 )
+
+            try:
+                seen_source = await one_picture(source)
+                seen_result = await one_picture(result)
             except VisionInputError:
                 with self.session_factory() as session:
                     job = session.get(Job, job_id)
@@ -7868,7 +7956,9 @@ class ConversationOrchestrator:
                         else:
                             session.rollback()
                 return
-            if visual.inspected_artifact_ids != [source.id, result.id]:
+            if seen_source.inspected_artifact_ids != [source.id] or (
+                seen_result.inspected_artifact_ids != [result.id]
+            ):
                 with self.session_factory() as session:
                     job = session.get(Job, job_id)
                     if job:
@@ -7954,7 +8044,7 @@ class ConversationOrchestrator:
                         session.rollback()
                     return
                 current_context = accepted_context(session, run)
-                prompt = build_image_edit_verification_prompt(
+                prompt = (
                     current_context.standalone_prompt
                     if current_context is not None
                     else run.standalone_prompt
@@ -7969,59 +8059,58 @@ class ConversationOrchestrator:
                     indeterminate=True,
                 )
                 session.commit()
-            messages = self.vision.attach_to_latest_user(
-                [{"role": MessageRole.USER.value, "content": prompt}],
-                visual,
-            )
-            raw = ""
-            complete = False
-            async with asyncio.timeout(180):
-                async for event in self.engines.chat.stream(
-                    ChatRequest(
-                        run_id=job_id,
-                        messages=messages,
-                        settings={
-                            "temperature": 0,
-                            "max_tokens": min(
-                                256,
-                                snapshot.vision_bridge_max_tokens
-                                if snapshot is not None
-                                else self.engines.settings.vision_bridge_max_tokens,
-                            ),
-                        },
-                        persistence_scope=self.persistence_scope,
-                        scope_id=self.scope_id,
-                    )
-                ):
-                    # Every event of the assessment is this execution's to
-                    # consume only while it owns the row.
-                    self._require_ownership(job_id, claim, "mid-assessment")
-                    if event.type == "delta":
-                        raw += event.text
-                        if len(raw) > MAX_ASSESSMENT_CHARACTERS:
-                            raise ValueError("vision assessment exceeded its safety limit")
-                    elif event.type == "error":
-                        raise RuntimeError(
-                            str(event.data.get("error") or "vision assessment failed")
-                        )
-                    elif event.type == "cancelled":
-                        raise asyncio.CancelledError
-                    elif event.type == "complete":
-                        complete = True
-            if not complete:
-                raise RuntimeError("vision assessment did not complete")
+            inventory_prompt = build_image_inventory_prompt()
             try:
-                assessment = parse_image_edit_verification_assessment(raw)
+                before = parse_image_inventory(
+                    await self._vision_answer(
+                        job_id,
+                        claim,
+                        self.vision.attach_to_latest_user(
+                            [{"role": MessageRole.USER.value, "content": inventory_prompt}],
+                            seen_source,
+                        ),
+                        snapshot=snapshot,
+                        limit=MAX_INVENTORY_CHARACTERS,
+                    )
+                )
+                after = parse_image_inventory(
+                    await self._vision_answer(
+                        job_id,
+                        claim,
+                        self.vision.attach_to_latest_user(
+                            [{"role": MessageRole.USER.value, "content": inventory_prompt}],
+                            seen_result,
+                        ),
+                        snapshot=snapshot,
+                        limit=MAX_INVENTORY_CHARACTERS,
+                    )
+                )
             except ValueError:
-                with self.session_factory() as session:
-                    job = session.get(Job, job_id)
-                    if job:
-                        if self._finish_image_edit_verification(
-                            session, job, VerificationReason.INVALID_ASSESSMENT, claim=claim
-                        ):
-                            session.commit()
-                        else:
-                            session.rollback()
+                self._abandon_image_edit_verification(
+                    job_id, VerificationReason.INVENTORY_UNAVAILABLE, claim
+                )
+                return
+            changes = compare_inventories(before, after)
+            # Which difference was asked for is a question about two lists, so it
+            # is asked as one, with no picture attached.
+            attribution_raw = await self._vision_answer(
+                job_id,
+                claim,
+                [
+                    {
+                        "role": MessageRole.USER.value,
+                        "content": build_change_attribution_prompt(prompt, before, changes),
+                    }
+                ],
+                snapshot=snapshot,
+                limit=MAX_ASSESSMENT_CHARACTERS,
+            )
+            try:
+                attribution = parse_change_attribution(attribution_raw)
+            except ValueError:
+                self._abandon_image_edit_verification(
+                    job_id, VerificationReason.INVALID_ASSESSMENT, claim
+                )
                 return
             # The pixels are asked as well as the model. Nothing measurable
             # changed where the edit was asked is conclusive, and a vision
@@ -8029,6 +8118,15 @@ class ConversationOrchestrator:
             difference = await asyncio.to_thread(
                 self._image_edit_difference, source, result, verification_mask
             )
+            assessment = assess_from_inventories(changes, attribution, difference)
+            if assessment is None:
+                # Either the lists and the pixels do not account for each
+                # other, or they agree and still cannot show that nothing else
+                # moved, so the verdict cannot be told from what was seen.
+                self._abandon_image_edit_verification(
+                    job_id, VerificationReason.CHANGE_UNACCOUNTED, claim, difference
+                )
+                return
             decision = decide_image_edit_retry(
                 assessment,
                 attempt=payload.attempt,

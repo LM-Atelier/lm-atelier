@@ -223,3 +223,32 @@ def test_an_edit_check_records_its_largest_local_difference() -> None:
     assert provenance["threshold"] == UNCHANGED_THRESHOLD
     largest = provenance["largest_local_difference"]
     assert isinstance(largest, float) and largest > UNCHANGED_THRESHOLD
+
+
+def test_changed_areas_are_counted_so_coverage_can_be_checked() -> None:
+    """Two things changed in two places is two areas, not one bigger one.
+
+    A review reading a bounded list of what changed needs to know whether
+    everything that moved was named; the count of separate changed areas is
+    what lets it ask.
+    """
+
+    source = _solid((200, 200, 200))
+    one = source.copy()
+    one.paste((20, 40, 200), (16, 16, 64, 64))
+    two = one.copy()
+    two.paste((240, 200, 20), (176, 176, 232, 232))
+    touching = source.copy()
+    touching.paste((20, 40, 200), (16, 16, 120, 64))
+
+    single = compare_edit(_encode(source), _encode(one))
+    double = compare_edit(_encode(source), _encode(two))
+    spanning = compare_edit(_encode(source), _encode(touching))
+    unchanged = compare_edit(_encode(source), _encode(source))
+
+    assert single.changed_regions == 1
+    assert double.changed_regions == 2
+    # One thing wide enough to cross several parts of the grid is still one area.
+    assert spanning.changed_regions == 1
+    assert unchanged.changed_regions == 0
+    assert single.provenance()["changed_regions"] == 1

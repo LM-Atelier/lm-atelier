@@ -10,7 +10,6 @@ the property the record is for, and the one a shorter control would miss.
 from __future__ import annotations
 
 import io
-import json
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
@@ -77,15 +76,19 @@ async def _wait_for_job(client: AsyncClient, kind: str) -> dict:  # type: ignore
     )
 
 
-_RETRY_ASSESSMENT = json.dumps(
-    {
-        "requested_change_visible": False,
-        "unrelated_content_preserved": True,
-        "retry_recommended": True,
-        "direction": "increase",
-        "confidence": 0.94,
-    }
+_SEEN_BEFORE = '[{"subject": "square", "appearance": "red"}]'
+_SEEN_UNCHANGED = _SEEN_BEFORE
+_SEEN_CHANGED = '[{"subject": "square", "appearance": "blue"}]'
+_CHANGED_OTHERWISE = (
+    '{"subject_present": true, "operation": "change", "requested": [0], "as_asked": false}'
 )
+_CHANGE_ATTRIBUTED = (
+    '{"subject_present": true, "operation": "change", "requested": [0], "as_asked": true}'
+)
+#: The three answers the review asks for, in order: what is in the source, what
+#: is in the result, and which listed difference the request asked for.
+_SAW_NO_CHANGE = (_SEEN_BEFORE, _SEEN_CHANGED, _CHANGED_OTHERWISE)
+_SAW_THE_CHANGE = (_SEEN_BEFORE, _SEEN_CHANGED, _CHANGE_ATTRIBUTED)
 
 
 async def _wait_for_run(client: AsyncClient, run_id: str) -> dict[str, Any]:
@@ -108,7 +111,7 @@ async def test_retry_binding_survives_failed_execution_record(
     client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch, refusal_point: str
 ) -> None:
     """A truthful not-started record must leave the same durable retry recoverable."""
-    assessment_raw = _RETRY_ASSESSMENT
+    answers = _SAW_NO_CHANGE
     turn_settings: dict[str, object] = {}
     announcement_fails = True
     failures = {"count": 0}
@@ -148,7 +151,7 @@ async def test_retry_binding_survives_failed_execution_record(
         # plan is the retry. Arming the refusal earlier would refuse the
         # source's own announcement and no verification would run at all.
         refuse_announcements["armed"] = announcement_fails
-        yield ChatEvent(type="delta", text=assessment_raw)
+        yield ChatEvent(type="delta", text=answers[min(len(captured) - 1, len(answers) - 1)])
         yield ChatEvent(type="complete", data={"finish_reason": "stop"})
 
     async def edited_media(
@@ -297,7 +300,8 @@ async def test_retry_binding_survives_an_unavailable_verification(
     the source's, taking the retry's identity with it. Nothing can converge on
     the retry afterwards, because nothing can name it any more.
     """
-    assessment_raw = _RETRY_ASSESSMENT
+    answers = _SAW_NO_CHANGE
+    asked: list[ChatRequest] = []
     announcement_failures = {"count": 0}
     reconstruction_failures = {"count": 0}
     refuse = {"announcements": False, "reconstruction": False}
@@ -313,12 +317,12 @@ async def test_retry_binding_survives_an_unavailable_verification(
         _adapter: MockChatAdapter,
         request: ChatRequest,
     ) -> AsyncIterator[ChatEvent]:
-        del request
         # The source turn has announced its own plan by now, so refusing from
         # here refuses only the retry's announcement and a verification still
         # runs. Arming earlier would leave nothing to verify.
         refuse["announcements"] = True
-        yield ChatEvent(type="delta", text=assessment_raw)
+        asked.append(request)
+        yield ChatEvent(type="delta", text=answers[min(len(asked) - 1, len(answers) - 1)])
         yield ChatEvent(type="complete", data={"finish_reason": "stop"})
 
     async def edited_media(

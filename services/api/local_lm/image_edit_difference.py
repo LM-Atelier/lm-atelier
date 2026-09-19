@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import io
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from PIL import Image, ImageMath, UnidentifiedImageError
@@ -63,6 +64,11 @@ class ImageDifference:
     changed: bool
     comparable: bool
     largest_local_difference: float | None = None
+    #: How many separate areas of the picture changed, counted by compare_edit
+    #: from its own grid. A reader that knows how many things were reported
+    #: changed can tell "everything that moved was named" from "something else
+    #: moved too"; an aggregate difference cannot say that.
+    changed_regions: int | None = None
 
     def provenance(self) -> dict[str, object]:
         recorded: dict[str, object] = {
@@ -73,6 +79,8 @@ class ImageDifference:
         }
         if self.largest_local_difference is not None:
             recorded["largest_local_difference"] = round(self.largest_local_difference, 4)
+        if self.changed_regions is not None:
+            recorded["changed_regions"] = self.changed_regions
         return recorded
 
 
@@ -159,7 +167,45 @@ def compare_edit(
         changed=largest > UNCHANGED_THRESHOLD,
         comparable=True,
         largest_local_difference=largest,
+        changed_regions=_changed_regions(parts, coverage, grid),
     )
+
+
+def _changed_regions(
+    parts: Sequence[float], coverage: Sequence[object], grid: tuple[int, int]
+) -> int:
+    """How many separate areas of the grid changed, touching parts counted once.
+
+    Two things changed in two places is two areas; one thing spanning several
+    parts is still one. Counting areas is what lets a reader ask whether every
+    area that moved was among the things reported changed.
+    """
+
+    across, down = grid
+    changed = {
+        index
+        for index, (part, covered) in enumerate(zip(parts, coverage, strict=True))
+        if isinstance(covered, float) and covered > 0 and part > UNCHANGED_THRESHOLD
+    }
+    regions = 0
+    while changed:
+        regions += 1
+        frontier = [changed.pop()]
+        while frontier:
+            index = frontier.pop()
+            row, column = divmod(index, across)
+            for neighbour_row, neighbour_column in (
+                (row - 1, column),
+                (row + 1, column),
+                (row, column - 1),
+                (row, column + 1),
+            ):
+                if 0 <= neighbour_row < down and 0 <= neighbour_column < across:
+                    neighbour = neighbour_row * across + neighbour_column
+                    if neighbour in changed:
+                        changed.remove(neighbour)
+                        frontier.append(neighbour)
+    return regions
 
 
 def _working_pictures(
