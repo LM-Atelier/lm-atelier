@@ -1,20 +1,25 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
+from httpx2 import AsyncClient
+
+from local_lm.config import Settings
 from local_lm.db import SessionLocal
 from local_lm.models import AppSetting, ModelInstall, ModelProfile
+from local_lm.profile_service import LAST_CHAT_PROFILE_KEY
 from local_lm.scheduler import ResourceScheduler
 from local_lm.worker_startup import (
-    LAST_CHAT_PROFILE_KEY,
     chat_profile_to_restore,
     restore_configured_workers,
 )
 
 
-def worker_services(settings, processes):  # type: ignore[no-untyped-def]
-    return SimpleNamespace(
+def worker_services(settings: Settings, processes: SimpleNamespace) -> Mock:
+    return Mock(
+        spec_set=["settings", "processes", "scheduler", "downloads"],
         settings=settings,
         processes=processes,
         scheduler=ResourceScheduler(),
@@ -26,8 +31,8 @@ def worker_services(settings, processes):  # type: ignore[no-untyped-def]
 
 
 async def test_configured_workers_provision_and_restore_with_last_chat_profile(
-    client, settings, tmp_path
-) -> None:  # type: ignore[no-untyped-def]
+    client: AsyncClient, settings: Settings, tmp_path: Path
+) -> None:
     del client
     install = ModelInstall(
         id="model_restore",
@@ -71,7 +76,7 @@ async def test_configured_workers_provision_and_restore_with_last_chat_profile(
     processes = SimpleNamespace(start_media=AsyncMock(), load_chat=AsyncMock())
     services = worker_services(settings, processes)
 
-    await restore_configured_workers(services)  # type: ignore[arg-type]
+    await restore_configured_workers(services)
 
     processes.start_media.assert_awaited_once_with()
     services.downloads.refresh_installed_media_workflows.assert_awaited_once_with()
@@ -82,9 +87,9 @@ async def test_configured_workers_provision_and_restore_with_last_chat_profile(
 
 
 async def test_fresh_workspace_does_not_download_unused_worker_runtimes(
-    client,
-    settings,
-) -> None:  # type: ignore[no-untyped-def]
+    client: AsyncClient,
+    settings: Settings,
+) -> None:
     del client
     settings.chat_engine = "llama.cpp"
     settings.llama_executable = None
@@ -94,7 +99,7 @@ async def test_fresh_workspace_does_not_download_unused_worker_runtimes(
     processes = SimpleNamespace(start_media=AsyncMock(), load_chat=AsyncMock())
     services = worker_services(settings, processes)
 
-    await restore_configured_workers(services)  # type: ignore[arg-type]
+    await restore_configured_workers(services)
 
     processes.start_media.assert_not_awaited()
     processes.load_chat.assert_not_awaited()
@@ -103,8 +108,8 @@ async def test_fresh_workspace_does_not_download_unused_worker_runtimes(
 
 
 async def test_worker_restore_failure_does_not_prevent_other_worker(
-    client, settings, tmp_path
-) -> None:  # type: ignore[no-untyped-def]
+    client: AsyncClient, settings: Settings, tmp_path: Path
+) -> None:
     del client
     settings.chat_engine = "mock"
     settings.media_engine = "comfyui"
@@ -115,16 +120,16 @@ async def test_worker_restore_failure_does_not_prevent_other_worker(
         load_chat=AsyncMock(),
     )
 
-    await restore_configured_workers(worker_services(settings, processes))  # type: ignore[arg-type]
+    await restore_configured_workers(worker_services(settings, processes))
 
     processes.start_media.assert_awaited_once_with()
     processes.load_chat.assert_not_awaited()
 
 
 def test_worker_restore_rejects_a_mismatched_profile_install(
-    client,
-    tmp_path,
-) -> None:  # type: ignore[no-untyped-def]
+    client: AsyncClient,
+    tmp_path: Path,
+) -> None:
     del client
     install = ModelInstall(
         id="model_restore_mismatch",
