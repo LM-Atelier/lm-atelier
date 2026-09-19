@@ -14,7 +14,12 @@ would force a symmetry nobody asked for.
 
 from __future__ import annotations
 
+import copy
+import math
+from pathlib import Path
 from typing import Any
+
+from PIL import Image
 
 OUTPAINT_NODES = frozenset({"ImagePadForOutpaint"})
 
@@ -24,6 +29,10 @@ OUTPAINT_SCHEMA_KIND = "outpaint"
 #: result stops being an extension of anything.
 MAX_MARGIN_FRACTION = 2.0
 _SIDES = ("top", "right", "bottom", "left")
+#: EXIF orientations that show a stored picture turned a quarter, so its width
+#: and height are seen swapped. ComfyUI's LoadImage applies the orientation too.
+_QUARTER_TURNS = frozenset({5, 6, 7, 8})
+_ORIENTATION_TAG = 0x0112
 
 
 def graph_can_outpaint(graph: dict[str, Any]) -> bool:
@@ -68,6 +77,76 @@ def normalize_margins(value: object) -> dict[str, float]:
     if not any(margins.values()):
         raise ValueError("Extending by nothing on every side would not change the picture.")
     return margins
+
+
+def source_pad_node(graph: object) -> str | None:
+    """The one padding node that receives the source picture, or nothing.
+
+    A declared margin has somewhere to go only when the graph pads exactly once,
+    straight from the LoadImage that receives the source, and that node's four
+    sides are ordinary numbers. Anything else would leave a person guessing which
+    padding their drag changed, so it is not recognized.
+    """
+    if not isinstance(graph, dict):
+        return None
+    pads = [
+        str(node_id)
+        for node_id, node in graph.items()
+        if isinstance(node, dict) and node.get("class_type") in OUTPAINT_NODES
+    ]
+    if len(pads) != 1:
+        return None
+    inputs = graph[pads[0]].get("inputs")
+    if not isinstance(inputs, dict):
+        return None
+    link = inputs.get("image")
+    if not isinstance(link, list) or len(link) != 2 or link[1] != 0:
+        return None
+    source = graph.get(str(link[0]))
+    if not isinstance(source, dict) or source.get("class_type") != "LoadImage":
+        return None
+    source_inputs = source.get("inputs")
+    if not isinstance(source_inputs, dict) or source_inputs.get("image") != "${input_image}":
+        return None
+    if any(
+        isinstance(inputs.get(side), bool) or not isinstance(inputs.get(side), int)
+        for side in _SIDES
+    ):
+        return None
+    return pads[0]
+
+
+def oriented_size(path: Path) -> tuple[int, int]:
+    """A source picture's width and height as it is shown, not as it is stored."""
+    with Image.open(path) as image:
+        width, height = image.size
+        orientation = image.getexif().get(_ORIENTATION_TAG)
+    return (height, width) if orientation in _QUARTER_TURNS else (width, height)
+
+
+def margin_pixels(margins: dict[str, float], width: int, height: int) -> dict[str, int]:
+    """Whole pixels per side: left and right of the width, top and bottom of the height.
+
+    This is the unit the Studio's edge handles produce: a horizontal drag is
+    divided by the shown width and a vertical one by the shown height. A half
+    pixel rounds up, so a margin that was asked for is never lost to rounding.
+    """
+    return {
+        side: math.floor(
+            margins.get(side, 0.0) * (width if side in {"left", "right"} else height) + 0.5
+        )
+        for side in _SIDES
+    }
+
+
+def pad_the_source(graph: dict[str, Any], pixels: dict[str, int]) -> dict[str, Any]:
+    """A copy of the graph whose source padding is the requested number of pixels."""
+    node_id = source_pad_node(graph)
+    if node_id is None:
+        raise ValueError("This workflow has no single padding step for the source picture.")
+    padded = copy.deepcopy(graph)
+    padded[node_id]["inputs"].update({side: pixels[side] for side in _SIDES})
+    return padded
 
 
 def _class_types(value: Any) -> frozenset[str]:

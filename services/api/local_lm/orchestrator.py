@@ -146,7 +146,11 @@ from .models import (
 from .ordered_planning import OrderedPlanCompiler, OrderedPlanConfirmationRequired
 from .outpaint_workflows import (
     OUTPAINT_SETTING_KEY,
+    margin_pixels,
     normalize_margins,
+    oriented_size,
+    pad_the_source,
+    source_pad_node,
     workflow_declares_outpaint,
 )
 from .output_measurement import Budget, measure_output, record_to_keep
@@ -1829,8 +1833,10 @@ class ConversationOrchestrator:
         # each. The contract that refuses them existed already and nothing
         # called it.
         if plan.operation != Operation.TEXT and OUTPAINT_SETTING_KEY in effective_settings:
-            if not workflow_revision or not workflow_declares_outpaint(
-                workflow_revision.input_schema_json
+            if (
+                not workflow_revision
+                or not workflow_declares_outpaint(workflow_revision.input_schema_json)
+                or source_pad_node(workflow_revision.api_graph_json) is None
             ):
                 raise ValueError(
                     "This workflow cannot extend a picture past its edge; choose one built "
@@ -6467,6 +6473,18 @@ class ConversationOrchestrator:
                         raise RuntimeError(
                             "The effective LoRA graph changed after this run was queued."
                         )
+            # Margins are fractions of the source as it is shown; the padding
+            # node takes whole pixels. They are spent on this run's graph here,
+            # and never passed on as a setting that no graph input reads.
+            if revision and OUTPAINT_SETTING_KEY in execution_settings:
+                if not input_paths:
+                    raise RuntimeError("Extending a picture needs its source image.")
+                workflow = pad_the_source(
+                    workflow,
+                    margin_pixels(
+                        execution_settings[OUTPAINT_SETTING_KEY], *oriented_size(input_paths[0])
+                    ),
+                )
             # Asked here, once, because this is where the graph stops changing.
             # The proof is about the STORED revision and the rewrite above is
             # about this run, so the two have to be compared after the rewrite
@@ -6478,6 +6496,7 @@ class ConversationOrchestrator:
             # not appear as an attachment or count toward edit lineage.
             parameters: dict[str, Any] = copy.deepcopy(execution_settings)
             parameters.pop(WORKFLOW_LORA_OVERRIDES_SETTING_KEY, None)
+            parameters.pop(OUTPAINT_SETTING_KEY, None)
             if revision and workflow_video_length(revision.input_schema_json):
                 parameters.pop(VIDEO_DURATION_SETTING_KEY, None)
             mask_setting = execution_settings.get(MASK_SETTING_KEY)
@@ -9658,7 +9677,10 @@ class ConversationOrchestrator:
             turn_overrides=request_settings,
         )
         if OUTPAINT_SETTING_KEY in effective_settings:
-            if not workflow_declares_outpaint(revision.input_schema_json):
+            if (
+                not workflow_declares_outpaint(revision.input_schema_json)
+                or source_pad_node(revision.api_graph_json) is None
+            ):
                 raise ValueError(
                     "This workflow cannot extend a picture past its edge; choose one built "
                     "for outpainting."
