@@ -744,12 +744,16 @@ async def test_automatic_retry_reuses_source_turn_as_a_response_revision() -> No
     }
 
 
-def _verification_world(*, lose_at: str):  # type: ignore[no-untyped-def]
+def _verification_world(  # type: ignore[no-untyped-def]
+    *, lose_at: str, answer: str = "{}", mask: dict[str, object] | None = None
+):
     """A verification job with a complete source, a verifying chat, both
     artifacts and a verified vision profile, over a fake session whose
     ownership probe stops answering for the test claim once ``lose_at`` is
     reached: "preparation", "stop", "workers", "assessment" or "restore".
-    Returns (job, orchestrator, world)."""
+    ``mask`` becomes the source run's selection setting, and a stored mask
+    artifact named "artifact-mask" answers for it. Returns (job, orchestrator,
+    world)."""
 
     job = Job(
         id="job-verify-owned",
@@ -776,11 +780,13 @@ def _verification_world(*, lose_at: str):  # type: ignore[no-untyped-def]
         status=RunStatus.COMPLETE.value,
         chat_id="chat-v",
         standalone_prompt="make the mug green",
+        settings_json={} if mask is None else {"mask": mask},
         provenance_json={},
     )
     chat = SimpleNamespace(id="chat-v", vision_settings_json={"verify_image_edits": True})
     source = SimpleNamespace(id="artifact-source")
     result = SimpleNamespace(id="artifact-result")
+    stored_mask = SimpleNamespace(id="artifact-mask")
     install = SimpleNamespace(id="install-vision", active=True)
     profile = SimpleNamespace(id="profile-vision", model_install_id=install.id)
     previous = SimpleNamespace(id="profile-chat", model_install_id="install-chat")
@@ -801,6 +807,7 @@ def _verification_world(*, lose_at: str):  # type: ignore[no-untyped-def]
                 (Chat, chat.id): chat,
                 (Artifact, source.id): source,
                 (Artifact, result.id): result,
+                (Artifact, stored_mask.id): stored_mask,
                 (ModelProfile, profile.id): profile,
                 (ModelProfile, previous.id): previous,
                 (ModelInstall, install.id): install,
@@ -814,6 +821,9 @@ def _verification_world(*, lose_at: str):  # type: ignore[no-untyped-def]
             return None
 
         def rollback(self) -> None:
+            return None
+
+        def close(self) -> None:
             return None
 
         def execute(self, _statement):  # type: ignore[no-untyped-def]
@@ -895,12 +905,12 @@ def _verification_world(*, lose_at: str):  # type: ignore[no-untyped-def]
         from local_lm.adapters.base import ChatEvent
 
         consumed.append("first")
-        yield ChatEvent(type="delta", text="{", data={})
+        yield ChatEvent(type="delta", text=answer[:1], data={})
         if lose_at == "assessment":
             world["owned"] = False
             world["lost_at"] = "assessment"
         consumed.append("second")
-        yield ChatEvent(type="delta", text="}", data={})
+        yield ChatEvent(type="delta", text=answer[1:], data={})
         consumed.append("complete")
         yield ChatEvent(type="complete", text="", data={})
 
@@ -1106,3 +1116,120 @@ async def test_shutdown_does_not_restore_chat_from_active_verification() -> None
     assert [profile.id for profile in world["loads"]] == ["profile-vision"], (
         "shutdown restored chat from verification only to destroy it next"
     )
+
+
+def _picture(recolour: tuple[int, int, int, int] | None) -> bytes:
+    import io
+
+    from PIL import Image
+
+    image = Image.new("RGB", (64, 64), (40, 90, 180))
+    if recolour is not None:
+        image.paste((200, 40, 60), recolour)
+    buffer = io.BytesIO()
+    image.save(buffer, "PNG")
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("patch", "reason"),
+    [
+        (None, "no_measurable_change"),
+        ((16, 16, 48, 48), "accepted"),
+        # A sixty-fourth and a thousandth of the picture: each averages under
+        # the threshold over the whole picture, and each is a real change.
+        ((28, 28, 36, 36), "accepted"),
+        ((30, 30, 32, 32), "accepted"),
+    ],
+)
+async def test_a_confident_yes_does_not_accept_a_picture_whose_pixels_did_not_change(
+    patch: tuple[int, int, int, int] | None, reason: str
+) -> None:
+    """The model is asked, and so are the pixels. An unchanged result gets the
+    one stronger retry, however sure the assessment was that the edit happened,
+    and a small real change is not mistaken for none."""
+    recoloured = patch is not None
+
+    confident_yes = (
+        '{"requested_change_visible": true, "unrelated_content_preserved": true, '
+        '"retry_recommended": false, "direction": "none", "confidence": 0.95}'
+    )
+    job, orchestrator, _world = _verification_world(lose_at="never", answer=confident_yes)
+    pictures = {"artifact-source": _picture(None), "artifact-result": _picture(patch)}
+    orchestrator.artifacts.verified_bytes = Mock(  # type: ignore[method-assign]
+        side_effect=lambda artifact, *, maximum_bytes: pictures[artifact.id]
+    )
+    retry = SimpleNamespace(
+        run=SimpleNamespace(id="run-retry", work_plan_id="plan-retry", provenance_json={})
+    )
+    orchestrator._create_image_edit_verification_retry = AsyncMock(return_value=retry)  # type: ignore[method-assign]
+
+    await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
+
+    record = orchestrator._persist_image_edit_verification.call_args.args[2]
+    assert record["reason"] == reason
+    assert record["difference"]["comparable"] is True
+    assert record["difference"]["changed"] is recoloured
+    assert record["assessment"]["requested_change_visible"] is True
+    if recoloured:
+        orchestrator._create_image_edit_verification_retry.assert_not_awaited()
+        assert record["retry"] is False
+    else:
+        decision = orchestrator._create_image_edit_verification_retry.await_args.args[2]
+        assert (decision.retry, decision.value_before, decision.value_after) == (True, 0.5, 0.62)
+        assert record["automatic_retry_executed"] is True
+
+
+def _selection(box: tuple[int, int, int, int]) -> bytes:
+    import io
+
+    from PIL import Image
+
+    mask = Image.new("L", (64, 64), 0)
+    mask.paste(255, box)
+    buffer = io.BytesIO()
+    mask.save(buffer, "PNG")
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("patch", "stored", "reason"),
+    [
+        # Inverted, the selection is everything but the centre: a change only
+        # there left the selection as it was.
+        ((24, 24, 40, 40), True, "no_measurable_change"),
+        ((2, 2, 10, 10), True, "accepted"),
+        # A selection whose mask is no longer stored measures nothing, so the
+        # assessment decides.
+        (None, False, "accepted"),
+    ],
+)
+async def test_a_selection_is_measured_where_it_selects_through_the_real_check(
+    patch: tuple[int, int, int, int] | None, stored: bool, reason: str
+) -> None:
+    confident_yes = (
+        '{"requested_change_visible": true, "unrelated_content_preserved": true, '
+        '"retry_recommended": false, "direction": "none", "confidence": 0.95}'
+    )
+    selection = {"artifact_id": "artifact-mask" if stored else "artifact-gone", "invert": True}
+    job, orchestrator, _world = _verification_world(
+        lose_at="never", answer=confident_yes, mask=selection
+    )
+    pictures = {
+        "artifact-source": _picture(None),
+        "artifact-result": _picture(patch),
+        "artifact-mask": _selection((24, 24, 40, 40)),
+    }
+    orchestrator.artifacts.verified_bytes = Mock(  # type: ignore[method-assign]
+        side_effect=lambda artifact, *, maximum_bytes: pictures[artifact.id]
+    )
+    retry = SimpleNamespace(
+        run=SimpleNamespace(id="run-retry", work_plan_id="plan-retry", provenance_json={})
+    )
+    orchestrator._create_image_edit_verification_retry = AsyncMock(return_value=retry)  # type: ignore[method-assign]
+
+    await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
+
+    record = orchestrator._persist_image_edit_verification.call_args.args[2]
+    assert record["reason"] == reason
+    assert record["difference"]["comparable"] is stored

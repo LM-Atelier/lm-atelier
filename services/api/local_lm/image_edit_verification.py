@@ -3,13 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
 from .domain import Operation
+from .image_edit_difference import ImageDifference
 
 VERIFICATION_VERSION: Literal["image-edit-verification-v1"] = "image-edit-verification-v1"
 MAX_ASSESSMENT_CHARACTERS = 8_192
@@ -48,6 +49,7 @@ class VerificationReason(StrEnum):
     INVALID_ASSESSMENT = "invalid_assessment"
     ASSESSMENT_INTERRUPTED = "assessment_interrupted"
     CANCELLED = "cancelled"
+    NO_MEASURABLE_CHANGE = "no_measurable_change"
 
 
 class ImageEditVerificationJobPayload(BaseModel):
@@ -126,6 +128,7 @@ class ImageEditRetryDecision:
     def provenance(
         self,
         assessment: ImageEditVerificationAssessment,
+        difference: ImageDifference | None = None,
     ) -> dict[str, Any]:
         result: dict[str, Any] = {
             "version": VERIFICATION_VERSION,
@@ -134,6 +137,8 @@ class ImageEditRetryDecision:
             "reason": self.reason.value,
             "attempt": self.attempt,
         }
+        if difference is not None:
+            result["difference"] = difference.provenance()
         if (
             self.parameter is not None
             and self.value_before is not None
@@ -236,8 +241,30 @@ def decide_image_edit_retry(
     maximum: float | None,
     confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
     adjustment: float = DEFAULT_STRENGTH_ADJUSTMENT,
+    difference: ImageDifference | None = None,
 ) -> ImageEditRetryDecision:
-    next_attempt = max(0, attempt) + 1
+    """Decide from the assessment and, first, from what the pixels show.
+
+    A comparable difference that found nothing changed where the edit was
+    asked settles the question whatever the assessment says: the edit is not
+    accepted, and an automatic strength gets its one stronger retry. Otherwise
+    the assessment decides as before.
+    """
+    if difference is not None and difference.comparable and not difference.changed:
+        if attempt < MAX_RETRY_ATTEMPTS:
+            stronger = _adjusted_strength(
+                VerificationDirection.INCREASE,
+                attempt,
+                parameter=parameter,
+                current_strength=current_strength,
+                minimum=minimum,
+                maximum=maximum,
+                adjustment=adjustment,
+            )
+            if stronger.retry:
+                # The pixels, not the assessment, are why this retries.
+                return replace(stronger, reason=VerificationReason.NO_MEASURABLE_CHANGE)
+        return ImageEditRetryDecision(False, VerificationReason.NO_MEASURABLE_CHANGE, attempt)
     if attempt >= MAX_RETRY_ATTEMPTS:
         return ImageEditRetryDecision(
             False,
@@ -277,6 +304,29 @@ def decide_image_edit_retry(
             VerificationReason.CONTENT_ALREADY_PRESERVED,
             attempt,
         )
+    return _adjusted_strength(
+        assessment.direction,
+        attempt,
+        parameter=parameter,
+        current_strength=current_strength,
+        minimum=minimum,
+        maximum=maximum,
+        adjustment=adjustment,
+    )
+
+
+def _adjusted_strength(
+    direction: VerificationDirection,
+    attempt: int,
+    *,
+    parameter: str | None,
+    current_strength: float | None,
+    minimum: float | None,
+    maximum: float | None,
+    adjustment: float,
+) -> ImageEditRetryDecision:
+    """One strength step in the given direction, within bounds, or why not."""
+    next_attempt = max(0, attempt) + 1
     if (
         not parameter
         or current_strength is None
@@ -305,7 +355,7 @@ def decide_image_edit_retry(
     delta = adjustment
     candidate = (
         min(upper, before + delta)
-        if assessment.direction == VerificationDirection.INCREASE
+        if direction == VerificationDirection.INCREASE
         else max(lower, before - delta)
     )
     after = round(candidate, 4)
