@@ -39,6 +39,12 @@ function strengthChange(before: unknown, after: unknown): string {
  */
 const SILENT_SKIPS = new Set(["not_image_edit", "disabled", "eligible", "cancelled"]);
 
+/** Whether the comparison measured a change, whatever the review concluded from it. */
+function measuredAChange(review: Record<string, unknown>): boolean {
+  const difference = record(review.difference);
+  return difference?.comparable === true && difference.changed === true;
+}
+
 export function editReviewSummary(
   provenance: Record<string, unknown> | undefined,
 ): string | null {
@@ -87,7 +93,12 @@ export function editReviewSummary(
   const assessment = record(review.assessment);
   if (!assessment) return null;
   if (assessment.requested_change_visible === false) {
-    return "Edit review did not find the change you asked for";
+    // Say so when the two signals disagree. The comparison is measured from the
+    // pixels and the verdict is a model's reading of them, so a flat "not found"
+    // over a picture that visibly changed is the one claim worth qualifying.
+    return measuredAChange(review)
+      ? "Edit review did not find the change you asked for · the picture did change"
+      : "Edit review did not find the change you asked for";
   }
   if (assessment.unrelated_content_preserved === false) {
     return "Edit review found changes beyond the one you asked for";
