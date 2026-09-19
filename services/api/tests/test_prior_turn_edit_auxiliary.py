@@ -31,6 +31,7 @@ async def test_inherited_edit_never_rebinds_an_accepted_lora_to_changed_catalog_
     }
     extension = checkpoint_lora_extension(graph)
     assert extension is not None
+    asset: ModelAssetInstall | None
     with SessionLocal() as session:
         definition = WorkflowDefinition(name="Constructed ink workflow", operation="text_to_image")
         session.add(definition)

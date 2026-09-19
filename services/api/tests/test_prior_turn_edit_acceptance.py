@@ -16,7 +16,8 @@ from local_lm.orchestrator import ConversationOrchestrator
 async def _turn(client: AsyncClient, chat_id: str, text: str) -> dict[str, Any]:
     response = await client.post(f"/api/chats/{chat_id}/turns", json={"text": text, "mode": "text"})
     assert response.status_code == 202
-    return response.json()
+    result: dict[str, Any] = response.json()
+    return result
 
 
 def _source_state(run_id: str) -> dict[str, Any]:
@@ -417,7 +418,7 @@ async def test_edited_branch_head_contains_every_accepted_output(
     chat = (await client.post("/api/chats", json={"title": "Complete alternate branch"})).json()
     async with app.state.services.scheduler.lease("primary"):
         source = await _turn(client, chat["id"], "Keep this source")
-        payload = {
+        payload: dict[str, str | bool | int] = {
             "text": (
                 "Write a short story about a paper boat, then create an image based on it, "
                 "then animate the image into a video, then summarize the video"
