@@ -10,8 +10,11 @@ import shutil
 import subprocess
 import sys
 import tomllib
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from types import FunctionType
+from typing import Any
 
 import pytest
 import yaml
@@ -106,7 +109,7 @@ def test_payload_sbom_reconciliation_marks_build_only_components_excluded() -> N
     namespace = runpy.run_path(str(ROOT / "scripts/inventory-frozen-payload.py"))
     reconcile_sbom = namespace["reconcile_sbom"]
     root_ref = "pkg:generic/lm-atelier@0.1.7"
-    sbom = {
+    sbom: dict[str, Any] = {
         "metadata": {
             "component": {"bom-ref": root_ref},
             "properties": [],
@@ -181,7 +184,7 @@ def test_payload_sbom_adds_frozen_vendored_distribution_and_license(
     license_path.write_text("Apache License\nVersion 2.0\n", encoding="utf-8")
     (metadata_root / "third-party-licenses").mkdir(parents=True)
     root_ref = "pkg:generic/lm-atelier@0.1.7"
-    sbom = {
+    sbom: dict[str, Any] = {
         "metadata": {
             "component": {"bom-ref": root_ref},
             "properties": [],
@@ -241,7 +244,7 @@ def test_payload_sbom_rejects_unreviewed_frozen_distribution_license(
     )
     (dist_info / "LICENSE").write_text("unknown terms", encoding="utf-8")
     (metadata_root / "third-party-licenses").mkdir(parents=True)
-    sbom = {"components": []}
+    sbom: dict[str, Any] = {"components": []}
 
     with pytest.raises(RuntimeError, match="unreviewed license metadata"):
         namespace["augment_sbom_with_frozen_metadata"](
@@ -1140,7 +1143,9 @@ def test_ci_plan_rejects_malformed_event_shas() -> None:
         require_sha("base SHA", "--output=unexpected")
 
 
-def test_ci_plan_requires_exact_protected_develop_promotion(monkeypatch) -> None:
+def test_ci_plan_requires_exact_protected_develop_promotion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     namespace = runpy.run_path(str(ROOT / "scripts/ci-plan.py"))
     validate = namespace["validate_develop_promotion"]
     base = "a" * 40
@@ -1208,11 +1213,17 @@ def test_ci_plan_requires_exact_protected_develop_promotion(monkeypatch) -> None
     ],
 )
 def test_ci_plan_verifies_generated_merge_group_changes(
-    tmp_path: Path, monkeypatch, paths: list[str], mode: str, audit: str, windows: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    paths: list[str],
+    mode: str,
+    audit: str,
+    windows: str,
 ) -> None:
     """Plan the combined queue diff, whose event has no pull-request fields."""
     namespace = runpy.run_path(str(ROOT / "scripts/ci-plan.py"))
     main = namespace["main"]
+    assert isinstance(main, FunctionType)
     base, head = "a" * 40, "b" * 40
     output = tmp_path / "outputs"
     monkeypatch.setattr(
@@ -1257,7 +1268,7 @@ def test_ci_plan_verifies_generated_merge_group_changes(
 @pytest.mark.parametrize(
     "defect", ["main-target", "pr-head-ref", "checkout", "unrelated-base", "missing-sha"]
 )
-def test_ci_plan_refuses_unbound_merge_groups(monkeypatch, defect: str) -> None:
+def test_ci_plan_refuses_unbound_merge_groups(monkeypatch: pytest.MonkeyPatch, defect: str) -> None:
     namespace = runpy.run_path(str(ROOT / "scripts/ci-plan.py"))
     validate = namespace["validate_merge_group"]
     base, head = "a" * 40, "b" * 40
@@ -1287,7 +1298,9 @@ def test_ci_plan_refuses_unbound_merge_groups(monkeypatch, defect: str) -> None:
 
 
 @pytest.mark.parametrize("pr_fields", [{}, {"DRAFT": "", "BASE_CHANGED": "false"}])
-def test_merge_gate_accepts_verified_merge_group_without_pull_request_fields(pr_fields) -> None:
+def test_merge_gate_accepts_verified_merge_group_without_pull_request_fields(
+    pr_fields: dict[str, str],
+) -> None:
     namespace = runpy.run_path(str(ROOT / "scripts/ci-merge-gate.py"))
     environment = {
         "EVENT_NAME": "merge_group",
@@ -1495,7 +1508,7 @@ def test_each_production_shape_reaches_the_branch_that_names_it(
 # The exit code alone cannot separate "found an advisory" from "could not look",
 # which is the distinction the script exists to make, so these assert the reason
 # as well.
-AUDIT_REPORTS = (
+AUDIT_REPORTS: tuple[tuple[str, dict[str, object], int, str], ...] = (
     (
         "a clean closure with only our own package skipped",
         {
@@ -2007,35 +2020,49 @@ def _workflow_namespace() -> dict[str, object]:
     return runpy.run_path(str(ROOT / "scripts/validate-workflows.py"))
 
 
-def _shipped_ci() -> tuple[Path, str, dict]:
+def _shipped_ci() -> tuple[Path, str, dict[str | bool, Any]]:
     path = ROOT / ".github/workflows/ci.yml"
     content = path.read_text(encoding="utf-8")
-    return Path("ci.yml"), content, yaml.safe_load(content)
+    workflow = yaml.safe_load(content)
+    assert isinstance(workflow, dict)
+    return Path("ci.yml"), content, workflow
 
 
-def _triggers(workflow: dict) -> dict:
-    return workflow.get("on") or workflow.get(True)
+def _triggers(workflow: dict[str | bool, Any]) -> dict[str, Any]:
+    triggers = workflow.get("on") or workflow.get(True)
+    assert isinstance(triggers, dict)
+    return triggers
 
 
-def _merge_gate(workflow: dict) -> dict:
-    return workflow["jobs"]["merge-gate"]
+def _merge_gate(workflow: dict[str | bool, Any]) -> dict[str, Any]:
+    gate = workflow["jobs"]["merge-gate"]
+    assert isinstance(gate, dict)
+    return gate
 
 
-def _first_checkout(workflow: dict) -> dict:
+def _first_checkout(workflow: dict[str | bool, Any]) -> dict[str, Any]:
     for job in workflow["jobs"].values():
         for step in job.get("steps") or []:
             if str(step.get("uses", "")).startswith("actions/checkout@"):
+                assert isinstance(step, dict)
                 return step
     raise AssertionError("ci.yml has no checkout step")
 
 
-def _job_mutations() -> list[tuple[str, object]]:
+WorkflowMutation = Callable[[str, dict[str | bool, Any]], object]
+
+
+def _job_mutations() -> list[tuple[str, WorkflowMutation]]:
     """Merge-gate job and step drifts. Each edits the parsed workflow."""
 
-    def job(name, apply):  # noqa: ANN001, ANN202
+    def job(name: str, apply: Callable[[dict[str, Any]], object]) -> tuple[str, WorkflowMutation]:
         return (name, lambda content, workflow: apply(_merge_gate(workflow)))
 
-    steps = lambda j: j["steps"]  # noqa: E731
+    def steps(job: dict[str, Any]) -> list[dict[str, Any]]:
+        value = job["steps"]
+        assert isinstance(value, list)
+        return value
+
     return [
         job("job continue-on-error", lambda j: j.update({"continue-on-error": True})),
         job("job defaults shell", lambda j: j.update({"defaults": {"run": {"shell": "bash"}}})),
@@ -2159,8 +2186,10 @@ def _job_mutations() -> list[tuple[str, object]]:
     ]
 
 
-def _trigger_mutations() -> list[tuple[str, object]]:
-    def trig(name, apply):  # noqa: ANN001, ANN202
+def _trigger_mutations() -> list[tuple[str, WorkflowMutation]]:
+    def trig(
+        name: str, apply: Callable[[dict[str | bool, Any]], object]
+    ) -> tuple[str, WorkflowMutation]:
         return (name, lambda content, workflow: apply(workflow))
 
     return [
@@ -2223,32 +2252,32 @@ def _trigger_mutations() -> list[tuple[str, object]]:
     ]
 
 
-def _policy_mutations() -> list[tuple[str, object]]:
+def _policy_mutations() -> list[tuple[str, WorkflowMutation]]:
     """Drifts caught by the other validators the coordinator wires in.
 
     These prove the coordinator calls more than the merge gate: each one is
     invisible to the gate checks and must still be refused.
     """
 
-    def doc(name, apply):  # noqa: ANN001, ANN202
+    def doc(name: str, apply: WorkflowMutation) -> tuple[str, WorkflowMutation]:
         return (name, apply)
 
-    def widen_permissions(content, workflow):
+    def widen_permissions(content: str, workflow: dict[str | bool, Any]) -> None:
         workflow["permissions"] = {"contents": "write"}
 
-    def drop_permissions(content, workflow):
+    def drop_permissions(content: str, workflow: dict[str | bool, Any]) -> None:
         workflow.pop("permissions")
 
-    def job_write_permission(content, workflow):
+    def job_write_permission(content: str, workflow: dict[str | bool, Any]) -> None:
         _merge_gate(workflow)["permissions"] = {"contents": "write"}
 
-    def runner_context_in_env(content, workflow):
+    def runner_context_in_env(content: str, workflow: dict[str | bool, Any]) -> None:
         _merge_gate(workflow)["env"] = {"TEMP_DIR": "${{ runner.temp }}"}
 
-    def persist_credentials_elsewhere(content, workflow):
+    def persist_credentials_elsewhere(content: str, workflow: dict[str | bool, Any]) -> None:
         _first_checkout(workflow)["with"]["persist-credentials"] = True
 
-    def drop_credentials_block_elsewhere(content, workflow):
+    def drop_credentials_block_elsewhere(content: str, workflow: dict[str | bool, Any]) -> None:
         _first_checkout(workflow).pop("with")
 
     return [
@@ -2289,19 +2318,21 @@ def _content_mutations() -> list[tuple[str, str, str]]:
     ]
 
 
-def _queue_binding_mutations() -> list[tuple[str, object]]:
-    def job(name, key, apply):
+def _queue_binding_mutations() -> list[tuple[str, WorkflowMutation]]:
+    def job(
+        name: str, key: str, apply: Callable[[dict[str, Any]], object]
+    ) -> tuple[str, WorkflowMutation]:
         return name, lambda content, workflow: apply(workflow["jobs"][key])
 
-    def checkout_ref(ref):
-        def apply(candidate):
+    def checkout_ref(ref: str) -> Callable[[dict[str, Any]], None]:
+        def apply(candidate: dict[str, Any]) -> None:
             for step in candidate["steps"]:
                 if str(step.get("uses", "")).startswith("actions/checkout@"):
                     step["with"]["ref"] = ref
 
         return apply
 
-    mutations = [
+    mutations: list[tuple[str, WorkflowMutation]] = [
         (
             "missing merge group trigger",
             lambda content, workflow: _triggers(workflow).pop("merge_group", None),
@@ -2384,12 +2415,15 @@ def test_workflow_policy_rejects_pull_request_merge_ref(job_key: str) -> None:
                 "${{ github.event_name == 'merge_group' && "
                 "github.event.merge_group.head_sha || github.sha }}"
             )
-    assert namespace["validate_workflow_document"](path, content, workflow)
+    validate = namespace["validate_workflow_document"]
+    assert callable(validate)
+    assert validate(path, content, workflow)
 
 
 def test_workflow_policy_rejects_merge_group_binding_drift() -> None:
     namespace = _workflow_namespace()
     validate = namespace["validate_workflow_document"]
+    assert callable(validate)
     path, content, shipped = _shipped_ci()
     assert validate(path, content, shipped) == []
     accepted = []
@@ -2401,7 +2435,7 @@ def test_workflow_policy_rejects_merge_group_binding_drift() -> None:
     assert not accepted, accepted
 
 
-def _all_workflow_mutations() -> list[tuple[str, object]]:
+def _all_workflow_mutations() -> list[tuple[str, WorkflowMutation]]:
     return _job_mutations() + _trigger_mutations() + _policy_mutations()
 
 
@@ -2415,6 +2449,7 @@ def test_workflow_policy_refuses_every_recorded_production_drift() -> None:
     """
     namespace = _workflow_namespace()
     validate_document = namespace["validate_workflow_document"]
+    assert callable(validate_document)
     named, content, shipped = _shipped_ci()
 
     # The shipped file must satisfy the whole coordinator, or every refusal
@@ -2454,6 +2489,7 @@ def test_exact_comparator_refuses_every_equal_but_differently_typed_value() -> N
     """
     namespace = _workflow_namespace()
     exactly_equal = namespace["exactly_equal"]
+    assert callable(exactly_equal)
 
     scalar_pairs = [
         (False, 0),
@@ -2487,7 +2523,9 @@ def test_exact_comparator_refuses_every_equal_but_differently_typed_value() -> N
 
 
 @pytest.mark.parametrize("surface", ["verification", "merge-gate"])
-def test_invalid_workflow_does_not_execute_the_merge_decision(monkeypatch, surface: str) -> None:
+def test_invalid_workflow_does_not_execute_the_merge_decision(
+    monkeypatch: pytest.MonkeyPatch, surface: str
+) -> None:
     namespace = _workflow_namespace()
     path, content, workflow = _shipped_ci()
     if surface == "verification":
@@ -2495,26 +2533,50 @@ def test_invalid_workflow_does_not_execute_the_merge_decision(monkeypatch, surfa
     else:
         workflow["jobs"]["merge-gate"]["continue-on-error"] = True
 
-    def unexpected_execution(*args, **kwargs):
+    def unexpected_execution(*args: object, **kwargs: object) -> None:
         raise AssertionError("An invalid workflow executed the merge decision")
 
     monkeypatch.setattr(namespace["subprocess"], "run", unexpected_execution)
-    assert namespace["validate_workflow_document"](path, content, workflow)
+    validate = namespace["validate_workflow_document"]
+    assert callable(validate)
+    assert validate(path, content, workflow)
 
 
-def test_valid_workflow_still_executes_every_merge_decision_case(monkeypatch) -> None:
+def test_valid_workflow_still_executes_every_merge_decision_case(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     namespace = _workflow_namespace()
     path, content, workflow = _shipped_ci()
-    original_run = namespace["subprocess"].run
-    executed = []
+    assert namespace["subprocess"] is subprocess
+    original_run = subprocess.run
+    executed: list[list[str]] = []
 
-    def record_execution(command, **kwargs):
+    def record_execution(
+        command: list[str],
+        *,
+        env: dict[str, str],
+        capture_output: bool,
+        text: bool,
+        timeout: int,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
         executed.append(command)
-        return original_run(command, **kwargs)
+        return original_run(
+            command,
+            env=env,
+            capture_output=capture_output,
+            text=text,
+            timeout=timeout,
+            check=check,
+        )
 
     monkeypatch.setattr(namespace["subprocess"], "run", record_execution)
-    assert namespace["validate_workflow_document"](path, content, workflow) == []
-    assert len(executed) == len(namespace["MERGE_GATE_MATRIX"])
+    validate = namespace["validate_workflow_document"]
+    assert callable(validate)
+    assert validate(path, content, workflow) == []
+    matrix = namespace["MERGE_GATE_MATRIX"]
+    assert isinstance(matrix, (list, tuple))
+    assert len(executed) == len(matrix)
     expected_command = [sys.executable, str(Path("scripts") / "ci-merge-gate.py")]
     assert all(command == expected_command for command in executed)
 
@@ -2578,6 +2640,7 @@ def _hygiene_namespace() -> dict[str, object]:
 
 def test_hygiene_diagnostics_do_not_echo_rejected_values() -> None:
     listed = _hygiene_namespace()["_listed"]
+    assert callable(listed)
     first = "docs/sensitive-source-name.md"
     second = "docs/another-sensitive-source-name.md:4"
 
@@ -2597,6 +2660,7 @@ def test_repository_hygiene_passes_a_clean_candidate(
 ) -> None:
     namespace = _hygiene_namespace()
     main = namespace["main"]
+    assert isinstance(main, FunctionType)
 
     monkeypatch.chdir(tmp_path)
     (tmp_path / "docs").mkdir()
@@ -2613,6 +2677,7 @@ def test_unsafe_candidate_is_refused_before_content_readers(
 ) -> None:
     namespace = _hygiene_namespace()
     main = namespace["main"]
+    assert isinstance(main, FunctionType)
     opened: list[str] = []
 
     def recording_reader(path: str) -> bool:
