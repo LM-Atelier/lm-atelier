@@ -47,6 +47,7 @@ from .filesystem_links import (
     UNSAFE_ENTRY_KINDS,
     AnchoredDirectory,
     AnchoredDirectoryError,
+    AnchoredDirectoryNotFound,
     AnchoredEntryKind,
     is_link_or_reparse,
     list_entries,
@@ -54,7 +55,9 @@ from .filesystem_links import (
     publish_opened_file,
     remove_directory_entry,
     remove_entry,
+    remove_tree,
     take_regular_file,
+    walk_entries,
 )
 from .gguf import (
     GGUFSelectionError,
@@ -154,6 +157,72 @@ def _path_is_link(path: Path) -> bool:
         missing="assume_regular",
         unreadable="assume_link",
     )
+
+
+#: How deep the empty-directory prune below an install descends.
+_PRUNE_DEPTH = 64
+
+
+def _remove_contained(parent: Path, name: str) -> bool:
+    """Remove one entry of `parent` through a held handle, never following a link.
+
+    A directory is removed with remove_tree, which never enters a link and
+    refuses a tree that holds one. A file is removed itself, and so is a link at
+    this level where that can be done without following it; a directory link on
+    Windows refuses instead. True when the entry is gone, including when it or
+    its parent was already absent. False when the removal refused, for any
+    reason: the entry stays where it is, for the caller to report.
+
+    Only the absence of `parent` or of `name` itself counts as removed. Something
+    that disappears inside the tree while it is removed stops remove_tree before
+    the entry goes, so that refusal is False like any other.
+    """
+
+    try:
+        anchor = AnchoredDirectory(parent)
+    except AnchoredDirectoryNotFound:
+        return True
+    except AnchoredDirectoryError:
+        return False
+    with anchor:
+        try:
+            kinds = {
+                entry.name: entry.kind for entry in list_entries(anchor, include_metadata=False)
+            }
+            kind = kinds.get(name)
+            if kind is None:
+                return True
+            if kind is AnchoredEntryKind.DIRECTORY:
+                remove_tree(anchor, name)
+            else:
+                remove_entry(anchor, name)
+        except AnchoredDirectoryError:
+            return False
+    return True
+
+
+def _prune_empty_directories(root: Path) -> None:
+    """Remove the empty directories below `root`, deepest first, through held parents.
+
+    A link is never entered, so no directory outside the tree is pruned, and a
+    directory that still holds anything, or cannot be removed, stays. `root`
+    itself is kept.
+    """
+
+    with suppress(AnchoredDirectoryError), AnchoredDirectory(root) as anchor:
+        _prune_below(anchor, 1)
+
+
+def _prune_below(directory: AnchoredDirectory, depth: int) -> None:
+    if depth > _PRUNE_DEPTH:
+        return
+    for entry in list_entries(directory, include_metadata=False):
+        if entry.kind is not AnchoredEntryKind.DIRECTORY:
+            continue
+        with suppress(AnchoredDirectoryError):
+            with open_child_directory(directory, entry.name) as child:
+                _prune_below(child, depth + 1)
+            remove_directory_entry(directory, entry.name)
 
 
 _NUMBERED_WORKFLOW_INPUT_IMAGE = re.compile(r"input_image_(?P<index>\d{1,2})\Z")
@@ -1155,23 +1224,27 @@ class DownloadManager:
                 job_id.startswith("plan-") and job_id.removeprefix("plan-") in active_plan_hashes
             ):
                 continue
-            reclaimed_bytes += self._path_size(candidate)
-            if candidate.is_dir() and not _path_is_link(candidate):
-                shutil.rmtree(candidate)
-            else:
-                candidate.unlink(missing_ok=True)
+            size = self._path_size(candidate)
+            if not _remove_contained(self.settings.download_dir, candidate.name):
+                logger.warning(
+                    "Left partial download %s in place: it could not be removed safely", candidate
+                )
+                continue
+            reclaimed_bytes += size
             removed_count += 1
         quarantine_parent = self.settings.download_dir / ".discarded-installs"
         if quarantine_parent.is_dir() and not _path_is_link(quarantine_parent):
             for candidate in quarantine_parent.iterdir():
                 if any(candidate.name.startswith(f"{job_id}-") for job_id in active_ids):
                     continue
-                if not _path_is_link(candidate):
-                    reclaimed_bytes += self._path_size(candidate)
-                if candidate.is_dir() and not _path_is_link(candidate):
-                    shutil.rmtree(candidate)
-                else:
-                    candidate.unlink(missing_ok=True)
+                size = self._path_size(candidate)
+                if not _remove_contained(quarantine_parent, candidate.name):
+                    logger.warning(
+                        "Left discarded install %s in place: it could not be removed safely",
+                        candidate,
+                    )
+                    continue
+                reclaimed_bytes += size
                 removed_count += 1
             with suppress(OSError):
                 quarantine_parent.rmdir()
@@ -2856,18 +2929,13 @@ class DownloadManager:
                 session.rollback()
                 self._restore_quarantined_files(moves)
                 raise
-        if quarantined_root:
-            try:
-                if quarantined_root.is_dir() and not _path_is_link(quarantined_root):
-                    shutil.rmtree(quarantined_root)
-                else:
-                    quarantined_root.unlink(missing_ok=True)
-            except OSError:
-                logger.warning(
-                    "Provisional install files remain safely quarantined at %s",
-                    quarantined_root,
-                    exc_info=True,
-                )
+        if quarantined_root and not _remove_contained(
+            quarantined_root.parent, quarantined_root.name
+        ):
+            logger.warning(
+                "Provisional install files remain safely quarantined at %s",
+                quarantined_root,
+            )
         return True
 
     def _quarantine_provisional_files(
@@ -2922,12 +2990,7 @@ class DownloadManager:
                 quarantined.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(candidate, quarantined)
                 moves.append((quarantined, candidate))
-            for directory in sorted(
-                (item for item in install_path.rglob("*") if item.is_dir()),
-                reverse=True,
-            ):
-                with suppress(OSError):
-                    directory.rmdir()
+            _prune_empty_directories(install_path)
             return moves, quarantine_root if moves else None
         except Exception:
             self._restore_quarantined_files(moves)
@@ -2946,10 +3009,10 @@ class DownloadManager:
         if not re.fullmatch(r"[A-Za-z0-9_-]+", job_id):
             return
         partial = self.settings.download_dir / f"{job_id}.partial"
-        if partial.is_dir() and not _path_is_link(partial):
-            shutil.rmtree(partial)
-        else:
-            partial.unlink(missing_ok=True)
+        if not _remove_contained(self.settings.download_dir, partial.name):
+            logger.warning(
+                "Left partial download %s in place: it could not be removed safely", partial
+            )
 
     async def _stop_task(self, job_id: str) -> None:
         """Stop the isolated transfer process before cancelling its controller task."""
@@ -3713,9 +3776,28 @@ class DownloadManager:
 
     @staticmethod
     def _path_size(path: Path) -> int:
+        """Bytes in a file, or in the files of a tree, never counted through a link.
+
+        A link counts nothing, at the top or anywhere below it, and neither does
+        a tree the contained walk refuses: these figures report what removing
+        the entry reclaims, and a link's target is not reclaimed.
+        """
+
+        if _path_is_link(path):
+            return 0
         if path.is_file():
             return path.stat().st_size
-        return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+        if not path.is_dir():
+            return 0
+        try:
+            with AnchoredDirectory(path) as anchor:
+                return sum(
+                    walked.entry.size_bytes or 0
+                    for walked in walk_entries(anchor)
+                    if walked.entry.kind is AnchoredEntryKind.FILE
+                )
+        except AnchoredDirectoryError:
+            return 0
 
     @staticmethod
     def _relocate_companion_download(
