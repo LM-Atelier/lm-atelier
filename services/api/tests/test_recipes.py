@@ -3,12 +3,14 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
 from httpx2 import AsyncClient
 
 from local_lm.catalog import HuggingFaceCatalog
 from local_lm.downloads import DownloadManager
 from local_lm.processes import ProcessSupervisor
 from local_lm.recipes import get_reference_recipe, list_reference_recipes
+from local_lm.schemas import ReferenceRecipe
 from local_lm.settings_registry import (
     CHAT_SETTINGS,
     IMAGE_SETTINGS,
@@ -44,7 +46,12 @@ def test_every_recipe_pins_a_checksum_for_every_file() -> None:
         assert all(file.sha256 for file in recipe.files), recipe.id
 
 
-def _chat_recipe_catalog(recipe, monkeypatch, *, files=None):  # type: ignore[no-untyped-def]
+def _chat_recipe_catalog(
+    recipe: ReferenceRecipe,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    files: list[dict[str, object]] | None = None,
+) -> None:
     """Answer catalog lookups with exactly what the recipe pins, unless overridden."""
 
     async def inspect(
@@ -52,7 +59,7 @@ def _chat_recipe_catalog(recipe, monkeypatch, *, files=None):  # type: ignore[no
         remote_id: str,
         revision: str = "main",
         requested_role: str | None = None,
-    ) -> dict:  # type: ignore[type-arg]
+    ) -> dict[str, object]:
         return {
             "model": {
                 "remote_id": remote_id,
@@ -78,8 +85,8 @@ def _chat_recipe_catalog(recipe, monkeypatch, *, files=None):  # type: ignore[no
 
 async def test_recipe_install_produces_a_plan_matching_its_pins(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Recipes used to bypass the install plan entirely and could never be ready."""
     recipe = get_reference_recipe("qwen3-8b-q4-k-m")
     assert recipe
@@ -128,8 +135,8 @@ async def test_recipe_install_produces_a_plan_matching_its_pins(
 
 async def test_recipe_install_refuses_a_repository_that_drifted_from_its_pins(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Preflight carries no hashes, so drift has to be caught before installing."""
     recipe = get_reference_recipe("qwen3-8b-q4-k-m")
     assert recipe
@@ -150,8 +157,8 @@ async def test_recipe_install_refuses_a_repository_that_drifted_from_its_pins(
 
 async def test_recipe_install_refuses_a_repository_missing_pinned_files(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     recipe = get_reference_recipe("qwen3-8b-q4-k-m")
     assert recipe
     _chat_recipe_catalog(
@@ -217,8 +224,8 @@ async def test_reference_recipe_api_lists_pinned_metadata(client: AsyncClient) -
 
 async def test_recipe_install_reports_an_unreachable_catalog_as_unavailable(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The shared operation raises a domain error; each route maps it itself."""
 
     async def unreachable(
@@ -226,7 +233,7 @@ async def test_recipe_install_reports_an_unreachable_catalog_as_unavailable(
         _remote_id: str,
         _revision: str = "main",
         _requested_role: str | None = None,
-    ) -> dict:  # type: ignore[type-arg]
+    ) -> dict[str, object]:
         raise OSError("network is down")
 
     monkeypatch.setattr(HuggingFaceCatalog, "inspect", unreachable)
@@ -239,8 +246,8 @@ async def test_recipe_install_reports_an_unreachable_catalog_as_unavailable(
 
 async def test_drift_refusal_leaves_no_installable_plan(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A refused recipe must not leave a usable plan behind.
 
     A persisted plan is installable on its own through the download endpoint, so
