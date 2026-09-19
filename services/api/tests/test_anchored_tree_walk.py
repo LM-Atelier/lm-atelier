@@ -182,6 +182,121 @@ def test_a_zero_or_negative_bound_refuses(tmp_path: Path, bound: dict[str, int])
     assert (root / "a" / "b" / "deep.bin").exists()
 
 
+def test_a_breadth_first_walk_yields_each_level_before_the_next(tmp_path: Path) -> None:
+    root = tmp_path / "tree"
+    _tree(root)
+
+    with AnchoredDirectory(root) as anchor:
+        breadth = [
+            (walked.parts, walked.entry.kind) for walked in walk_entries(anchor, breadth_first=True)
+        ]
+
+    depths = [len(parts) for parts, _kind in breadth]
+    assert depths == sorted(depths)
+    assert sorted(breadth, key=repr) == sorted(_walk(root), key=repr)
+
+
+def test_a_breadth_first_walk_reads_each_entry_through_its_own_held_parent(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "tree"
+    _tree(root)
+
+    with AnchoredDirectory(root) as anchor:
+        contents = {
+            walked.parts: read_entry(walked.parent, walked.entry.name)
+            for walked in walk_entries(anchor, breadth_first=True)
+            if walked.entry.kind is AnchoredEntryKind.FILE
+        }
+
+    assert contents == {
+        ("top.bin",): b"top",
+        ("a", "middle.bin"): b"middle",
+        ("a", "b", "deep.bin"): b"deep",
+    }
+
+
+@pytest.mark.parametrize("depth", LINK_DEPTHS, ids=["root", "one-down", "two-down"])
+def test_a_breadth_first_walk_reports_a_link_at_any_depth_and_never_enters_it(
+    tmp_path: Path, depth: tuple[str, ...]
+) -> None:
+    root = tmp_path / "tree"
+    _tree(root)
+    outside = _outside(tmp_path)
+    if not _make_link_dir(root.joinpath(*depth, "link"), outside):
+        pytest.skip("this host refuses to create a directory link")
+
+    with AnchoredDirectory(root) as anchor:
+        walked = {item.parts: item.entry.kind for item in walk_entries(anchor, breadth_first=True)}
+
+    assert walked[(*depth, "link")] is AnchoredEntryKind.LINK
+    assert not any(
+        parts[: len(depth) + 1] == (*depth, "link") and len(parts) > len(depth) + 1
+        for parts in walked
+    )
+    assert (outside / "foreign.bin").read_bytes() == b"not part of the tree"
+
+
+def test_a_directory_swapped_for_a_link_before_its_level_refuses_instead_of_being_entered(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "tree"
+    (root / "a").mkdir(parents=True)
+    (root / "a" / "inner.bin").write_bytes(b"inner")
+    outside = _outside(tmp_path)
+
+    with AnchoredDirectory(root) as anchor:
+        walk = walk_entries(anchor, breadth_first=True)
+        first: WalkedEntry = next(walk)
+        assert first.parts == ("a",)
+        # The walk has listed the root and not yet reopened `a` for the next level.
+        shutil.rmtree(root / "a")
+        if not _make_link_dir(root / "a", outside):
+            pytest.skip("this host refuses to create a directory link")
+        with pytest.raises(AnchoredDirectoryError):
+            next(walk)
+
+    assert (outside / "foreign.bin").read_bytes() == b"not part of the tree"
+
+
+@pytest.mark.parametrize(
+    "bound",
+    [{"max_depth": 2}, {"limit": 5}, {"level_limit": 2}],
+    ids=["depth", "total", "level"],
+)
+def test_a_breadth_first_walk_keeps_every_bound(tmp_path: Path, bound: dict[str, int]) -> None:
+    root = tmp_path / "tree"
+    _tree(root)
+
+    with AnchoredDirectory(root) as anchor, pytest.raises(AnchoredDirectoryError):
+        list(walk_entries(anchor, breadth_first=True, **bound))
+
+
+def test_a_level_wider_than_its_bound_refuses_and_a_wider_bound_walks_it(
+    tmp_path: Path,
+) -> None:
+    """Each level is listed whole, so this bound applies to the widest level, not the total.
+
+    The root of this tree holds three entries and the whole tree six.
+    """
+    root = tmp_path / "tree"
+    _tree(root)
+
+    with AnchoredDirectory(root) as anchor:
+        assert len(list(walk_entries(anchor, level_limit=3))) == 6
+    with AnchoredDirectory(root) as anchor, pytest.raises(AnchoredDirectoryError):
+        list(walk_entries(anchor, level_limit=2))
+
+
+@pytest.mark.parametrize("level_limit", [0, -1])
+def test_a_zero_or_negative_level_bound_refuses(tmp_path: Path, level_limit: int) -> None:
+    root = tmp_path / "tree"
+    _tree(root)
+
+    with AnchoredDirectory(root) as anchor, pytest.raises(AnchoredDirectoryError):
+        list(walk_entries(anchor, level_limit=level_limit))
+
+
 def test_a_stop_request_abandons_the_walk_within_a_level_already_read(tmp_path: Path) -> None:
     """One flat level is listed whole before its first entry is yielded, so only
     a check before every entry can stop the walk partway through it."""
