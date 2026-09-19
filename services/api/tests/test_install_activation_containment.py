@@ -257,8 +257,8 @@ def test_copy_fallback_preserves_bytes_when_a_write_is_short(
     def short_write(descriptor: int, data: bytes) -> int:
         return real_write(descriptor, data[: max(1, len(data) // 2)])
 
-    monkeypatch.setattr(filesystem_links.os, "open", open_destination)
-    monkeypatch.setattr(filesystem_links.os, "write", short_write)
+    monkeypatch.setattr(os, "open", open_destination)
+    monkeypatch.setattr(os, "write", short_write)
     try:
         filesystem_links._copy_opened_posix(opened, 123, "installed.bin")
     finally:
@@ -286,9 +286,7 @@ class _DecliningLibc:
 
 
 def _decline_linking(monkeypatch: pytest.MonkeyPatch, failure: int) -> None:
-    from local_lm import filesystem_links
-
-    monkeypatch.setattr(filesystem_links.ctypes, "CDLL", lambda *_a, **_k: _DecliningLibc(failure))
+    monkeypatch.setattr(ctypes, "CDLL", lambda *_a, **_k: _DecliningLibc(failure))
 
 
 @pytest.mark.parametrize(

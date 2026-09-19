@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -183,7 +184,9 @@ def test_a_half_measured_posix_entry_carries_nothing(
     root.mkdir()
     (root / "payload.bin").write_bytes(b"x")
 
-    def always(measured: tuple[int | None, datetime | None]):
+    def always(
+        measured: tuple[int | None, datetime | None],
+    ) -> Callable[..., tuple[int | None, datetime | None]]:
         # Bound here rather than captured from the loop: a lambda closing over
         # the loop variable reads the LAST value if it ever outlives the
         # iteration, which is a real trap even where this use is safe.
