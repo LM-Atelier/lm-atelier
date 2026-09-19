@@ -26,7 +26,6 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from . import __version__
 from .adapters.comfyui import ComfyUIAdapter
 from .api import (
-    recover_model_delete_quarantines,
     router,
     shutdown_registry_preparations,
 )
@@ -54,6 +53,7 @@ from .exports import ProjectExporter
 from .generation_queue import recover_generation_queue
 from .instance_identity import INSTANCE_ID_HEADER, load_or_create_instance_identity
 from .instance_lock import DataDirectoryLock
+from .model_quarantine import recover_model_delete_quarantines
 from .orchestrator import ConversationOrchestrator
 from .processes import ProcessSupervisor
 from .retention_policy import windows_for
