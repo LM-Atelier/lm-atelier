@@ -4,21 +4,28 @@ import asyncio
 import hashlib
 import io
 import json
+import platform
+import shutil
+import subprocess
 import threading
 import time
 import zipfile
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import Never
 
 import httpx
 import pytest
 
 import local_lm.runtime_provisioning as runtime_provisioning
+from local_lm.config import Settings
 from local_lm.runtime_config import runtime_config_path
 from local_lm.runtime_provisioning import (
     RuntimeProvisioner,
     RuntimeProvisioningError,
     RuntimeVerificationCancelled,
 )
+from local_lm.schemas import RuntimeStatus
 
 
 def _zip_bytes(files: dict[str, bytes]) -> bytes:
@@ -141,9 +148,9 @@ def _write_manifest(
 
 
 async def test_runtime_download_resumes_verifies_and_persists(
-    settings,
+    settings: Settings,
     tmp_path: Path,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     content = _zip_bytes({"llama-server.exe": b"verified executable"})
     manifest = tmp_path / "engines.json"
     _write_manifest(manifest, llama_content=content)
@@ -190,10 +197,10 @@ async def test_runtime_download_resumes_verifies_and_persists(
 
 
 async def test_runtime_start_keeps_background_progress_typed(
-    settings,
+    settings: Settings,
     tmp_path: Path,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     content = _zip_bytes({"llama-server.exe": b"runtime"})
     manifest = tmp_path / "engines.json"
     _write_manifest(manifest, llama_content=content)
@@ -210,7 +217,7 @@ async def test_runtime_start_keeps_background_progress_typed(
 
         async def observe_background_progress(
             engine: runtime_provisioning.RuntimeName,
-        ) -> runtime_provisioning.RuntimeStatus:
+        ) -> RuntimeStatus:
             definition = provisioner._definition(engine)
             return provisioner._status(
                 engine,
@@ -233,9 +240,9 @@ async def test_runtime_start_keeps_background_progress_typed(
 
 
 async def test_runtime_download_uses_shared_exact_byte_progress(
-    settings,
+    settings: Settings,
     tmp_path: Path,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     content = _zip_bytes({"llama-server.exe": b"runtime"})
     manifest = tmp_path / "engines.json"
     _write_manifest(manifest, llama_content=content)
@@ -264,9 +271,9 @@ async def test_runtime_download_uses_shared_exact_byte_progress(
 
 
 async def test_runtime_checksum_failure_removes_untrusted_partial(
-    settings,
+    settings: Settings,
     tmp_path: Path,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     expected = _zip_bytes({"llama-server.exe": b"expected"})
     corrupted = b"x" * len(expected)
     manifest = tmp_path / "engines.json"
@@ -295,9 +302,9 @@ async def test_runtime_checksum_failure_removes_untrusted_partial(
 
 
 async def test_runtime_archive_cannot_escape_install_root(
-    settings,
+    settings: Settings,
     tmp_path: Path,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     content = _zip_bytes(
         {
             "../outside.exe": b"unsafe",
@@ -350,9 +357,9 @@ def test_7z_listing_rejects_links_and_uncompressed_size_overflow() -> None:
 
 
 async def test_explicit_external_runtime_is_never_replaced(
-    settings,
+    settings: Settings,
     tmp_path: Path,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     content = _zip_bytes({"llama-server.exe": b"managed"})
     manifest = tmp_path / "engines.json"
     _write_manifest(manifest, llama_content=content)
@@ -382,10 +389,10 @@ async def test_explicit_external_runtime_is_never_replaced(
 
 
 async def test_external_comfy_archive_is_provisioned_without_bundling_it(
-    settings,
+    settings: Settings,
     tmp_path: Path,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     llama_content = _zip_bytes({"llama-server.exe": b"llama"})
     comfy_content = _zip_bytes(
         {
@@ -409,9 +416,9 @@ async def test_external_comfy_archive_is_provisioned_without_bundling_it(
         "packages": {"example": "1.0"},
     }
     monkeypatch.setattr(
-        runtime_provisioning.subprocess,
+        subprocess,
         "run",
-        lambda *args, **kwargs: runtime_provisioning.subprocess.CompletedProcess(  # noqa: ARG005
+        lambda *args, **kwargs: subprocess.CompletedProcess(  # noqa: ARG005
             args[0],
             0,
             stdout=(
@@ -455,10 +462,10 @@ async def test_external_comfy_archive_is_provisioned_without_bundling_it(
 
 
 async def test_comfy_upgrade_carries_only_managed_registry_nodes(
-    settings,
+    settings: Settings,
     tmp_path: Path,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     llama_content = _zip_bytes({"llama-server.exe": b"llama"})
     comfy_content = _zip_bytes(
         {
@@ -480,9 +487,9 @@ async def test_comfy_upgrade_carries_only_managed_registry_nodes(
     settings.prepare()
     probe = {"python": "3.13.14", "comfyui": "0.28.0", "packages": {"example": "1.0"}}
     monkeypatch.setattr(
-        runtime_provisioning.subprocess,
+        subprocess,
         "run",
-        lambda *args, **kwargs: runtime_provisioning.subprocess.CompletedProcess(  # noqa: ARG005
+        lambda *args, **kwargs: subprocess.CompletedProcess(  # noqa: ARG005
             args[0],
             0,
             stdout=f"{runtime_provisioning._RUNTIME_PROBE_SENTINEL}{json.dumps(probe)}\n",
@@ -579,7 +586,7 @@ def test_managed_registry_copy_budget_is_shared_across_folders(tmp_path: Path) -
         )
 
 
-def _provisioner(settings, tmp_path: Path):  # type: ignore[no-untyped-def]
+def _provisioner(settings: Settings, tmp_path: Path) -> RuntimeProvisioner:
     manifest = tmp_path / "engines.json"
     _write_manifest(manifest, llama_content=_zip_bytes({"llama-server.exe": b"llama"}))
     settings.prepare()
@@ -593,9 +600,9 @@ def _provisioner(settings, tmp_path: Path):  # type: ignore[no-untyped-def]
 
 
 def test_integrity_walk_refuses_a_link_that_escapes_the_runtime(
-    settings,
+    settings: Settings,
     tmp_path: Path,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     """Only a reparse point can point elsewhere, so only it is containment-checked."""
     provisioner = _provisioner(settings, tmp_path)
     root = tmp_path / "runtime-root"
@@ -613,9 +620,9 @@ def test_integrity_walk_refuses_a_link_that_escapes_the_runtime(
 
 
 def test_integrity_walk_refuses_a_linked_directory(
-    settings,
+    settings: Settings,
     tmp_path: Path,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     provisioner = _provisioner(settings, tmp_path)
     root = tmp_path / "runtime-root"
     (root / "inner").mkdir(parents=True)
@@ -631,9 +638,9 @@ def test_integrity_walk_refuses_a_linked_directory(
 
 
 def test_integrity_walk_lists_every_ordinary_file(
-    settings,
+    settings: Settings,
     tmp_path: Path,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     provisioner = _provisioner(settings, tmp_path)
     root = tmp_path / "runtime-root"
     (root / "a" / "b").mkdir(parents=True)
@@ -658,9 +665,9 @@ def test_integrity_walk_lists_every_ordinary_file(
 
 
 async def test_installation_reclaims_staging_left_by_a_failed_attempt(
-    settings,
+    settings: Settings,
     tmp_path: Path,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     """A failed extraction can strand gigabytes; the next attempt must reclaim it."""
     content = _zip_bytes({"llama-server.exe": b"llama"})
     manifest = tmp_path / "engines.json"
@@ -691,9 +698,9 @@ async def test_installation_reclaims_staging_left_by_a_failed_attempt(
 
 
 async def test_managed_runtime_integrity_change_is_not_reported_ready(
-    settings,
+    settings: Settings,
     tmp_path: Path,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     content = _zip_bytes(
         {
             "llama-server.exe": b"verified executable",
@@ -747,9 +754,9 @@ async def test_managed_runtime_integrity_change_is_not_reported_ready(
 
 
 async def test_same_release_asset_correction_replaces_only_the_owned_runtime(
-    settings,
+    settings: Settings,
     tmp_path: Path,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     original = _zip_bytes({"llama-server.exe": b"original executable"})
     corrected = _zip_bytes({"llama-server.exe": b"corrected executable"})
     manifest = tmp_path / "engines.json"
@@ -800,10 +807,10 @@ async def test_same_release_asset_correction_replaces_only_the_owned_runtime(
 
 
 async def test_managed_runtime_verification_starts_in_background(
-    settings,
+    settings: Settings,
     tmp_path: Path,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     content = _zip_bytes({"llama-server.exe": b"verified executable"})
     manifest = tmp_path / "engines.json"
     _write_manifest(manifest, llama_content=content)
@@ -828,10 +835,25 @@ async def test_managed_runtime_verification_starts_in_background(
         release = threading.Event()
         original = RuntimeProvisioner._managed_marker_matches
 
-        def delayed_verification(*args, **kwargs):  # type: ignore[no-untyped-def]
+        def delayed_verification(
+            provisioner: RuntimeProvisioner,
+            root: Path,
+            engine: runtime_provisioning.RuntimeName,
+            definition: Mapping[str, object],
+            asset: Mapping[str, object],
+            *,
+            cancel_requested: Callable[[], bool] | None = None,
+        ) -> bool:
             started.set()
             assert release.wait(timeout=5)
-            return original(*args, **kwargs)
+            return original(
+                provisioner,
+                root,
+                engine,
+                definition,
+                asset,
+                cancel_requested=cancel_requested,
+            )
 
         monkeypatch.setattr(RuntimeProvisioner, "_managed_marker_matches", delayed_verification)
         restarted = RuntimeProvisioner(
@@ -860,10 +882,10 @@ async def test_managed_runtime_verification_starts_in_background(
 
 
 async def test_managed_runtime_verification_stops_cleanly_on_close(
-    settings,
+    settings: Settings,
     tmp_path: Path,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     content = _zip_bytes({"llama-server.exe": b"verified executable"})
     manifest = tmp_path / "engines.json"
     _write_manifest(manifest, llama_content=content)
@@ -885,8 +907,9 @@ async def test_managed_runtime_verification_stops_cleanly_on_close(
 
         started = threading.Event()
 
-        def cancellable_verification(*_args, **kwargs):  # type: ignore[no-untyped-def]
-            cancel_requested = kwargs["cancel_requested"]
+        def cancellable_verification(
+            *_args: object, cancel_requested: Callable[[], bool], **_kwargs: object
+        ) -> Never:
             started.set()
             while not cancel_requested():
                 time.sleep(0.01)
@@ -913,9 +936,11 @@ async def test_managed_runtime_verification_stops_cleanly_on_close(
         assert restore.done()
 
 
-def test_platform_selection_gates_nvidia_runtime_generations(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    monkeypatch.setattr(runtime_provisioning.platform, "system", lambda: "Windows")
-    monkeypatch.setattr(runtime_provisioning.platform, "machine", lambda: "AMD64")
+def test_platform_selection_gates_nvidia_runtime_generations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(platform, "system", lambda: "Windows")
+    monkeypatch.setattr(platform, "machine", lambda: "AMD64")
     monkeypatch.setattr(
         RuntimeProvisioner,
         "_nvidia_runtime_info",
@@ -940,12 +965,12 @@ def test_platform_selection_gates_nvidia_runtime_generations(monkeypatch) -> Non
 
 
 def test_platform_selection_advertises_the_pinned_ubuntu_nvidia_chat_asset(
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
-    monkeypatch.setattr(runtime_provisioning.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(runtime_provisioning.platform, "machine", lambda: "x86_64")
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
     monkeypatch.setattr(
-        runtime_provisioning.platform,
+        platform,
         "freedesktop_os_release",
         lambda: {"ID": "ubuntu"},
     )
@@ -959,12 +984,12 @@ def test_platform_selection_advertises_the_pinned_ubuntu_nvidia_chat_asset(
     assert RuntimeProvisioner._platform_key("comfyui") == "ubuntu-x86_64-nvidia"
 
 
-def test_nvidia_probe_parses_driver_and_compute_capability(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    monkeypatch.setattr(runtime_provisioning.shutil, "which", lambda _name: "nvidia-smi")
+def test_nvidia_probe_parses_driver_and_compute_capability(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(shutil, "which", lambda _name: "nvidia-smi")
     monkeypatch.setattr(
-        runtime_provisioning.subprocess,
+        subprocess,
         "run",
-        lambda *args, **kwargs: runtime_provisioning.subprocess.CompletedProcess(  # noqa: ARG005
+        lambda *args, **kwargs: subprocess.CompletedProcess(  # noqa: ARG005
             args[0],
             0,
             stdout="610.74, 12.0\n",
@@ -976,9 +1001,9 @@ def test_nvidia_probe_parses_driver_and_compute_capability(monkeypatch) -> None:
 
 
 async def test_blocked_runtime_security_status_prevents_automatic_download(
-    settings,
+    settings: Settings,
     tmp_path: Path,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     content = _zip_bytes({"llama-server.exe": b"llama"})
     manifest = tmp_path / "engines.json"
     _write_manifest(manifest, llama_content=content)
@@ -1011,9 +1036,9 @@ async def test_blocked_runtime_security_status_prevents_automatic_download(
 
 
 async def test_blocked_runtime_without_assets_is_reported_before_asset_selection(
-    settings,
+    settings: Settings,
     tmp_path: Path,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     content = _zip_bytes({"llama-server.exe": b"llama"})
     manifest = tmp_path / "engines.json"
     _write_manifest(manifest, llama_content=content)
@@ -1042,9 +1067,9 @@ async def test_blocked_runtime_without_assets_is_reported_before_asset_selection
 
 
 async def test_asset_level_security_block_prevents_automatic_download(
-    settings,
+    settings: Settings,
     tmp_path: Path,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     content = _zip_bytes({"llama-server.exe": b"llama"})
     manifest = tmp_path / "engines.json"
     _write_manifest(manifest, llama_content=content)
@@ -1077,9 +1102,9 @@ async def test_asset_level_security_block_prevents_automatic_download(
 
 
 async def test_security_overlay_requires_exact_files_and_rewrites_deterministically(
-    settings,
+    settings: Settings,
     tmp_path: Path,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     content = _zip_bytes({"llama-server.exe": b"llama"})
     manifest = tmp_path / "engines.json"
     _write_manifest(manifest, llama_content=content)
@@ -1139,10 +1164,10 @@ async def test_security_overlay_requires_exact_files_and_rewrites_deterministica
 
 
 async def test_runtime_contract_rejects_inventory_and_probe_drift(
-    settings,
+    settings: Settings,
     tmp_path: Path,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     content = _zip_bytes({"llama-server.exe": b"llama"})
     manifest = tmp_path / "engines.json"
     _write_manifest(manifest, llama_content=content)
@@ -1176,14 +1201,14 @@ async def test_runtime_contract_rejects_inventory_and_probe_drift(
         "comfyui": probe["comfyui"],
         "packages": probe["packages"],
     }
-    probe_result = runtime_provisioning.subprocess.CompletedProcess(
+    probe_result = subprocess.CompletedProcess(
         [str(executable)],
         0,
         stdout=(f"{runtime_provisioning._RUNTIME_PROBE_SENTINEL}{json.dumps(expected_result)}\n"),
         stderr="",
     )
     monkeypatch.setattr(
-        runtime_provisioning.subprocess,
+        subprocess,
         "run",
         lambda *args, **kwargs: probe_result,  # noqa: ARG005
     )
@@ -1209,9 +1234,9 @@ async def test_runtime_contract_rejects_inventory_and_probe_drift(
             "python": "3.13.15",
         }
         monkeypatch.setattr(
-            runtime_provisioning.subprocess,
+            subprocess,
             "run",
-            lambda *args, **kwargs: runtime_provisioning.subprocess.CompletedProcess(  # noqa: ARG005
+            lambda *args, **kwargs: subprocess.CompletedProcess(  # noqa: ARG005
                 args[0],
                 0,
                 stdout=(

@@ -3,20 +3,27 @@ from __future__ import annotations
 import io
 import os
 import sys
+import urllib.error
+import urllib.request
+import webbrowser
 from pathlib import Path
 
 import pytest
 from httpx2 import ASGITransport, AsyncClient
 
-from local_lm import desktop
+from local_lm import __version__, desktop
 from local_lm.config import Settings
 from local_lm.downloads import download_worker_command
-from local_lm.instance_identity import INSTANCE_ID_HEADER, InstanceIdentityError
+from local_lm.instance_identity import (
+    INSTANCE_ID_HEADER,
+    InstanceIdentityError,
+    load_or_create_instance_identity,
+)
 from local_lm.main import create_app
 from local_lm.runtime_config import configure_persisted_runtime, runtime_config_path
 
 
-def test_default_data_dir_uses_windows_local_app_data(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_default_data_dir_uses_windows_local_app_data(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Tester\AppData\Local")
 
@@ -24,14 +31,14 @@ def test_default_data_dir_uses_windows_local_app_data(monkeypatch) -> None:  # t
     assert desktop.default_data_dir() == expected
 
 
-def test_default_data_dir_uses_xdg_data_home(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_default_data_dir_uses_xdg_data_home(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setenv("XDG_DATA_HOME", "/tmp/xdg-data")
 
     assert desktop.default_data_dir() == Path("/tmp/xdg-data/lm-atelier")
 
 
-def test_download_worker_uses_frozen_executable_dispatch(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_download_worker_uses_frozen_executable_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable", "/opt/lm-atelier/lm-atelier")
 
@@ -73,9 +80,9 @@ def test_runtime_configuration_survives_desktop_relaunch(tmp_path: Path) -> None
 
 
 def test_saved_startup_limit_reaches_settings_on_the_next_launch(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     data_dir = tmp_path / "data"
     configure_persisted_runtime(data_dir, {"LOCAL_LM_WORKER_STARTUP_SECONDS": "240"})
 
@@ -105,9 +112,9 @@ def test_explicit_runtime_configuration_overrides_saved_value(tmp_path: Path) ->
 
 
 def test_desktop_defaults_to_real_engines_without_hidden_environment(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     data_dir = tmp_path / "data"
     monkeypatch.setenv("LOCAL_LM_DATA_DIR", str(data_dir))
     monkeypatch.delenv("LOCAL_LM_CHAT_ENGINE", raising=False)
@@ -116,31 +123,31 @@ def test_desktop_defaults_to_real_engines_without_hidden_environment(
 
     desktop.configure_desktop_environment()
 
-    assert desktop.os.environ["LOCAL_LM_CHAT_ENGINE"] == "llama.cpp"
-    assert desktop.os.environ["LOCAL_LM_MEDIA_ENGINE"] == "comfyui"
+    assert os.environ["LOCAL_LM_CHAT_ENGINE"] == "llama.cpp"
+    assert os.environ["LOCAL_LM_MEDIA_ENGINE"] == "comfyui"
     saved = runtime_config_path(data_dir).read_text(encoding="utf-8")
     assert '"LOCAL_LM_CHAT_ENGINE": "llama.cpp"' in saved
     assert '"LOCAL_LM_MEDIA_ENGINE": "comfyui"' in saved
 
 
 def test_explicit_mock_engine_remains_available_for_development(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     monkeypatch.setenv("LOCAL_LM_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("LOCAL_LM_CHAT_ENGINE", "mock")
     monkeypatch.setenv("LOCAL_LM_MEDIA_ENGINE", "mock")
 
     desktop.configure_desktop_environment()
 
-    assert desktop.os.environ["LOCAL_LM_CHAT_ENGINE"] == "mock"
-    assert desktop.os.environ["LOCAL_LM_MEDIA_ENGINE"] == "mock"
+    assert os.environ["LOCAL_LM_CHAT_ENGINE"] == "mock"
+    assert os.environ["LOCAL_LM_MEDIA_ENGINE"] == "mock"
 
 
 def test_source_launcher_honors_documented_environment_file(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".env").write_text(
         "\n".join(
@@ -159,15 +166,15 @@ def test_source_launcher_honors_documented_environment_file(
 
     desktop.configure_desktop_environment()
 
-    assert desktop.os.environ["LOCAL_LM_DATA_DIR"] == "developer-data"
-    assert desktop.os.environ["LOCAL_LM_CHAT_ENGINE"] == "mock"
-    assert desktop.os.environ["LOCAL_LM_MEDIA_ENGINE"] == "mock"
+    assert os.environ["LOCAL_LM_DATA_DIR"] == "developer-data"
+    assert os.environ["LOCAL_LM_CHAT_ENGINE"] == "mock"
+    assert os.environ["LOCAL_LM_MEDIA_ENGINE"] == "mock"
 
 
 def test_frozen_launcher_ignores_source_environment_file(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".env").write_text(
         "LOCAL_LM_CHAT_ENGINE=mock\nLOCAL_LM_MEDIA_ENGINE=mock\n",
@@ -180,11 +187,11 @@ def test_frozen_launcher_ignores_source_environment_file(
 
     desktop.configure_desktop_environment()
 
-    assert desktop.os.environ["LOCAL_LM_CHAT_ENGINE"] == "llama.cpp"
-    assert desktop.os.environ["LOCAL_LM_MEDIA_ENGINE"] == "comfyui"
+    assert os.environ["LOCAL_LM_CHAT_ENGINE"] == "llama.cpp"
+    assert os.environ["LOCAL_LM_MEDIA_ENGINE"] == "comfyui"
 
 
-def test_desktop_health_probe_ignores_proxy_environment(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_desktop_health_probe_ignores_proxy_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
     expected_identity = "a" * 64
 
@@ -192,7 +199,7 @@ def test_desktop_health_probe_ignores_proxy_environment(monkeypatch) -> None:  #
         def open(self, url: str, *, timeout: int) -> io.BytesIO:
             captured["url"] = url
             captured["timeout"] = timeout
-            response = io.BytesIO(f'{{"version":"{desktop.__version__}"}}'.encode())
+            response = io.BytesIO(f'{{"version":"{__version__}"}}'.encode())
             response.headers = {INSTANCE_ID_HEADER: expected_identity}  # type: ignore[attr-defined]
             return response
 
@@ -201,7 +208,7 @@ def test_desktop_health_probe_ignores_proxy_environment(monkeypatch) -> None:  #
         return FakeOpener()
 
     monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:8080")
-    monkeypatch.setattr(desktop.urllib.request, "build_opener", build_opener)
+    monkeypatch.setattr(urllib.request, "build_opener", build_opener)
 
     assert desktop._health_matches("http://127.0.0.1:12340", expected_identity)
     assert captured == {
@@ -214,12 +221,12 @@ def test_desktop_health_probe_ignores_proxy_environment(monkeypatch) -> None:  #
 def test_instance_identity_is_stable_opaque_and_bound_to_data_root(tmp_path: Path) -> None:
     first_root = tmp_path / "first"
     second_root = tmp_path / "second"
-    first = desktop.load_or_create_instance_identity(first_root)
-    repeated = desktop.load_or_create_instance_identity(first_root)
+    first = load_or_create_instance_identity(first_root)
+    repeated = load_or_create_instance_identity(first_root)
     seed = (first_root / "state" / "desktop-instance-seed").read_text(encoding="ascii")
     (second_root / "state").mkdir(parents=True)
     (second_root / "state" / "desktop-instance-seed").write_text(seed, encoding="ascii")
-    copied = desktop.load_or_create_instance_identity(second_root)
+    copied = load_or_create_instance_identity(second_root)
 
     assert repeated == first
     assert len(first) == 64
@@ -233,7 +240,7 @@ def test_invalid_instance_identity_is_not_silently_replaced(tmp_path: Path) -> N
     seed.write_text("not-an-instance-seed", encoding="ascii")
 
     with pytest.raises(InstanceIdentityError, match="invalid"):
-        desktop.load_or_create_instance_identity(tmp_path / "data")
+        load_or_create_instance_identity(tmp_path / "data")
 
     assert seed.read_text(encoding="ascii") == "not-an-instance-seed"
 
@@ -244,7 +251,7 @@ def test_existing_instance_seed_permissions_are_restricted(tmp_path: Path) -> No
     seed.write_text("a" * 64, encoding="ascii")
     seed.chmod(0o666)
 
-    identity = desktop.load_or_create_instance_identity(tmp_path / "data")
+    identity = load_or_create_instance_identity(tmp_path / "data")
 
     assert len(identity) == 64
     if os.name != "nt":
@@ -262,7 +269,7 @@ def test_instance_identity_rejects_linked_state_directory(tmp_path: Path) -> Non
         pytest.skip("filesystem links are unavailable in this test environment")
 
     with pytest.raises(InstanceIdentityError, match="state folder"):
-        desktop.load_or_create_instance_identity(data)
+        load_or_create_instance_identity(data)
 
     assert not (outside / "desktop-instance-seed").exists()
 
@@ -272,25 +279,25 @@ def test_instance_identity_rejects_non_file_seed(tmp_path: Path) -> None:
     seed.mkdir(parents=True)
 
     with pytest.raises(InstanceIdentityError, match="regular file"):
-        desktop.load_or_create_instance_identity(tmp_path / "data")
+        load_or_create_instance_identity(tmp_path / "data")
 
 
 @pytest.mark.parametrize("identity", [None, "b" * 64])
 def test_same_version_service_without_expected_identity_is_a_conflict(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
     identity: str | None,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     class FakeOpener:
         def open(self, _url: str, *, timeout: int) -> io.BytesIO:
             assert timeout == 2
-            response = io.BytesIO(f'{{"version":"{desktop.__version__}"}}'.encode())
+            response = io.BytesIO(f'{{"version":"{__version__}"}}'.encode())
             response.headers = (  # type: ignore[attr-defined]
                 {} if identity is None else {INSTANCE_ID_HEADER: identity}
             )
             return response
 
     monkeypatch.setattr(
-        desktop.urllib.request,
+        urllib.request,
         "build_opener",
         lambda _handler: FakeOpener(),
     )
@@ -301,14 +308,16 @@ def test_same_version_service_without_expected_identity_is_a_conflict(
     assert "different data folder" in probe.reason
 
 
-def test_unresponsive_occupied_port_is_reported_as_a_conflict(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_unresponsive_occupied_port_is_reported_as_a_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class FakeOpener:
         def open(self, _url: str, *, timeout: int) -> io.BytesIO:
             assert timeout == 2
-            raise desktop.urllib.error.URLError("timed out")
+            raise urllib.error.URLError("timed out")
 
     monkeypatch.setattr(
-        desktop.urllib.request,
+        urllib.request,
         "build_opener",
         lambda _handler: FakeOpener(),
     )
@@ -356,7 +365,7 @@ def test_desktop_reuses_only_the_owned_same_version_instance(
         "_probe_instance",
         lambda _url, _identity: desktop.InstanceProbe("owned"),
     )
-    monkeypatch.setattr(desktop.webbrowser, "open", opened.append)
+    monkeypatch.setattr(webbrowser, "open", opened.append)
 
     assert desktop.main() == 0
     assert opened == ["http://127.0.0.1:12340"]
@@ -378,7 +387,7 @@ def test_desktop_reports_identity_conflict_without_starting_or_opening(
         ),
     )
     monkeypatch.setattr(
-        desktop.webbrowser,
+        webbrowser,
         "open",
         lambda _url: pytest.fail("a conflicting service must never be opened"),
     )
@@ -415,7 +424,7 @@ async def test_ready_probe_exposes_the_selected_data_root_identity(tmp_path: Pat
         media_engine="mock",
     )
     app = create_app(settings)
-    expected = desktop.load_or_create_instance_identity(settings.data_dir)
+    expected = load_or_create_instance_identity(settings.data_dir)
 
     async with (
         app.router.lifespan_context(app),
@@ -427,5 +436,5 @@ async def test_ready_probe_exposes_the_selected_data_root_identity(tmp_path: Pat
         response = await client.get("/api/ready")
 
     assert response.status_code == 200
-    assert response.json() == {"version": desktop.__version__}
+    assert response.json() == {"version": __version__}
     assert response.headers[INSTANCE_ID_HEADER] == expected
