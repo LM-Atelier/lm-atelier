@@ -745,15 +745,22 @@ async def test_automatic_retry_reuses_source_turn_as_a_response_revision() -> No
 
 
 def _verification_world(  # type: ignore[no-untyped-def]
-    *, lose_at: str, answer: str = "{}", mask: dict[str, object] | None = None
+    *,
+    lose_at: str,
+    answer: str = "{}",
+    mask: dict[str, object] | None = None,
+    settings: dict[str, object] | None = None,
+    workflow_schema: dict[str, object] | None = None,
 ):
     """A verification job with a complete source, a verifying chat, both
     artifacts and a verified vision profile, over a fake session whose
     ownership probe stops answering for the test claim once ``lose_at`` is
     reached: "preparation", "stop", "workers", "assessment" or "restore".
     ``mask`` becomes the source run's selection setting, and a stored mask
-    artifact named "artifact-mask" answers for it. Returns (job, orchestrator,
-    world)."""
+    artifact named "artifact-mask" answers for it. ``settings`` are further
+    settings of the source run, and ``workflow_schema`` makes the source run's
+    workflow revision answer with that input schema. Returns (job,
+    orchestrator, world)."""
 
     job = Job(
         id="job-verify-owned",
@@ -780,13 +787,15 @@ def _verification_world(  # type: ignore[no-untyped-def]
         status=RunStatus.COMPLETE.value,
         chat_id="chat-v",
         standalone_prompt="make the mug green",
-        settings_json={} if mask is None else {"mask": mask},
+        settings_json={**(settings or {}), **({} if mask is None else {"mask": mask})},
+        workflow_revision_id="wfrev-source" if workflow_schema is not None else None,
         provenance_json={},
     )
     chat = SimpleNamespace(id="chat-v", vision_settings_json={"verify_image_edits": True})
     source = SimpleNamespace(id="artifact-source")
     result = SimpleNamespace(id="artifact-result")
     stored_mask = SimpleNamespace(id="artifact-mask")
+    workflow_revision = SimpleNamespace(id="wfrev-source", input_schema_json=workflow_schema)
     install = SimpleNamespace(id="install-vision", active=True)
     profile = SimpleNamespace(id="profile-vision", model_install_id=install.id)
     previous = SimpleNamespace(id="profile-chat", model_install_id="install-chat")
@@ -808,6 +817,7 @@ def _verification_world(  # type: ignore[no-untyped-def]
                 (Artifact, source.id): source,
                 (Artifact, result.id): result,
                 (Artifact, stored_mask.id): stored_mask,
+                (WorkflowRevision, workflow_revision.id): workflow_revision,
                 (ModelProfile, profile.id): profile,
                 (ModelProfile, previous.id): previous,
                 (ModelInstall, install.id): install,
@@ -1233,3 +1243,60 @@ async def test_a_selection_is_measured_where_it_selects_through_the_real_check(
     record = orchestrator._persist_image_edit_verification.call_args.args[2]
     assert record["reason"] == reason
     assert record["difference"]["comparable"] is stored
+
+
+def _calibrated_schema(*, steps_default: int = 4) -> dict[str, object]:
+    from local_lm.workflow_edit_calibration import standard_edit_calibration
+
+    return {
+        "type": "object",
+        "properties": {
+            "denoise": {"type": "number", "minimum": 0.3, "maximum": 0.8, "default": 0.5},
+            "steps": {"type": "integer", "minimum": 1, "default": steps_default},
+        },
+        "x-lm-atelier-edit-calibration": standard_edit_calibration(
+            parameter="denoise", minimum=0.3, maximum=0.8, steps_parameter="steps"
+        ),
+    }
+
+
+@pytest.mark.parametrize(
+    ("settings", "schema", "after"),
+    [
+        # The source ran four steps: the retry step widens to one whole step.
+        ({"steps": 4}, _calibrated_schema(steps_default=20), 0.75),
+        # No steps setting: the step field's own default decides.
+        ({}, _calibrated_schema(steps_default=4), 0.75),
+        # A long schedule keeps the ordinary step.
+        ({"steps": 20}, _calibrated_schema(), 0.62),
+        # A workflow that declares no schedule keeps the ordinary step.
+        ({"steps": 4}, None, 0.62),
+    ],
+)
+async def test_a_retry_steps_by_the_schedule_the_source_ran_with(
+    settings: dict[str, object], schema: dict[str, object] | None, after: float
+) -> None:
+    job, orchestrator, _world = _verification_world(
+        lose_at="never",
+        answer=(
+            '{"requested_change_visible": false, "unrelated_content_preserved": true, '
+            '"retry_recommended": true, "direction": "increase", "confidence": 0.95}'
+        ),
+        settings=settings,
+        workflow_schema=schema,
+    )
+    pictures = {"artifact-source": _picture(None), "artifact-result": _picture((16, 16, 48, 48))}
+    orchestrator.artifacts.verified_bytes = Mock(  # type: ignore[method-assign]
+        side_effect=lambda artifact, *, maximum_bytes: pictures[artifact.id]
+    )
+    retry = SimpleNamespace(
+        run=SimpleNamespace(id="run-retry", work_plan_id="plan-retry", provenance_json={})
+    )
+    orchestrator._create_image_edit_verification_retry = AsyncMock(return_value=retry)  # type: ignore[method-assign]
+
+    await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
+
+    decision = orchestrator._create_image_edit_verification_retry.await_args.args[2]
+    assert (decision.value_before, decision.value_after) == (0.5, after)
+    record = orchestrator._persist_image_edit_verification.call_args.args[2]
+    assert ("schedule" in record["strength_adjustment"]) is (after == 0.75)

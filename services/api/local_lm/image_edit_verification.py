@@ -17,6 +17,10 @@ MAX_ASSESSMENT_CHARACTERS = 8_192
 MAX_REQUEST_CHARACTERS = 20_000
 DEFAULT_CONFIDENCE_THRESHOLD = 0.7
 DEFAULT_STRENGTH_ADJUSTMENT = 0.12
+#: The largest strength step a short schedule may widen a retry to. On a
+#: four-step schedule a quarter of the strength is one effective step; on a
+#: shorter one it is less than a step.
+MAX_SCHEDULE_AWARE_ADJUSTMENT = 0.25
 MAX_RETRY_ATTEMPTS = 1
 
 
@@ -124,6 +128,8 @@ class ImageEditRetryDecision:
     value_after: float | None = None
     minimum: float | None = None
     maximum: float | None = None
+    #: The source's resolved sampling steps, when they set the step size.
+    schedule_steps: float | None = None
 
     def provenance(
         self,
@@ -155,6 +161,12 @@ class ImageEditRetryDecision:
                     "maximum": self.maximum,
                 },
             }
+            if self.schedule_steps is not None:
+                result["strength_adjustment"]["schedule"] = {
+                    "resolved_steps": self.schedule_steps,
+                    "effective_steps_before": round(self.value_before * self.schedule_steps, 4),
+                    "effective_steps_after": round(self.value_after * self.schedule_steps, 4),
+                }
         return result
 
 
@@ -242,6 +254,7 @@ def decide_image_edit_retry(
     confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
     adjustment: float = DEFAULT_STRENGTH_ADJUSTMENT,
     difference: ImageDifference | None = None,
+    schedule_steps: float | None = None,
 ) -> ImageEditRetryDecision:
     """Decide from the assessment and, first, from what the pixels show.
 
@@ -249,6 +262,14 @@ def decide_image_edit_retry(
     asked settles the question whatever the assessment says: the edit is not
     accepted, and an automatic strength gets its one stronger retry. Otherwise
     the assessment decides as before.
+
+    `schedule_steps` is the source's resolved sampling steps. On a short
+    schedule the ordinary step can move the strength without moving the number
+    of steps that denoise (strength times steps), so the step is widened toward
+    one effective step, at most MAX_SCHEDULE_AWARE_ADJUSTMENT and within the
+    strength's bounds. It is a best effort, not a guarantee: on a schedule under
+    four steps, or near the upper bound, the retry can move less than a whole
+    step, and the recorded effective steps before and after show it.
     """
     if difference is not None and difference.comparable and not difference.changed:
         if attempt < MAX_RETRY_ATTEMPTS:
@@ -260,6 +281,7 @@ def decide_image_edit_retry(
                 minimum=minimum,
                 maximum=maximum,
                 adjustment=adjustment,
+                schedule_steps=schedule_steps,
             )
             if stronger.retry:
                 # The pixels, not the assessment, are why this retries.
@@ -312,6 +334,7 @@ def decide_image_edit_retry(
         minimum=minimum,
         maximum=maximum,
         adjustment=adjustment,
+        schedule_steps=schedule_steps,
     )
 
 
@@ -324,6 +347,7 @@ def _adjusted_strength(
     minimum: float | None,
     maximum: float | None,
     adjustment: float,
+    schedule_steps: float | None = None,
 ) -> ImageEditRetryDecision:
     """One strength step in the given direction, within bounds, or why not."""
     next_attempt = max(0, attempt) + 1
@@ -352,7 +376,15 @@ def _adjusted_strength(
     lower = minimum
     upper = maximum
     before = min(max(current_strength, lower), upper)
-    delta = adjustment
+    schedule_delta = (
+        min(MAX_SCHEDULE_AWARE_ADJUSTMENT, 1 / schedule_steps)
+        if schedule_steps is not None
+        and not isinstance(schedule_steps, bool)
+        and math.isfinite(schedule_steps)
+        and schedule_steps > 0
+        else 0.0
+    )
+    delta = max(adjustment, schedule_delta)
     candidate = (
         min(upper, before + delta)
         if direction == VerificationDirection.INCREASE
@@ -380,4 +412,5 @@ def _adjusted_strength(
         value_after=after,
         minimum=lower,
         maximum=upper,
+        schedule_steps=schedule_steps if schedule_delta > adjustment else None,
     )
