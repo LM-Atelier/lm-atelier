@@ -154,6 +154,7 @@ def test_the_bounds_are_the_installation_settings_own() -> None:
         metadata = Settings.model_fields[field].metadata
         low = next(item.ge for item in metadata if isinstance(item, Ge))
         high = next(item.le for item in metadata if isinstance(item, Le))
+        assert isinstance(low, int) and isinstance(high, int)
         return int(low), int(high)
 
     assert bounds("artifact_retention_days") == (1, MAX_RETENTION_DAYS)
