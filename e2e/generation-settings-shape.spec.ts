@@ -1,4 +1,5 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import type { WorkerStatus } from "../apps/web/src/types";
 
 /** The output-shape row, measured in a real browser at a real window size.
  *
@@ -141,6 +142,19 @@ async function installShapeCapableWorkflow(
 ): Promise<{ familyId: string; csrfToken: string }> {
   const csrfToken = await createSession(request);
   const headers = { "x-local-lm-csrf": csrfToken };
+  await expect.poll(async () => {
+    const response = await request.get("/api/workers");
+    expect(response.status(), await response.text()).toBe(200);
+    const workers = await response.json() as WorkerStatus[];
+    const media = workers.find((worker) => worker.name === "media");
+    return {
+      managed: media?.managed,
+      running: media?.running,
+      state: media?.state,
+      hasProcess: typeof media?.pid === "number",
+    };
+  }, { message: "the managed media worker must be ready before workflow review", timeout: 30_000 })
+    .toEqual({ managed: true, running: true, state: "ready", hasProcess: true });
   const created = await request.post("/api/workflows", {
     headers,
     data: {
