@@ -23,7 +23,8 @@ if TYPE_CHECKING:
 
 
 def _reference(tmp_path: Path) -> SharedPackageReference:
-    api = importlib.import_module("local_lm.shared_package_bindings")
+    from local_lm import shared_package_bindings as api
+
     source = tmp_path / "weights.bin"
     source.write_bytes(b"neutral immutable weights")
     root = tmp_path / "library"
@@ -70,10 +71,10 @@ def test_binding_migration_preserves_existing_model_and_lora_installs(tmp_path: 
     with db.engine.connect() as connection:
         assert connection.execute(
             text("SELECT local_path,active,shared_package_binding_id FROM model_installs")
-        ).all() == [("models/existing.gguf", 1, None)]
+        ).tuples().all() == [("models/existing.gguf", 1, None)]
         assert connection.execute(
             text("SELECT local_path,active,shared_package_binding_id FROM model_asset_installs")
-        ).all() == [("models/existing.safetensors", 1, None)]
+        ).tuples().all() == [("models/existing.safetensors", 1, None)]
         assert (
             connection.execute(text("SELECT COUNT(*) FROM shared_package_bindings")).scalar() == 0
         )
@@ -82,7 +83,10 @@ def test_binding_migration_preserves_existing_model_and_lora_installs(tmp_path: 
 def test_preparation_rolls_back_and_never_switches_an_existing_install(
     settings: Settings, tmp_path: Path
 ) -> None:
-    api = importlib.import_module("local_lm.shared_package_bindings")
+    install: models.ModelInstall | None
+    binding: models.SharedPackageBinding | None
+    from local_lm import shared_package_bindings as api
+
     reference = _reference(tmp_path)
     with db.SessionLocal() as session:
         install = models.ModelInstall(
@@ -119,7 +123,9 @@ def test_preparation_rolls_back_and_never_switches_an_existing_install(
 def test_both_install_kinds_keep_a_referenced_binding_durable(
     settings: Settings, tmp_path: Path
 ) -> None:
-    api = importlib.import_module("local_lm.shared_package_bindings")
+    binding: models.SharedPackageBinding | None
+    from local_lm import shared_package_bindings as api
+
     with db.SessionLocal() as session:
         binding = api.prepare_binding(session, _reference(tmp_path))
         model = models.ModelInstall(
@@ -158,7 +164,8 @@ def test_both_install_kinds_keep_a_referenced_binding_durable(
 
 
 def test_preparation_is_scoped_to_the_opaque_consumer(settings: Settings, tmp_path: Path) -> None:
-    api = importlib.import_module("local_lm.shared_package_bindings")
+    from local_lm import shared_package_bindings as api
+
     first = _reference(tmp_path)
     second = api.SharedPackageReference(
         library_id=first.library_id,
@@ -176,6 +183,7 @@ def test_preparation_is_scoped_to_the_opaque_consumer(settings: Settings, tmp_pa
 
 def test_reference_keeps_a_detached_exact_member_snapshot(tmp_path: Path) -> None:
     api = importlib.import_module("local_lm.shared_package_bindings")
+
     original = _reference(tmp_path)
     members = dict(original.members)
     reference = api.SharedPackageReference(
@@ -194,7 +202,8 @@ def test_reference_keeps_a_detached_exact_member_snapshot(tmp_path: Path) -> Non
 def test_preparation_does_not_reactivate_a_retiring_or_invalid_binding(
     settings: Settings, tmp_path: Path, state: str
 ) -> None:
-    api = importlib.import_module("local_lm.shared_package_bindings")
+    from local_lm import shared_package_bindings as api
+
     reference = _reference(tmp_path)
     with db.SessionLocal() as session:
         binding = api.prepare_binding(session, reference)
@@ -208,7 +217,8 @@ def test_preparation_does_not_reactivate_a_retiring_or_invalid_binding(
 def test_modified_members_and_claimless_ready_records_refuse(
     settings: Settings, tmp_path: Path
 ) -> None:
-    api = importlib.import_module("local_lm.shared_package_bindings")
+    from local_lm import shared_package_bindings as api
+
     with db.SessionLocal() as session:
         binding = api.prepare_binding(session, _reference(tmp_path))
         original = dict(binding.member_digests_json)
@@ -225,7 +235,8 @@ def test_modified_members_and_claimless_ready_records_refuse(
 def test_concurrent_preparations_converge_on_one_local_record(
     settings: Settings, tmp_path: Path
 ) -> None:
-    api = importlib.import_module("local_lm.shared_package_bindings")
+    from local_lm import shared_package_bindings as api
+
     reference = _reference(tmp_path)
     start = Barrier(2)
 
@@ -248,7 +259,9 @@ def test_concurrent_preparations_converge_on_one_local_record(
 def test_downgrade_refuses_live_bindings_and_keeps_legacy_installs(
     settings: Settings, tmp_path: Path
 ) -> None:
-    api = importlib.import_module("local_lm.shared_package_bindings")
+    binding: models.SharedPackageBinding | None
+    from local_lm import shared_package_bindings as api
+
     with db.SessionLocal() as session:
         binding = api.prepare_binding(session, _reference(tmp_path))
         install = models.ModelInstall(
@@ -274,6 +287,6 @@ def test_downgrade_refuses_live_bindings_and_keeps_legacy_installs(
     command.downgrade(config, "f5c2a8d91e40")
     assert "shared_package_bindings" not in inspect(db.engine).get_table_names()
     with db.engine.connect() as connection:
-        assert connection.execute(text("SELECT local_path,active FROM model_installs")).all() == [
-            ("models/legacy.gguf", 1)
-        ]
+        assert connection.execute(
+            text("SELECT local_path,active FROM model_installs")
+        ).tuples().all() == [("models/legacy.gguf", 1)]
