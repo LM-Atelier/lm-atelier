@@ -22,6 +22,7 @@ from local_lm.models import (
 from local_lm.workflow_compatibility import ensure_legacy_profile_workflow
 from local_lm.workflow_selection import (
     WorkflowFamilySelectionError,
+    WorkflowSelectionMode,
     resolve_workflow_family,
 )
 
@@ -510,3 +511,61 @@ def test_selector_operation_mismatch_is_rejected_before_selection(session: Sessi
         )
 
     assert raised.value.reason == "selector_operation_mismatch"
+
+
+def test_automatic_puts_preferred_revisions_first_without_changing_other_modes(
+    session: Session,
+) -> None:
+    usual, _, usual_revision = _family_revision(
+        session,
+        "Usual edits",
+        operation=Operation.IMAGE_TO_IMAGE,
+        use_case="change colors in a picture",
+        is_default=True,
+        variant_key="edit",
+    )
+    preferred, _, preferred_revision = _family_revision(
+        session,
+        "Preferred edits",
+        operation=Operation.IMAGE_TO_IMAGE,
+        use_case="studio portraits",
+        variant_key="edit",
+    )
+    preferred.preferences[0].sort_order = 90
+    unready, _, unready_revision = _family_revision(
+        session,
+        "Preferred but unready",
+        operation=Operation.IMAGE_TO_IMAGE,
+        use_case="change colors in a picture",
+        trusted=False,
+        variant_key="edit",
+    )
+    session.flush()
+    accepted = {preferred_revision.id, unready_revision.id}
+
+    def prefer(revision: WorkflowRevision) -> bool:
+        return revision.id in accepted
+
+    def resolve(
+        mode: WorkflowSelectionMode, family_id: str | None = None, *, with_preference: bool
+    ) -> str:
+        return resolve_workflow_family(
+            session,
+            capability="image",
+            operation=Operation.IMAGE_TO_IMAGE,
+            mode=mode,
+            workflow_family_id=family_id,
+            prompt="change the colors in this picture",
+            engine="comfyui",
+            preferred_revision=prefer if with_preference else None,
+        ).workflow_family_id
+
+    # Without a preference the default and the use-case match win, as before.
+    assert resolve("automatic", with_preference=False) == usual.id
+    # With one, the accepted ready revision comes first; the unready one never does.
+    assert resolve("automatic", with_preference=True) == preferred.id
+    assert resolve("automatic", with_preference=True) != unready.id
+    # Explicit and default choices are the person's, and stay exactly as chosen.
+    assert resolve("explicit", usual.id, with_preference=True) == usual.id
+    assert resolve("default", with_preference=True) == usual.id
+    assert usual_revision.id not in accepted
