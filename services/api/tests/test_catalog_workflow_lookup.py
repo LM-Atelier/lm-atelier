@@ -12,7 +12,7 @@ from local_lm.config import Settings
 from local_lm.schemas import CatalogModel, CatalogPage
 
 
-def _catalog(monkeypatch: pytest.MonkeyPatch, *, empty: bool = False):
+def _catalog(monkeypatch: pytest.MonkeyPatch, *, empty: bool = False) -> tuple[list[str], set[str]]:
     page = CatalogPage(
         items=[]
         if empty
