@@ -1303,6 +1303,8 @@ def walk_entries(
     *,
     max_depth: int = _MAX_WALK_DEPTH,
     limit: int = _MAX_WALKED_ENTRIES,
+    level_limit: int = _MAX_LISTED_ENTRIES,
+    breadth_first: bool = False,
     include_metadata: bool = True,
     should_stop: Callable[[], bool] | None = None,
 ) -> Generator[WalkedEntry, None, None]:
@@ -1322,20 +1324,43 @@ def walk_entries(
     A directory is yielded before its contents, so a caller can stop at the
     first entry it will not accept. An entry that becomes a link between its
     listing and its descent refuses instead of being entered. An entry more
-    than `max_depth` levels below the root, or a tree holding more than `limit`
-    entries, refuses rather than being walked in part; so does a zero or
-    negative bound. The refusal can come after earlier entries were yielded,
+    than `max_depth` levels below the root, a directory holding more than
+    `level_limit` entries (list_entries' own bound unless raised), or a tree
+    holding more than `limit` entries, refuses rather than being walked in
+    part; so does a zero or negative bound. Each level is listed whole before
+    its first entry is yielded, so `level_limit` is what one directory may
+    hold; a caller that means `limit` to be the only bound sets `level_limit`
+    to match it. The refusal can come after earlier entries were yielded,
     so a caller acting on entries as they arrive must treat it as the tree's
     answer, not as the end of it.
+
+    By default a directory's contents follow it at once, depth first. With
+    `breadth_first`, every entry of one level is yielded before any entry of
+    the next, so a caller that stops at a count has seen the shallowest
+    entries first. Each directory of the next level is then reopened from the
+    root through held parents, one name at a time, so a component that has
+    become a link since it was listed refuses, as a descent does. Every bound
+    applies the same way in either order.
     """
 
-    if max_depth < 1 or limit < 1:
+    if max_depth < 1 or limit < 1 or level_limit < 1:
         _refuse()
+    if breadth_first:
+        yield from _walk_breadth_first(
+            anchor,
+            _WalkBudget(limit),
+            max_depth=max_depth,
+            level_limit=level_limit,
+            include_metadata=include_metadata,
+            should_stop=should_stop,
+        )
+        return
     yield from _walk_level(
         anchor,
         (),
         _WalkBudget(limit),
         max_depth=max_depth,
+        level_limit=level_limit,
         include_metadata=include_metadata,
         should_stop=should_stop,
     )
@@ -1347,10 +1372,16 @@ def _walk_level(
     budget: _WalkBudget,
     *,
     max_depth: int,
+    level_limit: int,
     include_metadata: bool,
     should_stop: Callable[[], bool] | None,
 ) -> Generator[WalkedEntry, None, None]:
-    entries = list_entries(directory, include_metadata=include_metadata, should_stop=should_stop)
+    entries = list_entries(
+        directory,
+        limit=level_limit,
+        include_metadata=include_metadata,
+        should_stop=should_stop,
+    )
     if entries and len(prefix) >= max_depth:
         _refuse()
     for entry in entries:
@@ -1369,9 +1400,48 @@ def _walk_level(
                 parts,
                 budget,
                 max_depth=max_depth,
+                level_limit=level_limit,
                 include_metadata=include_metadata,
                 should_stop=should_stop,
             )
+
+
+def _walk_breadth_first(
+    anchor: AnchoredDirectory,
+    budget: _WalkBudget,
+    *,
+    max_depth: int,
+    level_limit: int,
+    include_metadata: bool,
+    should_stop: Callable[[], bool] | None,
+) -> Generator[WalkedEntry, None, None]:
+    level: list[tuple[str, ...]] = [()]
+    while level:
+        below: list[tuple[str, ...]] = []
+        for prefix in level:
+            _raise_if_listing_stopped(should_stop)
+            with contextlib.ExitStack() as held:
+                # Only one directory's chain is held at a time, however wide the
+                # level, and each name in it is opened through its held parent.
+                directory = anchor
+                for name in prefix:
+                    directory = held.enter_context(open_child_directory(directory, name))
+                entries = list_entries(
+                    directory,
+                    limit=level_limit,
+                    include_metadata=include_metadata,
+                    should_stop=should_stop,
+                )
+                if entries and len(prefix) >= max_depth:
+                    _refuse()
+                for entry in entries:
+                    _raise_if_listing_stopped(should_stop)
+                    budget.spend()
+                    parts = (*prefix, entry.name)
+                    yield WalkedEntry(directory, parts, entry)
+                    if entry.kind is AnchoredEntryKind.DIRECTORY:
+                        below.append(parts)
+        level = below
 
 
 def remove_tree(
