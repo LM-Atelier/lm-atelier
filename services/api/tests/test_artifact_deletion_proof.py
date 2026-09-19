@@ -11,7 +11,6 @@ from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
 from local_lm.artifact_deletion_authority import (
-    ARTIFACT_DELETION_AUTHORIZED_SQL,
     ArtifactDeletionProofError,
     activate_artifact_deletion_proof,
     mint_artifact_deletion_proof,
@@ -21,7 +20,10 @@ from local_lm.artifact_library import (
     begin_artifact_write_fence,
     referenced_artifact_ids,
 )
-from local_lm.artifact_library_schema import STORED_JSON_INVALID_SQL
+from local_lm.artifact_library_schema import (
+    ARTIFACT_DELETION_AUTHORIZED_SQL,
+    STORED_JSON_INVALID_SQL,
+)
 from local_lm.artifacts import ArtifactStore
 from local_lm.config import Settings
 from local_lm.db import Base
