@@ -227,6 +227,7 @@ async def test_execute_detaches_only_target_payload_and_durably_replays(
 async def test_stale_revision_and_reused_operation_key_refuse_without_partial_mutation(
     client: AsyncClient,
 ) -> None:
+    target: Message | None
     with SessionLocal() as session:
         chat = Chat(id="chat_remove_stale", title="Stale authority")
         target = Message(
@@ -288,6 +289,7 @@ async def test_execute_waits_for_chat_guard_then_revalidates_from_fresh_state(
     app: FastAPI,
     client: AsyncClient,
 ) -> None:
+    target: Message | None
     with SessionLocal() as session:
         chat = Chat(id="chat_remove_revalidate", title="Revalidate")
         target = Message(
@@ -509,6 +511,7 @@ async def test_identity_and_already_removed_refusals_are_typed(client: AsyncClie
 async def test_removed_user_source_refuses_both_regeneration_prompt_resolutions(
     client: AsyncClient,
 ) -> None:
+    assistant: Message | None
     with SessionLocal() as session:
         for suffix, provenance in (
             ("parts", {}),
@@ -620,6 +623,8 @@ async def test_removed_user_source_refuses_both_regeneration_prompt_resolutions(
 async def test_removed_run_source_refuses_every_retry_entry_without_mutation(
     client: AsyncClient,
 ) -> None:
+    run: Run | None
+    assistant: Message | None
     with SessionLocal() as session:
         chat = Chat(id="chat_remove_retry_source", title="Retry refusal")
         user = Message(

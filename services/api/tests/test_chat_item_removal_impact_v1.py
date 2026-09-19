@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
 from local_lm.chat_item_removal_impact_v1 import (
@@ -70,8 +72,9 @@ def test_refuses_invalid_and_unbounded_refs() -> None:
 def test_public_constructor_cannot_verify_impact() -> None:
     with pytest.raises(ChatItemRemovalImpactError, match=INVALID_IMPACT):
         ChatItemRemovalImpactV1()
+    constructor: Callable[..., object] = ChatItemRemovalImpactV1
     with pytest.raises(TypeError):
-        ChatItemRemovalImpactV1(
+        constructor(
             schema="lm-atelier-chat-item-removal-impact-v1",
             schema_version=1,
             repository_snapshot_verified=True,

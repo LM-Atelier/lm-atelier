@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
 from local_lm.chat_item_removal_reply_preserve_v1 import (
@@ -32,8 +34,9 @@ def test_refuses_unbounded_ids() -> None:
 def test_public_constructor_cannot_authorize_cascade() -> None:
     with pytest.raises(ChatItemRemovalReplyPreserveError, match=INVALID_REPLY_PRESERVE):
         ChatItemRemovalReplyPreserveV1()
+    constructor: Callable[..., object] = ChatItemRemovalReplyPreserveV1
     with pytest.raises(TypeError):
-        ChatItemRemovalReplyPreserveV1(
+        constructor(
             schema="lm-atelier-chat-item-removal-reply-preserve-v1",
             schema_version=1,
             message_id="m1",

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
 from local_lm.chat_item_removal_replay_refuse_v1 import (
@@ -33,8 +35,9 @@ def test_refuses_unbounded_ids() -> None:
 def test_public_constructor_cannot_authorize_replay() -> None:
     with pytest.raises(ChatItemRemovalReplayRefuseError, match=INVALID_REPLAY_REFUSE):
         ChatItemRemovalReplayRefuseV1()
+    constructor: Callable[..., object] = ChatItemRemovalReplayRefuseV1
     with pytest.raises(TypeError):
-        ChatItemRemovalReplayRefuseV1(
+        constructor(
             schema="lm-atelier-chat-item-removal-replay-refuse-v1",
             schema_version=1,
             message_id="m1",

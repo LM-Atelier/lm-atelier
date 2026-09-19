@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
 from local_lm.chat_item_removal_declaration_v1 import (
@@ -80,8 +82,9 @@ def test_invalid() -> None:
 def test_public_constructor_cannot_authorize() -> None:
     with pytest.raises(ChatItemRemovalDeclarationError, match=INVALID_REMOVAL):
         ChatItemRemovalDeclarationV1()
+    constructor: Callable[..., object] = ChatItemRemovalDeclarationV1
     with pytest.raises(TypeError):
-        ChatItemRemovalDeclarationV1(
+        constructor(
             schema="lm-atelier-chat-item-removal-declaration-v1",
             schema_version=1,
             allowed=True,

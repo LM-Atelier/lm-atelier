@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
 from local_lm.chat_item_removal_identity_preserve_v1 import (
@@ -32,8 +34,9 @@ def test_refuses_unbounded_ids() -> None:
 def test_public_constructor_cannot_authorize_delete() -> None:
     with pytest.raises(ChatItemRemovalIdentityPreserveError, match=INVALID_IDENTITY_PRESERVE):
         ChatItemRemovalIdentityPreserveV1()
+    constructor: Callable[..., object] = ChatItemRemovalIdentityPreserveV1
     with pytest.raises(TypeError):
-        ChatItemRemovalIdentityPreserveV1(
+        constructor(
             schema="lm-atelier-chat-item-removal-identity-preserve-v1",
             schema_version=1,
             message_id="m1",
