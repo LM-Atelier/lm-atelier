@@ -369,14 +369,17 @@ export function StudioView({
               if (plan.sendsLightMap) {
                 // Drawn at the picture's own size, so the map and the picture line up.
                 if (!bitmap) return;
+                // Drawing can throw as well as come back empty; both refuse the same way.
                 void renderLightMap(bitmap.width, bitmap.height, tools.lightDirection).then(
                   (map) => (map ? send(null, map) : setSelectionError(LIGHT_MAP_NOT_PREPARED)),
+                  () => setSelectionError(LIGHT_MAP_NOT_PREPARED),
                 );
               } else if (selection) {
                 // A selection that cannot be encoded is refused, never sent as an
                 // edit of the whole picture it was drawn to protect.
                 void encodeMaskPng(plan.blendSelection ? softened(selection, tools.featherPx) : selection).then(
                   (mask) => (mask ? send(mask) : setSelectionError(SELECTION_NOT_PREPARED)),
+                  () => setSelectionError(SELECTION_NOT_PREPARED),
                 );
               } else send(null);
             }}

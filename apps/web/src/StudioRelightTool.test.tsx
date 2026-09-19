@@ -113,6 +113,18 @@ it("refuses and says why when the light map cannot be drawn", async () => {
   expect(apply).not.toHaveBeenCalled();
 });
 
+it("refuses the same way when drawing the light map throws", async () => {
+  vi.mocked(renderLightMap).mockRejectedValue(new Error("canvas drawing failed"));
+  fireEvent.click(screen.getByRole("button", { name: "Relight from a direction" }));
+  const relight = await screen.findByRole("button", { name: "Relight" });
+  await waitFor(() => expect(relight).toBeEnabled());
+
+  fireEvent.click(relight);
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("The light map could not be drawn");
+  expect(apply).not.toHaveBeenCalled();
+});
+
 it("draws the map bright on the side the light comes from", () => {
   expect(lightMapGradient(400, 200, "left")).toEqual([0, 0, 400, 0]);
   expect(lightMapGradient(400, 200, "right")).toEqual([400, 0, 0, 0]);

@@ -72,3 +72,24 @@ it("refuses and says why instead of editing the whole picture", async () => {
   // The words stay for another try.
   expect(screen.getByRole("textbox")).toHaveValue("make it blue");
 });
+
+it("refuses the same way when drawing the selection throws", async () => {
+  fireEvent.click(screen.getByRole("button", { name: "Brush a selection" }));
+  const canvas = screen.getByRole("application");
+  fireEvent.keyDown(canvas, { key: "Enter" });
+  fireEvent.keyDown(canvas, { key: "ArrowRight" });
+  fireEvent.keyDown(canvas, { key: "Enter" });
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "make it blue" } });
+  // Only the encoder's canvas fails: it throws while drawing, so encoding rejects
+  // rather than coming back empty.
+  vi.mocked(HTMLCanvasElement.prototype.getContext).mockReturnValue({
+    putImageData: () => {
+      throw new Error("canvas drawing failed");
+    },
+  } as unknown as CanvasRenderingContext2D);
+
+  fireEvent.click(screen.getByRole("button", { name: "Apply to selection" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("The selection could not be prepared");
+  expect(apply).not.toHaveBeenCalled();
+});
