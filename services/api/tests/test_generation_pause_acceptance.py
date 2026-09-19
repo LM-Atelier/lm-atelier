@@ -85,7 +85,8 @@ async def test_accepts_turns_while_paused_and_resumes_the_same_snapshot(
     async def read() -> dict[str, Any]:
         current = await client.get("/api/runs/" + run_id)
         assert current.status_code == 200
-        return current.json()
+        payload: dict[str, Any] = current.json()
+        return payload
 
     finished = await wait_for_terminal_status(read, what="the resumed constructed generation")
     assert finished["id"] == run_id and finished["work_plan_id"] == plan_id

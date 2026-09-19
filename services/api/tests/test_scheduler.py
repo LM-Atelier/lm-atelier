@@ -12,7 +12,7 @@ from local_lm.config import Settings
 from local_lm.db import SessionLocal, configure_database, init_db
 from local_lm.domain import JobStatus, utcnow
 from local_lm.models import Chat, Job, Message, Run, WorkPlan, WorkStep, WorkStepDependency
-from local_lm.scheduler import _ELIGIBILITY_SHARE_SECONDS, ResourceScheduler
+from local_lm.scheduler import _ELIGIBILITY_SHARE_SECONDS, JobClaim, ResourceScheduler
 
 
 class _FrozenClock:
@@ -759,7 +759,7 @@ def test_the_claim_path_scans_fresh_rather_than_trusting_the_share(
 
     monkeypatch.setattr(ResourceScheduler, "_eligible_jobs", staticmethod(probe))
 
-    async def drive() -> str:
+    async def drive() -> JobClaim:
         return await scheduler._acquire_job(
             "claimfresh_000",
             resource="gpu",
@@ -789,12 +789,12 @@ def _acquire_one_pass(
     monkeypatch: Any,
     job_id: str,
     capacity: int,
-) -> str | None:
-    """Drive `_acquire_job` through exactly one pass; return the token, or None.
+) -> JobClaim | None:
+    """Drive `_acquire_job` through exactly one pass; return the claim, or None.
 
     `_expire_foreign_claims` runs at the top of every pass, so counting it bounds
     the loop deterministically, with no timer and no dependence on how fast the
-    runner is. A pass that claims returns its token before the second pass
+    runner is. A pass that claims returns its claim before the second pass
     begins, so None means the pass declined to claim.
     """
 
@@ -812,7 +812,7 @@ def _acquire_one_pass(
     monkeypatch.setattr(ResourceScheduler, "_expire_foreign_claims", stop_after_one)
     monkeypatch.setattr(ResourceScheduler, "_publish_job", _no_publish)
 
-    async def drive() -> str:
+    async def drive() -> JobClaim:
         return await scheduler._acquire_job(
             job_id,
             resource="gpu",

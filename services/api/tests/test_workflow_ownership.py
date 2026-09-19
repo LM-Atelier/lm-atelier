@@ -407,8 +407,12 @@ async def test_authored_cloned_and_imported_workflows_are_selectable(
     cloned_family = family_for(cloned["id"])
     imported_family = family_for(imported["id"])
     assert len({created_family["id"], cloned_family["id"], imported_family["id"]}) == 3
-    assert created_family["variants"][0]["readiness"] == "ready"
-    assert imported_family["variants"][0]["readiness"] == "review_required"
+    created_variants = created_family["variants"]
+    imported_variants = imported_family["variants"]
+    assert isinstance(created_variants, list)
+    assert isinstance(imported_variants, list)
+    assert created_variants[0]["readiness"] == "ready"
+    assert imported_variants[0]["readiness"] == "review_required"
 
     chat = (await client.post("/api/chats", json={"title": "Selectable"})).json()
     selected = await client.put(
