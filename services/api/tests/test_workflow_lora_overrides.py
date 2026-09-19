@@ -11,7 +11,7 @@ from typing import Any, cast
 import pytest
 
 import local_lm.workflow_lora_overrides as overrides_module
-from local_lm.auxiliary_assets import MAX_LORA_STRENGTH
+from local_lm.lora_constraints import MAX_LORA_STRENGTH
 from local_lm.workflow_lora_overrides import (
     MAX_WORKFLOW_LORA_OVERRIDE_TARGETS,
     MAX_WORKFLOW_LORA_OVERRIDES_PER_TARGET,

@@ -5,7 +5,7 @@ import inspect
 import json
 from copy import deepcopy
 from dataclasses import FrozenInstanceError, dataclass, replace
-from typing import Any, cast
+from typing import Any, Literal, TypedDict, cast
 
 import pytest
 from httpx2 import AsyncClient
@@ -73,6 +73,11 @@ from local_lm.workflow_lora_slots import (
     extract_workflow_lora_slots_with_private_targets,
 )
 from local_lm.workflow_trust import canonical_graph
+
+
+class _StoredGraphChanges(TypedDict, total=False):
+    workflow_effective_api_graph_json: str
+    effective_api_graph_json: str
 
 
 def _sha256(value: str) -> str:
@@ -957,7 +962,7 @@ async def test_override_and_graph_receipts_cannot_be_rehashed_independently(
 )
 async def test_noncanonical_stored_graph_bytes_are_refused_independently(
     client: AsyncClient,
-    field_name: str,
+    field_name: Literal["workflow_effective_api_graph_json", "effective_api_graph_json"],
 ) -> None:
     del client
     with SessionLocal() as session:
@@ -967,7 +972,9 @@ async def test_noncanonical_stored_graph_bytes_are_refused_independently(
     encoded = cast(str, getattr(result, field_name))
     noncanonical = json.dumps(json.loads(encoded), sort_keys=True, indent=2)
     assert noncanonical != encoded
-    forged = replace(result, **{field_name: noncanonical})
+    changes: _StoredGraphChanges = {}
+    changes[field_name] = noncanonical
+    forged = replace(result, **changes)
 
     with pytest.raises(WorkflowLoraCompositionError) as raised:
         workflow_lora_composition_payload(forged)

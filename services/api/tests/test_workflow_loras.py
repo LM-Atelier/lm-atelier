@@ -11,9 +11,9 @@ from httpx2 import AsyncClient
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
-from local_lm.auxiliary_assets import MAX_LORA_STRENGTH
 from local_lm.comfy_package_widgets import POWER_LORA_LOADER
 from local_lm.db import Base, SessionLocal
+from local_lm.lora_constraints import MAX_LORA_STRENGTH
 from local_lm.models import (
     ComfyRegistryInstall,
     CustomNodeInstall,

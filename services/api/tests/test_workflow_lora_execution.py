@@ -477,23 +477,6 @@ def _admission_receipt(
     return workflow_lora_replay_payload(composition, resolution)
 
 
-def _workflow_witness(session: Session, seeded: SeededWorkflow) -> dict[str, object]:
-    revision = session.get(WorkflowRevision, seeded.revision_id)
-    activation = session.get(WorkflowActivation, seeded.activation_id)
-    assert revision is not None and activation is not None
-    return {
-        "definition_id": seeded.definition_id,
-        "revision_id": seeded.revision_id,
-        "activation": {
-            "id": activation.id,
-            "resolver_version": activation.resolver_version,
-            "dependency_contract_sha256": activation.dependency_contract_sha256,
-            "binding_sha256": activation.binding_sha256,
-            "launch_sha256": activation.details_json["launch_sha256"],
-        },
-    }
-
-
 _ABSENT = object()
 
 

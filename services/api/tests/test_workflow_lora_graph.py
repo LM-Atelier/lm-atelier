@@ -4,7 +4,7 @@ import hashlib
 import json
 from copy import deepcopy
 from dataclasses import FrozenInstanceError, dataclass, replace
-from typing import Any, cast
+from typing import Any, Literal, TypedDict, cast
 
 import pytest
 
@@ -60,6 +60,12 @@ from local_lm.workflow_lora_slots import (
 from local_lm.workflow_trust import canonical_graph
 
 _MISSING = object()
+
+
+class _WitnessDigestChanges(TypedDict, total=False):
+    api_graph_sha256: str
+    dependency_contract_sha256: str
+    activation_binding_sha256: str
 
 
 def _digest(index: int) -> str:
@@ -940,10 +946,14 @@ def test_witness_component_drift_refuses_private_application() -> None:
     ["api_graph_sha256", "dependency_contract_sha256", "activation_binding_sha256"],
 )
 def test_plan_resolved_for_other_evidence_never_applies_to_this_extraction(
-    component: str,
+    component: Literal[
+        "api_graph_sha256", "dependency_contract_sha256", "activation_binding_sha256"
+    ],
 ) -> None:
     case = _case()
-    other = replace(case.catalog.target, **{component: _digest(52)})
+    changes: _WitnessDigestChanges = {}
+    changes[component] = _digest(52)
+    other = replace(case.catalog.target, **changes)
     catalog = WorkflowLoraOverrideCatalog(other, case.catalog.slots)
     plan = _resolution(_Case(case.graph, catalog, case.extraction), {"model_strength": 0.4})
     original = deepcopy(case.graph)
