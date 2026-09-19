@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
 from local_lm.chat_item_removal_payload_detach_v1 import (
@@ -33,8 +35,9 @@ def test_refuses_unbounded_ids() -> None:
 def test_public_constructor_cannot_authorize_detach() -> None:
     with pytest.raises(ChatItemRemovalPayloadDetachError, match=INVALID_PAYLOAD_DETACH):
         ChatItemRemovalPayloadDetachV1()
+    constructor: Callable[..., object] = ChatItemRemovalPayloadDetachV1
     with pytest.raises(TypeError):
-        ChatItemRemovalPayloadDetachV1(
+        constructor(
             schema="lm-atelier-chat-item-removal-payload-detach-v1",
             schema_version=1,
             message_id="m1",
