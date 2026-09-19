@@ -1,6 +1,6 @@
 import { useMutation, type QueryClient } from "@tanstack/react-query";
 import { api } from "./api";
-import type { Chat, Project } from "./types";
+import type { Project } from "./types";
 
 /** The four project mutations, exactly as the workspace root wires them. */
 export function useProjectMutations({
@@ -8,7 +8,7 @@ export function useProjectMutations({
   onImportedChat,
 }: {
   client: QueryClient;
-  onImportedChat: (chatId: string) => void;
+  onImportedChat?: (chatId: string) => void;
 }) {
   const updateProject = useMutation({
     mutationFn: ({ id, values }: { id: string; values: Partial<Project> }) => api.updateProject(id, values),
@@ -32,14 +32,12 @@ export function useProjectMutations({
   });
   const importProject = useMutation({
     mutationFn: api.importProject,
-    onSuccess: (project) => {
+    onSuccess: async (project) => {
       void client.invalidateQueries({ queryKey: ["projects"] });
-      // Awaited, not timed: a slower refetch used to leave the import on nothing.
-      void client.invalidateQueries({ queryKey: ["chats"] }).then(() => {
-        const importedChat = client.getQueryData<Chat[]>(["chats"])?.find((item) => item.project_id === project.id);
-        if (!importedChat) return;
-        onImportedChat(importedChat.id);
-      });
+      await client.invalidateQueries({ queryKey: ["chats"] });
+      if (!onImportedChat) return;
+      const [importedChat] = await api.chats(project.id, true, "", { limit: 1, offset: 0 });
+      if (importedChat) onImportedChat(importedChat.id);
     },
   });
   return { updateProject, deleteProject, exportProject, importProject };
