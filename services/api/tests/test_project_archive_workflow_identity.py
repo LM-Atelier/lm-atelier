@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import io
 import zipfile
+from collections.abc import Mapping
 
 import pytest
 from httpx2 import AsyncClient
@@ -37,7 +38,7 @@ async def _exported_project(
     *,
     operation: str = "text_to_image",
     engine: str = "comfyui",
-    api_graph: dict[str, object] = _GRAPH,
+    api_graph: Mapping[str, object] = _GRAPH,
     input_schema: dict[str, object] | None = None,
 ) -> tuple[str, str, bytes]:
     created = await client.post(

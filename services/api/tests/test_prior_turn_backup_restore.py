@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import copy
 import shutil
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
 from httpx2 import ASGITransport, AsyncClient
 from run_waits import wait_for_terminal_status
 from sqlalchemy import select
@@ -21,7 +23,7 @@ from local_lm.models import Chat, Run
 
 
 @asynccontextmanager
-async def _running(settings: Settings):
+async def _running(settings: Settings) -> AsyncIterator[tuple[FastAPI, AsyncClient]]:
     app = create_app(settings)
     async with app.router.lifespan_context(app):
         await asyncio.wait_for(app.state.retention_sweep, timeout=30)
