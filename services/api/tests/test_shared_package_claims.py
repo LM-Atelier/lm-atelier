@@ -1,26 +1,35 @@
 from __future__ import annotations
 
-import importlib
+from multiprocessing.queues import Queue
+from multiprocessing.synchronize import Event
 from pathlib import Path
+from typing import Never
 
 import pytest
 
 from local_lm import db, models
+from local_lm import shared_package_claims as api
 from local_lm.config import Settings
+from local_lm.filesystem_links import AnchoredDirectory
 from local_lm.shared_asset_contract_v1 import initialize_store_identity
 from local_lm.shared_asset_lock_v1 import SharedAssetLockError
-from local_lm.shared_asset_package_v1 import publish_package
+from local_lm.shared_asset_package_v1 import _load_package_from_store_versions, publish_package
 from local_lm.shared_asset_registry_v1 import (
     FINAL,
     claims_for_consumer,
     finalize_claim,
+    release_claim,
     reserve_claim,
 )
 from local_lm.shared_asset_store_v1 import object_path, publish_file
-from local_lm.shared_package_bindings import SharedPackageReference, prepare_binding
+from local_lm.shared_package_bindings import (
+    SharedPackageBindingError,
+    SharedPackageReference,
+    prepare_binding,
+)
 
 
-def _prepared(tmp_path: Path, consumer: str = "a" * 64):
+def _prepared(tmp_path: Path, consumer: str = "a" * 64) -> tuple[Path, str, SharedPackageReference]:
     root = tmp_path / "library"
     identity = initialize_store_identity(root=root)
     source = tmp_path / "weights.bin"
@@ -35,14 +44,15 @@ def _prepared(tmp_path: Path, consumer: str = "a" * 64):
     return root, binding_id, reference
 
 
-def _row(binding_id):
+def _row(binding_id: str) -> tuple[str, str | None] | None:
     with db.SessionLocal() as session:
         row = session.get(models.SharedPackageBinding, binding_id)
         return None if row is None else (row.state, row.claim_id)
 
 
-def test_completion_is_durable_idempotent_and_keeps_old_install(settings: Settings, tmp_path: Path):
-    api = importlib.import_module("local_lm.shared_package_claims")
+def test_completion_is_durable_idempotent_and_keeps_old_install(
+    settings: Settings, tmp_path: Path
+) -> None:
     root, binding_id, reference = _prepared(tmp_path)
     with db.SessionLocal() as session:
         install = models.ModelInstall(
@@ -60,22 +70,23 @@ def test_completion_is_durable_idempotent_and_keeps_old_install(settings: Settin
     claims = claims_for_consumer(database=root / "index.sqlite3", consumer_id=reference.consumer_id)
     assert [(item.claim_id, item.state) for item in claims] == [(claim, FINAL)]
     with db.SessionLocal() as session:
-        install = session.get(models.ModelInstall, install_id)
-        assert install.active and install.local_path == "models/old.gguf"
-        assert install.shared_package_binding_id is None
+        persisted = session.get(models.ModelInstall, install_id)
+        assert persisted is not None
+        assert persisted.active and persisted.local_path == "models/old.gguf"
+        assert persisted.shared_package_binding_id is None
 
 
 @pytest.mark.parametrize(
     "boundary", ["reserve_claim", "_load_package_from_store_versions", "finalize_claim"]
 )
 def test_completion_recovers_after_external_boundary(
-    settings: Settings, tmp_path: Path, monkeypatch, boundary
-):
-    api = importlib.import_module("local_lm.shared_package_claims")
+    settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
     root, binding_id, reference = _prepared(tmp_path)
     original = getattr(api, boundary)
+    assert callable(original)
 
-    def interrupted(**kwargs):
+    def interrupted(**kwargs: object) -> Never:
         original(**kwargs)
         raise RuntimeError("constructed interruption")
 
@@ -91,14 +102,15 @@ def test_completion_recovers_after_external_boundary(
 
 
 def test_member_verification_has_no_profile_or_registry_writer(
-    settings: Settings, tmp_path: Path, monkeypatch
-):
-    api = importlib.import_module("local_lm.shared_package_claims")
+    settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     root, binding_id, reference = _prepared(tmp_path)
-    original = api._load_package_from_store_versions
+    original = _load_package_from_store_versions
     observed = []
 
-    def verify(**kwargs):
+    def verify(
+        *, store: AnchoredDirectory, digest: str, allow_v2: bool
+    ) -> tuple[tuple[str, str], ...]:
         with db.SessionLocal() as session:
             session.connection().exec_driver_sql("UPDATE shared_package_bindings SET id=id WHERE 0")
             session.rollback()
@@ -108,7 +120,7 @@ def test_member_verification_has_no_profile_or_registry_writer(
             package_digest=reference.package_digest,
         )
         observed.append(_row(binding_id))
-        return original(**kwargs)
+        return original(store=store, digest=digest, allow_v2=allow_v2)
 
     monkeypatch.setattr(api, "_load_package_from_store_versions", verify)
     claim = api.complete_binding_claim(sessions=db.SessionLocal, root=root, binding_id=binding_id)
@@ -116,11 +128,13 @@ def test_member_verification_has_no_profile_or_registry_writer(
 
 
 @pytest.mark.parametrize("kind", ["model", "asset"])
-def test_release_refuses_each_referenced_install(settings: Settings, tmp_path: Path, kind):
-    api = importlib.import_module("local_lm.shared_package_claims")
+def test_release_refuses_each_referenced_install(
+    settings: Settings, tmp_path: Path, kind: str
+) -> None:
     root, binding_id, reference = _prepared(tmp_path)
     claim = api.complete_binding_claim(sessions=db.SessionLocal, root=root, binding_id=binding_id)
     with db.SessionLocal() as session:
+        row: models.ModelInstall | models.ModelAssetInstall
         if kind == "model":
             row = models.ModelInstall(
                 name="Model",
@@ -137,7 +151,7 @@ def test_release_refuses_each_referenced_install(settings: Settings, tmp_path: P
             )
         session.add(row)
         session.commit()
-    with pytest.raises(api.SharedPackageBindingError):
+    with pytest.raises(SharedPackageBindingError):
         api.release_binding_claim(sessions=db.SessionLocal, root=root, binding_id=binding_id)
     assert _row(binding_id) == ("ready", claim)
     assert (
@@ -148,9 +162,8 @@ def test_release_refuses_each_referenced_install(settings: Settings, tmp_path: P
 
 @pytest.mark.parametrize("after_release", [False, True])
 def test_release_recovers_and_preserves_other_consumer_and_bytes(
-    settings: Settings, tmp_path: Path, monkeypatch, after_release
-):
-    api = importlib.import_module("local_lm.shared_package_claims")
+    settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, after_release: bool
+) -> None:
     root, binding_id, reference = _prepared(tmp_path)
     claim = api.complete_binding_claim(sessions=db.SessionLocal, root=root, binding_id=binding_id)
     other = reserve_claim(
@@ -158,11 +171,11 @@ def test_release_recovers_and_preserves_other_consumer_and_bytes(
         consumer_id="b" * 64,
         package_digest=reference.package_digest,
     )
-    original = api.release_claim
+    original = release_claim
 
-    def interrupted(**kwargs):
+    def interrupted(*, database: Path, consumer_id: str, claim_id: str) -> Never:
         if after_release:
-            original(**kwargs)
+            original(database=database, consumer_id=consumer_id, claim_id=claim_id)
         raise RuntimeError("constructed interruption")
 
     with monkeypatch.context() as patch:
@@ -184,8 +197,9 @@ def test_release_recovers_and_preserves_other_consumer_and_bytes(
     )
 
 
-def test_release_recovers_reservation_before_local_claim_commit(settings: Settings, tmp_path: Path):
-    api = importlib.import_module("local_lm.shared_package_claims")
+def test_release_recovers_reservation_before_local_claim_commit(
+    settings: Settings, tmp_path: Path
+) -> None:
     root, binding_id, reference = _prepared(tmp_path)
     reserve_claim(
         database=root / "index.sqlite3",
@@ -200,7 +214,7 @@ def test_release_recovers_reservation_before_local_claim_commit(settings: Settin
     )
 
 
-def test_release_refuses_an_unexplained_finalized_claim(settings: Settings, tmp_path: Path):
+def test_release_refuses_an_unexplained_finalized_claim(settings: Settings, tmp_path: Path) -> None:
     """The negative of the reservation-recovery case above.
 
     That one proves a PROVISIONAL reservation is adopted when the local row lost
@@ -214,7 +228,6 @@ def test_release_refuses_an_unexplained_finalized_claim(settings: Settings, tmp_
     thing this module promises not to do to bytes another consumer may hold.
     """
 
-    api = importlib.import_module("local_lm.shared_package_claims")
     root, binding_id, reference = _prepared(tmp_path)
     claim = reserve_claim(
         database=root / "index.sqlite3",
@@ -227,7 +240,7 @@ def test_release_refuses_an_unexplained_finalized_claim(settings: Settings, tmp_
         claim_id=claim.claim_id,
     )
 
-    with pytest.raises(api.SharedPackageBindingError):
+    with pytest.raises(SharedPackageBindingError):
         api.release_binding_claim(sessions=db.SessionLocal, root=root, binding_id=binding_id)
 
     # Surviving is not enough: a refusal that had already moved the row, or
@@ -241,24 +254,24 @@ def test_release_refuses_an_unexplained_finalized_claim(settings: Settings, tmp_
     assert remaining[0].state == FINAL, "the finalized claim must not have been released"
 
 
-def test_wrong_library_refuses_before_claim_mutation(settings: Settings, tmp_path: Path):
-    api = importlib.import_module("local_lm.shared_package_claims")
+def test_wrong_library_refuses_before_claim_mutation(settings: Settings, tmp_path: Path) -> None:
     root, binding_id, reference = _prepared(tmp_path)
     wrong = tmp_path / "other-library"
     initialize_store_identity(root=wrong)
-    with pytest.raises(api.SharedPackageBindingError):
+    with pytest.raises(SharedPackageBindingError):
         api.complete_binding_claim(sessions=db.SessionLocal, root=wrong, binding_id=binding_id)
     assert _row(binding_id) == ("preparing", None)
     assert not (wrong / "index.sqlite3").exists()
 
 
-def test_corrupt_member_keeps_recovery_claim(settings: Settings, tmp_path: Path):
-    api = importlib.import_module("local_lm.shared_package_claims")
+def test_corrupt_member_keeps_recovery_claim(settings: Settings, tmp_path: Path) -> None:
     root, binding_id, reference = _prepared(tmp_path)
     object_path(root=root, digest=reference.members["unet"]).write_bytes(b"changed")
     with pytest.raises(ValueError):
         api.complete_binding_claim(sessions=db.SessionLocal, root=root, binding_id=binding_id)
-    state, claim = _row(binding_id)
+    row = _row(binding_id)
+    assert row is not None
+    state, claim = row
     assert state == "preparing" and claim
     assert (
         len(claims_for_consumer(database=root / "index.sqlite3", consumer_id=reference.consumer_id))
@@ -267,16 +280,17 @@ def test_corrupt_member_keeps_recovery_claim(settings: Settings, tmp_path: Path)
 
 
 def test_release_cannot_enter_while_completion_holds_binding_lock(
-    settings: Settings, tmp_path: Path, monkeypatch
-):
-    api = importlib.import_module("local_lm.shared_package_claims")
+    settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     root, binding_id, reference = _prepared(tmp_path)
-    original = api._load_package_from_store_versions
+    original = _load_package_from_store_versions
 
-    def verify(**kwargs):
+    def verify(
+        *, store: AnchoredDirectory, digest: str, allow_v2: bool
+    ) -> tuple[tuple[str, str], ...]:
         with pytest.raises(SharedAssetLockError):
             api.release_binding_claim(sessions=db.SessionLocal, root=root, binding_id=binding_id)
-        return original(**kwargs)
+        return original(store=store, digest=digest, allow_v2=allow_v2)
 
     monkeypatch.setattr(api, "_load_package_from_store_versions", verify)
     claim = api.complete_binding_claim(sessions=db.SessionLocal, root=root, binding_id=binding_id)
@@ -287,18 +301,17 @@ def test_release_cannot_enter_while_completion_holds_binding_lock(
 @pytest.mark.parametrize("commit_number", [1, 2])
 @pytest.mark.parametrize("after_commit", [False, True])
 def test_recovery_at_each_profile_commit(
-    settings: Settings, tmp_path: Path, operation, commit_number, after_commit
-):
+    settings: Settings, tmp_path: Path, operation: str, commit_number: int, after_commit: bool
+) -> None:
     from sqlalchemy.orm import Session, sessionmaker
 
-    api = importlib.import_module("local_lm.shared_package_claims")
     root, binding_id, reference = _prepared(tmp_path)
     if operation == "release":
         api.complete_binding_claim(sessions=db.SessionLocal, root=root, binding_id=binding_id)
     calls = 0
 
     class InterruptedSession(Session):
-        def commit(self):
+        def commit(self) -> None:
             nonlocal calls
             calls += 1
             if calls == commit_number and not after_commit:
@@ -320,16 +333,17 @@ def test_recovery_at_each_profile_commit(
         assert _row(binding_id) is None and claims == []
 
 
-def test_install_added_after_release_intent_preserves_claim(settings: Settings, tmp_path: Path):
+def test_install_added_after_release_intent_preserves_claim(
+    settings: Settings, tmp_path: Path
+) -> None:
     from sqlalchemy.orm import Session, sessionmaker
 
-    api = importlib.import_module("local_lm.shared_package_claims")
     root, binding_id, reference = _prepared(tmp_path)
     claim = api.complete_binding_claim(sessions=db.SessionLocal, root=root, binding_id=binding_id)
     inserted = False
 
     class ReferencingSession(Session):
-        def commit(self):
+        def commit(self) -> None:
             nonlocal inserted
             super().commit()
             if not inserted:
@@ -345,7 +359,7 @@ def test_install_added_after_release_intent_preserves_claim(settings: Settings, 
                     )
                     other.commit()
 
-    with pytest.raises(api.SharedPackageBindingError):
+    with pytest.raises(SharedPackageBindingError):
         api.release_binding_claim(
             sessions=sessionmaker(bind=db.engine, class_=ReferencingSession),
             root=root,
@@ -361,16 +375,17 @@ def test_install_added_after_release_intent_preserves_claim(settings: Settings, 
     ] == [claim]
 
 
-def test_profile_writer_spans_external_release(settings: Settings, tmp_path: Path, monkeypatch):
+def test_profile_writer_spans_external_release(
+    settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     import sqlite3
 
-    api = importlib.import_module("local_lm.shared_package_claims")
     root, binding_id, reference = _prepared(tmp_path)
     api.complete_binding_claim(sessions=db.SessionLocal, root=root, binding_id=binding_id)
-    original = api.release_claim
+    original = release_claim
     observed = []
 
-    def release(**kwargs):
+    def release(*, database: Path, consumer_id: str, claim_id: str) -> None:
         connection = sqlite3.connect(str(db.engine.url.database), timeout=0)
         try:
             with pytest.raises(sqlite3.OperationalError, match="locked"):
@@ -378,44 +393,48 @@ def test_profile_writer_spans_external_release(settings: Settings, tmp_path: Pat
             observed.append(True)
         finally:
             connection.close()
-        return original(**kwargs)
+        return original(database=database, consumer_id=consumer_id, claim_id=claim_id)
 
     monkeypatch.setattr(api, "release_claim", release)
     api.release_binding_claim(sessions=db.SessionLocal, root=root, binding_id=binding_id)
     assert observed == [True] and _row(binding_id) is None
 
 
-def _complete_in_child(profile, root, binding_id, entered, resume, result):
+def _complete_in_child(
+    profile: str, root: str, binding_id: str, entered: Event, resume: Event, result: Queue[str]
+) -> None:
     from local_lm import shared_package_claims as api
 
     db.configure_database(Settings(data_dir=Path(profile), dev=True))
-    original = api._load_package_from_store_versions
+    original = _load_package_from_store_versions
 
-    def verify(**kwargs):
+    def verify(
+        *, store: AnchoredDirectory, digest: str, allow_v2: bool
+    ) -> tuple[tuple[str, str], ...]:
         entered.set()
         if not resume.wait(20):
             raise RuntimeError("constructed child timeout")
-        return original(**kwargs)
+        return original(store=store, digest=digest, allow_v2=allow_v2)
 
-    api._load_package_from_store_versions = verify
-    try:
-        result.put(
-            api.complete_binding_claim(
-                sessions=db.SessionLocal,
-                root=Path(root),
-                binding_id=binding_id,
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(api, "_load_package_from_store_versions", verify)
+        try:
+            result.put(
+                api.complete_binding_claim(
+                    sessions=db.SessionLocal,
+                    root=Path(root),
+                    binding_id=binding_id,
+                )
             )
-        )
-    finally:
-        db.engine.dispose()
+        finally:
+            db.engine.dispose()
 
 
-def test_binding_operations_serialize_across_processes(settings: Settings, tmp_path: Path):
+def test_binding_operations_serialize_across_processes(settings: Settings, tmp_path: Path) -> None:
     import multiprocessing
 
     from local_lm.shared_asset_lock_v1 import SharedAssetLockError
 
-    api = importlib.import_module("local_lm.shared_package_claims")
     root, binding_id, reference = _prepared(tmp_path)
     context = multiprocessing.get_context("spawn")
     entered, resume, result = context.Event(), context.Event(), context.Queue()
