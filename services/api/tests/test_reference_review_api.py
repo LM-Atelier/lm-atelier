@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import os
 from contextlib import suppress
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -15,6 +16,7 @@ from sqlalchemy import select
 from local_lm import api as api_module
 from local_lm import artifacts as artifacts_module
 from local_lm.db import SessionLocal
+from local_lm.filesystem_links import AnchoredDirectory, open_entry
 from local_lm.models import Artifact, ReferenceAsset, ReferenceAssetReviewEvent
 
 
@@ -166,7 +168,7 @@ async def test_review_cannot_reach_another_subject_and_cannot_settle_twice(
 
 async def test_review_read_is_bounded_before_materializing_the_artifact(
     client: AsyncClient,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     image = png(800, 800)
     subject_id, asset_id = await attached(client, "Bounded", image)
@@ -325,11 +327,11 @@ async def test_review_materializes_the_descriptor_opened_through_the_held_shard(
         pass
 
     opened: list[TrackedDescriptor] = []
-    materialized: list[TrackedDescriptor] = []
-    real_open_entry = artifacts_module.open_entry
-    real_fdopen = artifacts_module.os.fdopen
+    materialized: list[int] = []
+    real_open_entry = open_entry
+    real_fdopen = os.fdopen
 
-    def tracked_open_entry(anchor, name: str) -> int | None:
+    def tracked_open_entry(anchor: AnchoredDirectory, name: str) -> int | None:
         descriptor = real_open_entry(anchor, name)
         if descriptor is not None:
             tracked = TrackedDescriptor(descriptor)
@@ -337,13 +339,13 @@ async def test_review_materializes_the_descriptor_opened_through_the_held_shard(
             return tracked
         return None
 
-    def tracked_fdopen(descriptor: int, *args, **kwargs):
+    def tracked_fdopen(descriptor: int, *args: Any, **kwargs: Any) -> Any:
         if opened and descriptor is opened[-1]:
             materialized.append(descriptor)
         return real_fdopen(descriptor, *args, **kwargs)
 
     monkeypatch.setattr(artifacts_module, "open_entry", tracked_open_entry)
-    monkeypatch.setattr(artifacts_module.os, "fdopen", tracked_fdopen)
+    monkeypatch.setattr(os, "fdopen", tracked_fdopen)
 
     reviewed = await client.post(
         f"/api/references/{subject_id}/assets/{asset_id}/review",
