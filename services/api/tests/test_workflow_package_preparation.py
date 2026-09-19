@@ -7,9 +7,11 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock, Mock
 
 import pytest
 from httpx2 import AsyncClient
+from sqlalchemy.orm import Session
 
 from local_lm import workflow_package_preparation as composition
 from local_lm.comfy_registry import ComfyNodeResolution, ComfyRegistryResolution
@@ -78,9 +80,17 @@ class _NullSessionFactory:
 
     def __init__(self, install: object | None = None) -> None:
         self._install = install
+        self._session = MagicMock(spec_set=["get", "__enter__", "__exit__"])
+        self._session.get.side_effect = self.get
+        self._session.__enter__.side_effect = self._enter_session
+        self._session.__exit__.side_effect = self.__exit__
 
-    def __call__(self) -> _NullSessionFactory:
-        return self
+    def __call__(self) -> Session:
+        return self._session
+
+    def _enter_session(self) -> Session:
+        self.__enter__()
+        return self._session
 
     def __enter__(self) -> _NullSessionFactory:
         return self
@@ -96,7 +106,7 @@ async def test_composes_resolve_close_prepare_in_order(monkeypatch: pytest.Monke
     order: list[str] = []
     phases: list[str] = []
     closure = SimpleNamespace(closure="closure-object")
-    prepared = SimpleNamespace(install_id="install_1")
+    prepared = Mock(spec_set=["install_id"], install_id="install_1")
 
     async def fake_drive(resolution: Any, **kwargs: Any) -> Any:
         order.append("drive")
@@ -150,7 +160,7 @@ async def test_renewal_reuses_resolution_and_closure_without_replacing_node_code
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     closure = SimpleNamespace(closure="closure-object")
-    prepared = SimpleNamespace(install_id="install_1")
+    prepared = Mock(spec_set=["install_id"], install_id="install_1")
 
     async def fake_drive(_resolution: Any, **_kwargs: Any) -> Any:
         return closure
@@ -422,7 +432,7 @@ async def test_commit_pin_stages_reads_closes_and_prepares_the_same_tree(
         report,
     )
     closure = SimpleNamespace(closure="closure-object")
-    prepared = SimpleNamespace(install_id="install_commit")
+    prepared = Mock(spec_set=["install_id"], install_id="install_commit")
 
     async def fake_stage(**kwargs: Any) -> ComfyRegistryStagedArchive:
         order.append("stage")
@@ -739,7 +749,7 @@ async def test_a_registry_archive_omission_reaches_the_install_transaction(
     of them exercised.
     """
     closure = SimpleNamespace(closure="closure-object")
-    prepared = SimpleNamespace(install_id="install_1")
+    prepared = Mock(spec_set=["install_id"], install_id="install_1")
     seen: dict[str, Any] = {}
 
     async def fake_drive(resolution: Any, **_kwargs: Any) -> Any:
