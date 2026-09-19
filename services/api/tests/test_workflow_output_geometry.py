@@ -157,7 +157,7 @@ def test_proof_is_sealed_frozen_and_detached() -> None:
     with pytest.raises(WorkflowOutputGeometryError):
         WorkflowOutputGeometryProof(object())
     with pytest.raises(FrozenInstanceError):
-        result.proof.revision_id = "other"  # type: ignore[misc]
+        result.proof.revision_id = "other"
 
     cast_graph = arguments["api_graph"]
     assert isinstance(cast_graph, dict)
@@ -191,7 +191,7 @@ def test_artifact_drift_fails_closed() -> None:
     arguments = _arguments()
     graph = arguments["api_graph"]
     assert isinstance(graph, dict)
-    graph["latent"]["inputs"]["width"] = 512  # type: ignore[index]
+    graph["latent"]["inputs"]["width"] = 512
 
     assert _prove(arguments).available is False
 
@@ -302,7 +302,7 @@ def test_split_dimension_bindings_and_lone_outpaint_node_fail_closed() -> None:
     split = _arguments()
     split_graph = split["api_graph"]
     assert isinstance(split_graph, dict)
-    split_graph["latent"]["inputs"]["height"] = 768  # type: ignore[index]
+    split_graph["latent"]["inputs"]["height"] = 768
     split_graph["unrelated"] = {
         "class_type": "EmptyLatentImage",
         "inputs": {"width": 1024, "height": "${height}"},
@@ -354,7 +354,7 @@ def test_nan_and_boolean_dimensions_fail_closed() -> None:
         arguments = deepcopy(_arguments())
         schema = arguments["input_schema"]
         assert isinstance(schema, dict)
-        schema["properties"]["width"]["default"] = invalid  # type: ignore[index]
+        schema["properties"]["width"]["default"] = invalid
         arguments["artifact_sha256"] = "a" * 64
         assert _prove(arguments).available is False
 
@@ -596,7 +596,7 @@ def test_stored_artifact_drift_resolves_nothing_for_a_valid_request() -> None:
     arguments = _arguments()
     schema = arguments["input_schema"]
     assert isinstance(schema, dict)
-    width = schema["properties"]["width"]  # type: ignore[index]
+    width = schema["properties"]["width"]
     width["maximum"] = 4096
 
     assert resolve_workflow_output_geometry(_prove(arguments), _request()) is None
