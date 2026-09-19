@@ -8,6 +8,8 @@ from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
+from fastapi import FastAPI
 from httpx2 import AsyncClient
 from run_waits import wait_for_terminal_status
 from sqlalchemy import select, update
@@ -19,6 +21,7 @@ from local_lm.auxiliary_assets import checkpoint_lora_extension
 from local_lm.db import SessionLocal
 from local_lm.domain import utcnow
 from local_lm.models import (
+    Artifact,
     Job,
     ModelAssetInstall,
     Run,
@@ -31,7 +34,7 @@ async def _wait_for_run(
     client: AsyncClient,
     run_id: str,
     expected: str = "complete",
-) -> dict:  # type: ignore[type-arg]
+) -> dict[str, Any]:
     async def read() -> dict[str, Any]:
         response = await client.get(f"/api/runs/{run_id}")
         assert response.status_code == 200
@@ -48,9 +51,9 @@ async def _wait_for_step_states(
     client: AsyncClient,
     plan_id: str,
     expected: list[str],
-) -> dict:  # type: ignore[type-arg]
+) -> dict[str, Any]:
     deadline = asyncio.get_running_loop().time() + 8
-    plan: dict = {}  # type: ignore[type-arg]
+    plan: dict[str, Any] = {}
     while asyncio.get_running_loop().time() < deadline:
         response = await client.get(f"/api/work-plans/{plan_id}")
         assert response.status_code == 200
@@ -63,8 +66,8 @@ async def _wait_for_step_states(
 
 async def test_ordered_story_image_video_summary_retries_only_cancelled_video(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     original_generate = MockMediaAdapter.generate
     video_started = asyncio.Event()
 
@@ -151,8 +154,8 @@ async def test_ordered_story_image_video_summary_retries_only_cancelled_video(
 
 async def test_lora_image_regeneration_cancel_retry_revision_switch_and_export(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     with SessionLocal() as session:
         definition = session.scalar(
             select(WorkflowDefinition).where(WorkflowDefinition.operation == "text_to_image")
@@ -355,8 +358,8 @@ async def test_lora_image_regeneration_cancel_retry_revision_switch_and_export(
 
 async def test_exhausted_media_storage_rejects_before_any_turn_is_written(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         "local_lm.orchestrator.shutil.disk_usage",
         lambda _path: SimpleNamespace(free=0),
@@ -377,8 +380,8 @@ async def test_exhausted_media_storage_rejects_before_any_turn_is_written(
 
 async def test_media_oom_fails_truthfully_then_retries_without_duplicate_output(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     original_generate = MockMediaAdapter.generate
 
     async def fail_with_oom(
@@ -416,13 +419,13 @@ async def test_media_oom_fails_truthfully_then_retries_without_duplicate_output(
 
 
 async def test_video_postprocessing_never_holds_a_sqlite_write_transaction(
-    app,
+    app: FastAPI,
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     poster_checked = asyncio.Event()
 
-    async def poster_with_concurrent_progress_write(_artifact) -> None:  # type: ignore[no-untyped-def]
+    async def poster_with_concurrent_progress_write(_artifact: Artifact) -> None:
         with SessionLocal() as concurrent:
             concurrent.execute(
                 update(Job).where(Job.status == "running").values(updated_at=utcnow())
@@ -447,14 +450,14 @@ async def test_video_postprocessing_never_holds_a_sqlite_write_transaction(
 
 
 async def test_video_proxy_is_ingested_from_disk_and_staging_is_removed(
-    app,
+    app: FastAPI,
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     proxy_content = b"file-backed-proxy-output"
     staged_path = app.state.services.artifacts.root / "owned-proxy-test.mp4"
 
-    async def staged_proxy(_artifact) -> StagedArtifactFile:  # type: ignore[no-untyped-def]
+    async def staged_proxy(_artifact: Artifact) -> StagedArtifactFile:
         staged_path.write_bytes(proxy_content)
         return StagedArtifactFile(
             path=staged_path,
@@ -462,7 +465,7 @@ async def test_video_proxy_is_ingested_from_disk_and_staging_is_removed(
             original_name="owned-proxy.mp4",
         )
 
-    async def no_poster(_artifact) -> None:  # type: ignore[no-untyped-def]
+    async def no_poster(_artifact: Artifact) -> None:
         return None
 
     monkeypatch.setattr(
