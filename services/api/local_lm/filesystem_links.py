@@ -116,6 +116,12 @@ _DIRECTORY_QUERY_BUFFER: Final = 64 * 1024
 #: this primitive walks what it returns, so an unbounded answer is an
 #: unbounded amount of someone else's work.
 _MAX_LISTED_ENTRIES: Final = 8192
+#: How many levels below its root a walk or a tree removal descends. Deeper
+#: than any tree this application writes; a deeper one refuses whole rather
+#: than being handled in part.
+_MAX_WALK_DEPTH: Final = 64
+#: How many entries one walk or tree removal handles in total.
+_MAX_WALKED_ENTRIES: Final = 200_000
 #: linkat flag: oldpath is ignored and olddirfd is the file itself.
 _AT_EMPTY_PATH: Final = 0x1000
 #: POSIX d_type values. Only the four that map to a distinct kind are named;
@@ -1258,6 +1264,183 @@ def _raise_if_listing_stopped(
 
     if should_stop is not None and should_stop():
         raise AnchoredListingStopped("directory listing stopped") from None
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class WalkedEntry:
+    """One entry of a held tree, with the held directory it was listed in.
+
+    `parts` places the entry below the walk's root, one validated component per
+    level. This module never joins them into a pathname; they exist so a caller
+    can report or compare positions.
+
+    `parent` is held only while the walk is paused on this entry. Act through
+    it - read_entry, remove_entry, open_child_directory - before asking for the
+    next entry, and never keep it: the walk closes it on the way back up.
+    """
+
+    parent: AnchoredDirectory
+    parts: tuple[str, ...]
+    entry: AnchoredEntry
+
+
+class _WalkBudget:
+    """Count down the entries one walk may still take, shared by every level."""
+
+    __slots__ = ("remaining",)
+
+    def __init__(self, limit: int) -> None:
+        self.remaining = limit
+
+    def spend(self) -> None:
+        self.remaining -= 1
+        if self.remaining < 0:
+            _refuse()
+
+
+def walk_entries(
+    anchor: AnchoredDirectory,
+    *,
+    max_depth: int = _MAX_WALK_DEPTH,
+    limit: int = _MAX_WALKED_ENTRIES,
+    include_metadata: bool = True,
+    should_stop: Callable[[], bool] | None = None,
+) -> Generator[WalkedEntry, None, None]:
+    """Walk a held tree top-down without ever entering a link.
+
+    Each level is listed through its held parent with list_entries, so an
+    entry's name and kind come from one enumeration record, and only a
+    DIRECTORY is entered - opened through that same parent by
+    open_child_directory, which refuses a link on both platforms. A link, an
+    unknown kind and anything else are yielded for the caller to judge and are
+    never entered.
+
+    os.walk cannot be made to do this. On Windows a junction is not a link to
+    the predicates `followlinks` consults, so os.walk and Path.rglob descend
+    into one and report the target's files as the tree's own.
+
+    A directory is yielded before its contents, so a caller can stop at the
+    first entry it will not accept. An entry that becomes a link between its
+    listing and its descent refuses instead of being entered. An entry more
+    than `max_depth` levels below the root, or a tree holding more than `limit`
+    entries, refuses rather than being walked in part; so does a zero or
+    negative bound. The refusal can come after earlier entries were yielded,
+    so a caller acting on entries as they arrive must treat it as the tree's
+    answer, not as the end of it.
+    """
+
+    if max_depth < 1 or limit < 1:
+        _refuse()
+    yield from _walk_level(
+        anchor,
+        (),
+        _WalkBudget(limit),
+        max_depth=max_depth,
+        include_metadata=include_metadata,
+        should_stop=should_stop,
+    )
+
+
+def _walk_level(
+    directory: AnchoredDirectory,
+    prefix: tuple[str, ...],
+    budget: _WalkBudget,
+    *,
+    max_depth: int,
+    include_metadata: bool,
+    should_stop: Callable[[], bool] | None,
+) -> Generator[WalkedEntry, None, None]:
+    entries = list_entries(directory, include_metadata=include_metadata, should_stop=should_stop)
+    if entries and len(prefix) >= max_depth:
+        _refuse()
+    for entry in entries:
+        # Observed before every entry, not only between levels: a caller that
+        # asks the walk to stop gets no further entry from a level already read.
+        _raise_if_listing_stopped(should_stop)
+        budget.spend()
+        parts = (*prefix, entry.name)
+        yield WalkedEntry(directory, parts, entry)
+        if entry.kind is not AnchoredEntryKind.DIRECTORY:
+            continue
+        _raise_if_listing_stopped(should_stop)
+        with open_child_directory(directory, entry.name) as child:
+            yield from _walk_level(
+                child,
+                parts,
+                budget,
+                max_depth=max_depth,
+                include_metadata=include_metadata,
+                should_stop=should_stop,
+            )
+
+
+def remove_tree(
+    anchor: AnchoredDirectory,
+    name: str,
+    *,
+    max_depth: int = _MAX_WALK_DEPTH,
+    limit: int = _MAX_WALKED_ENTRIES,
+) -> None:
+    """Remove one child directory and everything below it, through held parents.
+
+    The contained counterpart of shutil.rmtree. Every level is emptied through
+    its own held handle - files with remove_entry, directories with
+    remove_directory_entry once they are empty - so no pathname is rebuilt at
+    any depth and nothing reached through a link is touched.
+
+    It fails closed rather than choosing for its caller. The whole tree is
+    walked first, and a link, an unknown kind or anything else anywhere in it
+    refuses before anything is removed; so does `name` itself being a link or
+    a file. A link that a listing sees is neither entered nor removed. Each
+    level is listed again before it is touched, so a link planted since the
+    first walk refuses where it is met; what was already removed stays removed.
+
+    No check closes the moment between listing a file and removing it. A file
+    is removed by its name, which removes whatever entry holds that name at
+    that moment, so a link put in a listed file's place just then is itself
+    unlinked. Its target is never reached, and nothing outside the tree is
+    written or removed, on either platform. A caller must not rely on a link
+    inside a tree it removes surviving the removal.
+
+    Absence of `name` is success, matching remove_directory_entry. A file that
+    cannot be removed - held open elsewhere, or read-only on Windows - refuses;
+    no attribute is changed to force it.
+    """
+
+    _require_entry_name(name)
+    if max_depth < 1 or limit < 1:
+        _refuse()
+    found = [entry for entry in list_entries(anchor, include_metadata=False) if entry.name == name]
+    if not found:
+        return
+    if found[0].kind is not AnchoredEntryKind.DIRECTORY:
+        _refuse()
+    with open_child_directory(anchor, name) as directory:
+        for walked in walk_entries(
+            directory, max_depth=max_depth, limit=limit, include_metadata=False
+        ):
+            if not walked.entry.is_safe:
+                _refuse()
+        _empty_directory(directory, 1, _WalkBudget(limit), max_depth=max_depth)
+    remove_directory_entry(anchor, name)
+
+
+def _empty_directory(
+    directory: AnchoredDirectory, depth: int, budget: _WalkBudget, *, max_depth: int
+) -> None:
+    entries = list_entries(directory, include_metadata=False)
+    # Checked again at every level, before this level is touched: the first
+    # walk proved the tree safe, but only as it was then.
+    if any(not entry.is_safe for entry in entries) or (entries and depth > max_depth):
+        _refuse()
+    for entry in entries:
+        budget.spend()
+        if entry.kind is AnchoredEntryKind.FILE:
+            remove_entry(directory, entry.name)
+            continue
+        with open_child_directory(directory, entry.name) as child:
+            _empty_directory(child, depth + 1, budget, max_depth=max_depth)
+        remove_directory_entry(directory, entry.name)
 
 
 def _iter_anchored_entries(
