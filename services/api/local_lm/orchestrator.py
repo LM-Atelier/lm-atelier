@@ -88,6 +88,7 @@ from .generation_offers import (
     routing_plan_for_offer,
     should_extract_generation_offer,
 )
+from .image_edit_difference import INCOMPARABLE, ImageDifference, compare_edit
 from .image_edit_kind import image_edit_kind
 from .image_edit_strength import (
     EditScope,
@@ -7591,6 +7592,47 @@ class ConversationOrchestrator:
         return accepted
 
     @staticmethod
+    def _image_edit_verification_mask(
+        session: Session, settings: dict[str, Any]
+    ) -> tuple[Artifact | None, bool] | None:
+        """The selection an edit was confined to, as its mask and inversion, if any.
+
+        None means the edit had no selection. A selection whose mask is no
+        longer stored returns no artifact, which leaves nothing to compare.
+        """
+        selection = settings.get(MASK_SETTING_KEY)
+        if not isinstance(selection, dict):
+            return None
+        mask = session.get(Artifact, str(selection.get("artifact_id") or ""))
+        if mask is not None:
+            # Read later off the event loop, after this session has closed.
+            session.expunge(mask)
+        return mask, selection.get("invert") is True
+
+    def _image_edit_difference(
+        self,
+        source: Artifact,
+        result: Artifact,
+        mask: tuple[Artifact | None, bool] | None,
+    ) -> ImageDifference:
+        """How the result differs from its source where the edit was asked."""
+        invert = False
+        mask_bytes: bytes | None = None
+        try:
+            source_bytes = self.artifacts.verified_bytes(source, maximum_bytes=MAX_BLEND_READ_BYTES)
+            result_bytes = self.artifacts.verified_bytes(result, maximum_bytes=MAX_BLEND_READ_BYTES)
+            if mask is not None:
+                mask_artifact, invert = mask
+                if mask_artifact is None:
+                    return INCOMPARABLE
+                mask_bytes = self.artifacts.verified_bytes(
+                    mask_artifact, maximum_bytes=MAX_BLEND_READ_BYTES
+                )
+        except (OSError, ValueError):
+            return INCOMPARABLE
+        return compare_edit(source_bytes, result_bytes, mask=mask_bytes, invert=invert)
+
+    @staticmethod
     def _image_edit_verification_profile(
         session: Session, profile_id: str, snapshot: AcceptedContext | None
     ) -> tuple[ModelProfile | None, ModelInstall | None, str | None]:
@@ -7696,6 +7738,9 @@ class ConversationOrchestrator:
                     else:
                         session.rollback()
                     return
+                verification_mask = self._image_edit_verification_mask(
+                    session, snapshot.settings if snapshot is not None else run.settings_json
+                )
                 profile, install, launch_scope = self._image_edit_verification_profile(
                     session, payload.vision_profile_id, snapshot
                 )
@@ -7914,6 +7959,12 @@ class ConversationOrchestrator:
                         else:
                             session.rollback()
                 return
+            # The pixels are asked as well as the model. Nothing measurable
+            # changed where the edit was asked is conclusive, and a vision
+            # "yes" does not override it.
+            difference = await asyncio.to_thread(
+                self._image_edit_difference, source, result, verification_mask
+            )
             decision = decide_image_edit_retry(
                 assessment,
                 attempt=payload.attempt,
@@ -7921,9 +7972,10 @@ class ConversationOrchestrator:
                 current_strength=payload.current_strength,
                 minimum=payload.minimum,
                 maximum=payload.maximum,
+                difference=difference,
             )
             persisted = {
-                **decision.provenance(assessment),
+                **decision.provenance(assessment, difference),
                 "status": "complete",
                 "worker_profile_id": payload.vision_profile_id,
                 "source_artifact_id": payload.source_artifact_id,

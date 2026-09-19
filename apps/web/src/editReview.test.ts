@@ -56,6 +56,17 @@ describe("editReviewSummary", () => {
     })).toBe("Edit review found your change");
   });
 
+  it("reports a result whose pixels did not change, whatever the model said", () => {
+    expect(editReviewSummary({
+      image_edit_verification: {
+        status: "complete",
+        reason: "no_measurable_change",
+        assessment,
+        difference: { mean_absolute_difference: 0.2, changed: false, comparable: true },
+      },
+    })).toBe("Edit review measured no change where you asked for one");
+  });
+
   it("reports a missing change and collateral change separately", () => {
     expect(editReviewSummary({
       image_edit_verification: {

@@ -6,6 +6,7 @@ import math
 import pytest
 
 from local_lm.domain import Operation
+from local_lm.image_edit_difference import ImageDifference
 from local_lm.image_edit_verification import (
     MAX_ASSESSMENT_CHARACTERS,
     ImageEditVerificationAssessment,
@@ -338,3 +339,75 @@ def test_provenance_is_bounded_and_contains_no_model_prose() -> None:
     }
     assert "prompt" not in json.dumps(provenance).casefold()
     assert "identity" not in json.dumps(provenance).casefold()
+
+
+UNCHANGED = ImageDifference(mean_absolute_difference=0.4, changed=False, comparable=True)
+CHANGED = ImageDifference(mean_absolute_difference=9.0, changed=True, comparable=True)
+UNREADABLE = ImageDifference(mean_absolute_difference=0.0, changed=True, comparable=False)
+CONFIDENT_YES = _assessment(
+    visible=True, preserved=True, retry=False, direction=VerificationDirection.NONE
+)
+
+
+def test_an_unchanged_picture_is_never_accepted_on_the_assessment_alone() -> None:
+    decision = decide_image_edit_retry(
+        CONFIDENT_YES,
+        attempt=0,
+        parameter=None,
+        current_strength=None,
+        minimum=None,
+        maximum=None,
+        difference=UNCHANGED,
+    )
+    assert (decision.retry, decision.reason) == (False, VerificationReason.NO_MEASURABLE_CHANGE)
+    assert decision.provenance(CONFIDENT_YES, UNCHANGED)["difference"] == UNCHANGED.provenance()
+
+
+def test_an_unchanged_picture_gets_its_one_stronger_retry_whatever_the_assessment_says() -> None:
+    decision = decide_image_edit_retry(
+        CONFIDENT_YES,
+        attempt=0,
+        parameter="denoise",
+        current_strength=0.5,
+        minimum=0.3,
+        maximum=0.8,
+        difference=UNCHANGED,
+    )
+    assert (decision.retry, decision.reason) == (True, VerificationReason.NO_MEASURABLE_CHANGE)
+    assert (decision.value_before, decision.value_after) == (0.5, 0.62)
+    at_limit = decide_image_edit_retry(
+        CONFIDENT_YES,
+        attempt=1,
+        parameter="denoise",
+        current_strength=0.62,
+        minimum=0.3,
+        maximum=0.8,
+        difference=UNCHANGED,
+    )
+    assert (at_limit.retry, at_limit.reason) == (False, VerificationReason.NO_MEASURABLE_CHANGE)
+    at_bound = decide_image_edit_retry(
+        CONFIDENT_YES,
+        attempt=0,
+        parameter="denoise",
+        current_strength=0.8,
+        minimum=0.3,
+        maximum=0.8,
+        difference=UNCHANGED,
+    )
+    assert (at_bound.retry, at_bound.reason) == (False, VerificationReason.NO_MEASURABLE_CHANGE)
+
+
+@pytest.mark.parametrize("difference", [CHANGED, UNREADABLE, None])
+def test_a_changed_or_incomparable_picture_leaves_the_assessment_to_decide(
+    difference: ImageDifference | None,
+) -> None:
+    decision = decide_image_edit_retry(
+        CONFIDENT_YES,
+        attempt=0,
+        parameter="denoise",
+        current_strength=0.5,
+        minimum=0.3,
+        maximum=0.8,
+        difference=difference,
+    )
+    assert (decision.retry, decision.reason) == (False, VerificationReason.ACCEPTED)

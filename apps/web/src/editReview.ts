@@ -78,6 +78,12 @@ export function editReviewSummary(
       return "Edit review suggested another attempt · it has not started yet";
   }
 
+  // The pixels outrank the model: a result that measurably did not change
+  // where the edit was asked is reported as such, whatever the model said.
+  if (review.reason === "no_measurable_change") {
+    return "Edit review measured no change where you asked for one";
+  }
+
   const assessment = record(review.assessment);
   if (!assessment) return null;
   if (assessment.requested_change_visible === false) {
