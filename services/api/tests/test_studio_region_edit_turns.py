@@ -343,11 +343,11 @@ async def test_an_automatic_retry_keeps_the_selection() -> None:
             return None
 
     orchestrator = ConversationOrchestrator(
-        engines=SimpleNamespace(settings=SimpleNamespace()),
+        engines=Mock(spec_set=["settings"], settings=SimpleNamespace()),
         artifacts=Mock(),
-        events=SimpleNamespace(publish=AsyncMock()),
-        scheduler=SimpleNamespace(publish_job=AsyncMock()),
-        processes=SimpleNamespace(statuses=Mock(return_value=[])),
+        events=Mock(spec_set=["publish"], publish=AsyncMock()),
+        scheduler=Mock(spec_set=["publish_job"], publish_job=AsyncMock()),
+        processes=Mock(spec_set=["statuses"], statuses=Mock(return_value=[])),
         session_factory=Mock(),
     )
     # What the stored-settings filter returns: the workflow's own fields only.
@@ -390,5 +390,7 @@ async def test_an_automatic_retry_keeps_the_selection() -> None:
         claim=JobClaim(token="verification-attempt", attempt=1),
     )
 
-    request = orchestrator.create_turn.await_args.args[2]
+    awaited = orchestrator.create_turn.await_args
+    assert awaited is not None
+    request = awaited.args[2]
     assert request.settings == {"steps": 8, "denoise": 0.62, "mask": selection}
