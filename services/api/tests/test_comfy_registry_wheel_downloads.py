@@ -7,6 +7,7 @@ import subprocess
 import sys
 import textwrap
 import time
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -32,7 +33,7 @@ _TAG = "py3-none-any"
 
 
 def _manifest(
-    entries: list[tuple[str, str, bytes, bytes | None]] | None = None,
+    entries: Sequence[tuple[str, str, bytes, bytes | None]] | None = None,
 ) -> ComfyRegistryWheelArtifactManifest:
     selected = (
         entries
