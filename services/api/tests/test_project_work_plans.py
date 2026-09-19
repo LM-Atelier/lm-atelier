@@ -73,7 +73,8 @@ async def _archive(
 
 def _manifest(content: bytes) -> dict[str, Any]:
     with zipfile.ZipFile(io.BytesIO(content)) as archive:
-        return json.loads(archive.read("manifest.json"))
+        manifest: dict[str, Any] = json.loads(archive.read("manifest.json"))
+        return manifest
 
 
 @pytest.mark.parametrize("output_count", [1, 3])
