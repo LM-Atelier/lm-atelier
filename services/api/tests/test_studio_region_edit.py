@@ -22,6 +22,12 @@ MASK_ID = f"sha256:{'c' * 64}"
 BOX = (16, 12, 40, 30)
 
 
+def _pixel_channels(image: Image.Image, position: tuple[int, int]) -> tuple[int, ...]:
+    pixel = image.getpixel(position)
+    assert isinstance(pixel, tuple)
+    return pixel
+
+
 def _png(image: Image.Image, **options: object) -> bytes:
     buffer = io.BytesIO()
     image.save(buffer, format="PNG", **options)
@@ -97,7 +103,7 @@ def test_a_feathered_edge_mixes_the_two_pictures() -> None:
     out = _pixels(blend_through_selection(_edit(_png(source), _mask(blur=3)), _png(edited)).content)
 
     centre = out.getpixel((28, 21))
-    edge = out.getpixel((16, 21))
+    edge = _pixel_channels(out, (16, 21))
     far = out.getpixel((2, 2))
     assert centre == (255, 255, 255)
     assert far == (0, 0, 0)
@@ -214,7 +220,7 @@ def test_a_transparent_source_stays_transparent_where_it_was() -> None:
 
     assert out.mode == "RGBA"
     assert out.getpixel((24, 20)) == (10, 200, 30, 255)
-    assert out.getpixel((17, 13))[3] == 0
+    assert _pixel_channels(out, (17, 13))[3] == 0
     assert out.getpixel((2, 2)) == (200, 20, 20, 0)
 
 

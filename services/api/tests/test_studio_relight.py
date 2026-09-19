@@ -26,6 +26,12 @@ from local_lm.studio_relight import (
 SOURCE_ID = f"sha256:{'b' * 64}"
 
 
+def _pixel_channels(image: Image.Image, position: tuple[int, int]) -> tuple[int, ...]:
+    pixel = image.getpixel(position)
+    assert isinstance(pixel, tuple)
+    return pixel
+
+
 def _png(image: Image.Image, **options: Any) -> bytes:
     buffer = io.BytesIO()
     image.save(buffer, format="PNG", **options)
@@ -213,9 +219,9 @@ def test_neutral_warmth_changes_nothing_and_a_warm_light_warms() -> None:
     picture = Image.new("RGB", (8, 8), (128, 128, 128))
 
     assert warmth_grade(picture, 6500).getpixel((0, 0)) == (128, 128, 128)
-    red, green, blue = warmth_grade(picture, 4500).getpixel((0, 0))
+    red, green, blue = _pixel_channels(warmth_grade(picture, 4500), (0, 0))
     assert red > 128 > blue
-    cool_red, _, cool_blue = warmth_grade(picture, 7500).getpixel((0, 0))
+    cool_red, _, cool_blue = _pixel_channels(warmth_grade(picture, 7500), (0, 0))
     assert cool_blue > 128 > cool_red
 
 
@@ -242,8 +248,8 @@ def test_a_transparent_source_keeps_its_transparency() -> None:
     )
 
     assert out.mode == "RGBA"
-    assert out.getpixel((5, 5))[3] == 255
-    assert out.getpixel((30, 30))[3] == 0
+    assert _pixel_channels(out, (5, 5))[3] == 255
+    assert _pixel_channels(out, (30, 30))[3] == 0
 
 
 def test_the_source_colour_profile_is_kept() -> None:
