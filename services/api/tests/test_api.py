@@ -18,7 +18,7 @@ import pytest
 from fastapi import FastAPI
 from httpx2 import ASGITransport, AsyncClient
 from PIL import Image
-from run_waits import wait_for_terminal_status
+from run_waits import wait_for_terminal_status, wait_until
 from sqlalchemy import func, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
@@ -92,6 +92,20 @@ async def wait_for_assistant(client: AsyncClient, chat_id: str, expected_type: s
     assistant = await wait_for_terminal_status(read, what=f"the assistant run in chat {chat_id}")
     assert any(part["type"] == expected_type for part in assistant["parts"])
     return cast(dict, assistant)
+
+
+async def wait_for_step_statuses(
+    client: AsyncClient, plan_id: str, expected: list[str]
+) -> dict[str, Any]:
+    async def read() -> dict[str, Any]:
+        plan: dict[str, Any] = (await client.get(f"/api/work-plans/{plan_id}")).json()
+        return plan
+
+    return await wait_until(
+        read,
+        lambda plan: [step["status"] for step in plan["steps"]] == expected,
+        what=f"the steps of work plan {plan_id}",
+    )
 
 
 async def wait_for_run(client: AsyncClient, run_id: str) -> dict:  # type: ignore[type-arg]
@@ -2306,17 +2320,7 @@ async def test_ordered_plan_blocks_dependents_and_resumes_after_retry(
     )
     assert response.status_code == 202
     plan_id = response.json()["run"]["work_plan_id"]
-    deadline = asyncio.get_running_loop().time() + 5
-    blocked_plan: dict = {}
-    while asyncio.get_running_loop().time() < deadline:
-        blocked_plan = (await client.get(f"/api/work-plans/{plan_id}")).json()
-        if [step["status"] for step in blocked_plan["steps"]] == [
-            "failed",
-            "blocked",
-            "blocked",
-        ]:
-            break
-        await asyncio.sleep(0.03)
+    blocked_plan = await wait_for_step_statuses(client, plan_id, ["failed", "blocked", "blocked"])
     assert [step["status"] for step in blocked_plan["steps"]] == [
         "failed",
         "blocked",
@@ -2378,17 +2382,7 @@ async def test_ordered_retry_preserves_completed_predecessor(
         },
     )
     plan_id = response.json()["run"]["work_plan_id"]
-    deadline = asyncio.get_running_loop().time() + 5
-    failed_plan: dict = {}
-    while asyncio.get_running_loop().time() < deadline:
-        failed_plan = (await client.get(f"/api/work-plans/{plan_id}")).json()
-        if [step["status"] for step in failed_plan["steps"]] == [
-            "complete",
-            "failed",
-            "blocked",
-        ]:
-            break
-        await asyncio.sleep(0.03)
+    failed_plan = await wait_for_step_statuses(client, plan_id, ["complete", "failed", "blocked"])
     assert [step["status"] for step in failed_plan["steps"]] == [
         "complete",
         "failed",
@@ -2778,16 +2772,15 @@ async def test_active_chat_run_can_be_cancelled_directly(client: AsyncClient) ->
     )
     assert turn.status_code == 202
     assistant_id = turn.json()["assistant_message"]["id"]
-    deadline = asyncio.get_running_loop().time() + 5
-    streamed_text = ""
-    while asyncio.get_running_loop().time() < deadline:
+
+    async def read_streamed_text() -> str:
         assistant = (await client.get(f"/api/messages/{assistant_id}")).json()
-        streamed_text = "".join(
-            part["text"] or "" for part in assistant["parts"] if part["type"] == "text"
-        )
-        if streamed_text:
-            break
-        await asyncio.sleep(0.01)
+        return "".join(part["text"] or "" for part in assistant["parts"] if part["type"] == "text")
+
+    # The run is cancelled while it streams, so keep the pace this was written at.
+    streamed_text = await wait_until(
+        read_streamed_text, bool, what=f"text streamed into {assistant_id}", interval=0.01
+    )
     assert streamed_text
 
     cancelled = await client.post(f"/api/chats/{chat['id']}/cancel")
@@ -2821,13 +2814,13 @@ async def test_failed_chat_run_preserves_streamed_text_and_reports_error(
     )
     assert turn.status_code == 202
 
-    deadline = asyncio.get_running_loop().time() + 5
-    run = turn.json()["run"]
-    while asyncio.get_running_loop().time() < deadline:
-        run = (await client.get(f"/api/runs/{run['id']}")).json()
-        if run["status"] == "failed":
-            break
-        await asyncio.sleep(0.01)
+    run_id = turn.json()["run"]["id"]
+
+    async def read_run() -> dict[str, Any]:
+        run: dict[str, Any] = (await client.get(f"/api/runs/{run_id}")).json()
+        return run
+
+    run = await wait_for_terminal_status(read_run, what=f"run {run_id}", expected="failed")
     assert run["status"] == "failed"
     assert run["error"] == "Chat engine stream failed"
 
@@ -3433,13 +3426,12 @@ async def test_failed_regeneration_keeps_the_selected_response(
     )
     assert regenerated.status_code == 202
     run_id = regenerated.json()["run"]["id"]
-    deadline = asyncio.get_running_loop().time() + 5
-    run = regenerated.json()["run"]
-    while asyncio.get_running_loop().time() < deadline:
-        run = (await client.get(f"/api/runs/{run_id}")).json()
-        if run["status"] == "failed":
-            break
-        await asyncio.sleep(0.03)
+
+    async def read_run() -> dict[str, Any]:
+        run: dict[str, Any] = (await client.get(f"/api/runs/{run_id}")).json()
+        return run
+
+    run = await wait_for_terminal_status(read_run, what=f"run {run_id}", expected="failed")
     assert run["status"] == "failed"
 
     after = (await client.get(f"/api/messages/{message_id}")).json()
@@ -4321,14 +4313,17 @@ async def test_chat_delete_cancels_all_queued_runs_and_cleans_up_tasks(
     turns = [response.json() for response in turn_responses]
     run_ids = {turn["run"]["id"] for turn in turns}
     orchestrator: ConversationOrchestrator = app.state.services.orchestrator
-    deadline = asyncio.get_running_loop().time() + 5
-    job_ids: set[str] = set()
-    while asyncio.get_running_loop().time() < deadline:
+
+    async def read_job_ids() -> set[str]:
         jobs = (await client.get("/api/jobs")).json()
-        job_ids = {job["id"] for job in jobs if job["run_id"] in run_ids}
-        if len(job_ids) == 2 and started == job_ids:
-            break
-        await asyncio.sleep(0.01)
+        return {job["id"] for job in jobs if job["run_id"] in run_ids}
+
+    job_ids = await wait_until(
+        read_job_ids,
+        lambda ids: len(ids) == 2 and started == ids,
+        what="the two queued jobs starting",
+        interval=0.01,
+    )
     assert len(job_ids) == 2
     assert started == job_ids
     assert job_ids <= orchestrator._tasks.keys()
@@ -11468,19 +11463,17 @@ async def test_a_queue_of_images_restores_the_chat_model_once_at_the_end(
     assert second.status_code == 202
     release_first.set()
 
-    deadline = asyncio.get_running_loop().time() + 10
-    while asyncio.get_running_loop().time() < deadline:
+    async def read_completed() -> list[dict[str, Any]]:
         messages = (await client.get(f"/api/chats/{chat['id']}")).json()["messages"]
-        done = [
+        return [
             message
             for message in messages
             if message["role"] == "assistant" and message["status"] == "complete"
         ]
-        if len(done) == 2:
-            break
-        await asyncio.sleep(0.03)
-    else:  # pragma: no cover - the queue did not drain
-        raise AssertionError("both queued images did not complete")
+
+    await wait_until(
+        read_completed, lambda done: len(done) == 2, what="both queued images completing"
+    )
 
     # The second entry is the whole point: it exists only because the dispatch
     # asked what the run still owed rather than what this job displaced.
