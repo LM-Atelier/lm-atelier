@@ -10,12 +10,12 @@ from fastapi import FastAPI
 from httpx2 import ASGITransport, AsyncClient
 from sqlalchemy import event, select
 from sqlalchemy.orm import Session, sessionmaker
+from test_queue_control import job_audit, make_queue_app, seed_plan
 
 from local_lm.config import Settings
 from local_lm.db import Base, create_database_engine
 from local_lm.models import Job
 from local_lm.scheduler import ResourceScheduler
-from tests.test_queue_control import job_audit, make_queue_app, seed_plan
 
 POLICY = "/api/queue/lanes/generation"
 
@@ -377,11 +377,12 @@ async def test_a_valid_hidden_verification_job_obeys_generation_pause(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert (await client.get(POLICY)).status_code == 200
-    from local_lm.domain import utcnow
-    from tests.test_queue_control import (
+    from test_queue_control import (
         finish_source_and_queue_verifier,
         prepare_verification_source,
     )
+
+    from local_lm.domain import utcnow
 
     orchestrator, run_id, artifacts = prepare_verification_source(settings, sessions, monkeypatch)
     with sessions() as session:
