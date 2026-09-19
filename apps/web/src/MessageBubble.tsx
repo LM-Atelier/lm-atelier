@@ -19,6 +19,7 @@ import { MessageRemovalConfirmation, UserMessageControls } from "./MessageRemova
 import { MessageTimestamp } from "./MessageTimestamp";
 import { PendingResponseStatus } from "./PendingResponseStatus";
 import { editReviewSummary } from "./editReview";
+import { editStrengthNote } from "./editStrengthNote";
 import {
   mediaOriginForPart,
   messagePartsForTranscript,
@@ -254,6 +255,7 @@ export function MessageBubble({
             )}
             {appliedTriggerWords.length > 0 && <span>Added trigger words: {appliedTriggerWords.join(", ")}</span>}
             {editReviewSummary(provenance) && <span>{editReviewSummary(provenance)}</span>}
+            {editStrengthNote(provenance) && <span>{editStrengthNote(provenance)}</span>}
             {videoLengthSummary(provenance) && <span>{videoLengthSummary(provenance)}</span>}
             {contextLimit > 0 && (
               <span>

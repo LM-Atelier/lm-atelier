@@ -130,6 +130,18 @@ describe("MessageBubble edit review status", () => {
     expect(screen.getByText("Edit review retried this once at a higher strength")).toBeVisible();
   });
 
+  it("says plainly when a specific change was redrawn at an automatic strength", () => {
+    render(<MessageBubble message={assistant({
+      image_edit: {
+        strength: { mode: "auto", parameter: "denoise", value: 0.5, scope: "localized", reason_codes: [] },
+      },
+    })} />);
+
+    expect(
+      screen.getByText(/Redrawn at an automatic strength, so a small change may not show/),
+    ).toBeVisible();
+  });
+
   it("says nothing about a message the review never looked at", () => {
     render(<MessageBubble message={assistant({
       model_selection: { mode: "manual" },
