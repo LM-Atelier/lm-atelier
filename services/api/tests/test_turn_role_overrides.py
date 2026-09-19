@@ -24,7 +24,8 @@ async def _source(client: AsyncClient) -> dict[str, Any]:
         json={"text": "Describe a blue paper boat", "mode": "text"},
     )
     assert source.status_code == 202, source.text
-    return source.json()
+    payload: dict[str, Any] = source.json()
+    return payload
 
 
 def _choices() -> dict[str, dict[str, Any]]:

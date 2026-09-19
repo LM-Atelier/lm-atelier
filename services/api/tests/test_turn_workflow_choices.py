@@ -373,7 +373,8 @@ async def _resource_batch(
         },
     )
     assert response.status_code == 201, response.text
-    return response.json()
+    payload: dict[str, Any] = response.json()
+    return payload
 
 
 def _composer_source(batch: dict[str, Any]) -> dict[str, Any]:

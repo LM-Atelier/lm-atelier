@@ -110,9 +110,9 @@ async def test_versioned_routing_corpus_matches_production_pipeline() -> None:
     }:
         true_positive = confusion[operation][operation]
         predicted = sum(confusion[expected][operation] for expected in operations)
-        actual = sum(confusion[operation].values())
+        actual_count = sum(confusion[operation].values())
         precision = true_positive / predicted if predicted else 0
-        recall = true_positive / actual if actual else 0
+        recall = true_positive / actual_count if actual_count else 0
         assert precision >= 0.9, f"{operation} precision was {precision:.3f}"
         assert recall >= 0.9, f"{operation} recall was {recall:.3f}"
 
@@ -1071,9 +1071,15 @@ def test_a_run_of_spaces_is_never_retried_one_length_at_a_time() -> None:
 
     from local_lm.routing import _OUTPUT_COUNT
 
-    assert _OUTPUT_COUNT.search("make 5 images").group("count") == "5"
-    assert _OUTPUT_COUNT.search("two   distinct   videos").group("count") == "two"
-    assert _OUTPUT_COUNT.search("SIX  DIFFERENT  CLIPS").group("count").casefold() == "six"
+    numbered = _OUTPUT_COUNT.search("make 5 images")
+    assert numbered is not None
+    assert numbered.group("count") == "5"
+    spelled = _OUTPUT_COUNT.search("two   distinct   videos")
+    assert spelled is not None
+    assert spelled.group("count") == "two"
+    uppercase = _OUTPUT_COUNT.search("SIX  DIFFERENT  CLIPS")
+    assert uppercase is not None
+    assert uppercase.group("count").casefold() == "six"
 
     # Near-misses that must still not match.
     for text in ("5different images", "5 differentimages", "no count here"):
