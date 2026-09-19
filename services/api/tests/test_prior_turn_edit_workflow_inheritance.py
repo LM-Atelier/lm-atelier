@@ -19,6 +19,7 @@ async def test_edited_workflow_uses_accepted_revision_content_until_reselected(
 ) -> None:
     graph = {"nodes": [{"inputs": {"color": "blue"}}]}
     schema = {"type": "object", "properties": {"seed": {"type": "integer", "default": 10}}}
+    revision: WorkflowRevision | None
     with SessionLocal() as session:
         definition = WorkflowDefinition(
             name="Constructed color workflow", operation="text_to_image"
