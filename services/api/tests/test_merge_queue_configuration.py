@@ -18,6 +18,11 @@ RUNTIME_PATHS = (
 )
 
 
+def _mapping(value: object) -> dict[str, object]:
+    assert isinstance(value, dict)
+    return value
+
+
 def configure_queue(
     tmp_path: Path,
     *,
@@ -97,19 +102,19 @@ def configure_queue(
         },
     }
     if identity_fault == "owner-id":
-        fixture["repository"]["owner"]["id"] = 1
+        _mapping(_mapping(fixture["repository"])["owner"])["id"] = 1
     elif identity_fault == "owner-type":
-        fixture["repository"]["owner"]["type"] = "User"
+        _mapping(_mapping(fixture["repository"])["owner"])["type"] = "User"
     elif identity_fault == "repository-id":
-        fixture["repository"]["id"] = 1
+        _mapping(fixture["repository"])["id"] = 1
     elif identity_fault == "full-name":
-        fixture["repository"]["full_name"] = "LM-Atelier/another-repository"
+        _mapping(fixture["repository"])["full_name"] = "LM-Atelier/another-repository"
     elif identity_fault == "full-name-case":
-        fixture["repository"]["full_name"] = REPOSITORY.lower()
+        _mapping(fixture["repository"])["full_name"] = REPOSITORY.lower()
     if readback_fault == "incorrect-queue":
-        fixture["queue_readback"]["enforcement"] = "disabled"
+        _mapping(fixture["queue_readback"])["enforcement"] = "disabled"
     elif readback_fault == "missing-rule":
-        fixture["queue_readback"]["rules"] = []
+        _mapping(fixture["queue_readback"])["rules"] = []
     fixture_path = tmp_path / "fixture.json"
     fixture_path.write_text(json.dumps(fixture), encoding="utf-8")
     log = tmp_path / "requests.jsonl"
