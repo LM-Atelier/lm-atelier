@@ -13,6 +13,7 @@ from threading import Event
 import pytest
 from alembic import command
 from alembic.autogenerate import compare_metadata
+from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from alembic.util.exc import CommandError
@@ -2121,7 +2122,7 @@ _ARTIFACT_INDEX_REVISION = "b41e7c0a92d5"
 _ARTIFACT_INDEX_PRIOR = "c9e1d4a70b82"
 
 
-def _migrated_to(tmp_path: Path, revision: str) -> tuple[Settings, object, Path]:
+def _migrated_to(tmp_path: Path, revision: str) -> tuple[Settings, Config, Path]:
     """Bring a fresh database to an exact revision and hand back its handles."""
 
     settings = Settings(data_dir=tmp_path / "data")
