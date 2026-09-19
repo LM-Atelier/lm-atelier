@@ -20,8 +20,11 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
+
+type JsonSchema = dict[str, Any]
 
 REPOSITORY = Path(__file__).resolve().parents[3]
 TYPES_FILE = REPOSITORY / "apps" / "web" / "src" / "types.ts"
@@ -165,7 +168,7 @@ ALLOWED_MISSING = {
 }
 
 
-def _openapi_schemas() -> dict[str, dict]:
+def _openapi_schemas() -> dict[str, JsonSchema]:
     result = subprocess.run(  # noqa: S603 - fixed argv, repository-local script
         [sys.executable, str(REPOSITORY / "scripts" / "export-openapi.py")],
         capture_output=True,
@@ -212,7 +215,7 @@ def _typescript_fields(source: str, interface: str) -> set[str]:
     return fields
 
 
-def _array_item_components(spec: dict, *, array_item: bool = False) -> set[str]:
+def _array_item_components(spec: JsonSchema, *, array_item: bool = False) -> set[str]:
     """Referenced array elements, including nullable and nested arrays."""
     references: set[str] = set()
     reference = spec.get("$ref")
@@ -229,7 +232,7 @@ def _array_item_components(spec: dict, *, array_item: bool = False) -> set[str]:
 
 
 @pytest.fixture(scope="module")
-def schemas() -> dict[str, dict]:
+def schemas() -> dict[str, JsonSchema]:
     return _openapi_schemas()
 
 
@@ -242,7 +245,7 @@ def types_source() -> str:
 def test_browser_type_mirrors_the_api_model(
     interface: str,
     component: str,
-    schemas: dict[str, dict],
+    schemas: dict[str, JsonSchema],
     types_source: str,
 ) -> None:
     schema = schemas.get(component)
@@ -302,7 +305,7 @@ def test_a_closed_vocabulary_inside_an_array_is_still_compared() -> None:
     array position would have been checked by neither side.
     """
 
-    schemas = {
+    schemas: dict[str, JsonSchema] = {
         "DeviceKind": {"enum": ["cpu", "cuda"], "type": "string"},
         "Wrapper": {"type": "object", "properties": {}},
     }
@@ -325,7 +328,7 @@ def test_a_closed_vocabulary_inside_an_array_is_still_compared() -> None:
     assert _declared_literals(source, "DeviceKind") == {"cpu", "cuda"}
 
 
-def test_every_checked_component_still_exists(schemas: dict[str, dict]) -> None:
+def test_every_checked_component_still_exists(schemas: dict[str, JsonSchema]) -> None:
     """A renamed model must not silently drop out of the comparison."""
     unknown = sorted(set(CHECKED_CONTRACTS.values()) - set(schemas))
     assert not unknown, f"CHECKED_CONTRACTS names components that no longer exist: {unknown}"
@@ -417,7 +420,7 @@ def _declared_literals(source: str, expression: str | None) -> set[str] | None:
     return resolve(expression, frozenset())
 
 
-def _admissible_values(spec: dict, schemas: dict[str, dict]) -> list[str] | None:
+def _admissible_values(spec: JsonSchema, schemas: dict[str, JsonSchema]) -> list[str] | None:
     """Read finite string vocabularies from the forms emitted by OpenAPI.
 
     Enums, singleton constants and named components can be combined in nullable
@@ -425,7 +428,7 @@ def _admissible_values(spec: dict, schemas: dict[str, dict]) -> list[str] | None
     not become finite merely because another branch has a closed vocabulary.
     """
 
-    def resolve(spec: dict, seen: frozenset[str]) -> list[str] | None:
+    def resolve(spec: JsonSchema, seen: frozenset[str]) -> list[str] | None:
         if "enum" in spec:
             return [value for value in spec["enum"] if isinstance(value, str)]
         if "const" in spec:
@@ -464,7 +467,7 @@ def _admissible_values(spec: dict, schemas: dict[str, dict]) -> list[str] | None
 def test_browser_can_represent_every_value_the_server_returns(
     interface: str,
     component: str,
-    schemas: dict[str, dict],
+    schemas: dict[str, JsonSchema],
     types_source: str,
 ) -> None:
     """Matching field names is not a matching contract.
@@ -552,7 +555,7 @@ def test_array_contract_registration_exposes_nested_models(
         '  status: "pending" | "ready";\n'
         "}\n"
     )
-    nested_schemas = {
+    nested_schemas: dict[str, JsonSchema] = {
         "NestedReportOut": {
             "properties": {
                 "roles": {
@@ -619,7 +622,7 @@ def test_array_contract_requires_the_exact_named_pair(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = "export interface ArrayParent {\n  children: " + expression + ";\n}\n"
-    nested_schemas = {
+    nested_schemas: dict[str, JsonSchema] = {
         "ArrayParentOut": {
             "properties": {
                 "children": {
@@ -646,7 +649,7 @@ def test_array_contract_rejects_composition_only_targets() -> None:
         '  status: "ready";\n'
         "}\n"
     )
-    composed_schemas = {
+    composed_schemas: dict[str, JsonSchema] = {
         "ArrayParentOut": {
             "properties": {
                 "children": {
@@ -696,8 +699,8 @@ OPEN_VOCABULARY_FIELDS = {
 
 
 def _resolve_reference(
-    spec: dict, schemas: dict[str, dict], seen: frozenset[str]
-) -> tuple[dict, frozenset[str]]:
+    spec: JsonSchema, schemas: dict[str, JsonSchema], seen: frozenset[str]
+) -> tuple[JsonSchema, frozenset[str]]:
     """Follow a local component reference to the schema it names.
 
     Returns the spec unchanged when it is not a reference, when the target is
@@ -721,7 +724,7 @@ def _resolve_reference(
 
 
 def _is_closed_vocabulary(
-    spec: dict, schemas: dict[str, dict], seen: frozenset[str] = frozenset()
+    spec: JsonSchema, schemas: dict[str, JsonSchema], seen: frozenset[str] = frozenset()
 ) -> bool:
     """An enum, a const, or a reference to something that is one.
 
@@ -746,7 +749,7 @@ def _is_closed_vocabulary(
 
 
 def _declared_types(
-    spec: dict, schemas: dict[str, dict], seen: frozenset[str] = frozenset()
+    spec: JsonSchema, schemas: dict[str, JsonSchema], seen: frozenset[str] = frozenset()
 ) -> set[str]:
     """Every JSON type this field can take, following unions AND references.
 
@@ -768,7 +771,7 @@ def _declared_types(
     return found
 
 
-def _open_vocabulary_fields(schemas: dict[str, dict]) -> set[str]:
+def _open_vocabulary_fields(schemas: dict[str, JsonSchema]) -> set[str]:
     """Vocabulary-named STRING fields that carry no closed vocabulary.
 
     The string check is not decoration. Without it an integer exit_code counts
@@ -845,7 +848,7 @@ def test_the_excluded_components_are_honoured() -> None:
 
 
 def test_no_new_api_field_is_a_vocabulary_typed_as_an_open_string(
-    schemas: dict[str, dict],
+    schemas: dict[str, JsonSchema],
 ) -> None:
     """A new open vocabulary has to be argued for, not merely committed."""
 
@@ -857,7 +860,7 @@ def test_no_new_api_field_is_a_vocabulary_typed_as_an_open_string(
     )
 
 
-def test_the_open_vocabulary_baseline_does_not_rot(schemas: dict[str, dict]) -> None:
+def test_the_open_vocabulary_baseline_does_not_rot(schemas: dict[str, JsonSchema]) -> None:
     """Every baselined field must still be open, so the list shrinks.
 
     Without this the baseline only ever holds: a field could be typed properly,
@@ -882,7 +885,7 @@ def test_a_referenced_open_vocabulary_is_not_hidden_from_the_ratchet() -> None:
     evolution rather than a speculative edge.
     """
 
-    schemas: dict[str, dict] = {
+    schemas: dict[str, JsonSchema] = {
         "OpenString": {"type": "string"},
         "ClosedEnum": {"type": "string", "enum": ["ready", "failed"]},
         "Widget": {
@@ -919,7 +922,7 @@ def test_a_reference_cycle_terminates_instead_of_recursing() -> None:
     and two that refer to each other.
     """
 
-    schemas: dict[str, dict] = {
+    schemas: dict[str, JsonSchema] = {
         "Loop": {"$ref": "#/components/schemas/Loop"},
         "Ping": {"$ref": "#/components/schemas/Pong"},
         "Pong": {"$ref": "#/components/schemas/Ping"},
@@ -954,7 +957,7 @@ def test_custom_node_names_do_not_exempt_other_components() -> None:
     }
 
 
-def _composed_status_schemas() -> dict[str, dict]:
+def _composed_status_schemas() -> dict[str, JsonSchema]:
     return {
         "BaseStatus": {"type": "string", "enum": ["ready", "failed"]},
         "MixedStatus": {
@@ -1015,7 +1018,7 @@ def test_composed_browser_literals_can_contain_a_union_separator() -> None:
         {"$ref": "#/components/schemas/AliasStatus"},
     ],
 )
-def test_composed_server_vocabulary_keeps_references_and_constants(spec: dict) -> None:
+def test_composed_server_vocabulary_keeps_references_and_constants(spec: JsonSchema) -> None:
     assert set(_admissible_values(spec, _composed_status_schemas()) or []) == {
         "ready",
         "failed",

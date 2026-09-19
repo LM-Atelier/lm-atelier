@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from sqlalchemy import ColumnDefault, ColumnElement, String
+
+from local_lm.db import Base
 from local_lm.domain import new_id
 from local_lm.models import (
-    Base,
     ComfyRegistryInstall,
     ModelCapabilityEvidence,
     ModelComponentManifest,
@@ -11,6 +13,11 @@ from local_lm.models import (
     WorkflowPreference,
     WorkflowRevision,
 )
+
+
+def _string_type(column: ColumnElement[object]) -> String:
+    assert isinstance(column.type, String)
+    return column.type
 
 
 def test_generated_model_ids_fit_their_declared_columns() -> None:
@@ -27,25 +34,31 @@ def test_generated_model_ids_fit_their_declared_columns() -> None:
     assert len(workflow_family_id) == 41
     assert len(workflow_preference_id) == 39
     assert len(registry_id) == 41
-    assert ModelComponentManifest.__table__.c.id.type.length == 64
-    assert ModelCapabilityEvidence.__table__.c.id.type.length == 64
-    assert WorkflowDefinition.__table__.c.id.type.length == 64
-    assert WorkflowDefinition.__table__.c.family_id.type.length == 64
-    assert WorkflowFamily.__table__.c.id.type.length == 64
-    assert WorkflowPreference.__table__.c.id.type.length == 40
-    assert WorkflowPreference.__table__.c.workflow_family_id.type.length == 64
-    assert WorkflowRevision.__table__.c.workflow_id.type.length == 64
-    assert ComfyRegistryInstall.__table__.c.id.type.length == 64
+    assert _string_type(ModelComponentManifest.__table__.c.id).length == 64
+    assert _string_type(ModelCapabilityEvidence.__table__.c.id).length == 64
+    assert _string_type(WorkflowDefinition.__table__.c.id).length == 64
+    assert _string_type(WorkflowDefinition.__table__.c.family_id).length == 64
+    assert _string_type(WorkflowFamily.__table__.c.id).length == 64
+    assert _string_type(WorkflowPreference.__table__.c.id).length == 40
+    assert _string_type(WorkflowPreference.__table__.c.workflow_family_id).length == 64
+    assert _string_type(WorkflowRevision.__table__.c.workflow_id).length == 64
+    assert _string_type(ComfyRegistryInstall.__table__.c.id).length == 64
 
     for table in Base.metadata.tables.values():
         for column in table.primary_key.columns:
-            if column.default is None or not callable(column.default.arg):
+            if column.default is None:
+                continue
+            assert isinstance(column.default, ColumnDefault)
+            if not callable(column.default.arg):
                 continue
             generated_id = column.default.arg(None)
             assert isinstance(generated_id, str)
-            assert column.type.length is not None
-            assert len(generated_id) <= column.type.length, (
+            column_type = _string_type(column)
+            assert column_type.length is not None
+            assert len(generated_id) <= column_type.length, (
                 f"{table.name}.{column.name} stores {len(generated_id)} characters in {column.type}"
             )
 
-    assert len(workflow_id) <= WorkflowRevision.__table__.c.workflow_id.type.length
+    workflow_id_type = _string_type(WorkflowRevision.__table__.c.workflow_id)
+    assert workflow_id_type.length is not None
+    assert len(workflow_id) <= workflow_id_type.length
