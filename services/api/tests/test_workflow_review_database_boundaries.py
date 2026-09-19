@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator, Iterator
 from contextlib import contextmanager
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import FastAPI
 from httpx2 import AsyncClient
 from sqlalchemy import update
+from sqlalchemy.orm import Session
 from test_custom_node_source_identity import installed_source as installed_source
 from test_reviewed_custom_node_execution import (
+    CustomWorkflow,
     _approve_custom,
 )
 from test_reviewed_custom_node_execution import (
@@ -16,14 +21,21 @@ from test_reviewed_custom_node_execution import (
 )
 from test_workflow_revision_review import reviewed_runtime as reviewed_runtime
 
+from local_lm.adapters.base import MediaEvent, MediaRequest
+from local_lm.config import Settings
 from local_lm.custom_nodes import CustomNodeManager
 from local_lm.db import SessionLocal
-from local_lm.models import Chat, Run
+from local_lm.models import Chat, CustomNodeInstall, Run
 
 
 @pytest.mark.parametrize("stage", ["http", "package", "selection_change"])
 async def test_workflow_dispatch_releases_transactions_during_verification(
-    custom_workflow, client: AsyncClient, app, settings, monkeypatch, stage: str
+    custom_workflow: CustomWorkflow,
+    client: AsyncClient,
+    app: FastAPI,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
 ) -> None:
     workflow, _, _ = custom_workflow
     await _approve_custom(client, custom_workflow)
@@ -41,14 +53,14 @@ async def test_workflow_dispatch_releases_transactions_during_verification(
         json={"active_image_profile_id": profile.json()["id"]},
     )
     assert selected.status_code == 200, selected.text
-    active_sessions = []
+    active_sessions: list[Session] = []
     observed_transactions: list[bool] = []
     writes: list[str] = []
-    captured = []
+    captured: list[MediaRequest] = []
     original_factory = services.orchestrator.session_factory
 
     @contextmanager
-    def tracked_session():
+    def tracked_session() -> Iterator[Session]:
         with original_factory() as session:
             active_sessions.append(session)
             try:
@@ -58,7 +70,7 @@ async def test_workflow_dispatch_releases_transactions_during_verification(
 
     original_generate = services.engines.media.generate
 
-    async def generate(request):
+    async def generate(request: MediaRequest) -> AsyncIterator[MediaEvent]:
         captured.append(request)
         async for event in original_generate(request):
             yield event
@@ -67,10 +79,10 @@ async def test_workflow_dispatch_releases_transactions_during_verification(
     original_verify = CustomNodeManager.verify
     run_id = ""
 
-    async def probe():
+    async def probe() -> None:
         observed_transactions.append(any(session.in_transaction() for session in active_sessions))
 
-        def write():
+        def write() -> None:
             with SessionLocal() as writer:
                 writer.connection().exec_driver_sql("PRAGMA busy_timeout=500")
                 writer.execute(
@@ -85,12 +97,14 @@ async def test_workflow_dispatch_releases_transactions_during_verification(
 
         await asyncio.wait_for(asyncio.to_thread(write), timeout=2)
 
-    async def object_info():
+    async def object_info() -> dict[str, Any]:
         if stage in {"http", "selection_change"}:
             await probe()
-        return await original_info()
+        result = await original_info()
+        assert isinstance(result, dict)
+        return result
 
-    async def verify(manager, install):
+    async def verify(manager: CustomNodeManager, install: CustomNodeInstall) -> None:
         if stage == "package":
             await probe()
         await original_verify(manager, install)
@@ -131,4 +145,6 @@ async def test_workflow_dispatch_releases_transactions_during_verification(
         assert current["status"] == "complete", current
         assert len(captured) == 1
     with SessionLocal() as session:
-        assert session.get(Chat, chat["id"]).title == "Writer progressed"
+        persisted_chat = session.get(Chat, chat["id"])
+        assert persisted_chat is not None
+        assert persisted_chat.title == "Writer progressed"

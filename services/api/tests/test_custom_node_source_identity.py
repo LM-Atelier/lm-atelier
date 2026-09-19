@@ -1,13 +1,26 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
+from typing import TypedDict, Unpack
 
 import pytest
+from httpx2 import AsyncClient
 
+from local_lm.config import Settings
 from local_lm.custom_nodes import CustomNodeManager
+from local_lm.filesystem_links import AnchoredDirectory
 from local_lm.models import CustomNodeInstall
 from local_lm.subprocess_env import git_subprocess_environment
+
+type InstalledSource = tuple[CustomNodeManager, CustomNodeInstall, Path]
+
+
+class _RunOptions(TypedDict, total=False):
+    timeout: float
+    pass_fds: tuple[int, ...]
+
 
 # Two Git subprocesses finish before the reader starts; their startup time is
 # independent of the cancellation ordering these tests exercise.
@@ -25,7 +38,7 @@ def _git(root: Path, *arguments: str) -> str:
 
 
 @pytest.fixture
-def installed_source(settings):
+def installed_source(settings: Settings) -> InstalledSource:
     root = settings.custom_node_dir / "lm-atelier-node_fixture"
     root.mkdir(parents=True)
     _git(root, "init", "--quiet")
@@ -51,14 +64,16 @@ def installed_source(settings):
     return CustomNodeManager(settings), install, root
 
 
-async def test_verification_accepts_unchanged_pinned_source(installed_source) -> None:
+async def test_verification_accepts_unchanged_pinned_source(
+    installed_source: InstalledSource,
+) -> None:
     manager, install, _ = installed_source
     await manager.verify(install)
 
 
 @pytest.mark.parametrize("index_hint", [None, "--assume-unchanged", "--skip-worktree"])
 async def test_verification_refuses_changed_source_even_with_index_hints(
-    installed_source, index_hint: str | None
+    installed_source: InstalledSource, index_hint: str | None
 ) -> None:
     manager, install, root = installed_source
     if index_hint:
@@ -72,7 +87,7 @@ async def test_verification_refuses_changed_source_even_with_index_hints(
 
 @pytest.mark.parametrize("filename", ["extra_node.py", "ignored_node.py"])
 async def test_verification_refuses_untracked_loadable_source(
-    installed_source, filename: str
+    installed_source: InstalledSource, filename: str
 ) -> None:
     manager, install, root = installed_source
     (root / filename).write_text("VALUE = 3\n", encoding="utf-8")
@@ -80,14 +95,18 @@ async def test_verification_refuses_untracked_loadable_source(
         await manager.verify(install)
 
 
-async def test_verification_refuses_missing_tracked_source(installed_source) -> None:
+async def test_verification_refuses_missing_tracked_source(
+    installed_source: InstalledSource,
+) -> None:
     manager, install, root = installed_source
     (root / "node.py").unlink()
     with pytest.raises(ValueError):
         await manager.verify(install)
 
 
-async def test_verification_accepts_nested_tree_and_reviewed_cache(installed_source) -> None:
+async def test_verification_accepts_nested_tree_and_reviewed_cache(
+    installed_source: InstalledSource,
+) -> None:
     manager, install, root = installed_source
     for directory in ("nested", "nested.more", "nested module"):
         (root / directory).mkdir()
@@ -102,7 +121,9 @@ async def test_verification_accepts_nested_tree_and_reviewed_cache(installed_sou
     await manager.verify(install)
 
 
-async def test_verification_refuses_cache_without_reviewed_source(installed_source) -> None:
+async def test_verification_refuses_cache_without_reviewed_source(
+    installed_source: InstalledSource,
+) -> None:
     manager, install, root = installed_source
     cache = root / "__pycache__"
     cache.mkdir()
@@ -112,7 +133,7 @@ async def test_verification_refuses_cache_without_reviewed_source(installed_sour
 
 
 async def test_verification_refuses_a_linked_source_directory(
-    installed_source, tmp_path: Path
+    installed_source: InstalledSource, tmp_path: Path
 ) -> None:
     from test_anchored_directory_listing import _make_link_dir
 
@@ -128,7 +149,7 @@ async def test_verification_refuses_a_linked_source_directory(
 
 
 async def test_verification_refuses_changed_bytes_with_preserved_timestamp(
-    installed_source,
+    installed_source: InstalledSource,
 ) -> None:
     import os
 
@@ -143,7 +164,7 @@ async def test_verification_refuses_changed_bytes_with_preserved_timestamp(
 
 
 async def test_verification_does_not_trust_a_rewritten_git_manifest(
-    installed_source, monkeypatch
+    installed_source: InstalledSource, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import hashlib
 
@@ -153,7 +174,7 @@ async def test_verification_does_not_trust_a_rewritten_git_manifest(
     (root / "node.py").write_bytes(body)
     replacement = hashlib.sha1(b"blob " + str(len(body)).encode("ascii") + b"\0" + body).hexdigest()
 
-    async def changed_manifest(*command, **kwargs):
+    async def changed_manifest(*command: str, **kwargs: Unpack[_RunOptions]) -> str:
         result = await original(*command, **kwargs)
         if "ls-tree" in command:
             rows = result.split("\0")
@@ -170,7 +191,7 @@ async def test_verification_does_not_trust_a_rewritten_git_manifest(
 
 
 async def test_verification_keeps_selected_directory_through_metadata_reads(
-    installed_source, tmp_path: Path, monkeypatch
+    installed_source: InstalledSource, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from test_anchored_directory_listing import _make_link_dir
 
@@ -182,7 +203,7 @@ async def test_verification_keeps_selected_directory_through_metadata_reads(
     moved = root.with_name(root.name + "-preserved")
     attempted = False
 
-    async def checked_git(*command, **kwargs):
+    async def checked_git(*command: str, **kwargs: Unpack[_RunOptions]) -> str:
         nonlocal attempted
         result = await original(*command, **kwargs)
         if "rev-parse" in command and not attempted:
@@ -204,7 +225,7 @@ async def test_verification_keeps_selected_directory_through_metadata_reads(
 
 
 async def test_cancelled_verification_joins_reader_before_releasing_directory(
-    installed_source, monkeypatch
+    installed_source: InstalledSource, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import asyncio
     import threading
@@ -217,7 +238,9 @@ async def test_cancelled_verification_joins_reader_before_releasing_directory(
     started = threading.Event()
     finished = threading.Event()
 
-    def reader(package, _manifest, _tree, should_stop):
+    def reader(
+        package: AnchoredDirectory, _manifest: str, _tree: str, should_stop: Callable[[], bool]
+    ) -> None:
         started.set()
         while not should_stop():
             threading.Event().wait(0.005)
@@ -240,7 +263,7 @@ async def test_cancelled_verification_joins_reader_before_releasing_directory(
 
 
 async def test_repeated_cancellation_keeps_directory_until_reader_stops(
-    installed_source, monkeypatch
+    installed_source: InstalledSource, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import asyncio
     import threading
@@ -256,7 +279,9 @@ async def test_repeated_cancellation_keeps_directory_until_reader_stops(
     finished = threading.Event()
     reader_errors = []
 
-    def reader(package, _manifest, _tree, should_stop):
+    def reader(
+        package: AnchoredDirectory, _manifest: str, _tree: str, should_stop: Callable[[], bool]
+    ) -> None:
         started.set()
         try:
             while not should_stop():
@@ -295,7 +320,12 @@ async def test_repeated_cancellation_keeps_directory_until_reader_stops(
 
 @pytest.mark.parametrize("changed", [False, True])
 async def test_managed_start_checks_pinned_node_bytes_before_spawning(
-    client, settings, request: pytest.FixtureRequest, monkeypatch, tmp_path: Path, changed: bool
+    client: AsyncClient,
+    settings: Settings,
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    changed: bool,
 ) -> None:
     from unittest.mock import AsyncMock
 
@@ -329,6 +359,7 @@ async def test_managed_start_checks_pinned_node_bytes_before_spawning(
     else:
         await supervisor.start_media()
         spawn.assert_awaited_once()
+        assert spawn.await_args is not None
         command = spawn.await_args.args[1]
         assert "--disable-all-custom-nodes" in command
         assert command[command.index("--whitelist-custom-nodes") + 1 :] == [
