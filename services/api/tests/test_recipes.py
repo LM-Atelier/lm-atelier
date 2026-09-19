@@ -3,7 +3,9 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import httpx
 import pytest
+from fastapi import FastAPI
 from httpx2 import AsyncClient
 
 from local_lm.catalog import HuggingFaceCatalog
@@ -130,6 +132,61 @@ async def test_recipe_install_produces_a_plan_matching_its_pins(
         # test_planned_chat_activation_requires_completion_and_records_evidence.
         assert plan.activation_probe_json.get("required") is True
 
+    await client.post(f"/api/jobs/{job['id']}/cancel")
+
+
+async def test_recipe_install_plans_its_pinned_revision_after_the_repository_moves_on(
+    app: FastAPI,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recipe pins a commit, so the repository's main branch moving on must not matter.
+
+    The real catalog lookup runs against a transport that answers the way Hugging
+    Face does: the default branch for a bare model path, whatever query it
+    carries, and the pinned commit only for that commit's revision path.
+    """
+    recipe = get_reference_recipe("qwen3-8b-q4-k-m")
+    assert recipe
+    moved_on = "f" * 40
+    assert recipe.revision != moved_on
+    model_path = f"/api/models/{recipe.remote_id}"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == model_path:
+            sha = moved_on
+        elif request.url.path == f"{model_path}/revision/{recipe.revision}":
+            sha = recipe.revision
+        else:
+            return httpx.Response(404)
+        return httpx.Response(
+            200,
+            json={
+                "id": recipe.remote_id,
+                "sha": sha,
+                "pipeline_tag": "text-generation",
+                "tags": ["gguf"],
+                "siblings": [
+                    {
+                        "rfilename": file.path,
+                        "size": file.size_bytes,
+                        "lfs": {"sha256": file.sha256},
+                    }
+                    for file in recipe.files
+                ],
+            },
+        )
+
+    monkeypatch.delattr(HuggingFaceCatalog, "inspect_file_prefix", raising=False)
+    async with httpx.AsyncClient(
+        base_url="https://huggingface.co", transport=httpx.MockTransport(handler)
+    ) as hub:
+        monkeypatch.setattr(app.state.services.catalog, "_client", hub)
+        accepted = await client.post(f"/api/recipes/{recipe.id}/install")
+
+    assert accepted.status_code == 202, accepted.text
+    job = accepted.json()
+    assert job["payload_json"]["revision"] == recipe.revision
     await client.post(f"/api/jobs/{job['id']}/cancel")
 
 

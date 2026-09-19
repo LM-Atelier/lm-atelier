@@ -220,7 +220,11 @@ class HuggingFaceCatalog:
     ) -> dict[str, Any]:
         if not self._valid_remote_id(remote_id):
             raise ValueError("remote_id must be in owner/model form")
-        cache = self._cache_path("detail", remote_id, revision, requested_role)
+        # Keyed apart from entries cached before the revision moved into the
+        # request path: those hold the default branch's answer under the pinned
+        # revision that was asked for, and reusing one, fresh or as a fallback
+        # while the hub is unavailable, would keep planning the wrong revision.
+        cache = self._cache_path("revision-detail", remote_id, revision, requested_role)
         fresh = self._read_detail_cache(
             cache,
             max_age_seconds=self._cache.policy.fresh_seconds,
@@ -228,9 +232,13 @@ class HuggingFaceCatalog:
         if fresh is not None:
             return fresh
         try:
+            # The revision belongs in the path. Hugging Face ignores a revision
+            # query parameter and answers for the default branch, so a pinned
+            # commit would be planned against whatever main has become. A
+            # branch name can contain "/", so it is encoded as one segment.
             response = await self._client.get(
-                f"/api/models/{remote_id}",
-                params={"revision": revision, "blobs": "true"},
+                f"/api/models/{remote_id}/revision/{quote(revision, safe='')}",
+                params={"blobs": "true"},
             )
             response.raise_for_status()
             payload = response.json()
