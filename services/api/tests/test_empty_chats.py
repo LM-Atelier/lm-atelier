@@ -20,7 +20,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from local_lm.db import Base
-from local_lm.domain import JobKind, Operation
+from local_lm.domain import JobKind, MessageRole, Operation
 from local_lm.empty_chats import (
     CONFIGURATION_TABLES,
     CONFIGURED_REASONS,
@@ -37,7 +37,6 @@ from local_lm.models import (
     ChatWorkflowSelection,
     Job,
     Message,
-    MessageRole,
     PromptExpansionBatch,
     Run,
     SetupVerification,

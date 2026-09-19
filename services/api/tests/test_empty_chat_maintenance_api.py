@@ -13,7 +13,8 @@ from httpx2 import AsyncClient
 from sqlalchemy.orm import Session
 
 from local_lm.db import SessionLocal
-from local_lm.models import Chat, Message, MessageRole
+from local_lm.domain import MessageRole
+from local_lm.models import Chat, Message
 
 ROUTE = "/api/maintenance/empty-chats"
 

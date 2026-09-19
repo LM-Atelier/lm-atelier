@@ -235,8 +235,6 @@ def test_a_stale_duplicate_link_loses_to_the_slot_its_own_record_names() -> None
         "links": [],
         "definitions": {"subgraphs": [{"id": "Wrap", **workflow}]},
     }
-    graph["nodes"][0]["type"] = "Wrap"
-
     expanded = expand_workflow(graph)
 
     # The array carries a stale entry, but the input records which link it
