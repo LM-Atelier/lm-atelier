@@ -17,8 +17,9 @@ from __future__ import annotations
 import os
 import subprocess
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import TypedDict, Unpack
 
 import pytest
 from sqlalchemy import create_engine
@@ -35,6 +36,13 @@ from local_lm.filesystem_links import (
     list_entries,
     remove_entry,
 )
+
+
+class _ListEntriesOptions(TypedDict, total=False):
+    limit: int
+    include_metadata: bool
+    should_stop: Callable[[], bool] | None
+
 
 DIGEST_A = "aabb" + "0" * 60
 DIGEST_B = "aabb" + "1" * 60
@@ -379,7 +387,9 @@ def test_a_shard_swapped_after_it_was_named_is_not_followed(
             _swap()
         return real_iterdir(self)
 
-    def fake_list_entries(anchor: AnchoredDirectory, **kwargs: int) -> tuple[AnchoredEntry, ...]:
+    def fake_list_entries(
+        anchor: AnchoredDirectory, **kwargs: Unpack[_ListEntriesOptions]
+    ) -> tuple[AnchoredEntry, ...]:
         listed = list_entries(anchor, **kwargs)
         if not swapped and anchor.path.resolve() == root.resolve():
             _swap()
@@ -438,7 +448,9 @@ def test_a_file_whose_age_could_not_be_measured_is_skipped(
     store, session, root = store_session
     orphan = _write_aged(root / "aa" / "bb" / DIGEST_A, b"unmeasurable")
 
-    def unmeasured(anchor: AnchoredDirectory, **kwargs: int) -> tuple[AnchoredEntry, ...]:
+    def unmeasured(
+        anchor: AnchoredDirectory, **kwargs: Unpack[_ListEntriesOptions]
+    ) -> tuple[AnchoredEntry, ...]:
         return tuple(
             AnchoredEntry(name=entry.name, kind=entry.kind) if entry.name == DIGEST_A else entry
             for entry in list_entries(anchor, **kwargs)
@@ -477,7 +489,9 @@ def test_an_unmeasurable_EMPTY_file_is_skipped_rather_than_counted_as_zero(
     orphan = _write_aged(root / "aa" / "bb" / DIGEST_A, b"")
     assert orphan.stat().st_size == 0, "the point of this test is the zero"
 
-    def unmeasured(anchor: AnchoredDirectory, **kwargs: int) -> tuple[AnchoredEntry, ...]:
+    def unmeasured(
+        anchor: AnchoredDirectory, **kwargs: Unpack[_ListEntriesOptions]
+    ) -> tuple[AnchoredEntry, ...]:
         return tuple(
             AnchoredEntry(name=entry.name, kind=entry.kind) if entry.name == DIGEST_A else entry
             for entry in list_entries(anchor, **kwargs)
@@ -574,7 +588,7 @@ def test_a_same_size_replacement_is_still_refused_on_its_age(
     real_list_entries = list_entries
 
     def replace_after_listing(
-        anchor: AnchoredDirectory, **kwargs: int
+        anchor: AnchoredDirectory, **kwargs: Unpack[_ListEntriesOptions]
     ) -> tuple[AnchoredEntry, ...]:
         listed = real_list_entries(anchor, **kwargs)
         if not replaced and any(entry.name == DIGEST_A for entry in listed):
@@ -613,7 +627,7 @@ def test_an_aged_replacement_of_another_size_is_refused_on_its_size(
     real_list_entries = list_entries
 
     def replace_after_listing(
-        anchor: AnchoredDirectory, **kwargs: int
+        anchor: AnchoredDirectory, **kwargs: Unpack[_ListEntriesOptions]
     ) -> tuple[AnchoredEntry, ...]:
         listed = real_list_entries(anchor, **kwargs)
         if not replaced and any(entry.name == DIGEST_A for entry in listed):
@@ -654,7 +668,7 @@ def test_a_leaf_replaced_after_it_was_measured_is_not_deleted(
     real_list_entries = list_entries
 
     def replace_after_listing(
-        anchor: AnchoredDirectory, **kwargs: int
+        anchor: AnchoredDirectory, **kwargs: Unpack[_ListEntriesOptions]
     ) -> tuple[AnchoredEntry, ...]:
         listed = real_list_entries(anchor, **kwargs)
         if not replaced and any(entry.name == DIGEST_A for entry in listed):
