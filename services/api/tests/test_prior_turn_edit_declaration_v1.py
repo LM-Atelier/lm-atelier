@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
 from local_lm.prior_turn_edit_declaration_v1 import (
@@ -101,8 +103,9 @@ def test_malformed_utf8_refuses() -> None:
 def test_public_constructor_cannot_accept() -> None:
     with pytest.raises(PriorTurnEditDeclarationError, match=INVALID_DECLARATION):
         PriorTurnEditDeclarationV1()
+    constructor: Callable[..., object] = PriorTurnEditDeclarationV1
     with pytest.raises(TypeError):
-        PriorTurnEditDeclarationV1(
+        constructor(
             schema="lm-atelier-prior-turn-edit-declaration-v1",
             schema_version=1,
             accepted=True,

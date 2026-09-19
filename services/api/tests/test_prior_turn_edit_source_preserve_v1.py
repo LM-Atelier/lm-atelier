@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
 from local_lm.prior_turn_edit_source_preserve_v1 import (
@@ -34,8 +36,9 @@ def test_refuses_unbounded_ids() -> None:
 def test_public_constructor_cannot_authorize_mutation() -> None:
     with pytest.raises(PriorTurnEditSourcePreserveError, match=INVALID_SOURCE_PRESERVE):
         PriorTurnEditSourcePreserveV1()
+    constructor: Callable[..., object] = PriorTurnEditSourcePreserveV1
     with pytest.raises(TypeError):
-        PriorTurnEditSourcePreserveV1(
+        constructor(
             schema="lm-atelier-prior-turn-edit-source-preserve-v1",
             schema_version=1,
             source_message_id="m1",
