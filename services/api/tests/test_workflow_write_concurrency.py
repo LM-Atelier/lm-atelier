@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from sqlite3 import Cursor
 
 import pytest
 from httpx2 import AsyncClient
-from sqlalchemy import event, func, select
+from sqlalchemy import Connection, event, func, select
 
 from local_lm import api
 from local_lm.db import SessionLocal
@@ -48,7 +49,14 @@ async def test_workflow_writes_allow_the_event_loop_to_release_another_writer(
             writer.rollback()
             released.set()
 
-        def before_write(conn, cursor, statement, parameters, context, executemany):
+        def before_write(
+            conn: Connection,
+            cursor: Cursor,
+            statement: str,
+            parameters: object,
+            context: object,
+            executemany: bool,
+        ) -> None:
             writes_workflow = statement.startswith(f"INSERT INTO {table} ") or (
                 revision and statement.startswith("UPDATE workflow_revisions ")
             )
@@ -95,7 +103,14 @@ async def test_cancelling_a_workflow_write_keeps_its_session_until_the_worker_fi
 
     # Hold the write at SQLite itself, so the test keeps reaching it wherever
     # the revision is assembled.
-    def before_write(conn, cursor, statement, parameters, context, executemany):
+    def before_write(
+        conn: Connection,
+        cursor: Cursor,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
         if writes or not statement.startswith("INSERT INTO workflow_revisions "):
             return
         writes.append(statement)
@@ -109,7 +124,7 @@ async def test_cancelling_a_workflow_write_keeps_its_session_until_the_worker_fi
         finally:
             finished.set()
 
-    async def request():
+    async def request() -> WorkflowDefinition | WorkflowRevision:
         with SessionLocal() as session:
             try:
                 if revision:
@@ -122,6 +137,7 @@ async def test_cancelling_a_workflow_write_keeps_its_session_until_the_worker_fi
 
     with SessionLocal() as session:
         count = session.scalar(select(func.count()).select_from(WorkflowRevision))
+        assert count is not None
         engine = session.get_bind()
     event.listen(engine, "before_cursor_execute", before_write)
     task = asyncio.create_task(request())
@@ -169,7 +185,14 @@ async def test_concurrent_revision_writes_choose_distinct_versions(
     with SessionLocal() as session:
         engine = session.get_bind()
 
-    def before_statement(conn, cursor, statement, parameters, context, executemany):
+    def before_statement(
+        conn: Connection,
+        cursor: Cursor,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
         if (
             statement.startswith("UPDATE workflow_revisions SET version = version WHERE 0")
             and reader_threads
@@ -177,7 +200,14 @@ async def test_concurrent_revision_writes_choose_distinct_versions(
         ):
             loop.call_soon_threadsafe(second_entered.set)
 
-    def after_statement(conn, cursor, statement, parameters, context, executemany):
+    def after_statement(
+        conn: Connection,
+        cursor: Cursor,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
         if not statement.startswith("SELECT max(workflow_revisions.version)"):
             return
         reader_threads.append(threading.get_ident())
@@ -213,7 +243,9 @@ async def test_concurrent_revision_writes_choose_distinct_versions(
             ).all()
             assert versions == [1, 2, 3]
             definition = session.get(WorkflowDefinition, workflow_id)
+            assert definition is not None
             current = session.get(WorkflowRevision, definition.current_revision_id)
+            assert current is not None
             assert current.version == 3
     finally:
         release.set()

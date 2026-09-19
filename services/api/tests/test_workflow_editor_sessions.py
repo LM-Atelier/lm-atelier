@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from itertools import count
 from threading import Lock
+from typing import TypedDict
 
 import pytest
 
@@ -228,10 +229,21 @@ def test_changed_return_is_marked_as_a_fork_when_current_revision_advanced() -> 
     assert manager.validated_return_count == 1
 
 
+class _ConsumePayload(TypedDict):
+    session_id: str
+    nonce: str
+    workflow_id: str
+    base_revision_id: str
+    current_revision_id: str
+    returned_ui_graph: dict[str, object]
+    returned_api_graph: dict[str, object]
+    runtime_identity: str
+
+
 def test_consume_replays_only_the_exact_authenticated_payload() -> None:
     manager, _clock = _sessions()
     session = _start(manager)
-    payload = {
+    payload: _ConsumePayload = {
         "session_id": session.id,
         "nonce": session.nonce,
         "workflow_id": session.workflow_id,
@@ -248,10 +260,15 @@ def test_consume_replays_only_the_exact_authenticated_payload() -> None:
     assert replay == first
     assert manager.validated_return_count == 1
     with pytest.raises(WorkflowEditorSessionError) as mismatched:
-        manager.consume(**{**payload, "returned_ui_graph": _graph(node_type="KSampler")})
+        mismatched_payload: _ConsumePayload = {
+            **payload,
+            "returned_ui_graph": _graph(node_type="KSampler"),
+        }
+        manager.consume(**mismatched_payload)
     assert mismatched.value.code == "workflow-editor-session-replay-mismatch"
     with pytest.raises(WorkflowEditorSessionError) as unauthenticated:
-        manager.consume(**{**payload, "nonce": "wrong"})
+        unauthenticated_payload: _ConsumePayload = {**payload, "nonce": "wrong"}
+        manager.consume(**unauthenticated_payload)
     assert unauthenticated.value.code == "workflow-editor-session-authentication-failed"
 
 
