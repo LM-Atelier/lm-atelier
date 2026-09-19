@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,12 @@ import pytest
 
 import local_lm.https_transfer as transfer_module
 from local_lm import download_worker
-from local_lm.https_transfer import HttpsTransferError, download_https_artifact
+from local_lm.filesystem_links import AnchoredDirectory, open_child_directory, open_entry
+from local_lm.https_transfer import (
+    HttpsArtifactRequest,
+    HttpsTransferError,
+    download_https_artifact,
+)
 
 
 def _stdin(payload: dict[str, Any]) -> io.TextIOWrapper:
@@ -31,7 +37,7 @@ def test_download_worker_keeps_legacy_huggingface_payload_compatible(
     output = io.StringIO()
     monkeypatch.setattr(download_worker, "hf_hub_download", download)
     monkeypatch.setattr(
-        download_worker.sys,
+        sys,
         "stdin",
         _stdin(
             {
@@ -43,7 +49,7 @@ def test_download_worker_keeps_legacy_huggingface_payload_compatible(
             }
         ),
     )
-    monkeypatch.setattr(download_worker.sys, "stdout", output)
+    monkeypatch.setattr(sys, "stdout", output)
 
     assert download_worker.main() == 0
     assert json.loads(output.getvalue()) == {"path": "C:/models/model.gguf"}
@@ -54,7 +60,7 @@ def test_download_worker_keeps_legacy_huggingface_payload_compatible(
 def test_download_worker_rejects_unknown_transfer_kind(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(download_worker.sys, "stdin", _stdin({"kind": "ftp"}))
+    monkeypatch.setattr(sys, "stdin", _stdin({"kind": "ftp"}))
 
     with pytest.raises(ValueError, match="unsupported download worker kind: ftp"):
         download_worker.main()
@@ -219,8 +225,11 @@ def test_https_transfer_rejects_invalid_envelope(
     payload = _https_payload(tmp_path)
     payload[field] = value
 
+    def unexpected_request(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("Invalid transfer envelopes must not send requests")
+
     with pytest.raises(HttpsTransferError) as raised:
-        download_https_artifact(payload, transport=httpx.MockTransport(lambda _request: None))
+        download_https_artifact(payload, transport=httpx.MockTransport(unexpected_request))
 
     assert raised.value.code == code
 
@@ -280,10 +289,10 @@ def test_prepare_destination_holds_the_nested_parent_after_a_name_swap(
     outside.mkdir()
     (outside / "sentinel").write_text("outside", encoding="utf-8")
     request = transfer_module._parse_request(_https_payload(tmp_path))
-    original_open_entry = transfer_module.open_entry
+    original_open_entry = open_entry
     seen: list[str] = []
 
-    def swap_then_open(parent: object, name: str) -> int | None:
+    def swap_then_open(parent: AnchoredDirectory, name: str) -> int | None:
         moved = tmp_path / "models-moved"
         if os.name == "nt":
             with pytest.raises(OSError):
@@ -318,10 +327,12 @@ def test_download_holds_the_nested_parent_through_the_stream(
     models.mkdir()
     (models / "sentinel").write_text("inside", encoding="utf-8")
     content = b"verified artifact"
-    captured: dict[str, object] = {}
-    original_open_child = transfer_module.open_child_directory
+    captured: dict[str, AnchoredDirectory] = {}
+    original_open_child = open_child_directory
 
-    def wrap_open_child(parent: object, name: str, *, create: bool = False) -> object:
+    def wrap_open_child(
+        parent: AnchoredDirectory, name: str, *, create: bool = False
+    ) -> AnchoredDirectory:
         child = original_open_child(parent, name, create=create)
         captured["parent"] = child
         return child
@@ -329,11 +340,13 @@ def test_download_holds_the_nested_parent_through_the_stream(
     original_stream = transfer_module._stream_response
     seen: list[str] = []
 
-    def wrap_stream(*args: object, **kwargs: object) -> int:
+    def wrap_stream(
+        client: httpx.Client, request: HttpsArtifactRequest, partial: Path, starting_size: int
+    ) -> int:
         from local_lm.filesystem_links import list_entries
 
         seen.extend(entry.name for entry in list_entries(captured["parent"]))
-        return original_stream(*args, **kwargs)
+        return original_stream(client, request, partial, starting_size)
 
     monkeypatch.setattr(transfer_module, "open_child_directory", wrap_open_child)
     monkeypatch.setattr(transfer_module, "_stream_response", wrap_stream)
@@ -476,8 +489,8 @@ def test_https_download_worker_returns_only_the_verified_path(
     destination.parent.mkdir()
     destination.write_bytes(content)
     output = io.StringIO()
-    monkeypatch.setattr(download_worker.sys, "stdin", _stdin(payload))
-    monkeypatch.setattr(download_worker.sys, "stdout", output)
+    monkeypatch.setattr(sys, "stdin", _stdin(payload))
+    monkeypatch.setattr(sys, "stdout", output)
 
     assert download_worker.main() == 0
     assert json.loads(output.getvalue()) == {"path": str(destination)}
@@ -488,7 +501,7 @@ def test_https_download_worker_reports_only_a_stable_error_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = _https_payload(tmp_path)
-    monkeypatch.setattr(download_worker.sys, "stdin", _stdin(payload))
+    monkeypatch.setattr(sys, "stdin", _stdin(payload))
     monkeypatch.setattr(
         download_worker,
         "download_https_artifact",
