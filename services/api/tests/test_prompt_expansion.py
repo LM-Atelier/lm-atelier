@@ -4,6 +4,9 @@ import copy
 import dataclasses
 import hashlib
 import json
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from functools import partial
+from typing import Any, Never
 
 import pytest
 
@@ -35,6 +38,7 @@ from local_lm.prompt_expansion import (
 )
 from local_lm.prompt_model_values import (
     PromptModelValues,
+    PromptModelValuesResult,
     parse_prompt_model_values,
     prompt_model_slot_contract,
     prompt_model_values_payload,
@@ -65,7 +69,9 @@ _SLOTS: list[dict[str, object]] = [
 ]
 
 
-def _contract(*, body: str = _BODY, slots: list[dict[str, object]] | None = None):
+def _contract(
+    *, body: str = _BODY, slots: Sequence[Mapping[str, object]] | None = None
+) -> PromptTemplateContract:
     return parse_prompt_template_contract(
         {
             "schema_version": 1,
@@ -77,7 +83,9 @@ def _contract(*, body: str = _BODY, slots: list[dict[str, object]] | None = None
     )
 
 
-def _request(contract=None, **overrides: object):
+def _request(
+    contract: PromptTemplateContract | None = None, /, **overrides: object
+) -> ExpansionRequest:
     """Build a request bound to the contract it will be expanded against.
 
     The digest is real rather than a placeholder, because the codec now refuses
@@ -98,17 +106,17 @@ def _request(contract=None, **overrides: object):
     return parse_expansion_request(payload)
 
 
-def _values(plan, name: str) -> list[str | None]:
+def _values(plan: ExpansionPlan, name: str) -> list[str | None]:
     return [
         next(entry.value for entry in item.evidence if entry.name == name) for item in plan.items
     ]
 
 
-def _prompts(plan) -> list[str | None]:
+def _prompts(plan: ExpansionPlan) -> list[str | None]:
     return [item.rendered_prompt for item in plan.items]
 
 
-def _bridge_contract():
+def _bridge_contract() -> PromptTemplateContract:
     slots: list[dict[str, object]] = [
         {
             "name": "style",
@@ -142,7 +150,7 @@ def _bridge_contract():
     )
 
 
-def _bridge_plan():
+def _bridge_plan() -> tuple[PromptTemplateContract, ExpansionPlan]:
     contract = _bridge_contract()
     return contract, expand_prompt_template(
         contract,
@@ -150,7 +158,7 @@ def _bridge_plan():
     )
 
 
-def _bridge_values(contract=None):
+def _bridge_values(contract: PromptTemplateContract | None = None) -> PromptModelValues:
     selected = contract if contract is not None else _bridge_contract()
     model_contract = prompt_model_slot_contract(selected, item_count=2)
     return parse_prompt_model_values(
@@ -193,7 +201,7 @@ def test_an_expansion_produces_exactly_n_distinct_rendered_drafts() -> None:
 def test_a_batch_choice_alone_cannot_produce_two_distinct_drafts() -> None:
     """Batch scope shares one value, so it adds no item diversity at all."""
 
-    slots = [dict(slot) for slot in _SLOTS]
+    slots: list[dict[str, object]] = [dict(slot) for slot in _SLOTS]
     slots[2]["variation_scope"] = "batch"
     contract = _contract(slots=slots)
     assert expand_prompt_template(contract, _request(contract, item_count=1)).complete
@@ -203,7 +211,7 @@ def test_a_batch_choice_alone_cannot_produce_two_distinct_drafts() -> None:
 
 
 def test_two_item_choices_yield_two_drafts_and_refuse_a_third() -> None:
-    slots = [dict(slot) for slot in _SLOTS]
+    slots: list[dict[str, object]] = [dict(slot) for slot in _SLOTS]
     slots[2]["choices"] = ["calm", "stormy"]
     contract = _contract(slots=slots)
     plan = expand_prompt_template(contract, _request(contract, item_count=2))
@@ -214,7 +222,7 @@ def test_two_item_choices_yield_two_drafts_and_refuse_a_third() -> None:
 
 
 def test_reusable_item_choice_can_repeat_through_the_global_batch_cap() -> None:
-    slots = [dict(slot) for slot in _SLOTS]
+    slots: list[dict[str, object]] = [dict(slot) for slot in _SLOTS]
     slots[2]["choices"] = ["calm"]
     slots[2]["choice_strategy"] = "with_replacement"
     contract = _contract(slots=slots)
@@ -237,7 +245,7 @@ def test_reusable_item_choice_can_repeat_through_the_global_batch_cap() -> None:
 def test_distinct_item_input_vectors_produce_distinct_drafts() -> None:
     """An item-scoped input is an ordered vector, one value per ordinal."""
 
-    slots = [dict(slot) for slot in _SLOTS]
+    slots: list[dict[str, object]] = [dict(slot) for slot in _SLOTS]
     slots[1]["variation_scope"] = "item"
     plan = expand_prompt_template(
         _contract(slots=slots),
@@ -250,7 +258,7 @@ def test_distinct_item_input_vectors_produce_distinct_drafts() -> None:
 
 
 def test_an_item_input_vector_must_be_exactly_the_requested_length() -> None:
-    slots = [dict(slot) for slot in _SLOTS]
+    slots: list[dict[str, object]] = [dict(slot) for slot in _SLOTS]
     slots[1]["variation_scope"] = "item"
     contract = _contract(slots=slots)
     with pytest.raises(PromptExpansionError):
@@ -264,7 +272,7 @@ def test_a_batch_input_must_be_a_scalar_and_an_item_input_a_vector() -> None:
     with pytest.raises(PromptExpansionError):
         # `subject` is batch-scoped here, so a vector is the wrong shape.
         expand_prompt_template(_contract(), _request(item_count=1, inputs={"subject": ["a fox"]}))
-    slots = [dict(slot) for slot in _SLOTS]
+    slots: list[dict[str, object]] = [dict(slot) for slot in _SLOTS]
     slots[1]["variation_scope"] = "item"
     with pytest.raises(PromptExpansionError):
         expand_prompt_template(
@@ -347,7 +355,7 @@ def test_rendering_is_one_pass_so_a_value_that_looks_like_a_token_stays_literal(
 
 
 def test_a_model_slot_leaves_its_item_unrendered_and_is_reported_as_pending() -> None:
-    slots = [
+    slots: list[dict[str, object]] = [
         *_SLOTS,
         {
             "name": "extra",
@@ -557,7 +565,7 @@ def test_seed_material_refuses_a_generator_and_stays_bounded() -> None:
 
     reads = 0
 
-    def material():
+    def material() -> Iterator[str]:
         nonlocal reads
         reads += 1
         yield "ptdef_expansion"
@@ -567,7 +575,7 @@ def test_seed_material_refuses_a_generator_and_stays_bounded() -> None:
     assert reads == 0
 
     class Custom:
-        def __iter__(self):  # pragma: no cover - must never be invoked
+        def __iter__(self) -> Never:  # pragma: no cover - must never be invoked
             raise AssertionError("caller behaviour was invoked")
 
     with pytest.raises(PromptExpansionError):
@@ -584,7 +592,7 @@ def test_seed_material_refuses_a_generator_and_stays_bounded() -> None:
 def test_item_choices_still_vary_when_a_model_slot_is_pending() -> None:
     """N copies of one allocation is not a batch, even before the model runs."""
 
-    slots = [
+    slots: list[dict[str, object]] = [
         *_SLOTS,
         {
             "name": "extra",
@@ -602,7 +610,7 @@ def test_item_choices_still_vary_when_a_model_slot_is_pending() -> None:
 def test_n_of_one_and_n_of_sixteen_both_succeed() -> None:
     """The exact bounds of the declared range, both accepted."""
 
-    slots = [dict(slot) for slot in _SLOTS]
+    slots: list[dict[str, object]] = [dict(slot) for slot in _SLOTS]
     slots[1]["variation_scope"] = "item"
     contract = _contract(slots=slots)
     for count in (1, MAX_EXPANSION_ITEMS):
@@ -616,7 +624,7 @@ def test_n_of_one_and_n_of_sixteen_both_succeed() -> None:
 
 
 def test_declared_choice_order_changes_what_is_allocated() -> None:
-    slots = [dict(slot) for slot in _SLOTS]
+    slots: list[dict[str, object]] = [dict(slot) for slot in _SLOTS]
     slots[2]["choices"] = ["bright", "stormy", "calm"]
     reordered_contract = _contract(slots=slots)
     reordered = expand_prompt_template(
@@ -629,7 +637,7 @@ def test_declared_choice_order_changes_what_is_allocated() -> None:
 def test_a_batch_choice_stays_shared_while_an_item_source_varies() -> None:
     """Mixed scopes: batch evidence identical across items, item evidence not."""
 
-    slots = [dict(slot) for slot in _SLOTS]
+    slots: list[dict[str, object]] = [dict(slot) for slot in _SLOTS]
     slots[1]["variation_scope"] = "item"
     slots[2]["variation_scope"] = "batch"
     contract = _contract(slots=slots)
@@ -670,13 +678,13 @@ def test_the_plan_digest_covers_the_rendered_identity() -> None:
 # finished plan and requires the digest call to refuse rather than agree.
 
 
-def _finished_plan():
+def _finished_plan() -> tuple[PromptTemplateContract, ExpansionPlan]:
     contract = _contract()
     return contract, expand_prompt_template(contract, _request(contract))
 
 
-def _pending_contract():
-    slots = [
+def _pending_contract() -> PromptTemplateContract:
+    slots: list[dict[str, object]] = [
         *_SLOTS,
         {"name": "extra", "mode": "model", "variation_scope": "item", "guidance": "a detail"},
     ]
@@ -789,7 +797,7 @@ def test_duplicate_slot_names_within_one_item_refuse() -> None:
 def test_an_expansion_plan_subclass_cannot_pass_as_the_real_type() -> None:
     """`isinstance` would admit this; the codec checks the exact type."""
 
-    sneaky = dataclasses.dataclass(frozen=True, slots=True)(
+    sneaky: type[ExpansionPlan] = dataclasses.dataclass(frozen=True, slots=True)(
         type("SneakyPlan", (ExpansionPlan,), {})
     )
     _unused, plan = _finished_plan()
@@ -799,7 +807,7 @@ def test_an_expansion_plan_subclass_cannot_pass_as_the_real_type() -> None:
 
 
 def test_a_model_slot_request_subclass_cannot_pass_as_the_real_type() -> None:
-    sneaky = dataclasses.dataclass(frozen=True, slots=True)(
+    sneaky: type[ModelSlotRequest] = dataclasses.dataclass(frozen=True, slots=True)(
         type("SneakySlot", (ModelSlotRequest,), {})
     )
     _unused, plan = _finished_plan()
@@ -925,7 +933,7 @@ def test_the_normalised_boundary_echoes_no_template_text() -> None:
     this whole review round is about. Guidance is covered separately below.
     """
 
-    slots = [
+    slots: list[dict[str, object]] = [
         {
             "name": "style",
             "mode": "fixed",
@@ -964,7 +972,7 @@ def test_the_normalised_boundary_echoes_no_template_text() -> None:
 def test_a_refusal_over_a_pending_plan_echoes_no_guidance() -> None:
     """Guidance is template text too, and it only exists on a pending plan."""
 
-    slots = [
+    slots: list[dict[str, object]] = [
         *_SLOTS,
         {
             "name": "extra",
@@ -1004,7 +1012,7 @@ def test_a_model_slot_carries_guidance_as_a_string_never_none() -> None:
 # nothing and the suite stayed green. These isolate them.
 
 
-def _pending_plan():
+def _pending_plan() -> ExpansionPlan:
     contract = _pending_contract()
     return expand_prompt_template(contract, _request(contract))
 
@@ -1034,7 +1042,7 @@ def test_a_model_slot_request_subclass_is_refused_on_an_otherwise_valid_plan() -
 
     plan = _pending_plan()
     real = plan.pending_model_slots[0]
-    sneaky = dataclasses.dataclass(frozen=True, slots=True)(
+    sneaky: type[ModelSlotRequest] = dataclasses.dataclass(frozen=True, slots=True)(
         type("SneakySlot", (ModelSlotRequest,), {})
     )
     object.__setattr__(
@@ -1057,7 +1065,7 @@ def test_a_slot_evidence_subclass_is_refused() -> None:
 
     _unused, plan = _finished_plan()
     real = plan.items[0].evidence[0]
-    sneaky = dataclasses.dataclass(frozen=True, slots=True)(
+    sneaky: type[SlotEvidence] = dataclasses.dataclass(frozen=True, slots=True)(
         type("SneakyEvidence", (SlotEvidence,), {})
     )
     forged = sneaky(**{f.name: getattr(real, f.name) for f in dataclasses.fields(real)})
@@ -1174,7 +1182,7 @@ def test_a_tampered_request_field_cannot_be_hashed(attribute: str, value: object
 
 
 def test_an_expansion_request_subclass_cannot_pass_as_the_real_type() -> None:
-    sneaky = dataclasses.dataclass(frozen=True, slots=True)(
+    sneaky: type[ExpansionRequest] = dataclasses.dataclass(frozen=True, slots=True)(
         type("SneakyRequest", (ExpansionRequest,), {})
     )
     _unused, plan = _finished_plan()
@@ -1226,7 +1234,7 @@ def test_no_repr_exposes_body_guidance_choices_values_or_rendered_text() -> None
     modes, scopes, and digests stay visible so a repr is still worth having.
     """
 
-    slots = [
+    slots: list[dict[str, object]] = [
         {
             "name": "style",
             "mode": "fixed",
@@ -1293,7 +1301,7 @@ def test_no_repr_exposes_body_guidance_choices_values_or_rendered_text() -> None
 # --- a template with no slots is a valid shape -------------------------------
 
 
-def _slotless_contract():
+def _slotless_contract() -> PromptTemplateContract:
     return _contract(body="A fixed authored prompt.", slots=[])
 
 
@@ -1327,10 +1335,12 @@ def test_a_slotless_template_still_refuses_a_second_item() -> None:
 # --- the reading half: a stored receipt is revalidated, not deserialised -----
 
 
-def _receipt(plan) -> dict:
+def _receipt(plan: ExpansionPlan) -> dict[str, Any]:
     """A receipt as a store would hold it: plain JSON with no dataclass behind it."""
 
-    return json.loads(json.dumps(expansion_plan_payload(plan)))
+    payload = json.loads(json.dumps(expansion_plan_payload(plan)))
+    assert isinstance(payload, dict)
+    return payload
 
 
 def test_every_receipt_shape_reparses_to_itself_and_agrees_on_its_digest() -> None:
@@ -1349,7 +1359,7 @@ def test_every_receipt_shape_reparses_to_itself_and_agrees_on_its_digest() -> No
         assert expansion_plan_payload_digest(stored) == expansion_plan_digest(plan)
 
 
-def _bend(plan, mutate):
+def _bend(plan: ExpansionPlan, mutate: Callable[[dict[str, Any]], object]) -> dict[str, Any]:
     stored = _receipt(plan)
     mutate(stored)
     return stored
@@ -1383,7 +1393,9 @@ def _bend(plan, mutate):
         ),
     ],
 )
-def test_a_tampered_receipt_refuses_on_the_way_back_in(mutate) -> None:
+def test_a_tampered_receipt_refuses_on_the_way_back_in(
+    mutate: Callable[[dict[str, Any]], object],
+) -> None:
     contract = _contract()
     plan = expand_prompt_template(contract, _request(contract))
     with pytest.raises(PromptExpansionError) as caught:
@@ -1399,7 +1411,7 @@ def test_a_rewritten_rendered_digest_refuses_at_the_reader_boundary() -> None:
         expansion_plan_payload_digest(bent)
 
 
-def _rewrite_receipt_prompt(item: dict, prompt: str) -> None:
+def _rewrite_receipt_prompt(item: dict[str, Any], prompt: str) -> None:
     item["rendered_prompt"] = prompt
     material = "\x00".join(("prompt-expansion-rendered-v1", prompt))
     item["rendered_sha256"] = hashlib.sha256(material.encode("utf-8")).hexdigest()
@@ -1464,7 +1476,7 @@ def test_completed_model_evidence_is_bound_to_each_rendered_prompt() -> None:
 
 
 def test_receipt_rendering_accepts_static_text_equal_to_overlapping_values() -> None:
-    slots = [
+    slots: list[dict[str, object]] = [
         {"name": "left", "mode": "input", "variation_scope": "batch"},
         {"name": "right", "mode": "input", "variation_scope": "batch"},
     ]
@@ -1486,7 +1498,7 @@ def test_pending_receipt_binds_evidence_order_to_the_recorded_body() -> None:
 
 
 def test_pending_receipt_binds_pending_model_slot_order() -> None:
-    slots = [
+    slots: list[dict[str, object]] = [
         *_SLOTS,
         {"name": "first", "mode": "model", "variation_scope": "batch", "guidance": "x"},
         {"name": "second", "mode": "model", "variation_scope": "item", "guidance": "y"},
@@ -1522,7 +1534,7 @@ def test_a_malformed_receipt_refuses(receipt: object) -> None:
 
 
 def test_receipt_refusals_echo_nothing_from_the_template() -> None:
-    slots = [
+    slots: list[dict[str, object]] = [
         {
             "name": "style",
             "mode": "fixed",
@@ -1553,8 +1565,10 @@ def test_receipt_refusals_echo_nothing_from_the_template() -> None:
 # --- every caller-controlled receipt collection is bounded -----------------
 
 
-def _model_only_contract(slot_count: int = MAX_EXPANSION_INPUT_SLOTS):
-    slots = [
+def _model_only_contract(
+    slot_count: int = MAX_EXPANSION_INPUT_SLOTS,
+) -> PromptTemplateContract:
+    slots: list[dict[str, object]] = [
         {
             "name": f"model_{index}",
             "mode": "model",
@@ -1630,26 +1644,23 @@ def test_pending_and_evidence_collections_refuse_cap_plus_one(boundary: str) -> 
             "pending_model_slots",
             (*plan.pending_model_slots, plan.pending_model_slots[0]),
         )
-        candidate: object = plan
-        call = expansion_plan_digest
+        call = partial(expansion_plan_digest, plan)
     elif boundary == "dataclass-evidence":
         object.__setattr__(
             plan.items[0],
             "evidence",
             (*plan.items[0].evidence, plan.items[0].evidence[0]),
         )
-        candidate = plan
-        call = expansion_plan_digest
+        call = partial(expansion_plan_digest, plan)
     else:
         stored = _receipt(plan)
         if boundary == "json-pending":
             stored["pending_model_slots"].append(stored["pending_model_slots"][0])
         else:
             stored["items"][0]["evidence"].append(stored["items"][0]["evidence"][0])
-        candidate = stored
-        call = expansion_plan_payload_digest
+        call = partial(expansion_plan_payload_digest, stored)
     with pytest.raises(PromptExpansionError):
-        call(candidate)
+        call()
 
 
 class _PrivateTrap:
@@ -1713,7 +1724,7 @@ def test_stored_keys_are_typed_before_hash_or_repr() -> None:
 
 def test_large_wrong_key_records_refuse_with_the_fixed_error() -> None:
     _unused, plan = _finished_plan()
-    builders = [
+    builders: list[Callable[[], dict[str, Any]]] = [
         lambda: {f"unknown_{index}": _PrivateTrap() for index in range(12_000)},
         lambda: _bend(
             plan,
@@ -1763,8 +1774,7 @@ def test_one_slot_cannot_change_mode_or_scope_between_items(boundary: str, field
         else:
             entry = plan.items[1].evidence[2]
             object.__setattr__(entry, "variation_scope", PromptTemplateVariationScope.BATCH)
-        candidate: object = plan
-        call = expansion_plan_digest
+        call = partial(expansion_plan_digest, plan)
     else:
         stored = _receipt(plan)
         if field == "mode":
@@ -1774,10 +1784,9 @@ def test_one_slot_cannot_change_mode_or_scope_between_items(boundary: str, field
             entry["choice_index"] = 0
         else:
             stored["items"][1]["evidence"][2]["variation_scope"] = "batch"
-        candidate = stored
-        call = expansion_plan_payload_digest
+        call = partial(expansion_plan_payload_digest, stored)
     with pytest.raises(PromptExpansionError):
-        call(candidate)
+        call()
 
 
 @pytest.mark.parametrize("boundary", ["dataclass", "json"])
@@ -1789,15 +1798,13 @@ def test_pending_model_scope_must_match_every_items_evidence(boundary: str) -> N
             "variation_scope",
             PromptTemplateVariationScope.BATCH,
         )
-        candidate: object = plan
-        call = expansion_plan_digest
+        call = partial(expansion_plan_digest, plan)
     else:
         stored = _receipt(plan)
         stored["pending_model_slots"][0]["variation_scope"] = "batch"
-        candidate = stored
-        call = expansion_plan_payload_digest
+        call = partial(expansion_plan_payload_digest, stored)
     with pytest.raises(PromptExpansionError):
-        call(candidate)
+        call()
 
 
 @pytest.mark.parametrize("boundary", ["dataclass", "json"])
@@ -1808,17 +1815,15 @@ def test_fixed_slots_cannot_claim_item_scope_without_echoing_values(boundary: st
             entry = item.evidence[0]
             object.__setattr__(entry, "variation_scope", PromptTemplateVariationScope.ITEM)
             object.__setattr__(entry, "value", "SECRET-FIXED-VALUE")
-        candidate: object = plan
-        call = expansion_plan_digest
+        call = partial(expansion_plan_digest, plan)
     else:
         stored = _receipt(plan)
         for item in stored["items"]:
             item["evidence"][0]["variation_scope"] = "item"
             item["evidence"][0]["value"] = "SECRET-FIXED-VALUE"
-        candidate = stored
-        call = expansion_plan_payload_digest
+        call = partial(expansion_plan_payload_digest, stored)
     with pytest.raises(PromptExpansionError) as caught:
-        call(candidate)
+        call()
     assert str(caught.value) == PROMPT_EXPANSION_INVALID
     assert "SECRET-FIXED-VALUE" not in str(caught.value)
 
@@ -1851,15 +1856,13 @@ def test_choice_index_refuses_the_cap_and_huge_integers_with_the_fixed_error(
     _unused, plan = _finished_plan()
     if boundary == "dataclass":
         object.__setattr__(plan.items[0].evidence[2], "choice_index", index)
-        candidate: object = plan
-        call = expansion_plan_digest
+        call = partial(expansion_plan_digest, plan)
     else:
         stored = _receipt(plan)
         stored["items"][0]["evidence"][2]["choice_index"] = index
-        candidate = stored
-        call = expansion_plan_payload_digest
+        call = partial(expansion_plan_payload_digest, stored)
     with pytest.raises(PromptExpansionError) as caught:
-        call(candidate)
+        call()
     assert str(caught.value) == PROMPT_EXPANSION_INVALID
 
 
@@ -2092,8 +2095,8 @@ def test_completion_allows_repeated_prompts_when_a_choice_explicitly_allows_reus
     assert _prompts(completed) == ["same detail", "same detail"]
 
 
-class _ExplodingTuple(tuple):
-    def __iter__(self):
+class _ExplodingTuple(tuple[object, ...]):
+    def __iter__(self) -> Never:
         raise AssertionError("must refuse this tuple subclass before traversal")
 
 
@@ -2194,7 +2197,9 @@ def test_invocation_data_requires_the_exact_authored_pending_contract() -> None:
     assert "forged guidance" not in str(caught.value)
 
 
-def _partial_completion_fixture():
+def _partial_completion_fixture() -> tuple[
+    PromptTemplateContract, ExpansionPlan, PromptModelValuesResult
+]:
     from local_lm.prompt_model_values import parse_prompt_model_values_result
 
     contract = _contract(
@@ -2233,7 +2238,7 @@ def _partial_completion_fixture():
     return contract, plan, result
 
 
-def _partial_completion():
+def _partial_completion() -> ExpansionPlan:
     import local_lm.prompt_expansion as expansion
 
     contract, plan, result = _partial_completion_fixture()
