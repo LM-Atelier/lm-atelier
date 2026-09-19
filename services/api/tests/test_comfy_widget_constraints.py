@@ -14,7 +14,9 @@ from local_lm.settings_registry import (
 )
 
 
-def _compile(specs: dict[str, Any], values: list[Any], *, operation: str = "text_to_video"):
+def _compile(
+    specs: dict[str, Any], values: list[Any], *, operation: str = "text_to_video"
+) -> tuple[dict[str, Any], dict[str, Any]]:
     node = {
         "id": 1,
         "type": "NeutralSampler",
