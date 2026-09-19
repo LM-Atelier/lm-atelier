@@ -11,7 +11,9 @@ require cleanup to finish on its own within a bound.
 from __future__ import annotations
 
 import asyncio
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -30,8 +32,8 @@ def _launch_as(
 ) -> list[asyncio.subprocess.Process]:
     """Run `script` in place of the decoder, with the real pipes the decoder would get."""
 
-    monkeypatch.setattr(measurement.tempfile, "tempdir", str(tmp_path))
-    monkeypatch.setattr(measurement.shutil, "which", lambda _name: sys.executable)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(shutil, "which", lambda _name: sys.executable)
     launch = asyncio.create_subprocess_exec
     processes: list[asyncio.subprocess.Process] = []
 
@@ -47,7 +49,7 @@ def _launch_as(
         processes.append(process)
         return process
 
-    monkeypatch.setattr(measurement.asyncio, "create_subprocess_exec", child)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", child)
     return processes
 
 

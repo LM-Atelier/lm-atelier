@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -17,8 +19,8 @@ from local_lm.output_measurement import Budget
 async def test_a_real_flooding_decoder_finishes_cleanup(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, descriptor: int
 ) -> None:
-    monkeypatch.setattr(measurement.tempfile, "tempdir", str(tmp_path))
-    monkeypatch.setattr(measurement.shutil, "which", lambda name: sys.executable)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(shutil, "which", lambda name: sys.executable)
     launch = asyncio.create_subprocess_exec
     processes: list[asyncio.subprocess.Process] = []
 
@@ -35,7 +37,7 @@ async def test_a_real_flooding_decoder_finishes_cleanup(
         processes.append(process)
         return process
 
-    monkeypatch.setattr(measurement.asyncio, "create_subprocess_exec", flooding)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", flooding)
     task = asyncio.create_task(measurement.measure_video_output(b"neutral-video-fixture", Budget()))
     done, _ = await asyncio.wait({task}, timeout=5)
     finished_without_help = bool(done)
