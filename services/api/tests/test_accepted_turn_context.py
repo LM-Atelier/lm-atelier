@@ -291,6 +291,8 @@ async def test_accepted_profile_configuration_reaches_worker_loading(
     from local_lm.models import Chat, ModelInstall, ModelProfile
     from local_lm.schemas import WorkerStatus
 
+    install: ModelInstall | None
+    profile: ModelProfile | None
     orchestrator = app.state.services.orchestrator
     neutral_fields = await orchestrator.engines.settings_for_role("chat", engine="mock")
 
@@ -397,12 +399,13 @@ async def test_accepted_profile_configuration_reaches_worker_loading(
 
         assert await orchestrator._ensure_chat_worker(run_id) is loaded
         loader.assert_awaited_once()
-        supplied_profile, supplied_install = loader.await_args.args
+        awaited = loader.await_args_list[0]
+        supplied_profile, supplied_install = awaited.args
         assert supplied_profile.load_settings_json == original_load
         assert supplied_profile.name == "Accepted launch"
         assert supplied_install.id == "model-accepted-launch"
-        assert len(loader.await_args.kwargs["launch_scope_sha256"]) == 64
-        assert loader.await_args.kwargs["vision_max_images"] == 2
+        assert len(awaited.kwargs["launch_scope_sha256"]) == 64
+        assert awaited.kwargs["vision_max_images"] == 2
         with SessionLocal() as session:
             current_profile = session.get(ModelProfile, "profile-accepted-launch")
             assert current_profile is not None
@@ -436,6 +439,8 @@ async def test_accepted_vision_bridge_uses_accepted_inputs(
     from local_lm.vision import VisionInputError
     from local_lm.workflow_compatibility import mirror_legacy_chat_workflow_selections
 
+    source: ModelSource | None
+    profile: ModelProfile | None
     orchestrator = app.state.services.orchestrator
     neutral_fields = await orchestrator.engines.settings_for_role("chat", engine="mock")
 
