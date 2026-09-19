@@ -7,6 +7,7 @@ identical content rather than against the reconcile's own arithmetic.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -63,6 +64,7 @@ async def test_starting_the_workspace_records_the_identity_creation_would_have(
         app.router.lifespan_context(app),
         AsyncClient(transport=transport, base_url="http://testserver") as client,
     ):
+        await asyncio.wait_for(app.state.retention_sweep, timeout=30)
         client.headers["x-local-lm-csrf"] = (await client.post("/api/session")).json()["csrf_token"]
         _, reference = await _created(client, "Reference copy", {})
         _, forgotten = await _created(client, "Imported copy", {})
@@ -177,6 +179,7 @@ async def test_a_row_that_cannot_be_read_is_left_alone_and_the_rest_are_repaired
         app.router.lifespan_context(app),
         AsyncClient(transport=transport, base_url="http://testserver") as client,
     ):
+        await asyncio.wait_for(app.state.retention_sweep, timeout=30)
         client.headers["x-local-lm-csrf"] = (await client.post("/api/session")).json()["csrf_token"]
         _, damaged = await _created(client, "Damaged copy", {})
         _, healthy = await _created(client, "Healthy copy", {})
