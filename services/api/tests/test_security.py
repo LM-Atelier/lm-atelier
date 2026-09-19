@@ -4,12 +4,14 @@ import ast
 import asyncio
 import hashlib
 import hmac
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Annotated
 
 import pytest
 from fastapi import FastAPI, File, Response, UploadFile
 from httpx2 import ASGITransport, AsyncClient
+from starlette.types import Message, Receive, Scope, Send
 
 from local_lm.config import Settings
 from local_lm.main import create_app
@@ -57,8 +59,8 @@ def test_all_application_subprocesses_use_an_explicit_environment() -> None:
 
 
 def test_public_preview_rejects_non_loopback_binding(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:  # type: ignore[no-untyped-def]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("LOCAL_LM_ALLOW_LAN", "true")
     settings = Settings(data_dir=tmp_path / "lan", host="0.0.0.0")
 
@@ -91,7 +93,7 @@ def test_worker_url_normalizes_a_trailing_slash() -> None:
     assert settings.comfy_url == "http://[::1]:8188"
 
 
-async def test_non_dev_api_requires_cookie_and_csrf(tmp_path) -> None:  # type: ignore[no-untyped-def]
+async def test_non_dev_api_requires_cookie_and_csrf(tmp_path: Path) -> None:
     settings = Settings(data_dir=tmp_path / "secure", dev=False)
     app = create_app(settings)
     async with app.router.lifespan_context(app):
@@ -118,8 +120,8 @@ async def test_non_dev_api_requires_cookie_and_csrf(tmp_path) -> None:  # type: 
 
 
 async def test_browser_origins_are_limited_to_the_local_application(
-    tmp_path,
-) -> None:  # type: ignore[no-untyped-def]
+    tmp_path: Path,
+) -> None:
     settings = Settings(data_dir=tmp_path / "origins", dev=False, port=12340)
     app = create_app(settings)
     async with app.router.lifespan_context(app):
@@ -184,8 +186,8 @@ async def test_developer_mode_retains_test_hosts_and_openapi(tmp_path: Path) -> 
 
 
 def test_websocket_origin_policy_allows_non_browser_clients_and_local_ui(
-    tmp_path,
-) -> None:  # type: ignore[no-untyped-def]
+    tmp_path: Path,
+) -> None:
     security = SessionSecurity(
         Settings(data_dir=tmp_path / "websocket-origins", dev=False, port=12340)
     )
@@ -199,8 +201,8 @@ def test_websocket_origin_policy_allows_non_browser_clients_and_local_ui(
 
 
 async def test_json_request_body_limit_covers_streamed_bodies_without_content_length(
-    tmp_path,
-) -> None:  # type: ignore[no-untyped-def]
+    tmp_path: Path,
+) -> None:
     settings = Settings(
         data_dir=tmp_path / "json-body-limit",
         dev=True,
@@ -209,7 +211,7 @@ async def test_json_request_body_limit_covers_streamed_bodies_without_content_le
     )
     app = create_app(settings)
 
-    async def oversized_body():  # type: ignore[no-untyped-def]
+    async def oversized_body() -> AsyncIterator[bytes]:
         yield b'{"name":"'
         yield b"x" * MAX_JSON_BODY_BYTES
         yield b'"}'
@@ -237,14 +239,14 @@ async def test_json_body_replay_waits_on_the_real_connection_after_the_body() ->
     downstream_receive_started = asyncio.Event()
     allow_disconnect = asyncio.Event()
 
-    async def downstream(scope, receive, send) -> None:  # type: ignore[no-untyped-def]
+    async def downstream(scope: Scope, receive: Receive, send: Send) -> None:
         body = await receive()
         assert body == {
             "type": "http.request",
             "body": b'{"ok":true}',
             "more_body": False,
         }
-        pending_receive = asyncio.create_task(receive())
+        pending_receive = asyncio.ensure_future(receive())
         await asyncio.wait_for(downstream_receive_started.wait(), timeout=0.5)
         await asyncio.sleep(0)
         assert not pending_receive.done()
@@ -254,7 +256,7 @@ async def test_json_body_replay_waits_on_the_real_connection_after_the_body() ->
         await send({"type": "http.response.body", "body": b""})
 
     middleware = JsonBodyLimitMiddleware(downstream)
-    source_messages: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+    source_messages: asyncio.Queue[Message] = asyncio.Queue()
     source_messages.put_nowait(
         {
             "type": "http.request",
@@ -264,7 +266,7 @@ async def test_json_body_replay_waits_on_the_real_connection_after_the_body() ->
     )
     receive_count = 0
 
-    async def receive() -> dict[str, object]:
+    async def receive() -> Message:
         nonlocal receive_count
         receive_count += 1
         if receive_count > 1:
@@ -274,9 +276,9 @@ async def test_json_body_replay_waits_on_the_real_connection_after_the_body() ->
         message = await source_messages.get()
         return message
 
-    sent: list[dict[str, object]] = []
+    sent: list[Message] = []
 
-    async def send(message: dict[str, object]) -> None:
+    async def send(message: Message) -> None:
         sent.append(message)
 
     await middleware(
@@ -285,8 +287,8 @@ async def test_json_body_replay_waits_on_the_real_connection_after_the_body() ->
             "path": "/api/example",
             "headers": [(b"content-type", b"application/json")],
         },
-        receive,  # type: ignore[arg-type]
-        send,  # type: ignore[arg-type]
+        receive,
+        send,
     )
 
     assert sent == [
@@ -311,7 +313,7 @@ async def test_upload_limit_rejects_streamed_multipart_before_endpoint_runs() ->
         project_max_bytes=16,
     )
 
-    async def oversized_body():  # type: ignore[no-untyped-def]
+    async def oversized_body() -> AsyncIterator[bytes]:
         yield (
             b"--test\r\n"
             b'Content-Disposition: form-data; name="file"; filename="oversized.bin"\r\n'
@@ -372,7 +374,7 @@ async def test_security_headers_block_remote_active_content_and_preserve_stricte
     assert artifact_response.headers["content-security-policy"] == "sandbox; default-src 'none'"
 
 
-async def test_each_refusal_says_which_one_it_was(tmp_path) -> None:  # type: ignore[no-untyped-def]
+async def test_each_refusal_says_which_one_it_was(tmp_path: Path) -> None:
     """Three refusals a caller must tell apart to know what to do next.
 
     An untrusted origin means the request came from somewhere it should not.
