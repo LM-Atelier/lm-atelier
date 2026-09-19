@@ -7,6 +7,7 @@ import struct
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 from sqlalchemy import select
@@ -148,7 +149,8 @@ def test_official_workflow_staging_honors_declared_safe_component_contracts() ->
         ("vae.safetensors", "vae", "vae"),
         ("lightning.safetensors", "lora", "loras"),
     ]
-    plan = SimpleNamespace(
+    plan = Mock(
+        spec_set=["family", "role", "artifacts_json", "runtime_contract_json"],
         family=None,
         role="image",
         artifacts_json=[
@@ -180,7 +182,7 @@ def test_official_workflow_staging_honors_declared_safe_component_contracts() ->
     )
     hashes = {path: str(index) * 64 for index, (path, _kind, _target) in enumerate(contracts, 1)}
 
-    DownloadManager._validate_staged_plan(plan, inspection, hashes)  # type: ignore[arg-type]
+    DownloadManager._validate_staged_plan(plan, inspection, hashes)
 
     mismatched = ModelManifestInspection(
         architecture=None,
@@ -196,9 +198,10 @@ def test_official_workflow_staging_honors_declared_safe_component_contracts() ->
         metadata_files=(),
     )
     with pytest.raises(ValueError, match="contract changed"):
-        DownloadManager._validate_staged_plan(plan, mismatched, hashes)  # type: ignore[arg-type]
+        DownloadManager._validate_staged_plan(plan, mismatched, hashes)
 
-    standalone = SimpleNamespace(
+    standalone = Mock(
+        spec_set=["family", "role", "artifacts_json", "runtime_contract_json"],
         family=None,
         role="image",
         artifacts_json=[
@@ -216,7 +219,7 @@ def test_official_workflow_staging_honors_declared_safe_component_contracts() ->
         },
     )
     with pytest.raises(ValueError, match="unsupported"):
-        DownloadManager._validate_staged_plan(  # type: ignore[arg-type]
+        DownloadManager._validate_staged_plan(
             standalone,
             inspection,
             hashes,
@@ -330,9 +333,9 @@ async def test_planned_chat_activation_requires_completion_and_records_evidence(
 
     processes = FakeProcesses()
 
-    def active_adapter() -> FakeChatAdapter:
+    def active_adapter() -> Mock:
         assert processes.loaded
-        return FakeChatAdapter()
+        return Mock(spec_set=["capabilities", "count_tokens", "stream"], wraps=FakeChatAdapter())
 
     manager = DownloadManager(
         settings,
@@ -531,7 +534,7 @@ async def test_unknown_gguf_plan_installs_and_activates_with_one_request(
             install_plan_id=plan.id,
             remote_id=plan.remote_id,
             revision=plan.revision,
-            role=plan.role,  # type: ignore[arg-type]
+            role=plan.role,
             engine=plan.engine,
             allow_patterns=["weights.bin.gguf"],
             expected_sha256={"weights.bin.gguf": digest},
@@ -1151,7 +1154,8 @@ def test_staged_model_family_must_match_the_immutable_plan() -> None:
         ["model.gguf"],
         role="chat",
     )
-    plan = SimpleNamespace(
+    plan = Mock(
+        spec_set=["family", "artifacts_json"],
         family="qwen",
         artifacts_json=[
             {
@@ -1164,7 +1168,7 @@ def test_staged_model_family_must_match_the_immutable_plan() -> None:
     )
 
     with pytest.raises(ValueError, match="family"):
-        DownloadManager._validate_staged_plan(  # type: ignore[arg-type]
+        DownloadManager._validate_staged_plan(
             plan,
             inspection,
             {"model.gguf": "a" * 64},
@@ -1701,9 +1705,7 @@ async def test_adaptive_checkpoint_activation_runs_a_small_bounded_generation(
     )
     graph = {"loader": {"class_type": "CheckpointLoaderSimple", "inputs": {}}}
 
-    await manager._probe_adaptive_checkpoint(  # type: ignore[arg-type]
-        SimpleNamespace(api_graph=graph)
-    )
+    await manager._probe_adaptive_checkpoint(Mock(spec_set=["api_graph"], api_graph=graph))
 
     assert adapter.request
     assert adapter.request.workflow == graph
@@ -1735,7 +1737,8 @@ async def test_native_edit_activation_uses_ephemeral_inputs_for_each_loader(
         "first": {"class_type": "LoadImage", "inputs": {"image": "${input_image_0}"}},
         "second": {"class_type": "LoadImage", "inputs": {"image": "${input_image_1}"}},
     }
-    compiled = SimpleNamespace(
+    compiled = Mock(
+        spec_set=["api_graph", "input_schema", "template"],
         api_graph=graph,
         input_schema={
             "properties": {
@@ -1746,7 +1749,7 @@ async def test_native_edit_activation_uses_ephemeral_inputs_for_each_loader(
         template=SimpleNamespace(operation="image_to_image"),
     )
 
-    await manager._probe_adaptive_checkpoint(compiled)  # type: ignore[arg-type]
+    await manager._probe_adaptive_checkpoint(compiled)
 
     assert adapter.request
     assert adapter.request.operation == "image_to_image"
@@ -1763,7 +1766,7 @@ async def test_workflow_refresh_adds_an_image_edit_contract_for_existing_install
     settings.prepare()
     configure_database(settings)
     init_db()
-    object_info = {"LoadImage": {"input": {}}, "VAEEncode": {"input": {}}}
+    object_info: dict[str, object] = {"LoadImage": {"input": {}}, "VAEEncode": {"input": {}}}
 
     class MediaAdapter:
         async def object_info(self) -> dict[str, object]:
@@ -1897,7 +1900,8 @@ async def test_media_activation_waits_for_the_shared_compute_lease(
         async def validate_workflow(self, _graph: dict[str, object]) -> list[str]:
             return []
 
-    compiled = SimpleNamespace(
+    compiled = Mock(
+        spec_set=["template", "ui_graph", "api_graph", "input_schema"],
         template=SimpleNamespace(
             id="lease-image",
             operation="text_to_image",
@@ -1953,7 +1957,7 @@ async def test_media_activation_waits_for_the_shared_compute_lease(
 
     async with scheduler.lease("primary"):
         activation = asyncio.create_task(
-            manager._activate_comfy_install(  # type: ignore[arg-type]
+            manager._activate_comfy_install(
                 job_id="job_lease_image",
                 install_id="model_lease_image",
                 destination=destination,
@@ -2013,7 +2017,8 @@ async def test_planned_media_activation_requires_output_and_records_evidence(
         "signals": [{"kind": "native-low-step", "steps": 4}],
         "native_optimized": True,
     }
-    compiled = SimpleNamespace(
+    compiled = Mock(
+        spec_set=["template", "ui_graph", "api_graph", "input_schema"],
         template=SimpleNamespace(
             id="planned-image",
             operation="text_to_image",
@@ -2071,7 +2076,7 @@ async def test_planned_media_activation_requires_output_and_records_evidence(
         workflow_template_sha256="a" * 64,
     )
 
-    result = await manager._activate_comfy_install(  # type: ignore[arg-type]
+    result = await manager._activate_comfy_install(
         job_id="job_planned_image",
         install_id="model_planned_image",
         destination=destination,
@@ -2104,7 +2109,8 @@ async def test_adaptive_activation_failure_is_removed_before_retry(
     settings.prepare()
     configure_database(settings)
     init_db()
-    compiled = SimpleNamespace(
+    compiled = Mock(
+        spec_set=["template", "ui_graph", "api_graph", "input_schema"],
         template=SimpleNamespace(
             id="adaptive-image",
             operation="text_to_image",
