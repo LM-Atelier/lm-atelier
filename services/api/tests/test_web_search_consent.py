@@ -22,6 +22,11 @@ ENDPOINT = "https://search.example.test"
 CLAIM = JobClaim(token="constructed-search-claim", attempt=1)
 
 
+def _required[T](value: T | None) -> T:
+    assert value is not None
+    return value
+
+
 def _seed(settings: Settings) -> tuple[Any, str, str, str]:
     consent = importlib.import_module("local_lm.web_search_consent")
     with SessionLocal() as session:
@@ -116,9 +121,9 @@ def test_wait_persists_exact_proposal_and_pauses_owned_work(settings: Settings) 
         assert job is not None and run is not None
         assert job.status == "paused" and job.claim_owner == CLAIM.token
         assert run.status == "queued" and run.completed_at is None
-        assert session.get(WorkStep, run.work_step_id).status == "paused"
-        assert session.get(WorkPlan, run.work_plan_id).status == "paused"
-        persisted = session.scalar(select(consent.WebSearchProposal))
+        assert _required(session.get(WorkStep, run.work_step_id)).status == "paused"
+        assert _required(session.get(WorkPlan, run.work_plan_id)).status == "paused"
+        persisted = _required(session.scalar(select(consent.WebSearchProposal)))
         assert persisted.query == proposed.query
         assert persisted.provider_revision == "provider-one"
 
@@ -129,7 +134,7 @@ def test_stale_or_disallowed_producer_cannot_publish_query(
 ) -> None:
     consent, job_id, _, chat_id = _seed(settings)
     with SessionLocal() as session:
-        job = session.get(Job, job_id)
+        job = _required(session.get(Job, job_id))
         if failure == "token":
             job.claim_owner = "another-claim"
         elif failure == "attempt":
@@ -139,7 +144,7 @@ def test_stale_or_disallowed_producer_cannot_publish_query(
         elif failure == "cancelled":
             job.status = "cancelled"
         else:
-            session.get(Chat, chat_id).web_settings_json = {}
+            _required(session.get(Chat, chat_id)).web_settings_json = {}
         session.commit()
     with pytest.raises(consent.SearchConsentConflict):
         _pause(consent, job_id)
@@ -156,7 +161,7 @@ def test_approval_retry_is_stable_but_stale_revision_is_refused(settings: Settin
     with pytest.raises(consent.SearchConsentConflict):
         _decide(consent, job_id, proposed.revision + 1, "approve")
     with SessionLocal() as session:
-        assert session.get(Job, job_id).status == "queued"
+        assert _required(session.get(Job, job_id)).status == "queued"
 
 
 @pytest.mark.parametrize("action", ["decline", "cancel"])
@@ -184,7 +189,7 @@ def test_dispatch_rechecks_current_authority(settings: Settings, change: str) ->
         overrides["installation_enabled"] = False
     elif change == "chat":
         with SessionLocal() as session:
-            session.get(Chat, chat_id).web_settings_json = {}
+            _required(session.get(Chat, chat_id)).web_settings_json = {}
             session.commit()
     elif change == "endpoint":
         overrides["provider_endpoint"] = "https://other.example.test"
@@ -230,7 +235,7 @@ def test_uncertain_dispatch_is_not_reapproved_or_reissued_after_restart(settings
     with SessionLocal() as session:
         assert consent.recover_search_dispatches(session) == 1
     with SessionLocal() as session:
-        persisted = session.scalar(select(consent.WebSearchProposal))
+        persisted = _required(session.scalar(select(consent.WebSearchProposal)))
         assert persisted.state == "uncertain"
         assert persisted.error_code == "search_dispatch_uncertain"
     with SessionLocal() as repeated:
@@ -253,7 +258,7 @@ def test_run_deletion_removes_pending_consent(settings: Settings) -> None:
     consent, job_id, run_id, _ = _seed(settings)
     _pause(consent, job_id)
     with SessionLocal() as session:
-        session.delete(session.get(Run, run_id))
+        session.delete(_required(session.get(Run, run_id)))
         session.commit()
     with SessionLocal() as session:
         assert session.scalar(select(consent.WebSearchProposal)) is None
@@ -329,7 +334,7 @@ def test_only_the_dispatching_execution_can_store_its_result(
     )
     if lost:
         with SessionLocal() as session:
-            job = session.get(Job, job_id)
+            job = _required(session.get(Job, job_id))
             job.claim_owner = "replacement-claim"
             job.attempt += 1
             session.commit()
@@ -349,7 +354,7 @@ def test_only_the_dispatching_execution_can_store_its_result(
                 == "complete"
             )
     with SessionLocal() as session:
-        row = session.scalar(select(consent.WebSearchProposal))
+        row = _required(session.scalar(select(consent.WebSearchProposal)))
         assert row.state == ("dispatching" if lost else "complete")
         assert row.result_json == (
             {}
@@ -411,9 +416,9 @@ async def test_application_restart_preserves_consent_without_replaying_uncertain
     )
     orchestrator.recover_interrupted()
     with SessionLocal() as session:
-        proposal = session.scalar(select(consent.WebSearchProposal))
-        job = session.get(Job, job_id)
-        run = session.get(Run, run_id)
+        proposal = _required(session.scalar(select(consent.WebSearchProposal)))
+        job = _required(session.get(Job, job_id))
+        run = _required(session.get(Run, run_id))
         assert job.claim_owner is None
         assert job.claim_expires_at is None
         assert job.heartbeat_at is None
@@ -424,7 +429,7 @@ async def test_application_restart_preserves_consent_without_replaying_uncertain
             assert proposal.error_code == "search_dispatch_uncertain"
         elif stage == "awaiting_approval":
             assert job.status == "paused" and run.status == "queued"
-            assert session.get(WorkStep, run.work_step_id).status == "paused"
+            assert _required(session.get(WorkStep, run.work_step_id)).status == "paused"
         else:
             assert job.status == "queued" and run.status == "queued"
 
@@ -526,7 +531,7 @@ def test_an_old_edit_cannot_overwrite_a_newer_query(settings: Settings) -> None:
             installation_enabled=True,
         )
     with SessionLocal() as session:
-        persisted = session.scalar(select(consent.WebSearchProposal))
+        persisted = _required(session.scalar(select(consent.WebSearchProposal)))
         assert persisted.query == newer.query
         assert persisted.revision == newer.revision
 
@@ -536,7 +541,7 @@ def _schedule(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> tuple[Any,
     moment = utcnow()
     monkeypatch.setattr(consent, "utcnow", lambda: moment)
     with SessionLocal() as session:
-        session.get(Chat, chat_id).web_settings_json = {
+        _required(session.get(Chat, chat_id)).web_settings_json = {
             "allow_search": True,
             "allow_search_without_asking": True,
         }
@@ -564,9 +569,9 @@ def test_automatic_search_has_a_persisted_five_second_cancellation_window(
     assert proposal.dispatch_after == moment + timedelta(seconds=5)
     assert _approve_automatic(consent, job_id, proposal.revision).state == "scheduled"
     with SessionLocal() as session:
-        job = session.get(Job, job_id)
+        job = _required(session.get(Job, job_id))
         assert job.status == "paused"
-        run = session.get(Run, job.run_id)
+        run = _required(session.get(Run, job.run_id))
         assert run.provenance_json["web_search"]["state"] == "scheduled"
         assert run.provenance_json["web_search"]["query"] == QUERY
     monkeypatch.setattr(consent, "utcnow", lambda: moment + timedelta(seconds=5))
@@ -587,9 +592,9 @@ def test_automatic_search_rechecks_permission_and_provider_when_the_window_ends(
         overrides["installation_enabled"] = False
     elif change in ("chat", "confirmation"):
         with SessionLocal() as session:
-            job = session.get(Job, job_id)
-            run = session.get(Run, job.run_id)
-            chat = session.get(Chat, run.chat_id)
+            job = _required(session.get(Job, job_id))
+            run = _required(session.get(Run, job.run_id))
+            chat = _required(session.get(Chat, run.chat_id))
             chat.web_settings_json = {} if change == "chat" else {"allow_search": True}
             session.commit()
     else:
@@ -598,7 +603,7 @@ def test_automatic_search_rechecks_permission_and_provider_when_the_window_ends(
     assert result.state == ("cancelled" if change in ("global", "chat") else "awaiting_approval")
     assert result.dispatch_after is None
     with SessionLocal() as session:
-        job = session.get(Job, job_id)
+        job = _required(session.get(Job, job_id))
         assert job.status == ("queued" if result.state == "cancelled" else "paused")
 
 
@@ -613,7 +618,7 @@ def test_cancelling_the_automatic_window_cannot_be_undone_by_its_timer(
         _approve_automatic(consent, job_id, proposal.revision)
     with SessionLocal() as session:
         assert session.scalar(select(consent.WebSearchProposal.state)) == "cancelled"
-        assert session.get(Job, job_id).status == "queued"
+        assert _required(session.get(Job, job_id)).status == "queued"
 
 
 def test_search_history_survives_removal_of_a_completed_execution_job(settings: Settings) -> None:
@@ -635,12 +640,12 @@ def test_search_history_survives_removal_of_a_completed_execution_job(settings: 
             ),
         )
     with SessionLocal() as session:
-        session.get(Run, run_id).status = "complete"
-        session.delete(session.get(Job, job_id))
+        _required(session.get(Run, run_id)).status = "complete"
+        session.delete(_required(session.get(Job, job_id)))
         session.commit()
     with SessionLocal() as session:
         assert session.scalar(select(consent.WebSearchProposal)) is None
-        history = session.get(Run, run_id).provenance_json["web_search"]
+        history = _required(session.get(Run, run_id)).provenance_json["web_search"]
         assert history["query"] == QUERY
         assert history["provider_endpoint"] == ENDPOINT
         assert history["state"] == "complete"
@@ -663,16 +668,16 @@ def test_dispatch_rechecks_automatic_permission_without_revoking_manual_approval
         proposal = _pause(consent, job_id)
         _decide(consent, job_id, proposal.revision, "approve")
     with SessionLocal() as session:
-        job = session.get(Job, job_id)
-        run = session.get(Run, job.run_id)
-        session.get(Chat, run.chat_id).web_settings_json = {"allow_search": True}
+        job = _required(session.get(Job, job_id))
+        run = _required(session.get(Run, job.run_id))
+        _required(session.get(Chat, run.chat_id)).web_settings_json = {"allow_search": True}
         session.commit()
     claim = _resume(job_id)
     if automatic:
         with pytest.raises(consent.SearchConsentConflict):
             _dispatch(consent, job_id, proposal.revision, claim)
         with SessionLocal() as session:
-            row = session.scalar(select(consent.WebSearchProposal))
+            row = _required(session.scalar(select(consent.WebSearchProposal)))
             assert row.state == "approved"
             assert row.dispatch_owner is None
     else:
@@ -695,14 +700,14 @@ async def test_restart_reoffers_the_full_automatic_window_and_resumes_its_timer(
     orchestrator.recover_interrupted()
     assert resumed == [job_id]
     with SessionLocal() as session:
-        row = session.scalar(select(consent.WebSearchProposal))
-        job = session.get(Job, job_id)
+        row = _required(session.scalar(select(consent.WebSearchProposal)))
+        job = _required(session.get(Job, job_id))
         assert row.state == "scheduled"
         assert row.dispatch_after.replace(tzinfo=UTC) == restarted + timedelta(seconds=5)
         assert row.dispatch_after.replace(tzinfo=UTC) != proposal.dispatch_after
         assert job.status == "paused" and job.claim_owner is None
         assert job.claim_expires_at is None and job.heartbeat_at is None
-        run = session.get(Run, row.run_id)
+        run = _required(session.get(Run, row.run_id))
         assert run.status == "queued"
         assert (
             run.provenance_json["web_search"]["dispatch_after"]
@@ -737,16 +742,16 @@ def test_dispatch_preparation_continues_locally_after_permission_or_provider_los
         values["installation_enabled"] = False
     elif change == "chat":
         with SessionLocal() as session:
-            session.get(Chat, chat_id).web_settings_json = {}
+            _required(session.get(Chat, chat_id)).web_settings_json = {}
             session.commit()
     else:
         values.update(provider_endpoint=None, provider_revision=None)
     result = _prepare_dispatch(consent, job_id, proposed.revision, claim, **values)
     assert result.state == "cancelled"
     with SessionLocal() as session:
-        job = session.get(Job, job_id)
-        run = session.get(Run, run_id)
-        stored = session.scalar(select(consent.WebSearchProposal))
+        job = _required(session.get(Job, job_id))
+        run = _required(session.get(Run, run_id))
+        stored = _required(session.scalar(select(consent.WebSearchProposal)))
         assert job.status == "running" and job.claim_owner == claim.token
         assert stored.dispatch_owner is None and stored.dispatch_attempt is None
         assert stored.error_code == (
@@ -776,11 +781,14 @@ def test_dispatch_preparation_requires_new_approval_for_changed_provider(
     assert result.state == "awaiting_approval" and result.revision == proposed.revision + 1
     assert result.query == QUERY and result.provider_endpoint == endpoint
     with SessionLocal() as session:
-        job = session.get(Job, job_id)
-        run = session.get(Run, run_id)
-        stored = session.scalar(select(consent.WebSearchProposal))
+        job = _required(session.get(Job, job_id))
+        run = _required(session.get(Run, run_id))
+        stored = _required(session.scalar(select(consent.WebSearchProposal)))
         assert job.status == "paused" and job.claim_owner == claim.token
-        assert run.status == "queued" and session.get(WorkStep, run.work_step_id).status == "paused"
+        assert (
+            run.status == "queued"
+            and _required(session.get(WorkStep, run.work_step_id)).status == "paused"
+        )
         assert stored.provider_revision == "provider-two"
         assert stored.dispatch_owner is None and stored.dispatch_attempt is None
         assert stored.approved_automatically is False
@@ -814,17 +822,17 @@ def test_dispatch_preparation_respects_revoked_automatic_approval(
         proposed = _pause(consent, job_id)
         _decide(consent, job_id, proposed.revision, "approve")
     with SessionLocal() as session:
-        run_id = session.get(Job, job_id).run_id
-        chat_id = session.get(Run, run_id).chat_id
-        session.get(Chat, chat_id).web_settings_json = {"allow_search": True}
+        run_id = _required(session.get(Job, job_id)).run_id
+        chat_id = _required(session.get(Run, run_id)).chat_id
+        _required(session.get(Chat, chat_id)).web_settings_json = {"allow_search": True}
         session.commit()
     claim = _resume(job_id)
     result = _prepare_dispatch(consent, job_id, proposed.revision, claim)
     assert result.state == ("awaiting_approval" if automatic else "dispatching")
     with SessionLocal() as session:
-        job = session.get(Job, job_id)
-        run = session.get(Run, run_id)
-        proposal = session.scalar(select(consent.WebSearchProposal))
+        job = _required(session.get(Job, job_id))
+        run = _required(session.get(Run, run_id))
+        proposal = _required(session.scalar(select(consent.WebSearchProposal)))
         assert job.status == ("paused" if automatic else "running")
         if automatic:
             assert result.revision == proposed.revision + 1
@@ -847,7 +855,7 @@ def test_dispatch_preparation_cannot_reconcile_for_an_execution_that_lost_owners
     _decide(consent, job_id, proposed.revision, "approve")
     claim = _resume(job_id)
     with SessionLocal() as session:
-        job = session.get(Job, job_id)
+        job = _required(session.get(Job, job_id))
         if lost == "token":
             job.claim_owner = "another-execution"
         elif lost == "attempt":
@@ -858,7 +866,7 @@ def test_dispatch_preparation_cannot_reconcile_for_an_execution_that_lost_owners
     with pytest.raises(consent.SearchConsentConflict):
         _prepare_dispatch(consent, job_id, proposed.revision, claim, installation_enabled=False)
     with SessionLocal() as session:
-        proposal = session.scalar(select(consent.WebSearchProposal))
+        proposal = _required(session.scalar(select(consent.WebSearchProposal)))
         assert proposal.state == "approved" and proposal.revision == proposed.revision
         assert proposal.dispatch_owner is None
 
@@ -884,8 +892,11 @@ def test_dispatch_preparation_keeps_a_cancellation_that_committed_first(settings
     result = _prepare_dispatch(consent, job_id, proposed.revision, claim)
     assert result.state == "cancelled"
     with SessionLocal() as session:
-        proposal = session.scalar(select(consent.WebSearchProposal))
-        assert proposal.dispatch_owner is None and session.get(Job, job_id).status == "running"
+        proposal = _required(session.scalar(select(consent.WebSearchProposal)))
+        assert (
+            proposal.dispatch_owner is None
+            and _required(session.get(Job, job_id)).status == "running"
+        )
 
 
 def test_saved_search_evidence_is_restored_without_authorizing_another_dispatch(
@@ -923,10 +934,13 @@ def test_an_unfinished_saved_dispatch_becomes_uncertain_instead_of_repeating(
     with SessionLocal() as session:
         assert consent.search_result_for_answer(session, job_id, proposed.revision, claim) is None
     with SessionLocal() as session:
-        stored = session.scalar(select(consent.WebSearchProposal))
+        stored = _required(session.scalar(select(consent.WebSearchProposal)))
         assert stored.state == "uncertain" and stored.error_code == "search_dispatch_uncertain"
-        assert session.get(Run, run_id).provenance_json["web_search"]["state"] == "uncertain"
-        assert session.get(Job, job_id).status == "running"
+        assert (
+            _required(session.get(Run, run_id)).provenance_json["web_search"]["state"]
+            == "uncertain"
+        )
+        assert _required(session.get(Job, job_id)).status == "running"
     with SessionLocal() as session:
         assert consent.search_result_for_answer(session, job_id, proposed.revision, claim) is None
     with pytest.raises(consent.SearchConsentConflict):
@@ -944,7 +958,7 @@ def test_saved_search_outcome_cannot_be_changed_after_execution_ownership_is_los
     claim = _resume(job_id)
     _dispatch(consent, job_id, proposed.revision, claim)
     with SessionLocal() as session:
-        job = session.get(Job, job_id)
+        job = _required(session.get(Job, job_id))
         if lost == "token":
             job.claim_owner = "new-owner"
         elif lost == "attempt":
@@ -955,9 +969,12 @@ def test_saved_search_outcome_cannot_be_changed_after_execution_ownership_is_los
     with SessionLocal() as session, pytest.raises(consent.SearchConsentConflict):
         consent.search_result_for_answer(session, job_id, proposed.revision, claim)
     with SessionLocal() as session:
-        stored = session.scalar(select(consent.WebSearchProposal))
+        stored = _required(session.scalar(select(consent.WebSearchProposal)))
         assert stored.state == "dispatching" and stored.error_code is None
-        assert session.get(Run, run_id).provenance_json["web_search"]["state"] == "dispatching"
+        assert (
+            _required(session.get(Run, run_id)).provenance_json["web_search"]["state"]
+            == "dispatching"
+        )
 
 
 def test_revocation_commits_and_rolls_back_with_its_owning_job(settings: Settings) -> None:
@@ -965,22 +982,25 @@ def test_revocation_commits_and_rolls_back_with_its_owning_job(settings: Setting
     proposal = _pause(consent, job_id)
     _decide(consent, job_id, proposal.revision, "approve")
     with SessionLocal() as session:
-        run = session.get(Run, run_id)
-        job = session.get(Job, job_id)
+        run = _required(session.get(Run, run_id))
+        job = _required(session.get(Job, job_id))
         job.status = "cancelled"
         consent.cancel_pending_search(session, run)
         session.rollback()
     with SessionLocal() as session:
-        assert session.get(Job, job_id).status == "queued"
-        assert session.scalar(select(consent.WebSearchProposal)).state == "approved"
-        run = session.get(Run, run_id)
-        session.get(Job, job_id).status = "cancelled"
+        assert _required(session.get(Job, job_id)).status == "queued"
+        assert _required(session.scalar(select(consent.WebSearchProposal))).state == "approved"
+        run = _required(session.get(Run, run_id))
+        _required(session.get(Job, job_id)).status = "cancelled"
         consent.cancel_pending_search(session, run)
         session.commit()
     with SessionLocal() as session:
-        assert session.get(Job, job_id).status == "cancelled"
-        assert session.scalar(select(consent.WebSearchProposal)).state == "cancelled"
-        assert session.get(Run, run_id).provenance_json["web_search"]["state"] == "cancelled"
+        assert _required(session.get(Job, job_id)).status == "cancelled"
+        assert _required(session.scalar(select(consent.WebSearchProposal))).state == "cancelled"
+        assert (
+            _required(session.get(Run, run_id)).provenance_json["web_search"]["state"]
+            == "cancelled"
+        )
 
 
 def test_revocation_cannot_claim_an_already_started_dispatch_was_cancelled(
@@ -1002,12 +1022,15 @@ def test_revocation_cannot_claim_an_already_started_dispatch_was_cancelled(
         )
     assert dispatched.state == "dispatching"
     with SessionLocal() as session:
-        run = session.get(Run, run_id)
+        run = _required(session.get(Run, run_id))
         consent.cancel_pending_search(session, run)
         session.commit()
     with SessionLocal() as session:
-        assert session.scalar(select(consent.WebSearchProposal)).state == "dispatching"
-        assert session.get(Run, run_id).provenance_json["web_search"]["state"] == "dispatching"
+        assert _required(session.scalar(select(consent.WebSearchProposal))).state == "dispatching"
+        assert (
+            _required(session.get(Run, run_id)).provenance_json["web_search"]["state"]
+            == "dispatching"
+        )
 
 
 @pytest.mark.parametrize("status", ["running", "failed", "cancelled", "interrupted"])
@@ -1022,9 +1045,9 @@ async def test_retry_after_restart_revokes_legacy_pending_approval(
     _decide(consent, job_id, proposed.revision, "approve")
     _resume(job_id)
     with SessionLocal() as session:
-        session.get(Job, job_id).status = status
+        _required(session.get(Job, job_id)).status = status
         if status != "running":
-            session.get(Run, run_id).status = "failed"
+            _required(session.get(Run, run_id)).status = "failed"
         session.commit()
     orch = app.state.services.orchestrator
     starts = []
@@ -1033,14 +1056,17 @@ async def test_retry_after_restart_revokes_legacy_pending_approval(
     with SessionLocal() as session:
         # Existing recovery never replays a dispatch. An older pending
         # approval is instead revoked by the explicit retry transaction.
-        assert session.scalar(select(consent.WebSearchProposal)).state == "approved"
-        orch.prepare_retry(session, session.get(Run, run_id))
+        assert _required(session.scalar(select(consent.WebSearchProposal))).state == "approved"
+        orch.prepare_retry(session, _required(session.get(Run, run_id)))
         session.commit()
     with SessionLocal() as session:
-        row = session.scalar(select(consent.WebSearchProposal))
+        row = _required(session.scalar(select(consent.WebSearchProposal)))
         assert row.state == "cancelled"
         assert row.dispatch_after is None and not row.approved_automatically
-        assert session.get(Run, run_id).provenance_json["web_search"]["state"] == "cancelled"
+        assert (
+            _required(session.get(Run, run_id)).provenance_json["web_search"]["state"]
+            == "cancelled"
+        )
     assert starts == []
 
 
@@ -1068,7 +1094,7 @@ def test_stopping_and_preparing_dispatch_serialize_the_actual_writes(
             else:
                 contender_started.set()
             if action == "dispatch":
-                return consent.prepare_search_dispatch(
+                state = consent.prepare_search_dispatch(
                     session,
                     job_id,
                     proposal.revision,
@@ -1077,8 +1103,10 @@ def test_stopping_and_preparing_dispatch_serialize_the_actual_writes(
                     provider_revision="provider-one",
                     installation_enabled=True,
                 ).state
-            run = session.get(Run, run_id)
-            session.get(Job, job_id).status = "cancelled"
+                assert isinstance(state, str)
+                return state
+            run = _required(session.get(Run, run_id))
+            _required(session.get(Job, job_id)).status = "cancelled"
             run.status = "cancelled"
             consent.cancel_pending_search(session, run)
             session.commit()
@@ -1105,6 +1133,6 @@ def test_stopping_and_preparing_dispatch_serialize_the_actual_writes(
         else:
             assert second.result(timeout=30) == "cancelled"
     with SessionLocal() as session:
-        row = session.scalar(select(consent.WebSearchProposal))
+        row = _required(session.scalar(select(consent.WebSearchProposal)))
         assert row.state == ("cancelled" if first_action == "stop" else "dispatching")
-        assert session.get(Job, job_id).status == "cancelled"
+        assert _required(session.get(Job, job_id)).status == "cancelled"
