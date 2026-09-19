@@ -42,7 +42,9 @@ pytestmark = pytest.mark.asyncio
 async def created(
     client: AsyncClient, dependencies: dict[str, Any] | None = None
 ) -> tuple[str, str, dict[str, Any]]:
-    declaration = dependencies if dependencies is not None else {"version": 1, "slots": []}
+    declaration: dict[str, Any] = (
+        dependencies if dependencies is not None else {"version": 1, "slots": []}
+    )
     result = await client.post(
         "/api/workflows",
         json={
