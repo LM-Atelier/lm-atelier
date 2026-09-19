@@ -14,6 +14,7 @@ import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 from contextlib import AsyncExitStack, suppress
 from datetime import UTC, datetime
+from itertools import islice
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
@@ -2242,18 +2243,40 @@ async def list_chats(
     project_id: str | None = None,
     include_archived: bool = False,
     query: str = Query(default="", max_length=500),
+    search_projects: bool = False,
+    limit: int | None = Query(default=None, ge=1, le=200),
+    offset: int = Query(default=0, ge=0, le=9_223_372_036_854_775_807),
 ) -> list[Chat]:
     statement = (
         select(Chat)
         .where(Chat.scope == STANDARD_CHAT_SCOPE)
-        .order_by(Chat.pinned.desc(), Chat.updated_at.desc())
+        .order_by(Chat.pinned.desc(), Chat.updated_at.desc(), Chat.id.desc())
     )
     if project_id:
         statement = statement.where(Chat.project_id == project_id)
     if not include_archived:
         statement = statement.where(Chat.archived.is_(False))
     if query.strip():
-        statement = statement.where(Chat.title.ilike(f"%{query.strip()}%"))
+        if search_projects:
+            # SQLite's lowercase function only folds ASCII. Match the browser's
+            # Unicode search over streamed names, then hydrate only this page.
+            names = statement.with_only_columns(Chat.id, Chat.title, Project.name).outerjoin(
+                Project, Chat.project_id == Project.id
+            )
+            normalized = query.strip().lower()
+            with session.execute(names.execution_options(yield_per=200)) as candidates:
+                matches = (
+                    identity
+                    for identity, title, project_name in candidates
+                    if normalized in title.lower() or normalized in (project_name or "").lower()
+                )
+                identities = list(islice(islice(matches, offset, None), limit))
+            return list(session.scalars(statement.where(Chat.id.in_(identities))).all())
+        else:
+            statement = statement.where(Chat.title.ilike(f"%{query.strip()}%"))
+    if limit is not None:
+        statement = statement.limit(limit)
+    statement = statement.offset(offset)
     return list(session.scalars(statement).all())
 
 

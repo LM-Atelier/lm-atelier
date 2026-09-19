@@ -1,50 +1,31 @@
+import { ChatSidebar } from "./ChatSidebar";
+import { changeChatPages, restoreChatPages, snapshotChatPages, useChatPages } from "./useChatPages";
 import { useAppNavigation } from "./useAppNavigation";
 import { ChatWebAccess } from "./ChatWebAccess";
 import { ChatSearchConsent } from "./ChatSearchConsent";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Bot,
-  ChevronDown,
-  Download,
-  Folder,
-  Image as ImageIcon,
-  Library,
   LoaderCircle,
-  Menu,
   MessageSquare,
-  MoreHorizontal,
-  Pin,
-  Plus,
-  Quote,
-  Search,
   Sparkles,
-  Star,
-  Upload,
-  Workflow as WorkflowIcon,
 } from "lucide-react";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AtelierMark } from "./AtelierMark";
-import { ChatManager } from "./ChatManager";
-import { PromptDialog } from "./ConfirmDialog";
 import { EditedBranchCards } from "./EditedBranchCards";
 import { EmptyState } from "./EmptyState";
 import { FirstFailure } from "./FirstFailure";
 import { GlobalNotices } from "./GlobalNotices";
-import { ImageStudioIcon } from "./ImageStudioIcon";
 import { JobsPanel } from "./JobsPanel";
 import { MediaLibraryView } from "./MediaLibraryView";
 import { MediaOutputPlan } from "./MediaOutputPlan";
 import { ModelsView } from "./ModelsView";
 import { PriorTurnEditor } from "./PriorTurnEditor";
-import { ProjectManager } from "./ProjectManager";
 import { PromptHelperDialog } from "./PromptHelperDialog";
 import { PromptLibraryView } from "./PromptLibraryView";
 import { ReferencesLibrary } from "./ReferencesLibrary";
 import { SettingsView } from "./SettingsView";
 import { SetupSurface } from "./SetupSurface";
 import { FirstRunSetup } from "./SetupWizard";
-import { SidebarFooter } from "./SidebarFooter";
-import { SidebarResizer } from "./SidebarResizer";
 import { StudioView } from "./StudioView";
 import { TurnEditor } from "./TurnEditor";
 import { WorkspaceComposerDraft } from "./WorkspaceComposerDraft";
@@ -66,19 +47,14 @@ import {
 } from "./messageMedia";
 import { recoverPromptSourceSend } from "./promptSourceSendRecovery";
 import { regenerateWithRetry } from "./regenerationRequest";
-import { type View } from "./rooms";
-import { useWorkspaceChrome, type SidebarLayout } from "./sidebarLayout";
+import { useWorkspaceChrome } from "./sidebarLayout";
 import { prefersLessMotion } from "./theme";
 import { activeBranchMessages } from "./turnEditorContext";
 import type {
   Chat,
   ChatDetail,
   WebSearch,
-  EngineCapabilities,
   EngineRole,
-  GenerationPreset,
-  Project,
-  SetupReadinessReport,
   TurnAccepted,
 } from "./types";
 import { useAutoSettingsRoles } from "./useAutoSettingsRoles";
@@ -397,108 +373,6 @@ function ChatView({
   );
 }
 
-function Sidebar({
-  projects,
-  chats,
-  engines,
-  presets,
-  currentChatId,
-  view,
-  setupState,
-  onChat,
-  onSetup,
-  onView,
-  onNewChat,
-  onNewProject,
-  onExportProject,
-  onImportProject,
-  onUpdateChat,
-  onDeleteChat,
-  onUpdateProject,
-  onDeleteProject,
-  sidebar,
-}: {
-  projects: Project[];
-  chats: Chat[];
-  engines: EngineCapabilities[];
-  presets: GenerationPreset[];
-  currentChatId: string | null;
-  view: View;
-  setupState?: SetupReadinessReport["state"] | undefined;
-  onChat: (id: string) => void;
-  onSetup: () => void;
-  onView: (view: View) => void;
-  onNewChat: (projectId?: string | null) => void;
-  onNewProject: (name: string) => void;
-  onExportProject: (id: string, includeMedia?: boolean) => void;
-  onImportProject: (file: File) => void;
-  onUpdateChat: (id: string, values: Partial<Chat>) => void;
-  onDeleteChat: (id: string, deleteGeneratedMedia: boolean) => void;
-  onUpdateProject: (id: string, values: Partial<Project>) => void;
-  onDeleteProject: (id: string) => void;
-  sidebar: SidebarLayout;
-}) {
-  const [naming, setNaming] = useState(false);
-  const [closedProjects, setClosedProjects] = useState<Set<string>>(new Set());
-  const [search, setSearch] = useState("");
-  const [showArchived, setShowArchived] = useState(false);
-  const [managedChat, setManagedChat] = useState<Chat | null>(null);
-  const [managedProject, setManagedProject] = useState<Project | null>(null);
-  const [mobileOpen, setMobileOpen] = useState(false);
-  const projectImport = useRef<HTMLInputElement>(null);
-  const normalizedSearch = search.trim().toLowerCase();
-  const visibleChats = chats.filter((chat) => (showArchived || !chat.archived) && (!normalizedSearch || chat.title.toLowerCase().includes(normalizedSearch)));
-  const visibleProjects = projects.filter((project) => (showArchived || !project.archived) && (!normalizedSearch || project.name.toLowerCase().includes(normalizedSearch) || visibleChats.some((chat) => chat.project_id === project.id)));
-  const unfiled = visibleChats.filter((chat) => !chat.project_id);
-  const chatRow = (chat: Chat) => <div className="sidebar-chat-row" key={chat.id}><button className={`chat-main ${view === "chat" && currentChatId === chat.id ? "active" : ""}`} aria-current={view === "chat" && currentChatId === chat.id ? "page" : undefined} onClick={() => { onChat(chat.id); setMobileOpen(false); }}><span>{chat.title}</span>{chat.archived && <small>Archived</small>}</button><button className={`inline-add sidebar-pin ${chat.pinned ? "pinned" : ""}`} aria-label={chat.pinned ? `Unpin ${chat.title}` : `Pin ${chat.title}`} aria-pressed={chat.pinned} title={chat.pinned ? "Unpin" : "Pin"} onClick={() => onUpdateChat(chat.id, { pinned: !chat.pinned })}><Pin size={13} /></button><button className="inline-add" aria-label={`Manage ${chat.title}`} onClick={() => setManagedChat(chat)}><MoreHorizontal size={13} /></button></div>;
-  return (
-    <>
-    <aside className={`sidebar ${mobileOpen ? "mobile-open" : ""}`}>
-      <div className="brand"><div className="brand-mark"><AtelierMark /></div><span>LM Atelier<small>Local creative studio</small></span><button className="icon-button mobile-menu" aria-label="Toggle navigation" aria-expanded={mobileOpen} onClick={() => setMobileOpen((open) => !open)}><Menu /></button></div>
-      <button className="new-chat" onClick={() => { onNewChat(null); setMobileOpen(false); }}><Plus size={18} />New chat</button>
-      <nav className="primary-nav"><button className={view === "media" ? "active" : ""} aria-current={view === "media" ? "page" : undefined} onClick={() => { onView("media"); setMobileOpen(false); }}><ImageIcon />Media library</button><button className={view === "models" ? "active" : ""} aria-current={view === "models" ? "page" : undefined} onClick={() => { onView("models"); setMobileOpen(false); }}><Library />Model library</button><button className={view === "references" ? "active" : ""} aria-current={view === "references" ? "page" : undefined} onClick={() => { onView("references"); setMobileOpen(false); }}><Star />References</button><button className={view === "prompts" ? "active" : ""} aria-current={view === "prompts" ? "page" : undefined} onClick={() => { onView("prompts"); setMobileOpen(false); }}><Quote />Prompt library</button><button className={view === "workflows" ? "active" : ""} aria-current={view === "workflows" ? "page" : undefined} onClick={() => { onView("workflows"); setMobileOpen(false); }}><WorkflowIcon />Workflows</button><button className={view === "studio" ? "active" : ""} aria-current={view === "studio" ? "page" : undefined} onClick={() => { onView("studio"); setMobileOpen(false); }}><ImageStudioIcon />Image Studio</button></nav>
-      <div className="workspace-search"><Search size={14} /><input aria-label="Search projects and chats" placeholder="Search workspace" value={search} onChange={(event) => setSearch(event.target.value)} /><button className={showArchived ? "active" : ""} aria-pressed={showArchived} onClick={() => setShowArchived((value) => !value)}>Archived</button></div>
-      <div className="workspace-tree" role="region" aria-label="Projects and chats">
-        <div className="sidebar-section">
-          <div className="section-title"><span>Projects</span><input ref={projectImport} hidden type="file" accept=".zip,.lm-atelier.zip,application/zip" onChange={(event) => { const file = event.target.files?.[0]; if (file) onImportProject(file); event.target.value = ""; }} /><button aria-label="Import project" onClick={() => projectImport.current?.click()}><Upload size={14} /></button><button aria-label="New project" onClick={() => setNaming(true)}><Plus size={15} /></button></div>
-          {visibleProjects.map((project) => {
-            const open = !closedProjects.has(project.id);
-            const projectMatches = normalizedSearch && project.name.toLowerCase().includes(normalizedSearch);
-            const projectChats = chats.filter((chat) => chat.project_id === project.id && (showArchived || !chat.archived) && (!normalizedSearch || projectMatches || chat.title.toLowerCase().includes(normalizedSearch)));
-            return (
-              <div className="project-group" key={project.id}>
-                <div className="project-row">
-                  <button className="project-main" aria-expanded={open} onClick={() => setClosedProjects((current) => {
-                    const next = new Set(current);
-                    if (open) next.add(project.id);
-                    else next.delete(project.id);
-                    return next;
-                  })}>
-                    <ChevronDown className={open ? "" : "closed"} size={14} />
-                    <Folder size={16} />
-                    <span>{project.name}</span>
-                  </button>
-                  <button className="inline-add" onClick={() => { onNewChat(project.id); setMobileOpen(false); }} aria-label={`New chat in ${project.name}`}><Plus size={13} /></button>
-                  <button className="inline-add" onClick={() => onExportProject(project.id)} aria-label={`Export ${project.name}`}><Download size={13} /></button>
-                  <button className="inline-add" onClick={() => setManagedProject(project)} aria-label={`Manage ${project.name}`}><MoreHorizontal size={13} /></button>
-                </div>
-                {open && <div className="chat-list">{projectChats.map(chatRow)}</div>}
-              </div>
-            );
-          })}
-        </div>
-        {unfiled.length > 0 && <div className="sidebar-section"><div className="section-title"><span>Chats</span></div><div className="chat-list standalone">{unfiled.map(chatRow)}</div></div>}
-      </div>
-      {naming && <PromptDialog title="New project" label="Project name" confirmLabel="Create project" placeholder="Portrait studies" onCancel={() => setNaming(false)} onConfirm={(name) => { setNaming(false); onNewProject(name); }} />}
-      <SidebarFooter setupState={setupState} view={view} onSetup={onSetup} onView={onView} onNavigate={() => setMobileOpen(false)} />
-      {managedChat && <ChatManager chat={managedChat} projects={projects} onClose={() => setManagedChat(null)} onSave={(values) => { onUpdateChat(managedChat.id, values); setManagedChat(null); }} onDelete={(deleteGeneratedMedia) => { onDeleteChat(managedChat.id, deleteGeneratedMedia); setManagedChat(null); }} />}
-      {managedProject && <ProjectManager project={managedProject} engines={engines} presets={presets} onClose={() => setManagedProject(null)} onSave={(values) => { onUpdateProject(managedProject.id, values); setManagedProject(null); }} onDelete={() => { onDeleteProject(managedProject.id); setManagedProject(null); }} onExport={(includeMedia) => onExportProject(managedProject.id, includeMedia)} />}
-    </aside>
-      <SidebarResizer layout={sidebar} />
-    </>
-  );
-}
-
 export default function App() {
   const client = useQueryClient();
   const [turnConfirmDialog, requestTurnConfirmation] = useTurnConfirmation();
@@ -529,7 +403,7 @@ export default function App() {
     queryKey: ["projects"],
     queryFn: () => api.projects(true),
   });
-  const chats = useQuery({ queryKey: ["chats"], queryFn: () => api.chats(null, true) });
+  const chats = useChatPages();
   const firstActiveChatId = chats.data?.find((candidate) => !candidate.archived)?.id ?? null;
   const activeChatId = currentChatId ?? firstActiveChatId;
   const chat = useQuery({ queryKey: ["chat", activeChatId], queryFn: () => api.chat(activeChatId!), enabled: Boolean(activeChatId) });
@@ -636,16 +510,14 @@ export default function App() {
   });
   const updateChat = useMutation({
     mutationFn: ({ id, values }: { id: string; values: Partial<Chat> }) => api.updateChat(id, values),
-    onMutate: ({ id, values }) => {
-      void client.cancelQueries({ queryKey: ["chat", id] });
+    onMutate: async ({ id, values }) => {
+      await Promise.all([client.cancelQueries({ queryKey: ["chat", id] }), client.cancelQueries({ queryKey: ["chats"] })]);
       const previousChat = client.getQueryData<ChatDetail>(["chat", id]);
-      const previousChats = client.getQueryData<Chat[]>(["chats"]);
+      const previousChats = snapshotChatPages(client);
       client.setQueryData<ChatDetail>(["chat", id], (current) => (
         current ? { ...current, ...values } : current
       ));
-      client.setQueryData<Chat[]>(["chats"], (current) => current?.map((item) => (
-        item.id === id ? { ...item, ...values } : item
-      )));
+      changeChatPages(client, (item) => item.id === id ? { ...item, ...values } : item);
       return { previousChat, previousChats };
     },
     onError: (_error, { id }, context) => {
@@ -655,16 +527,14 @@ export default function App() {
         return next;
       });
       if (context?.previousChat) client.setQueryData(["chat", id], context.previousChat);
-      if (context?.previousChats) client.setQueryData(["chats"], context.previousChats);
+      if (context?.previousChats) restoreChatPages(client, context.previousChats);
     },
     onSuccess: (updated, { id, values }) => {
       if (updated) {
         client.setQueryData<ChatDetail>(["chat", id], (current) => (
           current ? { ...current, ...updated } : current
         ));
-        client.setQueryData<Chat[]>(["chats"], (current) => current?.map((item) => (
-          item.id === id ? { ...item, ...updated } : item
-        )));
+        changeChatPages(client, (item) => item.id === id ? { ...item, ...updated } : item);
         setChatDrafts((current) => {
           const draft = current[id];
           if (!draft) return current;
@@ -697,10 +567,10 @@ export default function App() {
     mutationFn: ({ id, deleteGeneratedMedia }: { id: string; deleteGeneratedMedia: boolean }) => api.deleteChat(id, deleteGeneratedMedia),
     onMutate: async ({ id: deletedId }) => {
       await client.cancelQueries({ queryKey: ["chats"] });
-      const previousChats = client.getQueryData<Chat[]>(["chats"]) ?? [];
-      const remainingChats = previousChats.filter((candidate) => candidate.id !== deletedId);
+      const previousChats = snapshotChatPages(client);
+      const remainingChats = (chats.data ?? []).filter((candidate) => candidate.id !== deletedId);
       const previousCurrentChatId = currentChatId;
-      client.setQueryData<Chat[]>(["chats"], remainingChats);
+      changeChatPages(client, (item) => item.id === deletedId ? null : item);
       if (activeChatId === deletedId) {
         const nextChatId = remainingChats.find((candidate) => !candidate.archived)?.id ?? null;
         setCurrentChatId(nextChatId);
@@ -723,7 +593,7 @@ export default function App() {
     },
     onError: (_error, _deletedChat, context) => {
       if (!context) return;
-      client.setQueryData(["chats"], context.previousChats);
+      restoreChatPages(client, context.previousChats);
       setCurrentChatId(context.previousCurrentChatId);
       if (context.previousCurrentChatId) localStorage.setItem(CURRENT_CHAT_KEY, context.previousCurrentChatId);
       else localStorage.removeItem(CURRENT_CHAT_KEY);
@@ -744,8 +614,7 @@ export default function App() {
     setView("studio");
     focusMainContent();
   }, [setView]);
-  const allChats = useMemo(() => chats.data ?? [], [chats.data]);
-  const [autoSettingsRoles, rememberSettingsRole] = useAutoSettingsRoles(chats.data);
+  const [autoSettingsRoles, rememberSettingsRole] = useAutoSettingsRoles(chats.data, { complete: false });
   const allProjects = useMemo(() => projects.data ?? [], [projects.data]);
   // One place that knows what opening the library means, since three
   // different surfaces send people there.
@@ -846,7 +715,7 @@ export default function App() {
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content">Skip to main content</a>
-      <Sidebar projects={allProjects} chats={allChats} engines={engines.data ?? []} presets={presets.data ?? []} currentChatId={activeChatId} view={view} setupState={setupReadiness.data?.state} onSetup={() => setSetupOpen(true)} onChat={(id) => { setCurrentChatId(id); localStorage.setItem(CURRENT_CHAT_KEY, id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={(name) => createProject.mutate(name)} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} sidebar={sidebar} />
+      <ChatSidebar projects={allProjects} engines={engines.data ?? []} presets={presets.data ?? []} currentChatId={activeChatId} view={view} setupState={setupReadiness.data?.state} onSetup={() => setSetupOpen(true)} onChat={(id) => { setCurrentChatId(id); localStorage.setItem(CURRENT_CHAT_KEY, id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={(name) => createProject.mutate(name)} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} sidebar={sidebar} />
       <main id="main-content" tabIndex={-1}>{activeContent}</main>
       <SetupSurface
         open={setupOpen}

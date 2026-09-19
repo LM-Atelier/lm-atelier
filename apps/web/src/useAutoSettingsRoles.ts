@@ -18,20 +18,20 @@ import type { EngineRole } from "./types";
  */
 export function useAutoSettingsRoles(
   knownChats: readonly { id: string }[] | undefined,
+  { complete = true }: { complete?: boolean } = {},
 ): [Record<string, EngineRole>, (chatId: string, role: EngineRole) => void] {
   const [roles, setRoles] = useState<Record<string, EngineRole>>(
     () => readAutoSettingsRoles(localStorage),
   );
   const knownChatIds = useMemo(
-    () => (knownChats === undefined ? undefined : knownChats.map((chat) => chat.id)),
-    [knownChats],
+    () => (!complete || knownChats === undefined ? undefined : knownChats.map((chat) => chat.id)),
+    [knownChats, complete],
   );
 
   useEffect(() => {
     // Pruned against the live list so a deleted chat stops being remembered.
-    // Readiness travels as `undefined`: before the query resolves nothing is
-    // pruned, and once it resolves an empty list genuinely means no chats
-    // exist and the record is cleared.
+    // An unresolved or partial list cannot establish which chats were deleted.
+    // Only a complete empty list proves there is no chat memory left to keep.
     writeAutoSettingsRoles(localStorage, prunedAutoSettingsRoles(roles, knownChatIds));
   }, [roles, knownChatIds]);
 

@@ -344,10 +344,13 @@ export const api = {
   updateProject: (id: string, values: Partial<Project>) =>
     request<Project>(`/api/projects/${id}`, { method: "PATCH", body: JSON.stringify(values) }),
   deleteProject: (id: string) => request<void>(`/api/projects/${id}`, { method: "DELETE" }),
-  chats: (projectId?: string | null, includeArchived = false, query = "") => {
+  chats: (projectId?: string | null, includeArchived = false, query = "", options: { limit?: number; offset?: number; searchProjects?: boolean; signal?: AbortSignal } = {}) => {
     const parameters = new URLSearchParams({ include_archived: String(includeArchived), query });
     if (projectId) parameters.set("project_id", projectId);
-    return request<Chat[]>(`/api/chats?${parameters}`);
+    if (options.limit !== undefined) parameters.set("limit", String(options.limit));
+    if (options.offset !== undefined) parameters.set("offset", String(options.offset));
+    if (options.searchProjects) parameters.set("search_projects", "true");
+    return request<Chat[]>(`/api/chats?${parameters}`, options.signal ? { signal: options.signal } : undefined);
   },
   chat: (id: string) => request<ChatDetail>(`/api/chats/${id}`),
   classifyDraft: (chatId: string, text: string, mode: RoutingMode, editSource?: PriorTurnEditBinding) =>

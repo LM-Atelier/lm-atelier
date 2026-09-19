@@ -19,7 +19,7 @@ export function ProjectArchives() {
   const client = useQueryClient();
   // Importing from the sidebar opens the imported chat; from Settings the
   // person stays where they are and is told what arrived.
-  const { exportProject, importProject } = useProjectMutations({ client, onImportedChat: () => undefined });
+  const { exportProject, importProject } = useProjectMutations({ client });
   const projects = useQuery({ queryKey: ["projects", "including-archived"], queryFn: () => api.projects(true) });
   const picker = useRef<HTMLInputElement>(null);
   const error = exportProject.error ?? importProject.error ?? projects.error;
