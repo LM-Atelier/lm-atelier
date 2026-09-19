@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import pytest
+
 import local_lm.hardware as hardware
 from local_lm.config import Settings
+from local_lm.schemas import SystemInfo
 
 
-def _count_collect_calls(monkeypatch, settings: Settings) -> list[int]:  # type: ignore[no-untyped-def]
+def _count_collect_calls(monkeypatch: pytest.MonkeyPatch, settings: Settings) -> list[int]:
     calls = [0]
     original = hardware.collect_system_info
 
-    def counted(value: Settings):  # type: ignore[no-untyped-def]
+    def counted(value: Settings) -> SystemInfo:
         calls[0] += 1
         return original(value)
 
@@ -18,8 +21,8 @@ def _count_collect_calls(monkeypatch, settings: Settings) -> list[int]:  # type:
 
 def test_capability_class_is_memoized_across_repeated_calls(
     settings: Settings,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Readiness polls this once per install; device enumeration spawns processes."""
     hardware.reset_hardware_capability_class_cache()
     calls = _count_collect_calls(monkeypatch, settings)
@@ -33,8 +36,8 @@ def test_capability_class_is_memoized_across_repeated_calls(
 
 def test_capability_class_is_recomputed_once_the_cache_expires(
     settings: Settings,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     hardware.reset_hardware_capability_class_cache()
     calls = _count_collect_calls(monkeypatch, settings)
     clock = [1000.0]
@@ -49,8 +52,8 @@ def test_capability_class_is_recomputed_once_the_cache_expires(
 
 def test_resetting_the_cache_forces_a_fresh_measurement(
     settings: Settings,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     hardware.reset_hardware_capability_class_cache()
     calls = _count_collect_calls(monkeypatch, settings)
 
@@ -98,6 +101,9 @@ def test_every_device_kind_produced_here_is_in_the_declared_vocabulary() -> None
                 assert isinstance(keyword.value, ast.Constant), (
                     f"DeviceInfo at line {node.lineno} computes its kind, so this "
                     "test can no longer prove the vocabulary from the source"
+                )
+                assert isinstance(keyword.value.value, str), (
+                    f"DeviceInfo at line {node.lineno} has a non-string kind"
                 )
                 produced.add(keyword.value.value)
 
