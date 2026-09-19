@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
+from fastapi import FastAPI
 from httpx2 import AsyncClient
 
+from local_lm.config import Settings
 from local_lm.db import SessionLocal
 from local_lm.models import WorkflowRevision
 
@@ -15,7 +19,7 @@ _GRAPH = {
 
 
 @pytest.fixture(autouse=True)
-def reviewed_runtime(app, monkeypatch):
+def reviewed_runtime(app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> None:
     services = app.state.services
     original_statuses = services.processes.statuses
     monkeypatch.setattr(
@@ -31,7 +35,7 @@ def reviewed_runtime(app, monkeypatch):
         ],
     )
 
-    async def object_info():
+    async def object_info() -> dict[str, Any]:
         return {
             "EmptyLatentImage": {
                 "python_module": "nodes",
@@ -67,7 +71,7 @@ def _url(workflow: str, revision: str) -> str:
     return f"/api/workflows/{workflow}/revisions/{revision}/review"
 
 
-async def _approved(client: AsyncClient) -> tuple[str, str, dict]:
+async def _approved(client: AsyncClient) -> tuple[str, str, dict[str, Any]]:
     workflow, revision = await _created(client)
     preview = await client.get(_url(workflow, revision))
     assert preview.status_code == 200, preview.text
@@ -152,7 +156,7 @@ async def test_changed_preview_cannot_approve_revised_bytes(client: AsyncClient)
     ],
 )
 async def test_review_revalidates_stored_execution_identity(
-    client: AsyncClient, field: str, replacement: dict
+    client: AsyncClient, field: str, replacement: dict[str, object]
 ) -> None:
     workflow, revision, snapshot = await _approved(client)
     with SessionLocal() as session:
@@ -237,7 +241,7 @@ async def test_selection_rejects_a_review_whose_revision_changed(client: AsyncCl
 
 
 async def test_downgrade_drops_review_authority_without_retaining_trusted_cache(
-    client: AsyncClient, settings
+    client: AsyncClient, settings: Settings
 ) -> None:
     from alembic import command
     from sqlalchemy import text
@@ -262,7 +266,11 @@ async def test_downgrade_drops_review_authority_without_retaining_trusted_cache(
 
 @pytest.mark.parametrize("changed", ["definition", "node_contract", "worker"])
 async def test_execution_rechecks_changes_during_package_verification(
-    client: AsyncClient, app, settings, monkeypatch, changed: str
+    client: AsyncClient,
+    app: FastAPI,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    changed: str,
 ) -> None:
     from local_lm import workflow_review_runtime
     from local_lm.models import WorkflowDefinition
@@ -271,7 +279,7 @@ async def test_execution_rechecks_changes_during_package_verification(
     workflow, revision, _ = await _approved(client)
     services = app.state.services
 
-    async def verify_packages(*args, **kwargs):
+    async def verify_packages(*args: object, **kwargs: object) -> None:
         if changed == "definition":
             with SessionLocal() as writer:
                 definition = writer.get(WorkflowDefinition, workflow)
@@ -281,8 +289,9 @@ async def test_execution_rechecks_changes_during_package_verification(
         elif changed == "node_contract":
             original_info = services.engines.media.object_info
 
-            async def changed_info():
+            async def changed_info() -> dict[str, Any]:
                 info = await original_info()
+                assert isinstance(info, dict)
                 info["EmptyLatentImage"]["output"] = ["IMAGE"]
                 return info
 
@@ -309,7 +318,7 @@ async def test_execution_rechecks_changes_during_package_verification(
 
 
 async def test_execution_accepts_current_reviewed_runtime(
-    client: AsyncClient, app, settings
+    client: AsyncClient, app: FastAPI, settings: Settings
 ) -> None:
     from local_lm.workflow_review_runtime import verify_workflow_review_runtime
 
@@ -391,7 +400,7 @@ async def test_execution_accepts_current_reviewed_runtime(
     ],
 )
 async def test_review_refuses_invalid_graph_before_approval(
-    client: AsyncClient, graph: dict
+    client: AsyncClient, graph: dict[str, object]
 ) -> None:
     workflow, revision = await _created(client)
     with SessionLocal() as session:
@@ -408,7 +417,7 @@ async def test_review_refuses_invalid_graph_before_approval(
 
 
 async def test_approved_review_can_be_revoked_while_runtime_is_offline(
-    client: AsyncClient, app, monkeypatch
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     workflow, revision, _ = await _approved(client)
     services = app.state.services
@@ -441,7 +450,7 @@ async def test_approved_review_can_be_revoked_while_runtime_is_offline(
 
 
 async def test_runtime_contract_refresh_preserves_unchanged_workflow_approval(
-    client: AsyncClient, app, settings, monkeypatch
+    client: AsyncClient, app: FastAPI, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from local_lm.workflow_review_runtime import verify_workflow_review_runtime
 
@@ -449,8 +458,9 @@ async def test_runtime_contract_refresh_preserves_unchanged_workflow_approval(
     services = app.state.services
     original_info = services.engines.media.object_info
 
-    async def refreshed_info():
+    async def refreshed_info() -> dict[str, Any]:
         info = await original_info()
+        assert isinstance(info, dict)
         info["EmptyLatentImage"]["input"]["optional"] = {
             "new_optional_setting": ["INT", {"default": 0}]
         }
@@ -497,7 +507,7 @@ async def test_runtime_contract_refresh_preserves_unchanged_workflow_approval(
     ],
 )
 async def test_review_enforces_declared_structure_limits(
-    client: AsyncClient, field: str, replacement: dict
+    client: AsyncClient, field: str, replacement: dict[str, object]
 ) -> None:
     workflow, revision = await _created(client)
     with SessionLocal() as session:
