@@ -94,12 +94,14 @@ async def test_verdicts_are_per_install_and_never_guessed(
     assert sorted(calls) == ["101", "999"]
 
 
+@pytest.mark.parametrize("version_identity", [False, True])
 async def test_checkpoint_versions_reach_catalog_and_update_reports(
     client: AsyncClient,
+    version_identity: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from local_lm.db import SessionLocal
-    from local_lm.models import ModelInstall, ModelSource
+    from local_lm.models import InstallPlan, ModelInstall, ModelSource
 
     with SessionLocal() as session:
         source = ModelSource(provider="civitai", remote_id="101", revision="201")
@@ -117,6 +119,40 @@ async def test_checkpoint_versions_reach_catalog_and_update_reports(
             )
             for name in ["Checkpoint A", "Checkpoint B"]
         ]
+        if version_identity:
+            source.remote_id = "201"
+            source.metadata_json = {"source_version_id": "201"}
+            for install in installs:
+                install.manifest_json = {
+                    "remote_id": "201",
+                    "revision": "201",
+                    "files": ["model.safetensors"],
+                    "expected_sha256": {"model.safetensors": "a" * 64},
+                }
+            session.add(
+                InstallPlan(
+                    provider="civitai",
+                    remote_id="201",
+                    revision="201",
+                    role="image",
+                    engine="comfyui",
+                    plan_hash="b" * 64,
+                    resolver_version="test",
+                    compatibility="supported",
+                    status="activated",
+                    artifacts_json=[
+                        {
+                            "path": "model.safetensors",
+                            "required": True,
+                            "sha256": "a" * 64,
+                            "source_remote_id": "101",
+                            "source_revision": "201",
+                            "source_version_id": "201",
+                            "source_file_id": "301",
+                        }
+                    ],
+                )
+            )
         session.add_all(installs)
         session.commit()
         install_ids = {install.id for install in installs}

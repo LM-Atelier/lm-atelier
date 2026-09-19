@@ -16,7 +16,7 @@ from local_lm.model_updates import (
     installed_civitai_identities,
     newer_version,
 )
-from local_lm.models import ModelAssetInstall, ModelInstall, ModelSource
+from local_lm.models import InstallPlan, ModelAssetInstall, ModelInstall, ModelSource
 
 
 @pytest.fixture
@@ -288,3 +288,137 @@ def test_checkpoint_identity_requires_agreeing_persisted_source(
     identities = installed_civitai_identities(session)
 
     assert [identity.install_id for identity in identities] == [valid.id]
+
+
+def _version_checkpoint(session: Session) -> tuple[ModelInstall, InstallPlan]:
+    install = _checkpoint(session, "Version checkpoint")
+    source = session.get(ModelSource, install.source_id)
+    assert source is not None
+    source.remote_id = "201"
+    source.metadata_json = {"source_version_id": "201"}
+    install.manifest_json = {
+        "remote_id": "201",
+        "revision": "201",
+        "files": ["model.safetensors"],
+        "expected_sha256": {"model.safetensors": "a" * 64},
+    }
+    plan = InstallPlan(
+        provider="civitai",
+        remote_id="201",
+        revision="201",
+        role="image",
+        engine="comfyui",
+        plan_hash="b" * 64,
+        resolver_version="test",
+        compatibility="supported",
+        status="activated",
+        artifacts_json=[
+            {
+                "path": "model.safetensors",
+                "required": True,
+                "sha256": "a" * 64,
+                "source_remote_id": "101",
+                "source_revision": "201",
+                "source_version_id": "201",
+                "source_file_id": "301",
+            }
+        ],
+    )
+    session.add(plan)
+    session.commit()
+    return install, plan
+
+
+def test_version_checkpoint_uses_the_installed_plan_parent(session: Session) -> None:
+    install, _ = _version_checkpoint(session)
+    identities = installed_civitai_identities(session)
+    assert [(row.install_id, row.model_id, row.version_id) for row in identities] == [
+        (install.id, "101", "201"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "no_plan",
+        "not_activated",
+        "other_provider",
+        "other_role",
+        "other_engine",
+        "other_version",
+        "other_remote",
+        "different_hash",
+        "missing_hash",
+        "extra_file",
+        "missing_file",
+        "missing_parent",
+        "invalid_parent",
+        "different_source_version",
+        "different_source_revision",
+        "missing_file_id",
+        "duplicate_path",
+        "conflicting_parent",
+    ],
+)
+def test_version_checkpoint_never_guesses_a_parent(session: Session, change: str) -> None:
+    install, plan = _version_checkpoint(session)
+    artifacts = [dict(item) for item in plan.artifacts_json]
+    if change == "no_plan":
+        session.delete(plan)
+    elif change == "not_activated":
+        plan.status = "planned"
+    elif change == "other_provider":
+        plan.provider = "huggingface"
+    elif change == "other_role":
+        plan.role = "chat"
+    elif change == "other_engine":
+        plan.engine = "llama.cpp"
+    elif change == "other_version":
+        plan.revision = "202"
+    elif change == "other_remote":
+        plan.remote_id = "202"
+    elif change == "different_hash":
+        artifacts[0]["sha256"] = "c" * 64
+    elif change == "missing_hash":
+        install.manifest_json = {**install.manifest_json, "expected_sha256": {}}
+    elif change == "extra_file":
+        artifacts.append({**artifacts[0], "path": "other.safetensors"})
+    elif change == "missing_file":
+        artifacts = []
+    elif change == "missing_parent":
+        artifacts[0].pop("source_remote_id")
+    elif change == "invalid_parent":
+        artifacts[0]["source_remote_id"] = True
+    elif change == "different_source_version":
+        artifacts[0]["source_version_id"] = "202"
+    elif change == "different_source_revision":
+        artifacts[0]["source_revision"] = "202"
+    elif change == "missing_file_id":
+        artifacts[0].pop("source_file_id")
+    elif change == "duplicate_path":
+        artifacts.append(dict(artifacts[0]))
+    elif change == "conflicting_parent":
+        session.add(
+            InstallPlan(
+                provider="civitai",
+                remote_id="201",
+                revision="201",
+                role="image",
+                engine="comfyui",
+                plan_hash="c" * 64,
+                resolver_version="test",
+                compatibility="supported",
+                status="activated",
+                artifacts_json=[
+                    {
+                        **artifacts[0],
+                        "source_remote_id": "102",
+                    }
+                ],
+            )
+        )
+    plan.artifacts_json = artifacts
+    sentinel = _checkpoint(session, "Legacy checkpoint", "401")
+    session.commit()
+    identities = installed_civitai_identities(session)
+    assert [row.install_id for row in identities] == [sentinel.id]
