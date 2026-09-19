@@ -15,8 +15,9 @@ import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import suppress
+from ctypes import c_void_p
 from pathlib import Path
 
 import pytest
@@ -37,7 +38,8 @@ def anchor(tmp_path: Path) -> Path:
 
 
 def _lease_file(anchor: Path) -> Path:
-    return anchor / ".git" / _NAMESPACE["LEASE_BASENAME"]
+    basename: str = _NAMESPACE["LEASE_BASENAME"]
+    return anchor / ".git" / basename
 
 
 def test_acquire_holds_and_release_frees(anchor: Path) -> None:
@@ -806,17 +808,17 @@ def test_a_refused_raw_handle_close_after_a_failed_acquisition_is_reported(
             taken["handle"] = int(handle)
         return handle
 
-    def unmarkable(handle: object, mask: int, flags: int) -> int:
+    def unmarkable(handle: int | c_void_p, mask: int, flags: int) -> int:
         # The pins are marked inheritable before the lease is opened; only
         # the exclusion handle's mark is refused.
-        if int(getattr(handle, "value", handle)) == taken.get("handle"):  # type: ignore[arg-type]
+        if int(getattr(handle, "value", handle)) == taken.get("handle"):
             return 0
         return int(real_mark(handle, mask, flags))
 
-    def refusing_close_handle(handle: object) -> int:
+    def refusing_close_handle(handle: int | c_void_p) -> int:
         # Only the exclusion handle is refused; the pins and the held
         # directory handles close as they would in the kernel.
-        if int(getattr(handle, "value", handle)) == taken.get("handle"):  # type: ignore[arg-type]
+        if int(getattr(handle, "value", handle)) == taken.get("handle"):
             return 0
         return int(real_close_handle(handle))
 
@@ -856,8 +858,8 @@ def test_a_status_probe_whose_close_is_refused_never_answers_free(
             probes.append(int(handle))
         return handle
 
-    def refusing_probe_close(handle: object) -> int:
-        if int(getattr(handle, "value", handle)) in probes:  # type: ignore[arg-type]
+    def refusing_probe_close(handle: int | c_void_p) -> int:
+        if int(getattr(handle, "value", handle)) in probes:
             return 0
         return int(real_close_handle(handle))
 
@@ -984,8 +986,8 @@ def test_a_stranded_probe_reports_its_own_exit_code(
             probes.append(int(handle))
         return handle
 
-    def refusing_probe_close(handle: object) -> int:
-        if int(getattr(handle, "value", handle)) in probes:  # type: ignore[arg-type]
+    def refusing_probe_close(handle: int | c_void_p) -> int:
+        if int(getattr(handle, "value", handle)) in probes:
             return 0
         return int(real_close_handle(handle))
 
@@ -1041,10 +1043,11 @@ def _act_on_common_name(
     after the lease open, before the binding is re-verified."""
 
     real_final_path = module["_final_path"]
+    assert callable(real_final_path)
     seen: list[str] = []
 
     def final_path(handle: int) -> str:
-        name = real_final_path(handle)  # type: ignore[operator]
+        name: str = real_final_path(handle)
         if name.endswith(".git"):
             seen.append(name)
             if len(seen) == occurrence:
@@ -1101,13 +1104,13 @@ def test_a_directory_replaced_after_the_re_verification_is_refused_before_the_op
     leases normally."""
 
     module = _NAMESPACE["acquire"].__globals__
-    real_directory_identity = module["_directory_identity"]
+    real_directory_identity: Callable[[Path], tuple[int, int, int]] = module["_directory_identity"]
     git_dir = anchor / ".git"
     moved = anchor / ".git-moved"
     swapped: list[Path] = []
 
     def identity_then_swap(path: Path) -> tuple[int, int, int]:
-        identity = real_directory_identity(path)  # type: ignore[operator]
+        identity = real_directory_identity(path)
         if not swapped:
             swapped.append(path)
             _swap_directory_under_the_name(git_dir, moved)
@@ -1272,10 +1275,11 @@ def _resolve_then(
     the resolved common directory is opened."""
 
     real_common_dir = module["_common_dir"]
+    assert callable(real_common_dir)
     seen: list[Path] = []
 
     def common_dir(repo: Path | None) -> Path:
-        common = real_common_dir(repo)  # type: ignore[operator]
+        common: Path = real_common_dir(repo)
         if not seen:
             seen.append(common)
             action()
@@ -1519,7 +1523,7 @@ def test_a_pointer_cannot_move_once_the_chain_is_pinned(
             _repoint(pointer, _redirect(other))
         except PermissionError as refusal:
             refused.append(str(refusal))
-        real_assert_binding(binding)  # type: ignore[operator]
+        real_assert_binding(binding)
 
     monkeypatch.setitem(module, "_assert_binding", rewrite_then_verify)
     lease = _NAMESPACE["acquire"]("pinned-open", repo=linked)
@@ -2859,8 +2863,8 @@ def _pin_marks_refused(monkeypatch: pytest.MonkeyPatch, *, protect: bool) -> dic
             taken["pin"] = int(handle)
         return handle
 
-    def refusing_mark(handle: object, mask: int, flags: int) -> int:
-        if int(getattr(handle, "value", handle)) == taken.get("pin"):  # type: ignore[arg-type]
+    def refusing_mark(handle: int | c_void_p, mask: int, flags: int) -> int:
+        if int(getattr(handle, "value", handle)) == taken.get("pin"):
             if protect:
                 assert real_mark(handle, 2, 2)
             return 0
@@ -3276,8 +3280,8 @@ def _second_pin_mark_refused(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
                 taken["inner"] = number
         return handle
 
-    def refusing_mark(handle: object, mask: int, flags: int) -> int:
-        number = int(getattr(handle, "value", handle))  # type: ignore[arg-type]
+    def refusing_mark(handle: int | c_void_p, mask: int, flags: int) -> int:
+        number = int(getattr(handle, "value", handle))
         if number == taken.get("inner") and mask == 1:
             assert real_mark(ctypes.c_void_p(number), 2, 2)
             return 0
@@ -3539,7 +3543,7 @@ def test_temporary_directory_close_refusal_is_reported(
 ) -> None:
     """A temporary probe must not silently survive a successful operation."""
     module = _NAMESPACE["acquire"].__globals__
-    original_open = module["_open_directory"]
+    original_open: Callable[[Path], int] = module["_open_directory"]
     original_close = module["_close"]
     held = _NAMESPACE["acquire"]("binding-probe", repo=anchor) if operation == "binding" else None
     returned = None
@@ -3569,6 +3573,7 @@ def test_temporary_directory_close_refusal_is_reported(
                 if operation == "identity":
                     module["_directory_identity"](anchor)
                 elif operation == "binding":
+                    assert held is not None
                     held.assert_bound()
                 else:
                     returned = _NAMESPACE["acquire"]("probe-refusal", repo=anchor)
@@ -3598,7 +3603,7 @@ def test_directory_probe_close_refusal_keeps_the_identity_error(
     anchor: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     module = _NAMESPACE["acquire"].__globals__
-    original_open = module["_open_directory"]
+    original_open: Callable[[Path], int] = module["_open_directory"]
     protected: list[int] = []
     primary = LeaseRefused("constructed identity refusal")
 
@@ -3686,9 +3691,9 @@ def test_acquisition_reports_temporary_probes_and_pins_in_one_failure(
     anchor: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     module = _NAMESPACE["acquire"].__globals__
-    original_open = module["_open_directory"]
+    original_open: Callable[[Path], int] = module["_open_directory"]
     original_pin = module["_open_pin"]
-    original_common = module["_common_dir"]
+    original_common: Callable[[Path | None], Path] = module["_common_dir"]
     original_close = module["_close"]
     protected: list[tuple[str, int]] = []
     opens = 0
@@ -3801,7 +3806,7 @@ def test_a_new_junction_cannot_leave_the_lease_mapping_unheld(
     chosen = private.parent if boundary == "enumeration" else private
     moved = chosen.with_name(chosen.name + "-held")
     module = _NAMESPACE["acquire"].__globals__
-    real_chain = module["_resolution_chain"]
+    real_chain: Callable[[Path], Iterator[tuple[Path, str]]] = module["_resolution_chain"]
     kernel = module["_kernel32"]()
     real_create = kernel.CreateFileW
     attempted = False
@@ -3828,7 +3833,7 @@ def test_a_new_junction_cannot_leave_the_lease_mapping_unheld(
         switched = True
         assert module["_directory_identity"](chosen) == identity
 
-    def after_enumeration(path: Path) -> list[tuple[Path, str]]:
+    def after_enumeration(path: Path) -> Iterator[tuple[Path, str]]:
         chain = real_chain(path)
         if not attempted:
             switch_to_junction()
@@ -4006,7 +4011,7 @@ def test_an_ordinary_component_is_held_before_its_attributes_are_read(
     chosen = private.parent
     moved = chosen.with_name(chosen.name + "-during-read")
     module = _NAMESPACE["acquire"].__globals__
-    original = module["_attributes"]
+    original: Callable[[Path], int] = module["_attributes"]
     attempts: list[bool] = []
     open_pin = module["_open_pin"]
     held: set[Path] = set()
@@ -4188,9 +4193,9 @@ def test_a_refused_parent_pin_retirement_closes_the_replacement_once(
     lease = None
     failure = None
 
-    def create(name: str, *arguments: object) -> object:
-        handle = original_create(name, *arguments)
-        if Path(name) == chosen and int(arguments[0]) & 0x80000000:
+    def create(name: str, access: int, *arguments: object) -> object:
+        handle = original_create(name, access, *arguments)
+        if Path(name) == chosen and int(access) & 0x80000000:
             assert handle is not None and handle != module["_INVALID_HANDLE"]
             opened.append(int(handle))
         return handle
