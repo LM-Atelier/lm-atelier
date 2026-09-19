@@ -29,8 +29,37 @@ from local_lm.schemas import (
     CatalogPage,
     CatalogPreflightRequest,
     DownloadRequest,
+    PlatformAssessment,
     SystemInfo,
 )
+
+
+def _catalog_system() -> SystemInfo:
+    return SystemInfo(
+        platform="linux",
+        platform_release="fixture",
+        distribution="Fixture Linux",
+        distribution_version="1",
+        architecture="x86_64",
+        python_version="3.12.10",
+        cpu_model="Fixture CPU",
+        cpu_count=8,
+        memory_total_bytes=16 * 1024**3,
+        memory_available_bytes=16 * 1024**3,
+        disk_total_bytes=100 * 1024**3,
+        disk_free_bytes=100 * 1024**3,
+        ffmpeg_available=False,
+        devices=[],
+        support=PlatformAssessment(
+            platform_status="target",
+            platform_label="Fixture Linux",
+            accelerator_status="cpu-only",
+            accelerator_label="CPU",
+            certification_status="hardware-pending",
+            chat_ready=True,
+            reference_media_ready=False,
+        ),
+    )
 
 
 class Sibling:
@@ -197,11 +226,7 @@ def test_preflight_uses_the_exact_civitai_variant_through_every_file_lookup(
         revision="201",
         files=[first, second],
     )
-    system = SystemInfo.model_construct(
-        memory_total_bytes=16 * 1024**3,
-        disk_free_bytes=100 * 1024**3,
-        devices=[],
-    )
+    system = _catalog_system()
 
     result = assess_catalog_install(
         detail,
@@ -472,11 +497,7 @@ def test_chat_preflight_selects_and_hashes_multimodal_projector(tmp_path: Path) 
             },
         ],
     )
-    system = SystemInfo.model_construct(
-        memory_total_bytes=16 * 1024**3,
-        disk_free_bytes=100 * 1024**3,
-        devices=[],
-    )
+    system = _catalog_system()
 
     result = assess_catalog_install(
         detail,
@@ -522,11 +543,7 @@ def test_chat_preflight_preserves_external_projector_provenance(tmp_path: Path) 
             },
         ],
     )
-    system = SystemInfo.model_construct(
-        memory_total_bytes=16 * 1024**3,
-        disk_free_bytes=100 * 1024**3,
-        devices=[],
-    )
+    system = _catalog_system()
 
     result = assess_catalog_install(
         detail,
@@ -640,14 +657,10 @@ def test_preflight_pins_the_catalog_resolved_revision_for_every_role(
     )
     request = CatalogPreflightRequest(
         revision="main",
-        role=role,  # type: ignore[arg-type]
+        role=role,
         engine=engine,
     )
-    system = SystemInfo.model_construct(
-        memory_total_bytes=16 * 1024**3,
-        disk_free_bytes=100 * 1024**3,
-        devices=[],
-    )
+    system = _catalog_system()
 
     result = assess_catalog_install(
         detail,
@@ -877,7 +890,7 @@ def test_catalog_filters_and_rejects_external_cursors() -> None:
     )
 
 
-async def test_catalog_uses_hugging_face_trending_order_and_update_age(tmp_path) -> None:
+async def test_catalog_uses_hugging_face_trending_order_and_update_age(tmp_path: Path) -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -899,7 +912,7 @@ async def test_catalog_uses_hugging_face_trending_order_and_update_age(tmp_path)
     assert requests[0].url.params["direction"] == "-1"
 
 
-async def test_catalog_uses_filtered_saved_results_during_an_outage(tmp_path) -> None:
+async def test_catalog_uses_filtered_saved_results_during_an_outage(tmp_path: Path) -> None:
     online = [True]
 
     def handler(_request: httpx.Request) -> httpx.Response:
@@ -935,7 +948,7 @@ async def test_catalog_uses_filtered_saved_results_during_an_outage(tmp_path) ->
     assert saved.next_cursor is None
 
 
-async def test_catalog_detail_requests_live_blob_metadata(tmp_path) -> None:
+async def test_catalog_detail_requests_live_blob_metadata(tmp_path: Path) -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1129,7 +1142,7 @@ async def test_catalog_search_ignores_entries_with_unsafe_remote_ids(tmp_path: P
     assert [item.remote_id for item in page.items] == ["owner/model"]
 
 
-async def test_maximum_size_filter_hydrates_live_file_sizes(tmp_path) -> None:
+async def test_maximum_size_filter_hydrates_live_file_sizes(tmp_path: Path) -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:

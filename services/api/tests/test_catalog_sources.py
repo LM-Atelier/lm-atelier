@@ -12,6 +12,7 @@ class FakeCatalogSource:
     def __init__(self, source_id: str) -> None:
         self.source_id = source_id
         self.display_name = source_id.title()
+        self.web_origin = "https://catalog.example.test"
         self.closed = False
 
     def validate_item_id(self, item_id: str) -> bool:
