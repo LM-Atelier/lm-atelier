@@ -16,6 +16,7 @@ from test_workflow_package_install_plans import _payload, configure_runtime
 
 from local_lm import models
 from local_lm.db import SessionLocal
+from local_lm.downloads import DownloadManager
 from local_lm.schemas import DownloadRequest
 
 pytestmark = pytest.mark.asyncio
@@ -222,7 +223,7 @@ async def test_failed_job_staging_rolls_back_the_source_draft_and_offer(
 ) -> None:
     plan = await _plan(client)
     before = _identities()
-    manager = app.state.services.downloads
+    manager: DownloadManager = app.state.services.downloads
     original = manager.stage
 
     def interrupted(session: Session, request: DownloadRequest) -> models.Job:
@@ -372,7 +373,7 @@ async def test_repeated_acceptance_reuses_the_active_download_worker(
     entered = asyncio.Event()
     release = asyncio.Event()
     calls: list[str] = []
-    manager = app.state.services.downloads
+    manager: DownloadManager = app.state.services.downloads
 
     async def download(job_id: str) -> None:
         calls.append(job_id)
@@ -449,7 +450,7 @@ async def test_restart_finishes_saved_cancellation_before_starting_downloads(
     response = await client.post(_url(plan["id"]))
     assert response.status_code == 202, response.text
     jobs = {item["kind"]: item["id"] for item in response.json()}
-    manager = app.state.services.downloads
+    manager: DownloadManager = app.state.services.downloads
 
     async def stop_before_child_cancel(_job_id: str, **_kwargs: Any) -> bool:
         raise OSError("Neutral shutdown interruption")
@@ -514,17 +515,17 @@ async def test_cancelled_installation_preserves_another_installations_shared_dow
     right = {item["kind"]: item["id"] for item in second.json()}
     assert left["workflow_install"] != right["workflow_install"]
     assert left["download"] == right["download"]
-    manager = app.state.services.downloads
+    manager: DownloadManager = app.state.services.downloads
     resumed: list[str] = []
     if operation == "retry-during-cleanup":
         stopped = await client.post(f"/api/jobs/{right['workflow_install']}/cancel")
         assert stopped.status_code == 200, stopped.text
         monkeypatch.setattr(manager, "start", type(manager).start.__get__(manager))
 
-        async def download(identifier: str) -> None:
+        async def record_download(identifier: str) -> None:
             resumed.append(identifier)
 
-        monkeypatch.setattr(manager, "_download", download)
+        monkeypatch.setattr(manager, "_download", record_download)
         stop_task = manager._stop_task
 
         async def retry_while_stopping(identifier: str) -> None:
