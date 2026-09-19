@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from local_lm.models import Artifact, ArtifactLibraryEntry
 
 
 @pytest.fixture
-def artifact_session(tmp_path: Path) -> tuple[ArtifactStore, Session]:
+def artifact_session(tmp_path: Path) -> Iterator[tuple[ArtifactStore, Session]]:
     settings = Settings(data_dir=tmp_path / "data")
     settings.prepare()
     engine = create_engine(f"sqlite:///{tmp_path / 'artifacts.sqlite3'}")
@@ -135,7 +136,7 @@ def test_temporary_preview_delete_defers_windows_locked_files(
     def locked_replace(source: str | Path, destination: str | Path) -> None:
         if Path(source) == path:
             error = OSError(13, "file is in use")
-            error.winerror = 32  # type: ignore[attr-defined]
+            error.winerror = 32
             raise error
         real_replace(source, destination)
 
