@@ -26,6 +26,7 @@ from local_lm.adapters.base import MediaEvent, MediaRequest
 from local_lm.adapters.mock import MockMediaAdapter
 from local_lm.db import SessionLocal
 from local_lm.domain import JobStatus, MessageStatus, Operation, RunStatus
+from local_lm.engines import EngineRegistry
 from local_lm.models import (
     Chat,
     Job,
@@ -36,6 +37,7 @@ from local_lm.models import (
     WorkPlan,
     WorkStep,
 )
+from local_lm.orchestrator import ConversationOrchestrator
 from local_lm.settings_registry import WORKFLOW_LORA_OVERRIDES_SETTING_KEY
 from local_lm.workflow_lora_admission import (
     WORKFLOW_LORA_ADMISSION_CONFLICT_CODE,
@@ -52,6 +54,7 @@ from local_lm.workflow_lora_admission import (
 )
 from local_lm.workflow_lora_overrides import workflow_lora_override_resolution_sha256
 from local_lm.workflow_loras import workflow_lora_controls
+from local_lm.workflow_selection import resolve_exact_workflow_revision
 
 
 def _override_envelope(
@@ -142,7 +145,7 @@ def _force_seeded_workflow(
     monkeypatch: pytest.MonkeyPatch,
     seeded: SeededWorkflow,
 ) -> list[MediaRequest]:
-    orchestrator = app.state.services.orchestrator
+    orchestrator: ConversationOrchestrator = app.state.services.orchestrator
     original_selector = orchestrator._profile_and_workflow_for_operation
 
     def forced_selector(
@@ -168,7 +171,8 @@ def _force_seeded_workflow(
         )
 
     monkeypatch.setattr(orchestrator, "_profile_and_workflow_for_operation", forced_selector)
-    original_settings = app.state.services.engines.settings_for_role
+    engines: EngineRegistry = app.state.services.engines
+    original_settings = engines.settings_for_role
 
     async def forced_settings(role: str, *, engine: str | None = None) -> list[Any]:
         del engine
@@ -194,7 +198,7 @@ async def _wait_for_plan(client: AsyncClient, plan_id: str) -> dict[str, Any]:
     deadline = asyncio.get_running_loop().time() + 8
     while asyncio.get_running_loop().time() < deadline:
         response = await client.get(f"/api/work-plans/{plan_id}")
-        plan = response.json()
+        plan: dict[str, Any] = response.json()
         if plan["status"] in {"complete", "failed", "cancelled", "interrupted", "blocked"}:
             return plan
         await asyncio.sleep(0.03)
@@ -1092,7 +1096,7 @@ def _force_media_revisions(
 ) -> list[MediaRequest]:
     """Select the preferred revision when a batch names one, and a default otherwise."""
 
-    orchestrator = app.state.services.orchestrator
+    orchestrator: ConversationOrchestrator = app.state.services.orchestrator
     original_selector = orchestrator._profile_and_workflow_for_operation
 
     def forced_selector(
@@ -1119,7 +1123,8 @@ def _force_media_revisions(
         )
 
     monkeypatch.setattr(orchestrator, "_profile_and_workflow_for_operation", forced_selector)
-    original_settings = app.state.services.engines.settings_for_role
+    engines: EngineRegistry = app.state.services.engines
+    original_settings = engines.settings_for_role
 
     async def forced_settings(role: str, *, engine: str | None = None) -> list[Any]:
         del engine
@@ -1178,7 +1183,7 @@ async def test_prompt_batch_outputs_each_admit_and_dispatch_saved_workflow_lora_
     monkeypatch.setattr(
         prompt_library, "prompt_template_workflow_revision_is_ready", ready_for_its_own_engine
     )
-    exact = orchestrator_module.resolve_exact_workflow_revision
+    exact = resolve_exact_workflow_revision
 
     def exact_for_its_own_engine(
         session: Session, revision_id: str, **kwargs: Any
