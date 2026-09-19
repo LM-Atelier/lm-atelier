@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
 from local_lm.operation_idempotency_declaration_v1 import (
@@ -85,8 +87,9 @@ def test_invalid() -> None:
 def test_public_constructor_cannot_authorize() -> None:
     with pytest.raises(OperationIdempotencyError, match=INVALID):
         OperationIdempotencyDeclarationV1()
+    constructor: Callable[..., object] = OperationIdempotencyDeclarationV1
     with pytest.raises(TypeError):
-        OperationIdempotencyDeclarationV1(
+        constructor(
             schema="lm-atelier-operation-idempotency-declaration-v1",
             schema_version=1,
             execution_authorized=True,
