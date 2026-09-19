@@ -9,7 +9,6 @@ the envelope that replaces that equality test.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Any
 
 from local_lm.capability_evidence import _hardware_still_sufficient
@@ -18,6 +17,7 @@ from local_lm.hardware import (
     HARDWARE_ENVELOPE_VERSION,
     hardware_envelope_satisfied,
 )
+from local_lm.models import ModelCapabilityEvidence
 
 # The class is computed from the real machine; these tests only care that it
 # differs from the recorded one, which any fixed string guarantees.
@@ -50,7 +50,7 @@ def test_a_changed_capability_class_no_longer_discards_the_proof() -> None:
     capability-class hash, while leaving the machine exactly as able to run the
     model. Previously the equality test alone rejected the evidence.
     """
-    evidence = SimpleNamespace(
+    evidence = ModelCapabilityEvidence(
         hardware_class="windows-amd64-beforethedriverupdate",
         hardware_envelope_json=_envelope(),
     )
@@ -60,7 +60,7 @@ def test_a_changed_capability_class_no_longer_discards_the_proof() -> None:
 
 def test_a_row_with_no_envelope_still_needs_an_exact_capability_class() -> None:
     """Rows written before envelopes existed must behave exactly as before."""
-    legacy = SimpleNamespace(
+    legacy = ModelCapabilityEvidence(
         hardware_class="windows-amd64-somethingelse",
         hardware_envelope_json=None,
     )
@@ -70,7 +70,7 @@ def test_a_row_with_no_envelope_still_needs_an_exact_capability_class() -> None:
 
 def test_an_envelope_the_machine_cannot_meet_is_still_rejected() -> None:
     """The equality test is a fast accept, not a way around the envelope."""
-    evidence = SimpleNamespace(
+    evidence = ModelCapabilityEvidence(
         hardware_class="windows-amd64-somethingelse",
         hardware_envelope_json=_envelope(accelerator_memory_bytes=48 * _GIB),
     )
