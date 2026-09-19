@@ -19,6 +19,7 @@ from test_video_output_measurement import _neutral_video
 from local_lm import orchestrator as orchestrator_module
 from local_lm.adapters.base import GeneratedAsset
 from local_lm.output_measurement import Budget
+from local_lm.video_output_measurement import measure_video_output
 
 pytestmark = pytest.mark.asyncio
 
@@ -47,6 +48,7 @@ async def test_a_produced_video_is_recorded_at_the_size_of_its_decoded_frame(
     }
     clip = records[hashlib.sha256(video).hexdigest()]
     still = records[hashlib.sha256(picture).hexdigest()]
+    assert clip is not None and still is not None
     assert clip["state"] == "measured"
     assert clip["method"] == "video_first_frame_png"
     assert (clip["raster_width"], clip["raster_height"]) == (96, 64)
@@ -60,7 +62,7 @@ async def test_every_video_in_a_run_draws_on_one_budget(
     """The dispatch passes the run's single budget, not a fresh one per video."""
 
     budgets: list[int] = []
-    measure = orchestrator_module.measure_video_output
+    measure = measure_video_output
 
     async def recording(content: bytes, budget: Budget) -> dict[str, object]:
         budgets.append(id(budget))
