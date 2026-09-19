@@ -9,7 +9,11 @@ from typing import Any, cast
 
 import pytest
 
-from local_lm.settings_registry import IMAGE_SETTINGS, validate_settings
+from local_lm.settings_registry import (
+    IMAGE_SETTINGS,
+    WORKFLOW_LORA_OVERRIDES_SETTING_KEY,
+    validate_settings,
+)
 from local_lm.workflow_lora_overrides import (
     WorkflowLoraOverrideError,
     parse_workflow_lora_override_resolution,
@@ -20,7 +24,6 @@ from local_lm.workflow_lora_overrides import (
     workflow_lora_overrides_sha256,
 )
 from local_lm.workflow_lora_settings import (
-    WORKFLOW_LORA_OVERRIDES_SETTING_KEY,
     WorkflowLoraSettingsError,
     overlay_workflow_lora_overrides,
     split_workflow_lora_overrides_setting,
@@ -212,7 +215,9 @@ def test_reserved_setting_is_split_and_canonicalized_before_generic_validation()
     assert validate_settings(ordinary, IMAGE_SETTINGS)["steps"] == 24
     assert parsed is not None
     payload = workflow_lora_overrides_setting_value(parsed)
-    assert [target["workflow_definition_id"] for target in payload["targets"]] == [
+    targets = payload["targets"]
+    assert isinstance(targets, list)
+    assert [target["workflow_definition_id"] for target in targets] == [
         "workflow-1",
         "workflow-2",
     ]
@@ -267,7 +272,7 @@ def test_settings_transport_rejects_outer_and_nested_builtin_subclasses() -> Non
 
     raw = _envelope(_target(1))
     target = cast(dict[str, object], cast(list[object], raw["targets"])[0])
-    target["overrides"] = [hostile_dict(cast(dict[str, object], _slot(1)))]
+    target["overrides"] = [hostile_dict(_slot(1))]
     with pytest.raises(WorkflowLoraOverrideError):
         split_workflow_lora_overrides_setting(
             {WORKFLOW_LORA_OVERRIDES_SETTING_KEY: raw},
@@ -480,6 +485,8 @@ def test_overlay_reset_and_conflicting_slot_evidence_are_explicit() -> None:
 
 
 def test_resolution_parser_is_exact_canonical_and_digest_stable() -> None:
+    overrides = _resolution()["overrides"]
+    assert isinstance(overrides, list)
     raw = _resolution(
         overrides=[
             {
@@ -488,7 +495,7 @@ def test_resolution_parser_is_exact_canonical_and_digest_stable() -> None:
                 "loader_authority_sha256": _digest(102),
                 "changes": {"enabled": {"value": False, "origin": "project"}},
             },
-            cast(dict[str, object], _resolution()["overrides"][0]),
+            cast(dict[str, object], overrides[0]),
         ]
     )
 
