@@ -7,10 +7,12 @@ import os
 import sqlite3
 import threading
 import zipfile
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from fastapi import FastAPI
@@ -274,8 +276,8 @@ async def test_app_serves_while_daily_backup_verification_is_pending(
 
 async def test_app_serves_while_managed_runtime_verification_is_pending(
     tmp_path: Path,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     started = asyncio.Event()
     release = asyncio.Event()
 
@@ -340,8 +342,8 @@ async def test_backup_api_offloads_every_filesystem_operation(
     observed_threads: dict[str, int] = {}
     main_thread = threading.get_ident()
 
-    def record(name: str, result):  # type: ignore[no-untyped-def]
-        def operation(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+    def record[T](name: str, result: T) -> Callable[..., T]:
+        def operation(*_args: object, **_kwargs: object) -> T:
             observed_threads[name] = threading.get_ident()
             return result
 
@@ -380,8 +382,8 @@ async def test_backup_cadence_checks_long_running_sessions() -> None:
             checked.set()
 
     maintenance = asyncio.create_task(
-        maintain_automatic_recovery_backups(  # type: ignore[arg-type]
-            CountingBackups(),
+        maintain_automatic_recovery_backups(
+            Mock(spec_set=BackupManager, wraps=CountingBackups()),
             interval_seconds=0.01,
         )
     )
@@ -404,7 +406,7 @@ async def test_cancelling_backup_check_waits_for_filesystem_transaction() -> Non
             assert release.wait(timeout=2)
 
     check = asyncio.create_task(
-        ensure_automatic_recovery_backup(BlockingBackups()),  # type: ignore[arg-type]
+        ensure_automatic_recovery_backup(Mock(spec_set=BackupManager, wraps=BlockingBackups())),
     )
     observed = await asyncio.wait_for(asyncio.to_thread(started.wait, 1), timeout=2)
     assert observed is True
@@ -424,7 +426,7 @@ async def test_automatic_backup_failure_is_logged_without_crashing(
             raise OSError("simulated backup failure")
 
     with caplog.at_level("ERROR", logger="local_lm"):
-        await ensure_automatic_recovery_backup(FailingBackups())  # type: ignore[arg-type]
+        await ensure_automatic_recovery_backup(Mock(spec_set=BackupManager, wraps=FailingBackups()))
 
     assert "Could not maintain the automatic LM Atelier recovery backup" in caplog.text
 

@@ -20,7 +20,7 @@ from local_lm import main
 from local_lm.main import _startup_stage
 
 
-def test_a_stuck_stage_is_named_while_it_is_still_stuck(capsys) -> None:
+def test_a_stuck_stage_is_named_while_it_is_still_stuck(capsys: pytest.CaptureFixture[str]) -> None:
     """The whole point: evidence arrives during the hang, not after it.
 
     The stage blocks on `release`, and `release` is only set once the watchdog
@@ -51,7 +51,9 @@ def test_a_stuck_stage_is_named_while_it_is_still_stuck(capsys) -> None:
     assert "still running after" in err
 
 
-def test_the_notice_repeats_so_a_wait_is_visibly_growing(capsys) -> None:
+def test_the_notice_repeats_so_a_wait_is_visibly_growing(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     """One line could be read as a step that completed; repetition cannot."""
     seen = threading.Semaphore(0)
 
@@ -72,7 +74,7 @@ def test_the_notice_repeats_so_a_wait_is_visibly_growing(capsys) -> None:
     assert capsys.readouterr().err.count("slow-stage") >= 2
 
 
-def test_a_healthy_stage_says_nothing_at_all(capsys) -> None:
+def test_a_healthy_stage_says_nothing_at_all(capsys: pytest.CaptureFixture[str]) -> None:
     """Bounded means silent when there is nothing wrong to report."""
     with _startup_stage("quick-stage", warn_after=30.0):
         pass
@@ -81,7 +83,9 @@ def test_a_healthy_stage_says_nothing_at_all(capsys) -> None:
     assert captured.out == ""
 
 
-def test_the_notice_reaches_stderr_without_any_logging_handler(capsys) -> None:
+def test_the_notice_reaches_stderr_without_any_logging_handler(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     """The stages that hang worst run before api.log exists.
 
     Five stages run before the lifespan installs the file handler, so a stage
@@ -343,7 +347,7 @@ def test_a_watchdog_that_wakes_after_the_stage_finished_stays_silent() -> None:
 
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(main, "_emit_startup_notice", recording_notice)
-    monkeypatch.setattr(main.threading, "Lock", lock_factory)
+    monkeypatch.setattr(threading, "Lock", lock_factory)
     try:
         with main._startup_stage("woken-late", warn_after=0.05):
             assert at_the_lock.wait(timeout=10), "the watchdog never reached the lock"
