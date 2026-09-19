@@ -51,7 +51,9 @@ async def command(
         json={"expected_revision": revision, "idempotency_key": key},
     )
     assert response.status_code == 200, response.text
-    return response.json()
+    payload = response.json()
+    assert isinstance(payload, dict)
+    return payload
 
 
 @pytest.mark.asyncio
