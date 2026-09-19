@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from typing import TypedDict
+
 import pytest
+from httpx2 import AsyncClient
 
 from local_lm.studio_masks import (
     MaskContractError,
@@ -18,6 +21,15 @@ MASK_SCHEMA = {
     "type": "object",
     "properties": {"mask": {"type": "object", "x-lm-atelier-kind": "mask"}},
 }
+
+
+class _GeometryInputs(TypedDict, total=False):
+    source_width: int
+    source_height: int
+    mask_width: int
+    mask_height: int
+    orientation: int
+    threshold: int
 
 
 def test_only_a_declared_mask_input_counts() -> None:
@@ -155,15 +167,16 @@ def test_a_selection_drawn_on_a_different_shape_refuses() -> None:
         ({"threshold": 300}, "mask-threshold-invalid"),
     ],
 )
-def test_impossible_geometry_refuses_typed(kwargs: dict[str, int], code: str) -> None:
-    base = {
+def test_impossible_geometry_refuses_typed(kwargs: _GeometryInputs, code: str) -> None:
+    base: _GeometryInputs = {
         "source_width": 800,
         "source_height": 600,
         "mask_width": 800,
         "mask_height": 600,
     }
     with pytest.raises(MaskContractError) as raised:
-        mask_geometry(**{**base, **kwargs})
+        geometry: _GeometryInputs = {**base, **kwargs}
+        mask_geometry(**geometry)
     assert raised.value.code == code
 
 
@@ -189,7 +202,7 @@ def test_provenance_carries_the_whole_story() -> None:
     assert raised.value.code == "mask-coverage-invalid"
 
 
-async def test_a_masked_edit_is_accepted_by_the_real_turn_route(client) -> None:
+async def test_a_masked_edit_is_accepted_by_the_real_turn_route(client: AsyncClient) -> None:
     """The defect this file previously claimed to cover, exercised for real.
 
     Splitting the selection out of the tunables was necessary and not
@@ -251,7 +264,7 @@ async def test_a_masked_edit_is_accepted_by_the_real_turn_route(client) -> None:
     assert response.status_code == 202, response.text
 
 
-def test_the_mask_contract_refuses_a_workflow_without_one(client) -> None:
+def test_the_mask_contract_refuses_a_workflow_without_one(client: AsyncClient) -> None:
     """A masked edit must refuse before acceptance, not after execution."""
 
     from local_lm.db import SessionLocal
