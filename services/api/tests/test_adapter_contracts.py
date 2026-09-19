@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import pytest
 from pydantic import ValidationError
@@ -171,8 +171,8 @@ async def test_loopback_adapter_clients_ignore_environment_proxies(
     llama = LlamaCppAdapter("http://127.0.0.1:12341")
     comfy = ComfyUIAdapter("http://127.0.0.1:8188")
     try:
-        assert llama._client._trust_env is False  # type: ignore[attr-defined]
-        assert comfy._client._trust_env is False  # type: ignore[attr-defined]
+        assert llama._client._trust_env is False
+        assert comfy._client._trust_env is False
     finally:
         await llama.close()
         await comfy.close()
@@ -600,7 +600,7 @@ async def test_an_ordinary_close_is_still_awaited_and_its_failure_still_dropped(
     closed: list[str] = []
 
     class Ordinary:
-        def __aiter__(self) -> object:
+        def __aiter__(self) -> Self:
             return self
 
         async def __anext__(self) -> object:
@@ -635,7 +635,7 @@ async def test_cancelling_the_caller_still_asks_the_close_to_stop() -> None:
     asked_to_stop = asyncio.Event()
 
     class SlowClose:
-        def __aiter__(self) -> object:
+        def __aiter__(self) -> Self:
             return self
 
         async def __anext__(self) -> object:
