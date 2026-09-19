@@ -14,8 +14,10 @@ import asyncio
 import hashlib
 import logging
 import os
+import sqlite3
 import threading
 import time
+from collections.abc import Iterator
 from contextlib import suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -31,6 +33,7 @@ from sqlalchemy.orm import Session
 
 from local_lm import artifacts as artifacts_module
 from local_lm import main as main_module
+from local_lm.artifact_library import begin_artifact_write_fence
 from local_lm.artifacts import ArtifactStore
 from local_lm.config import Settings
 from local_lm.db import Base, SessionLocal
@@ -40,7 +43,7 @@ from local_lm.models import Artifact
 
 
 @pytest.fixture
-def sweepable(tmp_path: Path) -> tuple[ArtifactStore, Session]:
+def sweepable(tmp_path: Path) -> Iterator[tuple[ArtifactStore, Session]]:
     settings = Settings(data_dir=tmp_path / "data")
     settings.prepare()
     engine = create_engine(f"sqlite:///{settings.data_dir / 'retention.sqlite3'}")
@@ -658,13 +661,15 @@ async def test_retention_progress_counts_rows_and_excludes_writer_wait(
         favorite.favorite = True
         session.commit()
     clock = 0.0
-    real_fence = artifacts_module.begin_artifact_write_fence
+    real_fence = begin_artifact_write_fence
+    assert vars(artifacts_module)["begin_artifact_write_fence"] is real_fence
     real_references = ArtifactStore.referenced_artifact_ids
     real_commit = Session.commit
 
     def waiting_fence(session: Session) -> None:
         nonlocal clock
         driver = session.connection().connection.driver_connection
+        assert isinstance(driver, sqlite3.Connection)
         if not driver.in_transaction:
             clock += 7.0
         real_fence(session)
@@ -735,6 +740,7 @@ async def test_retention_progress_reports_a_statement_while_sqlite_is_still_insi
             return
         attempted.set()
         driver = session.connection().connection.driver_connection
+        assert isinstance(driver, sqlite3.Connection)
         driver.create_function("retention_progress_pause", 0, pause_inside_sqlite)
         session.execute(text("SELECT retention_progress_pause()"))
 
