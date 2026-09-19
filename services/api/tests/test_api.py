@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 from workflow_fixtures import seed_workflow_trust
 
 import local_lm.api as api_module
+import local_lm.model_quarantine as model_quarantine
 from local_lm import __version__
 from local_lm.adapters.base import ChatEvent, ChatRequest, GeneratedAsset, MediaEvent, MediaRequest
 from local_lm.adapters.mock import MockChatAdapter, MockMediaAdapter
@@ -6611,7 +6612,7 @@ async def test_model_delete_finalization_failure_is_recoverable_after_commit(
     assert (quarantines[0] / "payload" / "model.gguf").read_bytes() == b"finalize"
 
     with SessionLocal() as session:
-        api_module.recover_model_delete_quarantines(
+        model_quarantine.recover_model_delete_quarantines(
             session,
             settings.model_dir.resolve(),
         )
@@ -6626,7 +6627,7 @@ def test_model_quarantine_rejects_nested_filesystem_links(
     outside.mkdir()
     sentinel = outside / "sentinel.gguf"
     sentinel.write_bytes(b"outside")
-    quarantine = api_module._new_model_quarantine(
+    quarantine = model_quarantine._new_model_quarantine(
         settings.model_dir.resolve(),
         "model_nested_link",
     )
@@ -6639,12 +6640,12 @@ def test_model_quarantine_rejects_nested_filesystem_links(
         pytest.skip("filesystem links are unavailable in this test environment")
 
     with pytest.raises(ValueError, match="filesystem link"):
-        api_module._safe_quarantine_file_path(
+        model_quarantine._safe_quarantine_file_path(
             quarantine,
             PurePosixPath("nested/model.gguf"),
         )
     with pytest.raises(OSError, match="link"):
-        api_module._finalize_model_quarantine(quarantine)
+        model_quarantine._finalize_model_quarantine(quarantine)
 
     assert sentinel.read_bytes() == b"outside"
     assert (quarantine / ".model-id").is_file()
