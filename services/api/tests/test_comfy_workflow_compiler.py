@@ -13,6 +13,11 @@ from local_lm.comfy_workflow_compiler import (
 from local_lm.comfy_workflow_packages import WorkflowPackageError
 
 
+def _mapping(value: object) -> dict[str, object]:
+    assert isinstance(value, dict)
+    return value
+
+
 def _object_info() -> dict[str, Any]:
     return {
         "Source": {
@@ -283,7 +288,7 @@ def test_compiles_a_fixed_primitive_widget_value() -> None:
     compiled = compile_comfyui_ui_graph(workflow, _object_info())
 
     assert compiled.execution_order == ("1", "2")
-    assert compiled.api_graph["1"]["inputs"]["label"] == "from primitive"
+    assert _mapping(compiled.api_graph["1"]["inputs"])["label"] == "from primitive"
     assert "3" not in compiled.api_graph
 
 
@@ -727,8 +732,8 @@ def test_a_reroute_feeding_several_targets_reconnects_each_of_them() -> None:
 
     compiled = compile_comfyui_ui_graph(workflow, _object_info())
 
-    assert compiled.api_graph["2"]["inputs"]["images"] == ["1", 0]
-    assert compiled.api_graph["3"]["inputs"]["images"] == ["1", 0]
+    assert _mapping(compiled.api_graph["2"]["inputs"])["images"] == ["1", 0]
+    assert _mapping(compiled.api_graph["3"]["inputs"])["images"] == ["1", 0]
     assert "9" not in compiled.api_graph
 
 
@@ -835,8 +840,8 @@ def test_one_written_value_feeds_every_reader_of_it() -> None:
 
     compiled = compile_comfyui_ui_graph(workflow, _object_info())
 
-    assert compiled.api_graph["2"]["inputs"]["images"] == ["1", 0]
-    assert compiled.api_graph["3"]["inputs"]["images"] == ["1", 0]
+    assert _mapping(compiled.api_graph["2"]["inputs"])["images"] == ["1", 0]
+    assert _mapping(compiled.api_graph["3"]["inputs"])["images"] == ["1", 0]
     assert "11" not in compiled.api_graph
     assert "12" not in compiled.api_graph
 
@@ -864,7 +869,7 @@ def test_a_value_written_through_a_reroute_resolves_through_both() -> None:
 
     compiled = compile_comfyui_ui_graph(workflow, _object_info())
 
-    assert compiled.api_graph["2"]["inputs"]["images"] == ["1", 0]
+    assert _mapping(compiled.api_graph["2"]["inputs"])["images"] == ["1", 0]
     assert set(compiled.api_graph) == {"1", "2"}
 
 
@@ -920,7 +925,7 @@ def test_a_value_written_twice_but_never_read_still_compiles() -> None:
 
     compiled = compile_comfyui_ui_graph(workflow, _object_info())
 
-    assert compiled.api_graph["2"]["inputs"]["images"] == ["1", 0]
+    assert _mapping(compiled.api_graph["2"]["inputs"])["images"] == ["1", 0]
     assert set(compiled.api_graph) == {"1", "2"}
 
 
@@ -979,7 +984,7 @@ def _power_loras(*entries: Any, properties: dict[str, Any] | None = None) -> dic
 
 def _compiled_loras(*entries: Any) -> dict[str, Any]:
     compiled = compile_comfyui_ui_graph(_power_loras(*entries), _drawn_object_info())
-    return dict(compiled.api_graph["3"]["inputs"])
+    return dict(_mapping(compiled.api_graph["3"]["inputs"]))
 
 
 def test_each_saved_lora_becomes_the_input_the_node_names_it() -> None:
@@ -1034,8 +1039,10 @@ def test_the_links_the_node_carries_survive_its_widgets() -> None:
 
     compiled = compile_comfyui_ui_graph(workflow, _drawn_object_info())
 
-    assert compiled.api_graph["3"]["inputs"]["model"] == ["1", 0]
-    assert compiled.api_graph["3"]["inputs"]["lora_1"]["lora"] == "one.safetensors"
+    assert _mapping(compiled.api_graph["3"]["inputs"])["model"] == ["1", 0]
+    assert (
+        _mapping(_mapping(compiled.api_graph["3"]["inputs"])["lora_1"])["lora"] == "one.safetensors"
+    )
 
 
 @pytest.mark.parametrize(
@@ -1134,7 +1141,7 @@ def test_a_name_the_graph_did_not_save_falls_back_to_the_declared_default() -> N
 
     compiled = compile_comfyui_ui_graph(workflow, _object_info())
 
-    assert compiled.api_graph["1"]["inputs"]["label"] == "default"
+    assert _mapping(compiled.api_graph["1"]["inputs"])["label"] == "default"
 
 
 def test_a_link_still_overrides_a_widget_saved_by_name() -> None:
@@ -1291,7 +1298,9 @@ def test_the_other_audited_revision_of_the_same_layout_is_read() -> None:
 
     compiled = compile_comfyui_ui_graph(workflow, _drawn_object_info())
 
-    assert compiled.api_graph["3"]["inputs"]["lora_1"]["lora"] == "one.safetensors"
+    assert (
+        _mapping(_mapping(compiled.api_graph["3"]["inputs"])["lora_1"])["lora"] == "one.safetensors"
+    )
 
 
 @pytest.mark.parametrize("divider", [{}, None])
@@ -1314,7 +1323,9 @@ def test_both_recorded_furniture_variants_are_read(divider: Any) -> None:
 
     compiled = compile_comfyui_ui_graph(workflow, _drawn_object_info())
 
-    assert compiled.api_graph["3"]["inputs"]["lora_1"]["lora"] == "one.safetensors"
+    assert (
+        _mapping(_mapping(compiled.api_graph["3"]["inputs"])["lora_1"])["lora"] == "one.safetensors"
+    )
 
 
 @pytest.mark.parametrize("strength", [float("nan"), float("inf"), float("-inf")])
@@ -1410,8 +1421,8 @@ def test_the_players_own_state_is_recognised_and_dropped() -> None:
 
     compiled = compile_comfyui_ui_graph(workflow, object_info)
 
-    assert "videopreview" not in compiled.api_graph["4"]["inputs"]
-    assert compiled.api_graph["4"]["inputs"]["crf"] == 17
+    assert "videopreview" not in _mapping(compiled.api_graph["4"]["inputs"])
+    assert _mapping(compiled.api_graph["4"]["inputs"])["crf"] == 17
 
 
 @pytest.mark.parametrize(
@@ -1659,7 +1670,7 @@ def test_a_reader_takes_the_value_from_its_own_nesting_or_one_around_it(
         _scoped_named_wires(writer_scope, reader_scope), _object_info()
     )
 
-    assert compiled.api_graph["2"]["inputs"]["images"] == ["1", 0]
+    assert _mapping(compiled.api_graph["2"]["inputs"])["images"] == ["1", 0]
 
 
 @pytest.mark.parametrize(
@@ -1741,8 +1752,8 @@ def test_two_copies_of_one_nesting_each_keep_their_own_value() -> None:
 
     compiled = compile_comfyui_ui_graph(workflow, _object_info())
 
-    assert compiled.api_graph["2"]["inputs"]["images"] == ["1", 0]
-    assert compiled.api_graph["6"]["inputs"]["images"] == ["5", 0]
+    assert _mapping(compiled.api_graph["2"]["inputs"])["images"] == ["1", 0]
+    assert _mapping(compiled.api_graph["6"]["inputs"])["images"] == ["5", 0]
 
 
 def test_a_value_set_twice_in_one_nesting_is_still_ambiguous() -> None:

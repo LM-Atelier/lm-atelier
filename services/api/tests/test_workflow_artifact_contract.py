@@ -1,8 +1,19 @@
 from __future__ import annotations
 
+from typing import TypedDict
+
 from local_lm.model_planner import workflow_artifact_contract
 
-_BASE = {
+
+class _ContractInputs(TypedDict):
+    operation: str
+    engine: str
+    api_graph: dict[str, object]
+    input_schema: dict[str, object]
+    dependencies: dict[str, object]
+
+
+_BASE: _ContractInputs = {
     "operation": "text_to_image",
     "engine": "comfyui",
     "api_graph": {"3": {"class_type": "KSampler", "inputs": {"steps": 20, "cfg": 7.0}}},
@@ -24,7 +35,7 @@ def test_the_same_compile_produces_the_same_contract() -> None:
 
 
 def test_mapping_order_does_not_change_the_contract() -> None:
-    reordered = dict(_BASE)
+    reordered = _BASE.copy()
     reordered["api_graph"] = {"3": {"inputs": {"cfg": 7.0, "steps": 20}, "class_type": "KSampler"}}
     reordered["dependencies"] = {
         "extensions": {},
@@ -38,14 +49,14 @@ def test_mapping_order_does_not_change_the_contract() -> None:
 
 
 def test_a_changed_graph_changes_the_contract() -> None:
-    changed = dict(_BASE)
+    changed = _BASE.copy()
     changed["api_graph"] = {"3": {"class_type": "KSampler", "inputs": {"steps": 8, "cfg": 7.0}}}
 
     assert workflow_artifact_contract(**changed) != workflow_artifact_contract(**_BASE)
 
 
 def test_a_changed_schema_changes_the_contract() -> None:
-    changed = dict(_BASE)
+    changed = _BASE.copy()
     changed["input_schema"] = {
         "type": "object",
         "properties": {"steps": {"type": "integer", "readOnly": True}},
@@ -55,7 +66,7 @@ def test_a_changed_schema_changes_the_contract() -> None:
 
 
 def test_a_changed_execution_dependency_changes_the_contract() -> None:
-    changed = dict(_BASE)
+    changed = _BASE.copy()
     changed["dependencies"] = {
         **_BASE["dependencies"],
         "custom_nodes": [{"id": "pack", "revision": "b" * 40}],
@@ -67,7 +78,7 @@ def test_a_changed_execution_dependency_changes_the_contract() -> None:
 def test_local_identifiers_do_not_change_the_contract() -> None:
     """Install ids and the compiler version differ per machine and per release;
     including them is exactly the coupling this removes."""
-    with_local = dict(_BASE)
+    with_local = _BASE.copy()
     with_local["dependencies"] = {
         **_BASE["dependencies"],
         "model_install_ids": ["model_abc123"],
@@ -79,7 +90,7 @@ def test_local_identifiers_do_not_change_the_contract() -> None:
 
 def test_list_order_is_significant() -> None:
     """LoRA stacks and multi-file bundles apply in order, so order is semantic."""
-    reordered = dict(_BASE)
+    reordered = _BASE.copy()
     reordered["dependencies"] = {
         **_BASE["dependencies"],
         "model_files": ["second.safetensors", "model.safetensors"],
@@ -96,7 +107,7 @@ def test_template_provenance_does_not_change_the_contract() -> None:
     compiler-version problem at template granularity - a bump invalidating
     evidence for workflows that execute exactly as before.
     """
-    reissued = dict(_BASE)
+    reissued = _BASE.copy()
     reissued["dependencies"] = {
         **_BASE["dependencies"],
         "template_id": "a_different_template",
