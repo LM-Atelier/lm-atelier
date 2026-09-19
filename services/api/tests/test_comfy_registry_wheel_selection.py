@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import replace
 
 import pytest
@@ -118,7 +119,7 @@ def _document(name: str, *versions: str) -> dict[str, object]:
 
 def _select(
     plan: ComfyRegistryWheelMetadataPlan,
-    documents: dict[str, object],
+    documents: Mapping[str, object],
     *,
     environment: dict[str, str] | None = None,
     tags: tuple[str, ...] = (_TAG,),
@@ -272,9 +273,11 @@ def test_metadata_plan_is_revalidated_before_selection(mutate: object) -> None:
 def test_file_order_does_not_change_selection_identity() -> None:
     plan = _metadata_plan([("alpha", "1.0", ["dependency>=1"], True)])
     document = _document("dependency", "1.0", "2.0")
+    files = document["files"]
+    assert isinstance(files, list)
     reversed_document = {
         **document,
-        "files": list(reversed(document["files"])),  # type: ignore[arg-type]
+        "files": list(reversed(files)),
     }
 
     first = _select(plan, {"dependency": document})

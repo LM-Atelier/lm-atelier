@@ -18,6 +18,7 @@ from local_lm.comfy_registry_wheel_closure import (
     plan_comfy_registry_wheel_closure,
 )
 from local_lm.comfy_registry_wheel_selection import (
+    ComfyRegistryWheelSelection,
     select_comfy_registry_wheel_versions,
 )
 
@@ -110,7 +111,7 @@ def _selection(
     documents: dict[str, object],
     *,
     environment: dict[str, str] | None = None,
-) -> closure_module.ComfyRegistryWheelSelection:
+) -> ComfyRegistryWheelSelection:
     return select_comfy_registry_wheel_versions(
         closure.metadata_plan,
         documents,
@@ -347,7 +348,7 @@ def test_round_count_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     assert raised.value.code == "closure_round_limit"
 
 
-def _selection_for_unrelated_dependency() -> closure_module.ComfyRegistryWheelSelection:
+def _selection_for_unrelated_dependency() -> ComfyRegistryWheelSelection:
     manifest, metadata = _initial([("source", "1.0", ["dependency>=1"])])
     closure = plan_comfy_registry_wheel_closure(
         manifest,

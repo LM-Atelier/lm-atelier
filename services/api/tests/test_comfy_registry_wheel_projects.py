@@ -228,7 +228,9 @@ async def test_legitimate_project_document_can_exceed_the_former_two_mib_limit()
         ),
     )
 
-    assert documents["package"]["name"] == "package"
+    document = documents["package"]
+    assert isinstance(document, dict)
+    assert document["name"] == "package"
 
 
 async def test_aggregate_project_size_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -5,6 +5,7 @@ import csv
 import hashlib
 import io
 import os
+import shutil
 import sys
 import zipfile
 from collections.abc import Generator
@@ -1080,7 +1081,7 @@ async def test_unreadable_cleanup_path_is_refused_not_removed(
         removed.append(path)
 
     monkeypatch.setattr(Path, "lstat", fake_lstat)
-    monkeypatch.setattr(lifecycle_module.shutil, "rmtree", track_rmtree)
+    monkeypatch.setattr(shutil, "rmtree", track_rmtree)
     with pytest.raises(ComfyRegistryLifecycleError) as raised:
         await lifecycle_module._remove_tree(target, root)
     assert raised.value.code == "cleanup_failed"
