@@ -5,11 +5,12 @@ import copy
 import hashlib
 import json
 import logging
+import math
 import re
 import secrets
 import shutil
 import time
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -277,6 +278,7 @@ from .workflow_compatibility import (
     resolve_chat_workflow_selection,
     resolve_project_workflow_selection,
 )
+from .workflow_edit_calibration import safe_workflow_edit_calibration
 from .workflow_lora_admission import (
     WorkflowLoraAdmission,
     WorkflowLoraAdmissionError,
@@ -7609,6 +7611,46 @@ class ConversationOrchestrator:
             session.expunge(mask)
         return mask, selection.get("invert") is True
 
+    @staticmethod
+    def _image_edit_verification_schedule_steps(
+        session: Session, run: Run, snapshot: AcceptedContext | None
+    ) -> float | None:
+        """Resolve the source's sampling steps, when its workflow declares its schedule.
+
+        Read from the settings the source ran with, falling back to the step
+        field's own default, which the calibration contract requires it to
+        have. None when the workflow declares no schedule or the value is not
+        a usable count.
+        """
+        if snapshot is not None:
+            schema = snapshot.workflow.input_schema_json if snapshot.workflow else None
+            settings: Mapping[str, Any] = snapshot.settings
+        else:
+            revision = (
+                session.get(WorkflowRevision, run.workflow_revision_id)
+                if run.workflow_revision_id
+                else None
+            )
+            schema = revision.input_schema_json if revision else None
+            settings = run.settings_json
+        calibration = safe_workflow_edit_calibration(schema)
+        if calibration is None or not calibration.steps_parameter or schema is None:
+            return None
+        raw = settings.get(calibration.steps_parameter)
+        if raw is None:
+            properties = schema.get("properties")
+            field = (
+                properties.get(calibration.steps_parameter)
+                if isinstance(properties, Mapping)
+                else None
+            )
+            if isinstance(field, Mapping):
+                raw = field.get("default", field.get("const"))
+        if not isinstance(raw, int | float) or isinstance(raw, bool):
+            return None
+        steps = float(raw)
+        return steps if math.isfinite(steps) and 0 < steps <= 10_000 else None
+
     def _image_edit_difference(
         self,
         source: Artifact,
@@ -7740,6 +7782,9 @@ class ConversationOrchestrator:
                     return
                 verification_mask = self._image_edit_verification_mask(
                     session, snapshot.settings if snapshot is not None else run.settings_json
+                )
+                schedule_steps = self._image_edit_verification_schedule_steps(
+                    session, run, snapshot
                 )
                 profile, install, launch_scope = self._image_edit_verification_profile(
                     session, payload.vision_profile_id, snapshot
@@ -7973,6 +8018,7 @@ class ConversationOrchestrator:
                 minimum=payload.minimum,
                 maximum=payload.maximum,
                 difference=difference,
+                schedule_steps=schedule_steps,
             )
             persisted = {
                 **decision.provenance(assessment, difference),
