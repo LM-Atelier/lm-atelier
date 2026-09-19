@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
 
@@ -578,13 +578,16 @@ def test_downgrade_fence_blocks_a_concurrent_settle_writer(tmp_path: Path) -> No
     writer_started = Event()
     writer_done = Event()
     writer_was_blocked: list[bool] = []
+    writer_result: Future[str] | None = None
 
     def trace(statement: str) -> None:
+        nonlocal writer_result
         if preflight_seen.is_set():
             return
         if "reference_asset_review_events LIMIT 1" not in statement:
             return
         preflight_seen.set()
+        writer_result = executor.submit(write_racing_settle)
         if writer_started.wait(5):
             writer_was_blocked.append(not writer_done.wait(0.2))
 
@@ -610,8 +613,8 @@ def test_downgrade_fence_blocks_a_concurrent_settle_writer(tmp_path: Path) -> No
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
             downgrade_result = executor.submit(downgrade)
-            writer_result = executor.submit(write_racing_settle)
             downgrade_result.result(timeout=15)
+            assert writer_result is not None
             outcome = writer_result.result(timeout=15)
     finally:
         event.remove(Engine, "connect", register_trace)
