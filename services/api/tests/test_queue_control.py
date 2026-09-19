@@ -22,6 +22,7 @@ from fastapi import FastAPI
 from httpx2 import ASGITransport, AsyncClient
 from PIL import Image
 from sqlalchemy import delete, event, select, text, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session, sessionmaker
 
 from local_lm import api, db
@@ -32,10 +33,13 @@ from local_lm.chat_deletion import delete_exchange
 from local_lm.config import Settings
 from local_lm.db import Base, SessionLocal, create_database_engine
 from local_lm.domain import ArtifactKind, Operation, utcnow
+from local_lm.engines import EngineRegistry
+from local_lm.events import EventBroker
 from local_lm.exports import ProjectExporter
 from local_lm.image_edit_verification import ImageEditVerificationJobPayload
 from local_lm.models import Chat, Job, Message, ModelProfile, Project, Run, WorkPlan, WorkStep
 from local_lm.orchestrator import ConversationOrchestrator
+from local_lm.processes import ProcessSupervisor
 from local_lm.scheduler import JobClaim, ResourceScheduler
 
 STAMP = datetime(2026, 9, 1, tzinfo=UTC)
@@ -247,11 +251,14 @@ def before_first_claim(
             # after SQLAlchemy has consumed UPDATE RETURNING. A cursor callback
             # before that consumption reports zero even for a winning write.
             if is_claim(str(statement)) and not completed.is_set():
+                assert isinstance(result, CursorResult)
                 rowcounts.append(result.rowcount)
                 completed.set()
             return result
 
-    observed = sessionmaker(engine, class_=ObservedSession, expire_on_commit=False)
+    observed: sessionmaker[Session] = sessionmaker(
+        engine, class_=ObservedSession, expire_on_commit=False
+    )
     event.listen(engine, "before_cursor_execute", before)
     try:
         yield reached, release, completed, rowcounts, observed
@@ -280,9 +287,13 @@ async def test_hold_wins_at_the_real_final_claim_write(
             assert rowcounts == [0]
             assert not entered.is_set()
             with sessions() as session:
-                remaining = session.execute(
-                    select(Job.status, Job.claim_owner).where(Job.id.in_(["first", "second"]))
-                ).all()
+                remaining = (
+                    session.execute(
+                        select(Job.status, Job.claim_owner).where(Job.id.in_(["first", "second"]))
+                    )
+                    .tuples()
+                    .all()
+                )
             assert remaining == [("queued", None), ("queued", None)]
             response = await queue_client.post(
                 "/api/queue/items/plan-a/release",
@@ -358,7 +369,9 @@ async def test_hold_and_release_invalidate_the_pre_hold_ranking_revision(
             with sessions() as session:
                 ordered = ResourceScheduler._eligible_jobs(session, "primary", utcnow())
                 assert ordered[0].id == "younger"
-                assert session.get(Job, "first").claim_owner is None
+                job = session.get(Job, "first")
+                assert job is not None
+                assert job.claim_owner is None
         finally:
             release.set()
 
@@ -739,7 +752,9 @@ async def test_new_descendants_age_from_their_own_later_enqueue_time(
             session, "primary", released_at + timedelta(seconds=60)
         )
         assert [job.id for job in ordered] == ["first", "second", "aaa-new"]
-        assert session.get(Job, "first").enqueued_at == STAMP.replace(tzinfo=None)
+        job = session.get(Job, "first")
+        assert job is not None
+        assert job.enqueued_at == STAMP.replace(tzinfo=None)
 
 
 async def test_real_exchange_deletion_removes_controls_and_receipts(
@@ -787,7 +802,9 @@ async def test_portable_project_round_trip_excludes_live_controls_and_receipts(
         project = Project(name="Portable queue history")
         session.add(project)
         session.flush()
-        session.get(Chat, "chat-a").project_id = project.id
+        chat = session.get(Chat, "chat-a")
+        assert chat is not None
+        chat.project_id = project.id
         session.commit()
         artifact = exporter.export(session, project.id, include_media=False)
         session.commit()
@@ -968,6 +985,7 @@ async def test_owner_deletion_and_hold_are_ordered_by_the_actual_database_writer
     def remove_owner() -> int:
         with sessions() as session:
             result = session.execute(delete(Chat).where(Chat.id == "chat-a"))
+            assert isinstance(result, CursorResult)
             session.commit()
             return result.rowcount
 
@@ -1037,6 +1055,7 @@ def prepare_verification_source(
         run.operation = Operation.IMAGE_TO_IMAGE.value
         run.status = "running"
         source = session.get(Job, "first")
+        assert source is not None
         source.status = "running"
         source.attempt = 1
         source.claim_owner = "existing-worker"
@@ -1066,17 +1085,19 @@ def prepare_verification_source(
             )
         session.flush()
         run.provenance_json = {"input_artifact_ids": [artifacts[0].id]}
-        session.get(Chat, "chat-a").vision_settings_json = {"verify_image_edits": True}
+        chat = session.get(Chat, "chat-a")
+        assert chat is not None
+        chat.vision_settings_json = {"verify_image_edits": True}
         profile = ModelProfile(id="neutral-vision", name="Example vision", engine="mock")
         session.add(profile)
         session.commit()
         run_id, artifact_ids = run.id, [artifact.id for artifact in artifacts]
     orchestrator = ConversationOrchestrator(
-        engines=SimpleNamespace(settings=settings),
+        engines=EngineRegistry(settings),
         artifacts=store,
-        events=SimpleNamespace(),
+        events=EventBroker(),
         scheduler=ResourceScheduler(session_factory=sessions),
-        processes=SimpleNamespace(),
+        processes=ProcessSupervisor(settings),
         session_factory=sessions,
     )
     # Vision qualification is independent of the queue transaction under test.
@@ -1133,8 +1154,11 @@ async def test_an_existing_internal_child_participates_in_the_plan_command(
     with sessions() as session:
         child = session.get(Job, identifier)
         assert child is not None and child.work_plan_id is None and child.run_id is None
-        assert session.get(Job, "first").status == "complete"
-        assert session.get(Job, "second").claim_owner is None
+        source = session.get(Job, "first")
+        sibling = session.get(Job, "second")
+        assert source is not None and sibling is not None
+        assert source.status == "complete"
+        assert sibling.claim_owner is None
         if already_claimed:
             assert child.claim_owner == "verification-worker"
             assert session.scalar(text("SELECT count(*) FROM work_plan_controls")) == 0
@@ -1196,9 +1220,12 @@ async def test_hold_waits_for_atomic_source_completion_and_internal_child_insert
         hold_attempted.set()
         event.remove(engine, "before_cursor_execute", before)
     with sessions() as session:
-        assert session.get(Job, "first").status == "complete"
-        assert session.get(Job, identifier).status == "queued"
-        assert session.get(Job, identifier).claim_owner is None
+        source = session.get(Job, "first")
+        child = session.get(Job, identifier)
+        assert source is not None and child is not None
+        assert source.status == "complete"
+        assert child.status == "queued"
+        assert child.claim_owner is None
         assert session.scalar(text("SELECT state FROM work_plan_controls")) == "held"
         assert ResourceScheduler._eligible_jobs(session, "primary", utcnow()) == []
 
@@ -1237,6 +1264,7 @@ async def test_a_stale_revision_is_refused_even_when_the_plan_is_eligible(
     assert response.json()["code"] == "queue-control-conflict"
     with sessions() as session:
         control = session.get(WorkPlanControl, "plan-a")
+        assert control is not None
         assert control.state == "eligible" and control.revision == 2
         assert session.get(WorkPlanControlReceipt, ("plan-a", "stale-first-hold")) is None
         assert len(session.scalars(select(WorkPlanControlReceipt)).all()) == 2
@@ -1272,7 +1300,9 @@ async def test_a_terminal_plan_cannot_hold_still_queued_descendants(
 ) -> None:
     seed_plan(sessions)
     with sessions() as session:
-        session.get(WorkPlan, "plan-a").status = status
+        plan = session.get(WorkPlan, "plan-a")
+        assert plan is not None
+        plan.status = status
         session.commit()
     before = job_audit(sessions)
     response = await queue_client.post(
@@ -1302,9 +1332,11 @@ async def test_hold_refuses_a_running_descendant_after_its_real_lease_releases_o
         assert claim is not None
         with sessions() as session:
             job = session.get(Job, "first")
+            assert job is not None
             assert job.status == "running" and job.claim_owner == claim.token
     with sessions() as session:
         job = session.get(Job, "first")
+        assert job is not None
         assert job.status == "running" and job.claim_owner is None
         assert job.claim_expires_at is None and job.heartbeat_at is None
     before = job_audit(sessions)
