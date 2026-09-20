@@ -1,4 +1,5 @@
 import { AccessibleDialog } from "./AccessibleDialog";
+import { InstallHardwareFit } from "./InstallHardwareFit";
 import { formatBytes } from "./format";
 import type { CatalogPreflight, SystemInfo } from "./types";
 
@@ -39,7 +40,20 @@ export function InstallConfirmDialog({
   const accelerator = acceleratorBytes(system);
   const needed = preflight.estimated_vram_bytes;
   const exceedsAccelerator = needed != null && accelerator != null && needed > accelerator;
-  const warnings = preflight.checks.filter((check) => check.status === "warn");
+  const fit = preflight.hardware_fit;
+  const warnings = preflight.checks.filter((check) => check.status === "warn"
+    && !(fit && ["memory", "memory-availability"].includes(check.id)));
+  let downloadSize = formatBytes(preflight.download_bytes);
+  let downloadAction = `Download ${downloadSize}`;
+  if (preflight.download_size_complete === false) {
+    if (preflight.download_bytes > 0) {
+      downloadAction = `Download at least ${downloadSize}`;
+      downloadSize = `At least ${downloadSize}`;
+    } else {
+      downloadSize = "Size unknown";
+      downloadAction = "Download";
+    }
+  }
 
   return (
     <AccessibleDialog
@@ -52,19 +66,19 @@ export function InstallConfirmDialog({
       <dl className="install-facts">
         <div>
           <dt>Download</dt>
-          <dd>{formatBytes(preflight.download_bytes)}</dd>
+          <dd>{downloadSize}</dd>
         </div>
         <div>
           <dt>Free space</dt>
           <dd>{formatBytes(preflight.available_disk_bytes)}</dd>
         </div>
-        {preflight.estimated_ram_bytes != null && (
+        {!fit && preflight.estimated_ram_bytes != null && (
           <div>
             <dt>Memory to load</dt>
             <dd>{formatBytes(preflight.estimated_ram_bytes)}</dd>
           </div>
         )}
-        {needed != null && (
+        {!fit && needed != null && (
           <div>
             <dt>Accelerator memory</dt>
             <dd>
@@ -74,7 +88,8 @@ export function InstallConfirmDialog({
           </div>
         )}
       </dl>
-      {exceedsAccelerator && (
+      {fit && <InstallHardwareFit fit={fit} />}
+      {!fit && exceedsAccelerator && (
         <p className="install-warning" role="status">
           This model needs more accelerator memory than this machine reports. It
           may run slowly on the processor instead, or fail to load.
@@ -94,7 +109,7 @@ export function InstallConfirmDialog({
         <button className="primary" aria-disabled={pending} onClick={() => {
           if (!pending) onConfirm();
         }}>
-          {pending ? "Starting…" : `Download ${formatBytes(preflight.download_bytes)}`}
+          {pending ? "Starting…" : downloadAction}
         </button>
       </footer>
     </AccessibleDialog>

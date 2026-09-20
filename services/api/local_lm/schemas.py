@@ -2724,6 +2724,79 @@ class CatalogFileSource(ApiModel):
     source_file_id: str | None = Field(default=None, pattern=r"^[1-9][0-9]{0,11}$")
 
 
+HardwareFitStatus = Literal["recommended", "likely", "tight", "unsupported", "unknown"]
+HardwareFitBasis = Literal["unknown", "calculated", "declared", "measured", "tested", "certified"]
+
+
+class HardwareFitReasonOut(ApiModel):
+    code: Literal[
+        "accelerator_backend_missing",
+        "accelerator_memory_below_minimum",
+        "accelerator_memory_busy",
+        "accelerator_memory_declared",
+        "accelerator_memory_estimated",
+        "accelerator_memory_measured",
+        "accelerator_memory_unknown",
+        "accelerator_missing",
+        "architecture_unsupported",
+        "cpu_capabilities_unknown",
+        "cpu_capability_missing",
+        "evidence_stale",
+        "platform_unsupported",
+        "runtime_backend_missing",
+        "system_memory_below_minimum",
+        "system_memory_busy",
+        "system_memory_declared",
+        "system_memory_estimated",
+        "system_memory_measured",
+        "system_memory_unknown",
+    ]
+    severity: Literal["info", "warning", "block"]
+    message: str
+
+
+class HardwareFitAlternativeOut(ApiModel):
+    code: Literal[
+        "choose_compatible_backend",
+        "choose_cpu_compatible_variant",
+        "choose_smaller_variant",
+        "free_current_memory",
+        "install_supported_runtime",
+        "use_safer_settings",
+    ]
+    message: str
+
+
+class HardwareFitResourceOut(ApiModel):
+    kind: Literal["system", "accelerator"]
+    capacity_bytes: int = Field(ge=0)
+    available_bytes: int | None = Field(ge=0)
+    required_bytes: int = Field(ge=0)
+    status: HardwareFitStatus
+    basis: HardwareFitBasis
+    immediate_pressure: bool
+
+
+class HardwareFitSettingOut(ApiModel):
+    key: str
+    label: str
+    unit: str
+    minimum: int
+    maximum: int
+    advisory_only: bool
+    preserves_user_override: bool
+
+
+class HardwareFitAdviceOut(ApiModel):
+    status: HardwareFitStatus
+    basis: HardwareFitBasis
+    evidence_label: Literal["tested", "certified"] | None
+    reasons: list[HardwareFitReasonOut]
+    alternatives: list[HardwareFitAlternativeOut]
+    resources: list[HardwareFitResourceOut]
+    settings: list[HardwareFitSettingOut]
+
+
 class CatalogPreflight(ApiModel):
     remote_id: str
     source_remote_id: str | None = None
@@ -2735,9 +2808,11 @@ class CatalogPreflight(ApiModel):
     workflow_template_id: str | None = None
     workflow_template_sha256: str | None = None
     download_bytes: int
+    download_size_complete: bool = False
     available_disk_bytes: int
     estimated_ram_bytes: int | None = None
     estimated_vram_bytes: int | None = None
+    hardware_fit: HardwareFitAdviceOut | None = None
     can_install: bool
     checks: list[CatalogPreflightCheck]
     install_plan: InstallPlanOut | None = None

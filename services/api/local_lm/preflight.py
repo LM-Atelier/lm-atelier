@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import asdict
 from pathlib import PurePosixPath
 from typing import Any, Literal
 
@@ -23,6 +24,7 @@ from .schemas import (
     CatalogPreflight,
     CatalogPreflightCheck,
     CatalogPreflightRequest,
+    HardwareFitAdviceOut,
     SystemInfo,
 )
 
@@ -663,9 +665,16 @@ def assess_catalog_install(
         )
     )
 
-    known_sizes = [int(files[name].get("size") or 0) for name in selected if name in files]
-    download_bytes = sum(known_sizes)
-    unknown_sizes = [name for name in selected if name in files and not files[name].get("size")]
+    known_sizes = {
+        name: size
+        for name in selected
+        if name in files
+        and isinstance(size := files[name].get("size"), int)
+        and not isinstance(size, bool)
+        and size > 0
+    }
+    download_bytes = sum(known_sizes.values())
+    unknown_sizes = [name for name in selected if name in files and name not in known_sizes]
     if unknown_sizes:
         checks.append(
             _check(
@@ -694,10 +703,11 @@ def assess_catalog_install(
             )
         )
 
-    estimated_ram = int(download_bytes * 1.2) + 512 * 1024**2 if download_bytes else None
+    complete_sizes = bool(download_bytes) and not unknown_sizes
+    estimated_ram = int(download_bytes * 1.2) + 512 * 1024**2 if complete_sizes else None
     estimated_vram = (
         int(download_bytes * 1.25) + 1024**3
-        if download_bytes and (request.role != "chat" or request.engine == "vllm")
+        if complete_sizes and (request.role != "chat" or request.engine == "vllm")
         else None
     )
     hardware_fit = assess_preflight_hardware_fit(
@@ -748,10 +758,12 @@ def assess_catalog_install(
         expected_sha256=expected_sha256,
         file_sources=file_sources,
         download_bytes=download_bytes,
+        download_size_complete=complete_sizes,
         available_disk_bytes=system.disk_free_bytes,
         estimated_ram_bytes=estimated_ram,
         estimated_vram_bytes=estimated_vram,
         can_install=not any(check.status == "block" for check in checks),
+        hardware_fit=HardwareFitAdviceOut.model_validate(asdict(hardware_fit)),
         checks=checks,
         auxiliary_kind=request.auxiliary_kind,
         content_rating=detail.model.content_rating,
