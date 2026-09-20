@@ -750,6 +750,11 @@ _SAW_THE_CHANGE = (
     '[{"subject": "mug", "appearance": "green"}]',
     '{"subject_present": true, "operation": "change", "requested": [0], "as_asked": true}',
 )
+#: The fourth answer, asked once per changed area: this region holds the one
+#: difference the request asked for and nothing else.
+_AREA_HOLDS_THE_REQUEST = '{"subjects": [0]}'
+_AREA_HOLDS_SOMETHING_ELSE = '{"subjects": [0], "unlisted": true}'
+_SAW_THE_CHANGE_AND_LOOKED = _SAW_THE_CHANGE + (_AREA_HOLDS_THE_REQUEST,)
 _SAW_NO_CHANGE = (
     '[{"subject": "mug", "appearance": "blue"}]',
     '[{"subject": "mug", "appearance": "blue"}]',
@@ -918,9 +923,18 @@ def _verification_world(  # type: ignore[no-untyped-def]
         # whichever one it was handed.
         return SimpleNamespace(inspected_artifact_ids=[item.id for item in artifacts])
 
+    regions: list[list[tuple[float, float, float, float]]] = []
+
+    def region_context(crops):  # type: ignore[no-untyped-def]
+        # One call per changed area, carrying the part of the source and the
+        # part of the result, each with the artifact it was cut from.
+        regions.append([(artifact.id, box) for artifact, box, _content in crops])
+        return SimpleNamespace(frames=tuple(content for _a, _box, content in crops))
+
     orchestrator.vision = SimpleNamespace(  # type: ignore[assignment]
         prepare=AsyncMock(side_effect=prepare),
         attach_to_latest_user=Mock(side_effect=lambda messages, _visual: messages),
+        region_context=Mock(side_effect=region_context),
     )
 
     async def chat_capabilities() -> object:
@@ -952,6 +966,7 @@ def _verification_world(  # type: ignore[no-untyped-def]
     world["consumed"] = consumed
     world["asked"] = asked
     world["questions"] = questions
+    world["regions"] = regions
     return job, orchestrator, world
 
 
@@ -1154,16 +1169,31 @@ async def test_shutdown_does_not_restore_chat_from_active_verification() -> None
     )
 
 
-def _picture(recolour: tuple[int, int, int, int] | None) -> bytes:
+def _picture(*recolour: tuple[int, int, int, int] | None) -> bytes:
     import io
 
     from PIL import Image
 
     image = Image.new("RGB", (64, 64), (40, 90, 180))
-    if recolour is not None:
-        image.paste((200, 40, 60), recolour)
+    for box in recolour:
+        if box is not None:
+            image.paste((200, 40, 60), box)
     buffer = io.BytesIO()
     image.save(buffer, "PNG")
+    return buffer.getvalue()
+
+
+def _selection(box: tuple[int, int, int, int]) -> bytes:
+    """A mask selecting one rectangle, white inside and black outside."""
+
+    import io
+
+    from PIL import Image
+
+    mask = Image.new("L", (64, 64), 0)
+    mask.paste(255, box)
+    buffer = io.BytesIO()
+    mask.save(buffer, "PNG")
     return buffer.getvalue()
 
 
@@ -1171,14 +1201,14 @@ def _picture(recolour: tuple[int, int, int, int] | None) -> bytes:
     ("patch", "reason"),
     [
         (None, "no_measurable_change"),
-        # A change the pixels agree with ends the review without a retry, and
-        # without a pass: two readings that name the same things cannot show
-        # that nothing else moved, so the review says it could not tell.
-        ((16, 16, 48, 48), "change_unaccounted"),
+        # A change the pixels agree with, and the one area that moved answers
+        # that it holds the requested difference and nothing else. That is the
+        # evidence the two readings could not supply, so the edit passes.
+        ((16, 16, 48, 48), "accepted"),
         # A sixty-fourth and a thousandth of the picture: each averages under
         # the threshold over the whole picture, and each is a real change.
-        ((28, 28, 36, 36), "change_unaccounted"),
-        ((30, 30, 32, 32), "change_unaccounted"),
+        ((28, 28, 36, 36), "accepted"),
+        ((30, 30, 32, 32), "accepted"),
     ],
 )
 async def test_a_confident_yes_does_not_accept_a_picture_whose_pixels_did_not_change(
@@ -1189,7 +1219,9 @@ async def test_a_confident_yes_does_not_accept_a_picture_whose_pixels_did_not_ch
     and a small real change is not mistaken for none."""
     recoloured = patch is not None
 
-    job, orchestrator, _world = _verification_world(lose_at="never", answers=_SAW_THE_CHANGE)
+    job, orchestrator, _world = _verification_world(
+        lose_at="never", answers=_SAW_THE_CHANGE_AND_LOOKED
+    )
     pictures = {"artifact-source": _picture(None), "artifact-result": _picture(patch)}
     orchestrator.artifacts.verified_bytes = Mock(  # type: ignore[method-assign]
         side_effect=lambda artifact, *, maximum_bytes: pictures[artifact.id]
@@ -1206,9 +1238,11 @@ async def test_a_confident_yes_does_not_accept_a_picture_whose_pixels_did_not_ch
     assert record["difference"]["comparable"] is True
     assert record["difference"]["changed"] is recoloured
     if recoloured:
-        # The pixels agree with the answers, and agreement is not a pass: the
-        # review reaches no verdict, records what it measured, retries nothing.
-        assert "assessment" not in record
+        # The area that moved was looked at and held only what was asked for,
+        # so the verdict is available and nothing is retried.
+        assert record["assessment"]["requested_change_visible"] is True
+        assert record["assessment"]["unrelated_content_preserved"] is True
+        assert record["assessment"]["confidence"] == 0.9
         orchestrator._create_image_edit_verification_retry.assert_not_awaited()
     else:
         assert record["assessment"]["requested_change_visible"] is False
@@ -1235,7 +1269,7 @@ def _selection(box: tuple[int, int, int, int]) -> bytes:
         # Inverted, the selection is everything but the centre: a change only
         # there left the selection as it was.
         ((24, 24, 40, 40), True, "no_measurable_change"),
-        ((2, 2, 10, 10), True, "change_unaccounted"),
+        ((2, 2, 10, 10), True, "accepted"),
         # A selection whose mask is no longer stored measures nothing, so the
         # assessment decides.
         (None, False, "change_unaccounted"),
@@ -1246,7 +1280,7 @@ async def test_a_selection_is_measured_where_it_selects_through_the_real_check(
 ) -> None:
     selection = {"artifact_id": "artifact-mask" if stored else "artifact-gone", "invert": True}
     job, orchestrator, _world = _verification_world(
-        lose_at="never", answers=_SAW_THE_CHANGE, mask=selection
+        lose_at="never", answers=_SAW_THE_CHANGE_AND_LOOKED, mask=selection
     )
     pictures = {
         "artifact-source": _picture(None),
@@ -1307,14 +1341,25 @@ async def test_the_review_asks_about_one_picture_at_a_time_then_about_the_lists(
         ["artifact-result"],
     ]
     questions: list[str] = world["questions"]
-    assert len(questions) == 3
+    assert len(questions) == 4
     assert questions[0] == questions[1] and "attached picture" in questions[0]
     assert "no picture is attached" in questions[2]
     assert "make the mug green" in questions[2]
-    # The verdict is the product's, worked out from those answers: the three
-    # readings agree with each other and with the pixels, and that is still not
-    # a pass, because a bounded list cannot show that nothing else moved. So
-    # the review records that it could not tell, and asks for no retry.
+    # Then one more, about the single area that moved, with both crops of it
+    # attached: the two readings agreed, and agreement is what has to be
+    # checked against the picture rather than taken.
+    assert "Two crops of the same region are attached" in questions[3]
+    regions: list[list[tuple[float, float, float, float]]] = world["regions"]
+    assert len(regions) == 1
+    shown = regions[0]
+    assert [artifact_id for artifact_id, _box in shown] == ["artifact-source", "artifact-result"]
+    assert shown[0][1] == shown[1][1], "the same region of both pictures"
+    # The verdict is the product's, worked out from those answers. Three
+    # readings that agree still cannot show that nothing else moved, so a
+    # fourth question is asked about the one area that changed. This world has
+    # no fourth answer to give and repeats its third, which is not a reading of
+    # a region, so the review records that it could not tell rather than
+    # treating an unparseable answer as agreement.
     record = orchestrator._persist_image_edit_verification.call_args.args[2]
     assert record["status"] == "skipped"
     assert record["reason"] == "change_unaccounted"
@@ -1361,3 +1406,115 @@ async def test_a_retry_steps_by_the_schedule_the_source_ran_with(
     assert (decision.value_before, decision.value_after) == (0.5, after)
     record = orchestrator._persist_image_edit_verification.call_args.args[2]
     assert ("schedule" in record["strength_adjustment"]) is (after == 0.75)
+
+
+async def test_an_area_holding_something_unlisted_refuses_the_edit() -> None:
+    """The case a count can never catch: one area, and something else in it.
+
+    The two readings agree that the mug changed and name nothing else, which is
+    exactly the shape a clean edit has. Looking at the area that moved is what
+    separates them, and here it answers that the region holds something neither
+    list described.
+    """
+
+    job, orchestrator, world = _verification_world(
+        lose_at="never", answers=_SAW_THE_CHANGE + (_AREA_HOLDS_SOMETHING_ELSE,)
+    )
+    pictures = {"artifact-source": _picture(None), "artifact-result": _picture((16, 16, 48, 48))}
+    orchestrator.artifacts.verified_bytes = Mock(  # type: ignore[method-assign]
+        side_effect=lambda artifact, *, maximum_bytes: pictures[artifact.id]
+    )
+    retry = SimpleNamespace(
+        run=SimpleNamespace(id="run-retry", work_plan_id="plan-retry", provenance_json={})
+    )
+    orchestrator._create_image_edit_verification_retry = AsyncMock(return_value=retry)  # type: ignore[method-assign]
+
+    await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
+
+    record = orchestrator._persist_image_edit_verification.call_args.args[2]
+    assert record["assessment"]["unrelated_content_preserved"] is False
+    assert record["assessment"]["direction"] == "decrease"
+    assert record["reason"] != "accepted"
+    assert len(world["questions"]) == 4
+
+
+async def test_an_uncertain_area_decides_nothing_rather_than_passing_the_edit() -> None:
+    job, orchestrator, _world = _verification_world(
+        lose_at="never", answers=_SAW_THE_CHANGE + ('{"uncertain": true}',)
+    )
+    pictures = {"artifact-source": _picture(None), "artifact-result": _picture((16, 16, 48, 48))}
+    orchestrator.artifacts.verified_bytes = Mock(  # type: ignore[method-assign]
+        side_effect=lambda artifact, *, maximum_bytes: pictures[artifact.id]
+    )
+
+    await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
+
+    record = orchestrator._persist_image_edit_verification.call_args.args[2]
+    assert record["status"] == "skipped"
+    assert record["reason"] == "change_unaccounted"
+    assert "assessment" not in record
+
+
+async def test_a_review_that_would_retry_anyway_asks_about_no_areas() -> None:
+    """The crops are spent only where they decide something.
+
+    Nothing measurable changed, so the verdict is already settled and the three
+    ordinary questions are the whole cost.
+    """
+
+    job, orchestrator, world = _verification_world(
+        lose_at="never", answers=_SAW_NO_CHANGE + (_AREA_HOLDS_THE_REQUEST,)
+    )
+    pictures = {"artifact-source": _picture(None), "artifact-result": _picture(None)}
+    orchestrator.artifacts.verified_bytes = Mock(  # type: ignore[method-assign]
+        side_effect=lambda artifact, *, maximum_bytes: pictures[artifact.id]
+    )
+    retry = SimpleNamespace(
+        run=SimpleNamespace(id="run-retry", work_plan_id="plan-retry", provenance_json={})
+    )
+    orchestrator._create_image_edit_verification_retry = AsyncMock(return_value=retry)  # type: ignore[method-assign]
+
+    await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
+
+    assert len(world["questions"]) == 3
+    assert world["regions"] == []
+
+
+async def test_a_selected_edit_does_not_certify_the_corner_it_never_looked_at() -> None:
+    """A selection bounds the measurement, and preservation is not a bounded claim.
+
+    The requested change is inside the selection and the crops of it answer
+    that it holds only what was asked for. Something else changed in a corner
+    the selection never covered. A verdict drawn from the masked comparison
+    would never see that corner: it is not a changed area, so every area is
+    explained and the edit passes. The areas therefore come from the whole
+    picture, and this refuses.
+    """
+
+    selection = {"artifact_id": "artifact-mask", "invert": False}
+    job, orchestrator, world = _verification_world(
+        lose_at="never", answers=_SAW_THE_CHANGE_AND_LOOKED, mask=selection
+    )
+    pictures = {
+        "artifact-source": _picture(None),
+        "artifact-result": _picture((24, 24, 40, 40), (2, 2, 10, 10)),
+        "artifact-mask": _selection((20, 20, 44, 44)),
+    }
+    orchestrator.artifacts.verified_bytes = Mock(  # type: ignore[method-assign]
+        side_effect=lambda artifact, *, maximum_bytes: pictures[artifact.id]
+    )
+    retry = SimpleNamespace(
+        run=SimpleNamespace(id="run-retry", work_plan_id="plan-retry", provenance_json={})
+    )
+    orchestrator._create_image_edit_verification_retry = AsyncMock(return_value=retry)  # type: ignore[method-assign]
+
+    await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
+
+    record = orchestrator._persist_image_edit_verification.call_args.args[2]
+    assert record["reason"] != "accepted", record
+    assert record.get("assessment", {}).get("unrelated_content_preserved") is not True
+    # It refuses before spending a single crop: two places moved and one
+    # difference was named, which the whole picture shows and the masked
+    # comparison cannot. The cheapest refusal is the one that never asks.
+    assert world["regions"] == []
+    assert record["reason"] == "change_unaccounted"

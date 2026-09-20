@@ -7,6 +7,7 @@ import io
 import json
 import shutil
 import warnings
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -74,6 +75,11 @@ class VisualFrame:
     media_type: str
     content: bytes
     timestamp_seconds: float | None = None
+    #: Which part of that artifact this frame shows, as left, top, right and
+    #: bottom fractions, when it is a region rather than the whole picture. The
+    #: hash beside it stays the artifact's own, because that is what it is; the
+    #: region is how the record stays truthful about what was actually shown.
+    region: tuple[float, float, float, float] | None = None
 
     @property
     def label(self) -> str:
@@ -106,6 +112,7 @@ class PreparedVisualContext:
                     "artifact_id": frame.artifact_id,
                     "timestamp_seconds": frame.timestamp_seconds,
                     "sha256": hashlib.sha256(frame.content).hexdigest(),
+                    **({"region": list(frame.region)} if frame.region is not None else {}),
                 }
                 for frame in self.frames
             ],
@@ -200,6 +207,60 @@ class VisionContextService:
                 frames.append(frame)
                 total_bytes += len(frame.content)
         return PreparedVisualContext(tuple(frames), tuple(dict.fromkeys(skipped)))
+
+    def region_context(
+        self,
+        crops: Sequence[tuple[Artifact, tuple[float, float, float, float], bytes]],
+    ) -> PreparedVisualContext:
+        """Frames showing parts of one artifact this service already accepts.
+
+        The bytes are produced by this application from an artifact it has
+        read, not supplied from outside, so the question here is not whether
+        they can be trusted but whether they are within the same limits any
+        other frame must meet. They get the same decode, pixel and byte checks.
+
+        Each crop carries its own artifact, because a caller showing a region
+        of two pictures is showing two artifacts, and a frame that named the
+        wrong one would make the record say a thing that is not so. The region
+        each frame records is the extent actually cut, which the cropping
+        function measures back from the pixels it took.
+        """
+
+        frames: list[VisualFrame] = []
+        total_bytes = 0
+        for artifact, region, content in crops:
+            if len(content) > self.settings.vision_max_image_bytes:
+                raise VisionInputError("image exceeds the configured byte limit")
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error", Image.DecompressionBombWarning)
+                    with Image.open(io.BytesIO(content)) as image:
+                        width, height = image.size
+                        if width < 1 or height < 1:
+                            raise VisionInputError("image dimensions are invalid")
+                        if width * height > self.settings.vision_max_pixels:
+                            raise VisionInputError("image exceeds the configured pixel limit")
+                        image.load()
+            except (
+                Image.DecompressionBombError,
+                Image.DecompressionBombWarning,
+                UnidentifiedImageError,
+                OSError,
+            ) as exc:
+                raise VisionInputError("image decoding failed") from exc
+            total_bytes += len(content)
+            if total_bytes > self.settings.vision_max_total_bytes:
+                raise VisionInputError("Visual inputs exceed the configured byte limit.")
+            frames.append(
+                VisualFrame(
+                    artifact_id=artifact.id,
+                    artifact_sha256=artifact.sha256,
+                    media_type="image/png",
+                    content=content,
+                    region=region,
+                )
+            )
+        return PreparedVisualContext(tuple(frames), ())
 
     @staticmethod
     def attach_to_latest_user(

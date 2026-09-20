@@ -258,6 +258,55 @@ def _changed_areas(
     return tuple(sorted(areas, key=lambda area: (area.top, area.left)))
 
 
+def crop_changed_area(
+    content: bytes, area: ChangedArea, *, margin: float
+) -> tuple[bytes, ChangedArea]:
+    """The part of this picture one changed area covers, widened by ``margin``.
+
+    The area comes from a coarse grid, so a subject can sit a little outside the
+    box its changed parts made; the margin is what makes the crop show the thing
+    rather than its middle. It is a fraction of the whole picture, applied on
+    every side and clamped to the picture's own edges, so a change against a
+    border widens inward instead of falling off.
+
+    The crop is re-encoded as PNG because that is lossless: a question about
+    what is in a region should not be answered against compression artefacts
+    this code introduced.
+
+    Returns the crop and the extent it actually cut. That is not the widened
+    box: the box is rounded to whole pixels of this picture and clamped to its
+    edges, so the only truthful description of what a reader was shown is the
+    one measured back from those pixels. A caller recording provenance records
+    this, not the area it asked for.
+    """
+
+    if margin < 0:
+        raise ValueError("margin cannot be negative")
+    with Image.open(io.BytesIO(content)) as image:
+        picture = image.convert("RGB")
+    width, height = picture.size
+    left = max(0.0, area.left - margin)
+    top = max(0.0, area.top - margin)
+    right = min(1.0, area.right + margin)
+    bottom = min(1.0, area.bottom + margin)
+    box = (
+        int(left * width),
+        int(top * height),
+        max(int(left * width) + 1, min(width, int(round(right * width)))),
+        max(int(top * height) + 1, min(height, int(round(bottom * height)))),
+    )
+    cropped = picture.crop(box)
+    buffer = io.BytesIO()
+    cropped.save(buffer, format="PNG")
+    cut = ChangedArea(
+        left=box[0] / width,
+        top=box[1] / height,
+        right=box[2] / width,
+        bottom=box[3] / height,
+    )
+    return buffer.getvalue(), cut
+
+
 def _working_pictures(
     source: bytes, result: bytes, mask: bytes | None, *, invert: bool
 ) -> tuple[Image.Image, Image.Image, Image.Image]:
