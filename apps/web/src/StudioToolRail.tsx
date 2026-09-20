@@ -95,8 +95,10 @@ ${unavailable}` : label}
         className="icon-button"
         aria-label="Undo the selection change"
         title="Undo"
-        disabled={disabled || !canUndo}
-        onClick={onUndo}
+        aria-disabled={disabled || !canUndo}
+        onClick={() => {
+          if (!disabled && canUndo) onUndo();
+        }}
       >
         <Undo2 size={18} aria-hidden="true" />
       </button>
@@ -105,8 +107,10 @@ ${unavailable}` : label}
         className="icon-button"
         aria-label="Redo the selection change"
         title="Redo"
-        disabled={disabled || !canRedo}
-        onClick={onRedo}
+        aria-disabled={disabled || !canRedo}
+        onClick={() => {
+          if (!disabled && canRedo) onRedo();
+        }}
       >
         <Redo2 size={18} aria-hidden="true" />
       </button>

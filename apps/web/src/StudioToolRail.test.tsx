@@ -49,8 +49,14 @@ describe("StudioToolRail", () => {
 
   it("disables undo and redo until there is something to undo", () => {
     const props = renderRail({ canUndo: false, canRedo: false });
-    expect(screen.getByRole("button", { name: "Undo the selection change" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Redo the selection change" })).toBeDisabled();
+    const undo = screen.getByRole("button", { name: "Undo the selection change" });
+    const redo = screen.getByRole("button", { name: "Redo the selection change" });
+    expect(undo).toHaveAttribute("aria-disabled", "true");
+    expect(redo).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(undo);
+    fireEvent.click(redo);
+    expect(props.onUndo).not.toHaveBeenCalled();
+    expect(props.onRedo).not.toHaveBeenCalled();
 
     cleanup();
     const live = renderRail({ canUndo: true, canRedo: true });
@@ -62,9 +68,16 @@ describe("StudioToolRail", () => {
   });
 
   it("disables everything while no image is loaded", () => {
-    renderRail({ disabled: true, canUndo: true });
+    const props = renderRail({ disabled: true, canUndo: true, canRedo: true });
     expect(screen.getByRole("button", { name: "Brush a selection" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Undo the selection change" })).toBeDisabled();
+    const undo = screen.getByRole("button", { name: "Undo the selection change" });
+    const redo = screen.getByRole("button", { name: "Redo the selection change" });
+    expect(undo).toHaveAttribute("aria-disabled", "true");
+    expect(redo).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(undo);
+    fireEvent.click(redo);
+    expect(props.onUndo).not.toHaveBeenCalled();
+    expect(props.onRedo).not.toHaveBeenCalled();
   });
 
   it("guides a tool whose workflow is not installed instead of hiding it", () => {
