@@ -13,12 +13,12 @@ from .workflow_asset_bindings import (
     MAX_WORKFLOW_ASSET_BINDINGS,
     BoundWorkflowAsset,
     WorkflowAssetBindingPlan,
+    is_immutable_install_revision,
 )
 from .workflow_dependency_error_types import WorkflowAssetDownloadErrorCode
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _CIVITAI_ID = re.compile(r"^[1-9][0-9]{0,19}$")
-_IMMUTABLE_REVISION = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64}|[1-9][0-9]{0,19})$")
 _PROVIDERS = frozenset({"huggingface", "civitai"})
 
 
@@ -130,7 +130,7 @@ def install_plan_download_request(
                 not isinstance(source_remote_id, str)
                 or not source_remote_id
                 or not isinstance(source_revision, str)
-                or not _IMMUTABLE_REVISION.fullmatch(source_revision)
+                or not is_immutable_install_revision("huggingface", source_revision)
                 or not isinstance(source_path, str)
             ):
                 raise WorkflowAssetDownloadError(
@@ -185,7 +185,7 @@ def _validate_plan_state(plan: InstallPlan, *, allow_activated: bool = False) ->
         or not isinstance(plan.remote_id, str)
         or not plan.remote_id
         or not isinstance(plan.revision, str)
-        or not _IMMUTABLE_REVISION.fullmatch(plan.revision)
+        or not is_immutable_install_revision(plan.provider, plan.revision)
         or not isinstance(plan.plan_hash, str)
         or not _DIGEST.fullmatch(plan.plan_hash)
     ):
