@@ -450,6 +450,22 @@ class ChatDetail(ChatOut):
     web_searches: list[WebSearchOut] = Field(default_factory=list)
 
 
+class ChatMessageWindow(ApiModel):
+    """One page of a conversation, and whether more of it exists either side.
+
+    A whole transcript is not a page size that scales: a long conversation
+    answers this endpoint in the same bounded time as a short one, which the
+    endpoint that returns every message cannot do. ``has_older`` and
+    ``has_newer`` are what let a reader ask for the next page without guessing
+    whether there is one.
+    """
+
+    chat_id: str
+    messages: list[MessageOut]
+    has_older: bool
+    has_newer: bool
+
+
 class ExchangeDeletionOut(ApiModel):
     chat_id: str
     user_message_id: str

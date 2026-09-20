@@ -36,6 +36,7 @@ from fastapi import (
 from sqlalchemy import Select, and_, func, or_, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.sql.elements import ColumnElement
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import FileResponse, HTMLResponse
 
@@ -177,6 +178,7 @@ from .gguf import (
 from .hardware import collect_system_info
 from .image_edit_strength import STRENGTH_MODE_PARAMETER
 from .lora_suggestions import lora_suggestion_scope, suggested_loras
+from .message_window_v1 import DEFAULT_WINDOW, MAX_WINDOW
 from .model_manifests import (
     MAX_METADATA_BYTES,
     MAX_WEIGHT_HEADER_BYTES,
@@ -391,6 +393,7 @@ from .schemas import (
     ChatItemRemovalExecute,
     ChatItemRemovalExecutionOut,
     ChatItemRemovalImpactOut,
+    ChatMessageWindow,
     ChatOut,
     ChatUpdate,
     ChatWorkflowSelectionIn,
@@ -2350,6 +2353,113 @@ async def get_chat(chat_id: str, session: ConversationSessionDep) -> ChatDetail:
         raise api_error(404, "chat-not-found", "chat not found")
     return ChatDetail.model_validate(chat).model_copy(
         update={"web_searches": chat_searches(session, chat_id)}
+    )
+
+
+#: What one message needs to render, and nothing that belongs to the chat as a
+#: whole: the window's cost has to stay proportional to the page, not the
+#: conversation.
+_MESSAGE_WINDOW_LOADERS = (
+    selectinload(Message.parts).selectinload(MessagePart.artifact),
+    selectinload(Message.response_revisions)
+    .selectinload(ResponseRevision.parts)
+    .selectinload(ResponseRevisionPart.artifact),
+    selectinload(Message.feedback_rows),
+    selectinload(Message.references),
+    selectinload(Message.response_revisions).selectinload(ResponseRevision.feedback_rows),
+)
+
+
+@router.get("/chats/{chat_id}/messages", response_model=ChatMessageWindow)
+async def get_chat_messages(
+    chat_id: str,
+    session: ConversationSessionDep,
+    before: str | None = None,
+    after: str | None = None,
+    around: str | None = None,
+    limit: int = DEFAULT_WINDOW,
+) -> ChatMessageWindow:
+    """One bounded page of a conversation, anchored on a message or its end.
+
+    The endpoint that returns a whole chat loads every message with its parts,
+    artifacts, revisions, feedback and references, so its cost is the length of
+    the conversation. This one is bounded by the database rather than after it:
+    each mode orders in SQL and stops at the page, so a long transcript answers
+    in the time a short one does.
+
+    One anchor at most. Without one the newest page is returned, which is what
+    opening a conversation asks for.
+    """
+
+    anchors = [value for value in (before, after, around) if value is not None]
+    if len(anchors) > 1:
+        raise api_error(
+            400, "chat-window-ambiguous", "Ask for one of before, after or around, not several."
+        )
+    if limit < 1 or limit > MAX_WINDOW:
+        raise api_error(
+            400, "chat-window-invalid", f"A page holds between 1 and {MAX_WINDOW} messages."
+        )
+    chat = session.scalar(select(Chat).where(Chat.id == chat_id, Chat.scope == STANDARD_CHAT_SCOPE))
+    if not chat:
+        raise api_error(404, "chat-not-found", "chat not found")
+    anchor_at = None
+    if anchors:
+        anchor_message = session.scalar(
+            select(Message).where(Message.id == anchors[0], Message.chat_id == chat_id)
+        )
+        if not anchor_message:
+            raise api_error(404, "message-not-found", "This message is not in this conversation")
+        anchor_at = anchor_message.created_at
+
+    def page(
+        newest_first: bool, *, strictly: ColumnElement[bool] | None, count: int
+    ) -> list[Message]:
+        query = select(Message).where(Message.chat_id == chat_id)
+        if strictly is not None:
+            query = query.where(strictly)
+        order = Message.created_at.desc() if newest_first else Message.created_at.asc()
+        return list(
+            session.scalars(
+                query.order_by(order, Message.id.desc() if newest_first else Message.id.asc())
+                .limit(count)
+                .options(*_MESSAGE_WINDOW_LOADERS)
+            ).all()
+        )
+
+    if around is not None and anchor_at is not None:
+        older_half = max(0, (limit - 1) // 2)
+        newer_half = limit - 1 - older_half
+        older = page(True, strictly=Message.created_at < anchor_at, count=older_half + 1)
+        newer = page(False, strictly=Message.created_at > anchor_at, count=newer_half + 1)
+        has_older = len(older) > older_half
+        has_newer = len(newer) > newer_half
+        anchor_row = session.get(Message, anchors[0])
+        messages = (
+            list(reversed(older[:older_half]))
+            + ([anchor_row] if anchor_row is not None else [])
+            + newer[:newer_half]
+        )
+    elif after is not None and anchor_at is not None:
+        found = page(False, strictly=Message.created_at > anchor_at, count=limit + 1)
+        has_newer = len(found) > limit
+        messages = found[:limit]
+        has_older = True
+    elif before is not None and anchor_at is not None:
+        found = page(True, strictly=Message.created_at < anchor_at, count=limit + 1)
+        has_older = len(found) > limit
+        messages = list(reversed(found[:limit]))
+        has_newer = True
+    else:
+        found = page(True, strictly=None, count=limit + 1)
+        has_older = len(found) > limit
+        messages = list(reversed(found[:limit]))
+        has_newer = False
+    return ChatMessageWindow(
+        chat_id=chat_id,
+        messages=[MessageOut.model_validate(message) for message in messages],
+        has_older=has_older,
+        has_newer=has_newer,
     )
 
 
