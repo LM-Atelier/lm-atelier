@@ -8,7 +8,7 @@ import { CLOCK_KEY } from "./clockPreference";
 import type { QueueActivityItem, QueueActivityPage } from "./types";
 
 vi.mock("./api", async (importOriginal) => ({ ...(await importOriginal<typeof import("./api")>()), api: {
-  queueControl: vi.fn(), jobActivity: vi.fn(), queueActivity: vi.fn(), generationQueuePolicy: vi.fn(), generationQueueControl: vi.fn(), queuePlanSteps: vi.fn(), cancelJob: vi.fn(),
+  queueControl: vi.fn(), jobActivity: vi.fn(), queueActivity: vi.fn(), transferQueuePolicy: vi.fn(), transferQueueControl: vi.fn(), generationQueuePolicy: vi.fn(), generationQueueControl: vi.fn(), queuePlanSteps: vi.fn(), cancelJob: vi.fn(),
   pauseDownload: vi.fn(), resumeDownload: vi.fn(), retryJob: vi.fn(),
 } }));
 const clients: QueryClient[] = [];
@@ -26,6 +26,10 @@ function page(items: QueueActivityItem[], next: string | null = null, total = it
 }
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.mocked(api.transferQueuePolicy).mockResolvedValue({
+    lane: "transfer", dispatch_state: "open", revision: 0,
+    running_jobs: 0, allowed_actions: ["pause_after_current"],
+  });
   vi.mocked(api.generationQueuePolicy).mockResolvedValue({
     lane: "generation", dispatch_state: "open", revision: 0,
     running_jobs: 0, allowed_actions: ["pause_after_current"],

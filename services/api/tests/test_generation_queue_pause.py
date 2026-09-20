@@ -439,7 +439,7 @@ async def test_foreign_claim_expiry_finishes_draining_without_starting_queued_wo
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("lane", ["transfer", "install"])
+@pytest.mark.parametrize("lane", ["install", "unknown"])
 async def test_unsupported_lane_actions_do_not_change_generation(
     client: AsyncClient,
     lane: str,

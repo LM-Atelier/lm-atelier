@@ -461,6 +461,15 @@ export interface GenerationQueuePolicy {
   allowed_actions: GenerationQueueAction[];
 }
 
+export type TransferQueueAction = "pause_after_current" | "resume";
+export interface TransferQueuePolicy {
+  lane: "transfer";
+  dispatch_state: "open" | "draining" | "paused";
+  revision: number;
+  running_jobs: number;
+  allowed_actions: TransferQueueAction[];
+}
+
 export interface QueueControlCommand {
   expected_revision: number;
   idempotency_key: string;

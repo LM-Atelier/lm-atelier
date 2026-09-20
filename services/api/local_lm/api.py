@@ -331,6 +331,7 @@ from .prompt_templates import (
     prompt_template_contract_sha256,
 )
 from .queue_control import QueueControlConflict, QueueControlMissing, change_plan_control
+from .queue_lane_policy import QueueLaneConflict, change_lane_policy, read_lane_policy
 from .recipes import get_reference_recipe, list_reference_recipes
 from .reference_library import (
     DEFAULT_PAGE,
@@ -508,6 +509,7 @@ from .schemas import (
     SystemInfo,
     ThirdPartyNoticesOut,
     ToolCapabilityProbe,
+    TransferQueuePolicyOut,
     TrustDerivation,
     TurnAccepted,
     TurnRequest,
@@ -4735,6 +4737,47 @@ async def resume_generation_queue(
     request: Request, payload: QueueControlCommand, session: ConversationSessionDep
 ) -> GenerationQueuePolicyOut:
     return await _change_generation_policy(request, "resume", payload, session)
+
+
+@router.get("/queue/lanes/transfer", response_model=TransferQueuePolicyOut)
+def transfer_queue_policy(session: ConversationSessionDep) -> TransferQueuePolicyOut:
+    try:
+        result = read_lane_policy(session, "transfer")
+    except QueueLaneConflict as exc:
+        raise api_error(
+            409, "queue-lane-conflict", "The transfer queue changed. Refresh before trying again."
+        ) from exc
+    return TransferQueuePolicyOut.model_validate(dataclasses.asdict(result))
+
+
+async def _change_transfer_policy(
+    request: Request,
+    action: Literal["pause_after_current", "resume"],
+    payload: QueueControlCommand,
+    session: Session,
+) -> TransferQueuePolicyOut:
+    try:
+        result = await run_in_threadpool(change_lane_policy, session, "transfer", action, payload)
+    except QueueLaneConflict as exc:
+        raise api_error(
+            409, "queue-lane-conflict", "The transfer queue changed. Refresh before trying again."
+        ) from exc
+    await _services(request).scheduler.queue_control_changed("transfer")
+    return TransferQueuePolicyOut.model_validate(dataclasses.asdict(result))
+
+
+@router.post("/queue/lanes/transfer/pause-after-current", response_model=TransferQueuePolicyOut)
+async def pause_transfer_queue(
+    request: Request, payload: QueueControlCommand, session: ConversationSessionDep
+) -> TransferQueuePolicyOut:
+    return await _change_transfer_policy(request, "pause_after_current", payload, session)
+
+
+@router.post("/queue/lanes/transfer/resume", response_model=TransferQueuePolicyOut)
+async def resume_transfer_queue(
+    request: Request, payload: QueueControlCommand, session: ConversationSessionDep
+) -> TransferQueuePolicyOut:
+    return await _change_transfer_policy(request, "resume", payload, session)
 
 
 @router.get("/jobs/activity", response_model=JobActivityOut)

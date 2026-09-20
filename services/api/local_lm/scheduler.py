@@ -16,12 +16,6 @@ from sqlalchemy.orm import Session
 
 from .db import SessionLocal
 from .domain import JobKind, JobStatus, MessageStatus, PartType, RunStatus, utcnow
-from .generation_queue import (
-    GENERATION_KINDS,
-    generation_claim_predicate,
-    generation_dispatch,
-    reconcile_generation_queue,
-)
 from .models import (
     Job,
     Message,
@@ -33,6 +27,13 @@ from .models import (
 )
 from .progress import update_job_progress
 from .queue_control import claim_control_predicate, job_controls
+from .queue_lane_policy import (
+    dispatch_allowed,
+    lane_claim_predicate,
+    lane_for_kind,
+    queue_dispatches,
+    reconcile_queue_lanes,
+)
 from .schemas import JobOut
 from .work_plans import BLOCKED_WORK_STATUS, plan_status_summary, refresh_plan_status
 
@@ -243,12 +244,13 @@ class ResourceScheduler:
                     None,
                 )
                 control = job_controls(session, [job.id])[job.id]
-                dispatch = generation_dispatch(session)
-                if job.kind in GENERATION_KINDS and not dispatch.open:
+                dispatches = queue_dispatches(session)
+                lane = lane_for_kind(job.kind)
+                if lane is not None and not dispatches[lane].open:
                     position = None
                     update_job_progress(
                         job,
-                        stage="generation paused",
+                        stage=f"{lane} paused",
                         queue_resource=resource,
                         queue_position=None,
                         queue_length=len(candidates),
@@ -353,7 +355,7 @@ class ResourceScheduler:
                     with self.session_factory() as session:
                         current = session.get(Job, job_id)
                         control_snapshot = job_controls(session, [job_id]).get(job_id)
-                        dispatch_snapshot = generation_dispatch(session)
+                        dispatch_snapshots = queue_dispatches(session)
                         claimed_at = utcnow()
                         # Fresh, never shared: this decides whether the job
                         # STARTS. The final update also compares the control
@@ -391,7 +393,10 @@ class ResourceScheduler:
                                         Job.status == JobStatus.QUEUED.value,
                                         Job.claim_owner.is_(None),
                                         claim_control_predicate(control_snapshot),
-                                        generation_claim_predicate(dispatch_snapshot),
+                                        *[
+                                            lane_claim_predicate(snapshot)
+                                            for snapshot in dispatch_snapshots.values()
+                                        ],
                                     )
                                     .values(
                                         status=JobStatus.RUNNING.value,
@@ -454,7 +459,7 @@ class ResourceScheduler:
             ).all()
         )
         controls = job_controls(session, [job.id for job in jobs])
-        dispatch = generation_dispatch(session)
+        dispatches = queue_dispatches(session)
         blocked = {
             job.id for job in jobs if ResourceScheduler._blocking_steps(session, job.work_step_id)
         }
@@ -491,7 +496,7 @@ class ResourceScheduler:
                 if job.id not in blocked
                 and controls[job.id].valid
                 and controls[job.id].state == "eligible"
-                and (job.kind not in GENERATION_KINDS or dispatch.open)
+                and dispatch_allowed(job.kind, dispatches)
             ),
             key=rank,
         )
@@ -680,7 +685,7 @@ class ResourceScheduler:
                 expired_ids.append(job.id)
             if expired_ids:
                 session.flush()
-                reconcile_generation_queue(session)
+                reconcile_queue_lanes(session)
             session.commit()
         return expired_ids
 
@@ -695,7 +700,7 @@ class ResourceScheduler:
                     heartbeat_at=None,
                 )
             )
-            reconcile_generation_queue(session)
+            reconcile_queue_lanes(session)
             session.commit()
         self._invalidate_eligibility(group)
         self._queue_event(group).set()
