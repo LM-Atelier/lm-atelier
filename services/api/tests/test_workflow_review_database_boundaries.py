@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import wait_for_terminal_status
 from sqlalchemy import update
 from sqlalchemy.orm import Session
 from test_custom_node_source_identity import installed_source as installed_source
@@ -125,14 +126,13 @@ async def test_workflow_dispatch_releases_transactions_during_verification(
         monkeypatch.setattr(services.engines.media, "object_info", object_info)
         monkeypatch.setattr(CustomNodeManager, "verify", verify)
 
-    deadline = asyncio.get_running_loop().time() + 6
-    while asyncio.get_running_loop().time() < deadline:
-        current = (await client.get(f"/api/runs/{run_id}")).json()
-        if current["status"] in {"complete", "failed", "cancelled"}:
-            break
-        await asyncio.sleep(0.03)
-    else:
-        raise AssertionError("workflow dispatch did not terminate")
+    async def read_run() -> dict[str, Any]:
+        run: dict[str, Any] = (await client.get(f"/api/runs/{run_id}")).json()
+        return run
+
+    current = await wait_for_terminal_status(
+        read_run, what=f"the workflow dispatch on run {run_id}", expected=None
+    )
     assert observed_transactions, "verification probe did not execute"
     assert writes and len(writes) == len(observed_transactions), current
     assert not any(observed_transactions), (

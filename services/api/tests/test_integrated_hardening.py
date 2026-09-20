@@ -11,7 +11,7 @@ from typing import Any, cast
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
-from run_waits import wait_for_terminal_status
+from run_waits import wait_for_terminal_status, wait_until
 from sqlalchemy import select, update
 
 from local_lm.adapters.base import MediaEvent, MediaRequest
@@ -52,16 +52,17 @@ async def _wait_for_step_states(
     plan_id: str,
     expected: list[str],
 ) -> dict[str, Any]:
-    deadline = asyncio.get_running_loop().time() + 8
-    plan: dict[str, Any] = {}
-    while asyncio.get_running_loop().time() < deadline:
+    async def read_plan() -> dict[str, Any]:
         response = await client.get(f"/api/work-plans/{plan_id}")
         assert response.status_code == 200
-        plan = response.json()
-        if [step["status"] for step in plan["steps"]] == expected:
-            return plan
-        await asyncio.sleep(0.03)
-    raise AssertionError(f"plan {plan_id} did not reach {expected}: {plan}")
+        plan: dict[str, Any] = response.json()
+        return plan
+
+    return await wait_until(
+        read_plan,
+        lambda plan: [step["status"] for step in plan["steps"]] == expected,
+        what=f"the steps of plan {plan_id} reaching {expected}",
+    )
 
 
 async def test_ordered_story_image_video_summary_retries_only_cancelled_video(

@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import wait_until
 from sqlalchemy import select
 
 from local_lm.adapters.base import ChatEvent, ChatRequest, MediaEvent, MediaRequest
@@ -115,14 +116,18 @@ async def wait_for_role(
     role: str,
     *states: str,
 ) -> dict:  # type: ignore[type-arg]
-    deadline = asyncio.get_running_loop().time() + 8
-    while asyncio.get_running_loop().time() < deadline:
+    async def read() -> dict:  # type: ignore[type-arg]
         payload = (await client.get("/api/setup/readiness")).json()
-        current = next(item for item in payload["roles"] if item["role"] == role)
-        if current["state"] in states:
-            return current
-        await asyncio.sleep(0.03)
-    raise AssertionError(f"{role} did not reach {states}")
+        role_state: dict = next(  # type: ignore[type-arg]
+            item for item in payload["roles"] if item["role"] == role
+        )
+        return role_state
+
+    return await wait_until(
+        read,
+        lambda current: bool(current["state"] in states),
+        what=f"the {role} role reaching {states}",
+    )
 
 
 @pytest.mark.parametrize(
