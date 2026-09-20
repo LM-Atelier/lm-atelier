@@ -1553,6 +1553,11 @@ class ModelProfileCreate(ApiModel):
     is_default: bool = False
 
 
+class ModelProfileModelUpdate(ApiModel):
+    expected_install_id: str = Field(min_length=1, max_length=40)
+    download_job_id: str = Field(min_length=1, max_length=40)
+
+
 class ModelProfileUpdate(ApiModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     use_case: str | None = Field(default=None, max_length=1_000)

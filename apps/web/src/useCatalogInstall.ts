@@ -1,9 +1,11 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "./api";
+import { readModelUpdateDownloads, saveModelUpdateDownloads } from "./modelUpdateDownloads";
 import type { CatalogModel, CatalogPreflight } from "./types";
 
 export interface PendingInstall {
+  previousInstallId?: string;
   model: CatalogModel;
   preflight: CatalogPreflight;
   installRole: string;
@@ -20,11 +22,12 @@ export interface PendingInstall {
  */
 export function useCatalogInstall() {
   const client = useQueryClient();
+  const [updateDownloads, setUpdateDownloads] = useState(readModelUpdateDownloads);
   const [pendingInstall, setPendingInstall] = useState<PendingInstall | null>(null);
   // Named as Models reports them in its FirstFailure list; the suggestions
   // panel shows both errors itself.
   const download = useMutation({
-    mutationFn: async ({ model, selectedRole }: { model: CatalogModel; selectedRole: string }) => {
+    mutationFn: async ({ model, selectedRole, previousInstallId }: { model: CatalogModel; selectedRole: string; previousInstallId?: string }) => {
       const auxiliaryKind = selectedRole === "lora" ? "lora" : null;
       const installRole = auxiliaryKind ? "image" : selectedRole;
       const engine = model.required_runtime ?? (installRole === "chat" ? "llama.cpp" : "comfyui");
@@ -66,7 +69,7 @@ export function useCatalogInstall() {
           || "LM Atelier cannot safely activate this model with the current runtime.",
         );
       }
-      return { model, preflight, installRole, engine, auxiliaryKind } satisfies PendingInstall;
+      return { model, preflight, installRole, engine, auxiliaryKind, previousInstallId } satisfies PendingInstall;
     },
     onSuccess: (ready) => setPendingInstall(ready),
   });
@@ -91,13 +94,27 @@ export function useCatalogInstall() {
         ? api.download(...downloadArguments, auxiliaryKind, contentRating)
         : api.download(...downloadArguments, null, contentRating);
     },
-    onSuccess: () => {
+    onSuccess: (job, pending) => {
+      if (pending.previousInstallId) {
+        const next = [
+          ...readModelUpdateDownloads().filter((item) => item.jobId !== job.id),
+          { jobId: job.id, previousInstallId: pending.previousInstallId, modelName: pending.model.name },
+        ];
+        saveModelUpdateDownloads(next);
+        setUpdateDownloads(next);
+      }
       setPendingInstall(null);
       void client.invalidateQueries({ queryKey: ["jobs"] });
     },
   });
   return {
     pendingInstall,
+    updateDownloads,
+    dismissUpdate: (jobId: string) => {
+      const next = updateDownloads.filter((item) => item.jobId !== jobId);
+      saveModelUpdateDownloads(next);
+      setUpdateDownloads(next);
+    },
     cancel: () => setPendingInstall(null),
     prepare: download,
     confirm: confirmInstall,

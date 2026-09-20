@@ -12,6 +12,7 @@ import { InstallConfirmDialog } from "./InstallConfirmDialog";
 import { useCatalogInstall } from "./useCatalogInstall";
 import { ModelCard } from "./ModelCard";
 import { ModelUpdatesPanel } from "./ModelUpdatesPanel";
+import { ModelUpdateProfileOffers } from "./ModelUpdateProfileOffers";
 import { RecipeCard } from "./RecipeCard";
 import { VersionChooser } from "./VersionChooser";
 import { WorkflowConsumers } from "./WorkflowConsumers";
@@ -241,7 +242,7 @@ export function ModelsView({ initialRole }: { initialRole: EngineRole }) {
   const runtimeFor = (model: CatalogModel) => runtimes.data?.find(
     (runtime) => runtime.engine === model.required_runtime,
   );
-  const { pendingInstall, cancel: cancelInstall, prepare: download, confirm: confirmInstall } = useCatalogInstall();
+  const { pendingInstall, cancel: cancelInstall, prepare: download, confirm: confirmInstall, updateDownloads, dismissUpdate } = useCatalogInstall();
   const installRecipe = useMutation({
     mutationFn: (recipeId: string) => api.installRecipe(recipeId),
     onSuccess: () => void client.invalidateQueries({ queryKey: ["jobs"] }),
@@ -370,7 +371,8 @@ export function ModelsView({ initialRole }: { initialRole: EngineRole }) {
   return (
     <div className="page-view">
       <header className="page-header"><div><h1>Model library</h1></div><div className="storage-actions"><div className="storage-pill"><HardDrive size={17} />{storage.data?.installed_count ?? installed.data?.length ?? 0} installed · {formatBytes(storage.data?.installed_bytes)}</div><button className="secondary compact-button" onClick={() => setImportOpen(true)}><Folder size={16} />Import local</button>{Boolean(storage.data?.partial_download_count) && <button className="secondary compact-button" disabled={cleanupDownloads.isPending} onClick={() => cleanupDownloads.mutate()}>Clean {storage.data?.partial_download_count} partial</button>}</div></header>
-      <ModelUpdatesPanel onInstall={(model, selectedRole) => download.mutate({ model, selectedRole })} />
+      <ModelUpdatesPanel onInstall={(model, selectedRole, previousInstallId) => download.mutate({ model, selectedRole, previousInstallId })} />
+      <ModelUpdateProfileOffers downloads={updateDownloads} onDismiss={dismissUpdate} />
       <section className="recipe-section">
         <div className="section-heading"><div><h2>Reference recipes</h2></div></div>
         {recipes.isLoading && <div className="loading-line" />}

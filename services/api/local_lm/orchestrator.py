@@ -29,6 +29,7 @@ from .accepted_turn_context import (
     AcceptedWorkflow,
     accepted_context,
     accepted_profile_provenance,
+    capture_profile,
     resolve_accepted_profile,
     resolve_accepted_workflow,
     resolve_context_dependencies,
@@ -4810,19 +4811,16 @@ class ConversationOrchestrator:
                 )
                 if not profile or not install:
                     raise RuntimeError("the selected chat profile does not have an installed model")
-                session.expunge(profile)
-                session.expunge(install)
-        if launch_scope is not None:
-            return await self.processes.load_chat(
-                profile,
-                install,
-                launch_scope_sha256=launch_scope,
-                vision_max_images=snapshot.vision_sampling.max_images if snapshot else None,
-            )
-        status = next(item for item in self.processes.statuses() if item.name == "chat")
-        if status.running and status.state == "ready" and status.profile_id == profile.id:
-            return status
-        return await self.processes.load_chat(profile, install)
+                current_profile = capture_profile(session, profile.id)
+                if current_profile is None:
+                    raise RuntimeError("the selected chat profile does not have an installed model")
+                profile, install, launch_scope = resolve_accepted_profile(session, current_profile)
+        return await self.processes.load_chat(
+            profile,
+            install,
+            launch_scope_sha256=launch_scope,
+            vision_max_images=snapshot.vision_sampling.max_images if snapshot else None,
+        )
 
     async def _chat_planner_available(self) -> bool:
         if self.engines.settings.chat_engine not in {"llama.cpp", "vllm"}:

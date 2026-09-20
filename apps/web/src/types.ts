@@ -642,6 +642,11 @@ export interface ToolCapabilityProbe {
   error: string | null;
 }
 
+export interface ModelProfileModelUpdate {
+  expected_install_id: string;
+  download_job_id: string;
+}
+
 export interface ModelProfile {
   id: string;
   model_install_id: string | null;
