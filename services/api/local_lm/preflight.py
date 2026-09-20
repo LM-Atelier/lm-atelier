@@ -722,15 +722,21 @@ def assess_catalog_install(
             _check("memory-availability", "Memory available now", "warn", " ".join(pressure))
         )
 
+    if provider == "huggingface":
+        pinned_revision = re.fullmatch(r"[0-9a-f]{40}", resolved_revision) is not None
+    elif provider == "civitai":
+        pinned_revision = _CIVITAI_ID.fullmatch(resolved_revision) is not None
+    else:
+        pinned_revision = False
     checks.append(
         _check(
             "revision",
             "Pinned revision",
-            "pass" if resolved_revision != "main" else "warn",
+            "pass" if pinned_revision else "warn",
             (
                 f"Install is pinned to {resolved_revision}."
-                if resolved_revision != "main"
-                else "The catalog could not resolve main to an immutable commit."
+                if pinned_revision
+                else "The catalog did not return an exact version; this selection may change."
             ),
         )
     )
