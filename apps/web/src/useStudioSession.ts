@@ -85,21 +85,28 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
   const sessionId = current?.id ?? null;
 
   const open = useMutation({
-    mutationFn: () => api.openStudioSession(sourceArtifactId!, sourceChatId),
-    onSuccess: (session) => {
-      const opened = { id: session.id, source: sourceArtifactId! };
-      setBinding(opened);
-      localStorage.setItem(STUDIO_SESSION_KEY, JSON.stringify(opened));
-      client.setQueryData(["studio-session", session.id], session);
-    },
+    mutationFn: ({ source, chat }: { source: string; chat: string | null }) =>
+      api.openStudioSession(source, chat),
   });
+  const openSession = open.mutate;
 
   // Opening an image is the studio's entry: find-or-create runs once per
-  // source, and reopening the same image resumes its history.
+  // source, and reopening the same image resumes its history. A late response
+  // cannot replace the binding after another picture opens or Studio closes.
   useEffect(() => {
-    if (sourceArtifactId && !open.isPending) open.mutate();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceArtifactId, sourceChatId]);
+    if (!sourceArtifactId) return;
+    let active = true;
+    openSession({ source: sourceArtifactId, chat: sourceChatId }, {
+      onSuccess: (session) => {
+        if (!active) return;
+        const opened = { id: session.id, source: sourceArtifactId };
+        setBinding(opened);
+        localStorage.setItem(STUDIO_SESSION_KEY, JSON.stringify(opened));
+        client.setQueryData(["studio-session", session.id], session);
+      },
+    });
+    return () => { active = false; };
+  }, [sourceArtifactId, sourceChatId, openSession, client]);
 
   const session = useQuery({
     queryKey: ["studio-session", sessionId],
