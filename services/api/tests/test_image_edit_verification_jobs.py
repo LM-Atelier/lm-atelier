@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import json
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
@@ -72,15 +71,19 @@ async def _wait_for_job(client: AsyncClient, kind: str) -> dict:  # type: ignore
     )
 
 
-_RETRY_ASSESSMENT = json.dumps(
-    {
-        "requested_change_visible": False,
-        "unrelated_content_preserved": True,
-        "retry_recommended": True,
-        "direction": "increase",
-        "confidence": 0.94,
-    }
+_SEEN_BEFORE = '[{"subject": "square", "appearance": "red"}]'
+_SEEN_UNCHANGED = _SEEN_BEFORE
+_SEEN_CHANGED = '[{"subject": "square", "appearance": "blue"}]'
+_CHANGED_OTHERWISE = (
+    '{"subject_present": true, "operation": "change", "requested": [0], "as_asked": false}'
 )
+_CHANGE_ATTRIBUTED = (
+    '{"subject_present": true, "operation": "change", "requested": [0], "as_asked": true}'
+)
+#: The three answers the review asks for, in order: what is in the source, what
+#: is in the result, and which listed difference the request asked for.
+_SAW_NO_CHANGE = (_SEEN_BEFORE, _SEEN_CHANGED, _CHANGED_OTHERWISE)
+_SAW_THE_CHANGE = (_SEEN_BEFORE, _SEEN_CHANGED, _CHANGE_ATTRIBUTED)
 
 
 async def _wait_for_run(client: AsyncClient, run_id: str) -> dict[str, Any]:
@@ -100,7 +103,7 @@ async def _wait_for_run(client: AsyncClient, run_id: str) -> dict[str, Any]:
 
 @pytest.mark.parametrize(
     (
-        "assessment_raw",
+        "answers",
         "turn_settings",
         "expected_status",
         "expected_reason",
@@ -109,9 +112,9 @@ async def _wait_for_run(client: AsyncClient, run_id: str) -> dict[str, Any]:
         "announcement_fails",
     ),
     [
-        (_RETRY_ASSESSMENT, {}, "complete", "eligible", True, None, False),
+        (_SAW_NO_CHANGE, {}, "complete", "eligible", True, None, False),
         (
-            _RETRY_ASSESSMENT,
+            _SAW_NO_CHANGE,
             {"denoise": 0.5},
             "complete",
             "eligible",
@@ -119,14 +122,22 @@ async def _wait_for_run(client: AsyncClient, run_id: str) -> dict[str, Any]:
             "manual_strength_preserved",
             False,
         ),
-        ("not-json", {}, "skipped", "invalid_assessment", False, None, False),
+        (
+            ("not-json", "not-json", "not-json"),
+            {},
+            "skipped",
+            "inventory_unavailable",
+            False,
+            None,
+            False,
+        ),
         # The retry is created and durable, and every attempt to announce and
         # start it fails - the first during creation, the second during the
         # convergence that recovers from it. The record must not say the retry
         # ran, and must not say it was unavailable either: it is bound, and a
         # later convergence can still reach the start.
         (
-            _RETRY_ASSESSMENT,
+            _SAW_NO_CHANGE,
             {},
             "complete",
             "eligible",
@@ -140,7 +151,7 @@ async def test_image_edit_verification_is_dependent_at_most_once_and_non_destruc
     client: AsyncClient,
     app: FastAPI,
     monkeypatch: pytest.MonkeyPatch,
-    assessment_raw: str,
+    answers: tuple[str, ...],
     turn_settings: dict[str, object],
     expected_status: str,
     expected_reason: str,
@@ -184,7 +195,7 @@ async def test_image_edit_verification_is_dependent_at_most_once_and_non_destruc
         # plan is the retry. Arming the refusal earlier would refuse the
         # source's own announcement and no verification would run at all.
         refuse_announcements["armed"] = announcement_fails
-        yield ChatEvent(type="delta", text=assessment_raw)
+        yield ChatEvent(type="delta", text=answers[min(len(captured) - 1, len(answers) - 1)])
         yield ChatEvent(type="complete", data={"finish_reason": "stop"})
 
     async def edited_media(
@@ -301,11 +312,18 @@ async def test_image_edit_verification_is_dependent_at_most_once_and_non_destruc
         assert isinstance(retry_run_id, str)
     else:
         assert retry_run_id is None
-    assert source_complete_when_streamed == [True]
-    assert len(captured) == 1
-    content = captured[0].messages[-1]["content"]
-    assert isinstance(content, list)
-    assert [part["type"] for part in content] == ["text", "image_url", "image_url"]
+    # Three questions, each asked after the source turn finished: one about each
+    # picture, then one about the two lists with no picture attached. An answer
+    # that is not an inventory stops the review at the first of them.
+    unreadable = expected_reason == "inventory_unavailable"
+    asked = 1 if unreadable else 3
+    assert source_complete_when_streamed == [True] * asked
+    assert len(captured) == asked
+    parts = [message.messages[-1]["content"] for message in captured]
+    assert [part["type"] for part in parts[0]] == ["text", "image_url"]
+    if not unreadable:
+        assert [part["type"] for part in parts[1]] == ["text", "image_url"]
+        assert isinstance(parts[2], str)
 
     run_id = accepted.json()["run"]["id"]
     with SessionLocal() as session:
