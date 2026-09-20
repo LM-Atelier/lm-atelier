@@ -2705,9 +2705,16 @@ async def test_activation_can_be_requeued_for_an_installed_model(
     assert again.json()["id"] == accepted.json()["id"]
 
 
-async def test_activation_is_refused_for_a_model_without_a_manifest(
+async def test_a_model_imported_by_hand_can_still_be_activated(
     client: AsyncClient,
 ) -> None:
+    """The chat probe runs the installed runtime against the files on disk.
+
+    Where those files came from decides nothing about whether they work here, and
+    a model that can never be activated can never gather the evidence it is only
+    allowed to be used with.
+    """
+
     with SessionLocal() as session:
         session.add(
             ModelInstall(
@@ -2722,10 +2729,49 @@ async def test_activation_is_refused_for_a_model_without_a_manifest(
         )
         session.commit()
 
-    refused = await client.post("/api/models/model_imported/activate")
+    accepted = await client.post("/api/models/model_imported/activate")
 
-    assert refused.status_code == 422
-    assert "manifest" in refused.json()["detail"]
+    assert accepted.status_code == 202, accepted.text
+    assert accepted.json()["kind"] == "activate"
+
+
+async def test_activation_is_refused_for_a_workflow_model_without_its_manifest(
+    client: AsyncClient,
+) -> None:
+    """The media probe rebuilds the declared workflow against the model's origin."""
+
+    with SessionLocal() as session:
+        session.add_all(
+            [
+                ModelInstall(
+                    id="model_no_workflow",
+                    name="Imported image model",
+                    role="image",
+                    engine="comfyui",
+                    local_path="C:/models/imported-image",
+                    manifest_json={"remote_id": "synthetic/image", "imported": True},
+                    active=True,
+                ),
+                ModelInstall(
+                    id="model_no_origin",
+                    name="Image model without an origin",
+                    role="image",
+                    engine="comfyui",
+                    local_path="C:/models/no-origin",
+                    manifest_json={"workflow_template_id": "synthetic_template"},
+                    active=True,
+                ),
+            ]
+        )
+        session.commit()
+
+    without_workflow = await client.post("/api/models/model_no_workflow/activate")
+    without_origin = await client.post("/api/models/model_no_origin/activate")
+
+    assert without_workflow.status_code == 422
+    assert "workflow" in without_workflow.json()["detail"]
+    assert without_origin.status_code == 422
+    assert "manifest" in without_origin.json()["detail"]
 
 
 async def test_activation_of_an_unknown_model_is_not_found(client: AsyncClient) -> None:

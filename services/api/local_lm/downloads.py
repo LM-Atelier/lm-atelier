@@ -752,6 +752,37 @@ class DownloadManager:
             details=details,
         )
 
+    def measured_install_identity(
+        self, local_path: Path
+    ) -> tuple[dict[str, str], dict[str, list[int]]]:
+        """Hash what this install actually holds, and note how it looked then.
+
+        A download arrives with an identity: every file was checked against the
+        digest its plan declared. A model put in place by hand arrives with
+        none, and evidence bound to nothing proves nothing, so the files are
+        measured here instead of trusted. The sizes and modification times are
+        kept beside the digests: a later read can tell in one stat each that a
+        file has moved on, and only then is the evidence it backed stale.
+        """
+
+        files = (
+            sorted(child for child in local_path.rglob("*") if child.is_file())
+            if local_path.is_dir()
+            else [local_path]
+        )
+        digests: dict[str, str] = {}
+        signatures: dict[str, list[int]] = {}
+        for child in files:
+            name = child.relative_to(local_path).as_posix() if local_path.is_dir() else child.name
+            digest = hashlib.sha256()
+            with child.open("rb") as handle:
+                for block in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(block)
+            status = child.stat()
+            digests[name] = digest.hexdigest()
+            signatures[name] = [status.st_size, status.st_mtime_ns]
+        return digests, signatures
+
     def reactivate(self, session: Session, install: ModelInstall) -> Job:
         """Queue a bounded re-probe of an already installed model.
 
@@ -763,12 +794,20 @@ class DownloadManager:
 
         if install.engine not in {"llama.cpp", "comfyui"}:
             raise ValueError("this model's engine cannot be re-activated automatically")
-        if not str(install.manifest_json.get("remote_id") or ""):
-            raise ValueError("this model was imported without an installation manifest")
-        if install.engine == "comfyui" and not str(
-            install.manifest_json.get("workflow_template_id") or ""
-        ):
-            raise ValueError("this model has no declared workflow to re-activate")
+        if install.engine == "comfyui":
+            # Only the media probe needs to know where the model came from: it
+            # rebuilds the declared workflow, and the template is resolved
+            # against that origin. The chat probe starts the installed runtime
+            # against the files already on disk and reads neither, so requiring
+            # a download's manifest of it left a model that was imported by hand
+            # unable to gather evidence, and a model without evidence can never
+            # be verified for use.
+            if not str(install.manifest_json.get("workflow_template_id") or ""):
+                raise ValueError("this model has no declared workflow to re-activate")
+            if not str(install.manifest_json.get("remote_id") or ""):
+                raise ValueError(
+                    "this model was imported without the manifest its workflow is rebuilt from"
+                )
         for existing in session.scalars(
             select(Job)
             .where(
@@ -847,6 +886,23 @@ class DownloadManager:
                 for key, value in (manifest.get("expected_sha256") or {}).items()
                 if isinstance(key, str) and isinstance(value, str)
             }
+            if not component_hashes or manifest.get("file_signatures"):
+                # An install that declares no identity is measured before it is
+                # proved, and the measurement is written down, so the evidence
+                # this probe records names the exact bytes it ran against. It is
+                # measured again every time it is proved again, because the
+                # first measurement describes the first files: a model replaced
+                # in place and then activated has to be able to earn evidence
+                # for what it is now, and only this code writes these
+                # signatures, so a declared download is never measured here.
+                component_hashes, signatures = self.measured_install_identity(destination)
+                manifest["expected_sha256"] = component_hashes
+                manifest["file_signatures"] = signatures
+                with SessionLocal() as session:
+                    measured = session.get(ModelInstall, install_id)
+                    if measured:
+                        measured.manifest_json = dict(manifest)
+                        session.commit()
             default_settings = {
                 str(key): value
                 for key, value in (manifest.get("default_settings") or {}).items()
