@@ -34,7 +34,7 @@ test("pages the workspace while preserving saved selection and searching unloade
     const requests: URL[] = [];
     page.on("request", (message) => {
       const url = new URL(message.url());
-      if (url.pathname === "/api/chats" && message.method() === "GET") requests.push(url);
+      if (url.pathname === "/api/chats/summaries" && message.method() === "GET") requests.push(url);
     });
     await page.goto("/");
     const workspace = page.getByRole("region", { name: "Projects and chats" });

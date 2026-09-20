@@ -1,7 +1,8 @@
 import { ChevronDown, Download, Folder, Image as ImageIcon, Library, Menu, MoreHorizontal, Pin, Plus, Quote, Search, Star, Upload, Workflow as WorkflowIcon } from "lucide-react";
 import { useRef, useState } from "react";
 import { AtelierMark } from "./AtelierMark";
-import { ChatManager } from "./ChatManager";
+import { ChatManagerLoader } from "./ChatManagerLoader";
+import { ChatActivityIndicators } from "./ChatActivityIndicators";
 import { PromptDialog } from "./ConfirmDialog";
 import { ImageStudioIcon } from "./ImageStudioIcon";
 import { ProjectManager } from "./ProjectManager";
@@ -9,7 +10,7 @@ import { SidebarFooter } from "./SidebarFooter";
 import { SidebarResizer } from "./SidebarResizer";
 import type { View } from "./rooms";
 import type { SidebarLayout } from "./sidebarLayout";
-import type { Chat, Project, EngineCapabilities, GenerationPreset, SetupReadinessReport } from "./types";
+import type { Chat, ChatSummary, Project, EngineCapabilities, GenerationPreset, SetupReadinessReport } from "./types";
 import { useChatPages } from "./useChatPages";
 
 export function ChatSidebar({
@@ -55,7 +56,7 @@ export function ChatSidebar({
   const [closedProjects, setClosedProjects] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState("");
   const [showArchived, setShowArchived] = useState(false);
-  const [managedChat, setManagedChat] = useState<Chat | null>(null);
+  const [managedChat, setManagedChat] = useState<ChatSummary | null>(null);
   const [managedProject, setManagedProject] = useState<Project | null>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
   const projectImport = useRef<HTMLInputElement>(null);
@@ -65,7 +66,7 @@ export function ChatSidebar({
   const visibleChats = chats.filter((chat) => (showArchived || !chat.archived) && (!normalizedSearch || chat.title.toLowerCase().includes(normalizedSearch)));
   const visibleProjects = projects.filter((project) => (showArchived || !project.archived) && (!normalizedSearch || project.name.toLowerCase().includes(normalizedSearch) || visibleChats.some((chat) => chat.project_id === project.id)));
   const unfiled = visibleChats.filter((chat) => !chat.project_id);
-  const chatRow = (chat: Chat) => <div className="sidebar-chat-row" key={chat.id}><button className={`chat-main ${view === "chat" && currentChatId === chat.id ? "active" : ""}`} aria-current={view === "chat" && currentChatId === chat.id ? "page" : undefined} onClick={() => { onChat(chat.id); setMobileOpen(false); }}><span>{chat.title}</span>{chat.archived && <small>Archived</small>}</button><button className={`inline-add sidebar-pin ${chat.pinned ? "pinned" : ""}`} aria-label={chat.pinned ? `Unpin ${chat.title}` : `Pin ${chat.title}`} aria-pressed={chat.pinned} title={chat.pinned ? "Unpin" : "Pin"} onClick={() => onUpdateChat(chat.id, { pinned: !chat.pinned })}><Pin size={13} /></button><button className="inline-add" aria-label={`Manage ${chat.title}`} onClick={() => setManagedChat(chat)}><MoreHorizontal size={13} /></button></div>;
+  const chatRow = (chat: ChatSummary) => <div className="sidebar-chat-row" key={chat.id}><button className={`chat-main ${view === "chat" && currentChatId === chat.id ? "active" : ""}`} aria-current={view === "chat" && currentChatId === chat.id ? "page" : undefined} onClick={() => { onChat(chat.id); setMobileOpen(false); }}><span>{chat.title}</span><ChatActivityIndicators chatId={chat.id} activity={chat.activity} />{chat.archived && <small>Archived</small>}</button><button className={`inline-add sidebar-pin ${chat.pinned ? "pinned" : ""}`} aria-label={chat.pinned ? `Unpin ${chat.title}` : `Pin ${chat.title}`} aria-pressed={chat.pinned} title={chat.pinned ? "Unpin" : "Pin"} onClick={() => onUpdateChat(chat.id, { pinned: !chat.pinned })}><Pin size={13} /></button><button className="inline-add" aria-label={`Manage ${chat.title}`} onClick={() => setManagedChat(chat)}><MoreHorizontal size={13} /></button></div>;
   return (
     <>
     <aside className={`sidebar ${mobileOpen ? "mobile-open" : ""}`}>
@@ -109,7 +110,7 @@ export function ChatSidebar({
       </div>
       {naming && <PromptDialog title="New project" label="Project name" confirmLabel="Create project" placeholder="Portrait studies" onCancel={() => setNaming(false)} onConfirm={(name) => { setNaming(false); onNewProject(name); }} />}
       <SidebarFooter setupState={setupState} view={view} onSetup={onSetup} onView={onView} onNavigate={() => setMobileOpen(false)} />
-      {managedChat && <ChatManager chat={managedChat} projects={projects} onClose={() => setManagedChat(null)} onSave={(values) => { onUpdateChat(managedChat.id, values); setManagedChat(null); }} onDelete={(deleteGeneratedMedia) => { onDeleteChat(managedChat.id, deleteGeneratedMedia); setManagedChat(null); }} />}
+      {managedChat && <ChatManagerLoader chatId={managedChat.id} projects={projects} onClose={() => setManagedChat(null)} onSave={(values) => { onUpdateChat(managedChat.id, values); setManagedChat(null); }} onDelete={(deleteGeneratedMedia) => { onDeleteChat(managedChat.id, deleteGeneratedMedia); setManagedChat(null); }} />}
       {managedProject && <ProjectManager project={managedProject} engines={engines} presets={presets} onClose={() => setManagedProject(null)} onSave={(values) => { onUpdateProject(managedProject.id, values); setManagedProject(null); }} onDelete={() => { onDeleteProject(managedProject.id); setManagedProject(null); }} onExport={(includeMedia) => onExportProject(managedProject.id, includeMedia)} />}
     </aside>
       <SidebarResizer layout={sidebar} />

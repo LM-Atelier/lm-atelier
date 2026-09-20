@@ -1,13 +1,13 @@
 import { useInfiniteQuery, type InfiniteData, type QueryClient } from "@tanstack/react-query";
 import { api } from "./api";
-import type { Chat } from "./types";
+import type { ChatSummary } from "./types";
 
 const PAGE_SIZE = 50;
-const CHAT_PAGES_KEY = ["chats", "pages"] as const;
-type ChatPage = { items: Chat[]; nextOffset: number | null };
+const CHAT_PAGES_KEY = ["chats", "summaries"] as const;
+type ChatPage = { items: ChatSummary[]; nextOffset: number | null };
 type ChatPages = InfiniteData<ChatPage, number>;
 
-function flattenPages(data: ChatPages): Chat[] {
+function flattenPages(data: ChatPages): ChatSummary[] {
   const seen = new Set<string>();
   return data.pages.flatMap((page) => page.items).filter((chat) => {
     if (seen.has(chat.id)) return false;
@@ -22,8 +22,9 @@ export function useChatPages(search = "", includeArchived = false) {
     queryKey: [...CHAT_PAGES_KEY, query, includeArchived],
     initialPageParam: 0,
     placeholderData: (previous) => previous,
+    refetchInterval: 3_000,
     queryFn: async ({ pageParam, signal }): Promise<ChatPage> => {
-      const items = await api.chats(null, includeArchived, query, {
+      const items = await api.chatSummaries(null, includeArchived, query, {
         limit: PAGE_SIZE, offset: pageParam, searchProjects: true, signal,
       });
       return { items, nextOffset: items.length === PAGE_SIZE ? pageParam + items.length : null };
@@ -42,14 +43,18 @@ export function restoreChatPages(client: QueryClient, snapshot: ReturnType<typeo
 }
 
 /** Update loaded rows while preserving the server offsets for each page. */
-export function changeChatPages(client: QueryClient, change: (chat: Chat) => Chat | null) {
+export function changeChatPages(client: QueryClient, change: (chat: ChatSummary) => ChatSummary | null) {
   client.setQueriesData<ChatPages>({ queryKey: CHAT_PAGES_KEY }, (current) => current && ({
     ...current,
     pages: current.pages.map((page) => ({
       ...page,
       items: page.items.flatMap((chat) => {
         const updated = change(chat);
-        return updated ? [updated] : [];
+        return updated ? [{
+          id: updated.id, project_id: updated.project_id, title: updated.title,
+          archived: updated.archived, pinned: updated.pinned,
+          created_at: updated.created_at, updated_at: updated.updated_at, activity: updated.activity,
+        }] : [];
       }),
     })),
   }));

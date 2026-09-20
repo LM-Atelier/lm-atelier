@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from alembic import command
+from alembic.script import ScriptDirectory
 
 from local_lm import database_migrations
 from local_lm.config import Settings
@@ -16,7 +17,6 @@ from local_lm.database_migrations import DatabaseVersionError, alembic_config, u
 
 PARENT = "e9a5c7d31b62"
 REVISION = "f6c3a8d91b20"
-MIGRATION = REVISION + "_transfer_queue_policy.py"
 
 
 def prepare(tmp_path: Path) -> tuple[Settings, Path]:
@@ -59,7 +59,7 @@ def test_transfer_policy_upgrade_preserves_generation_and_can_revert_before_use(
     settings, database = prepare(tmp_path)
     before = rows(database)
     config = alembic_config(settings)
-    command.upgrade(config, "head")
+    command.upgrade(config, REVISION)
     assert rows(database) == before
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT version_num FROM alembic_version").fetchall() == [
@@ -75,7 +75,7 @@ def test_transfer_policy_downgrade_refuses_to_discard_supported_dispatch_state(
 ) -> None:
     settings, database = prepare(tmp_path)
     config = alembic_config(settings)
-    command.upgrade(config, "head")
+    command.upgrade(config, REVISION)
     with sqlite3.connect(database) as connection:
         connection.execute(
             "INSERT INTO generation_queue_policies VALUES ('transfer', ?, 2)", (state,)
@@ -95,16 +95,25 @@ def test_previous_migration_set_refuses_transfer_database_without_changing_polic
 ) -> None:
     settings, database = prepare(tmp_path)
     config = alembic_config(settings)
-    command.upgrade(config, "head")
+    command.upgrade(config, REVISION)
     with sqlite3.connect(database) as connection:
         connection.execute("INSERT INTO generation_queue_policies VALUES ('transfer', 'paused', 1)")
     before = rows(database)
     current_scripts = Path(database_migrations.__file__).parent / "migrations"
     previous_scripts = tmp_path / "previous-migrations"
+    previous_names = {
+        Path(revision.path).name
+        for revision in ScriptDirectory.from_config(config).walk_revisions(base="base", head=PARENT)
+    }
+    newer_names = {
+        path.name
+        for path in (current_scripts / "versions").glob("*.py")
+        if path.name != "__init__.py" and path.name not in previous_names
+    }
     shutil.copytree(
         current_scripts,
         previous_scripts,
-        ignore=shutil.ignore_patterns(MIGRATION, "__pycache__"),
+        ignore=shutil.ignore_patterns(*newer_names, "__pycache__"),
     )
     config.set_main_option("script_location", str(previous_scripts))
     monkeypatch.setattr(database_migrations, "alembic_config", lambda _settings: config)

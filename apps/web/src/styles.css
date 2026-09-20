@@ -361,6 +361,9 @@ body.resizing-sidebar { user-select: none; cursor: col-resize; }
 .chat-list { padding-left: calc(17px * var(--spacing-scale, 1)); }
 .chat-list.standalone { padding-left: 0; }
 .sidebar-chat-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; }
+.chat-activity-indicators { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 4px; }
+.chat-activity-indicators > span { display: inline-flex; align-items: center; gap: 2px; }
+.chat-main > span:first-child { min-width: 0; }
 .chat-main { width: 100%; display: flex; align-items: center; gap: calc(8px * var(--spacing-scale, 1)); border: 0; background: transparent; color: var(--ink-secondary); padding: calc(7px * var(--spacing-scale, 1)) calc(6px * var(--spacing-scale, 1)) calc(7px * var(--spacing-scale, 1)) calc(10px * var(--spacing-scale, 1)); border-radius: 10px; cursor: pointer; min-width: 0; text-align: left; }
 .chat-main span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Flex items shrink by default, so a long title squeezed these icons and the

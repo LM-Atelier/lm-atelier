@@ -59,6 +59,8 @@ from .auxiliary_assets import AUXILIARY_ASSET_KINDS, validate_lora_workflow_cont
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
 from .capability_probe import probe_structured_tools
 from .catalog_sources import CatalogSource, CatalogSourceNotFound, WorkflowCatalogSource
+from .chat_activity_history import chat_activity_history
+from .chat_activity_reads import chat_work_counts
 from .chat_composer_drafts import (
     DraftAttachmentUnavailable,
     DraftRevisionStale,
@@ -84,6 +86,7 @@ from .chat_item_removal import (
     execute_chat_item_removal,
     preview_chat_item_removal,
 )
+from .chat_summary_reads import list_chat_summary_rows
 from .civitai_catalog import CivitaiCatalog
 from .comfy_editor_bridge import ComfyEditorBridgeError
 from .comfy_registry import ComfyNodeResolution, ComfyRegistryClient
@@ -384,6 +387,8 @@ from .schemas import (
     CatalogPreflightRequest,
     CatalogVersionRow,
     CatalogVersions,
+    ChatActivityOut,
+    ChatActivityReferenceOut,
     ChatComposerDraftOut,
     ChatComposerDraftWrite,
     ChatCreate,
@@ -392,6 +397,7 @@ from .schemas import (
     ChatItemRemovalExecutionOut,
     ChatItemRemovalImpactOut,
     ChatOut,
+    ChatSummaryOut,
     ChatUpdate,
     ChatWorkflowSelectionIn,
     CredentialSet,
@@ -2290,6 +2296,50 @@ async def list_chats(
         statement = statement.limit(limit)
     statement = statement.offset(offset)
     return list(session.scalars(statement).all())
+
+
+@router.get("/chats/summaries", response_model=list[ChatSummaryOut])
+async def list_chat_summaries(
+    session: ConversationSessionDep,
+    project_id: str | None = None,
+    include_archived: bool = False,
+    query: str = Query(default="", max_length=500),
+    search_projects: bool = False,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0, le=9_223_372_036_854_775_807),
+) -> list[ChatSummaryOut]:
+    rows = list_chat_summary_rows(
+        session,
+        project_id=project_id,
+        include_archived=include_archived,
+        query=query,
+        search_projects=search_projects,
+        limit=limit,
+        offset=offset,
+    )
+    identities = [row.id for row in rows]
+    counts = chat_work_counts(session, identities)
+    history = chat_activity_history(session, identities)
+    return [
+        ChatSummaryOut(
+            **dataclasses.asdict(row),
+            activity=ChatActivityOut(
+                active_work_count=counts[row.id].active_work_count,
+                unresolved_failed_count=counts[row.id].unresolved_failed_count,
+                last_output=(
+                    ChatActivityReferenceOut.model_validate(history[row.id].last_output)
+                    if history[row.id].last_output is not None
+                    else None
+                ),
+                last_failure=(
+                    ChatActivityReferenceOut.model_validate(history[row.id].last_failure)
+                    if history[row.id].last_failure is not None
+                    else None
+                ),
+            ),
+        )
+        for row in rows
+    ]
 
 
 @router.post("/chats", response_model=ChatOut, status_code=201)

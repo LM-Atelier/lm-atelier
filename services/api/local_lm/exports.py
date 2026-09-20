@@ -218,7 +218,12 @@ class ProjectExporter:
         runs_by_id = {run.id: run for run in runs}
         chat_records: list[dict[str, Any]] = []
         for chat in chats:
-            record = ChatDetail.model_validate(chat).model_dump(mode="json")
+            record = ChatDetail.model_validate(chat).model_dump(
+                mode="json",
+                exclude={
+                    "messages": {"__all__": {"response_revisions": {"__all__": {"activity"}}}}
+                },
+            )
             self._snapshot_generation_defaults(session, chat, record, dependency_index)
             record["generation_settings_json"] = redact_local_paths(
                 record["generation_settings_json"]

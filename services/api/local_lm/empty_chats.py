@@ -44,6 +44,7 @@ from .chat_composer_drafts import has_content as composer_draft_has_content
 from .domain import JobKind, RoutingMode
 from .models import (
     Chat,
+    ChatActivityEvent,
     ChatComposerDraft,
     ChatItemRemovalReceipt,
     ChatWorkflowSelection,
@@ -108,6 +109,7 @@ class EmptyChat:
 #: `test_every_chat_reference_is_an_audited_producer`.
 WORK_PRODUCERS = (
     Message,
+    ChatActivityEvent,
     WorkPlan,
     Run,
     TurnCreationClaim,

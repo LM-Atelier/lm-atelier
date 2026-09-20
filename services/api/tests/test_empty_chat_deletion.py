@@ -35,6 +35,7 @@ from local_lm.empty_chats import (
 )
 from local_lm.models import (
     Chat,
+    ChatActivityEvent,
     ChatWorkflowSelection,
     EmptyChatDeletion,
     EmptyChatPreviewRecord,
@@ -339,8 +340,10 @@ def test_a_chat_that_changed_kind_since_the_preview_refuses_the_whole_selection(
     assert _remaining(session, [first, second]) == {first.id, second.id}
 
 
+@pytest.mark.parametrize("work", ["message", "activity"])
 def test_a_chat_that_gained_work_since_the_preview_refuses_the_whole_selection(
     session: Session,
+    work: str,
 ) -> None:
     first, second = chat(session), chat(session)
     ids = [first.id, second.id]
@@ -349,7 +352,21 @@ def test_a_chat_that_gained_work_since_the_preview_refuses_the_whole_selection(
     preview_id, _ = issue_preview(
         session, digest=stale.digest, chat_states=stale.chat_states, now=moment
     )
-    session.add(Message(chat_id=first.id, role=MessageRole.USER.value))
+    if work == "activity":
+        session.add(
+            ChatActivityEvent(
+                id="act_completed",
+                chat_id=first.id,
+                message_id="msg_absent",
+                response_revision_id="rev_absent",
+                job_id="job_completed",
+                attempt=1,
+                kind="output",
+                occurred_at=moment,
+            )
+        )
+    else:
+        session.add(Message(chat_id=first.id, role=MessageRole.USER.value))
     session.flush()
 
     with pytest.raises(EmptyChatExecuteError) as refused:

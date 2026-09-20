@@ -176,8 +176,35 @@ export interface ResponseRevision {
   status: "complete" | "pending" | "failed" | "cancelled";
   parts: MessagePart[];
   feedback?: "up" | "down" | null;
+  activity?: ChatActivityReference | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface ChatActivityReference {
+  id: string;
+  sequence: number;
+  message_id: string;
+  response_revision_id: string;
+  occurred_at: string;
+}
+
+export interface ChatActivity {
+  active_work_count: number;
+  unresolved_failed_count: number;
+  last_output: ChatActivityReference | null;
+  last_failure: ChatActivityReference | null;
+}
+
+export interface ChatSummary {
+  id: string;
+  project_id: string | null;
+  title: string;
+  archived: boolean;
+  pinned: boolean;
+  created_at: string;
+  updated_at: string;
+  activity: ChatActivity;
 }
 
 export interface Chat {

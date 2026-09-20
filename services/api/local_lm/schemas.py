@@ -285,6 +285,7 @@ class ResponseRevisionOut(ApiModel):
     status: MessageStatus
     parts: list[MessagePartOut]
     feedback: Literal["up", "down"] | None = None
+    activity: ChatActivityReferenceOut | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -349,6 +350,36 @@ class ResponseFeedbackOut(ApiModel):
     message_id: str
     response_revision_id: str | None
     rating: Literal["up", "down"] | None
+
+
+class ChatActivityReferenceOut(ApiModel):
+    id: str
+    sequence: int = Field(ge=1)
+    message_id: str
+    response_revision_id: str
+    occurred_at: datetime
+
+    @field_serializer("occurred_at", when_used="json")
+    def serialize_timestamp_as_utc(self, value: datetime) -> str:
+        return value.replace(tzinfo=UTC).isoformat() if value.tzinfo is None else value.isoformat()
+
+
+class ChatActivityOut(ApiModel):
+    active_work_count: int = Field(ge=0)
+    unresolved_failed_count: int = Field(ge=0)
+    last_output: ChatActivityReferenceOut | None
+    last_failure: ChatActivityReferenceOut | None
+
+
+class ChatSummaryOut(ApiModel):
+    id: str
+    project_id: str | None
+    title: str
+    archived: bool
+    pinned: bool
+    created_at: datetime
+    updated_at: datetime
+    activity: ChatActivityOut
 
 
 class ChatOut(ApiModel):
