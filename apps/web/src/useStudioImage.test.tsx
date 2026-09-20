@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, renderHook, waitFor } from "@testing-library/react";
+import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { useStudioImage } from "./useStudioImage";
 
 function fakeBitmap(width = 4, height = 4) {
@@ -17,6 +17,56 @@ afterEach(() => {
 });
 
 describe("loading the picture on the studio canvas", () => {
+  it("releases the current picture when the studio closes", async () => {
+    const bitmap = fakeBitmap();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, blob: () => Promise.resolve({}) }));
+    vi.mocked(createImageBitmap).mockResolvedValue(bitmap);
+    const { result, unmount } = renderHook(() => useStudioImage("art-1"));
+
+    await waitFor(() => expect(result.current.bitmap).toBe(bitmap));
+    expect(bitmap.close).not.toHaveBeenCalled();
+    unmount();
+
+    expect(bitmap.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("releases a reload's previous picture while the replacement is decoding", async () => {
+    const first = fakeBitmap();
+    const second = fakeBitmap();
+    let finishDecode!: (bitmap: ImageBitmap) => void;
+    const pending = new Promise<ImageBitmap>((resolve) => { finishDecode = resolve; });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, blob: () => Promise.resolve({}) }));
+    vi.mocked(createImageBitmap).mockResolvedValueOnce(first).mockReturnValueOnce(pending);
+    const { result, unmount } = renderHook(() => useStudioImage("art-1"));
+    await waitFor(() => expect(result.current.bitmap).toBe(first));
+
+    act(() => result.current.reload());
+    await waitFor(() => expect(createImageBitmap).toHaveBeenCalledTimes(2));
+    expect(result.current.bitmap).toBeNull();
+    expect(first.close).toHaveBeenCalledTimes(1);
+    await act(async () => { finishDecode(second); });
+    await waitFor(() => expect(result.current.bitmap).toBe(second));
+    expect(second.close).not.toHaveBeenCalled();
+    unmount();
+    expect(second.close).toHaveBeenCalledTimes(1);
+    expect(first.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("releases a decode that finishes after the studio closes", async () => {
+    const bitmap = fakeBitmap();
+    let finishDecode!: (bitmap: ImageBitmap) => void;
+    const pending = new Promise<ImageBitmap>((resolve) => { finishDecode = resolve; });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, blob: () => Promise.resolve({}) }));
+    vi.mocked(createImageBitmap).mockReturnValue(pending);
+    const { unmount } = renderHook(() => useStudioImage("art-1"));
+    await waitFor(() => expect(createImageBitmap).toHaveBeenCalledTimes(1));
+
+    unmount();
+    await act(async () => { finishDecode(bitmap); });
+
+    expect(bitmap.close).toHaveBeenCalledTimes(1);
+  });
+
   it("reports a refusal instead of waiting forever", async () => {
     // An error response has a body, and it decodes to nothing. Reported as a
     // missing bitmap it was indistinguishable from one still arriving.
