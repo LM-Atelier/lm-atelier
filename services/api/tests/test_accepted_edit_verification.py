@@ -258,13 +258,15 @@ async def test_image_edit_verification_uses_accepted_configuration(
         assert verified_settings == [{"context_length": 4096}]
         assert result["result_json"]["automatic_retry_executed"] is True
     else:
-        # The readings agree, which is not a pass: nothing here can show that
-        # the rest of the picture stayed as it was, so the review ends without
-        # a verdict and without a retry, having used the accepted settings.
+        # The readings agree, which is not a pass on its own, so a fourth
+        # question is asked about the area that moved. This engine answers it
+        # with the same reply it gave the third, which is not a reading of a
+        # region, so the review ends without a verdict and without a retry,
+        # having used the accepted settings throughout.
         assert result["result_json"]["status"] == "skipped", result["result_json"]
         assert result["result_json"]["reason"] == "change_unaccounted"
         assert result["result_json"]["automatic_retry_executed"] is False
-        assert len(captured) == 3
+        assert len(captured) == 4
         rendered = json.dumps([message.messages for message in captured])
         assert "Make the square green." in rendered
         assert "Make the square blue instead." not in rendered
@@ -376,5 +378,5 @@ async def test_image_edit_verification_uses_accepted_configuration(
             assert job.payload_json["vision_profile_id"] == "profile_accepted_verifier"
             assert job.result_json["status"] == "skipped"
             assert job.result_json["reason"] == "change_unaccounted"
-        assert len(captured) == 3
+        assert len(captured) == 4
         assert verified_settings == [{"context_length": 4096}]

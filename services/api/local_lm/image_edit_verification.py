@@ -502,6 +502,7 @@ def assess_from_inventories(
     changes: Sequence[InventoryChange],
     attribution: ChangeAttribution,
     difference: ImageDifference | None,
+    areas: bool | None = None,
 ) -> ImageEditVerificationAssessment | None:
     """The verdict worked out from what was seen; None when it cannot be told.
 
@@ -510,7 +511,10 @@ def assess_from_inventories(
     difference that is not in the list, a change the lists cannot account for,
     and more areas measurably changed than were reported changed all return
     None, and the caller records that the review could not tell. So does the
-    reading that would otherwise pass the edit: an inventory is bounded, so
+    reading that would otherwise pass the edit, unless ``areas`` carries the
+    answer the lists cannot reach: True when every changed area was matched to
+    what is in it and held only differences the request asked for, False when
+    one did not, and None when nobody asked. An inventory is bounded, so
     "nothing else was named" is not "nothing else changed", and the measured
     areas can contradict the lists but never complete them. What is left is
     every verdict the lists can carry on their own - the requested change is
@@ -558,6 +562,14 @@ def assess_from_inventories(
     if measured is not None and not measured.changed:
         visible = False
     preserved = len(attributed) == len(changes)
+    if visible and preserved and areas is not None:
+        # Each changed area was matched to what is in it, and every one of them
+        # held only differences the request asked for. That is the evidence the
+        # lists could not supply on their own, so the verdict they would have
+        # reached is available after all.
+        return _inventory_assessment(
+            visible=True, preserved=areas, measured=measured, corroborated=True
+        )
     if visible and preserved:
         # The one verdict these two readings cannot support. Saying the edit did
         # what was asked and nothing else moved is a claim about the whole
@@ -592,7 +604,11 @@ def _operation_holds(attribution: ChangeAttribution, attributed: Sequence[Invent
 
 
 def _inventory_assessment(
-    *, visible: bool, preserved: bool, measured: ImageDifference | None
+    *,
+    visible: bool,
+    preserved: bool,
+    measured: ImageDifference | None,
+    corroborated: bool = False,
 ) -> ImageEditVerificationAssessment:
     return ImageEditVerificationAssessment(
         requested_change_visible=visible,
@@ -611,10 +627,12 @@ def _inventory_assessment(
         # One level of confidence, and it is the lower one. The measurement can
         # contradict the lists but cannot confirm that they are complete, and
         # nothing else here can either, so no verdict from this evidence is
-        # better than probable. Every verdict that reaches here asks for
-        # another attempt, because the reading that would have passed the edit
-        # is not available from these lists at any confidence.
-        confidence=0.75,
+        # better than probable. A verdict that reaches here without
+        # corroboration asks for another attempt, because the reading that
+        # would have passed the edit is not available from these lists alone.
+        # With every changed area matched to what is in it, the missing
+        # evidence is no longer missing, and the verdict says so.
+        confidence=0.9 if corroborated else 0.75,
     )
 
 

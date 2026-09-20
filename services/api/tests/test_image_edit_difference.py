@@ -4,9 +4,16 @@ from __future__ import annotations
 
 import io
 
+import pytest
 from PIL import Image
 
-from local_lm.image_edit_difference import UNCHANGED_THRESHOLD, compare_edit, compare_images
+from local_lm.image_edit_difference import (
+    UNCHANGED_THRESHOLD,
+    ChangedArea,
+    compare_edit,
+    compare_images,
+    crop_changed_area,
+)
 
 
 def _encode(image: Image.Image, format_name: str = "PNG", **options: object) -> bytes:
@@ -309,3 +316,67 @@ def test_one_subject_spanning_many_parts_is_still_one_area() -> None:
     assert len(difference.changed_areas) == 1
     area = difference.changed_areas[0]
     assert area.right - area.left > area.bottom - area.top
+
+
+def test_a_crop_covers_its_area_and_a_margin_around_it() -> None:
+    """The grid is coarse, so the crop has to show more than the moved parts."""
+
+    picture = _patched((128, 128), (32, 32, 96, 96))
+    area = ChangedArea(left=0.25, top=0.25, right=0.75, bottom=0.75)
+
+    tight, tight_cut = crop_changed_area(picture, area, margin=0.0)
+    widened, widened_cut = crop_changed_area(picture, area, margin=1.0 / 32)
+
+    with Image.open(io.BytesIO(tight)) as image:
+        assert image.size == (64, 64)
+    with Image.open(io.BytesIO(widened)) as image:
+        assert image.size == (72, 72)
+    # The extent reported is the one actually cut, measured back from those
+    # pixels rather than from the box that was asked for.
+    assert (widened_cut.right - widened_cut.left) * 128 == 72
+    assert (tight_cut.right - tight_cut.left) * 128 == 64
+
+
+def test_a_crop_against_an_edge_widens_inward_instead_of_falling_off() -> None:
+    picture = _patched((128, 128), (0, 0, 32, 32))
+    area = ChangedArea(left=0.0, top=0.0, right=0.25, bottom=0.25)
+
+    cropped, cut = crop_changed_area(picture, area, margin=0.25)
+
+    with Image.open(io.BytesIO(cropped)) as image:
+        assert image.size == (64, 64), "the box is clamped to the picture, never past it"
+
+
+def test_a_crop_of_one_grid_part_is_never_empty() -> None:
+    """A single changed part is a thin box; a crop of nothing answers nothing."""
+
+    picture = _patched((128, 128), (60, 60, 64, 64))
+    area = ChangedArea(left=0.5, top=0.5, right=0.5, bottom=0.5)
+
+    cropped, _cut = crop_changed_area(picture, area, margin=0.0)
+
+    with Image.open(io.BytesIO(cropped)) as image:
+        assert image.size[0] >= 1 and image.size[1] >= 1
+
+
+def test_a_crop_shows_the_change_rather_than_the_whole_picture() -> None:
+    source = _encode(_solid(GREY, (128, 128)))
+    edited = _patched((128, 128), (80, 80, 112, 112))
+    difference = compare_edit(source, edited)
+    assert difference.changed_areas is not None
+    area = difference.changed_areas[0]
+
+    before, _before_cut = crop_changed_area(source, area, margin=1.0 / 32)
+    after, _after_cut = crop_changed_area(edited, area, margin=1.0 / 32)
+
+    assert compare_images(before, after).changed, "the crop must contain the edit"
+    with Image.open(io.BytesIO(after)) as image:
+        assert image.size[0] < 128 and image.size[1] < 128, "and less than everything else"
+
+
+def test_a_negative_margin_is_refused_rather_than_shrinking_the_crop() -> None:
+    picture = _patched((128, 128), (32, 32, 96, 96))
+    area = ChangedArea(left=0.25, top=0.25, right=0.75, bottom=0.75)
+
+    with pytest.raises(ValueError):
+        crop_changed_area(picture, area, margin=-0.1)

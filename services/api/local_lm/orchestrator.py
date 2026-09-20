@@ -90,7 +90,13 @@ from .generation_offers import (
     routing_plan_for_offer,
     should_extract_generation_offer,
 )
-from .image_edit_difference import INCOMPARABLE, ImageDifference, compare_edit
+from .image_edit_difference import (
+    INCOMPARABLE,
+    ChangedArea,
+    ImageDifference,
+    compare_edit,
+    crop_changed_area,
+)
 from .image_edit_kind import image_edit_kind
 from .image_edit_strength import (
     EditScope,
@@ -100,19 +106,27 @@ from .image_edit_strength import (
     resolve_image_edit_strength,
 )
 from .image_edit_verification import (
+    CORRESPONDENCE_MARGIN,
     MAX_ASSESSMENT_CHARACTERS,
+    MAX_CORRESPONDENCE_AREAS,
     MAX_INVENTORY_CHARACTERS,
     VERIFICATION_VERSION,
+    AreaContents,
+    ChangeAttribution,
     ImageEditRetryDecision,
     ImageEditVerificationJobPayload,
+    InventoryChange,
     VerificationReason,
+    areas_explain_the_changes,
     assess_from_inventories,
+    build_area_contents_prompt,
     build_change_attribution_prompt,
     build_image_inventory_prompt,
     compare_inventories,
     decide_image_edit_retry,
     image_edit_verification_eligibility,
     image_edit_verification_job_id,
+    parse_area_contents,
     parse_change_attribution,
     parse_image_inventory,
 )
@@ -7768,6 +7782,116 @@ class ConversationOrchestrator:
             else:
                 session.rollback()
 
+    async def _areas_explain_the_edit(
+        self,
+        job_id: str,
+        claim: JobClaim,
+        *,
+        changes: Sequence[InventoryChange],
+        attribution: ChangeAttribution,
+        difference: ImageDifference,
+        source: Artifact,
+        result: Artifact,
+        snapshot: AcceptedContext | None,
+    ) -> bool | None:
+        """Whether every changed area holds only what the request asked for.
+
+        Asked only when it decides something: the lists already agree that the
+        edit happened and that nothing else was named, and that is the one
+        verdict they cannot reach alone, because an omission beside the
+        requested change shares its area. Every other reading is settled
+        without spending a call here.
+
+        The areas come from a comparison of the WHOLE picture, never from the
+        selection-masked one the verdict otherwise uses. Preservation is a
+        claim about everything that was not asked about, and a measurement that
+        excludes the pixels outside a selection cannot support it: a collateral
+        edit in a corner the selection never covered would simply not appear as
+        an area, and every area that did appear would be explained. That is the
+        one way this question could certify an edit it had not looked at.
+
+        None means nobody asked, or nobody could tell, and the caller treats it
+        exactly as it treated a reading with no correspondence at all.
+        """
+
+        if not attribution.as_asked or not difference.comparable or not difference.changed:
+            return None
+        if not changes:
+            return None
+        whole = await asyncio.to_thread(self._image_edit_difference, source, result, None)
+        if not whole.comparable or not whole.changed:
+            return None
+        areas = whole.changed_areas
+        if not areas:
+            return None
+        if len(areas) > max(len(changes), 1):
+            # More of the whole picture moved than was reported changed. The
+            # verdict already refuses this shape when it measures it itself,
+            # and it must refuse it here too: the masked comparison the verdict
+            # uses cannot see a corner outside the selection, so this is the
+            # only place that check runs over everything.
+            return None
+        requested = sorted(set(attribution.requested))
+        if any(index >= len(changes) for index in requested):
+            return None
+        if len(requested) != len(changes):
+            # Something changed that nobody asked for. The lists already decide
+            # that, so the crops would only confirm a verdict already reached.
+            return None
+        if len(areas) > MAX_CORRESPONDENCE_AREAS:
+            # More places moved than this is willing to examine one at a time.
+            return None
+        try:
+            before = self.artifacts.verified_bytes(source, maximum_bytes=MAX_BLEND_READ_BYTES)
+            after = self.artifacts.verified_bytes(result, maximum_bytes=MAX_BLEND_READ_BYTES)
+        except (OSError, ValueError):
+            return None
+
+        def cut(
+            region: ChangedArea,
+        ) -> list[tuple[Artifact, tuple[float, float, float, float], bytes]]:
+            # Each crop carries the artifact it came from and the extent that
+            # was actually cut, which the cropping measures back from pixels.
+            crops: list[tuple[Artifact, tuple[float, float, float, float], bytes]] = []
+            for artifact, content in ((source, before), (result, after)):
+                cropped, cut_area = crop_changed_area(content, region, margin=CORRESPONDENCE_MARGIN)
+                crops.append(
+                    (
+                        artifact,
+                        (cut_area.left, cut_area.top, cut_area.right, cut_area.bottom),
+                        cropped,
+                    )
+                )
+            return crops
+
+        readings: list[AreaContents] = []
+        for area in areas:
+            try:
+                crops = await asyncio.to_thread(cut, area)
+                seen = self.vision.region_context(crops)
+            except (OSError, ValueError, VisionInputError):
+                return None
+            answer = await self._vision_answer(
+                job_id,
+                claim,
+                self.vision.attach_to_latest_user(
+                    [
+                        {
+                            "role": MessageRole.USER.value,
+                            "content": build_area_contents_prompt(changes),
+                        }
+                    ],
+                    seen,
+                ),
+                snapshot=snapshot,
+                limit=MAX_ASSESSMENT_CHARACTERS,
+            )
+            try:
+                readings.append(parse_area_contents(answer))
+            except ValueError:
+                return None
+        return areas_explain_the_changes(readings, changes, requested)
+
     async def _vision_answer(
         self,
         job_id: str,
@@ -8116,7 +8240,17 @@ class ConversationOrchestrator:
             difference = await asyncio.to_thread(
                 self._image_edit_difference, source, result, verification_mask
             )
-            assessment = assess_from_inventories(changes, attribution, difference)
+            areas = await self._areas_explain_the_edit(
+                job_id,
+                claim,
+                changes=changes,
+                attribution=attribution,
+                difference=difference,
+                source=source,
+                result=result,
+                snapshot=snapshot,
+            )
+            assessment = assess_from_inventories(changes, attribution, difference, areas)
             if assessment is None:
                 # Either the lists and the pixels do not account for each
                 # other, or they agree and still cannot show that nothing else
