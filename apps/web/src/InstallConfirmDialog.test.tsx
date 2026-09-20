@@ -88,4 +88,30 @@ describe("InstallConfirmDialog", () => {
     expect(onCancel).toHaveBeenCalled();
     expect(onConfirm).not.toHaveBeenCalled();
   });
+
+  it.each(["Cancel", "Download 24 GB"])(
+    "keeps %s focused while pending and ignores repeated activation",
+    (name) => {
+      const onCancel = vi.fn();
+      const onConfirm = vi.fn();
+      const props = { name: "Big Model", preflight, onCancel, onConfirm };
+      const { rerender } = render(<InstallConfirmDialog {...props} pending={false} />);
+      const button = screen.getByRole("button", { name });
+      button.focus();
+
+      rerender(<InstallConfirmDialog {...props} pending />);
+
+      expect(button).toHaveFocus();
+      expect(button).not.toBeDisabled();
+      expect(button).toHaveAttribute("aria-disabled", "true");
+      fireEvent.click(button);
+      expect(onConfirm).not.toHaveBeenCalled();
+      expect(onCancel).not.toHaveBeenCalled();
+
+      rerender(<InstallConfirmDialog {...props} pending={false} />);
+      expect(button).toHaveFocus();
+      fireEvent.click(button);
+      expect(name === "Cancel" ? onCancel : onConfirm).toHaveBeenCalledTimes(1);
+    },
+  );
 });

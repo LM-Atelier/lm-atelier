@@ -86,10 +86,14 @@ export function InstallConfirmDialog({
         </p>
       ))}
       <footer>
-        <button className="secondary" onClick={onCancel} disabled={pending}>
+        <button className="secondary" aria-disabled={pending} onClick={() => {
+          if (!pending) onCancel();
+        }}>
           Cancel
         </button>
-        <button className="primary" onClick={onConfirm} disabled={pending}>
+        <button className="primary" aria-disabled={pending} onClick={() => {
+          if (!pending) onConfirm();
+        }}>
           {pending ? "Starting…" : `Download ${formatBytes(preflight.download_bytes)}`}
         </button>
       </footer>
