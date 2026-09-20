@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import io
 import json
 import zipfile
@@ -9,6 +8,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import wait_until
 from sqlalchemy import func, select
 
 from local_lm.db import SessionLocal
@@ -57,14 +57,18 @@ async def _archive(
             assert exported.status_code == 201, exported.text
             content = await client.get(f"/api/artifacts/{exported.json()['id']}/content")
             return source.json(), edited.json(), content.content
-    deadline = asyncio.get_running_loop().time() + 10
-    while asyncio.get_running_loop().time() < deadline:
-        plans = (await client.get("/api/work-plans", params={"chat_id": chat["id"]})).json()
-        if plans and all(plan["status"] == "complete" for plan in plans):
-            break
-        await asyncio.sleep(0.03)
-    else:
-        raise AssertionError("Constructed text plans did not finish")
+
+    async def read_plans() -> list[dict[str, Any]]:
+        plans: list[dict[str, Any]] = (
+            await client.get("/api/work-plans", params={"chat_id": chat["id"]})
+        ).json()
+        return plans
+
+    await wait_until(
+        read_plans,
+        lambda plans: bool(plans) and all(plan["status"] == "complete" for plan in plans),
+        what=f"the constructed text plans of chat {chat['id']}",
+    )
     exported = await client.post(f"/api/projects/{project['id']}/export")
     assert exported.status_code == 201, exported.text
     content = await client.get(f"/api/artifacts/{exported.json()['id']}/content")

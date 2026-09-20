@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 from collections.abc import AsyncIterator
@@ -11,6 +10,7 @@ from typing import Any, cast
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import wait_until
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from test_workflow_lora_execution import (
@@ -195,14 +195,19 @@ def _force_seeded_workflow(
 
 
 async def _wait_for_plan(client: AsyncClient, plan_id: str) -> dict[str, Any]:
-    deadline = asyncio.get_running_loop().time() + 8
-    while asyncio.get_running_loop().time() < deadline:
-        response = await client.get(f"/api/work-plans/{plan_id}")
-        plan: dict[str, Any] = response.json()
-        if plan["status"] in {"complete", "failed", "cancelled", "interrupted", "blocked"}:
-            return plan
-        await asyncio.sleep(0.03)
-    raise AssertionError("work plan did not finish")
+    async def read_plan() -> dict[str, Any]:
+        plan: dict[str, Any] = (await client.get(f"/api/work-plans/{plan_id}")).json()
+        return plan
+
+    # This plan may end in states the shared terminal set does not name, so it
+    # waits on its own predicate rather than on that set.
+    return await wait_until(
+        read_plan,
+        lambda plan: (
+            plan["status"] in {"complete", "failed", "cancelled", "interrupted", "blocked"}
+        ),
+        what=f"work plan {plan_id}",
+    )
 
 
 def _assert_no_turn_rows(chat_id: str, *, title: str) -> None:
