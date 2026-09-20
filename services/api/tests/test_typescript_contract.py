@@ -78,6 +78,7 @@ CHECKED_CONTRACTS = {
     "QueueLaneCounts": "QueueLaneCountsOut",
     "QueueControlCommand": "QueueControlCommand",
     "GenerationQueuePolicy": "GenerationQueuePolicyOut",
+    "TransferQueuePolicy": "TransferQueuePolicyOut",
     "QueueControlResult": "QueueControlResultOut",
     "QueueActivityItem": "QueueActivityItemOut",
     "QueueActivityPage": "QueueActivityPageOut",

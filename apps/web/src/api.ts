@@ -57,6 +57,8 @@ import type {
   QueueControlCommand,
   GenerationQueueAction,
   GenerationQueuePolicy,
+  TransferQueueAction,
+  TransferQueuePolicy,
   QueueControlResult,
   QueueActivityPage,
   QueuePlanSteps,
@@ -615,6 +617,12 @@ export const api = {
       if (value.plan_id !== planId) throw new Error("The submitted work steps could not be read.");
       return value;
     }),
+  transferQueuePolicy: (signal?: AbortSignal) =>
+    request<TransferQueuePolicy>("/api/queue/lanes/transfer", { signal }),
+  transferQueueControl: (action: TransferQueueAction, command: QueueControlCommand) =>
+    request<TransferQueuePolicy>("/api/queue/lanes/transfer/"
+      + (action === "pause_after_current" ? "pause-after-current" : "resume"),
+    { method: "POST", body: JSON.stringify(command) }),
   generationQueuePolicy: (signal?: AbortSignal) =>
     request<GenerationQueuePolicy>("/api/queue/lanes/generation", { signal }),
   generationQueueControl: (action: GenerationQueueAction, command: QueueControlCommand) =>

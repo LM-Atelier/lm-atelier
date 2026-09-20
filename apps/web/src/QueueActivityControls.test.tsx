@@ -7,7 +7,7 @@ import type { QueueActivityItem } from "./types";
 
 vi.mock("./api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./api")>()),
-  api: { queueActivity: vi.fn(), generationQueuePolicy: vi.fn(), generationQueueControl: vi.fn(), queueControl: vi.fn(), queuePlanSteps: vi.fn() },
+  api: { queueActivity: vi.fn(), transferQueuePolicy: vi.fn(), transferQueueControl: vi.fn(), generationQueuePolicy: vi.fn(), generationQueueControl: vi.fn(), queueControl: vi.fn(), queuePlanSteps: vi.fn() },
 }));
 
 const clients: QueryClient[] = [];
@@ -16,6 +16,10 @@ const stamp = "2026-09-01T00:00:00Z";
 
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.mocked(api.transferQueuePolicy).mockResolvedValue({
+    lane: "transfer", dispatch_state: "open", revision: 0,
+    running_jobs: 0, allowed_actions: ["pause_after_current"],
+  });
   vi.mocked(api.generationQueuePolicy).mockResolvedValue({
     lane: "generation", dispatch_state: "open", revision: 0,
     running_jobs: 0, allowed_actions: ["pause_after_current"],

@@ -5,6 +5,7 @@ import { api } from "./api";
 import { clockOptions, useClockChoice } from "./clockPreference";
 import { QueuePlanControls } from "./QueuePlanControls";
 import { GenerationQueueControls } from "./GenerationQueueControls";
+import { QueueLaneControls } from "./QueueLaneControls";
 import { QueuePlanSteps } from "./QueuePlanSteps";
 import type { QueueActivityItem } from "./types";
 import "./QueueActivityDialog.css";
@@ -55,6 +56,7 @@ export function QueueActivityDialog({ onClose }: { onClose: () => void }) {
         </button>
       </div>
       <GenerationQueueControls />
+      <QueueLaneControls lane="transfer" />
       {activity.error && (
         <div role="alert" className="queue-activity-error">
           {activity.error.message}
