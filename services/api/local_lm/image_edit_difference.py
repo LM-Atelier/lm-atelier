@@ -52,6 +52,30 @@ MASK_SAMPLES = 4
 
 
 @dataclass(frozen=True)
+class ChangedArea:
+    """Where one connected run of changed parts sits, in fractions of the picture.
+
+    Fractions rather than pixels because the comparison works on a reduced grid
+    while a reader works on the original, and the two pictures are the same
+    shape by the time anything is compared. A reader that wants to look at one
+    area multiplies by that picture's own width and height.
+    """
+
+    left: float
+    top: float
+    right: float
+    bottom: float
+
+    def provenance(self) -> dict[str, float]:
+        return {
+            "left": round(self.left, 4),
+            "top": round(self.top, 4),
+            "right": round(self.right, 4),
+            "bottom": round(self.bottom, 4),
+        }
+
+
+@dataclass(frozen=True)
 class ImageDifference:
     """How much two images differ, and whether that counts as a change.
 
@@ -69,6 +93,10 @@ class ImageDifference:
     #: changed can tell "everything that moved was named" from "something else
     #: moved too"; an aggregate difference cannot say that.
     changed_regions: int | None = None
+    #: Where each of those areas sits. Counting told a reader that something
+    #: unnamed moved; this says where to look, which is what lets a reader ask
+    #: what is in it rather than only how many there were.
+    changed_areas: tuple[ChangedArea, ...] | None = None
 
     def provenance(self) -> dict[str, object]:
         recorded: dict[str, object] = {
@@ -81,6 +109,8 @@ class ImageDifference:
             recorded["largest_local_difference"] = round(self.largest_local_difference, 4)
         if self.changed_regions is not None:
             recorded["changed_regions"] = self.changed_regions
+        if self.changed_areas is not None:
+            recorded["changed_areas"] = [area.provenance() for area in self.changed_areas]
         return recorded
 
 
@@ -162,23 +192,30 @@ def compare_edit(
     if not measured:
         return INCOMPARABLE
     largest = max(measured)
+    areas = _changed_areas(parts, coverage, grid)
     return ImageDifference(
         mean_absolute_difference=sum(measured) / len(measured),
         changed=largest > UNCHANGED_THRESHOLD,
         comparable=True,
         largest_local_difference=largest,
-        changed_regions=_changed_regions(parts, coverage, grid),
+        changed_regions=len(areas),
+        changed_areas=areas,
     )
 
 
-def _changed_regions(
+def _changed_areas(
     parts: Sequence[float], coverage: Sequence[object], grid: tuple[int, int]
-) -> int:
-    """How many separate areas of the grid changed, touching parts counted once.
+) -> tuple[ChangedArea, ...]:
+    """Where each separate area of the grid changed, touching parts counted once.
 
     Two things changed in two places is two areas; one thing spanning several
-    parts is still one. Counting areas is what lets a reader ask whether every
-    area that moved was among the things reported changed.
+    parts is still one. The count alone lets a reader ask whether every area
+    that moved was among the things reported changed; the bounds let it ask the
+    harder question, which is what is inside one.
+
+    Each area is returned as the box enclosing its parts, in fractions of the
+    picture, ordered from the top left so that two runs over the same picture
+    describe its areas in the same order.
     """
 
     across, down = grid
@@ -187,10 +224,12 @@ def _changed_regions(
         for index, (part, covered) in enumerate(zip(parts, coverage, strict=True))
         if isinstance(covered, float) and covered > 0 and part > UNCHANGED_THRESHOLD
     }
-    regions = 0
+    areas: list[ChangedArea] = []
     while changed:
-        regions += 1
-        frontier = [changed.pop()]
+        start = min(changed)
+        changed.remove(start)
+        members = [start]
+        frontier = [start]
         while frontier:
             index = frontier.pop()
             row, column = divmod(index, across)
@@ -205,7 +244,18 @@ def _changed_regions(
                     if neighbour in changed:
                         changed.remove(neighbour)
                         frontier.append(neighbour)
-    return regions
+                        members.append(neighbour)
+        rows = [index // across for index in members]
+        columns = [index % across for index in members]
+        areas.append(
+            ChangedArea(
+                left=min(columns) / across,
+                top=min(rows) / down,
+                right=(max(columns) + 1) / across,
+                bottom=(max(rows) + 1) / down,
+            )
+        )
+    return tuple(sorted(areas, key=lambda area: (area.top, area.left)))
 
 
 def _working_pictures(

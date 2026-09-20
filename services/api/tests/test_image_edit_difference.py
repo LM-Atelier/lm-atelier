@@ -252,3 +252,60 @@ def test_changed_areas_are_counted_so_coverage_can_be_checked() -> None:
     assert spanning.changed_regions == 1
     assert unchanged.changed_regions == 0
     assert single.provenance()["changed_regions"] == 1
+
+
+def _patched_twice(
+    size: tuple[int, int],
+    first: tuple[int, int, int, int],
+    second: tuple[int, int, int, int],
+) -> bytes:
+    picture = _solid(GREY, size)
+    picture.paste(RED, first)
+    picture.paste(RED, second)
+    return _encode(picture)
+
+
+def test_a_changed_area_says_where_it_is_not_only_that_it_is_there() -> None:
+    """Counting told a reader that something unnamed moved; bounds say where."""
+
+    source = _encode(_solid(GREY, (128, 128)))
+    difference = compare_edit(source, _patched((128, 128), (32, 32, 96, 96)))
+
+    assert difference.changed_areas is not None
+    assert difference.changed_regions == len(difference.changed_areas)
+    assert len(difference.changed_areas) == 1
+    area = difference.changed_areas[0]
+    # The patch is the middle half of the picture, so its box encloses that and
+    # stays inside the picture.
+    assert 0.0 <= area.left <= 0.3 and 0.0 <= area.top <= 0.3
+    assert 0.7 <= area.right <= 1.0 and 0.7 <= area.bottom <= 1.0
+    assert area.left < area.right and area.top < area.bottom
+    assert difference.provenance()["changed_areas"] == [area.provenance()]
+
+
+def test_two_separate_changes_are_two_areas_ordered_from_the_top_left() -> None:
+    """Two things in two places are two boxes, and the order does not wander."""
+
+    source = _encode(_solid(GREY, (128, 128)))
+    difference = compare_edit(
+        source, _patched_twice((128, 128), (8, 8, 24, 24), (96, 100, 120, 124))
+    )
+
+    assert difference.changed_areas is not None
+    assert len(difference.changed_areas) == 2
+    first, second = difference.changed_areas
+    assert (first.top, first.left) < (second.top, second.left)
+    assert first.bottom <= second.top or first.right <= second.left
+    assert difference.changed_regions == 2
+
+
+def test_one_subject_spanning_many_parts_is_still_one_area() -> None:
+    """A wide change is one box, not one per part it touches."""
+
+    source = _encode(_solid(GREY, (128, 128)))
+    difference = compare_edit(source, _patched((128, 128), (4, 56, 124, 72)))
+
+    assert difference.changed_areas is not None
+    assert len(difference.changed_areas) == 1
+    area = difference.changed_areas[0]
+    assert area.right - area.left > area.bottom - area.top
