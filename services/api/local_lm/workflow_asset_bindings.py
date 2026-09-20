@@ -17,7 +17,10 @@ WORKFLOW_ASSET_BINDING_VERSION = 1
 MAX_WORKFLOW_ASSET_BINDINGS = 512
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
-_IMMUTABLE_REVISION = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64}|[1-9][0-9]{0,19})$")
+_IMMUTABLE_REVISIONS = {
+    "huggingface": re.compile(r"[0-9a-f]{40}"),
+    "civitai": re.compile(r"[1-9][0-9]{0,19}"),
+}
 _PLAN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")
 
 _REFERENCE_ARTIFACT_KINDS: dict[str, frozenset[InstalledAssetKind]] = {
@@ -242,6 +245,12 @@ def validate_workflow_asset_candidate(
     return artifact
 
 
+def is_immutable_install_revision(provider: str, revision: str) -> bool:
+    """Require the provider's exact identity format before binding model bytes."""
+    pattern = _IMMUTABLE_REVISIONS.get(provider)
+    return pattern is not None and pattern.fullmatch(revision) is not None
+
+
 def _validate_plan(plan: InstallPlan, expected_id: str) -> None:
     if not _PLAN_ID.fullmatch(expected_id) or plan.id != expected_id:
         raise WorkflowAssetBindingError(
@@ -268,7 +277,7 @@ def _validate_plan(plan: InstallPlan, expected_id: str) -> None:
         or not isinstance(plan.remote_id, str)
         or not plan.remote_id
         or not isinstance(plan.revision, str)
-        or not _IMMUTABLE_REVISION.fullmatch(plan.revision)
+        or not is_immutable_install_revision(plan.provider, plan.revision)
         or not isinstance(plan.plan_hash, str)
         or not _DIGEST.fullmatch(plan.plan_hash)
     ):
