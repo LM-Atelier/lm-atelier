@@ -273,8 +273,24 @@ async def test_context_folding_preserves_system_and_current_messages() -> None:
 
 async def test_managed_chat_worker_is_aligned_to_the_run_profile() -> None:
     run = SimpleNamespace(id="run-1", profile_id="profile-selected", provenance_json={})
-    profile = SimpleNamespace(id="profile-selected", model_install_id="install-selected")
-    install = SimpleNamespace(id="install-selected")
+    profile = ModelProfile(
+        id="profile-selected",
+        model_install_id="install-selected",
+        name="Selected model",
+        role="chat",
+        engine="llama.cpp",
+        load_settings_json={},
+        request_settings_json={},
+    )
+    install = ModelInstall(
+        id="install-selected",
+        name="Selected model",
+        role="chat",
+        engine="llama.cpp",
+        local_path="selected-model.gguf",
+        manifest_json={},
+        active=True,
+    )
 
     class FakeSession:
         def __enter__(self):  # type: ignore[no-untyped-def]
@@ -319,7 +335,11 @@ async def test_managed_chat_worker_is_aligned_to_the_run_profile() -> None:
     result = await orchestrator._ensure_chat_worker("run-1")
 
     assert result == aligned
-    processes.load_chat.assert_awaited_once_with(profile, install)
+    processes.load_chat.assert_awaited_once()
+    supplied_profile, supplied_install = processes.load_chat.await_args_list[0].args
+    assert supplied_profile.id == profile.id
+    assert supplied_profile.model_install_id == install.id == supplied_install.id
+    assert len(processes.load_chat.await_args_list[0].kwargs["launch_scope_sha256"]) == 64
 
 
 async def test_engine_cancel_runs_after_the_database_session_closes() -> None:

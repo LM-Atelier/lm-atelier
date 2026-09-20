@@ -267,6 +267,7 @@ from .prior_turn_edits import (
     prior_turn_edit_source,
     queue_prior_turn_edit,
 )
+from .profile_model_updates import ProfileModelUpdateError, switch_profile_model
 from .profile_service import (
     AUTO_PROFILE_ID,
     LAST_CHAT_PROFILE_KEY,
@@ -431,6 +432,7 @@ from .schemas import (
     ModelProfileBundle,
     ModelProfileClone,
     ModelProfileCreate,
+    ModelProfileModelUpdate,
     ModelProfileOut,
     ModelProfileUpdate,
     ModelStorageInfo,
@@ -4599,6 +4601,14 @@ async def retry_work_step(
     return await retry_job(job.id, request, session)
 
 
+@router.get("/downloads/{job_id}", response_model=JobOut)
+async def get_download_job(job_id: str, session: SessionDep) -> Job:
+    job = session.get(Job, job_id)
+    if job is None or job.kind != JobKind.DOWNLOAD.value:
+        raise api_error(404, "download-not-found", "Download not found.")
+    return job
+
+
 @router.get("/jobs", response_model=list[JobOut])
 async def list_jobs(
     session: ConversationSessionDep,
@@ -8182,6 +8192,27 @@ async def _create_profile(
     session.commit()
     session.refresh(profile)
     return profile
+
+
+@router.post("/profiles/{profile_id}/model-update", response_model=ModelProfileOut)
+async def update_profile_model(
+    profile_id: str,
+    payload: ModelProfileModelUpdate,
+    request: Request,
+    session: SessionDep,
+) -> ModelProfile:
+    services = _services(request)
+    try:
+        return switch_profile_model(
+            session,
+            profile_id,
+            expected_install_id=payload.expected_install_id,
+            download_job_id=payload.download_job_id,
+            settings=services.settings,
+            runtimes=services.runtimes,
+        )
+    except ProfileModelUpdateError as exc:
+        raise api_error(exc.status, exc.code, str(exc)) from exc
 
 
 @router.patch("/profiles/{profile_id}", response_model=ModelProfileOut)

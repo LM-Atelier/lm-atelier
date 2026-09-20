@@ -68,6 +68,7 @@ import type {
   ModelStorageInfo,
   ModelUpdate,
   ModelProfile,
+  ModelProfileModelUpdate,
   ModelProfileBundle,
   OutputRatioPresetId,
   PlatformMatrixEntry,
@@ -728,6 +729,11 @@ export const api = {
         request_settings: {},
         is_default: isDefault,
       }),
+    }),
+  downloadJob: (id: string) => request<Job>(`/api/downloads/${encodeURIComponent(id)}`),
+  updateProfileModel: (id: string, values: ModelProfileModelUpdate) =>
+    request<ModelProfile>(`/api/profiles/${encodeURIComponent(id)}/model-update`, {
+      method: "POST", body: JSON.stringify(values),
     }),
   updateProfile: (
     id: string,

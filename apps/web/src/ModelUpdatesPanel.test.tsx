@@ -134,7 +134,7 @@ describe("ModelUpdatesPanel", () => {
     expect(onInstall).not.toHaveBeenCalled();
     fireEvent.click(review);
 
-    await waitFor(() => expect(onInstall).toHaveBeenCalledExactlyOnceWith(model, role));
+    await waitFor(() => expect(onInstall).toHaveBeenCalledExactlyOnceWith(model, role, "checkpoint-a"));
     expect(api.modelInstall).toHaveBeenCalledExactlyOnceWith("checkpoint-a");
     expect(api.models).not.toHaveBeenCalled();
     expect(api.catalogItemDetail).toHaveBeenCalledExactlyOnceWith("civitai", "204", role);
@@ -181,7 +181,7 @@ describe("ModelUpdatesPanel", () => {
     const onInstall = renderPanel();
     fireEvent.click(screen.getByRole("button", { name: /Check for updates/ }));
     fireEvent.click(await screen.findByRole("button", { name: "Review update" }));
-    await waitFor(() => expect(onInstall).toHaveBeenCalledExactlyOnceWith(model, "video"));
+    await waitFor(() => expect(onInstall).toHaveBeenCalledExactlyOnceWith(model, "video", "checkpoint-a"));
     expect(api.modelInstall).toHaveBeenCalledExactlyOnceWith("checkpoint-a");
     expect(api.models).not.toHaveBeenCalled();
   });

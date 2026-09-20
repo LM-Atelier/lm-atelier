@@ -9,6 +9,8 @@ vi.mock("./ModelUpdatesPanel", () => ({ ModelUpdatesPanel: () => null }));
 vi.mock("./useCatalogInstall", () => ({
   useCatalogInstall: () => ({
     pendingInstall: null,
+    updateDownloads: [],
+    dismissUpdate: vi.fn(),
     cancel: vi.fn(),
     prepare: { isPending: false, variables: undefined, mutate: vi.fn() },
     confirm: { isPending: false, mutate: vi.fn() },
