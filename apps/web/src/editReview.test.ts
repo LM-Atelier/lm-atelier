@@ -67,6 +67,34 @@ describe("editReviewSummary", () => {
     })).toBe("Edit review measured no change where you asked for one");
   });
 
+  it("says the picture changed when the review did not find the change but the pixels moved", () => {
+    expect(editReviewSummary({
+      image_edit_verification: {
+        status: "complete",
+        automatic_retry_executed: false,
+        assessment: { ...assessment, requested_change_visible: false },
+        difference: { mean_absolute_difference: 15.55, changed: true, comparable: true, threshold: 2 },
+      },
+    })).toBe("Edit review did not find the change you asked for · the picture did change");
+  });
+
+  it("keeps the flat wording when the comparison agrees or could not be made", () => {
+    for (const difference of [
+      { mean_absolute_difference: 0.4, changed: false, comparable: true, threshold: 2 },
+      { mean_absolute_difference: 0, changed: true, comparable: false, threshold: 2 },
+      undefined,
+    ]) {
+      expect(editReviewSummary({
+        image_edit_verification: {
+          status: "complete",
+          automatic_retry_executed: false,
+          assessment: { ...assessment, requested_change_visible: false },
+          ...(difference ? { difference } : {}),
+        },
+      })).toBe("Edit review did not find the change you asked for");
+    }
+  });
+
   it("reports a missing change and collateral change separately", () => {
     expect(editReviewSummary({
       image_edit_verification: {
