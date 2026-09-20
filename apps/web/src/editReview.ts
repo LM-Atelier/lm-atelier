@@ -39,6 +39,21 @@ function strengthChange(before: unknown, after: unknown): string {
  */
 const SILENT_SKIPS = new Set(["not_image_edit", "disabled", "eligible", "cancelled"]);
 
+/**
+ * Skips where the review ran and reached no verdict, which is a different thing
+ * from never having started. A review that reads both pictures, reads both
+ * lists and then refuses to certify has done its work and learned something;
+ * telling the person it did not run describes the wrong event, and since a
+ * reading that would otherwise pass an edit now ends here, this is the common
+ * ending of a good edit rather than a rare one.
+ */
+const REACHED_NO_VERDICT = new Set([
+  "change_unaccounted",
+  "inventory_unavailable",
+  "assessment_unavailable",
+  "invalid_assessment",
+]);
+
 /** Whether the comparison measured a change, whatever the review concluded from it. */
 function measuredAChange(review: Record<string, unknown>): boolean {
   const difference = record(review.difference);
@@ -61,9 +76,13 @@ export function editReviewSummary(
 
   if (review.status === "skipped") {
     const reason = review.reason;
-    return typeof reason === "string" && SILENT_SKIPS.has(reason)
-      ? null
-      : "Edit review did not run";
+    if (typeof reason === "string" && SILENT_SKIPS.has(reason)) return null;
+    if (typeof reason === "string" && REACHED_NO_VERDICT.has(reason)) {
+      return measuredAChange(review)
+        ? "Edit review could not tell · the picture did change"
+        : "Edit review could not tell";
+    }
+    return "Edit review did not run";
   }
   if (review.status !== "complete") return null;
 

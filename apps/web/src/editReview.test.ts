@@ -130,6 +130,38 @@ describe("editReviewSummary", () => {
     })).toBe("Edit review did not run");
   });
 
+  it("says a review that ran and reached no verdict could not tell", () => {
+    for (const reason of [
+      "change_unaccounted",
+      "inventory_unavailable",
+      "assessment_unavailable",
+      "invalid_assessment",
+    ]) {
+      expect(editReviewSummary({
+        image_edit_verification: { status: "skipped", reason, automatic_retry_executed: false },
+      })).toBe("Edit review could not tell");
+    }
+  });
+
+  it("keeps the measurement beside a review that could not tell", () => {
+    expect(editReviewSummary({
+      image_edit_verification: {
+        status: "skipped",
+        reason: "change_unaccounted",
+        automatic_retry_executed: false,
+        difference: { comparable: true, changed: true },
+      },
+    })).toBe("Edit review could not tell · the picture did change");
+    expect(editReviewSummary({
+      image_edit_verification: {
+        status: "skipped",
+        reason: "change_unaccounted",
+        automatic_retry_executed: false,
+        difference: { comparable: true, changed: false },
+      },
+    })).toBe("Edit review could not tell");
+  });
+
   it("invents nothing from an absent or malformed record", () => {
     expect(editReviewSummary(undefined)).toBeNull();
     expect(editReviewSummary({})).toBeNull();
