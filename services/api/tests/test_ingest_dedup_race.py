@@ -13,6 +13,7 @@ from local_lm.artifacts import ArtifactStore
 from local_lm.config import Settings
 from local_lm.db import Base
 from local_lm.domain import ArtifactKind
+from local_lm.filesystem_links import rename_entry
 from local_lm.models import Artifact
 
 PAYLOAD = b"bytes that already exist in the store"
@@ -153,7 +154,7 @@ def test_the_reservation_is_held_before_the_bytes_appear_not_merely_before_the_r
     store, engine = store_and_engine
     _make_sweepable(store, engine)
 
-    real_rename = artifacts_module.rename_entry
+    real_rename = rename_entry
     excluded_at_publication: list[bool] = []
 
     def rename_then_probe(*args: Any, **kwargs: Any) -> Any:
