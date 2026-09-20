@@ -1,5 +1,5 @@
 import { Download, Star, X } from "lucide-react";
-import { useCallback, useEffect, useId, useMemo, useReducer, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useReducer, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import { GenerationIdentitySummary } from "./GenerationIdentitySummary";
@@ -58,6 +58,10 @@ export function StudioView({
   /** Put the picture down and go back to an empty studio. */
   onClose: () => void;
 }) {
+  const heading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    heading.current?.focus();
+  }, [sourceArtifactId]);
   const { sessionId, steps, previewArtifactId, busy, error, apply } = useStudioSession(
     sourceArtifactId,
     sourceChatId,
@@ -146,10 +150,25 @@ export function StudioView({
       dispatch({ type: "image-changed", width: bitmap.width, height: bitmap.height });
     }
   }, [bitmap]);
+  // Enhance asks for no words: the whole picture is the subject and
+  // the size is the whole instruction. Text takes its words from its
+  // own fields, and without a box it would change the whole picture.
+  const applyDisabled =
+    (tools.kind === "extend" && !Object.values(tools.margins).some(Boolean)) ||
+    (tools.kind === "text" && (!tools.newWords.trim() || selectionCoverage === 0)) ||
+    (!["enhance", "extend", "text", "relight"].includes(tools.kind) && !instruction.trim()) ||
+    busy ||
+    !current ||
+    Boolean(unavailable) ||
+    Boolean(
+      workflowUnavailable &&
+        !recipe?.workflow_revision_id &&
+        !(tools.kind === "relight" && activeTool?.workflow_revision_id),
+    );
   if (!sourceArtifactId) {
     return (
       <div className="page-view studio-view">
-        <header className="page-header"><div><h1>Image Studio</h1></div></header>
+        <header className="page-header"><div><h1 ref={heading} tabIndex={-1}>Image Studio</h1></div></header>
         <StudioOpenImage onOpened={onOpenArtifact} />
       </div>
     );
@@ -158,7 +177,7 @@ export function StudioView({
   return (
     <div className="page-view studio-view">
       <header className="page-header">
-        <div><h1>Image Studio</h1></div>
+        <div><h1 ref={heading} tabIndex={-1}>Image Studio</h1></div>
         <div className="studio-header-actions">
           {current && !previewArtifactId && (
             <>
@@ -322,24 +341,9 @@ export function StudioView({
           )}
           <button
             className="primary"
-            // Enhance asks for no words: the whole picture is the subject and
-            // the size is the whole instruction. Text takes its words from its
-            // own fields, and without a box it would change the whole picture.
-            disabled={
-              (tools.kind === "extend" && !Object.values(tools.margins).some(Boolean)) ||
-              (tools.kind === "text" && (!tools.newWords.trim() || selectionCoverage === 0)) ||
-              (!["enhance", "extend", "text", "relight"].includes(tools.kind) && !instruction.trim()) ||
-              busy ||
-              !current ||
-              Boolean(unavailable) ||
-              Boolean(
-                workflowUnavailable &&
-                  !recipe?.workflow_revision_id &&
-                  !(tools.kind === "relight" && activeTool?.workflow_revision_id),
-              )
-            }
+            aria-disabled={applyDisabled}
             onClick={() => {
-              if (!current) return;
+              if (applyDisabled || !current) return;
               const selection = toolUsesMask(tools.kind) && tools.mask && !isEmpty(tools.mask)
                 ? tools.mask
                 : null;
@@ -500,6 +504,7 @@ function StudioFilmstrip({
           aria-pressed={step.artifactId === selectedId}
           className={step.artifactId === selectedId ? "selected" : ""}
           onClick={() => onSelect(step.artifactId)}
+          onFocus={(event) => event.currentTarget.scrollIntoView({ block: "nearest", inline: "nearest" })}
         >
           <img
             src={`/api/artifacts/${encodeURIComponent(step.artifactId)}/content`}
