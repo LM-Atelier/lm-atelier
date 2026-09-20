@@ -359,6 +359,9 @@ def record_local_source_artifact_review(
         review_sha256=review_sha256,
         reviewed_at=utcnow(),
     )
+    # Flush caller changes before the savepoint so their errors cannot be
+    # mistaken for a conflict while inserting this review.
+    session.flush()
     conflicted = False
     try:
         with session.begin_nested():
