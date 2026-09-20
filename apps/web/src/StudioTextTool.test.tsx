@@ -80,15 +80,19 @@ function drawBox() {
 it("replaces the boxed words through a softened copy of the box", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Replace words in the picture" }));
   const replace = screen.getByRole("button", { name: "Replace words" });
-  expect(replace).toBeDisabled();
+  expect(replace).toHaveAttribute("aria-disabled", "true");
+  fireEvent.click(replace);
+  expect(apply).not.toHaveBeenCalled();
   expect(screen.queryByRole("slider", { name: "Brush size" })).toBeNull();
 
   fireEvent.change(screen.getByRole("textbox", { name: /Replace with/ }), { target: { value: "Open late" } });
   // New words without a box would change the whole picture.
-  expect(replace).toBeDisabled();
+  expect(replace).toHaveAttribute("aria-disabled", "true");
+  fireEvent.click(replace);
+  expect(apply).not.toHaveBeenCalled();
   drawBox();
   fireEvent.change(screen.getByRole("textbox", { name: /Words there now/ }), { target: { value: "Open daily" } });
-  expect(replace).toBeEnabled();
+  expect(replace).toHaveAttribute("aria-disabled", "false");
 
   fireEvent.click(replace);
   await waitFor(() => expect(apply).toHaveBeenCalledTimes(1));

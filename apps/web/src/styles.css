@@ -335,7 +335,7 @@ body.resizing-sidebar { user-select: none; cursor: col-resize; }
 .new-chat, .primary { border: 0; border-radius: 10px; background: var(--accent-fill); color: var(--accent-ink); display: inline-flex; align-items: center; justify-content: center; gap: calc(8px * var(--spacing-scale, 1)); font-weight: 600; padding: calc(10px * var(--spacing-scale, 1)) calc(14px * var(--spacing-scale, 1)); cursor: pointer; transition: filter var(--quick) var(--ease), transform var(--quick) var(--ease); }
 .new-chat { width: 100%; margin-bottom: 10px; }
 .new-chat:hover, .primary:hover { filter: brightness(1.1); transform: translateY(-1px); }
-.new-chat:disabled, .primary:disabled { opacity: .55; cursor: default; transform: none; }
+.new-chat:disabled, .primary:disabled, .primary[aria-disabled="true"] { opacity: .55; cursor: default; transform: none; }
 .primary-nav { border-bottom: 1px solid var(--border); padding: calc(5px * var(--spacing-scale, 1)) 0 calc(12px * var(--spacing-scale, 1)); margin-bottom: 12px; }
 .primary-nav button, .sidebar-footer > button { border: 0; background: transparent; color: var(--ink-secondary); border-radius: 10px; display: flex; width: 100%; align-items: center; gap: calc(12px * var(--spacing-scale, 1)); padding: calc(9px * var(--spacing-scale, 1)) calc(10px * var(--spacing-scale, 1)); cursor: pointer; }
 .primary-nav button svg, .sidebar-footer > button svg { width: 17px; }
@@ -410,7 +410,7 @@ h1, h2, h3 { margin: 0; }
 .chat-header h1 { font-size: calc(16px * var(--text-scale, 1)); margin-top: 2px; }
 .icon-button { width: 34px; height: 34px; display: inline-grid; place-items: center; border: 0; border-radius: 10px; background: transparent; color: var(--ink-secondary); cursor: pointer; }
 .icon-button:hover { background: var(--panel-3); color: var(--ink-primary); }
-.icon-button:disabled { opacity: .45; cursor: default; }
+.icon-button:disabled, .icon-button[aria-disabled="true"] { opacity: .45; cursor: default; }
 /* The column the conversation and its composer share. Standard is the fallback;
    Appearance can widen it, and full leaves only the gutters. */
 html[data-chat-width="wide"] { --chat-column: 1180px; }
@@ -1197,11 +1197,11 @@ html[data-motion="reduced"] .progress-track > div.indeterminate { width: 100% !i
 /* Image Studio. The canvas is three stacked layers - picture, mask tint,
    live stroke - so they must occupy the same box; without positioning they
    lay out as inline siblings and the mask paints beside the picture rather
-   than on it. Everything else here follows from the stage owning the space:
-   the rail and panel are fixed columns, the stage takes the remainder and
-   is the only scroll container. */
-.studio-view { display: grid; grid-template-rows: auto 1fr; gap: calc(12px * var(--spacing-scale, 1)); height: 100%; min-height: 0; }
-.studio-layout { display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(240px, 300px); gap: calc(12px * var(--spacing-scale, 1)); min-height: 0; }
+   than on it. The rail and panel keep fixed columns around a flexible canvas.
+   Each section stays within its row, and narrow windows stack them before
+   the edit history. */
+.studio-view { display: flex; flex-direction: column; gap: calc(12px * var(--spacing-scale, 1)); height: 100%; min-height: 0; }
+.studio-layout { display: grid; flex: 1 0 300px; grid-template-columns: auto minmax(0, 1fr) minmax(240px, 300px); grid-template-rows: minmax(0, 1fr); gap: calc(12px * var(--spacing-scale, 1)); min-height: 300px; }
 .studio-stage { display: grid; place-items: center; min-height: 0; min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: var(--cut); background: var(--bg); }
 .studio-generation-preview { position: relative; display: grid; place-items: center; width: 100%; height: 100%; min-height: 0; margin: 0; }
 .studio-generation-preview img { display: block; width: 100%; height: 100%; min-height: 0; object-fit: contain; }
@@ -1211,7 +1211,8 @@ html[data-motion="reduced"] .progress-track > div.indeterminate { width: 100% !i
 .studio-canvas-layers > canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 /* The picture is the only opaque layer; the two above it must not hide it. */
 .studio-canvas-layers > canvas[data-layer] { background: transparent; pointer-events: none; }
-.studio-tool-rail { display: flex; flex-direction: column; align-items: center; gap: calc(4px * var(--spacing-scale, 1)); padding: calc(7px * var(--spacing-scale, 1)); border: 1px solid var(--border); border-radius: var(--cut); background: var(--panel); align-self: start; }
+.studio-tool-rail { display: flex; flex-direction: column; align-items: center; gap: calc(4px * var(--spacing-scale, 1)); padding: calc(7px * var(--spacing-scale, 1)); border: 1px solid var(--border); border-radius: var(--cut); background: var(--panel); align-self: start; max-height: 100%; overflow-y: auto; }
+.studio-tool-rail > * { flex-shrink: 0; }
 .studio-rail-divider { width: 18px; height: 1px; margin: 3px 0; background: var(--border); }
 /* The selected tool needs a visible state, not only aria-pressed: without
    this the rail announces its selection correctly and shows nothing. */
@@ -1221,14 +1222,14 @@ html[data-motion="reduced"] .progress-track > div.indeterminate { width: 100% !i
 .studio-selection-controls { display: grid; gap: calc(8px * var(--spacing-scale, 1)); }
 .studio-selection-controls label { display: grid; gap: calc(4px * var(--spacing-scale, 1)); color: var(--muted); font-size: calc(11px * var(--text-scale, 1)); }
 .studio-selection-controls input[type="range"] { accent-color: var(--atelier); width: 100%; }
-.studio-view > .generation-identity { justify-self: center; max-width: min(100%, 720px); }
-.studio-filmstrip { display: flex; gap: calc(6px * var(--spacing-scale, 1)); overflow-x: auto; padding: calc(2px * var(--spacing-scale, 1)); list-style: none; margin: 0; }
-.studio-filmstrip button { padding: 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--panel-2); cursor: pointer; }
+.studio-view > .generation-identity { align-self: center; max-width: min(100%, 720px); }
+.studio-filmstrip { display: flex; flex-shrink: 0; gap: calc(6px * var(--spacing-scale, 1)); overflow-x: auto; padding: calc(2px * var(--spacing-scale, 1)); list-style: none; margin: 0; }
+.studio-filmstrip button { flex: 0 0 66px; padding: 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--panel-2); cursor: pointer; }
 .studio-filmstrip button.selected { border-color: var(--atelier); }
 .studio-filmstrip img { display: block; width: 64px; height: 64px; object-fit: cover; }
 @media (max-width: 900px) {
-  .studio-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(240px, 1fr) auto; }
-  .studio-tool-rail { flex-direction: row; flex-wrap: wrap; justify-self: start; }
+  .studio-layout { flex: 0 0 auto; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(240px, 50vh) auto; }
+  .studio-tool-rail { flex-direction: row; flex-wrap: wrap; justify-self: start; max-height: none; overflow-y: visible; }
   .studio-rail-divider { width: 1px; height: 18px; margin: 0 3px; }
 }
 

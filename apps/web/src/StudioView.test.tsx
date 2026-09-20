@@ -109,7 +109,7 @@ describe("applying an edit", () => {
     expect(screen.queryByRole("button", { name: /favorite/i })).toBeNull();
     expect(screen.queryByRole("link", { name: /export/i })).toBeNull();
     expect(screen.queryByTestId("studio-canvas")).toBeNull();
-    expect(screen.getByRole("button", { name: /apply/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /apply/i })).toHaveAttribute("aria-disabled", "true");
   });
 
   it("says when a pinned recipe overrides the displayed workflow choice", async () => {
@@ -136,7 +136,7 @@ describe("applying an edit", () => {
     expect(screen.getByRole("status")).toHaveTextContent(
       "Pinned portrait edit supplies the workflow for this edit.",
     );
-    expect(screen.getByRole("button", { name: "Apply edit" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Apply edit" })).toHaveAttribute("aria-disabled", "false");
 
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "make it cooler" } });
     expect(screen.queryByText(/supplies the workflow for this edit/i)).toBeNull();
@@ -164,7 +164,7 @@ describe("applying an edit", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Unpinned portrait edit" }));
 
     expect(screen.queryByText(/supplies the workflow for this edit/i)).toBeNull();
-    expect(screen.getByRole("button", { name: "Apply edit" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Apply edit" })).toHaveAttribute("aria-disabled", "true");
   });
 
   it("keeps the instruction when the turn is refused", async () => {
