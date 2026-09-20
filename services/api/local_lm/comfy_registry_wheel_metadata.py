@@ -101,7 +101,7 @@ class _ParsedRequirement:
 @dataclass(frozen=True)
 class _MetadataRecord:
     artifact: ComfyRegistryWheelArtifact
-    requirements: tuple[_ParsedRequirement, ...]
+    requirements: tuple[ComfyRegistryWheelMetadataRequirement, ...]
 
 
 def plan_comfy_registry_wheel_metadata(
@@ -339,11 +339,32 @@ def _metadata_record(
         raise ComfyRegistryWheelMetadataError(
             "invalid_core_metadata", "Wheel does not declare hash-bound core metadata"
         )
+    return _MetadataRecord(
+        artifact,
+        read_comfy_registry_core_metadata(
+            content,
+            name=artifact.name,
+            version=artifact.version,
+            filename=artifact.filename,
+            expected_sha256=artifact.metadata_sha256,
+        ),
+    )
+
+
+def read_comfy_registry_core_metadata(
+    content: bytes,
+    *,
+    name: str,
+    version: str,
+    filename: str,
+    expected_sha256: str,
+) -> tuple[ComfyRegistryWheelMetadataRequirement, ...]:
+    """Read bounded, hash-bound dependency declarations without choosing a transport or target."""
     if len(content) > MAX_WHEEL_CORE_METADATA_BYTES:
         raise ComfyRegistryWheelMetadataError(
             "core_metadata_too_large", "Wheel core metadata exceeds the size limit"
         )
-    if not hmac.compare_digest(hashlib.sha256(content).hexdigest(), artifact.metadata_sha256):
+    if not hmac.compare_digest(hashlib.sha256(content).hexdigest(), expected_sha256):
         raise ComfyRegistryWheelMetadataError(
             "core_metadata_hash_mismatch", "Wheel core metadata hash does not match"
         )
@@ -367,14 +388,14 @@ def _metadata_record(
         raise ComfyRegistryWheelMetadataError(
             "unsupported_core_metadata", "Wheel core metadata version is unsupported"
         )
-    name = canonicalize_name(_single_header(message.get_all("Name"), "Name"))
+    metadata_name = canonicalize_name(_single_header(message.get_all("Name"), "Name"))
     try:
-        version = Version(_single_header(message.get_all("Version"), "Version"))
+        metadata_version_value = Version(_single_header(message.get_all("Version"), "Version"))
     except InvalidVersion as exc:
         raise ComfyRegistryWheelMetadataError(
             "invalid_core_metadata", "Wheel core metadata version is invalid"
         ) from exc
-    if name != artifact.name or str(version) != artifact.version:
+    if metadata_name != name or str(metadata_version_value) != version:
         raise ComfyRegistryWheelMetadataError(
             "core_metadata_identity_mismatch",
             "Wheel core metadata identity does not match its artifact",
@@ -383,12 +404,14 @@ def _metadata_record(
     if len(values) > MAX_WHEEL_REQUIRES_DIST:
         raise ComfyRegistryWheelMetadataError(
             "too_many_transitive_requirements",
-            f"Wheel {artifact.filename} declares too many dependencies",
+            f"Wheel {filename} declares too many dependencies",
         )
     parsed = {_requirement(value) for value in values}
-    return _MetadataRecord(
-        artifact,
-        tuple(sorted(parsed, key=lambda item: (item.name, item.requirement))),
+    return tuple(
+        ComfyRegistryWheelMetadataRequirement(
+            name, version, item.name, item.requirement, item.specifier, item.marker, item.extras
+        )
+        for item in sorted(parsed, key=lambda item: (item.name, item.requirement))
     )
 
 

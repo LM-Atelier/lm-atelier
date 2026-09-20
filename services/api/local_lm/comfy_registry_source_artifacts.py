@@ -19,6 +19,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .artifacts import ArtifactStore
+from .comfy_registry_wheel_metadata import (
+    ComfyRegistryWheelMetadataError,
+    ComfyRegistryWheelMetadataRequirement,
+    read_comfy_registry_core_metadata,
+)
 from .domain import utcnow
 from .models import Artifact, ComfyRegistrySourceArtifactReview
 from .package_sources import SourceDependency, classify_source_url
@@ -51,6 +56,8 @@ class VerifiedSourceWheel:
     version: str
     review_sha256: str
     payload: bytes
+    core_metadata: bytes
+    metadata_requirements: tuple[ComfyRegistryWheelMetadataRequirement, ...]
 
 
 @dataclass(frozen=True)
@@ -67,6 +74,7 @@ class _WheelInspection:
     distribution: str
     version: str
     evidence: dict[str, object]
+    core_metadata: bytes
 
 
 def _fail(code: str) -> NoReturn:
@@ -219,7 +227,7 @@ def _inspect_wheel(
         "record_sha256": hashlib.sha256(record_bytes).hexdigest(),
         "tags": sorted(str(tag) for tag in tags),
     }
-    return _WheelInspection(filename, distribution, str(parsed_version), evidence)
+    return _WheelInspection(filename, distribution, str(parsed_version), evidence, metadata_bytes)
 
 
 def _artifact_bytes(
@@ -429,6 +437,16 @@ def verified_reviewed_source_wheel(
     )
     if not exact:
         _fail("source_artifact_review_stale")
+    try:
+        requirements = read_comfy_registry_core_metadata(
+            inspection.core_metadata,
+            name=inspection.distribution,
+            version=inspection.version,
+            filename=inspection.filename,
+            expected_sha256=str(inspection.evidence["metadata_sha256"]),
+        )
+    except ComfyRegistryWheelMetadataError as exc:
+        raise ComfyRegistrySourceArtifactError(exc.code) from exc
     return VerifiedSourceWheel(
         source.declaration,
         str(source.source.repository),
@@ -440,4 +458,6 @@ def verified_reviewed_source_wheel(
         inspection.version,
         expected_sha256,
         payload,
+        inspection.core_metadata,
+        requirements,
     )
