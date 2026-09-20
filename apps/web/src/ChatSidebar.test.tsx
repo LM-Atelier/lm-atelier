@@ -4,19 +4,18 @@ import type { ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { api } from "./api";
 import { ChatSidebar } from "./ChatSidebar";
-import type { Chat, Project } from "./types";
+import type { ChatSummary, Project } from "./types";
 import { changeChatPages, restoreChatPages, snapshotChatPages, useChatPages } from "./useChatPages";
 import { useProjectMutations } from "./useProjectMutations";
 
-vi.mock("./api", () => ({ api: { chats: vi.fn(), importProject: vi.fn() } }));
+vi.mock("./api", () => ({ api: { chatSummaries: vi.fn(), importProject: vi.fn() } }));
 
 const stamp = "2026-09-01T00:00:00Z";
-function chat(number: number): Chat {
+function chat(number: number): ChatSummary {
   return {
     id: `chat-${number}`, title: `Notebook ${number}`, project_id: null, archived: false,
-    pinned: false, routing_mode: "auto", confirm_uncertain_media: false,
-    active_chat_profile_id: null, active_image_profile_id: null, active_video_profile_id: null,
-    active_head_message_id: null, created_at: stamp, updated_at: stamp,
+    pinned: false, created_at: stamp, updated_at: stamp,
+    activity: { active_work_count: 0, unresolved_failed_count: 0, last_output: null, last_failure: null },
   };
 }
 const rows = Array.from({ length: 125 }, (_, index) => chat(index));
@@ -41,8 +40,8 @@ function sidebar(onChat = vi.fn()) {
 }
 
 beforeEach(() => {
-  vi.mocked(api.chats).mockReset();
-  vi.mocked(api.chats).mockImplementation(async (_project, _archived, _query, options) => {
+  vi.mocked(api.chatSummaries).mockReset();
+  vi.mocked(api.chatSummaries).mockImplementation(async (_project, _archived, _query, options) => {
     expect(options?.limit).toBe(50);
     const offset = options?.offset ?? 0;
     return rows.slice(offset, offset + 50);
@@ -62,12 +61,12 @@ it("loads a bounded first page and opens chats on later pages", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Load more chats" }));
   expect(await screen.findByRole("button", { name: "Notebook 124" })).toBeVisible();
   expect(screen.queryByRole("button", { name: "Load more chats" })).not.toBeInTheDocument();
-  expect(vi.mocked(api.chats).mock.calls.map((call) => call[3]?.offset)).toEqual([0, 50, 100]);
+  expect(vi.mocked(api.chatSummaries).mock.calls.map((call) => call[3]?.offset)).toEqual([0, 50, 100]);
 });
 
 it("searches unloaded chats and project names and restarts paging for archive changes", async () => {
   const { wrapper } = setup();
-  vi.mocked(api.chats).mockImplementation(async (_project, archived = false, query, options) => {
+  vi.mocked(api.chatSummaries).mockImplementation(async (_project, archived = false, query, options) => {
     expect(options).toMatchObject({ offset: 0, limit: 50, searchProjects: true });
     if (query === "Harbor") return [{ ...chat(124), project_id: project.id, archived }];
     if (query === "Notebook 124") return [chat(124)];
@@ -81,12 +80,12 @@ it("searches unloaded chats and project names and restarts paging for archive ch
   expect(await screen.findByRole("button", { name: "Notebook 124" })).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "Archived" }));
   expect(await screen.findByRole("button", { name: "Notebook 124 Archived" })).toBeVisible();
-  expect(api.chats).toHaveBeenLastCalledWith(null, true, "Harbor", expect.objectContaining({ limit: 50, offset: 0 }));
+  expect(api.chatSummaries).toHaveBeenLastCalledWith(null, true, "Harbor", expect.objectContaining({ limit: 50, offset: 0 }));
 });
 
 it("keeps loaded rows and retries a failed next page at its original offset", async () => {
   const { wrapper } = setup();
-  vi.mocked(api.chats).mockResolvedValueOnce(rows.slice(0, 50)).mockRejectedValueOnce(new Error("offline"))
+  vi.mocked(api.chatSummaries).mockResolvedValueOnce(rows.slice(0, 50)).mockRejectedValueOnce(new Error("offline"))
     .mockResolvedValueOnce(rows.slice(50, 75));
   render(sidebar(), { wrapper });
   await screen.findByRole("button", { name: "Notebook 0" });
@@ -95,7 +94,7 @@ it("keeps loaded rows and retries a failed next page at its original offset", as
   expect(screen.getByRole("button", { name: "Notebook 0" })).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "Try again" }));
   expect(await screen.findByRole("button", { name: "Notebook 74" })).toBeVisible();
-  expect(vi.mocked(api.chats).mock.calls.map((call) => call[3]?.offset)).toEqual([0, 50, 50]);
+  expect(vi.mocked(api.chatSummaries).mock.calls.map((call) => call[3]?.offset)).toEqual([0, 50, 50]);
 });
 
 it("updates and rolls back every loaded page without shifting pagination offsets", async () => {
@@ -112,16 +111,16 @@ it("updates and rolls back every loaded page without shifting pagination offsets
   await waitFor(() => expect(result.current.data).toHaveLength(100));
   expect(result.current.data?.find((item) => item.id === "chat-75")?.title).toBe("Notebook 75");
   await act(async () => { await result.current.fetchNextPage(); });
-  expect(vi.mocked(api.chats).mock.calls.at(-1)?.[3]?.offset).toBe(100);
+  expect(vi.mocked(api.chatSummaries).mock.calls.at(-1)?.[3]?.offset).toBe(100);
 });
 
 it("opens an imported project's chat with a bounded lookup even when no loaded page contains it", async () => {
   const { client, wrapper } = setup();
   vi.mocked(api.importProject).mockResolvedValue(project);
-  vi.mocked(api.chats).mockResolvedValue([{ ...chat(124), project_id: project.id }]);
+  vi.mocked(api.chatSummaries).mockResolvedValue([{ ...chat(124), project_id: project.id }]);
   const onImportedChat = vi.fn();
   const { result } = renderHook(() => useProjectMutations({ client, onImportedChat }), { wrapper });
   await act(async () => { await result.current.importProject.mutateAsync(new File(["archive"], "project.zip")); });
-  expect(api.chats).toHaveBeenCalledWith(project.id, true, "", { limit: 1, offset: 0 });
+  expect(api.chatSummaries).toHaveBeenCalledWith(project.id, true, "", { limit: 1, offset: 0 });
   expect(onImportedChat).toHaveBeenCalledWith("chat-124");
 });

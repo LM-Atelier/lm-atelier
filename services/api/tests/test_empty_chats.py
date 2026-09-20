@@ -33,6 +33,7 @@ from local_lm.empty_chats import (
 from local_lm.models import (
     Artifact,
     Chat,
+    ChatActivityEvent,
     ChatItemRemovalReceipt,
     ChatWorkflowSelection,
     Job,
@@ -173,6 +174,19 @@ def _add_work(session: Session, busy: Chat, table: str) -> None:
         )
     elif table == "claim":
         session.add(TurnCreationClaim(chat_id=busy.id, idempotency_key="k", owner_token="t"))
+    elif table == "activity":
+        session.add(
+            ChatActivityEvent(
+                id="act_completed",
+                chat_id=busy.id,
+                message_id="msg_absent",
+                response_revision_id="rev_absent",
+                job_id="job_completed",
+                attempt=1,
+                kind="output",
+                occurred_at=datetime.now(UTC),
+            )
+        )
     else:
         # An explicit choice, not the automatic row that creating a chat writes
         # for all four capabilities. Those have their own test below.
@@ -190,7 +204,7 @@ def _add_work(session: Session, busy: Chat, table: str) -> None:
     session.flush()
 
 
-_WORK_KINDS = ["message", "plan", "run", "claim", "removal", "batch", "workflow"]
+_WORK_KINDS = ["message", "plan", "run", "claim", "removal", "batch", "workflow", "activity"]
 
 
 @pytest.mark.parametrize("table", _WORK_KINDS)

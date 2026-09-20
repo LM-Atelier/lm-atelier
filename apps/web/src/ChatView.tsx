@@ -24,6 +24,7 @@ import { activeBranchMessages } from "./turnEditorContext";
 import type { WebSearch } from "./types";
 import { useEditedBranches } from "./useEditedBranches";
 import { MessageBubble } from "./MessageBubble";
+import { useVisibleChatActivity } from "./useVisibleChatActivity";
 
 export function ChatView({
   onOpenStudio,
@@ -64,6 +65,7 @@ export function ChatView({
   const edited = useEditedBranches(chat);
   const endRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
+  useVisibleChatActivity(messagesRef, chat?.id);
   const followMessages = useRef(true);
   const previousChatId = useRef<string | undefined>(undefined);
   const [visualTarget, setVisualTarget] = useState<VisualTarget | null>(null);

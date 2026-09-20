@@ -55,6 +55,7 @@ from .capability_evidence import (
     evidence_input_modalities,
     record_capability_evidence,
 )
+from .chat_activity_writes import record_response_activity
 from .comfy_registry_paths import registry_wheel_environment_root
 from .comfy_templates import COMFY_TEMPLATE_COMPILER_VERSION
 from .context_compaction import (
@@ -933,6 +934,7 @@ class ConversationOrchestrator:
                                         text=job.error,
                                     )
                                 )
+                            self._finalize_response_revision(session, run, message, promote=False)
                             for artifact_id in preview_ids:
                                 self.artifacts.delete_temporary_preview(session, artifact_id)
 
@@ -8954,6 +8956,7 @@ class ConversationOrchestrator:
                 for part in sorted(staged_message.parts, key=lambda item: item.position)
             )
             revision.status = staged_message.status
+            record_response_activity(session, run, staged_message, revision)
             return staged_message.id
         message_id = replacement.get("message_id")
         revision_id = replacement.get("revision_id")
@@ -8985,6 +8988,7 @@ class ConversationOrchestrator:
             )
             message.status = MessageStatus.COMPLETE.value
             message.active_response_revision_id = target_revision.id
+        record_response_activity(session, run, message, target_revision)
         return message.id
 
     def select_response_revision(

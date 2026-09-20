@@ -11,10 +11,10 @@ import App from "./App";
 import { api, connectEvents } from "./api";
 import type { BackupInfo, Chat, ChatDetail, EngineCapabilities, EngineRole, Job, ModelAssetInstall, SettingField, SetupReadinessReport, SetupRoleReadiness, TurnAccepted, WorkPlan, Workflow } from "./types";
 import { DEFAULT_CHAT_WORKFLOW_SELECTIONS, DEFAULT_PROJECT_WORKFLOW_SELECTIONS, familiesForWorkflows } from "./workflowSelectionFixtures";
+import { asChatSummary } from "./chatSummaryFixtures";
 const clipboardWrite = vi.fn();
 let workflowFixtures: Workflow[] = [];
 function setWorkflowFixtures(values: Workflow[]) { workflowFixtures = values; }
-
 // These cases wait on renders that follow mocked queries across the whole
 // workspace, so the time is CPU work. Run about eighteen times slower than a
 // quiet machine, as a busy shared runner can be, several cases pass five
@@ -121,7 +121,7 @@ vi.mock("./api", async (importOriginal) => ({
     setupReadiness: vi.fn().mockResolvedValue({ version: 2, state: "ready", roles: [] }),
     verifySetupRole: vi.fn(),
     projects: vi.fn().mockResolvedValue([]),
-    chats: vi.fn().mockResolvedValue([]),
+    chats: vi.fn().mockResolvedValue([]), chatSummaries: vi.fn((...args: Parameters<typeof api.chats>) => api.chats(...args).then((rows) => rows.map(asChatSummary))),
     chat: vi.fn(),
     classifyDraft: vi.fn(),
     createProject: vi.fn(),
@@ -987,7 +987,7 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
     ).not.toBeNull();
     fireEvent.change(screen.getByLabelText("Search projects and chats"), { target: { value: "notes" } });
     fireEvent.click(screen.getByRole("button", { name: "Manage Model notes" }));
-    fireEvent.change(screen.getByDisplayValue("Model notes"), { target: { value: "Renamed notes" } });
+    fireEvent.change(await screen.findByDisplayValue("Model notes"), { target: { value: "Renamed notes" } });
     fireEvent.change(screen.getByLabelText("Project"), { target: { value: "" } });
     fireEvent.click(screen.getByRole("checkbox", { name: /Archived/ }));
     fireEvent.click(screen.getByRole("checkbox", { name: /Review image edits/ }));
@@ -1093,7 +1093,7 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Manage First chat" }));
-    expect(screen.getByText("Ask before Auto mode starts an image or video when the planner is unsure.")).toBeVisible();
+    expect(await screen.findByText("Ask before Auto mode starts an image or video when the planner is unsure.")).toBeVisible();
     fireEvent.click(screen.getByRole("checkbox", { name: /Delete generated media with chat/ }));
     fireEvent.click(screen.getByRole("button", { name: "Delete chat" }));
     // The question names the media that goes with the chat, which is the
@@ -1479,9 +1479,9 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
     const opener = await screen.findByRole("button", { name: "Manage Keyboard dialog" });
     opener.focus();
     fireEvent.click(opener);
+    const save = await screen.findByRole("button", { name: "Save chat" });
     const dialog = screen.getByRole("dialog", { name: "Manage chat" });
     const close = screen.getByRole("button", { name: "Close chat manager" });
-    const save = screen.getByRole("button", { name: "Save chat" });
     expect(dialog).toHaveAttribute("aria-modal", "true");
     expect(close).toHaveFocus();
 

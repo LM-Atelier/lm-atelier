@@ -12,7 +12,7 @@ vi.mock("./api", () => ({
     searchConfiguration: vi.fn(),
     setupReadiness: vi.fn(),
     projects: vi.fn(),
-    chats: vi.fn(),
+    chats: vi.fn(), chatSummaries: vi.fn(),
     chat: vi.fn(),
     workPlans: vi.fn(),
     engines: vi.fn(),
@@ -51,7 +51,7 @@ beforeEach(() => {
     artifact_directory_requested: null,
   });
   for (const list of [
-    api.projects, api.chats, api.workPlans, api.engines, api.profiles, api.presets,
+    api.projects, api.chatSummaries, api.workPlans, api.engines, api.profiles, api.presets,
     api.workflows, api.workflowFamilies, api.chatWorkflowSelections,
     api.projectWorkflowSelections, api.jobs, api.workers, api.runtimes, api.backups,
   ]) {

@@ -36,7 +36,7 @@ export function useProjectMutations({
       void client.invalidateQueries({ queryKey: ["projects"] });
       await client.invalidateQueries({ queryKey: ["chats"] });
       if (!onImportedChat) return;
-      const [importedChat] = await api.chats(project.id, true, "", { limit: 1, offset: 0 });
+      const [importedChat] = await api.chatSummaries(project.id, true, "", { limit: 1, offset: 0 });
       if (importedChat) onImportedChat(importedChat.id);
     },
   });

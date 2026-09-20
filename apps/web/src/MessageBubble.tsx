@@ -32,6 +32,7 @@ import type {
   MessageReference,
 } from "./types";
 import { videoLengthSummary } from "./videoLength";
+import { VisibleChatActivity } from "./VisibleChatActivity";
 
 /** The library's Edit action: attach the selection in the chat composer,
  * switch to image mode, and open the studio. */
@@ -141,7 +142,8 @@ export function MessageBubble({
     ? []
     : messagePartsForTranscript(message, hiddenInputArtifactIds);
   const userText = visibleParts.filter((part) => part.type === "text").map((part) => part.text || "").join("\n");
-  const copyableText = (contentRemoved ? "" : liveText || userText).trim();
+  const streamingText = message.status === "pending" ? liveText : undefined;
+  const copyableText = (contentRemoved ? "" : streamingText || userText).trim();
   const chatProgress = visibleParts.find(
     (part) => part.type === "progress" && part.metadata_json.activity === "chat",
   );
@@ -216,6 +218,16 @@ export function MessageBubble({
   const regenerationPending = (message.response_revisions ?? []).some(
     (revision) => revision.status === "pending",
   );
+  const selectedResponse = (message.response_revisions ?? []).find((revision) => revision.id === message.active_response_revision_id);
+  const visibleActivity = !contentRemoved && !editing && message.status !== "pending"
+    && selectedResponse?.status === message.status && selectedResponse.activity?.message_id === message.id
+    && selectedResponse.activity.response_revision_id === selectedResponse.id
+    ? selectedResponse.activity : null;
+  const latestResponse = [...(message.response_revisions ?? [])].sort((a, b) => b.sequence - a.sequence)[0];
+  const otherAttempt = !contentRemoved && latestResponse?.id !== selectedResponse?.id
+    && (latestResponse?.status === "failed" || latestResponse?.status === "cancelled") ? latestResponse : null;
+  const otherActivity = otherAttempt?.activity?.message_id === message.id
+    && otherAttempt.activity.response_revision_id === otherAttempt.id ? otherAttempt.activity : null;
   const removalConfirmation = confirmingRemoval ? (
     <MessageRemovalConfirmation messageId={message.id} onRemove={(id) => { setConfirmingRemoval(false); onRemoveItem?.(id); }} onKeep={() => setConfirmingRemoval(false)} />
   ) : null;
@@ -234,12 +246,22 @@ export function MessageBubble({
     <article className={`message ${message.role}`}>
       <div className="avatar">{message.role === "user" ? "You" : <Bot size={19} />}</div>
       <div className="message-content">
-        {contentRemoved ? <div className="message-removed">Message removed</div> : editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part, index) => <Fragment key={part.id}><PartView part={part} liveText={liveText} markdown={message.role === "assistant"} references={message.references} origin={mediaOriginForPart(part, operation, message.role === "assistant" ? "generated" : null)} onEditImage={onEditImage} onOpenStudio={onOpenStudio} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} onToggleFavorite={onToggleFavorite} compareSourceUrl={message.role === "assistant" ? compareSourceUrl : undefined} lineage={message.role === "assistant" ? lineage : undefined} />{index === messageActionPartIndex && userMessageMeta}</Fragment>)}
-        {!contentRemoved && liveText && !visibleParts.some((part) => part.type === "text") && (
-          <MarkdownText text={liveText} />
+        {contentRemoved ? <div className="message-removed">Message removed</div> : editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part, index) => <Fragment key={part.id}><VisibleChatActivity activity={["text", "image", "video", "error"].includes(part.type) && !part.metadata_json.preview ? visibleActivity : null}><PartView part={part} liveText={streamingText} markdown={message.role === "assistant"} references={message.references} origin={mediaOriginForPart(part, operation, message.role === "assistant" ? "generated" : null)} onEditImage={onEditImage} onOpenStudio={onOpenStudio} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} onToggleFavorite={onToggleFavorite} compareSourceUrl={message.role === "assistant" ? compareSourceUrl : undefined} lineage={message.role === "assistant" ? lineage : undefined} /></VisibleChatActivity>{index === messageActionPartIndex && userMessageMeta}</Fragment>)}
+        {!contentRemoved && streamingText && !visibleParts.some((part) => part.type === "text") && (
+          <MarkdownText text={streamingText} />
         )}
         {!contentRemoved && showChatStartup && <PendingResponseStatus label={chatProgress?.text || "Starting chat"} startedAt={message.created_at} />}
         {messageActionPartIndex < 0 && userMessageMeta}
+        {otherAttempt && <section aria-label="Latest response attempt">
+          <VisibleChatActivity activity={otherAttempt.status === "failed" ? otherActivity : null}>
+            <p>{otherAttempt.status === "failed" ? "Another response failed." : "Another response was cancelled."}</p>
+          </VisibleChatActivity>
+          {otherAttempt.parts.filter((part) => ["text", "image", "video", "error"].includes(part.type) && !part.metadata_json.preview).map((part) => (
+            <VisibleChatActivity key={part.id} activity={otherActivity}>
+              <PartView part={part} markdown origin={null} />
+            </VisibleChatActivity>
+          ))}
+        </section>}
         {message.role === "assistant" && message.status === "cancelled" && !visibleParts.some((part) => part.type === "error") && (
           <div className="message-meta"><span>Generation cancelled</span></div>
         )}

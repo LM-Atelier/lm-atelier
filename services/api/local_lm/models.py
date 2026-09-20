@@ -583,6 +583,12 @@ class ResponseRevision(TimestampMixin, Base):
     )
     sequence: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(16), default=MessageStatus.PENDING.value, index=True)
+    activity_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+    @property
+    def activity(self) -> dict[str, Any] | None:
+        """Return the activity identity captured with this response snapshot."""
+        return self.activity_json
 
     feedback_rows: Mapped[list[ResponseFeedback]] = relationship(
         cascade="all, delete-orphan", foreign_keys="ResponseFeedback.response_revision_id"
@@ -601,6 +607,32 @@ class ResponseRevision(TimestampMixin, Base):
         cascade="all, delete-orphan",
         order_by="ResponseRevisionPart.position",
     )
+
+
+class ChatActivityEvent(Base):
+    """Keep terminal activity identities separate from portable conversation content."""
+
+    __tablename__ = "chat_activity_events"
+    __table_args__ = (
+        UniqueConstraint("job_id", "attempt", name="uq_chat_activity_attempt"),
+        Index("ix_chat_activity_chat_sequence", "chat_id", "sequence"),
+        {"sqlite_autoincrement": True},
+    )
+
+    sequence: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[str] = mapped_column(String(40), unique=True)
+    chat_id: Mapped[str] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"))
+    message_id: Mapped[str] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"), index=True
+    )
+    response_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("response_revisions.id", ondelete="CASCADE"), index=True
+    )
+    # Retaining the execution identity also retains deduplication after job cleanup.
+    job_id: Mapped[str] = mapped_column(String(40))
+    attempt: Mapped[int] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(String(16))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class ResponseRevisionPart(TimestampMixin, Base):

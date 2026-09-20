@@ -13,6 +13,7 @@ vi.mock("./api", () => ({
     setupReadiness: vi.fn(),
     projects: vi.fn(),
     chats: vi.fn(),
+    chatSummaries: vi.fn(),
     chat: vi.fn(),
     workPlans: vi.fn(),
     engines: vi.fn(),
@@ -119,6 +120,10 @@ beforeEach(() => {
     vi.mocked(list).mockResolvedValue([]);
   }
   vi.mocked(api.chats).mockResolvedValue([first, second]);
+  vi.mocked(api.chatSummaries).mockResolvedValue([first, second].map((chat) => ({
+    ...chat,
+    activity: { active_work_count: 0, unresolved_failed_count: 0, last_output: null, last_failure: null },
+  })));
   vi.mocked(api.chat).mockImplementation(async (id) => (id === first.id ? firstDetail : { ...second, messages: [] }));
   vi.mocked(api.updateChat).mockImplementation(async (id) => (id === first.id ? first : second) as never);
   vi.mocked(api.upload).mockResolvedValue(sketch);
