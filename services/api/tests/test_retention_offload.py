@@ -21,6 +21,7 @@ from collections.abc import Iterator
 from contextlib import suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -34,7 +35,7 @@ from sqlalchemy.orm import Session
 from local_lm import artifacts as artifacts_module
 from local_lm import main as main_module
 from local_lm.artifact_library import begin_artifact_write_fence
-from local_lm.artifacts import ArtifactStore
+from local_lm.artifacts import ArtifactStore, RetentionCleanupSummary
 from local_lm.config import Settings
 from local_lm.db import Base, SessionLocal
 from local_lm.domain import ArtifactKind
@@ -354,8 +355,8 @@ async def test_a_budget_smaller_than_the_fixed_work_still_makes_progress(
 ) -> None:
     """A zero budget cannot delete anything; the sweep must not spin on it.
 
-    After one batch that removes nothing within its budget, the sweep switches
-    to one deletion per batch and still drains the store.
+    After one batch that removes nothing within its budget, the sweep drops the
+    clock and still drains the store.
     """
 
     caplog.set_level(logging.INFO)
@@ -372,7 +373,7 @@ async def test_a_budget_smaller_than_the_fixed_work_still_makes_progress(
         await asyncio.wait_for(app.state.retention_sweep, timeout=30)
     with SessionLocal() as check:
         assert _count(check) == 0
-    assert "continuing one deletion per batch" in caplog.text
+    assert "continuing without the clock" in caplog.text
     assert "sweep complete" in caplog.text
 
 
@@ -648,7 +649,7 @@ async def test_a_slow_snapshot_keeps_the_default_batch_and_deletion_budget(
 
     assert removed == [25, 0]
     assert snapshots == 2
-    assert "continuing one deletion per batch" not in caplog.text
+    assert "continuing without the clock" not in caplog.text
 
 
 async def test_retention_progress_counts_rows_and_excludes_writer_wait(
@@ -955,3 +956,69 @@ async def test_retention_cancellation_reports_committed_unindexed_files(
         in caplog.text
     )
     assert "sweep complete:" not in caplog.text
+
+
+async def test_a_batch_that_removed_nothing_continues_in_bulk_not_one_at_a_time(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The batches after one that removed nothing must not pay a snapshot each.
+
+    A batch removes nothing when its row pass finds nothing to remove and the
+    walk of stored files after it spends the whole budget without removing one.
+    Dropping the clock for the batches after that is right, because a budget one
+    batch could not spend the next cannot spend either. Dropping to a single
+    deletion as well is not: every row then pays for another complete reference
+    snapshot, which is what held the writer for minutes on a store with a real
+    backlog behind it.
+
+    The store here keeps everything it holds, so the row pass has nothing to
+    remove and the file walk runs into the budget.
+    """
+
+    caplog.set_level(logging.INFO)
+    store = ArtifactStore(settings)
+    with SessionLocal() as session:
+        for index in range(30):
+            store.ingest_bytes(
+                session,
+                f"kept {index}".encode(),
+                kind=ArtifactKind.IMAGE,
+                media_type="image/png",
+            )
+        session.commit()
+
+    real_cleanup = ArtifactStore.cleanup_retention
+    requested: list[int | None] = []
+    summaries: list[RetentionCleanupSummary] = []
+
+    def recording_cleanup(self: ArtifactStore, session: Session, **kwargs: Any) -> Any:
+        requested.append(kwargs["max_deletions"])
+        summary = real_cleanup(self, session, **kwargs)
+        summaries.append(summary)
+        return summary
+
+    # Half a second a reading, so the first batch's walk of the stored files
+    # outlasts its two-second budget after a handful of them rather than at
+    # once. The batches after it run without a clock and never read it.
+    readings = count()
+    monkeypatch.setattr(
+        main_module, "time", SimpleNamespace(monotonic=lambda: next(readings) * 0.5)
+    )
+    monkeypatch.setattr(ArtifactStore, "cleanup_retention", recording_cleanup)
+
+    await main_module.sweep_artifact_retention(store, settings, pause_seconds=0)
+
+    # The first batch really did remove nothing and really was truncated: that
+    # is the state this whole branch exists for, reached through the sweep
+    # rather than asserted of it.
+    assert summaries[0].removed_count == 0 and summaries[0].truncated is True
+    assert requested[0] == main_module.RETENTION_BATCH_DELETIONS
+    # The behaviour first: the batch after it may delete in bulk. The ceiling
+    # second, so a failure says which of the two is wrong.
+    assert requested[1] is not None and requested[1] > 1
+    assert requested[1] == min(
+        main_module.RETENTION_BATCH_DELETIONS, main_module.RETENTION_UNTIMED_BATCH_DELETIONS
+    )
+    assert "continuing without the clock" in caplog.text
+    with SessionLocal() as check:
+        assert _count(check) == 30
