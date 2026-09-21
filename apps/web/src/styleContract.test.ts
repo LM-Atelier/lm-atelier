@@ -723,3 +723,63 @@ describe("one selector, one rule", () => {
     expect(shadowed).toEqual([]);
   });
 });
+
+describe("the settings drawer holds what it shows", () => {
+  const css = readFileSync(STYLESHEET, "utf8");
+
+  function ruleBody(selector: string): string {
+    // Anchored to the start of a line, so asking for `.lora-stack` does not
+    // answer with the drawer's own `.settings-drawer .lora-stack` rule.
+    const at = css.indexOf(`\n${selector} {`);
+    if (at < 0) return "";
+    const open = css.indexOf("{", at);
+    const close = css.indexOf("}", open);
+    return close < 0 ? "" : css.slice(open + 1, close);
+  }
+
+  function widthOf(selector: string, property: string): string {
+    for (const declaration of ruleBody(selector).split(";")) {
+      const [name, ...rest] = declaration.split(":");
+      if (name.trim() === property) return rest.join(":").trim();
+    }
+    return "";
+  }
+
+  function trackMinimums(template: string): number[] {
+    const minimums: number[] = [];
+    for (const track of template.matchAll(/minmax\(\s*([^,]+),/g)) {
+      minimums.push(Number.parseFloat(track[1]) || 0);
+    }
+    for (const track of template.matchAll(/(?:^|\s)(\d+(?:\.\d+)?)px/g)) {
+      minimums.push(Number.parseFloat(track[1]));
+    }
+    return minimums;
+  }
+
+  it("asks the LoRA control for no more width than the drawer has", () => {
+    // The drawer is a fixed 380px and the LoRA control declares a 580px
+    // minimum, which is what lets it escape the 105px value column in a wide
+    // panel. Inside the drawer that minimum made the settings list 300px wider
+    // than the drawer: it scrolled sideways, and controls sat past the edge.
+    const drawer = Number.parseFloat(widthOf(".modal.settings-drawer", "width"));
+    const listPadding = 22 * 2;
+    const itemPadding = 10 * 2 + 2;
+    const room = drawer - listPadding - itemPadding;
+    expect(drawer).toBeGreaterThan(0);
+
+    const stackMinimum = widthOf(".settings-drawer .lora-stack", "min-width");
+    expect(stackMinimum).toBe("0");
+
+    const template = widthOf(".settings-drawer .lora-stack-item", "grid-template-columns");
+    const minimums = trackMinimums(template);
+    expect(minimums.length).toBeGreaterThan(0);
+    const demanded = minimums.reduce((total, track) => total + track, 0) + 6 * (minimums.length - 1);
+    expect(demanded).toBeLessThanOrEqual(room);
+  });
+
+  it("lets a long setting label wrap rather than widen its panel", () => {
+    // `1fr` is `minmax(auto, 1fr)`, so the label column could not shrink below
+    // its longest word and pushed the whole row wider than the panel holding it.
+    expect(widthOf(".setting-row", "grid-template-columns")).toMatch(/^minmax\(0,\s*1fr\)/);
+  });
+});
