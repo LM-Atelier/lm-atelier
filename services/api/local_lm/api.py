@@ -2412,6 +2412,12 @@ async def get_chat(chat_id: str, session: ConversationSessionDep) -> ChatDetail:
 #: What one message needs to render, and nothing that belongs to the chat as a
 #: whole: the window's cost has to stay proportional to the page, not the
 #: conversation.
+#: How far back a lineage walk will follow parent links. A transcript longer
+#: than this is not one a page can anchor in anyway, and an unbounded recursive
+#: walk is the kind of query that turns a long conversation into a stall.
+MAX_LINEAGE_WALK = 10_000
+
+
 _MESSAGE_WINDOW_LOADERS = (
     selectinload(Message.parts).selectinload(MessagePart.artifact),
     selectinload(Message.response_revisions)
@@ -2427,6 +2433,7 @@ _MESSAGE_WINDOW_LOADERS = (
 async def get_chat_messages(
     chat_id: str,
     session: ConversationSessionDep,
+    head_id: str | None = None,
     before: str | None = None,
     after: str | None = None,
     around: str | None = None,
@@ -2442,6 +2449,15 @@ async def get_chat_messages(
 
     One anchor at most. Without one the newest page is returned, which is what
     opening a conversation asks for.
+
+    ``head_id`` names the branch being read, and it matters more than it looks:
+    a transcript is a lineage, not everything a conversation has ever held. A
+    chat that has been edited or forked holds messages from branches nobody is
+    looking at, and a page taken by time alone can hold those and can omit a
+    parent the lineage needs. With a head, the page walks that head's ancestry
+    through parent links and returns only messages on it. Without one, the whole
+    conversation is paged by time, which is what a caller wanting everything
+    means.
     """
 
     anchors = [value for value in (before, after, around) if value is not None]
@@ -2456,6 +2472,35 @@ async def get_chat_messages(
     chat = session.scalar(select(Chat).where(Chat.id == chat_id, Chat.scope == STANDARD_CHAT_SCOPE))
     if not chat:
         raise api_error(404, "chat-not-found", "chat not found")
+    lineage: list[str] | None = None
+    if head_id is not None:
+        head = session.scalar(
+            select(Message).where(Message.id == head_id, Message.chat_id == chat_id)
+        )
+        if not head:
+            raise api_error(404, "message-not-found", "This message is not in this conversation")
+        # One query rather than a walk of round trips, and bounded by the
+        # conversation's own length because a parent link cannot revisit a
+        # message already on the path.
+        walk = text(
+            """
+            WITH RECURSIVE ancestry(id, parent_id, depth) AS (
+                SELECT id, parent_id, 0 FROM messages WHERE id = :head AND chat_id = :chat
+                UNION ALL
+                SELECT m.id, m.parent_id, ancestry.depth + 1
+                FROM messages AS m
+                JOIN ancestry ON m.id = ancestry.parent_id
+                WHERE m.chat_id = :chat AND ancestry.depth < :ceiling
+            )
+            SELECT id FROM ancestry ORDER BY depth DESC
+            """
+        )
+        lineage = [
+            str(row[0])
+            for row in session.execute(
+                walk, {"head": head_id, "chat": chat_id, "ceiling": MAX_LINEAGE_WALK}
+            ).all()
+        ]
     anchor_at = None
     if anchors:
         anchor_message = session.scalar(
@@ -2469,6 +2514,8 @@ async def get_chat_messages(
         newest_first: bool, *, strictly: ColumnElement[bool] | None, count: int
     ) -> list[Message]:
         query = select(Message).where(Message.chat_id == chat_id)
+        if lineage is not None:
+            query = query.where(Message.id.in_(lineage))
         if strictly is not None:
             query = query.where(strictly)
         order = Message.created_at.desc() if newest_first else Message.created_at.asc()
