@@ -56,6 +56,7 @@ from .artifacts import (
     RETENTION_BATCH_SECONDS,
     RetentionCleanupSummary,
 )
+from .asset_adoption import AssetAdoptionError, adoptable_roots, measure_adoptable_file
 from .auxiliary_assets import AUXILIARY_ASSET_KINDS, validate_lora_workflow_contract
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
 from .capability_probe import probe_structured_tools
@@ -183,6 +184,7 @@ from .image_edit_strength import STRENGTH_MODE_PARAMETER
 from .lora_suggestions import lora_suggestion_scope, suggested_loras
 from .message_window_v1 import DEFAULT_WINDOW, MAX_WINDOW
 from .model_manifests import (
+    COMFY_MODEL_ASSET_KINDS,
     MAX_METADATA_BYTES,
     MAX_WEIGHT_HEADER_BYTES,
     ModelManifestError,
@@ -433,6 +435,7 @@ from .schemas import (
     JobOut,
     LoraSuggestionsOut,
     MessageOut,
+    ModelAssetAdopt,
     ModelAssetOut,
     ModelAssetUpdate,
     ModelCapabilityEvidenceOut,
@@ -7646,6 +7649,78 @@ async def read_model_asset_prompt_grammar(
             "No prompt grammar has been reviewed for this adapter on this machine.",
         )
     return row
+
+
+@router.post("/model-assets", response_model=ModelAssetOut, status_code=201)
+async def adopt_model_asset(
+    payload: ModelAssetAdopt, request: Request, session: SessionDep
+) -> ModelAssetInstall:
+    """Register a model file that is already where the runtime loads it from.
+
+    Every other asset here arrived by download, which is what holds its digest.
+    A file put in place by hand has none, so nothing will accept it however
+    correct its bytes are. This measures the file where it lies and records
+    what it found: the digest, the name a graph will pass to the loader, the
+    family it declares, and any activation words its own header names.
+
+    It does not move, copy or fetch anything, and it exposes no new directory:
+    the file has to be in one of the folders already named to the runtime, so
+    what it can reach afterwards is exactly what it could reach before.
+    """
+
+    services = _services(request)
+    if payload.kind not in COMFY_MODEL_ASSET_KINDS or comfy_folder_for_kind(payload.kind) is None:
+        raise api_error(422, "asset-kind-unsupported", "This kind of asset cannot be adopted.")
+    roots = adoptable_roots(session, services.settings, payload.kind)
+    if not roots:
+        raise api_error(
+            409,
+            "asset-runtime-unconfigured",
+            "No runtime folder is configured to adopt a file from.",
+        )
+    try:
+        measured = await run_in_threadpool(measure_adoptable_file, roots, payload.comfy_name)
+    except AssetAdoptionError as exc:
+        status = 404 if exc.code == "asset-file-missing" else 422
+        raise api_error(status, exc.code, exc.detail) from exc
+    existing = session.scalar(
+        select(ModelAssetInstall).where(
+            ModelAssetInstall.kind == payload.kind,
+            ModelAssetInstall.manifest_json["sha256"].as_string() == measured.sha256,
+        )
+    )
+    if existing is not None:
+        raise api_error(
+            409,
+            "asset-already-registered",
+            f"These exact bytes are already registered as {existing.name}.",
+        )
+    trigger_words = measured.trigger_words
+    asset = ModelAssetInstall(
+        id=new_id("asset"),
+        name=payload.name or PurePosixPath(measured.comfy_name).stem,
+        kind=payload.kind,
+        family=payload.family or measured.declared_family,
+        local_path=str(measured.path.parent),
+        size_bytes=measured.size_bytes,
+        manifest_json={
+            "adopted": True,
+            "comfy_name": measured.comfy_name,
+            "sha256": measured.sha256,
+            "metadata": {
+                "trigger_words": trigger_words,
+                "declared_architecture": measured.metadata.get("modelspec.architecture"),
+                "usage_hint": measured.metadata.get("modelspec.usage_hint"),
+            },
+        },
+        active=True,
+        use_case=payload.use_case or "",
+        verified_at=utcnow(),
+    )
+    session.add(asset)
+    session.commit()
+    session.refresh(asset)
+    return asset
 
 
 @router.patch("/model-assets/{asset_id}", response_model=ModelAssetOut)
