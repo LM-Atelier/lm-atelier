@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, false, func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
@@ -90,6 +90,13 @@ class ResourceScheduler:
         self._queue_events: dict[str, asyncio.Event] = {}
         self._eligibility: dict[str, tuple[float, tuple[str, ...]]] = {}
         self._owner = f"dispatcher_{secrets.token_hex(16)}"
+        # Claims this dispatcher took whose release could not be written.
+        # They belong to no live lease, so nothing else would ever reclaim
+        # them: the expiry below skips this dispatcher's own claims,
+        # because a live one is kept current by its heartbeat.
+        self._abandoned_claims: set[str] = (
+            resource_pool._abandoned_claims if resource_pool else set()
+        )
         self._events = events
         self.session_factory = session_factory
 
@@ -134,10 +141,36 @@ class ResourceScheduler:
             yield claim
         finally:
             heartbeat.cancel()
-            with suppress(asyncio.CancelledError):
-                await heartbeat
-            await self._release_job(job_id, claim.token, group)
-            lock.release()
+            stopped: BaseException | None = None
+            try:
+                with suppress(asyncio.CancelledError):
+                    await heartbeat
+            except BaseException as exc:
+                # The heartbeat writes too, so it can fail for the same reason
+                # the release can. Awaiting it here used to raise before the
+                # release ran, which left the claim owned and the slot held.
+                # Carry the failure and finish the exit first.
+                stopped = exc
+            released = False
+            try:
+                await self._release_job(job_id, claim.token, group)
+                released = True
+            finally:
+                if not released:
+                    # The row still names this token although the lease is
+                    # over, whether the release raised or was cancelled. Record
+                    # it so the next pass can clear it; otherwise the group
+                    # counts a claim no execution holds and stops dispatching.
+                    self._abandoned_claims.add(claim.token)
+                # The slot is this process's own memory; the release is a
+                # write. A database that refuses that write still has to let
+                # the next job take its turn, or one failed row stops the whole
+                # group until somebody restarts the application - which is what
+                # a long writer, such as a startup sweep holding the database
+                # past the busy timeout, makes likely rather than rare.
+                lock.release()
+            if stopped is not None:
+                raise stopped
 
     async def queue_control_changed(self, plan_id: str) -> None:
         self._eligibility.clear()
@@ -580,7 +613,13 @@ class ResourceScheduler:
                     return
 
     def _expire_foreign_claims(self, group: str) -> list[str]:
-        """Interrupt abandoned work without risking a duplicate backend request."""
+        """Interrupt abandoned work without risking a duplicate backend request.
+
+        A claim of another dispatcher counts as abandoned once it stops being
+        renewed. One of this dispatcher's own counts as abandoned only when its
+        lease ended and the release could not be written, because a live claim
+        here is kept current by its heartbeat rather than by its expiry time.
+        """
 
         now = utcnow()
         error = "The dispatcher lease expired before this job completed."
@@ -590,13 +629,23 @@ class ResourceScheduler:
                     Job.queue_group == group,
                     Job.status.in_([JobStatus.RUNNING.value, *_TERMINAL_STATUSES]),
                     Job.claim_owner.is_not(None),
-                    Job.claim_expires_at.is_not(None),
-                    Job.claim_expires_at < now,
-                    ~Job.claim_owner.like(f"{self._owner}_%"),
+                    or_(
+                        and_(
+                            Job.claim_expires_at.is_not(None),
+                            Job.claim_expires_at < now,
+                            ~Job.claim_owner.like(f"{self._owner}_%"),
+                        ),
+                        Job.claim_owner.in_(sorted(self._abandoned_claims))
+                        if self._abandoned_claims
+                        else false(),
+                    ),
                 )
             ).all()
             expired_ids: list[str] = []
+            cleared_tokens: list[str] = []
             for job in jobs:
+                if job.claim_owner:
+                    cleared_tokens.append(job.claim_owner)
                 if job.status in _TERMINAL_STATUSES:
                     # The result is settled; only an abandoned handoff remains.
                     job.claim_owner = None
@@ -687,6 +736,12 @@ class ResourceScheduler:
                 session.flush()
                 reconcile_queue_lanes(session)
             session.commit()
+        # Only now, because the flush, the reconciliation and the commit can
+        # each fail the same way the release did. Forgetting a token before its
+        # row is actually cleared would strand that claim for good: the row
+        # still names this dispatcher, which the expiry above otherwise skips.
+        for token in cleared_tokens:
+            self._abandoned_claims.discard(token)
         return expired_ids
 
     async def _release_job(self, job_id: str, token: str, group: str) -> None:

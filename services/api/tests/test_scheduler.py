@@ -5,7 +5,9 @@ import time as _real_time
 from datetime import timedelta
 from typing import Any
 
+import pytest
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from local_lm import scheduler as scheduler_module
 from local_lm.config import Settings
@@ -964,4 +966,175 @@ def test_a_job_overtaken_during_the_share_window_is_not_claimed(
         job = session.get(Job, "overtaken_000")
         assert job is not None
         assert job.status == JobStatus.QUEUED.value
+        assert job.claim_owner is None
+
+
+async def test_a_failed_release_still_lets_the_next_job_take_its_turn(
+    settings: Settings,
+) -> None:
+    """A release that cannot be written must not hold the group's only slot.
+
+    The slot is in this process's memory and the release is a database write.
+    When a long writer holds the database past the busy timeout, that write
+    fails; if the slot went with it, every later job in the group would wait on
+    a lock nothing will ever free, and only a restart would clear it.
+    """
+
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    now = utcnow()
+    with SessionLocal() as session:
+        for index in (1, 2):
+            session.add(
+                Job(
+                    id=f"job_release_{index}",
+                    status=JobStatus.QUEUED.value,
+                    queue_group="primary",
+                    queue_ticket=f"ticket-release-{index}",
+                    enqueued_at=now,
+                )
+            )
+        session.commit()
+
+    scheduler = ResourceScheduler(session_factory=SessionLocal)
+
+    async def refusing_release(job_id: str, token: str, group: str) -> None:
+        raise RuntimeError("database is locked")
+
+    scheduler._release_job = refusing_release  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError):
+        async with scheduler.job_lease(
+            "job_release_1", resource="media_compute", group="primary", capacity=1
+        ):
+            pass
+
+    second = asyncio.create_task(
+        scheduler._acquire_job(
+            "job_release_2",
+            resource="media_compute",
+            group="primary",
+            priority=0,
+            capacity=1,
+            local_lock=scheduler._lock("primary", 1),
+        )
+    )
+    try:
+        claim = await asyncio.wait_for(second, timeout=10)
+        assert claim.token
+    finally:
+        if not second.done():
+            second.cancel()
+            await asyncio.gather(second, return_exceptions=True)
+
+
+async def test_a_failed_heartbeat_still_releases_the_slot_and_the_claim(
+    settings: Settings,
+) -> None:
+    """The heartbeat writes too, so it fails the same way a release does.
+
+    Waiting for it on the way out used to raise before the release ran, which
+    left the claim owned and the slot held: the same stall, reached through the
+    other write.
+    """
+
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    now = utcnow()
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                id="job_heartbeat_failure",
+                status=JobStatus.QUEUED.value,
+                queue_group="primary",
+                queue_ticket="ticket-heartbeat",
+                enqueued_at=now,
+            )
+        )
+        session.commit()
+
+    scheduler = ResourceScheduler(session_factory=SessionLocal)
+
+    async def failing_heartbeat(job_id: str, token: str) -> None:
+        raise RuntimeError("database is locked")
+
+    scheduler._heartbeat = failing_heartbeat  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError):
+        async with scheduler.job_lease(
+            "job_heartbeat_failure", resource="media_compute", group="primary", capacity=1
+        ):
+            await asyncio.sleep(0)
+
+    assert not scheduler._lock("primary", 1).locked()
+    with SessionLocal() as session:
+        job = session.get(Job, "job_heartbeat_failure")
+        assert job is not None
+        assert job.claim_owner is None
+
+
+async def test_an_abandoned_claim_survives_a_failed_expiry_write(settings: Settings) -> None:
+    """Forgetting the token before its row is cleared would strand it for good.
+
+    The expiry pass skips this dispatcher's own claims, so the abandoned set is
+    the only thing that brings one back. If a failed clearing write dropped the
+    token anyway, the row would keep its claim and no later pass would look at
+    it again.
+    """
+
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    now = utcnow()
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                id="job_expiry_failure",
+                status=JobStatus.QUEUED.value,
+                queue_group="primary",
+                queue_ticket="ticket-expiry",
+                enqueued_at=now,
+            )
+        )
+        session.commit()
+
+    scheduler = ResourceScheduler(session_factory=SessionLocal)
+
+    async def refusing_release(job_id: str, token: str, group: str) -> None:
+        raise RuntimeError("database is locked")
+
+    scheduler._release_job = refusing_release  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        async with scheduler.job_lease(
+            "job_expiry_failure", resource="media_compute", group="primary", capacity=1
+        ):
+            pass
+
+    refusals = {"left": 1}
+    real_commit = Session.commit
+
+    def refusing_commit(self: Session) -> None:
+        if refusals["left"]:
+            refusals["left"] -= 1
+            raise RuntimeError("database is locked")
+        real_commit(self)
+
+    Session.commit = refusing_commit  # type: ignore[method-assign]
+    try:
+        with pytest.raises(RuntimeError):
+            scheduler._expire_foreign_claims("primary")
+    finally:
+        Session.commit = real_commit  # type: ignore[method-assign]
+
+    with SessionLocal() as session:
+        job = session.get(Job, "job_expiry_failure")
+        assert job is not None
+        assert job.claim_owner is not None
+
+    assert scheduler._expire_foreign_claims("primary") == ["job_expiry_failure"]
+    with SessionLocal() as session:
+        job = session.get(Job, "job_expiry_failure")
+        assert job is not None
         assert job.claim_owner is None
