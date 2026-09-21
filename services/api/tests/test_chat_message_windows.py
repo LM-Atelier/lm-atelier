@@ -162,3 +162,116 @@ async def test_an_unknown_conversation_is_not_found(client: AsyncClient) -> None
 
     assert missing.status_code == 404
     assert missing.json()["code"] == "chat-not-found"
+
+
+def _branched(chat_id: str = "chat_branch", *, early_sibling: bool = False) -> dict[str, str]:
+    """A conversation that forked: two children of one parent, one abandoned.
+
+    Returns the ids by name. The abandoned branch is created LAST, so it is the
+    newest by time while not being on the kept lineage at all.
+    """
+
+    started = utcnow() - timedelta(minutes=10)
+    with SessionLocal() as session:
+        session.add(Chat(id=chat_id, title="Branched"))
+        session.flush()
+        rows = [
+            ("root", None, 0),
+            ("kept_one", "root", 1),
+            ("kept_two", "kept_one", 2),
+            ("abandoned", "root", 3),
+        ]
+        if early_sibling:
+            # An abandoned message OLDER than the anchor. Without it, a page
+            # asking for what came before the anchor cannot tell a lineage from
+            # a stretch of time, because the only other branch is the newest
+            # thing in the conversation.
+            rows.insert(1, ("abandoned_early", "root", 0.5))
+        for name, parent, offset in rows:
+            session.add(
+                Message(
+                    id=f"msg_{chat_id}_{name}",
+                    chat_id=chat_id,
+                    parent_id=f"msg_{chat_id}_{parent}" if parent else None,
+                    role=MessageRole.USER.value,
+                    created_at=started + timedelta(minutes=float(offset)),
+                )
+            )
+        session.commit()
+    return {name: f"msg_{chat_id}_{name}" for name, _parent, _offset in rows}
+
+
+async def test_a_page_of_a_branch_holds_that_branch_and_not_the_other(
+    client: AsyncClient,
+) -> None:
+    """The reason head_id exists: a transcript is a lineage, not everything.
+
+    Paged by time alone, the newest page of this conversation ends with the
+    abandoned message, which the reader of the kept branch never sees, and the
+    lineage the reader does see is incomplete.
+    """
+
+    ids = _branched()
+
+    by_time = (await client.get("/api/chats/chat_branch/messages")).json()
+    along_branch = (
+        await client.get("/api/chats/chat_branch/messages", params={"head_id": ids["kept_two"]})
+    ).json()
+
+    assert ids["abandoned"] in [message["id"] for message in by_time["messages"]]
+    assert [message["id"] for message in along_branch["messages"]] == [
+        ids["root"],
+        ids["kept_one"],
+        ids["kept_two"],
+    ]
+
+
+async def test_a_branch_page_bounds_itself_like_any_other(client: AsyncClient) -> None:
+    ids = _branched()
+
+    window = (
+        await client.get(
+            "/api/chats/chat_branch/messages",
+            params={"head_id": ids["kept_two"], "limit": 2},
+        )
+    ).json()
+
+    assert [message["id"] for message in window["messages"]] == [
+        ids["kept_one"],
+        ids["kept_two"],
+    ]
+    assert window["has_older"] is True
+    assert window["has_newer"] is False
+
+
+async def test_an_older_page_of_a_branch_stays_on_it(client: AsyncClient) -> None:
+    """Asking for what came before an anchor stays on the branch as well.
+
+    The abandoned message here is older than the anchor, so a page taken by
+    time alone would hold it. Only a page that follows the lineage leaves it
+    out.
+    """
+
+    ids = _branched("chat_branch_early", early_sibling=True)
+
+    window = (
+        await client.get(
+            "/api/chats/chat_branch_early/messages",
+            params={"head_id": ids["kept_two"], "before": ids["kept_one"], "limit": 5},
+        )
+    ).json()
+
+    assert [message["id"] for message in window["messages"]] == [ids["root"]]
+    assert ids["abandoned_early"] not in [message["id"] for message in window["messages"]]
+
+
+async def test_a_head_from_another_conversation_is_not_found(client: AsyncClient) -> None:
+    _branched()
+    _conversation(2)
+
+    missing = await client.get(
+        "/api/chats/chat_window/messages", params={"head_id": "msg_chat_branch_root"}
+    )
+
+    assert missing.status_code == 404
+    assert missing.json()["code"] == "message-not-found"
