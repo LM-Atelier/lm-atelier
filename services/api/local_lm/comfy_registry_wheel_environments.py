@@ -13,7 +13,7 @@ import stat
 import tempfile
 import unicodedata
 import zipfile
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from email import policy
@@ -23,17 +23,30 @@ from pathlib import Path, PurePosixPath
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
+from .comfy_registry_mixed_wheel_closure import (
+    ComfyRegistryMixedWheelClosure,
+    validate_comfy_registry_mixed_wheel_closure,
+)
+from .comfy_registry_reviewed_inputs import ComfyRegistryReviewedInputContext
 from .comfy_registry_runtime import (
     ComfyRegistryRuntimeDistribution,
     ComfyRegistryRuntimeError,
     canonical_comfy_registry_runtime_distributions,
     comfy_registry_runtime_distribution_payload,
 )
-from .comfy_registry_wheel_artifacts import ComfyRegistryWheelArtifact
+from .comfy_registry_source_artifacts import ComfyRegistrySourceArtifactError
+from .comfy_registry_wheel_artifacts import (
+    ComfyRegistryWheelArtifact,
+    ComfyRegistryWheelArtifactError,
+)
 from .comfy_registry_wheel_closure import (
     ComfyRegistryWheelClosure,
     ComfyRegistryWheelClosureError,
     validate_comfy_registry_wheel_closure,
+)
+from .comfy_registry_wheel_inputs_v1 import (
+    ComfyRegistryReviewedWheelInput,
+    ComfyRegistryWheelInputError,
 )
 from .filesystem_links import (
     AnchoredDirectory,
@@ -69,6 +82,8 @@ _DIGEST_CHARACTERS = frozenset("0123456789abcdefABCDEF")
 WHEEL_OWNERSHIP_ATTESTATION = "wheel-source-record-v1"
 REGISTRY_WHEEL_ENVIRONMENT_PREFIX = "registry-wheels-v3-"
 _GENERATED_DISTRIBUTION_FILES = ("INSTALLER", "REQUESTED", "direct_url.json")
+_EnvironmentClosure = ComfyRegistryWheelClosure | ComfyRegistryMixedWheelClosure
+_EnvironmentWheel = ComfyRegistryWheelArtifact | ComfyRegistryReviewedWheelInput
 _RESERVED_WINDOWS_NAMES = {
     "CON",
     "PRN",
@@ -123,12 +138,13 @@ class _WheelOwnershipPlan:
 
 
 async def assemble_comfy_registry_wheel_environment(
-    closure: ComfyRegistryWheelClosure,
+    closure: _EnvironmentClosure,
     wheel_files: Mapping[str, Path],
     *,
     python_executable: Path,
     destination: Path,
     media_worker_stopped: bool,
+    reviewed_inputs: ComfyRegistryReviewedInputContext | None = None,
 ) -> ComfyRegistryWheelEnvironmentReport:
     """Atomically assemble a closed wheel set into an isolated offline overlay."""
     if media_worker_stopped is not True:
@@ -136,8 +152,13 @@ async def assemble_comfy_registry_wheel_environment(
             "media_worker_running",
             "The media worker must be stopped before changing its dependencies",
         )
+    artifacts: Sequence[_EnvironmentWheel]
     try:
-        artifacts = validate_comfy_registry_wheel_closure(closure)
+        if isinstance(closure, ComfyRegistryMixedWheelClosure):
+            inputs = validate_comfy_registry_mixed_wheel_closure(closure)
+            artifacts = (*inputs.remote.artifacts, *inputs.reviewed_local)
+        else:
+            artifacts = validate_comfy_registry_wheel_closure(closure)
     except ComfyRegistryWheelClosureError as exc:
         raise ComfyRegistryWheelEnvironmentError("invalid_closure", str(exc)) from exc
     if not closure.complete:
@@ -145,7 +166,8 @@ async def assemble_comfy_registry_wheel_environment(
             "closure_incomplete", "Wheel dependencies must be fully closed before assembly"
         )
     executable = _python_executable(python_executable)
-    wheels = await asyncio.to_thread(_wheel_inputs, artifacts, wheel_files)
+    await _environment_work(lambda: _check_source_reviews(closure, reviewed_inputs))
+    wheels = await _environment_work(lambda: _wheel_inputs(artifacts, wheel_files))
     parent, lock_name = _destination(closure, destination)
     with _hold_assembly_lock(parent, lock_name):
         staging: Path | None = None
@@ -159,19 +181,16 @@ async def assemble_comfy_registry_wheel_environment(
             site_packages = staging / "site-packages"
             site_packages.mkdir()
             wheel_staging = staging / "wheels"
-            staged_wheels, ownership_plan = await asyncio.to_thread(
-                _stage_wheels, wheels, wheel_staging
+            staged_wheels, ownership_plan = await _environment_work(
+                lambda: _stage_wheels(wheels, wheel_staging)
             )
             if staged_wheels:
                 await _run_pip(executable, staged_wheels, site_packages)
-            await asyncio.to_thread(_remove_staged_wheels, wheel_staging)
-            report, encoded = await asyncio.to_thread(
-                _audit_environment,
-                closure,
-                artifacts,
-                site_packages,
-                ownership_plan,
+            await _environment_work(lambda: _remove_staged_wheels(wheel_staging))
+            report, encoded = await _environment_work(
+                lambda: _audit_environment(closure, artifacts, site_packages, ownership_plan)
             )
+            await _environment_work(lambda: _check_source_reviews(closure, reviewed_inputs))
             _write_new(staging / "environment-manifest.json", encoded)
             if destination.exists() or destination.is_symlink():
                 raise ComfyRegistryWheelEnvironmentError(
@@ -184,6 +203,47 @@ async def assemble_comfy_registry_wheel_environment(
         finally:
             if staging is not None:
                 shutil.rmtree(staging, ignore_errors=True)
+
+
+def _check_source_reviews(
+    closure: _EnvironmentClosure, context: ComfyRegistryReviewedInputContext | None
+) -> None:
+    if (
+        not isinstance(closure, ComfyRegistryMixedWheelClosure)
+        or not closure.manifest.reviewed_local
+    ):
+        return
+    if not isinstance(context, ComfyRegistryReviewedInputContext):
+        raise ComfyRegistryWheelEnvironmentError(
+            "source_review_context_required",
+            "Reviewed source inputs need current review verification",
+        )
+    try:
+        context.validate(closure.manifest)
+    except (
+        ComfyRegistrySourceArtifactError,
+        ComfyRegistryWheelInputError,
+        ComfyRegistryWheelArtifactError,
+    ) as exc:
+        raise ComfyRegistryWheelEnvironmentError(exc.code, str(exc)) from exc
+
+
+async def _environment_work[T](work: Callable[[], T]) -> T:
+    """Finish outstanding file work before cancellation removes its staging directory."""
+    task = asyncio.create_task(asyncio.to_thread(work))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not task.cancelled():
+            task.exception()
+        raise
 
 
 def verify_comfy_registry_wheel_environment(
@@ -348,9 +408,9 @@ def _python_executable(value: Path) -> Path:
 
 
 def _wheel_inputs(
-    artifacts: Sequence[ComfyRegistryWheelArtifact],
+    artifacts: Sequence[_EnvironmentWheel],
     value: Mapping[str, Path],
-) -> tuple[tuple[ComfyRegistryWheelArtifact, Path], ...]:
+) -> tuple[tuple[_EnvironmentWheel, Path], ...]:
     if not isinstance(value, Mapping):
         raise ComfyRegistryWheelEnvironmentError(
             "invalid_wheel_files", "Wheel file mapping is invalid"
@@ -368,7 +428,7 @@ def _wheel_inputs(
         raise ComfyRegistryWheelEnvironmentError(
             code, f"Wheel files do not match closed artifact {detail}"
         )
-    resolved: list[tuple[ComfyRegistryWheelArtifact, Path]] = []
+    resolved: list[tuple[_EnvironmentWheel, Path]] = []
     for filename in sorted(expected):
         path = value[filename]
         if not isinstance(path, Path):
@@ -405,7 +465,7 @@ def _wheel_inputs(
 
 
 def _stage_wheels(
-    wheels: Sequence[tuple[ComfyRegistryWheelArtifact, Path]],
+    wheels: Sequence[tuple[_EnvironmentWheel, Path]],
     directory: Path,
 ) -> tuple[tuple[Path, ...], _WheelOwnershipPlan]:
     directory.mkdir()
@@ -796,7 +856,7 @@ def _remove_staged_wheels(directory: Path) -> None:
 
 
 def _destination(
-    closure: ComfyRegistryWheelClosure,
+    closure: _EnvironmentClosure,
     destination: Path,
 ) -> tuple[Path, str]:
     if not isinstance(destination, Path):
@@ -915,8 +975,8 @@ async def _terminate(process: asyncio.subprocess.Process) -> None:
 
 
 def _audit_environment(
-    closure: ComfyRegistryWheelClosure,
-    artifacts: Sequence[ComfyRegistryWheelArtifact],
+    closure: _EnvironmentClosure,
+    artifacts: Sequence[_EnvironmentWheel],
     site_packages: Path,
     ownership_plan: _WheelOwnershipPlan,
 ) -> tuple[ComfyRegistryWheelEnvironmentReport, bytes]:
