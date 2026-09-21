@@ -18,6 +18,19 @@ const eightGigabyteGpu = {
 describe("InstallConfirmDialog", () => {
   afterEach(cleanup);
 
+  it.each([
+    [0, "Size unknown", "Download"],
+    [2147483648, "At least 2.0 GB", "Download at least 2.0 GB"],
+  ])("labels incomplete transfer size %s honestly", (bytes, label, action) => {
+    const onConfirm = vi.fn();
+    render(<InstallConfirmDialog name="Fixture model"
+      preflight={{ ...preflight, download_bytes: Number(bytes), download_size_complete: false }}
+      pending={false} onConfirm={onConfirm} onCancel={() => undefined} />);
+    expect(screen.getByText(label)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: action }));
+    expect(onConfirm).toHaveBeenCalledOnce();
+  });
+
   it("states the cost of the transfer before it starts", () => {
     render(
       <InstallConfirmDialog

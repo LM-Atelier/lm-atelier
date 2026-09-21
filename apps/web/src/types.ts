@@ -1,3 +1,6 @@
+import type { HardwareFitAdvice } from "./hardwareFitTypes";
+export type * from "./hardwareFitTypes";
+
 import type { ComposerPromptSource } from "./composerPromptSource";
 
 export type RoutingMode = "auto" | "text" | "image" | "video";
@@ -1223,9 +1226,11 @@ export interface CatalogPreflight {
   workflow_template_id: string | null;
   workflow_template_sha256: string | null;
   download_bytes: number;
+  download_size_complete?: boolean;
   available_disk_bytes: number;
   estimated_ram_bytes: number | null;
   estimated_vram_bytes: number | null;
+  hardware_fit?: HardwareFitAdvice | null;
   can_install: boolean;
   /** The choices behind a filename this version could not settle. Present
    * only for names that are genuinely ambiguous, so a list of one never

@@ -28,6 +28,7 @@ type JsonSchema = dict[str, Any]
 
 REPOSITORY = Path(__file__).resolve().parents[3]
 TYPES_FILE = REPOSITORY / "apps" / "web" / "src" / "types.ts"
+HARDWARE_TYPES_FILE = TYPES_FILE.with_name("hardwareFitTypes.ts")
 
 # TypeScript interface -> OpenAPI component. Only pairs listed here are
 # checked; add a pair when a browser type starts mirroring a server model.
@@ -56,6 +57,11 @@ CHECKED_CONTRACTS = {
     "CatalogInstallPlan": "InstallPlanOut",
     "CatalogPreflight": "CatalogPreflight",
     "CatalogPreflightCheck": "CatalogPreflightCheck",
+    "HardwareFitAdvice": "HardwareFitAdviceOut",
+    "HardwareFitAlternative": "HardwareFitAlternativeOut",
+    "HardwareFitReason": "HardwareFitReasonOut",
+    "HardwareFitResource": "HardwareFitResourceOut",
+    "HardwareFitSetting": "HardwareFitSettingOut",
     "ChatComposerDraft": "ChatComposerDraftOut",
     "ChatComposerDraftAttachment": "ChatComposerDraftAttachmentIn",
     "ChatComposerDraftMention": "ChatComposerDraftMentionIn",
@@ -242,7 +248,7 @@ def schemas() -> dict[str, JsonSchema]:
 
 @pytest.fixture(scope="module")
 def types_source() -> str:
-    return TYPES_FILE.read_text(encoding="utf-8")
+    return "\n".join(path.read_text(encoding="utf-8") for path in (TYPES_FILE, HARDWARE_TYPES_FILE))
 
 
 @pytest.mark.parametrize(("interface", "component"), sorted(CHECKED_CONTRACTS.items()))
