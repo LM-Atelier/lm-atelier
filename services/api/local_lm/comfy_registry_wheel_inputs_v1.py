@@ -22,6 +22,7 @@ from .artifacts import ArtifactStore
 from .comfy_registry_source_artifacts import (
     MAX_REVIEWED_SOURCE_WHEEL_BYTES,
     MAX_SOURCE_DECLARATION_CHARACTERS,
+    VerifiedSourceWheel,
     verified_reviewed_source_wheel,
 )
 from .comfy_registry_wheel_artifacts import (
@@ -156,6 +157,18 @@ def reviewed_wheel_input(
 ) -> ComfyRegistryReviewedWheelInput:
     """Bind verified bytes to a compatible target; staging must revalidate their review."""
     wheel = verified_reviewed_source_wheel(session, store, declaration=declaration)
+    return wheel_input_from_verified_source(
+        wheel, marker_environment=marker_environment, supported_tags=supported_tags
+    )
+
+
+def wheel_input_from_verified_source(
+    wheel: VerifiedSourceWheel,
+    *,
+    marker_environment: Mapping[str, str],
+    supported_tags: Sequence[str],
+) -> ComfyRegistryReviewedWheelInput:
+    """Describe freshly verified source bytes without granting a new review."""
     if not _bounded_filename_tags(wheel.filename):
         _fail()
     try:
