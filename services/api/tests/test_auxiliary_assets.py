@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from local_lm.auxiliary_assets import (
     LORA_GRAPH_TRANSFORM_VERSION,
     checkpoint_lora_extension,
+    derived_lora_extension,
     detect_lora_extension,
     prompt_trigger_word_provenance,
     resolve_lora_stack,
@@ -21,6 +22,7 @@ from local_lm.auxiliary_assets import (
     transform_lora_graph,
     trigger_words_to_apply,
     validate_lora_workflow_contract,
+    workflow_lora_extension,
 )
 from local_lm.db import SessionLocal
 from local_lm.domain import utcnow
@@ -1117,3 +1119,166 @@ async def test_automatic_lora_uses_complete_activation_bindings(
         )
         assert refused.settings == []
         assert refused.provenance["skipped_reason"] == "workflow_architecture_unknown"
+
+
+def _carried_over_workflow(session: Session) -> WorkflowRevision:
+    """A revision whose graph offers one insertion point and records none.
+
+    The shape a workflow arrives in when it was brought across rather than
+    compiled here: a toggle chooses between the raw model and the end of a
+    built-in adapter chain, and the sampler reads the toggle. The chain and the
+    toggle belong to the workflow; the point every sampler reads is still
+    single and unambiguous.
+    """
+
+    base = ModelInstall(
+        name="Carried base",
+        role="image",
+        engine="comfyui",
+        local_path="C:/managed/carried",
+        manifest_json={"family": "sdxl"},
+        active=True,
+    )
+    definition = WorkflowDefinition(name="Carried over", operation="text_to_image")
+    session.add_all([base, definition])
+    session.flush()
+    revision = WorkflowRevision(
+        workflow_id=definition.id,
+        version=1,
+        engine="comfyui",
+        api_graph_json={
+            "10": {"class_type": "UNETLoader", "inputs": {"unet_name": "base.safetensors"}},
+            "11": {"class_type": "CLIPLoader", "inputs": {"clip_name": "text.safetensors"}},
+            "12": {
+                "class_type": "LoraLoader",
+                "inputs": {
+                    "model": ["10", 0],
+                    "clip": ["11", 0],
+                    "lora_name": "built-in.safetensors",
+                },
+            },
+            "13": {"class_type": "PrimitiveBoolean", "inputs": {"value": True}},
+            "14": {
+                "class_type": "ComfySwitchNode",
+                "inputs": {"switch": ["13", 0], "on_false": ["10", 0], "on_true": ["12", 0]},
+            },
+            "15": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["12", 1]}},
+            "16": {"class_type": "KSampler", "inputs": {"model": ["14", 0], "positive": ["15", 0]}},
+        },
+        input_schema_json={"type": "object", "properties": {}},
+        dependencies_json={"model_install_ids": [base.id]},
+        trusted=True,
+    )
+    session.add(revision)
+    session.flush()
+    definition.current_revision_id = revision.id
+    return revision
+
+
+async def test_a_graph_that_offers_one_insertion_point_provides_it_unrecorded(
+    client: AsyncClient,
+) -> None:
+    """Nothing can add the record afterwards, so its absence cannot be final."""
+
+    del client
+    with SessionLocal() as session:
+        revision = _carried_over_workflow(session)
+
+        assert revision.dependencies_json.get("extensions") is None
+        assert workflow_lora_extension(revision) == {"mode": "model_only", "model": ["14", 0]}
+
+
+async def test_a_recorded_insertion_point_is_read_rather_than_measured(
+    client: AsyncClient,
+) -> None:
+    """A revision that says where its LoRAs go is believed over its graph."""
+
+    del client
+    with SessionLocal() as session:
+        revision = _carried_over_workflow(session)
+        revision.dependencies_json = {
+            **revision.dependencies_json,
+            "extensions": {"lora": {"mode": "model_only", "model": ["12", 0]}},
+        }
+
+        assert workflow_lora_extension(revision) == {"mode": "model_only", "model": ["12", 0]}
+
+
+async def test_a_malformed_record_refuses_instead_of_measuring_the_graph(
+    client: AsyncClient,
+) -> None:
+    """A wrong record is damage to report, not an absence to fill in."""
+
+    del client
+    with SessionLocal() as session:
+        revision = _carried_over_workflow(session)
+        revision.dependencies_json = {
+            **revision.dependencies_json,
+            "extensions": {"lora": {"mode": "model_only", "model": "not a link"}},
+        }
+
+        assert derived_lora_extension(revision.api_graph_json) is not None
+        assert workflow_lora_extension(revision) is None
+
+
+async def test_samplers_reading_different_models_offer_no_insertion_point(
+    client: AsyncClient,
+) -> None:
+    """Injecting where only one of them reads would change half the picture."""
+
+    del client
+    with SessionLocal() as session:
+        revision = _carried_over_workflow(session)
+        revision.api_graph_json = {
+            **revision.api_graph_json,
+            "17": {"class_type": "KSampler", "inputs": {"model": ["12", 0]}},
+        }
+
+        assert workflow_lora_extension(revision) is None
+
+
+async def test_a_graph_holding_a_reserved_identifier_offers_nothing(
+    client: AsyncClient,
+) -> None:
+    """The insertion would collide with a node the graph already owns."""
+
+    del client
+    with SessionLocal() as session:
+        revision = _carried_over_workflow(session)
+        revision.api_graph_json = {
+            **revision.api_graph_json,
+            "lma_lora_001": {"class_type": "LoraLoader", "inputs": {"model": ["10", 0]}},
+        }
+
+        assert workflow_lora_extension(revision) is None
+
+
+async def test_a_carried_over_workflow_runs_a_lora_stack(
+    client: AsyncClient,
+) -> None:
+    """The whole point: a stack now reaches the graph this workflow runs."""
+
+    del client
+    with SessionLocal() as session:
+        revision = _carried_over_workflow(session)
+        asset = _asset(session, "Ink", "a" * 64)
+        stack = [
+            {"asset_id": asset.id, "model_strength": 1.0, "clip_strength": 1.0, "enabled": True}
+        ]
+
+        resolved = resolve_lora_stack(session, revision, stack)
+        detached = resolve_lora_stack_against_graph(
+            session,
+            revision,
+            stack,
+            base_api_graph=revision.api_graph_json,
+        )
+
+    assert [item["asset_id"] for item in resolved.provenance] == [asset.id]
+    assert resolved.graph_sha256 != _graph_hash(revision.api_graph_json)
+    assert detached.graph["lma_lora_001"]["class_type"] == "LoraLoaderModelOnly"
+    assert detached.graph["lma_lora_001"]["inputs"]["model"] == ["14", 0]
+    assert detached.graph["lma_lora_001"]["inputs"]["lora_name"] == "Ink.safetensors"
+    assert detached.graph["16"]["inputs"]["model"] == ["lma_lora_001", 0]
+    # Model-only insertion leaves the text encoder reading the graph's own CLIP.
+    assert detached.graph["15"]["inputs"]["clip"] == ["12", 1]
