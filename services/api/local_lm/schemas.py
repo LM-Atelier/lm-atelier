@@ -1693,6 +1693,16 @@ class WorkflowRevisionCreate(ApiModel):
     dependencies: dict[str, Any] = Field(default_factory=dict)
 
 
+class ModelAssetAdopt(ApiModel):
+    """A file already in the runtime's folder, offered for registration."""
+
+    kind: InstalledAssetKind
+    comfy_name: str
+    name: str | None = Field(default=None, min_length=1, max_length=300)
+    family: str | None = Field(default=None, min_length=1, max_length=100)
+    use_case: str | None = Field(default=None, max_length=10_000)
+
+
 class WorkflowRevisionReviewRequest(ApiModel):
     action: Literal["approve", "revoke"]
     subject_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
