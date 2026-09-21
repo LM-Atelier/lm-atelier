@@ -321,9 +321,56 @@ def detect_lora_extension(graph: dict[str, Any]) -> dict[str, Any] | None:
     return checkpoint_lora_extension(graph) or model_only_lora_extension(graph)
 
 
+def derived_lora_extension(graph: dict[str, Any]) -> dict[str, Any] | None:
+    """The insertion point a graph offers, when it offers exactly one.
+
+    A revision records where LoRAs go at the moment it is compiled here. A
+    revision that arrived some other way - imported, or carried across from an
+    older installation - can be missing that record while its graph plainly
+    offers the same single point, and nothing can add it afterwards: the record
+    is written when a revision is built, and no route rewrites a built one. So
+    a workflow somebody runs every day could refuse every LoRA permanently over
+    a line of missing metadata rather than anything about its graph.
+
+    Reading the graph gives the same answer through the same functions that
+    write that record in the first place, under the same conditions: one
+    unambiguous point, feeding every sampler the graph samples with, on a graph
+    that has not already reserved the identifiers an insertion uses.
+    """
+
+    extension = detect_lora_extension(graph)
+    if extension is None:
+        return None
+    if any(str(node_id).startswith("lma_lora_") for node_id in graph):
+        return None
+    links = [extension["model"]]
+    if extension.get("mode") != "model_only":
+        links.append(extension["clip"])
+    if not all(_graph_contains_link(graph, link) for link in links):
+        return None
+    return extension
+
+
 def workflow_lora_extension(revision: WorkflowRevision) -> dict[str, Any] | None:
-    extensions = revision.dependencies_json.get("extensions")
+    dependencies = revision.dependencies_json
+    extensions = dependencies.get("extensions") if isinstance(dependencies, dict) else None
+    if extensions is not None and not isinstance(extensions, dict):
+        return None
     raw = extensions.get("lora") if isinstance(extensions, dict) else None
+    if raw is not None:
+        return _declared_lora_extension(raw)
+    graph = revision.api_graph_json
+    return derived_lora_extension(graph) if isinstance(graph, dict) else None
+
+
+def _declared_lora_extension(raw: object) -> dict[str, Any] | None:
+    """Read a recorded insertion point exactly, or refuse it.
+
+    A revision that says where its LoRAs go and says it wrongly is not a
+    revision that says nothing. Measuring its graph instead would paper over
+    the damage rather than report it, so a malformed record still refuses.
+    """
+
     if not isinstance(raw, dict):
         return None
     model = raw.get("model")
