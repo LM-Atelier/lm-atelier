@@ -343,6 +343,7 @@ from .workflow_output_geometry import (
     prove_workflow_output_geometry,
 )
 from .workflow_review_runtime import (
+    refresh_workflow_review_packages,
     revalidate_workflow_review_runtime,
     verify_workflow_review_runtime,
 )
@@ -6446,10 +6447,6 @@ class ConversationOrchestrator:
                         "The selected ComfyUI workflow needs review. Open Workflows, "
                         "choose this revision, and use Review exact revision."
                     )
-                if verified_review is not None:
-                    revalidate_workflow_review_runtime(
-                        session, self.processes, revision, verified_review
-                    )
                 dependency_errors = node_dependency_errors(session, revision.dependencies_json)
                 if dependency_errors:
                     raise RuntimeError("; ".join(dependency_errors))
@@ -6617,6 +6614,15 @@ class ConversationOrchestrator:
         # progress, preview or completion means the row belongs to a later
         # attempt, and a superseded execution neither consumes nor holds
         # the backend's stream any longer.
+        if verified_review is not None:
+            verified_review = await refresh_workflow_review_packages(verified_review)
+            with self.session_factory() as session:
+                current_revision = session.get(WorkflowRevision, verified_review.revision_id)
+                if current_revision is None:
+                    raise RuntimeError("The selected media workflow is no longer available.")
+                revalidate_workflow_review_runtime(
+                    session, self.processes, current_revision, verified_review
+                )
         producer = self.engines.media.generate(request)
         try:
             async for event in producer:

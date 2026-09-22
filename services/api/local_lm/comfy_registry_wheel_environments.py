@@ -116,6 +116,7 @@ class ComfyRegistryWheelEnvironmentReport:
     total_bytes: int
     distributions: tuple[ComfyRegistryWheelEnvironmentDistribution, ...]
     runtime_distributions: tuple[ComfyRegistryRuntimeDistribution, ...] = ()
+    reviewed_input_manifest_sha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,6 +323,10 @@ def verify_comfy_registry_wheel_environment(
         "runtime_distributions",
         "inventory",
     }
+    reviewed_manifest: str | None = None
+    if isinstance(payload, dict) and payload.get("version") == 4:
+        required_fields.add("reviewed_input_manifest_sha256")
+        reviewed_manifest = _digest(payload.get("reviewed_input_manifest_sha256"), "wheel inputs")
     if not isinstance(payload, dict) or set(payload) != required_fields:
         raise ComfyRegistryWheelEnvironmentError(
             "invalid_environment_manifest", "Wheel environment manifest shape is invalid"
@@ -329,7 +334,7 @@ def verify_comfy_registry_wheel_environment(
     artifact_count = _count(payload["artifact_count"], "artifact")
     if (
         type(payload["version"]) is not int
-        or payload["version"] != 3
+        or payload["version"] != (4 if reviewed_manifest is not None else 3)
         or payload["ownership_attestation"] != WHEEL_OWNERSHIP_ATTESTATION
         or payload["closure_sha256"] != closure_sha256
     ):
@@ -372,6 +377,7 @@ def verify_comfy_registry_wheel_environment(
         distributions,
         inventory,
         runtime_distributions=runtime_distributions,
+        reviewed_input_manifest_sha256=reviewed_manifest,
     )
     canonical = _encode_environment_payload(verified_payload)
     if not hmac.compare_digest(canonical, encoded):
@@ -386,6 +392,7 @@ def verify_comfy_registry_wheel_environment(
         total_bytes,
         distributions,
         runtime_distributions,
+        reviewed_manifest,
     )
 
 
@@ -989,6 +996,11 @@ def _audit_environment(
             "Wheel environment distributions do not match the closed artifacts",
         )
     _verify_installed_ownership(site_packages, ownership_plan, inventory)
+    reviewed_manifest = (
+        closure.manifest.manifest_sha256
+        if isinstance(closure, ComfyRegistryMixedWheelClosure)
+        else None
+    )
     payload = _environment_payload(
         closure.closure_sha256,
         len(artifacts),
@@ -997,6 +1009,7 @@ def _audit_environment(
         resolved,
         inventory,
         runtime_distributions=closure.runtime_distributions,
+        reviewed_input_manifest_sha256=reviewed_manifest,
     )
     encoded = _encode_environment_payload(payload)
     environment_sha256 = hashlib.sha256(encoded).hexdigest()
@@ -1009,6 +1022,7 @@ def _audit_environment(
             total_bytes,
             resolved,
             closure.runtime_distributions,
+            reviewed_manifest,
         ),
         encoded,
     )
@@ -1212,10 +1226,11 @@ def _environment_payload(
     inventory: Sequence[dict[str, object]],
     *,
     runtime_distributions: Sequence[ComfyRegistryRuntimeDistribution] = (),
+    reviewed_input_manifest_sha256: str | None = None,
 ) -> dict[str, object]:
     runtime = canonical_comfy_registry_runtime_distributions(runtime_distributions)
     payload: dict[str, object] = {
-        "version": 3,
+        "version": 4 if reviewed_input_manifest_sha256 is not None else 3,
         "ownership_attestation": WHEEL_OWNERSHIP_ATTESTATION,
         "closure_sha256": closure_sha256,
         "artifact_count": artifact_count,
@@ -1228,6 +1243,10 @@ def _environment_payload(
         "runtime_distributions": comfy_registry_runtime_distribution_payload(runtime),
         "inventory": list(inventory),
     }
+    if reviewed_input_manifest_sha256 is not None:
+        payload["reviewed_input_manifest_sha256"] = _digest(
+            reviewed_input_manifest_sha256, "wheel inputs"
+        )
     return payload
 
 

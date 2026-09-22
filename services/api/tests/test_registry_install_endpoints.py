@@ -8,7 +8,6 @@ from types import SimpleNamespace
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
-from sqlalchemy.orm import Session
 
 from local_lm.comfy_registry_paths import registry_wheel_environment_root
 from local_lm.config import Settings
@@ -122,17 +121,17 @@ async def test_granting_trust_runs_the_full_launch_verification(
     _configure_runtime(settings, monkeypatch, tmp_path)
     install_id = _seed_install()
 
-    import local_lm.comfy_registry_activation as activation_module
+    import local_lm.comfy_registry_launch_verification as launch_module
     from local_lm.comfy_registry_installs import ComfyRegistryLaunchContract
 
-    def verified(session: Session, **_kwargs: object) -> ComfyRegistryLaunchContract:
+    def verified(installs: list[object], **_kwargs: object) -> ComfyRegistryLaunchContract:
         from local_lm.models import ComfyRegistryInstall
 
-        install = session.get(ComfyRegistryInstall, install_id)
-        assert install is not None
+        (install,) = installs
+        assert isinstance(install, ComfyRegistryInstall) and install.id == install_id
         return ComfyRegistryLaunchContract((install.installed_path,), (), ("ExampleNode",))
 
-    monkeypatch.setattr(activation_module, "trusted_comfy_registry_launch_contract", verified)
+    monkeypatch.setattr(launch_module, "_verified_comfy_registry_launch_contract", verified)
 
     response = await client.post(
         f"/api/workflows/packages/installs/{install_id}/review",

@@ -4,14 +4,15 @@ import asyncio
 import hashlib
 import logging
 import shutil
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .artifacts import ArtifactStore
 from .comfy_registry import ComfyNodeResolution
 from .comfy_registry_archives import (
     ComfyRegistryArchiveError,
@@ -25,10 +26,17 @@ from .comfy_registry_dependencies import (
 )
 from .comfy_registry_downloads import DownloadProgress
 from .comfy_registry_installs import (
-    bind_comfy_registry_wheel_environment,
+    apply_comfy_registry_verified_wheel_binding,
     persist_comfy_registry_install,
+    verify_comfy_registry_wheel_binding,
+)
+from .comfy_registry_mixed_dependencies_v1 import plan_comfy_registry_mixed_dependencies
+from .comfy_registry_mixed_wheel_closure import (
+    ComfyRegistryMixedWheelClosure,
+    validate_comfy_registry_mixed_wheel_closure,
 )
 from .comfy_registry_paths import registry_wheel_environment_root
+from .comfy_registry_reviewed_inputs import ComfyRegistryReviewedInputContext
 from .comfy_registry_sources import ComfyPackageSourceError, resolve_comfy_package_source
 from .comfy_registry_wheel_artifacts import (
     ComfyRegistryWheelArtifact,
@@ -47,8 +55,13 @@ from .comfy_registry_wheel_environments import (
     REGISTRY_WHEEL_ENVIRONMENT_PREFIX,
     ComfyRegistryWheelEnvironmentError,
     ComfyRegistryWheelEnvironmentReport,
+    _environment_work,
     assemble_comfy_registry_wheel_environment,
     verify_comfy_registry_wheel_environment,
+)
+from .comfy_registry_wheel_inputs_v1 import (
+    ComfyRegistryReviewedWheelInput,
+    ComfyRegistryWheelInputManifest,
 )
 from .filesystem_links import is_link_or_reparse
 from .models import ComfyRegistryInstall
@@ -84,6 +97,23 @@ class RegistryWheelDownloader(Protocol):
 
 
 EnvironmentAssembler = Callable[..., Awaitable[ComfyRegistryWheelEnvironmentReport]]
+RegistryClosure = ComfyRegistryWheelClosure | ComfyRegistryMixedWheelClosure
+RegistryWheel = ComfyRegistryWheelArtifact | ComfyRegistryReviewedWheelInput
+
+
+@runtime_checkable
+class ReviewedRegistryWheelDownloader(Protocol):
+    async def download_and_stage_inputs(
+        self,
+        manifest: ComfyRegistryWheelInputManifest,
+        destination: Path,
+        *,
+        session_factory: Callable[[], Session],
+        store: ArtifactStore,
+        marker_environment: Mapping[str, str],
+        supported_tags: Sequence[str],
+        progress: WheelDownloadProgress | None = None,
+    ) -> ComfyRegistryWheelStageReport: ...
 
 
 @dataclass(frozen=True)
@@ -171,7 +201,7 @@ async def prepare_comfy_registry_install(
     session: Session,
     *,
     resolution: ComfyNodeResolution,
-    closure: ComfyRegistryWheelClosure,
+    closure: RegistryClosure,
     archive_downloader: RegistryArchiveDownloader,
     wheel_downloader: RegistryWheelDownloader,
     python_executable: Path,
@@ -184,6 +214,7 @@ async def prepare_comfy_registry_install(
     environment_assembler: EnvironmentAssembler = assemble_comfy_registry_wheel_environment,
     pending_omission: PendingOmission | None = None,
     record_preparation: PreparationRecorder | None = None,
+    reviewed_inputs: ComfyRegistryReviewedInputContext | None = None,
 ) -> ComfyRegistryPreparation:
     """Prepare one exact Registry package without trusting or activating it.
 
@@ -199,6 +230,7 @@ async def prepare_comfy_registry_install(
         )
     package_id, package_version, record_id = _resolution_identity(resolution)
     artifacts = _complete_closure(closure, resolution)
+    await _check_reviews(closure, reviewed_inputs)
     node_root = _managed_root(custom_node_root, "custom node")
     managed_state = _managed_root(state_root, "state")
     environment_root = _managed_child(
@@ -260,21 +292,27 @@ async def prepare_comfy_registry_install(
             environment_destination=environment_destination,
             environment_root=environment_root,
             environment_assembler=environment_assembler,
+            reviewed_inputs=reviewed_inputs,
         )
         await _remove_tree(wheel_destination, staging_root)
+        declarations = tuple(resolution.pip_dependencies)
+        binding = await _environment_work(
+            lambda: verify_comfy_registry_wheel_binding(
+                declarations,
+                closure,
+                environment,
+                environment_destination,
+                environment_root=environment_root,
+                reviewed_inputs=reviewed_inputs,
+            )
+        )
         install = persist_comfy_registry_install(
             session,
             resolution=resolution,
             archive=archive,
             installed_path=installed_path,
         )
-        bind_comfy_registry_wheel_environment(
-            install,
-            closure,
-            environment,
-            environment_destination,
-            environment_root=environment_root,
-        )
+        apply_comfy_registry_verified_wheel_binding(session, install, binding)
         install.trusted = False
         install.active = False
         if pending_omission is not None:
@@ -324,7 +362,7 @@ async def renew_comfy_registry_install_environment(
     *,
     install_id: str,
     resolution: ComfyNodeResolution,
-    closure: ComfyRegistryWheelClosure,
+    closure: RegistryClosure,
     wheel_downloader: RegistryWheelDownloader,
     python_executable: Path,
     custom_node_root: Path,
@@ -332,6 +370,7 @@ async def renew_comfy_registry_install_environment(
     media_worker_stopped: bool,
     wheel_progress: WheelDownloadProgress | None = None,
     environment_assembler: EnvironmentAssembler = assemble_comfy_registry_wheel_environment,
+    reviewed_inputs: ComfyRegistryReviewedInputContext | None = None,
 ) -> ComfyRegistryPreparation:
     """Rebuild only an inactive package's target-bound wheel environment.
 
@@ -357,6 +396,7 @@ async def renew_comfy_registry_install_environment(
         )
     _validate_renewal_identity(install, resolution)
     artifacts = _complete_closure(closure, resolution)
+    await _check_reviews(closure, reviewed_inputs)
     node_root = _managed_root(custom_node_root, "custom node")
     managed_state = _managed_root(state_root, "state")
     environment_root = _managed_child(
@@ -409,8 +449,20 @@ async def renew_comfy_registry_install_environment(
             environment_destination=environment_destination,
             environment_root=environment_root,
             environment_assembler=environment_assembler,
+            reviewed_inputs=reviewed_inputs,
         )
         await _remove_tree(wheel_destination, staging_root)
+        declarations = tuple(resolution.pip_dependencies)
+        binding = await _environment_work(
+            lambda: verify_comfy_registry_wheel_binding(
+                declarations,
+                closure,
+                environment,
+                environment_destination,
+                environment_root=environment_root,
+                reviewed_inputs=reviewed_inputs,
+            )
+        )
         if old_environment != environment_destination and old_shared is None:
             if retirement.exists() or retirement.is_symlink():
                 raise ComfyRegistryLifecycleError(
@@ -424,13 +476,7 @@ async def renew_comfy_registry_install_environment(
         install.wheel_environment_sha256 = None
         install.wheel_environment_path = None
         try:
-            bind_comfy_registry_wheel_environment(
-                install,
-                closure,
-                environment,
-                environment_destination,
-                environment_root=environment_root,
-            )
+            apply_comfy_registry_verified_wheel_binding(session, install, binding)
         finally:
             install.trusted = original_trusted
         preparation = ComfyRegistryPreparation(
@@ -469,8 +515,8 @@ async def renew_comfy_registry_install_environment(
 async def _environment(
     session: Session,
     *,
-    closure: ComfyRegistryWheelClosure,
-    artifacts: tuple[ComfyRegistryWheelArtifact, ...],
+    closure: RegistryClosure,
+    artifacts: tuple[RegistryWheel, ...],
     wheel_downloader: RegistryWheelDownloader,
     wheel_destination: Path,
     wheel_progress: WheelDownloadProgress | None,
@@ -478,6 +524,7 @@ async def _environment(
     environment_destination: Path,
     environment_root: Path,
     environment_assembler: EnvironmentAssembler,
+    reviewed_inputs: ComfyRegistryReviewedInputContext | None,
 ) -> tuple[ComfyRegistryWheelEnvironmentReport, bool]:
     if environment_destination.exists() or environment_destination.is_symlink():
         existing = session.scalar(
@@ -494,23 +541,44 @@ async def _environment(
                 "The existing Registry wheel environment has no trusted database identity",
             )
         try:
-            report = await asyncio.to_thread(
-                verify_comfy_registry_wheel_environment,
-                environment_destination,
-                expected_closure_sha256=closure.closure_sha256,
-                expected_environment_sha256=existing.wheel_environment_sha256,
+            expected_environment_sha256 = existing.wheel_environment_sha256
+            report = await _environment_work(
+                lambda: verify_comfy_registry_wheel_environment(
+                    environment_destination,
+                    expected_closure_sha256=closure.closure_sha256,
+                    expected_environment_sha256=expected_environment_sha256,
+                )
             )
         except ComfyRegistryWheelEnvironmentError as exc:
             raise ComfyRegistryLifecycleError(exc.code, str(exc)) from exc
+        await _check_reviews(closure, reviewed_inputs)
         return report, True
 
     wheel_files: dict[str, Path] = {}
     if artifacts:
-        stage = await wheel_downloader.download_and_stage(
-            closure.manifest,
-            wheel_destination,
-            progress=wheel_progress,
-        )
+        if isinstance(closure, ComfyRegistryMixedWheelClosure):
+            if reviewed_inputs is None or not isinstance(
+                wheel_downloader, ReviewedRegistryWheelDownloader
+            ):
+                raise ComfyRegistryLifecycleError(
+                    "reviewed_wheel_staging_unavailable",
+                    "Reviewed wheel dependencies require mixed input staging",
+                )
+            stage = await wheel_downloader.download_and_stage_inputs(
+                closure.manifest,
+                wheel_destination,
+                session_factory=reviewed_inputs.session_factory,
+                store=reviewed_inputs.store,
+                marker_environment=reviewed_inputs.marker_environment,
+                supported_tags=reviewed_inputs.supported_tags,
+                progress=wheel_progress,
+            )
+        else:
+            stage = await wheel_downloader.download_and_stage(
+                closure.manifest,
+                wheel_destination,
+                progress=wheel_progress,
+            )
         if stage.artifact_manifest_sha256 != closure.manifest.manifest_sha256:
             raise ComfyRegistryLifecycleError(
                 "wheel_stage_identity_mismatch",
@@ -520,25 +588,62 @@ async def _environment(
             artifact.filename: wheel_destination / artifact.filename for artifact in artifacts
         }
     try:
-        report = await environment_assembler(
-            closure,
-            wheel_files,
-            python_executable=python_executable,
-            destination=environment_destination,
-            media_worker_stopped=True,
-        )
+        if isinstance(closure, ComfyRegistryMixedWheelClosure):
+            report = await environment_assembler(
+                closure,
+                wheel_files,
+                python_executable=python_executable,
+                destination=environment_destination,
+                media_worker_stopped=True,
+                reviewed_inputs=reviewed_inputs,
+            )
+        else:
+            report = await environment_assembler(
+                closure,
+                wheel_files,
+                python_executable=python_executable,
+                destination=environment_destination,
+                media_worker_stopped=True,
+            )
     except ComfyRegistryWheelEnvironmentError as exc:
         raise ComfyRegistryLifecycleError(exc.code, str(exc)) from exc
     return report, False
 
 
-def _complete_closure(
-    closure: ComfyRegistryWheelClosure,
-    resolution: ComfyNodeResolution,
-) -> tuple[ComfyRegistryWheelArtifact, ...]:
+async def _check_reviews(
+    closure: RegistryClosure, context: ComfyRegistryReviewedInputContext | None
+) -> None:
+    if not isinstance(closure, ComfyRegistryMixedWheelClosure):
+        return
+    if context is None:
+        raise ComfyRegistryLifecycleError(
+            "source_review_context_required", "Reviewed dependencies require current verification"
+        )
     try:
-        artifacts = validate_comfy_registry_wheel_closure(closure)
-        dependencies = plan_comfy_registry_dependencies(resolution.pip_dependencies)
+        await _environment_work(lambda: context.validate(closure.manifest))
+    except ValueError as exc:
+        raise ComfyRegistryLifecycleError(
+            "source_review_verification_failed", "Reviewed dependency verification failed"
+        ) from exc
+
+
+def _complete_closure(
+    closure: RegistryClosure,
+    resolution: ComfyNodeResolution,
+) -> tuple[RegistryWheel, ...]:
+    try:
+        artifacts: tuple[RegistryWheel, ...]
+        if isinstance(closure, ComfyRegistryMixedWheelClosure):
+            manifest = validate_comfy_registry_mixed_wheel_closure(closure)
+            artifacts = (*manifest.remote.artifacts, *manifest.reviewed_local)
+            declaration_sha256 = plan_comfy_registry_mixed_dependencies(
+                resolution.pip_dependencies
+            ).declaration_sha256
+        else:
+            artifacts = validate_comfy_registry_wheel_closure(closure)
+            declaration_sha256 = plan_comfy_registry_dependencies(
+                resolution.pip_dependencies
+            ).declaration_sha256
     except (ComfyRegistryWheelClosureError, ComfyRegistryDependencyError) as exc:
         raise ComfyRegistryLifecycleError(
             "invalid_dependency_closure", "Registry dependency closure is invalid"
@@ -547,7 +652,7 @@ def _complete_closure(
         raise ComfyRegistryLifecycleError(
             "dependency_closure_incomplete", "Registry dependency closure is incomplete"
         )
-    if dependencies.declaration_sha256 != closure.manifest.declaration_sha256:
+    if declaration_sha256 != closure.manifest.declaration_sha256:
         raise ComfyRegistryLifecycleError(
             "dependency_closure_mismatch",
             "Registry dependency closure does not belong to this package",

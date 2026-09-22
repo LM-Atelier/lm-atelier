@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 from .comfy_registry_activation_batches import (
     RegistryActivationBatch,
+    _worker,
     activate_registry_package_batch,
 )
 from .comfy_registry_paths import registry_wheel_environment_root
@@ -55,7 +55,7 @@ async def prepared_workflow_source_runtime(
     provisioner = processes.runtimes
     if provisioner is None:
         raise WorkflowOfferCompletionError("workflow-runtime-plan-unavailable")
-    await asyncio.to_thread(require_workflow_source_attempt, offer_id, attempt)
+    await _worker(lambda: require_workflow_source_attempt(offer_id, attempt))
     try:
         prepared = await prepare_workflow_source_extensions(
             SessionLocal,
@@ -64,22 +64,25 @@ async def prepared_workflow_source_runtime(
             media_worker_stopped=media_worker_stopped(processes),
         )
     except (ValueError, OSError):
-        await asyncio.to_thread(
-            quarantine_workflow_source_extensions,
-            SessionLocal,
-            offer_id,
-            media_worker_stopped=media_worker_stopped(processes),
+        stopped = media_worker_stopped(processes)
+        await _worker(
+            lambda: quarantine_workflow_source_extensions(
+                SessionLocal, offer_id, media_worker_stopped=stopped
+            )
         )
         raise
-    await asyncio.to_thread(require_workflow_source_attempt, offer_id, attempt)
-    trust = await asyncio.to_thread(
-        trust_workflow_source_extensions,
-        SessionLocal,
-        offer_id,
-        context=context,
-        media_worker_stopped=media_worker_stopped(processes),
+    await _worker(lambda: require_workflow_source_attempt(offer_id, attempt))
+    stopped = media_worker_stopped(processes)
+    trust = await _worker(
+        lambda: trust_workflow_source_extensions(
+            SessionLocal,
+            offer_id,
+            context=context,
+            media_worker_stopped=stopped,
+            reviewed_inputs=prepared.reviewed_inputs,
+        )
     )
-    await asyncio.to_thread(require_workflow_source_attempt, offer_id, attempt)
+    await _worker(lambda: require_workflow_source_attempt(offer_id, attempt))
     if trust.state != "ready":
         raise WorkflowOfferCompletionError("workflow-extension-review-required")
 
@@ -87,20 +90,22 @@ async def prepared_workflow_source_runtime(
 
     async def start(bindings: tuple[WorkflowRegistryLaunchBinding, ...]) -> None:
         nonlocal launch_scope
-        scope = await asyncio.to_thread(
-            prepare_workflow_source_launch_scope,
-            SessionLocal,
-            offer_id,
-            context=context,
-            runtime_materializer=lambda requirement, selection: (
-                materialize_comfy_runtime_dependency(provisioner, requirement, selection)
-            ),
+        scope = await _worker(
+            lambda: prepare_workflow_source_launch_scope(
+                SessionLocal,
+                offer_id,
+                context=context,
+                reviewed_inputs=prepared.reviewed_inputs,
+                runtime_materializer=lambda requirement, selection: (
+                    materialize_comfy_runtime_dependency(provisioner, requirement, selection)
+                ),
+            )
         )
-        require_workflow_source_attempt(offer_id, attempt)
+        await _worker(lambda: require_workflow_source_attempt(offer_id, attempt))
         if any(binding not in scope.registry_packages for binding in bindings):
             raise WorkflowOfferCompletionError("workflow-install-offer-changed")
         await processes.start_media(activation_scope=scope)
-        await asyncio.to_thread(require_workflow_source_attempt, offer_id, attempt)
+        await _worker(lambda: require_workflow_source_attempt(offer_id, attempt))
         if processes.launch_scope_sha256("media") != scope.launch_sha256:
             raise WorkflowOfferCompletionError("workflow-install-offer-changed")
         launch_scope = scope
@@ -126,6 +131,7 @@ async def prepared_workflow_source_runtime(
         start_media=start,
         stop_media=stop,
         read_node_inventory=processes.comfy_node_inventory,
+        reviewed_inputs=prepared.reviewed_inputs,
     ) as batch:
         if launch_scope is None:
             raise WorkflowOfferCompletionError("workflow-completion-unavailable")

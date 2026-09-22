@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import select, update
+from sqlalchemy.orm import Session, object_session
 
 from .comfy_registry import ComfyNodeResolution
 from .comfy_registry_archives import (
@@ -19,6 +20,19 @@ from .comfy_registry_archives import (
 from .comfy_registry_dependencies import (
     ComfyRegistryDependencyError,
     plan_comfy_registry_dependencies,
+)
+from .comfy_registry_mixed_dependencies_v1 import plan_comfy_registry_mixed_dependencies
+from .comfy_registry_mixed_wheel_closure import (
+    ComfyRegistryMixedWheelClosure,
+    validate_comfy_registry_mixed_wheel_closure,
+)
+from .comfy_registry_reviewed_closure_binding import (
+    parse_reviewed_closure_binding,
+    reviewed_closure_binding_payload,
+)
+from .comfy_registry_reviewed_inputs import (
+    ComfyRegistryReviewedInputAuthority,
+    ComfyRegistryReviewedInputContext,
 )
 from .comfy_registry_runtime import ComfyRegistryRuntimeDistribution
 from .comfy_registry_sources import ComfyPackageSourceError, resolve_comfy_package_source
@@ -43,6 +57,7 @@ _DIGEST = re.compile(r"^[0-9a-fA-F]{64}$")
 _INSTALL_PATH = re.compile(r"^lm-atelier-registry_[A-Za-z0-9._-]{1,200}$")
 _ENVIRONMENT_PATH = re.compile(r"^registry-wheels-v3-([0-9a-f]{64})$")
 _LEGACY_ENVIRONMENT_PATH = re.compile(r"^registry-wheels-([0-9a-f]{64})$")
+_BINDING_SEAL = object()
 
 
 class ComfyRegistryInstallError(ValueError):
@@ -79,6 +94,17 @@ class _ActivationReview:
     file_count: int
     expanded_bytes: int
     runtime_files: tuple[ComfyRegistryRuntimeFile, ...]
+
+
+@dataclass(frozen=True)
+class ComfyRegistryVerifiedWheelBinding:
+    declarations: tuple[str, ...]
+    closure_sha256: str
+    environment_sha256: str
+    environment_path: str
+    reviewed_binding_json: str | None
+    authority: ComfyRegistryReviewedInputAuthority | None
+    seal: object
 
 
 def installed_comfy_registry_versions(session: Session) -> dict[str, set[str]]:
@@ -156,26 +182,59 @@ def persist_comfy_registry_install(
 
 def bind_comfy_registry_wheel_environment(
     install: ComfyRegistryInstall,
-    closure: ComfyRegistryWheelClosure,
+    closure: ComfyRegistryWheelClosure | ComfyRegistryMixedWheelClosure,
     report: ComfyRegistryWheelEnvironmentReport,
     destination: Path,
     *,
     environment_root: Path,
+    reviewed_inputs: ComfyRegistryReviewedInputContext | None = None,
 ) -> None:
     """Bind an inert Registry install to one exact verified dependency overlay."""
     if not isinstance(install, ComfyRegistryInstall) or install.trusted or install.active:
         raise ComfyRegistryInstallError("Registry install must be inactive and untrusted")
+    binding = verify_comfy_registry_wheel_binding(
+        tuple(install.pip_dependencies_json),
+        closure,
+        report,
+        destination,
+        environment_root=environment_root,
+        reviewed_inputs=reviewed_inputs,
+    )
+    _apply_wheel_binding(install, binding)
+
+
+def verify_comfy_registry_wheel_binding(
+    declarations: Sequence[str],
+    closure: ComfyRegistryWheelClosure | ComfyRegistryMixedWheelClosure,
+    report: ComfyRegistryWheelEnvironmentReport,
+    destination: Path,
+    *,
+    environment_root: Path,
+    reviewed_inputs: ComfyRegistryReviewedInputContext | None = None,
+) -> ComfyRegistryVerifiedWheelBinding:
+    """Verify files without retaining or accessing the caller's database session."""
+    declarations = tuple(declarations)
+    reviewed_manifest: str | None = None
     try:
-        artifacts = validate_comfy_registry_wheel_closure(closure)
+        if isinstance(closure, ComfyRegistryMixedWheelClosure):
+            inputs = validate_comfy_registry_mixed_wheel_closure(closure)
+            artifact_count = len(inputs.remote.artifacts) + len(inputs.reviewed_local)
+            reviewed_manifest = inputs.manifest_sha256
+        else:
+            artifact_count = len(validate_comfy_registry_wheel_closure(closure))
     except ComfyRegistryWheelClosureError as exc:
         raise ComfyRegistryInstallError("Registry wheel closure is invalid") from exc
     if not closure.complete:
         raise ComfyRegistryInstallError("Registry wheel closure is incomplete")
     try:
-        dependency_plan = plan_comfy_registry_dependencies(install.pip_dependencies_json)
+        declaration_sha256 = (
+            plan_comfy_registry_mixed_dependencies(declarations).declaration_sha256
+            if isinstance(closure, ComfyRegistryMixedWheelClosure)
+            else plan_comfy_registry_dependencies(declarations).declaration_sha256
+        )
     except ComfyRegistryDependencyError as exc:
         raise ComfyRegistryInstallError("Registry dependency declarations are invalid") from exc
-    if dependency_plan.declaration_sha256 != closure.manifest.declaration_sha256:
+    if declaration_sha256 != closure.manifest.declaration_sha256:
         raise ComfyRegistryInstallError("Registry wheel closure does not match the install")
     root = _managed_root(environment_root)
     path = _managed_environment_path(root, destination)
@@ -192,10 +251,70 @@ def bind_comfy_registry_wheel_environment(
     if (
         verified != report
         or report.closure_sha256 != closure.closure_sha256
-        or report.artifact_count != len(artifacts)
+        or report.artifact_count != artifact_count
+        or report.reviewed_input_manifest_sha256 != reviewed_manifest
     ):
         raise ComfyRegistryInstallError("Registry wheel environment identity does not match")
-    identity = (closure.closure_sha256, report.environment_sha256, path.name)
+    binding = (
+        reviewed_closure_binding_payload(closure)
+        if isinstance(closure, ComfyRegistryMixedWheelClosure)
+        else None
+    )
+    authority = _verify_reviewed_binding(
+        declarations, binding, report, reviewed_inputs=reviewed_inputs
+    )
+    return ComfyRegistryVerifiedWheelBinding(
+        declarations,
+        closure.closure_sha256,
+        report.environment_sha256,
+        path.name,
+        json.dumps(binding, sort_keys=True, separators=(",", ":")) if binding is not None else None,
+        authority,
+        _BINDING_SEAL,
+    )
+
+
+def apply_comfy_registry_verified_wheel_binding(
+    session: Session, install: ComfyRegistryInstall, binding: ComfyRegistryVerifiedWheelBinding
+) -> None:
+    """Recheck current review authority under the short final write transaction."""
+    if object_session(install) is not session:
+        raise ComfyRegistryInstallError("Registry install must belong to the current transaction")
+    session.flush()
+    # A no-op update reserves SQLite's writer even when this is an unchanged
+    # binding. No file reads or awaits separate this reservation from commit.
+    reserved = session.execute(
+        update(ComfyRegistryInstall)
+        .where(ComfyRegistryInstall.id == install.id)
+        .values(id=ComfyRegistryInstall.id)
+        .returning(ComfyRegistryInstall.id)
+        .execution_options(synchronize_session=False)
+    ).scalar_one_or_none()
+    if reserved != install.id:
+        raise ComfyRegistryInstallError("Registry install no longer exists")
+    if binding.authority is not None:
+        try:
+            binding.authority.require_current(session)
+        except ValueError as exc:
+            raise ComfyRegistryInstallError(
+                "Registry source dependency review changed before commit",
+                code="source_review_verification_failed",
+            ) from exc
+    _apply_wheel_binding(install, binding)
+
+
+def _apply_wheel_binding(
+    install: ComfyRegistryInstall, binding: ComfyRegistryVerifiedWheelBinding
+) -> None:
+    if (
+        binding.seal is not _BINDING_SEAL
+        or not isinstance(install, ComfyRegistryInstall)
+        or install.trusted
+        or install.active
+        or tuple(install.pip_dependencies_json) != binding.declarations
+    ):
+        raise ComfyRegistryInstallError("Registry install changed during dependency verification")
+    identity = (binding.closure_sha256, binding.environment_sha256, binding.environment_path)
     current = (
         install.wheel_closure_sha256,
         install.wheel_environment_sha256,
@@ -203,6 +322,11 @@ def bind_comfy_registry_wheel_environment(
     )
     if any(value is not None for value in current) and current != identity:
         raise ComfyRegistryInstallError("Registry install is already bound to another environment")
+    if binding.reviewed_binding_json is not None:
+        install.review_json = {
+            **install.review_json,
+            "reviewed_wheel_closure": json.loads(binding.reviewed_binding_json),
+        }
     (
         install.wheel_closure_sha256,
         install.wheel_environment_sha256,
@@ -215,6 +339,7 @@ def trusted_comfy_registry_launch_contract(
     *,
     custom_node_root: Path,
     environment_root: Path,
+    reviewed_inputs: ComfyRegistryReviewedInputContext | None = None,
 ) -> ComfyRegistryLaunchContract:
     """Revalidate every trusted active Registry package for a stopped-worker launch."""
     installs = session.scalars(
@@ -229,6 +354,7 @@ def trusted_comfy_registry_launch_contract(
         installs,
         custom_node_root=custom_node_root,
         environment_root=environment_root,
+        reviewed_inputs=reviewed_inputs,
     )
 
 
@@ -238,6 +364,7 @@ def scoped_comfy_registry_launch_contract(
     *,
     custom_node_root: Path,
     environment_root: Path,
+    reviewed_inputs: ComfyRegistryReviewedInputContext | None = None,
 ) -> ComfyRegistryLaunchContract:
     """Revalidate only the exact Registry packages frozen into one activation."""
 
@@ -257,6 +384,7 @@ def scoped_comfy_registry_launch_contract(
         custom_node_root=custom_node_root,
         environment_root=environment_root,
         expected_bindings={item.registry_install_id: item for item in bindings},
+        reviewed_inputs=reviewed_inputs,
     )
 
 
@@ -266,6 +394,8 @@ def _verified_comfy_registry_launch_contract(
     custom_node_root: Path,
     environment_root: Path,
     expected_bindings: Mapping[str, WorkflowRegistryLaunchBinding] | None = None,
+    reviewed_inputs: ComfyRegistryReviewedInputContext | None = None,
+    review_authorities: list[ComfyRegistryReviewedInputAuthority] | None = None,
 ) -> ComfyRegistryLaunchContract:
     if not installs:
         return ComfyRegistryLaunchContract((), (), ())
@@ -313,7 +443,15 @@ def _verified_comfy_registry_launch_contract(
             raise ComfyRegistryInstallError(
                 "Registry wheel environment failed verification", code=exc.code
             ) from exc
-        if report.runtime_distributions:
+        authority = _verify_reviewed_binding(
+            install.pip_dependencies_json,
+            install.review_json.get("reviewed_wheel_closure"),
+            report,
+            reviewed_inputs=reviewed_inputs,
+        )
+        if authority is not None and review_authorities is not None:
+            review_authorities.append(authority)
+        if report.runtime_distributions or authority is not None:
             runtime_baselines.add(report.runtime_distributions)
         declared_nodes = _node_types(install.node_types_json)
         folders.append(folder.name)
@@ -330,6 +468,39 @@ def _verified_comfy_registry_launch_contract(
         tuple(sorted(node_types)),
         runtime_distributions,
     )
+
+
+def _verify_reviewed_binding(
+    declarations: Sequence[str],
+    binding: object,
+    report: ComfyRegistryWheelEnvironmentReport,
+    *,
+    reviewed_inputs: ComfyRegistryReviewedInputContext | None,
+) -> ComfyRegistryReviewedInputAuthority | None:
+    try:
+        plan = plan_comfy_registry_mixed_dependencies(declarations)
+        if binding is None and report.reviewed_input_manifest_sha256 is None and not plan.sources:
+            return None
+        if report.reviewed_input_manifest_sha256 is None or reviewed_inputs is None:
+            raise ComfyRegistryInstallError(
+                "Reviewed wheel dependencies require current source verification",
+                code="source_review_context_required",
+            )
+        manifest = parse_reviewed_closure_binding(
+            binding,
+            expected_closure_sha256=report.closure_sha256,
+            declarations=declarations,
+        )
+        if manifest.manifest_sha256 != report.reviewed_input_manifest_sha256:
+            raise ComfyRegistryInstallError("Registry environment source identity changed")
+        return reviewed_inputs.verified_authority(manifest)
+    except ValueError as exc:
+        if isinstance(exc, ComfyRegistryInstallError):
+            raise
+        raise ComfyRegistryInstallError(
+            "Registry source dependency review failed verification",
+            code="source_review_verification_failed",
+        ) from exc
 
 
 def _assert_scoped_registry_identity(

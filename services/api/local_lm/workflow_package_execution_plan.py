@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import Field
+from sqlalchemy.orm import Session
 
+from .artifacts import ArtifactStore
 from .comfy_package_requirements import read_staged_requirements, select_requirements_manifest
 from .comfy_registry import ComfyNodeResolution, ComfyRegistryClient
 from .comfy_registry_archives import ComfyRegistryArchiveReport
@@ -20,8 +22,17 @@ from .comfy_registry_closure_driver import (
 )
 from .comfy_registry_downloads import DownloadProgress
 from .comfy_registry_lifecycle import RegistryArchiveDownloader
+from .comfy_registry_mixed_dependencies_v1 import plan_comfy_registry_mixed_dependencies
+from .comfy_registry_mixed_wheel_closure import (
+    ComfyRegistryMixedWheelClosure,
+    validate_comfy_registry_mixed_wheel_closure,
+)
+from .comfy_registry_reviewed_closure import resolve_comfy_registry_reviewed_closure
 from .comfy_registry_runtime import ComfyRegistryRuntimeDistribution
-from .comfy_registry_wheel_artifacts import comfy_registry_wheel_target_sha256
+from .comfy_registry_wheel_artifacts import (
+    ComfyRegistryWheelArtifactManifest,
+    comfy_registry_wheel_target_sha256,
+)
 from .comfy_registry_wheel_closure import (
     ComfyRegistryWheelClosure,
     validate_comfy_registry_wheel_closure,
@@ -42,11 +53,11 @@ class WorkflowPackageExecutionPlanError(ValueError):
 
 
 class _ExecutionInputs(ApiModel):
-    version: Literal[1] = 1
+    version: Literal[1, 2] = 1
     resolution: ComfyNodeResolution
     archive: ComfyRegistryArchiveReport
     archive_bytes: int = Field(gt=0)
-    closure: ComfyRegistryWheelClosure
+    closure: ComfyRegistryWheelClosure | ComfyRegistryMixedWheelClosure
 
 
 class WorkflowPackageExecutionPlan(_ExecutionInputs):
@@ -54,19 +65,35 @@ class WorkflowPackageExecutionPlan(_ExecutionInputs):
 
     @property
     def wheel_bytes(self) -> int:
-        return sum(item.size_bytes for item in self.closure.manifest.artifacts)
+        retained = (
+            sum(item.size_bytes for item in self.closure.manifest.reviewed_local)
+            if isinstance(self.closure, ComfyRegistryMixedWheelClosure)
+            else 0
+        )
+        return sum(item.size_bytes for item in self._remote_manifest.artifacts) + retained
+
+    @property
+    def _remote_manifest(self) -> ComfyRegistryWheelArtifactManifest:
+        return (
+            self.closure.manifest.remote
+            if isinstance(self.closure, ComfyRegistryMixedWheelClosure)
+            else self.closure.manifest
+        )
 
     @property
     def download_bytes(self) -> int:
-        return self.archive_bytes + self.wheel_bytes
+        return self.archive_bytes + sum(item.size_bytes for item in self._remote_manifest.artifacts)
 
     def verify(self) -> None:
+        mixed = isinstance(self.closure, ComfyRegistryMixedWheelClosure)
+        if type(self.version) is not int or self.version != (2 if mixed else 1):
+            raise WorkflowPackageExecutionPlanError("workflow-package-execution-plan-changed")
         expected = hashlib.sha256(
             canonical_graph(self.model_dump(mode="json", exclude={"plan_sha256"})).encode("utf-8")
         ).hexdigest()
         if expected != self.plan_sha256 or not self.closure.complete:
             raise WorkflowPackageExecutionPlanError("workflow-package-execution-plan-changed")
-        validate_comfy_registry_wheel_closure(self.closure)
+        _validate_closure(self.closure)
 
     def verify_resolution(self, resolution: ComfyNodeResolution) -> None:
         self.verify()
@@ -77,7 +104,7 @@ class WorkflowPackageExecutionPlan(_ExecutionInputs):
         self.verify()
         if (
             comfy_registry_wheel_target_sha256(environment, tags)
-            != self.closure.manifest.target_sha256
+            != self._remote_manifest.target_sha256
         ):
             raise WorkflowPackageExecutionPlanError("workflow-package-runtime-changed")
 
@@ -90,16 +117,25 @@ class WorkflowPackageExecutionPlan(_ExecutionInputs):
         ):
             raise WorkflowPackageExecutionPlanError("workflow-package-resolution-changed")
 
-    def verify_closure(self, closure: ComfyRegistryWheelClosure) -> None:
+    def verify_closure(
+        self, closure: ComfyRegistryWheelClosure | ComfyRegistryMixedWheelClosure
+    ) -> None:
         self.verify()
         try:
-            validate_comfy_registry_wheel_closure(closure)
+            _validate_closure(closure)
         except ValueError as exc:
             raise WorkflowPackageExecutionPlanError(
                 "workflow-package-dependencies-changed"
             ) from exc
         if closure != self.closure:
             raise WorkflowPackageExecutionPlanError("workflow-package-dependencies-changed")
+
+
+def _validate_closure(closure: ComfyRegistryWheelClosure | ComfyRegistryMixedWheelClosure) -> None:
+    if isinstance(closure, ComfyRegistryMixedWheelClosure):
+        validate_comfy_registry_mixed_wheel_closure(closure)
+    else:
+        validate_comfy_registry_wheel_closure(closure)
 
 
 class PlannedArchiveDownloader:
@@ -142,6 +178,8 @@ async def plan_workflow_package_execution(
     project_client: ComfyRegistryWheelProjectClient,
     metadata_client: ComfyRegistryWheelMetadataClient,
     archive_downloader: RegistryArchiveDownloader,
+    source_session_factory: Callable[[], Session] | None = None,
+    source_store: ArtifactStore | None = None,
 ) -> WorkflowPackageExecutionPlan:
     """Inspect in temporary storage without installing code or writing application rows."""
     resolved = await registry_client.resolve([replace(requirement, locally_resolved=False)])
@@ -180,16 +218,38 @@ async def plan_workflow_package_execution(
                     read_staged_requirements(destination, manifest) if manifest is not None else ()
                 ),
             )
-        closed = await drive_comfy_registry_wheel_closure(
-            effective,
-            project_fetcher=project_client.fetch,
-            metadata_fetcher=metadata_client.fetch,
-            marker_environment=environment,
-            supported_tags=tags,
-            runtime_distributions=runtime,
-        )
+        closure: ComfyRegistryWheelClosure | ComfyRegistryMixedWheelClosure
+        if (
+            source_session_factory is not None
+            and source_store is not None
+            and plan_comfy_registry_mixed_dependencies(effective.pip_dependencies).sources
+        ):
+            closure = await resolve_comfy_registry_reviewed_closure(
+                effective.pip_dependencies,
+                session_factory=source_session_factory,
+                store=source_store,
+                project_fetcher=project_client.fetch,
+                metadata_fetcher=metadata_client.fetch,
+                marker_environment=environment,
+                supported_tags=tags,
+                runtime_distributions=runtime,
+            )
+        else:
+            closed = await drive_comfy_registry_wheel_closure(
+                effective,
+                project_fetcher=project_client.fetch,
+                metadata_fetcher=metadata_client.fetch,
+                marker_environment=environment,
+                supported_tags=tags,
+                runtime_distributions=runtime,
+            )
+            closure = closed.closure
     inputs = _ExecutionInputs(
-        resolution=resolution, archive=archive, archive_bytes=archive_bytes, closure=closed.closure
+        version=2 if isinstance(closure, ComfyRegistryMixedWheelClosure) else 1,
+        resolution=resolution,
+        archive=archive,
+        archive_bytes=archive_bytes,
+        closure=closure,
     )
     digest = hashlib.sha256(
         canonical_graph(inputs.model_dump(mode="json")).encode("utf-8")

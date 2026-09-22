@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import AsyncExitStack
 from typing import Any
 
 from pydantic import Field
+from sqlalchemy.orm import Session
 
+from .artifacts import ArtifactStore
 from .comfy_registry import MAX_REGISTRY_PACKAGES, ComfyRegistryClient
 from .comfy_registry_closure_driver import ComfyRegistryWheelMetadataClient
 from .comfy_registry_downloads import ComfyRegistryArchiveDownloader
@@ -34,6 +37,8 @@ async def preflight_workflow_extensions(
     graph: dict[str, Any],
     settings: Settings,
     *,
+    session_factory: Callable[[], Session],
+    source_store: ArtifactStore,
     runtimes: RuntimeProvisioner | None = None,
     runtime_plan: RuntimeProvisioningPlan | None = None,
 ) -> WorkflowPackageExtensionPreflight:
@@ -85,6 +90,8 @@ async def preflight_workflow_extensions(
                     project_client=projects,
                     metadata_client=metadata,
                     archive_downloader=archive,
+                    source_session_factory=session_factory,
+                    source_store=source_store,
                 )
             except ValueError as exc:
                 result.errors[requirement.package_id] = getattr(
