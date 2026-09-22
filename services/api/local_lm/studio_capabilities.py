@@ -17,6 +17,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from .matting_workflows import workflow_declares_matting
 from .outpaint_workflows import workflow_declares_outpaint
 from .studio_masks import workflow_accepts_mask
 from .upscale_workflows import workflow_declares_upscale
@@ -33,6 +34,7 @@ StudioToolKind = Literal[
     "extend",
     "text",
     "relight",
+    "isolate",
 ]
 
 
@@ -52,6 +54,7 @@ TOOL_WORKFLOW_CLASSES: dict[StudioToolKind, str] = {
     "extend": "outpaint",
     "text": "image_to_image",
     "relight": "relight",
+    "isolate": "matting",
 }
 
 _CLASS_GUIDANCE = {
@@ -63,6 +66,7 @@ _CLASS_GUIDANCE = {
         "Install an image editing workflow that takes a second picture and a LoRA to relight "
         "a picture."
     ),
+    "matting": "Install a background removal workflow to cut a subject out of a picture.",
 }
 _NO_LIGHTING_ADAPTER = "Install the Qwen Multi-Angle Lighting LoRA to relight a picture."
 
@@ -98,11 +102,13 @@ def tool_capabilities(
     can_mask = any(workflow_accepts_mask(schema) for schema in edit_input_schemas)
     can_upscale = any(workflow_declares_upscale(schema) for schema in edit_input_schemas)
     can_outpaint = any(workflow_declares_outpaint(schema) for schema in edit_input_schemas)
+    can_matte = any(workflow_declares_matting(schema) for schema in edit_input_schemas)
     available = {
         "image_to_image": can_edit,
         "inpaint": can_mask,
         "upscale": can_upscale,
         "outpaint": can_outpaint,
+        "matting": can_matte,
         # Relight needs both halves: a workflow that can take the light map and
         # a LoRA, and the one adapter whose behaviour was checked.
         "relight": bool(relight_workflow_ids) and bool(lighting_adapter_ids),

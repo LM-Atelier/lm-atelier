@@ -2146,7 +2146,7 @@ export interface WorkflowResourceConsumers {
 
 export type StudioToolKind =
   | "instruct" | "brush" | "eraser" | "rect" | "lasso" | "bucket" | "wand" | "enhance" | "extend"
-  | "text" | "relight";
+  | "text" | "relight" | "isolate";
 
 export interface StudioToolCapability {
   kind: StudioToolKind;
