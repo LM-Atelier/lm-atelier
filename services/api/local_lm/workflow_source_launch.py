@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from .comfy_registry_activation_batches import _row
 from .comfy_registry_installs import scoped_comfy_registry_launch_contract
 from .comfy_registry_paths import registry_wheel_environment_root
+from .comfy_registry_reviewed_inputs import ComfyRegistryReviewedInputContext
 from .revision_dependency_contract import declared_dependency_contract
 from .workflow_activation_preparation import prepare_workflow_dependency_choices
 from .workflow_activations import (
@@ -78,6 +79,7 @@ def prepare_workflow_source_launch_scope(
     *,
     context: PreparationContext,
     runtime_materializer: WorkflowRuntimeMaterializer,
+    reviewed_inputs: ComfyRegistryReviewedInputContext | None = None,
 ) -> WorkflowSourceLaunchScope:
     """Read a consistent accepted snapshot; the launcher revalidates it before execution."""
     environment_root = registry_wheel_environment_root(context.state_root)
@@ -166,6 +168,7 @@ def prepare_workflow_source_launch_scope(
             registry,
             custom_node_root=context.custom_node_root,
             environment_root=environment_root,
+            reviewed_inputs=reviewed_inputs,
         )
         _reject_loader_collisions(models, assets)
         _reject_node_type_collisions(declared.custom_nodes, registry)
@@ -246,6 +249,7 @@ def revalidate_workflow_source_launch_scope(
     *,
     context: PreparationContext,
     runtime_materializer: WorkflowRuntimeMaterializer,
+    reviewed_inputs: ComfyRegistryReviewedInputContext | None = None,
 ) -> None:
     """Refuse any change to the accepted launch, including its physical dependency files."""
     current = prepare_workflow_source_launch_scope(
@@ -253,6 +257,7 @@ def revalidate_workflow_source_launch_scope(
         expected.offer_id,
         context=context,
         runtime_materializer=runtime_materializer,
+        reviewed_inputs=reviewed_inputs,
     )
     if current != expected:
         raise WorkflowActivationError(

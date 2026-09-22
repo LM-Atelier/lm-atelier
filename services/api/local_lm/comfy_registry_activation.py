@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.orm import Session
 
@@ -17,15 +17,20 @@ from .comfy_registry_archives import (
     snapshot_staged_comfy_registry_files,
 )
 from .comfy_registry_installs import trusted_comfy_registry_launch_contract
+from .comfy_registry_launch_verification import VerifiedComfyRegistryLaunch
 from .domain import utcnow
 from .models import ComfyRegistryInstall
-from .registry_trust_policy import POLICY_ID, decide_registry_trust
+from .registry_trust_policy import POLICY_ID, RegistryTrustDecision, decide_registry_trust
 from .source_omission_proof import (
     OmissionProofError,
     evidence_digest,
     pending_omission_requirement,
     prove_omission,
 )
+
+if TYPE_CHECKING:
+    from .comfy_registry_target_verification import ComfyRegistryVerificationTarget
+
 
 MediaStarter = Callable[[], Awaitable[object]]
 #: Reads the running worker's loaded node types. Injected rather than imported
@@ -57,6 +62,7 @@ def review_comfy_registry_install(
     custom_node_root: Path,
     environment_root: Path,
     media_worker_stopped: bool,
+    verified_launch: VerifiedComfyRegistryLaunch | None = None,
 ) -> ComfyRegistryActivationState:
     """Record an explicit local trust decision after exact stopped-worker verification."""
     _require_stopped(media_worker_stopped)
@@ -67,6 +73,7 @@ def review_comfy_registry_install(
             install,
             custom_node_root=custom_node_root,
             environment_root=environment_root,
+            verified_launch=verified_launch,
         )
         install.trusted = True
     else:
@@ -94,6 +101,7 @@ def record_registry_policy_trust(
     custom_node_root: Path,
     environment_root: Path,
     media_worker_stopped: bool,
+    verified_launch: VerifiedComfyRegistryLaunch | None = None,
 ) -> ComfyRegistryActivationState:
     """Commit the exact Registry policy grant after stopped-worker verification."""
     _require_stopped(media_worker_stopped)
@@ -107,6 +115,7 @@ def record_registry_policy_trust(
         custom_node_root=custom_node_root,
         environment_root=environment_root,
         media_worker_stopped=media_worker_stopped,
+        verified_launch=verified_launch,
     )
     if not already_trusted:
         session.commit()
@@ -123,6 +132,7 @@ def stage_registry_policy_trust(
     custom_node_root: Path,
     environment_root: Path,
     media_worker_stopped: bool,
+    verified_launch: VerifiedComfyRegistryLaunch | None = None,
 ) -> ComfyRegistryActivationState:
     """Record the trust the Registry policy grants, under the verification a person's grant gets.
 
@@ -164,7 +174,20 @@ def stage_registry_policy_trust(
         install,
         custom_node_root=custom_node_root,
         environment_root=environment_root,
+        verified_launch=verified_launch,
     )
+    _apply_registry_policy_trust(install, decision)
+    return _state(install)
+
+
+def _apply_registry_policy_trust(
+    install: ComfyRegistryInstall, decision: RegistryTrustDecision
+) -> None:
+    """Apply an automatic grant after the caller verifies the complete transaction's inputs."""
+    if decision.outcome != "auto_trust":
+        raise ComfyRegistryActivationError(
+            "registry_policy_grant_invalid", "The Registry policy did not grant this package trust"
+        )
     install.trusted = True
     install.review_json = {
         **_without_trust_provenance(install.review_json),
@@ -173,7 +196,6 @@ def stage_registry_policy_trust(
         "trust_authority": POLICY_ID,
         "policy_notices": list(decision.notices),
     }
-    return _state(install)
 
 
 _TRUST_PROVENANCE_KEYS = frozenset({"trust_authority", "policy_notices"})
@@ -201,6 +223,7 @@ async def activate_comfy_registry_install(
     media_worker_stopped: bool,
     start_media: MediaStarter,
     read_node_inventory: NodeInventoryReader | None = None,
+    verification_target: ComfyRegistryVerificationTarget | None = None,
 ) -> ComfyRegistryActivationState:
     """Activate one trusted package and restore the prior runtime if startup fails.
 
@@ -211,6 +234,24 @@ async def activate_comfy_registry_install(
     afterwards, and a runtime that cannot show them is rolled back like any
     other failed activation.
     """
+    if verification_target is not None:
+        from .comfy_registry_verified_activation import activate_verified_comfy_registry_install
+
+        if (
+            verification_target.custom_node_root != custom_node_root
+            or verification_target.environment_root != environment_root
+        ):
+            raise ComfyRegistryActivationError(
+                "registry_install_verification_failed", "Registry activation roots changed"
+            )
+        return await activate_verified_comfy_registry_install(
+            session,
+            install_id=install_id,
+            target=verification_target,
+            media_worker_stopped=media_worker_stopped,
+            start_media=start_media,
+            read_node_inventory=read_node_inventory,
+        )
     _require_stopped(media_worker_stopped)
     install = _install(session, install_id)
     if not install.trusted:
@@ -375,7 +416,23 @@ def _verify_install(
     *,
     custom_node_root: Path,
     environment_root: Path,
+    verified_launch: VerifiedComfyRegistryLaunch | None = None,
 ) -> None:
+    if verified_launch is not None:
+        try:
+            verified_launch.require_install(
+                session,
+                install,
+                custom_node_root=custom_node_root,
+                environment_root=environment_root,
+            )
+        except ValueError as exc:
+            session.rollback()
+            raise ComfyRegistryActivationError(
+                "registry_install_verification_failed",
+                f"Registry package files or dependencies failed verification: {exc}",
+            ) from exc
+        return
     original_trusted = install.trusted
     original_active = install.active
     install.trusted = True

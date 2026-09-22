@@ -725,6 +725,18 @@ def _registry_launch_binding(
         raise WorkflowActivationError(
             "dependency_unavailable", "Selected Registry package is unavailable"
         )
+    return _registry_install_launch_binding(
+        install, custom_node_root=custom_node_root, environment_root=environment_root
+    )
+
+
+def _registry_install_launch_binding(
+    install: ComfyRegistryInstall,
+    *,
+    custom_node_root: Path | None,
+    environment_root: Path | None,
+) -> WorkflowRegistryLaunchBinding:
+    """Validate launch paths for a detached or session-bound package identity."""
     try:
         identity = materialize_registry_package(install).identity
     except WorkflowBindingError as exc:

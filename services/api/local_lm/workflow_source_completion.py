@@ -45,6 +45,7 @@ from .workflow_package_inputs import prepare_workflow_package_compilation
 from .workflow_package_install_plans import WorkflowPackageInstallPlanRequest
 from .workflow_package_runtime import WorkflowPackageRestorationError, workflow_package_runtime
 from .workflow_review_runtime import (
+    VerifiedReviewedPackages,
     _reviewed_package_inputs,
     _runtime_id,
     review_runtime_object_info,
@@ -211,8 +212,10 @@ def _finish(
     snapshot: ReviewSnapshot,
     worker_id: int,
     prepared: PreparedWorkflowSourceRuntime,
+    registry_verification: VerifiedReviewedPackages | None = None,
 ) -> str:
     _require_runtime_plan(processes, source)
+    batch = prepared.batch.verify_completion(SessionLocal) if prepared.batch is not None else None
     with SessionLocal() as session:
         # Reserve the writer before rereading consent and downloaded resources.
         # Compilation I/O is finished; all staged rows commit with the activation.
@@ -233,6 +236,8 @@ def _finish(
         fresh = build_review_snapshot(session, definition, revision, object_info=info)
         if fresh != snapshot or fresh.reasons:
             raise WorkflowOfferCompletionError("workflow-review-required")
+        if registry_verification is not None:
+            registry_verification.require_current(session)
         # Source approval covers this exact compilation after runtime/code checks.
         record_review(session, revision, fresh, approved=True)
         offer = session.get(WorkflowInstallOffer, offer_id)
@@ -286,8 +291,8 @@ def _finish(
         ):
             raise WorkflowOfferCompletionError("workflow-install-offer-changed")
         complete_workflow_job(session, offer, source.attempt, activation_id)
-        if prepared.batch is not None:
-            prepared.batch.complete(session)
+        if batch is not None:
+            batch.complete(session)
         offer.completion_error_code = None
         session.commit()
         return activation_id
@@ -390,7 +395,9 @@ async def _complete_running_source(
         if snapshot.reasons:
             raise WorkflowOfferCompletionError("workflow-review-required")
         packages = _reviewed_package_inputs(session, snapshot)
-    await verify_reviewed_packages(settings, None, snapshot, packages=packages)
+    registry_verification = await verify_reviewed_packages(
+        settings, None, snapshot, session_factory=SessionLocal, packages=packages
+    )
     try:
         errors = await media.validate_workflow(payload.api_graph)
     except (OSError, RuntimeError, ValueError, TimeoutError, httpx.HTTPError):
@@ -405,15 +412,28 @@ async def _complete_running_source(
         or _compile(source, refreshed) != payload
     ):
         raise WorkflowOfferCompletionError("workflow-review-required")
-    return await asyncio.to_thread(
-        _finish,
-        settings,
-        processes,
-        offer_id,
-        source,
-        payload,
-        refreshed,
-        snapshot,
-        worker_id,
-        prepared,
+    if registry_verification is not None:
+        registry_verification = await registry_verification.refresh()
+    completion = asyncio.create_task(
+        asyncio.to_thread(
+            _finish,
+            settings,
+            processes,
+            offer_id,
+            source,
+            payload,
+            refreshed,
+            snapshot,
+            worker_id,
+            prepared,
+            registry_verification,
+        )
     )
+    # Once finalization starts, retain its transaction outcome before cleanup.
+    # A durable job cancellation is rechecked by the transaction itself.
+    while not completion.done():
+        try:
+            return await asyncio.shield(completion)
+        except asyncio.CancelledError:
+            continue
+    return completion.result()
