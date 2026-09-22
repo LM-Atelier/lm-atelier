@@ -245,10 +245,13 @@ function RevisionLorasSection({
       {added}
       {/* Said about the workflow rather than about each LoRA: every row already
           shows its own family, and the half that is missing is the other one. */}
-      {controls && controls.base_model_family === null && (
+      {controls && (
         <small className="muted">
-          This workflow does not say which model family it runs, so a LoRA made for another
-          family is not refused here. Check that each one matches.
+          {controls.base_model_family === null
+            ? "This workflow does not say which model family it runs, so a LoRA made for "
+              + "another family is not refused here. Check that each one matches."
+            : "This workflow runs " + controls.base_model_family + ", so a LoRA made for "
+              + "another family is refused rather than run."}
         </small>
       )}
     </Section>

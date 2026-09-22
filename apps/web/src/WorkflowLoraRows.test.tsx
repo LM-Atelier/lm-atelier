@@ -157,11 +157,16 @@ it("says when the workflow names no family, so nothing checks the LoRAs against 
   expect(section).toHaveTextContent("Check that each one matches");
 });
 
-it("says nothing about families when the workflow names one", async () => {
-  vi.mocked(api.workflowLoraControls).mockResolvedValue(await controls([slot()]));
+it("says which family the workflow runs, so a LoRA can be matched to it", async () => {
+  vi.mocked(api.workflowLoraControls).mockResolvedValue({
+    ...(await controls([slot()])),
+    base_model_family: "krea2",
+  });
   withQueries(<LorasSection revisionId={REVISION} />);
 
   const section = await screen.findByRole("region", { name: "LoRAs" });
+  expect(section).toHaveTextContent("This workflow runs krea2");
+  expect(section).toHaveTextContent("refused rather than run");
   expect(section).not.toHaveTextContent("does not say which model family it runs");
 });
 
