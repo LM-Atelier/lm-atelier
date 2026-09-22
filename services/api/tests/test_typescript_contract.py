@@ -56,6 +56,7 @@ CHECKED_CONTRACTS = {
     "WorkflowCatalogGraph": "WorkflowCatalogGraphOut",
     "CatalogInstallPlan": "InstallPlanOut",
     "CatalogPreflight": "CatalogPreflight",
+    "CatalogHardwareAlternative": "CatalogHardwareAlternative",
     "CatalogPreflightCheck": "CatalogPreflightCheck",
     "HardwareFitAdvice": "HardwareFitAdviceOut",
     "HardwareFitAlternative": "HardwareFitAlternativeOut",

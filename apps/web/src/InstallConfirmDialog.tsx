@@ -1,5 +1,7 @@
 import { AccessibleDialog } from "./AccessibleDialog";
 import { InstallHardwareFit } from "./InstallHardwareFit";
+import { InstallAlternatives } from "./InstallAlternatives";
+import { ErrorCallout } from "./ErrorCallout";
 import { formatBytes } from "./format";
 import type { CatalogPreflight, SystemInfo } from "./types";
 
@@ -10,6 +12,9 @@ interface Props {
   pending: boolean;
   onConfirm: () => void;
   onCancel: () => void;
+  onSelectAlternative?: (files: string[]) => void;
+  selectingAlternative?: boolean;
+  alternativeError?: string;
 }
 
 /** The largest accelerator this machine reports, if it reports one. */
@@ -36,7 +41,11 @@ export function InstallConfirmDialog({
   pending,
   onConfirm,
   onCancel,
+  onSelectAlternative,
+  selectingAlternative = false,
+  alternativeError,
 }: Props) {
+  const busy = pending || selectingAlternative;
   const accelerator = acceleratorBytes(system);
   const needed = preflight.estimated_vram_bytes;
   const exceedsAccelerator = needed != null && accelerator != null && needed > accelerator;
@@ -89,6 +98,12 @@ export function InstallConfirmDialog({
         )}
       </dl>
       {fit && <InstallHardwareFit fit={fit} />}
+      {onSelectAlternative && (preflight.hardware_alternatives?.length ?? 0) > 0 && <>
+        <p>Selected files: {preflight.selected_files.join(", ")}</p>
+        <InstallAlternatives alternatives={preflight.hardware_alternatives ?? []} pending={busy} onSelect={onSelectAlternative} />
+      </>}
+      {selectingAlternative && <p role="status">Checking this variant…</p>}
+      {alternativeError && <ErrorCallout message={alternativeError} />}
       {!fit && exceedsAccelerator && (
         <p className="install-warning" role="status">
           This model needs more accelerator memory than this machine reports. It
@@ -101,15 +116,15 @@ export function InstallConfirmDialog({
         </p>
       ))}
       <footer>
-        <button className="secondary" aria-disabled={pending} onClick={() => {
-          if (!pending) onCancel();
+        <button className="secondary" aria-disabled={busy} onClick={() => {
+          if (!busy) onCancel();
         }}>
           Cancel
         </button>
-        <button className="primary" aria-disabled={pending} onClick={() => {
-          if (!pending) onConfirm();
+        <button className="primary" aria-disabled={busy} onClick={() => {
+          if (!busy) onConfirm();
         }}>
-          {pending ? "Starting…" : downloadAction}
+          {selectingAlternative ? "Checking…" : pending ? "Starting…" : downloadAction}
         </button>
       </footer>
     </AccessibleDialog>

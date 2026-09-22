@@ -2823,6 +2823,13 @@ class HardwareFitAdviceOut(ApiModel):
     settings: list[HardwareFitSettingOut]
 
 
+class CatalogHardwareAlternative(ApiModel):
+    selected_files: list[str]
+    download_bytes: int = Field(ge=0)
+    download_size_complete: bool
+    hardware_fit: HardwareFitAdviceOut
+
+
 class CatalogPreflight(ApiModel):
     remote_id: str
     source_remote_id: str | None = None
@@ -2839,6 +2846,7 @@ class CatalogPreflight(ApiModel):
     estimated_ram_bytes: int | None = None
     estimated_vram_bytes: int | None = None
     hardware_fit: HardwareFitAdviceOut | None = None
+    hardware_alternatives: list[CatalogHardwareAlternative] = Field(default_factory=list)
     can_install: bool
     checks: list[CatalogPreflightCheck]
     install_plan: InstallPlanOut | None = None
