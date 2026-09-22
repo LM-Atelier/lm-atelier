@@ -9,10 +9,9 @@ template actually gets both. It does; these pin it.
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 from httpx import AsyncClient
+from run_waits import wait_for_terminal_status
 
 from local_lm.auxiliary_assets import workflow_lora_extension
 from local_lm.comfy_templates import ComfyTemplate, CompiledComfyTemplate
@@ -25,12 +24,10 @@ pytestmark = pytest.mark.asyncio
 
 
 async def wait_for_run(client: AsyncClient, run_id: str) -> dict:  # type: ignore[type-arg]
-    for _ in range(400):
-        payload = (await client.get(f"/api/runs/{run_id}")).json()
-        if payload["status"] in {"complete", "failed", "cancelled"}:
-            return payload
-        await asyncio.sleep(0.01)
-    raise AssertionError("run did not finish in time")
+    async def read() -> dict:  # type: ignore[type-arg]
+        return (await client.get(f"/api/runs/{run_id}")).json()
+
+    return dict(await wait_for_terminal_status(read, what=f"run {run_id}", expected=None))
 
 
 async def test_a_checkpoint_edit_template_gains_the_lora_stack(

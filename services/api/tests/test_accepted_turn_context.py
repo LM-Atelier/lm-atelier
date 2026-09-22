@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import wait_for_terminal_status
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
@@ -149,7 +150,6 @@ async def test_missing_snapshot_binding_never_falls_back_to_live_context(
 async def test_frozen_ordered_text_uses_its_accepted_producer_output(
     app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch, later_change: str
 ) -> None:
-    import asyncio
     from collections.abc import AsyncIterator
     from copy import deepcopy
 
@@ -249,16 +249,15 @@ async def test_frozen_ordered_text_uses_its_accepted_producer_output(
             assert stored_project is not None
             stored_project.instructions = "Later project instructions"
             session.commit()
-    for _ in range(200):
+
+    async def read_last() -> dict[str, Any]:
         with SessionLocal() as session:
             last = session.get(Run, last_id)
             assert last is not None
-            if last.status in {"complete", "failed", "cancelled"}:
-                assert last.status == "complete", last.error
-                break
-        await asyncio.sleep(0.05)
-    else:
-        pytest.fail("The ordered consumer did not settle")
+            return {"status": last.status, "error": last.error}
+
+    settled = await wait_for_terminal_status(read_last, what="the ordered consumer", expected=None)
+    assert settled["status"] == "complete", settled["error"]
     assert len(seen) == 2
     assert len(original_output) == 1 and original_output[0]
     consumer = seen[-1]
