@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import subprocess
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
@@ -31,6 +33,107 @@ def _imported(tmp_path: Path, body: bytes = b"a model, imported by hand") -> tup
     model = tmp_path / "imported.gguf"
     model.write_bytes(body)
     return model, hashlib.sha256(body).hexdigest()
+
+
+def _link_dir(link: Path, target: Path) -> bool:
+    """Point `link` at `target`, or report that this host will not allow it.
+
+    A junction on Windows and a symbolic link elsewhere, and the two are not
+    equally interesting. Measured on CPython 3.12.10: a recursive glob descends
+    into a junction and reports the far side's files as the tree's own, and
+    does NOT descend into a symbolic link. So the case below only reproduces
+    the descent on Windows; everywhere else it checks that the walk still finds
+    the install's own files, including the nested one, which is worth having
+    but is not the same claim.
+    """
+
+    if os.name == "nt":
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)], capture_output=True
+        )
+        return completed.returncode == 0
+    try:
+        os.symlink(target, link, target_is_directory=True)
+    except OSError:
+        return False
+    return True
+
+
+def _imported_directory(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
+    """An install folder, a folder outside it, and the digests the install owns."""
+
+    install = tmp_path / "imported-model"
+    (install / "nested").mkdir(parents=True)
+    own = {
+        "weights.bin": b"the bytes this install is made of",
+        "nested/part.bin": b"a second file, one level down",
+    }
+    for name, body in own.items():
+        (install / name).write_bytes(body)
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "foreign.bin").write_bytes(b"bytes that belong to something else")
+    return install, outside, {name: hashlib.sha256(body).hexdigest() for name, body in own.items()}
+
+
+async def test_measuring_an_imported_folder_stays_inside_it(
+    app: FastAPI, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Identity covers what the install holds, not what it points at.
+
+    Sharing one large file between installs by pointing at it is an ordinary
+    thing to do on a full disk, and a folder that does it is not broken. What
+    would be broken is calling the other folder's bytes this install's own: the
+    digests taken here decide later whether an activation still holds, so a
+    file outside the install could invalidate evidence it never backed, and a
+    name like a link's would read as though the install contained it.
+    """
+
+    install, outside, own = _imported_directory(tmp_path)
+    if not _link_dir(install / "shared", outside):
+        pytest.skip("this host does not allow a directory link to be created")
+
+    install_id = new_id("model")
+    with SessionLocal() as session:
+        session.add(
+            ModelInstall(
+                id=install_id,
+                name="Imported by hand",
+                role="chat",
+                engine="llama.cpp",
+                local_path=str(install),
+                manifest_json={"imported": True},
+                active=True,
+            )
+        )
+        session.commit()
+
+    downloads = app.state.services.downloads
+    proved: dict[str, dict[str, str]] = {}
+
+    async def capture(
+        *, job_id: str, install_id: str, default_settings: Any, component_hashes: dict[str, str]
+    ) -> str:
+        proved["hashes"] = component_hashes
+        return "ok"
+
+    monkeypatch.setattr(downloads, "start_activation", lambda job_id: None)
+    monkeypatch.setattr(downloads, "_activate_chat_install", capture)
+    with SessionLocal() as session:
+        record = session.get(ModelInstall, install_id)
+        assert record is not None
+        job = downloads.reactivate(session, record)
+
+    await downloads._reactivate(job.id)
+
+    # Both halves stated: the install's own files down to the nested one are
+    # measured, and nothing beyond the link is, under any name.
+    assert proved["hashes"] == own
+    with SessionLocal() as session:
+        record = session.get(ModelInstall, install_id)
+        assert record is not None
+        assert record.manifest_json["expected_sha256"] == own
+        assert set(record.manifest_json["file_signatures"]) == set(own)
 
 
 async def test_activating_an_imported_model_measures_the_files_it_proves(
