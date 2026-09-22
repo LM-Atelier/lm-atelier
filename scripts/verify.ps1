@@ -129,12 +129,26 @@ try {
     Invoke-Checked "Version metadata" $Python @("scripts/sync-version.py")
     $PytestTemp = New-HeldPytestScratch `
         -RepositoryRoot $RepositoryRoot -Lease $MachineLease
+    # Away from the checkout unless the caller said otherwise, because the
+    # suite opens a data directory and the default is relative, so it would
+    # land in the tree. Beside the pytest scratch rather than inside it:
+    # pytest empties its own basetemp as it starts, and by then the
+    # application has taken ownership of the data directory, so one inside
+    # the other cannot both survive. The parent is the held directory the
+    # lease already pins, so this stays inside that containment.
+    if (-not $env:LOCAL_LM_DATA_DIR) {
+        $env:LOCAL_LM_DATA_DIR = Join-Path (Split-Path -Parent $PytestTemp) "data"
+    }
     Invoke-Checked "API tests" $Pytest @(
         "services/api/tests",
         "-q",
         "--basetemp=$PytestTemp",
         "-p",
-        "no:cacheprovider"
+        "no:cacheprovider",
+        "-n",
+        "auto",
+        "--dist",
+        "loadfile"
     )
     Invoke-Checked "Web lint" $Npm @("run", "lint")
     Invoke-Checked "Web typecheck" $Npm @("run", "typecheck")
