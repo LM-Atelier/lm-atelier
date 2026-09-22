@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -27,8 +27,14 @@ from .comfy_registry_dependencies import (
     ComfyRegistryDependencyError,
     plan_comfy_registry_dependencies,
 )
-from .comfy_registry_installs import scoped_comfy_registry_launch_contract
+from .comfy_registry_launch_verification import (
+    VerifiedComfyRegistryLaunch,
+    _verify_comfy_registry_launch,
+)
 from .comfy_registry_lifecycle import ComfyRegistryPreparation
+from .comfy_registry_mixed_dependencies_v1 import plan_comfy_registry_mixed_dependencies
+from .comfy_registry_mixed_wheel_closure import ComfyRegistryMixedWheelClosure
+from .comfy_registry_reviewed_inputs import ComfyRegistryReviewedInputContext
 from .comfy_registry_sources import resolve_comfy_package_source
 from .domain import utcnow
 from .models import ComfyRegistryInstall
@@ -36,7 +42,7 @@ from .schemas import ApiModel
 from .source_omission_proof import evidence_digest, pending_omission_requirement, prove_omission
 from .workflow_activations import (
     WorkflowRegistryLaunchBinding,
-    _registry_launch_binding,
+    _registry_install_launch_binding,
     _reject_node_type_collisions,
 )
 from .workflow_package_execution_plan import WorkflowPackageExecutionPlan
@@ -98,23 +104,38 @@ def _row(
     preparation: ComfyRegistryPreparation,
     plan: WorkflowPackageExecutionPlan,
 ) -> ComfyRegistryInstall:
+    return _check_row(session.get(ComfyRegistryInstall, preparation.install_id), preparation, plan)
+
+
+def _check_row(
+    row: ComfyRegistryInstall | None,
+    preparation: ComfyRegistryPreparation,
+    plan: WorkflowPackageExecutionPlan,
+) -> ComfyRegistryInstall:
     plan.verify()
     source = resolve_comfy_package_source(plan.resolution)
-    row = session.get(ComfyRegistryInstall, preparation.install_id)
-    if row is None or any(
-        getattr(row, name) != getattr(preparation, name)
-        for name in (
-            "installed_path",
-            "wheel_environment_path",
-            "archive_sha256",
-            "manifest_sha256",
-            "wheel_closure_sha256",
-            "wheel_environment_sha256",
+    if (
+        row is None
+        or row.id != preparation.install_id
+        or any(
+            getattr(row, name) != getattr(preparation, name)
+            for name in (
+                "installed_path",
+                "wheel_environment_path",
+                "archive_sha256",
+                "manifest_sha256",
+                "wheel_closure_sha256",
+                "wheel_environment_sha256",
+            )
         )
     ):
         raise _refuse("registry_batch_identity_changed")
     try:
-        dependencies = plan_comfy_registry_dependencies(row.pip_dependencies_json)
+        dependencies = (
+            plan_comfy_registry_mixed_dependencies(row.pip_dependencies_json)
+            if isinstance(plan.closure, ComfyRegistryMixedWheelClosure)
+            else plan_comfy_registry_dependencies(row.pip_dependencies_json)
+        )
     except ComfyRegistryDependencyError as exc:
         raise _refuse("registry_batch_identity_changed") from exc
     if (
@@ -162,12 +183,21 @@ class RegistryActivationBatch:
     previous_active: dict[str, bool]
     custom_node_root: Path
     environment_root: Path
+    reviewed_inputs: ComfyRegistryReviewedInputContext | None = None
+    completion_verification: VerifiedComfyRegistryLaunch | None = None
 
     def _rows(self, session: Session, state: str) -> list[ComfyRegistryInstall]:
         rows = [
             _row(session, item, self.execution_plans[item.install_id]) for item in self.preparations
         ]
-        for row in rows:
+        self._check_rows(rows, state)
+        return rows
+
+    def _check_rows(self, rows: list[ComfyRegistryInstall], state: str) -> None:
+        if tuple(row.id for row in rows) != tuple(item.install_id for item in self.preparations):
+            raise _refuse("registry_batch_identity_changed")
+        for row, preparation in zip(rows, self.preparations, strict=True):
+            _check_row(row, preparation, self.execution_plans[row.id])
             record = _record(row)
             if (
                 record is None
@@ -179,10 +209,11 @@ class RegistryActivationBatch:
                 or record.review_sha256 != _review_digest(row)
             ):
                 raise _refuse("registry_batch_record_changed")
+
+    def _check_bindings(self, rows: list[ComfyRegistryInstall]) -> None:
         bindings = tuple(
-            _registry_launch_binding(
-                session,
-                row.id,
+            _registry_install_launch_binding(
+                row,
                 custom_node_root=self.custom_node_root,
                 environment_root=self.environment_root,
             )
@@ -190,24 +221,38 @@ class RegistryActivationBatch:
         )
         if bindings != self.bindings:
             raise _refuse("registry_batch_identity_changed")
-        return rows
+
+    def _verify(self, session_factory: SessionFactory, state: str) -> VerifiedComfyRegistryLaunch:
+        def prepare(rows: list[ComfyRegistryInstall]) -> None:
+            self._check_rows(rows, state)
+            self._check_bindings(rows)
+
+        return _verify_comfy_registry_launch(
+            session_factory,
+            [item.install_id for item in self.preparations],
+            include_active=False,
+            custom_node_root=self.custom_node_root,
+            environment_root=self.environment_root,
+            reviewed_inputs=self.reviewed_inputs,
+            prepare_installs=prepare,
+        )
 
     def complete(self, session: Session) -> None:
         """Stage completion in the transaction that accepts the executable workflow."""
-        session.flush()
-        _reserve(session)
+        if self.completion_verification is None:
+            raise _refuse("registry_batch_not_verified")
+        self.completion_verification.require_current(session)
+        session.expire_all()
         rows = self._rows(session, "verified")
-        scoped_comfy_registry_launch_contract(
-            session,
-            self.bindings,
-            custom_node_root=self.custom_node_root,
-            environment_root=self.environment_root,
-        )
         for row in rows:
             record = _record(row)
             assert record is not None
             _write_record(row, self.id, "complete", self.previous_active, record.before_start)
         session.flush()
+
+    def verify_completion(self, session_factory: SessionFactory) -> RegistryActivationBatch:
+        """Refresh physical verification after consumer work and before its final writer."""
+        return replace(self, completion_verification=self._verify(session_factory, "verified"))
 
 
 def _begin(
@@ -217,6 +262,7 @@ def _begin(
     execution_plans: Mapping[str, WorkflowPackageExecutionPlan],
     custom_node_root: Path,
     environment_root: Path,
+    reviewed_inputs: ComfyRegistryReviewedInputContext | None = None,
 ) -> tuple[RegistryActivationBatch, dict[str, tuple[ComfyRegistryRuntimeFile, ...]]]:
     ordered = tuple(sorted(preparations, key=lambda item: item.install_id))
     identifiers = {item.install_id for item in ordered}
@@ -246,9 +292,15 @@ def _begin(
             }
         ).encode("utf-8")
     ).hexdigest()
-    with session_factory() as session:
-        _reserve(session)
-        rows = [_row(session, item, plans[item.install_id]) for item in ordered]
+    previous: dict[str, bool] = {}
+    bindings: tuple[WorkflowRegistryLaunchBinding, ...] = ()
+    before: dict[str, tuple[ComfyRegistryRuntimeFile, ...]] = {}
+    staged: list[ComfyRegistryInstall] = []
+
+    def prepare(rows: list[ComfyRegistryInstall]) -> None:
+        nonlocal previous, bindings, before
+        for row, item in zip(rows, ordered, strict=True):
+            _check_row(row, item, plans[item.install_id])
         previous = {row.id: row.active for row in rows}
         pending = [_record(row) for row in rows]
         unfinished = [item for item in pending if item and item.state in {"starting", "verified"}]
@@ -273,11 +325,9 @@ def _begin(
             raise _refuse("registry_install_untrusted")
         for row in rows:
             row.active = True
-        session.flush()
         bindings = tuple(
-            _registry_launch_binding(
-                session,
-                row.id,
+            _registry_install_launch_binding(
+                row,
                 custom_node_root=custom_node_root,
                 environment_root=environment_root,
             )
@@ -306,9 +356,6 @@ def _begin(
                     **row.review_json,
                     "runtime_files": comfy_registry_runtime_files_json(recovered),
                 }
-        scoped_comfy_registry_launch_contract(
-            session, bindings, custom_node_root=custom_node_root, environment_root=environment_root
-        )
         before = {
             item.registry_install_id: snapshot_staged_comfy_registry_files(item.installed_path)
             for item in bindings
@@ -316,9 +363,34 @@ def _begin(
         for row in rows:
             pending_omission_requirement(row.id, row.review_json)
             _write_record(row, digest, "starting", previous, before[row.id])
+        staged.extend(rows)
+
+    verified = _verify_comfy_registry_launch(
+        session_factory,
+        sorted(identifiers),
+        include_active=False,
+        custom_node_root=custom_node_root,
+        environment_root=environment_root,
+        reviewed_inputs=reviewed_inputs,
+        prepare_installs=prepare,
+    )
+    with session_factory() as session:
+        verified.require_current(session)
+        for install in staged:
+            current = session.get(ComfyRegistryInstall, install.id)
+            assert current is not None
+            current.active = True
+            current.review_json = install.review_json
         session.commit()
     return RegistryActivationBatch(
-        digest, ordered, plans, bindings, previous, custom_node_root, environment_root
+        digest,
+        ordered,
+        plans,
+        bindings,
+        previous,
+        custom_node_root,
+        environment_root,
+        reviewed_inputs,
     ), before
 
 
@@ -327,10 +399,12 @@ def _verified(
     batch: RegistryActivationBatch,
     before: dict[str, tuple[ComfyRegistryRuntimeFile, ...]],
     observed: frozenset[str],
-) -> None:
-    with session_factory() as session:
-        _reserve(session)
-        rows = batch._rows(session, "starting")
+) -> RegistryActivationBatch:
+    staged: list[ComfyRegistryInstall] = []
+
+    def prepare(rows: list[ComfyRegistryInstall]) -> None:
+        batch._check_rows(rows, "starting")
+        batch._check_bindings(rows)
         expected = {node for binding in batch.bindings for node in binding.node_types}
         if not expected.issubset(observed):
             raise _refuse("registry_node_types_missing")
@@ -355,7 +429,25 @@ def _verified(
                 "source_omission_digest": evidence_digest(proof) if proof is not None else None,
             }
             _write_record(row, batch.id, "verified", batch.previous_active, before[row.id])
+        staged.extend(rows)
+
+    verified = _verify_comfy_registry_launch(
+        session_factory,
+        [item.install_id for item in batch.preparations],
+        include_active=False,
+        custom_node_root=batch.custom_node_root,
+        environment_root=batch.environment_root,
+        reviewed_inputs=batch.reviewed_inputs,
+        prepare_installs=prepare,
+    )
+    with session_factory() as session:
+        verified.require_current(session)
+        for install in staged:
+            current = session.get(ComfyRegistryInstall, install.id)
+            assert current is not None
+            current.review_json = install.review_json
         session.commit()
+    return batch.verify_completion(session_factory)
 
 
 async def _rollback(
@@ -366,15 +458,49 @@ async def _rollback(
     if await stop_media() is not True:
         raise _refuse("media_worker_running")
     try:
-        _restore_flags(session_factory, batch)
+        await _worker(lambda: _restore_flags(session_factory, batch))
     except (ValueError, OSError):
-        _deactivate_pending(
-            session_factory, [item.install_id for item in batch.preparations], force=True
+        await _worker(
+            lambda: _deactivate_pending(
+                session_factory, [item.install_id for item in batch.preparations], force=True
+            )
         )
         raise
 
 
 def _restore_flags(session_factory: SessionFactory, batch: RegistryActivationBatch) -> None:
+    proofs: dict[str, VerifiedComfyRegistryLaunch] = {}
+    for binding in batch.bindings:
+        if not batch.previous_active[binding.registry_install_id]:
+            continue
+
+        def prepare(
+            rows: list[ComfyRegistryInstall], expected: WorkflowRegistryLaunchBinding = binding
+        ) -> None:
+            row = rows[0]
+            if not row.trusted:
+                raise _refuse("registry_install_untrusted")
+            row.active = True
+            current = _registry_install_launch_binding(
+                row,
+                custom_node_root=batch.custom_node_root,
+                environment_root=batch.environment_root,
+            )
+            if current != expected:
+                raise _refuse("registry_batch_identity_changed")
+
+        try:
+            proofs[binding.registry_install_id] = _verify_comfy_registry_launch(
+                session_factory,
+                [binding.registry_install_id],
+                include_active=False,
+                custom_node_root=batch.custom_node_root,
+                environment_root=batch.environment_root,
+                reviewed_inputs=batch.reviewed_inputs,
+                prepare_installs=prepare,
+            )
+        except (ValueError, OSError):
+            continue
     with session_factory() as session:
         _reserve(session)
         rows = [
@@ -389,18 +515,15 @@ def _restore_flags(session_factory: SessionFactory, batch: RegistryActivationBat
                 or record.previous_active != batch.previous_active
             ):
                 raise _refuse("registry_batch_record_changed")
-        for row, binding in zip(rows, batch.bindings, strict=True):
-            row.active = batch.previous_active[row.id] and row.trusted
-            if row.active:
-                try:
-                    scoped_comfy_registry_launch_contract(
-                        session,
-                        (binding,),
-                        custom_node_root=batch.custom_node_root,
-                        environment_root=batch.environment_root,
-                    )
-                except (ValueError, OSError):
-                    row.active = False
+        restored: set[str] = set()
+        for identifier, proof in proofs.items():
+            try:
+                proof.require_current(session)
+            except (ValueError, OSError):
+                continue
+            restored.add(identifier)
+        for row in rows:
+            row.active = row.id in restored
             row.review_json = {
                 **row.review_json,
                 "activation_failure_code": "registry_batch_failed",
@@ -461,6 +584,7 @@ def recover_registry_package_batch(
     custom_node_root: Path,
     environment_root: Path,
     media_worker_stopped: bool,
+    reviewed_inputs: ComfyRegistryReviewedInputContext | None = None,
 ) -> None:
     """Adopt interrupted runtime files before ordinary preparation verifies the package."""
     if media_worker_stopped is not True:
@@ -480,6 +604,7 @@ def recover_registry_package_batch(
             execution_plans,
             custom_node_root,
             environment_root,
+            reviewed_inputs,
         )
         _restore_flags(session_factory, batch)
     except (ValueError, OSError):
@@ -500,35 +625,72 @@ async def activate_registry_package_batch(
     start_media: BatchStarter,
     stop_media: StoppedVerifier,
     read_node_inventory: NodeReader,
+    reviewed_inputs: ComfyRegistryReviewedInputContext | None = None,
 ) -> AsyncIterator[RegistryActivationBatch]:
     """Hold the caller's primary lease through one start, completion or verified rollback."""
     if media_worker_stopped is not True:
         raise _refuse("media_worker_running")
-    try:
-        batch, before = _begin(
+    beginning = asyncio.create_task(
+        asyncio.to_thread(
+            _begin,
             session_factory,
             purpose,
             preparations,
             execution_plans,
             custom_node_root,
             environment_root,
+            reviewed_inputs,
         )
+    )
+    try:
+        batch, before = await asyncio.shield(beginning)
+    except asyncio.CancelledError:
+        try:
+            batch, before = await _drain(beginning)
+        except (ValueError, OSError):
+            await _drain(
+                asyncio.create_task(
+                    asyncio.to_thread(
+                        _deactivate_pending,
+                        session_factory,
+                        [item.install_id for item in preparations],
+                    )
+                )
+            )
+            raise
+        await _drain(asyncio.create_task(_rollback(session_factory, batch, stop_media)))
+        raise
     except (ValueError, OSError):
-        _deactivate_pending(session_factory, [item.install_id for item in preparations])
+        await _worker(
+            lambda: _deactivate_pending(session_factory, [item.install_id for item in preparations])
+        )
         raise
     try:
         await start_media(batch.bindings)
         observed = await read_node_inventory()
-        _verified(session_factory, batch, before, observed)
+        batch = await _worker(lambda: _verified(session_factory, batch, before, observed))
         yield batch
         with session_factory() as session:
             batch._rows(session, "complete")
     except (Exception, asyncio.CancelledError):
         rollback = asyncio.create_task(_rollback(session_factory, batch, stop_media))
-        while not rollback.done():
-            try:
-                await asyncio.shield(rollback)
-            except asyncio.CancelledError:
-                continue
-        rollback.result()
+        await _drain(rollback)
+        raise
+
+
+async def _drain[T](task: asyncio.Task[T]) -> T:
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+    return task.result()
+
+
+async def _worker[T](operation: Callable[[], T]) -> T:
+    task = asyncio.create_task(asyncio.to_thread(operation))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await _drain(task)
         raise

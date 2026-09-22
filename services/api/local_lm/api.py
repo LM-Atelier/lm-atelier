@@ -100,7 +100,7 @@ from .comfy_registry_activation import (
 )
 from .comfy_registry_closure_driver import ComfyRegistryWheelMetadataClient
 from .comfy_registry_downloads import ComfyRegistryArchiveDownloader
-from .comfy_registry_installs import installed_comfy_registry_versions
+from .comfy_registry_installs import ComfyRegistryInstallError, installed_comfy_registry_versions
 from .comfy_registry_interpreter import probe_comfy_registry_runtime_target
 from .comfy_registry_lifecycle import ComfyRegistryPreparation
 from .comfy_registry_paths import registry_wheel_environment_root
@@ -11432,6 +11432,7 @@ async def _run_workflow_package_preparation(
                     resolution,
                     context=context,
                     processes=services.processes,
+                    session_factory=SessionLocal,
                 )
 
             async with workflow_package_runtime(services.processes, context):
@@ -11707,7 +11708,9 @@ def _media_worker_truly_stopped(services: Services) -> bool:
 
 def _registry_activation_context(services: Services) -> PreparationContext:
     try:
-        return PreparationContext.from_settings(services.settings)
+        return dataclasses.replace(
+            PreparationContext.from_settings(services.settings), source_store=services.artifacts
+        )
     except WorkflowPackagePreparationError as exc:
         raise api_error(422, exc.code, str(exc)) from exc
 
@@ -11840,6 +11843,17 @@ async def review_registry_install(
                     await temporary.enter_async_context(
                         workflow_package_runtime(services.processes, context)
                     )
+                verified = None
+                if payload.trusted:
+                    _loaded_registry_install(session, install_id)
+                    if not _media_worker_truly_stopped(services):
+                        raise ComfyRegistryActivationError(
+                            "media_worker_running",
+                            "The media worker must be stopped before changing Registry activation",
+                        )
+                    target = context.verification_target(SessionLocal, services.settings)
+                    verified = await target.verify((install_id,))
+                    session.expire_all()
                 review_comfy_registry_install(
                     session,
                     install_id=install_id,
@@ -11847,7 +11861,16 @@ async def review_registry_install(
                     custom_node_root=context.custom_node_root,
                     environment_root=registry_wheel_environment_root(context.state_root),
                     media_worker_stopped=_media_worker_truly_stopped(services),
+                    verified_launch=verified,
                 )
+        except ComfyRegistryInstallError as exc:
+            session.rollback()
+            raise _registry_activation_failure(
+                ComfyRegistryActivationError(
+                    "registry_install_verification_failed",
+                    "Registry package files or dependencies failed verification",
+                )
+            ) from exc
         except ComfyRegistryActivationError as exc:
             raise _registry_activation_failure(exc) from exc
         except WorkflowPackagePreparationError as exc:
@@ -11882,6 +11905,7 @@ async def activate_registry_install(
                 # The same read startup verifies against, so a proof cannot be
                 # made about an inventory nobody else saw.
                 read_node_inventory=services.processes.comfy_node_inventory,
+                verification_target=context.verification_target(SessionLocal, services.settings),
             )
         except ComfyRegistryActivationError as exc:
             raise _registry_activation_failure(exc) from exc
@@ -12118,6 +12142,8 @@ async def preflight_workflow_package_installation(
         execution = await preflight_workflow_extensions(
             payload.ui_graph,
             services.settings,
+            session_factory=SessionLocal,
+            source_store=services.artifacts,
             runtimes=services.runtimes,
             runtime_plan=runtime_plan,
         )
@@ -12163,6 +12189,8 @@ async def get_workflow_package_install_plan(
         execution = await preflight_workflow_extensions(
             payload.ui_graph,
             services.settings,
+            session_factory=SessionLocal,
+            source_store=services.artifacts,
             runtimes=services.runtimes,
             runtime_plan=runtime_plan,
         )
@@ -13113,16 +13141,23 @@ async def decide_workflow_revision_review(
                     409, "workflow-review-changed", "The workflow review changed. Review it again."
                 )
             approved = payload.action == "approve"
+            registry_verification = None
             if approved:
                 if snapshot.reasons:
                     raise WorkflowReviewError("workflow_review_node_unavailable")
-                await verify_reviewed_packages(
-                    services.settings, session, snapshot, custom_nodes=services.custom_nodes
+                registry_verification = await verify_reviewed_packages(
+                    services.settings,
+                    session,
+                    snapshot,
+                    session_factory=SessionLocal,
+                    custom_nodes=services.custom_nodes,
                 )
                 refreshed_info = await _workflow_review_object_info(services)
                 if refreshed_info is None:
                     raise WorkflowReviewError("workflow_review_runtime_unavailable")
                 info = refreshed_info
+                if registry_verification is not None:
+                    registry_verification = await registry_verification.refresh()
             # No writer spans worker I/O or code verification. Take the writer
             # before the final durable-state read and compare the full subject.
             session.connection().exec_driver_sql(
@@ -13135,6 +13170,8 @@ async def decide_workflow_revision_review(
                 raise api_error(
                     409, "workflow-review-changed", "The workflow review changed. Review it again."
                 )
+            if registry_verification is not None:
+                registry_verification.require_current(session)
             record_workflow_review(session, revision, fresh, approved=approved)
             session.commit()
         except (WorkflowReviewError, ValueError, OSError, RuntimeError, TimeoutError) as exc:

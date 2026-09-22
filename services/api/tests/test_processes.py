@@ -2539,7 +2539,11 @@ def test_registry_launch_contracts_use_the_managed_registry_root(
     observed: list[Path] = []
 
     def trusted_contract(
-        _session: Session, *, custom_node_root: Path, environment_root: Path
+        _session: Session,
+        *,
+        custom_node_root: Path,
+        environment_root: Path,
+        reviewed_inputs: Any = None,
     ) -> ComfyRegistryLaunchContract:
         assert custom_node_root == settings.custom_node_dir
         observed.append(environment_root)
@@ -2551,6 +2555,7 @@ def test_registry_launch_contracts_use_the_managed_registry_root(
         *,
         custom_node_root: Path,
         environment_root: Path,
+        reviewed_inputs: Any = None,
     ) -> ComfyRegistryLaunchContract:
         assert tuple(bindings) == scope.registry_packages
         assert custom_node_root == settings.custom_node_dir

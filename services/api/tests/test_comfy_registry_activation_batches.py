@@ -377,7 +377,7 @@ async def test_interrupted_batch_reopens_its_durable_snapshot_and_can_restore_or
             '{"neutral":true}', encoding="utf-8"
         )
     if stage in {"verified", "verified-runtime-data"}:
-        batches._verified(SessionLocal, batch, before, NODES)
+        batch = batches._verified(SessionLocal, batch, before, NODES)
     assert all(active for active, _, _ in _rows().values())
 
     async def start(_bindings: tuple[WorkflowRegistryLaunchBinding, ...]) -> object:
@@ -421,7 +421,7 @@ async def test_pending_or_completed_batch_cannot_be_adopted_with_changed_evidenc
         arguments["environment_root"],
     )
     if change == "complete":
-        batches._verified(SessionLocal, batch, before, NODES)
+        batch = batches._verified(SessionLocal, batch, before, NODES)
         with SessionLocal() as session:
             batch.complete(session)
             session.commit()

@@ -5,23 +5,31 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from contextlib import AsyncExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from .comfy_registry import ComfyRegistryClient
-from .comfy_registry_activation import _verify_install
 from .comfy_registry_activation_batches import (
     _deactivate_pending,
-    _row,
+    _worker,
     recover_registry_package_batch,
 )
 from .comfy_registry_closure_driver import ComfyRegistryWheelMetadataClient
 from .comfy_registry_downloads import ComfyRegistryArchiveDownloader
-from .comfy_registry_interpreter import probe_comfy_registry_runtime_target
+from .comfy_registry_interpreter import (
+    ComfyRegistryInterpreterError,
+    probe_comfy_registry_runtime_target,
+)
+from .comfy_registry_launch_verification import verify_comfy_registry_launch
 from .comfy_registry_lifecycle import ComfyRegistryPreparation
 from .comfy_registry_paths import registry_wheel_environment_root
+from .comfy_registry_reviewed_inputs import ComfyRegistryReviewedInputContext
+from .comfy_registry_runtime import (
+    ComfyRegistryRuntimeDistribution,
+    canonical_comfy_registry_runtime_distributions,
+)
 from .comfy_registry_wheel_downloads import ComfyRegistryWheelDownloader
 from .comfy_registry_wheel_projects import ComfyRegistryWheelProjectClient
 from .domain import JobKind, utcnow
@@ -59,6 +67,7 @@ class ExtensionPreparationServices:
 class PreparedWorkflowExtensions:
     preparations: tuple[ComfyRegistryPreparation, ...]
     execution_plans: dict[str, WorkflowPackageExecutionPlan]
+    reviewed_inputs: ComfyRegistryReviewedInputContext | None = None
 
 
 def quarantine_workflow_source_extensions(
@@ -233,33 +242,101 @@ async def prepare_workflow_source_extensions(
         for package_id in missing:
             assert services is not None
             await _prepare_one(session_factory, offer_id, package_id, context, services)
-    with session_factory() as session:
-        _offer, _saved, packages = _accepted(session, offer_id)
-        if tuple(item.link.package_id for item in packages) != package_ids:
+
+    def snapshot() -> PreparedWorkflowExtensions:
+        with session_factory() as session:
+            return _prepared_snapshot(session, offer_id, package_ids)
+
+    prepared = await _worker(snapshot)
+    reviewed_inputs = None
+    runtime: tuple[ComfyRegistryRuntimeDistribution, ...] = ()
+    if prepared.preparations and context.source_store is not None:
+        probe = services.interpreter_probe if services else probe_comfy_registry_runtime_target
+        try:
+            target = await probe(context.python_executable)
+            if len(target) != 3:
+                raise ValueError("Runtime distribution evidence is missing")
+            environment, tags, distributions = target
+            runtime = canonical_comfy_registry_runtime_distributions(distributions)
+            reviewed_inputs = ComfyRegistryReviewedInputContext(
+                session_factory, context.source_store, environment, tuple(tags)
+            )
+        except ComfyRegistryInterpreterError as exc:
+            raise WorkflowPackagePreparationError(exc.code, str(exc)) from exc
+        except Exception as exc:
+            raise WorkflowPackagePreparationError(
+                "interpreter_probe_failed",
+                "The managed runtime's package target could not be determined.",
+            ) from exc
+        for plan in prepared.execution_plans.values():
+            plan.verify_target(reviewed_inputs.marker_environment, reviewed_inputs.supported_tags)
+    await _worker(
+        lambda: _recover_and_verify(
+            session_factory, offer_id, package_ids, prepared, context, reviewed_inputs, runtime
+        )
+    )
+    return replace(prepared, reviewed_inputs=reviewed_inputs)
+
+
+def _prepared_snapshot(
+    session: Session, offer_id: str, package_ids: tuple[str, ...]
+) -> PreparedWorkflowExtensions:
+    _offer, _saved, packages = _accepted(session, offer_id)
+    if tuple(item.link.package_id for item in packages) != package_ids:
+        raise WorkflowOfferPackageError()
+    prepared = []
+    plans = {}
+    for package in packages:
+        if package.preparation is None:
             raise WorkflowOfferPackageError()
-        prepared = []
-        plans = {}
-        for package in packages:
-            if package.preparation is None:
-                raise WorkflowOfferPackageError()
-            prepared.append(package.preparation)
-            plans[package.preparation.install_id] = package.plan
+        prepared.append(package.preparation)
+        plans[package.preparation.install_id] = package.plan.model_copy(deep=True)
+    return PreparedWorkflowExtensions(tuple(prepared), plans)
+
+
+def _recover_and_verify(
+    session_factory: SessionFactory,
+    offer_id: str,
+    package_ids: tuple[str, ...],
+    prepared: PreparedWorkflowExtensions,
+    context: PreparationContext,
+    reviewed_inputs: ComfyRegistryReviewedInputContext | None,
+    runtime: tuple[ComfyRegistryRuntimeDistribution, ...],
+) -> None:
+    environment_root = registry_wheel_environment_root(context.state_root)
     recover_registry_package_batch(
         session_factory,
         purpose=offer_id,
-        preparations=prepared,
-        execution_plans=plans,
+        preparations=prepared.preparations,
+        execution_plans=prepared.execution_plans,
         custom_node_root=context.custom_node_root,
-        environment_root=registry_wheel_environment_root(context.state_root),
-        media_worker_stopped=media_worker_stopped,
+        environment_root=environment_root,
+        media_worker_stopped=True,
+        reviewed_inputs=reviewed_inputs,
     )
+    verified = (
+        verify_comfy_registry_launch(
+            session_factory,
+            [item.install_id for item in prepared.preparations],
+            include_active=True,
+            custom_node_root=context.custom_node_root,
+            environment_root=environment_root,
+            reviewed_inputs=reviewed_inputs,
+        )
+        if prepared.preparations
+        else None
+    )
+    if (
+        verified is not None
+        and verified.authorities
+        and verified.contract.runtime_distributions != runtime
+    ):
+        raise WorkflowPackagePreparationError(
+            "workflow-package-runtime-changed",
+            "The managed runtime's installed packages changed after preparation.",
+        )
     with session_factory() as session:
-        for preparation in prepared:
-            row = _row(session, preparation, plans[preparation.install_id])
-            _verify_install(
-                session,
-                row,
-                custom_node_root=context.custom_node_root,
-                environment_root=registry_wheel_environment_root(context.state_root),
-            )
-    return PreparedWorkflowExtensions(tuple(prepared), plans)
+        if verified is not None:
+            verified.require_current(session)
+        if _prepared_snapshot(session, offer_id, package_ids) != prepared:
+            raise WorkflowOfferPackageError()

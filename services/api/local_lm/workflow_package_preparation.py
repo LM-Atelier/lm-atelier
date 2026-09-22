@@ -16,6 +16,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from .artifacts import ArtifactStore
 from .comfy_package_requirements import (
     StagedRequirementsError,
     read_staged_requirements,
@@ -25,11 +26,12 @@ from .comfy_package_requirements import (
 from .comfy_registry import ComfyNodeResolution, ComfyRegistryClient
 from .comfy_registry_closure_driver import (
     ComfyRegistryWheelClosureDriverError,
-    ComfyRegistryWheelClosureResult,
     ComfyRegistryWheelMetadataClient,
     drive_comfy_registry_wheel_closure,
 )
+from .comfy_registry_dependencies import ComfyRegistryDependencyError
 from .comfy_registry_downloads import ComfyRegistryArchiveDownloader
+from .comfy_registry_installs import ComfyRegistryInstallError
 from .comfy_registry_interpreter import ComfyRegistryInterpreterError
 from .comfy_registry_lifecycle import (
     ComfyRegistryLifecycleError,
@@ -37,12 +39,18 @@ from .comfy_registry_lifecycle import (
     ComfyRegistryStagedArchive,
     PreparationRecorder,
     RegistryArchiveDownloader,
+    RegistryClosure,
     discard_comfy_registry_staged_archive,
     prepare_comfy_registry_install,
     renew_comfy_registry_install_environment,
     stage_comfy_registry_install_archive,
 )
+from .comfy_registry_mixed_dependencies_v1 import plan_comfy_registry_mixed_dependencies
+from .comfy_registry_paths import registry_wheel_environment_root
+from .comfy_registry_reviewed_closure import resolve_comfy_registry_reviewed_closure
+from .comfy_registry_reviewed_inputs import ComfyRegistryReviewedInputContext
 from .comfy_registry_runtime import ComfyRegistryRuntimeDistribution
+from .comfy_registry_target_verification import ComfyRegistryVerificationTarget
 from .comfy_registry_wheel_downloads import ComfyRegistryWheelDownloader
 from .comfy_registry_wheel_projects import ComfyRegistryWheelProjectClient
 from .comfy_workflow_packages import WorkflowPackageRequirement
@@ -93,6 +101,32 @@ class PreparationContext:
     python_executable: Path
     custom_node_root: Path
     state_root: Path
+    source_store: ArtifactStore | None = None
+
+    def verification_target(
+        self, session_factory: Callable[[], Session], settings: Settings
+    ) -> ComfyRegistryVerificationTarget:
+        """Bind later verification to this preparation's still-selected runtime."""
+
+        def current() -> None:
+            if (
+                settings.comfy_executable != self.python_executable
+                or settings.custom_node_dir != self.custom_node_root
+                or settings.registry_dir != self.state_root
+            ):
+                raise ComfyRegistryInstallError(
+                    "The managed media runtime configuration changed during installation.",
+                    code="registry_runtime_changed",
+                )
+
+        return ComfyRegistryVerificationTarget(
+            session_factory,
+            self.python_executable,
+            self.custom_node_root,
+            registry_wheel_environment_root(self.state_root),
+            self.source_store,
+            current,
+        )
 
     @classmethod
     def from_settings(cls, settings: Settings) -> PreparationContext:
@@ -105,6 +139,7 @@ class PreparationContext:
             python_executable=Path(settings.comfy_executable),
             custom_node_root=Path(settings.comfy_directory) / "custom_nodes",
             state_root=settings.registry_dir,
+            source_store=ArtifactStore(settings),
         )
 
 
@@ -338,10 +373,8 @@ async def prepare_workflow_package(
     # archive states them in its record. Doing it per-branch covered one live
     # case and missed the other.
     #
-    # In preparation rather than in the planner, which stays uniformly hostile
-    # to URLs, and only under an authorized workflow - without one there is
-    # nothing an omission could later be proven against, so the ordinary
-    # refusal stands.
+    # Only an authorized workflow can justify an omission. A pinned source
+    # instead requires its own retained review and is never omitted here.
     installable, omitted = partition_unpinned_sources(
         effective_resolution.pip_dependencies,
         authorized=authorized_workflow is not None,
@@ -360,8 +393,33 @@ async def prepare_workflow_package(
     async def _closure_progress(name: str, round_number: int, items: tuple[str, ...]) -> None:
         _phase(f"Dependencies: {name.replace('_', ' ')} (round {round_number})", len(items), None)
 
-    async def _resolve_closure(resolution: ComfyNodeResolution) -> ComfyRegistryWheelClosureResult:
-        return await drive_comfy_registry_wheel_closure(
+    reviewed_inputs = (
+        ComfyRegistryReviewedInputContext(
+            session_factory, context.source_store, marker_environment, tuple(supported_tags)
+        )
+        if context.source_store is not None
+        else None
+    )
+
+    async def _resolve_closure(resolution: ComfyNodeResolution) -> RegistryClosure:
+        if context.source_store is not None:
+            try:
+                mixed = plan_comfy_registry_mixed_dependencies(resolution.pip_dependencies)
+            except ComfyRegistryDependencyError as exc:
+                raise ComfyRegistryWheelClosureDriverError(exc.code, str(exc)) from exc
+            if mixed.sources:
+                return await resolve_comfy_registry_reviewed_closure(
+                    resolution.pip_dependencies,
+                    session_factory=session_factory,
+                    store=context.source_store,
+                    project_fetcher=project_client.fetch,
+                    metadata_fetcher=metadata_client.fetch,
+                    marker_environment=marker_environment,
+                    supported_tags=supported_tags,
+                    runtime_distributions=runtime_distributions,
+                    progress=_closure_progress,
+                )
+        result = await drive_comfy_registry_wheel_closure(
             resolution,
             project_fetcher=project_client.fetch,
             metadata_fetcher=metadata_client.fetch,
@@ -370,6 +428,7 @@ async def prepare_workflow_package(
             runtime_distributions=runtime_distributions,
             progress=_closure_progress,
         )
+        return result.closure
 
     try:
         # A dependency with no wheel is set aside on the same terms as an
@@ -388,9 +447,9 @@ async def prepare_workflow_package(
         # rather than repeating it.
         while True:
             try:
-                closure_result = await _resolve_closure(effective_resolution)
+                closure = await _resolve_closure(effective_resolution)
                 if expected_plan is not None:
-                    expected_plan.verify_closure(closure_result.closure)
+                    expected_plan.verify_closure(closure)
                 break
             except ComfyRegistryWheelClosureDriverError as exc:
                 withdrawn = (
@@ -460,7 +519,7 @@ async def prepare_workflow_package(
                 preparation = await prepare_comfy_registry_install(
                     session,
                     resolution=effective_resolution,
-                    closure=closure_result.closure,
+                    closure=closure,
                     archive_downloader=bound_downloader,
                     wheel_downloader=wheel_downloader,
                     python_executable=context.python_executable,
@@ -472,19 +531,21 @@ async def prepare_workflow_package(
                     staged_archive=staged_archive,
                     pending_omission=pending_omission,
                     record_preparation=record_preparation,
+                    reviewed_inputs=reviewed_inputs,
                 )
             else:
                 preparation = await renew_comfy_registry_install_environment(
                     session,
                     install_id=renew_install_id,
                     resolution=effective_resolution,
-                    closure=closure_result.closure,
+                    closure=closure,
                     wheel_downloader=wheel_downloader,
                     python_executable=context.python_executable,
                     custom_node_root=context.custom_node_root,
                     state_root=context.state_root,
                     media_worker_stopped=media_worker_stopped,
                     wheel_progress=_wheel_progress,
+                    reviewed_inputs=reviewed_inputs,
                 )
             staged_archive = None
             if on_prepared is not None:
@@ -493,7 +554,11 @@ async def prepare_workflow_package(
                 # awaiting the worker, keeping other database writers free.
                 await on_prepared(session, preparation, effective_resolution)
             return preparation
-    except (ComfyRegistryLifecycleError, WorkflowPackageExecutionPlanError) as exc:
+    except (
+        ComfyRegistryLifecycleError,
+        ComfyRegistryInstallError,
+        WorkflowPackageExecutionPlanError,
+    ) as exc:
         if staged_archive is not None:
             await discard_comfy_registry_staged_archive(
                 resolution=resolution,

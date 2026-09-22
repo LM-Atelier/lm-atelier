@@ -57,6 +57,7 @@ from .worker_failures import (
 
 if TYPE_CHECKING:
     from .comfy_registry_installs import ComfyRegistryLaunchContract
+    from .comfy_registry_reviewed_inputs import ComfyRegistryReviewedInputContext
     from .runtime_provisioning import RuntimeProvisioner
     from .workflow_activations import WorkflowMediaLaunchScope
 
@@ -702,6 +703,7 @@ class ProcessSupervisor:
         directory = self.settings.comfy_directory
         if not executable or not directory:
             raise RuntimeError("The ComfyUI runtime is not installed.")
+        configured_runtime = (executable, directory)
         directory = directory.expanduser().resolve(strict=True)
         entrypoint = (directory / "main.py").resolve(strict=True)
         if directory not in entrypoint.parents:
@@ -713,35 +715,13 @@ class ProcessSupervisor:
         if activation_scope is None:
             await self._clear_cancelled_workflow_activations()
             trusted_custom_nodes = await self._trusted_comfy_node_folders()
-            registry_contract = await asyncio.to_thread(self._trusted_comfy_registry_contract)
         else:
             trusted_custom_nodes, custom_node_types = await self._scoped_comfy_node_folders(
                 activation_scope
             )
-            registry_contract = await asyncio.to_thread(
-                self._scoped_comfy_registry_contract,
-                activation_scope,
-            )
-        if registry_contract.runtime_distributions:
-            await report_phase("Verifying media runtime packages")
-            from .comfy_registry_interpreter import (
-                ComfyRegistryInterpreterError,
-                probe_comfy_registry_runtime_target,
-            )
-
-            try:
-                _, _, current_runtime_distributions = await probe_comfy_registry_runtime_target(
-                    executable
-                )
-            except ComfyRegistryInterpreterError as exc:
-                raise RuntimeError(
-                    "The managed media runtime package baseline could not be verified."
-                ) from exc
-            if current_runtime_distributions != registry_contract.runtime_distributions:
-                raise RuntimeError(
-                    "The managed media runtime changed after workflow dependencies "
-                    "were prepared. Prepare the workflow package again."
-                )
+        registry_contract, reviewed_inputs = await self._verified_comfy_registry_contract(
+            activation_scope, phase_callback=report_phase
+        )
         try:
             editor_bridge = await asyncio.to_thread(
                 prepare_comfy_editor_bridge,
@@ -813,13 +793,28 @@ class ProcessSupervisor:
         if trusted_custom_nodes:
             command.extend(["--whitelist-custom-nodes", *trusted_custom_nodes])
         await report_phase("Starting media runtime")
+
+        async def revalidate() -> None:
+            if (
+                self.settings.comfy_executable,
+                self.settings.comfy_directory,
+            ) != configured_runtime:
+                raise WorkerStartRefused("The configured media runtime changed before startup.")
+            if isinstance(activation_scope, WorkflowSourceLaunchScope):
+                await self._revalidate_source_media_scope(activation_scope)
+            else:
+                await self._revalidate_comfy_registry_contract(activation_scope, registry_contract)
+            if (
+                self.settings.comfy_executable,
+                self.settings.comfy_directory,
+            ) != configured_runtime:
+                raise WorkerStartRefused("The configured media runtime changed before startup.")
+
+        source_checks: dict[str, Any] = {}
+        if reviewed_inputs is not None or isinstance(activation_scope, WorkflowSourceLaunchScope):
+            source_checks["prestart_check"] = revalidate
         if activation_scope is not None:
             expected_node_types = tuple(sorted({*custom_node_types, *registry_contract.node_types}))
-            source_checks: dict[str, Any] = {}
-            if isinstance(activation_scope, WorkflowSourceLaunchScope):
-                source_checks["prestart_check"] = lambda: self._revalidate_source_media_scope(
-                    activation_scope
-                )
             await self._replace(
                 "media",
                 command,
@@ -842,6 +837,7 @@ class ProcessSupervisor:
                 environment_overrides=environment_overrides,
                 ready_check=lambda: self._verify_comfy_node_types(registry_contract.node_types),
                 editor_bridge_support=editor_bridge_support,
+                **source_checks,
             )
         else:
             await self._replace(
@@ -849,6 +845,7 @@ class ProcessSupervisor:
                 command,
                 self.worker_health_url("media"),
                 editor_bridge_support=editor_bridge_support,
+                **source_checks,
             )
         return self.statuses()[1]
 
@@ -895,7 +892,77 @@ class ProcessSupervisor:
                     cleanup.result()
                 raise
 
+    async def _verified_comfy_registry_contract(
+        self,
+        scope: WorkflowMediaLaunchScope | None,
+        *,
+        phase_callback: Callable[[str], Awaitable[None]] | None = None,
+    ) -> tuple[ComfyRegistryLaunchContract, ComfyRegistryReviewedInputContext | None]:
+        from .artifacts import ArtifactStore
+        from .comfy_registry_activation_batches import _worker
+        from .comfy_registry_installs import ComfyRegistryInstallError
+        from .comfy_registry_interpreter import probe_comfy_registry_runtime_target
+        from .comfy_registry_reviewed_inputs import ComfyRegistryReviewedInputContext
+        from .comfy_registry_runtime import canonical_comfy_registry_runtime_distributions
+        from .db import SessionLocal
+
+        def contract(
+            reviewed: ComfyRegistryReviewedInputContext | None = None,
+        ) -> ComfyRegistryLaunchContract:
+            if scope is None:
+                return (
+                    self._trusted_comfy_registry_contract()
+                    if reviewed is None
+                    else self._trusted_comfy_registry_contract(reviewed_inputs=reviewed)
+                )
+            return (
+                self._scoped_comfy_registry_contract(scope)
+                if reviewed is None
+                else self._scoped_comfy_registry_contract(scope, reviewed_inputs=reviewed)
+            )
+
+        current = None
+        reviewed_inputs = None
+        try:
+            current = await _worker(contract)
+        except ComfyRegistryInstallError as exc:
+            if exc.code != "source_review_context_required":
+                raise
+        if current is not None and not current.runtime_distributions:
+            return current, None
+        if phase_callback is not None:
+            await phase_callback("Verifying media runtime packages")
+        executable = self.settings.comfy_executable
+        if executable is None:
+            raise RuntimeError("The managed media runtime package baseline could not be verified.")
+        try:
+            environment, tags, distributions = await probe_comfy_registry_runtime_target(executable)
+            runtime = canonical_comfy_registry_runtime_distributions(distributions)
+        except (ValueError, OSError) as exc:
+            raise RuntimeError(
+                "The managed media runtime package baseline could not be verified."
+            ) from exc
+        if current is None:
+            reviewed_inputs = ComfyRegistryReviewedInputContext(
+                SessionLocal, ArtifactStore(self.settings), environment, tags
+            )
+            current = await _worker(lambda: contract(reviewed_inputs))
+        if current.runtime_distributions != runtime:
+            raise RuntimeError(
+                "The managed media runtime changed after workflow dependencies "
+                "were prepared. Prepare the workflow package again."
+            )
+        return current, reviewed_inputs
+
+    async def _revalidate_comfy_registry_contract(
+        self, scope: WorkflowMediaLaunchScope | None, expected: ComfyRegistryLaunchContract
+    ) -> None:
+        current, _reviewed = await self._verified_comfy_registry_contract(scope)
+        if current != expected:
+            raise WorkerStartRefused("The verified media dependencies changed before startup.")
+
     async def _revalidate_source_media_scope(self, scope: WorkflowMediaLaunchScope | None) -> None:
+        from .comfy_registry_activation_batches import _worker
         from .db import SessionLocal
         from .workflow_activations import (
             WorkflowSourceLaunchScope,
@@ -917,22 +984,28 @@ class ProcessSupervisor:
             or provisioner is None
         ):
             raise WorkerStartRefused("The accepted workflow runtime is unavailable.")
-        await asyncio.to_thread(
-            revalidate_workflow_source_launch_scope,
-            SessionLocal,
-            scope,
-            context=PreparationContext(
-                executable,
-                self.settings.custom_node_dir,
-                self.settings.registry_dir,
-            ),
-            runtime_materializer=lambda requirement, selection: (
-                materialize_comfy_runtime_dependency(provisioner, requirement, selection)
-            ),
+        _contract, reviewed_inputs = await self._verified_comfy_registry_contract(scope)
+        await _worker(
+            lambda: revalidate_workflow_source_launch_scope(
+                SessionLocal,
+                scope,
+                context=PreparationContext(
+                    executable,
+                    self.settings.custom_node_dir,
+                    self.settings.registry_dir,
+                ),
+                runtime_materializer=lambda requirement, selection: (
+                    materialize_comfy_runtime_dependency(provisioner, requirement, selection)
+                ),
+                reviewed_inputs=reviewed_inputs,
+            )
         )
 
     def _scoped_comfy_registry_contract(
-        self, scope: WorkflowMediaLaunchScope
+        self,
+        scope: WorkflowMediaLaunchScope,
+        *,
+        reviewed_inputs: ComfyRegistryReviewedInputContext | None = None,
     ) -> ComfyRegistryLaunchContract:
         from .comfy_registry_installs import scoped_comfy_registry_launch_contract
         from .db import SessionLocal
@@ -942,26 +1015,35 @@ class ProcessSupervisor:
         ):
             raise ValueError("Workflow activation Registry package scope is inconsistent")
         with SessionLocal() as session:
+            session.connection().exec_driver_sql("BEGIN")
             return scoped_comfy_registry_launch_contract(
                 session,
                 scope.registry_packages,
                 custom_node_root=self.settings.custom_node_dir,
                 environment_root=registry_wheel_environment_root(self.settings.registry_dir),
+                reviewed_inputs=reviewed_inputs,
             )
 
-    def _trusted_comfy_registry_contract(self) -> ComfyRegistryLaunchContract:
+    def _trusted_comfy_registry_contract(
+        self, *, reviewed_inputs: ComfyRegistryReviewedInputContext | None = None
+    ) -> ComfyRegistryLaunchContract:
         from .comfy_registry_installs import trusted_comfy_registry_launch_contract
         from .db import SessionLocal
 
         with SessionLocal() as session:
+            session.connection().exec_driver_sql("BEGIN")
             return trusted_comfy_registry_launch_contract(
                 session,
                 custom_node_root=self.settings.custom_node_dir,
                 environment_root=registry_wheel_environment_root(self.settings.registry_dir),
+                reviewed_inputs=reviewed_inputs,
             )
 
     def _trusted_comfy_registry_package_node_types(
         self,
+        *,
+        reviewed_inputs: ComfyRegistryReviewedInputContext | None = None,
+        expected_contract: ComfyRegistryLaunchContract | None = None,
     ) -> dict[tuple[str, str], frozenset[str]]:
         from sqlalchemy import select
 
@@ -970,11 +1052,17 @@ class ProcessSupervisor:
         from .models import ComfyRegistryInstall
 
         with SessionLocal() as session:
+            session.connection().exec_driver_sql("BEGIN")
             contract = trusted_comfy_registry_launch_contract(
                 session,
                 custom_node_root=self.settings.custom_node_dir,
                 environment_root=registry_wheel_environment_root(self.settings.registry_dir),
+                reviewed_inputs=reviewed_inputs,
             )
+            if expected_contract is not None and contract != expected_contract:
+                raise WorkerStartRefused(
+                    "The verified media dependencies changed before inspection."
+                )
             installs = session.scalars(
                 select(ComfyRegistryInstall).where(
                     ComfyRegistryInstall.trusted.is_(True),
@@ -1005,7 +1093,14 @@ class ProcessSupervisor:
         worker and read its live ``object_info`` before compilation.
         """
 
-        return await asyncio.to_thread(self._trusted_comfy_registry_package_node_types)
+        from .comfy_registry_activation_batches import _worker
+
+        contract, reviewed_inputs = await self._verified_comfy_registry_contract(None)
+        return await _worker(
+            lambda: self._trusted_comfy_registry_package_node_types(
+                reviewed_inputs=reviewed_inputs, expected_contract=contract
+            )
+        )
 
     async def trusted_comfy_custom_node_package_node_types(
         self,

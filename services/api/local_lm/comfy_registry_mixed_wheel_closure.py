@@ -261,6 +261,12 @@ def _is_digest(value: object) -> bool:
     )
 
 
+def mixed_wheel_closure_payload(closure: ComfyRegistryMixedWheelClosure) -> dict[str, object]:
+    """Return the validated identity witness used by the closure digest."""
+    validate_comfy_registry_mixed_wheel_closure(closure)
+    return _payload(closure)
+
+
 def _payload(closure: ComfyRegistryMixedWheelClosure) -> dict[str, object]:
     return {
         "version": 1,

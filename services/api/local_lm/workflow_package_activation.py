@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -13,6 +14,7 @@ from .comfy_registry_activation import (
     activate_comfy_registry_install,
     record_registry_policy_trust,
 )
+from .comfy_registry_installs import ComfyRegistryInstallError
 from .comfy_registry_lifecycle import ComfyRegistryPreparation
 from .comfy_registry_paths import registry_wheel_environment_root
 from .models import ComfyRegistryInstall
@@ -42,15 +44,9 @@ def media_worker_stopped(processes: ProcessSupervisor) -> bool:
     return media is None or (not media.running and media.state != "starting")
 
 
-async def activate_prepared_workflow_package(
-    session: Session,
-    preparation: ComfyRegistryPreparation,
-    resolution: ComfyNodeResolution,
-    *,
-    context: PreparationContext,
-    processes: ProcessSupervisor,
-) -> WorkflowPackageActivation:
-    """Use the verified source and bytes, then apply the ordinary launch checks."""
+def _prepared_install(
+    session: Session, preparation: ComfyRegistryPreparation
+) -> ComfyRegistryInstall:
     install = session.get(ComfyRegistryInstall, preparation.install_id)
     if install is None or (
         install.archive_sha256,
@@ -71,6 +67,20 @@ async def activate_prepared_workflow_package(
             "registry_policy_identity_mismatch",
             "The prepared extension changed before its installation could finish.",
         )
+    return install
+
+
+async def activate_prepared_workflow_package(
+    session: Session,
+    preparation: ComfyRegistryPreparation,
+    resolution: ComfyNodeResolution,
+    *,
+    context: PreparationContext,
+    processes: ProcessSupervisor,
+    session_factory: Callable[[], Session],
+) -> WorkflowPackageActivation:
+    """Use the verified source and bytes, then apply the ordinary launch checks."""
+    install = _prepared_install(session, preparation)
     decision = decide_registry_trust(resolution, install)
     if decision.outcome == "pause":
         return WorkflowPackageActivation(
@@ -81,7 +91,11 @@ async def activate_prepared_workflow_package(
             "registry_policy_" + decision.reason, decision.explanation
         )
     environment_root = registry_wheel_environment_root(context.state_root)
+    target = context.verification_target(session_factory, processes.settings)
     try:
+        verified = await target.verify((preparation.install_id,))
+        session.expire_all()
+        _prepared_install(session, preparation)
         record_registry_policy_trust(
             session,
             install_id=preparation.install_id,
@@ -91,6 +105,7 @@ async def activate_prepared_workflow_package(
             custom_node_root=context.custom_node_root,
             environment_root=environment_root,
             media_worker_stopped=media_worker_stopped(processes),
+            verified_launch=verified,
         )
         await activate_comfy_registry_install(
             session,
@@ -100,7 +115,14 @@ async def activate_prepared_workflow_package(
             media_worker_stopped=media_worker_stopped(processes),
             start_media=processes.start_media,
             read_node_inventory=processes.comfy_node_inventory,
+            verification_target=target,
         )
+    except ComfyRegistryInstallError as exc:
+        session.rollback()
+        raise WorkflowPackagePreparationError(
+            "registry_install_verification_failed",
+            "The extension could not complete its verified runtime setup.",
+        ) from exc
     except ComfyRegistryActivationError as exc:
         raise WorkflowPackagePreparationError(
             exc.code, "The extension could not complete its verified runtime setup."

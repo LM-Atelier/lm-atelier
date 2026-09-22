@@ -6,6 +6,7 @@ import asyncio
 import json
 import subprocess
 import sys
+import threading
 import traceback
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack
@@ -16,7 +17,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
-from sqlalchemy import select
+from sqlalchemy import select, text
 from test_workflow_completion_jobs import _settled
 from test_workflow_offer_packages import _setup
 from test_workflow_package_execution_plan import _inputs
@@ -139,6 +140,8 @@ async def fresh_runtime(
     [
         "complete",
         "validation-failure",
+        "changed-code-after-validation",
+        "completion-reader",
         "trust-review",
         "trust-resume",
         "trust-resume-running",
@@ -184,6 +187,13 @@ async def test_source_extensions_finish_or_pause_without_partial_workflow_activa
         Path(sys.executable), services.settings.custom_node_dir, services.settings.registry_dir
     )
     inputs = _inputs(commit=mode.startswith("trust-"))
+    original_probe = inputs["interpreter_probe"]
+
+    async def probe(executable: Path) -> Any:
+        environment, tags = await original_probe(executable)
+        return environment, tags, ()
+
+    inputs["interpreter_probe"] = probe
     source_payload = {
         "name": "Neutral extension source",
         "operation": "text_to_image",
@@ -231,10 +241,36 @@ async def test_source_extensions_finish_or_pause_without_partial_workflow_activa
 
     async def validate(_graph: dict[str, Any]) -> list[str]:
         validations.append(_graph)
+        if mode == "changed-code-after-validation":
+            with SessionLocal() as session:
+                extension = session.scalar(select(models.ComfyRegistryInstall))
+                assert extension is not None
+                installed = context.custom_node_root / extension.installed_path
+            (installed / "__init__.py").write_text("CHANGED = True\n", encoding="utf-8")
         return ["Constructed validation failure"] if mode == "validation-failure" else []
 
     monkeypatch.setattr(services.processes, "comfy_node_inventory", inventory)
     monkeypatch.setattr(services.engines.media, "validate_workflow", validate)
+    completion_reads: list[bool] = []
+    if mode == "completion-reader":
+        from local_lm.comfy_registry_activation_batches import RegistryActivationBatch
+
+        main_thread = threading.get_ident()
+        original_verify = RegistryActivationBatch.verify_completion
+
+        def verify(batch: RegistryActivationBatch, factory: Any) -> RegistryActivationBatch:
+            if validations:
+                assert threading.get_ident() != main_thread
+                with SessionLocal() as writer:
+                    writer.connection().exec_driver_sql("PRAGMA busy_timeout=100")
+                    writer.execute(
+                        text("UPDATE workflow_install_offers SET status = status WHERE 0")
+                    )
+                    writer.commit()
+                completion_reads.append(True)
+            return original_verify(batch, factory)
+
+        monkeypatch.setattr(RegistryActivationBatch, "verify_completion", verify)
     entered, release = asyncio.Event(), asyncio.Event()
     interrupted = False
 
@@ -504,6 +540,8 @@ async def test_source_extensions_finish_or_pause_without_partial_workflow_activa
         context = PreparationContext.from_settings(services.settings)
     progress = await client.get(f"/api/workflow-install-offers/{offer_id}/progress")
     assert progress.status_code == 200, progress.text
+    if mode == "completion-reader":
+        assert completion_reads == [True], failures
     if mode.startswith("cancel-") or mode == "trust-cancelled":
         # A cancelled installation says so and names the job a retry resumes.
         assert progress.json()["phase"] == "needs_attention"
@@ -534,8 +572,10 @@ async def test_source_extensions_finish_or_pause_without_partial_workflow_activa
         elif mode == "trust-cancelled":
             assert job.status == "cancelled" and job.attempt == 1
             assert not extension.active and not validations
-        elif mode == "validation-failure" or mode.startswith("refuse-activation-"):
-            assert len(validations) == (1 if mode == "validation-failure" else 0), (
+        elif mode in {"validation-failure", "changed-code-after-validation"} or mode.startswith(
+            "refuse-activation-"
+        ):
+            assert len(validations) == (0 if mode.startswith("refuse-activation-") else 1), (
                 offer.completion_error_code,
                 failures,
             )
