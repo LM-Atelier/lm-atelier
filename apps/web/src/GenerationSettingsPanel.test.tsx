@@ -318,6 +318,7 @@ describe("the workflow's own LoRAs in the panel", () => {
       dependency_contract_sha256: "c".repeat(64),
       activation_binding_sha256: null,
       ordering_authority: "presentation_only",
+      base_model_family: "krea2",
       evidence_gaps: [],
       slots: [{
         slot_id: `wflora_${"d".repeat(64)}`,

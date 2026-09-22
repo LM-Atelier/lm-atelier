@@ -1487,6 +1487,8 @@ export interface WorkflowLoraControls {
     | "package_binding_evidence_unavailable"
     | "package_graph_binding_unavailable"
   >;
+  /** The one model family the workflow runs, or null when that is not known. */
+  base_model_family: string | null;
   slots: WorkflowLoraControlSlot[];
 }
 

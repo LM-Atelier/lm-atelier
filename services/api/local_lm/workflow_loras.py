@@ -16,6 +16,7 @@ from typing import Any, Literal, cast
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .auxiliary_assets import workflow_model_family
 from .comfy_package_widgets import (
     POWER_LORA_LOADER,
     PackageClaim,
@@ -115,6 +116,11 @@ class WorkflowLoraControlsProjection:
     activation_binding_sha256: str | None
     ordering_authority: Literal["presentation_only"]
     evidence_gaps: tuple[WorkflowLoraEvidenceGap, ...]
+    #: The one model family this revision runs, or None when that cannot be
+    #: established. It is not an evidence gap: those are about who may edit a
+    #: slot, and this is about whether a LoRA chosen for the stack can be
+    #: checked against the workflow at all.
+    base_model_family: str | None
     slots: tuple[WorkflowLoraSlot, ...]
 
 
@@ -236,6 +242,7 @@ def workflow_lora_controls(
         activation_binding_sha256=extracted.activation_binding_sha256,
         ordering_authority=extracted.ordering_authority,
         evidence_gaps=tuple(sorted(gaps)),
+        base_model_family=workflow_model_family(session, revision),
         slots=extracted.slots,
     )
 

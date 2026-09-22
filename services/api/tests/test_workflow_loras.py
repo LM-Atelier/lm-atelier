@@ -18,6 +18,7 @@ from local_lm.models import (
     ComfyRegistryInstall,
     CustomNodeInstall,
     ModelAssetInstall,
+    ModelInstall,
     WorkflowActivation,
     WorkflowDefinition,
     WorkflowDependencyBinding,
@@ -527,6 +528,45 @@ def _seed_revision(
         )
     session.commit()
     return definition, revision
+
+
+def test_the_projection_says_when_no_family_can_be_established(session: Session) -> None:
+    """The stack refuses a mismatched LoRA only when the workflow resolves to one
+    family, so a revision that resolves to none accepts any LoRA. The person
+    choosing is then the only check left, and they can only be careful if the
+    controls say so.
+    """
+
+    _definition, revision = _seed_revision(session)
+
+    projection = workflow_lora_controls(session, revision_id=revision.id)
+
+    assert projection.base_model_family is None
+
+
+def test_the_projection_names_the_family_when_one_can_be_established(session: Session) -> None:
+    """The other half, so the field above is known to mean something.
+
+    Without this, a field wired to a constant None would pass the case above
+    and say nothing about whether the workflow's family is ever read.
+    """
+
+    _definition, revision = _seed_revision(session, with_contract=False)
+    session.add(
+        ModelInstall(
+            id="mi_family_probe",
+            name="Base",
+            engine="comfyui",
+            local_path="C:/managed/base.safetensors",
+            manifest_json={"family": "Krea2"},
+        )
+    )
+    revision.dependencies_json = {"model_install_ids": ["mi_family_probe"]}
+    session.commit()
+
+    projection = workflow_lora_controls(session, revision_id=revision.id)
+
+    assert projection.base_model_family == "krea2"
 
 
 def test_core_projection_requires_complete_graph_runtime_and_asset_evidence(
