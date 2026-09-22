@@ -1,17 +1,25 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import time as _real_time
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from local_lm import scheduler as scheduler_module
 from local_lm.config import Settings
-from local_lm.db import SessionLocal, configure_database, init_db
+from local_lm.db import (
+    SessionLocal,
+    configure_database,
+    database_is_contended,
+    init_db,
+)
 from local_lm.domain import JobStatus, utcnow
 from local_lm.models import Chat, Job, Message, Run, WorkPlan, WorkStep, WorkStepDependency
 from local_lm.scheduler import _ELIGIBILITY_SHARE_SECONDS, JobClaim, ResourceScheduler
@@ -131,6 +139,140 @@ def test_image_edit_checks_never_age_ahead_of_foreground_work(settings: Settings
         ordered = ResourceScheduler._eligible_jobs(session, "primary", now)
 
     assert [job.id for job in ordered] == ["job_foreground", "job_background_check"]
+
+
+def _real_sqlite_error(tmp_path: Path, *, contended: bool) -> OperationalError:
+    """Produce a genuine sqlite3 failure of the requested kind, and wrap it.
+
+    Genuine on both sides on purpose. A constructed error with an error code
+    assigned by hand would only prove that the test and the predicate agree
+    about an attribute the test set, which is no evidence about what SQLite
+    does. A busy timeout of a tenth of a second keeps the contended case fast.
+    """
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    database = tmp_path / "contended.sqlite3"
+    holder = sqlite3.connect(database, timeout=5)
+    try:
+        holder.execute("PRAGMA journal_mode=WAL")
+        holder.execute("CREATE TABLE waiting (id INTEGER PRIMARY KEY)")
+        holder.commit()
+        if contended:
+            holder.execute("BEGIN IMMEDIATE")
+            holder.execute("INSERT INTO waiting (id) VALUES (1)")
+        other = sqlite3.connect(database, timeout=0.1)
+        try:
+            if contended:
+                other.execute("BEGIN IMMEDIATE")
+                other.execute("INSERT INTO waiting (id) VALUES (2)")
+            else:
+                other.execute("SELECT missing FROM waiting")
+        except sqlite3.OperationalError as error:
+            return OperationalError("statement", {}, error)
+        finally:
+            other.close()
+        raise AssertionError("sqlite did not fail as this helper requires")
+    finally:
+        holder.rollback()
+        holder.close()
+
+
+def test_a_held_database_is_told_apart_from_a_broken_one(tmp_path: Path) -> None:
+    """The difference is SQLite's own code, not the message."""
+
+    contended = _real_sqlite_error(tmp_path / "busy", contended=True)
+    broken = _real_sqlite_error(tmp_path / "broken", contended=False)
+    assert database_is_contended(contended) is True
+    assert database_is_contended(broken) is False
+
+
+def _one_queued_job(settings: Settings) -> None:
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                id="job_waiting",
+                kind="image",
+                status=JobStatus.QUEUED.value,
+                queue_group="primary",
+                queue_ticket="ticket-a",
+                enqueued_at=utcnow(),
+            )
+        )
+        session.commit()
+
+
+async def _claim(scheduler: ResourceScheduler) -> Any:
+    return await asyncio.wait_for(
+        scheduler._acquire_job(
+            "job_waiting",
+            resource="primary",
+            group="primary",
+            priority=0,
+            capacity=1,
+            local_lock=asyncio.Semaphore(1),
+        ),
+        timeout=10,
+    )
+
+
+async def test_a_queued_job_waits_out_a_held_database_rather_than_failing(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """A sweep holding the writer must not end the jobs that are queued behind it.
+
+    The startup retention sweep holds SQLite's writer for most of every batch,
+    batch after batch. A job that is only waiting its turn writes its queue
+    bookkeeping on its first pass, and a read a few lines later flushes it, so
+    the wait is where the lock lands. Waiting longer is the answer; failing the
+    job is not, and the queue loop already knows how to wait.
+    """
+
+    _one_queued_job(settings)
+    scheduler = ResourceScheduler(session_factory=SessionLocal)
+    original = scheduler._eligible_job_ids
+    refusals: list[int] = []
+
+    def contended_once(*args: Any, **kwargs: Any) -> Any:
+        if not refusals:
+            refusals.append(1)
+            raise _real_sqlite_error(tmp_path / "busy", contended=True)
+        return original(*args, **kwargs)
+
+    scheduler._eligible_job_ids = contended_once  # type: ignore[method-assign]
+
+    claim = await _claim(scheduler)
+
+    assert refusals == [1], "the contended pass has to have happened"
+    assert claim.token
+    with SessionLocal() as session:
+        job = session.get(Job, "job_waiting")
+        assert job is not None
+        assert job.status == JobStatus.RUNNING.value
+
+
+async def test_a_database_error_that_is_not_contention_still_reaches_the_caller(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """Waiting is right for a held database and wrong for a broken one.
+
+    Without this the repair above could be a bare except that swallows every
+    database failure, and a queue would wait forever on damage nobody reports.
+    """
+
+    _one_queued_job(settings)
+    scheduler = ResourceScheduler(session_factory=SessionLocal)
+    broken = _real_sqlite_error(tmp_path / "broken", contended=False)
+
+    def always_broken(*args: Any, **kwargs: Any) -> Any:
+        raise broken
+
+    scheduler._eligible_job_ids = always_broken  # type: ignore[method-assign]
+
+    with pytest.raises(OperationalError):
+        await _claim(scheduler)
 
 
 def test_peek_next_eligible_job_does_not_claim_or_change_it(settings: Settings) -> None:
