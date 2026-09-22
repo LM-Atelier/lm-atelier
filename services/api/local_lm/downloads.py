@@ -17,7 +17,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, BinaryIO, Literal
 
 import psutil
 from huggingface_hub import HfApi
@@ -49,9 +49,11 @@ from .filesystem_links import (
     AnchoredDirectoryError,
     AnchoredDirectoryNotFound,
     AnchoredEntryKind,
+    WalkedEntry,
     is_link_or_reparse,
     list_entries,
     open_child_directory,
+    open_entry,
     publish_opened_file,
     remove_directory_entry,
     remove_entry,
@@ -258,6 +260,43 @@ def download_worker_command() -> list[str]:
     if getattr(sys, "frozen", False):
         return [sys.executable, "--download-worker"]
     return [sys.executable, "-m", "local_lm.download_worker"]
+
+
+def _digest_and_signature(handle: BinaryIO) -> tuple[str, list[int]]:
+    """Hash an open file and note the size and time it had while being read."""
+
+    digest = hashlib.sha256()
+    for block in iter(lambda: handle.read(1024 * 1024), b""):
+        digest.update(block)
+    status = os.fstat(handle.fileno())
+    return digest.hexdigest(), [status.st_size, status.st_mtime_ns]
+
+
+def _measured_file(path: Path) -> tuple[str, list[int]]:
+    """Measure one file named outright rather than found by walking a tree."""
+
+    with path.open("rb") as handle:
+        return _digest_and_signature(handle)
+
+
+def _measured_entry(walked: WalkedEntry) -> tuple[str, list[int]] | None:
+    """Measure one walked file through the directory it was listed in.
+
+    Opened through its held parent rather than by pathname, so the bytes hashed
+    are the entry the walk classified and not whatever the name resolves to a
+    moment later. None means it is no longer there, which is not a failure: an
+    install can lose a file between the listing and the read, and the identity
+    then describes what remained.
+    """
+
+    try:
+        descriptor = open_entry(walked.parent, walked.entry.name)
+    except (AnchoredDirectoryError, OSError):
+        return None
+    if descriptor is None:
+        return None
+    with os.fdopen(descriptor, "rb") as handle:
+        return _digest_and_signature(handle)
 
 
 class DownloadManager:
@@ -765,23 +804,45 @@ class DownloadManager:
         file has moved on, and only then is the evidence it backed stale.
         """
 
-        files = (
-            sorted(child for child in local_path.rglob("*") if child.is_file())
-            if local_path.is_dir()
-            else [local_path]
-        )
+        if not local_path.is_dir():
+            digest, status = _measured_file(local_path)
+            return {local_path.name: digest}, {local_path.name: status}
+
         digests: dict[str, str] = {}
         signatures: dict[str, list[int]] = {}
-        for child in files:
-            name = child.relative_to(local_path).as_posix() if local_path.is_dir() else child.name
-            digest = hashlib.sha256()
-            with child.open("rb") as handle:
-                for block in iter(lambda: handle.read(1024 * 1024), b""):
-                    digest.update(block)
-            status = child.stat()
-            digests[name] = digest.hexdigest()
-            signatures[name] = [status.st_size, status.st_mtime_ns]
-        return digests, signatures
+        unmeasured = 0
+        with AnchoredDirectory(local_path) as anchor:
+            for walked in walk_entries(anchor):
+                if walked.entry.kind is AnchoredEntryKind.DIRECTORY:
+                    continue
+                if walked.entry.kind is not AnchoredEntryKind.FILE:
+                    # A link, a junction, or a kind this platform will not name.
+                    # It is counted and left alone rather than followed: on
+                    # Windows a junction is not a link to the predicates a
+                    # recursive glob consults, so measuring through one hashes
+                    # files that are not in this install and writes them down
+                    # under names that read as though they were. That is the
+                    # evidence bound to nothing this measurement exists to
+                    # refuse, and it would go on to decide whether an
+                    # activation still holds.
+                    unmeasured += 1
+                    continue
+                measured = _measured_entry(walked)
+                if measured is None:
+                    continue
+                digest, status = measured
+                name = "/".join(walked.parts)
+                digests[name] = digest
+                signatures[name] = status
+        if unmeasured:
+            logger.info(
+                "Measured install identity skipped %d entry(ies) that lead outside %s",
+                unmeasured,
+                local_path,
+            )
+        # Sorted so the same install measures to the same document twice, which
+        # a reader comparing two manifests by eye has every right to expect.
+        return dict(sorted(digests.items())), dict(sorted(signatures.items()))
 
     def reactivate(self, session: Session, install: ModelInstall) -> Job:
         """Queue a bounded re-probe of an already installed model.
