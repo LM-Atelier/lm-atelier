@@ -7698,6 +7698,33 @@ async def read_model_asset_prompt_grammar(
     return row
 
 
+#: The settings that only ever describe a LoRA: what it is for, whether to
+#: reach for it unprompted, and how strongly to apply it when something does.
+#: Automatic selection reads them and selects on kind, so on any other asset
+#: they are text nothing will ever consult.
+LORA_ONLY_ASSET_SETTINGS = frozenset(
+    {"use_case", "auto_apply", "default_model_strength", "default_clip_strength"}
+)
+
+
+def _refuse_lora_only_settings(kind: str, requested: set[str]) -> None:
+    """Refuse LoRA settings on an asset that can never act on them.
+
+    Both the route that registers an asset and the route that edits one have
+    to answer this the same way. They did not: editing refused them, while
+    registering stored a use case for any kind, so a checkpoint or a matting
+    model could be given one at the door and never be able to correct or clear
+    it afterwards.
+    """
+
+    if requested and kind != "lora":
+        raise api_error(
+            422,
+            "automatic-selection-lora-only",
+            "automatic selection metadata is only available for LoRAs",
+        )
+
+
 @router.post("/model-assets", response_model=ModelAssetOut, status_code=201)
 async def adopt_model_asset(
     payload: ModelAssetAdopt, request: Request, session: SessionDep
@@ -7718,6 +7745,9 @@ async def adopt_model_asset(
     services = _services(request)
     if payload.kind not in COMFY_MODEL_ASSET_KINDS or comfy_folder_for_kind(payload.kind) is None:
         raise api_error(422, "asset-kind-unsupported", "This kind of asset cannot be adopted.")
+    _refuse_lora_only_settings(
+        payload.kind, {"use_case"} if payload.use_case and payload.use_case.strip() else set()
+    )
     roots = adoptable_roots(session, services.settings, payload.kind)
     if not roots:
         raise api_error(
@@ -7761,7 +7791,7 @@ async def adopt_model_asset(
             },
         },
         active=True,
-        use_case=payload.use_case or "",
+        use_case=(payload.use_case or "").strip(),
         verified_at=utcnow(),
     )
     session.add(asset)
@@ -7784,18 +7814,7 @@ async def update_model_asset(
     values = payload.model_dump(exclude_unset=True, exclude_none=True)
     if not values:
         return asset
-    lora_fields = {
-        "use_case",
-        "auto_apply",
-        "default_model_strength",
-        "default_clip_strength",
-    }
-    if set(values) & lora_fields and asset.kind != "lora":
-        raise api_error(
-            422,
-            "automatic-selection-lora-only",
-            "automatic selection metadata is only available for LoRAs",
-        )
+    _refuse_lora_only_settings(asset.kind, set(values) & LORA_ONLY_ASSET_SETTINGS)
     if "use_case" in values:
         values["use_case"] = values["use_case"].strip()
     for field in ("default_model_strength", "default_clip_strength"):

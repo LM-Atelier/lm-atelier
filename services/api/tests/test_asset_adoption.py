@@ -268,6 +268,78 @@ async def test_the_same_bytes_are_not_registered_twice(
     assert second.json()["code"] == "asset-already-registered"
 
 
+async def test_a_use_case_is_refused_where_nothing_would_read_it(
+    client: AsyncClient, runtime_settings: Settings
+) -> None:
+    """The two routes have to answer this the same way, and one did not.
+
+    Editing an asset refuses a use case on anything but a LoRA, because
+    automatic selection is what reads it and selects on kind. Registering one
+    stored it for any kind, so a use case given at the door could never be
+    corrected or cleared afterwards.
+    """
+
+    assert runtime_settings.comfy_directory is not None
+    folder = runtime_settings.comfy_directory / "models" / "vae"
+    folder.mkdir(parents=True, exist_ok=True)
+    _safetensors(folder / "encoder.safetensors", {})
+
+    refused = await client.post(
+        "/api/model-assets",
+        json={"kind": "vae", "comfy_name": "encoder.safetensors", "use_case": "product photos"},
+    )
+
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["code"] == "automatic-selection-lora-only"
+    assert (await client.get("/api/model-assets")).json() == []
+
+
+async def test_a_use_case_a_lora_is_registered_with_can_still_be_changed(
+    client: AsyncClient, runtime_settings: Settings
+) -> None:
+    """What one route accepts the other has to accept, or it cannot be undone."""
+
+    folder = _loras(runtime_settings)
+    _safetensors(folder / "slider.safetensors", {})
+
+    adopted = await client.post(
+        "/api/model-assets",
+        json={
+            "kind": "lora",
+            "comfy_name": "slider.safetensors",
+            "use_case": "watercolour landscapes",
+        },
+    )
+    assert adopted.status_code == 201, adopted.text
+    asset_id = adopted.json()["id"]
+
+    changed = await client.patch(
+        f"/api/model-assets/{asset_id}", json={"use_case": "product photography"}
+    )
+
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["use_case"] == "product photography"
+
+
+async def test_an_empty_use_case_is_not_metadata_to_refuse(
+    client: AsyncClient, runtime_settings: Settings
+) -> None:
+    """The refusal is about a value that would be kept, not about the field."""
+
+    assert runtime_settings.comfy_directory is not None
+    folder = runtime_settings.comfy_directory / "models" / "vae"
+    folder.mkdir(parents=True, exist_ok=True)
+    _safetensors(folder / "encoder.safetensors", {})
+
+    adopted = await client.post(
+        "/api/model-assets",
+        json={"kind": "vae", "comfy_name": "encoder.safetensors", "use_case": "   "},
+    )
+
+    assert adopted.status_code == 201, adopted.text
+    assert adopted.json()["use_case"] == ""
+
+
 async def test_a_kind_outside_the_vocabulary_never_reaches_the_handler(
     client: AsyncClient, runtime_settings: Settings
 ) -> None:
