@@ -57,9 +57,15 @@ run_checked "Version metadata" \
 
 mkdir -p "$root/temp"
 pytest_temp="$root/temp/verify-pytest-$$"
+# Away from the checkout unless the caller said otherwise, because the suite
+# opens a data directory and the default is relative, so it would land in the
+# tree. Beside the pytest scratch rather than inside it: pytest empties its
+# own basetemp as it starts, and by then the application has taken ownership
+# of the data directory, so one inside the other cannot both survive.
+export LOCAL_LM_DATA_DIR="${LOCAL_LM_DATA_DIR:-$root/temp/verify-data-$$}"
 run_checked "API tests" \
   "$python_tools/pytest" services/api/tests -q \
-    "--basetemp=$pytest_temp" -p no:cacheprovider
+    "--basetemp=$pytest_temp" -p no:cacheprovider -n auto --dist loadfile
 run_checked "Web lint" npm run lint
 run_checked "Web typecheck" npm run typecheck
 run_checked "Web tests" npm test

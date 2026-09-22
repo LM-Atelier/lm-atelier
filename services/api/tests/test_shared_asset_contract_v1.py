@@ -29,6 +29,13 @@ from local_lm.shared_asset_contract_v1 import (
     store_access_mode,
 )
 
+#: A settled identity for the cases below whose parameter name is the record
+#: itself. Generating one would name the same case differently in every process,
+#: and cases that cannot agree on their names cannot be shared between
+#: processes. The second is the first written the way a store must not write it.
+_SETTLED_LIBRARY_UUID = "0f1d4c3b-2a69-4e57-9b80-15d7c6e2a834"
+_SETTLED_LIBRARY_UUID_UNPUNCTUATED = "0F1D4C3B2A694E579B8015D7C6E2A834"
+
 
 def _identity_record(**overrides: object) -> dict[str, object]:
     record: dict[str, object] = {
@@ -534,11 +541,15 @@ def test_an_oversized_supplementary_name_refuses_before_any_native_call(
         b"not json at all",
         b"\xff\xfe\x00\x00",
         json.dumps({"schema": "some-other-store"}).encode(),
-        json.dumps(_identity_record(schema="some-other-store")).encode(),
-        json.dumps(_identity_record(format_version=0)).encode(),
-        json.dumps(_identity_record(min_reader_version=True)).encode(),
+        json.dumps(
+            _identity_record(schema="some-other-store", library_uuid=_SETTLED_LIBRARY_UUID)
+        ).encode(),
+        json.dumps(_identity_record(format_version=0, library_uuid=_SETTLED_LIBRARY_UUID)).encode(),
+        json.dumps(
+            _identity_record(min_reader_version=True, library_uuid=_SETTLED_LIBRARY_UUID)
+        ).encode(),
         json.dumps(_identity_record(library_uuid="not-a-uuid")).encode(),
-        json.dumps(_identity_record(library_uuid=uuid.uuid4().hex.upper())).encode(),
+        json.dumps(_identity_record(library_uuid=_SETTLED_LIBRARY_UUID_UNPUNCTUATED)).encode(),
         json.dumps([1, 2, 3]).encode(),
     ],
 )

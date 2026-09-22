@@ -1943,6 +1943,44 @@ def test_release_metadata_contains_licenses_and_sbom() -> None:
         shutil.rmtree(output, ignore_errors=True)
 
 
+def test_gates_keep_the_data_directory_outside_the_pytest_scratch() -> None:
+    """Neither gate may put the data directory inside the one pytest empties.
+
+    pytest clears its basetemp as it starts, and with work split across
+    processes the controller has already imported the application and taken
+    ownership of the data directory by then. A data directory inside that
+    basetemp therefore cannot be removed, and on Windows the run ends before a
+    single test has been collected. Both paths still belong under the same
+    held parent, so this is about which of the two contains the other rather
+    than about moving the data somewhere looser.
+    """
+
+    linux = (ROOT / "scripts" / "verify.sh").read_text(encoding="utf-8")
+    scratch = re.search(r'^pytest_temp="([^"]+)"', linux, re.M)
+    data = re.search(r'^export LOCAL_LM_DATA_DIR="\$\{LOCAL_LM_DATA_DIR:-([^}]+)\}"', linux, re.M)
+    assert scratch is not None and data is not None
+
+    def resolved(expression: str, scratch_value: str = "") -> Path:
+        expression = expression.replace("$$", "1234").replace("$root", "/repository")
+        return Path(expression.replace("$pytest_temp", scratch_value))
+
+    scratch_path = resolved(scratch.group(1))
+    # The scratch is substituted here as well, and it has to be: written as
+    # "$pytest_temp/data" an unexpanded name is its own parent, so the
+    # containment check below would pass the exact layout it exists to refuse.
+    data_path = resolved(data.group(1), str(scratch_path))
+    assert data_path != scratch_path
+    assert scratch_path not in data_path.parents
+    assert data_path.parent == scratch_path.parent
+
+    windows = (ROOT / "scripts" / "verify.ps1").read_text(encoding="utf-8")
+    assignment = re.search(r"^\s*\$env:LOCAL_LM_DATA_DIR = (.+)$", windows, re.M)
+    assert assignment is not None
+    # The parent of the scratch, not the scratch: the parent is the directory
+    # the lease pins, and the scratch is the one pytest empties.
+    assert assignment.group(1).strip() == 'Join-Path (Split-Path -Parent $PytestTemp) "data"'
+
+
 def test_strict_mypy_gates_load_the_strict_api_config() -> None:
     """A check that promises more than it enforces is worse than one that
     promises less.
