@@ -4,6 +4,7 @@ import { changeChatPages, restoreChatPages, snapshotChatPages, useChatPages } fr
 import { useChatFieldUpdate } from "./useChatFieldUpdate";
 import { useAppNavigation } from "./useAppNavigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useTurnSending } from "./useTurnSending";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { GlobalNotices } from "./GlobalNotices";
 import { JobsPanel } from "./JobsPanel";
@@ -22,17 +23,14 @@ import {
   EMPTY_COMPOSER_DRAFT,
   updatedComposerDrafts,
   withoutComposerDraft,
-  type ComposerDraft, type ComposerPromptSource,
+  type ComposerDraft,
 } from "./composerPromptSource";
-import type { TurnReference } from "./mentionDraft";
-import { recoverPromptSourceSend } from "./promptSourceSendRecovery";
 import { regenerateWithRetry } from "./regenerationRequest";
 import { useWorkspaceChrome } from "./sidebarLayout";
 import type {
   Chat,
   ChatDetail,
   EngineRole,
-  TurnAccepted,
 } from "./types";
 import { useAutoSettingsRoles } from "./useAutoSettingsRoles";
 import { useFirstRunSetup } from "./useFirstRunSetup";
@@ -43,17 +41,6 @@ import { useTurnConfirmation } from "./useTurnConfirmation";
 import { useWorkPlanMutations } from "./useWorkPlanMutations";
 import { focusMainContent, roleForMode } from "./viewHelpers";
 export { MessageBubble } from "./MessageBubble";
-
-type SendTurnVariables = PendingTurn & {
-  chatId: string;
-  artifacts: string[];
-  settings: Record<string, unknown>;
-  /** Subject ids chosen from the mention picker, never parsed from the text. */
-  references: TurnReference[];
-  outputCount?: number;
-  promptSource?: ComposerPromptSource;
-  stopCurrent?: boolean;
-};
 
 const SETUP_DISMISSED_KEY = "lm-atelier-setup-dismissed";
 const CURRENT_CHAT_KEY = "local-lm-chat";
@@ -117,52 +104,8 @@ export default function App() {
     mutationFn: api.createProject,
     onSuccess: () => void client.invalidateQueries({ queryKey: ["projects"] }),
   });
-  const applyAcceptedTurn = useCallback((chatId: string, accepted: TurnAccepted, activate = true) => {
-    client.setQueryData<ChatDetail>(["chat", chatId], (current) => {
-      if (!current) return current;
-      const messageIds = new Set(current.messages.map((message) => message.id));
-      const acceptedMessages = [accepted.user_message, accepted.assistant_message]
-        .filter((message) => !messageIds.has(message.id));
-      return {
-        ...current,
-        active_head_message_id: activate ? accepted.assistant_message.id : current.active_head_message_id,
-        messages: [...current.messages, ...acceptedMessages],
-      };
-    });
-    void client.invalidateQueries({ queryKey: ["chat", chatId], exact: true });
-    void client.invalidateQueries({ queryKey: ["chats"] });
-    void client.invalidateQueries({ queryKey: ["jobs"] });
-    void client.invalidateQueries({ queryKey: ["work-plans", chatId] });
-    void client.invalidateQueries({ queryKey: ["edited-branches", chatId] });
-  }, [client]);
-  const send = useMutation({
-    mutationFn: ({ chatId, id, text, mode, artifacts, settings, references, outputCount, promptSource, stopCurrent }: SendTurnVariables) => {
-      if (stopCurrent) return api.stopAndSendTurn(
-        chatId, text, mode, artifacts, settings, id, references, outputCount,
-        promptSource, requestTurnConfirmation,
-      );
-      return api.sendTurn(
-        chatId, text, mode, artifacts, settings, id, "turns", undefined,
-        references, outputCount, promptSource, requestTurnConfirmation,
-      );
-    },
-    onMutate: ({ chatId, id, text, mode }) => {
-      setPendingTurns((current) => ({
-        ...current,
-        [chatId]: [...(current[chatId] ?? []), { id, text, mode }],
-      }));
-    },
-    onSuccess: (accepted, { chatId }) => applyAcceptedTurn(chatId, accepted),
-    onError: (_error, variables) => recoverPromptSourceSend(client, setComposerDrafts, variables),
-    onSettled: (_accepted, _error, { chatId, id }) => {
-      setPendingTurns((current) => {
-        const remaining = (current[chatId] ?? []).filter((pending) => pending.id !== id);
-        const next = { ...current };
-        if (remaining.length) next[chatId] = remaining;
-        else delete next[chatId];
-        return next;
-      });
-    },
+  const { applyAcceptedTurn, send } = useTurnSending({
+    client, requestTurnConfirmation, setPendingTurns, setComposerDrafts,
   });
   const {
     cancelWorkPlan,
