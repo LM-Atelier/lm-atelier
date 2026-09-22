@@ -56,6 +56,22 @@ def test_extend_waits_for_a_workflow_that_paints_past_the_edge() -> None:
     assert _by_kind([outpaint])["enhance"].available is False
 
 
+def test_isolate_waits_for_a_workflow_that_says_it_cuts_a_subject_out() -> None:
+    """An editor is not a matting workflow, and a matting workflow is not an editor's mask."""
+
+    matting: dict[str, Any] = {
+        "type": "object",
+        "properties": {"matte": {"type": "boolean", "x-lm-atelier-kind": "matting"}},
+    }
+
+    assert _by_kind([PLAIN_SCHEMA])["isolate"].available is False
+    assert _by_kind([matting])["isolate"].available is True
+    # Each class stands alone, as with the outpainter above.
+    assert _by_kind([matting])["brush"].available is False
+    assert _by_kind([matting])["enhance"].available is False
+    assert _by_kind([MASK_SCHEMA])["isolate"].available is False
+
+
 def test_a_plain_editor_runs_instruct_but_not_a_selection() -> None:
     """The live case: an edit workflow that declares no mask input.
 

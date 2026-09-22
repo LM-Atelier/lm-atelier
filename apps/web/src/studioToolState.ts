@@ -291,6 +291,10 @@ export function toolFor(
     // point is pointing at where the picture is not.
     case "extend":
       return null;
+    // Isolate points at nothing either: the subject is whatever the workflow
+    // finds, and a gesture would only disagree with it.
+    case "isolate":
+      return null;
   }
 }
 
