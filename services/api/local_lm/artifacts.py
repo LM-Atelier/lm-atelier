@@ -173,6 +173,15 @@ def _removed(anchor: AnchoredDirectory, name: str, *, counted: int, cutoff: date
 # amortize that snapshot while the time budget still bounds slower deletion work.
 RETENTION_BATCH_DELETIONS = 1000
 RETENTION_BATCH_SECONDS = 2.0
+# What a batch may delete once the sweep has seen one remove nothing inside
+# its budget: a row pass that finds nothing to remove, followed by a walk of
+# the unindexed files that spends the whole budget without removing one,
+# reports exactly that. The clock comes off for the batches after it, and this
+# ceiling is what then bounds how many rows one of them removes while holding
+# the writer. Continuing one row per batch is bounded by the same measure and
+# is why such a backlog can hold the writer for minutes: each row pays for
+# another whole reference snapshot.
+RETENTION_UNTIMED_BATCH_DELETIONS = 25
 
 
 @dataclass(frozen=True)

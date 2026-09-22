@@ -33,6 +33,7 @@ from .api_errors import register_api_error_handler
 from .artifacts import (
     RETENTION_BATCH_DELETIONS,
     RETENTION_BATCH_SECONDS,
+    RETENTION_UNTIMED_BATCH_DELETIONS,
     ArtifactStore,
     RetentionCleanupSummary,
 )
@@ -547,9 +548,14 @@ async def sweep_artifact_retention(
             deletions = batch_deletions
             seconds: float | None = batch_seconds
             if single:
-                # A zero or exhausted deletion budget cannot make progress.
-                # Fall back to one deletion while still honoring shutdown.
-                deletions = 1
+                # A batch removed nothing inside its budget, so the clock
+                # comes off: one that cannot spend a budget cannot make progress
+                # under it either. The count stays, because it is what bounds
+                # the rows a batch removes while it holds the writer. One
+                # deletion here would pay a whole reference snapshot per row,
+                # which is how a backlog turns into minutes of holding the
+                # writer and failing everything else that writes.
+                deletions = min(batch_deletions, RETENTION_UNTIMED_BATCH_DELETIONS)
                 seconds = None
             operation = asyncio.create_task(
                 asyncio.to_thread(run_batch, deletions=deletions, seconds=seconds),
@@ -597,10 +603,11 @@ async def sweep_artifact_retention(
                 if summary.removed_count == 0 and not single:
                     single = True
                     logger.info(
-                        "Artifact retention batch %s made no progress within %.1fs; "
-                        "continuing one deletion per batch",
+                        "Artifact retention batch %s removed nothing within %.1fs; "
+                        "continuing without the clock, up to %s deletion(s) a batch",
                         batches,
                         batch_seconds,
+                        min(batch_deletions, RETENTION_UNTIMED_BATCH_DELETIONS),
                     )
                 else:
                     logger.info(
