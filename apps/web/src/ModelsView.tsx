@@ -242,7 +242,7 @@ export function ModelsView({ initialRole }: { initialRole: EngineRole }) {
   const runtimeFor = (model: CatalogModel) => runtimes.data?.find(
     (runtime) => runtime.engine === model.required_runtime,
   );
-  const { pendingInstall, cancel: cancelInstall, prepare: download, confirm: confirmInstall, updateDownloads, dismissUpdate } = useCatalogInstall();
+  const { pendingInstall, cancel: cancelInstall, prepare: download, confirm: confirmInstall, updateDownloads, dismissUpdate, selectAlternative } = useCatalogInstall();
   const installRecipe = useMutation({
     mutationFn: (recipeId: string) => api.installRecipe(recipeId),
     onSuccess: () => void client.invalidateQueries({ queryKey: ["jobs"] }),
@@ -453,6 +453,9 @@ export function ModelsView({ initialRole }: { initialRole: EngineRole }) {
           pending={confirmInstall.isPending}
           onConfirm={() => confirmInstall.mutate(pendingInstall)}
           onCancel={cancelInstall}
+          onSelectAlternative={(files) => selectAlternative.mutate({ pending: pendingInstall, files })}
+          selectingAlternative={selectAlternative.isPending}
+          alternativeError={selectAlternative.error?.message}
         />
       )}
       <FirstFailure of={[createProfile, download, confirmInstall, deleteModel, cleanupDownloads, updateUseCase, setDefaultModel, updateModelAsset, deleteModelAsset]} />

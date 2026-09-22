@@ -1209,6 +1209,13 @@ export interface CatalogInstallPlan {
   failure_reason: string | null;
 }
 
+export interface CatalogHardwareAlternative {
+  selected_files: string[];
+  download_bytes: number;
+  download_size_complete: boolean;
+  hardware_fit: HardwareFitAdvice;
+}
+
 export interface CatalogPreflight {
   remote_id: string;
   source_remote_id: string | null;
@@ -1231,6 +1238,7 @@ export interface CatalogPreflight {
   estimated_ram_bytes: number | null;
   estimated_vram_bytes: number | null;
   hardware_fit?: HardwareFitAdvice | null;
+  hardware_alternatives?: CatalogHardwareAlternative[];
   can_install: boolean;
   /** The choices behind a filename this version could not settle. Present
    * only for names that are genuinely ambiguous, so a list of one never

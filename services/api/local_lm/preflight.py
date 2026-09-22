@@ -5,6 +5,7 @@ from dataclasses import asdict
 from pathlib import PurePosixPath
 from typing import Any, Literal
 
+from .catalog_hardware_alternatives import catalog_hardware_alternatives, estimated_catalog_ram
 from .config import Settings
 from .gguf import (
     GGUFSelectionError,
@@ -704,7 +705,7 @@ def assess_catalog_install(
         )
 
     complete_sizes = bool(download_bytes) and not unknown_sizes
-    estimated_ram = int(download_bytes * 1.2) + 512 * 1024**2 if complete_sizes else None
+    estimated_ram = estimated_catalog_ram(download_bytes, complete=complete_sizes)
     estimated_vram = (
         int(download_bytes * 1.25) + 1024**3
         if complete_sizes and (request.role != "chat" or request.engine == "vllm")
@@ -764,6 +765,7 @@ def assess_catalog_install(
         estimated_vram_bytes=estimated_vram,
         can_install=not any(check.status == "block" for check in checks),
         hardware_fit=HardwareFitAdviceOut.model_validate(asdict(hardware_fit)),
+        hardware_alternatives=catalog_hardware_alternatives(detail, request, system, selected),
         checks=checks,
         auxiliary_kind=request.auxiliary_kind,
         content_rating=detail.model.content_rating,

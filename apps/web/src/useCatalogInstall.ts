@@ -107,6 +107,22 @@ export function useCatalogInstall() {
       void client.invalidateQueries({ queryKey: ["jobs"] });
     },
   });
+  const selectAlternative = useMutation({
+    mutationFn: async ({ pending, files }: { pending: PendingInstall; files: string[] }) => {
+      const preflight = await api.catalogPreflight(
+        pending.preflight.remote_id, pending.installRole, pending.engine,
+        pending.preflight.revision, files, pending.auxiliaryKind,
+        pending.model.workflow_template_id ?? null, pending.model.provider,
+      );
+      if (!preflight.can_install || preflight.install_plan?.compatibility !== "supported") {
+        throw new Error(preflight.checks.filter((check) => check.status === "block")
+          .map((check) => check.detail).join(" ") || preflight.install_plan?.failure_reason
+          || "This variant cannot be installed safely. The previous selection is unchanged.");
+      }
+      return { ...pending, preflight };
+    },
+    onSuccess: (ready, { pending }) => setPendingInstall((current) => current === pending ? ready : current),
+  });
   return {
     pendingInstall,
     updateDownloads,
@@ -115,7 +131,8 @@ export function useCatalogInstall() {
       saveModelUpdateDownloads(next);
       setUpdateDownloads(next);
     },
-    cancel: () => setPendingInstall(null),
+    cancel: () => { setPendingInstall(null); selectAlternative.reset(); },
+    selectAlternative,
     prepare: download,
     confirm: confirmInstall,
   };
