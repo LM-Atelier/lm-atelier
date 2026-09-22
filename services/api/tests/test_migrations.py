@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import sqlite3
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -23,7 +24,11 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from sqlalchemy.orm import Session
 
-from local_lm import db, models  # noqa: F401 - importing registers every table to compare
+from local_lm import (  # noqa: F401 - importing registers every table to compare
+    database_migrations,
+    db,
+    models,
+)
 from local_lm.artifact_library_schema import CREATE_TRIGGER_SQL
 from local_lm.backups import BackupManager
 from local_lm.chat_item_removal_schema import (
@@ -1858,6 +1863,67 @@ def test_a_brand_new_database_is_not_snapshotted(
 def _recorded_revisions_for(settings: Settings) -> set[str]:
     with closing(sqlite3.connect(settings.state_dir / "local-lm.sqlite3")) as connection:
         return {row[0] for row in connection.execute("SELECT version_num FROM alembic_version")}
+
+
+def test_a_start_on_current_data_does_not_run_the_upgrade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Applying nothing is not free: arriving at that answer walks the whole
+    revision graph, which means reading every migration in the build."""
+
+    settings = Settings(data_dir=tmp_path / "already-current")
+    settings.prepare()
+    upgrade_database(settings)
+    current = _recorded_revisions_for(settings)
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("upgraded data that was already at this build's revision")
+
+    monkeypatch.setattr(command, "upgrade", refuse)
+
+    upgrade_database(settings)
+
+    assert _recorded_revisions_for(settings) == current
+
+
+def test_a_start_one_revision_behind_still_reaches_the_head(tmp_path: Path) -> None:
+    """The one step that has to survive declining to do nothing."""
+
+    settings = Settings(data_dir=tmp_path / "one-behind")
+    settings.prepare()
+    parent = _parent_revision(settings)
+    command.upgrade(alembic_config(settings), parent)
+    assert _recorded_revisions_for(settings) == {parent}
+
+    upgrade_database(settings)
+
+    assert _recorded_revisions_for(settings) == {EXPECTED_ALEMBIC_HEAD}
+
+
+def test_an_older_migration_set_is_not_answered_from_the_current_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reading a migration set once is only safe while each set answers for
+    itself. An older set knows nothing of the revision this data records, and
+    has to say so rather than inherit the answer the current set gave."""
+
+    settings = Settings(data_dir=tmp_path / "older-set")
+    settings.prepare()
+    upgrade_database(settings)
+
+    script = ScriptDirectory.from_config(alembic_config(settings))
+    older = tmp_path / "older-migrations"
+    shutil.copytree(
+        Path(script.dir),
+        older,
+        ignore=shutil.ignore_patterns(Path(script.get_revision("head").path).name, "__pycache__"),
+    )
+    config = alembic_config(settings)
+    config.set_main_option("script_location", str(older))
+    monkeypatch.setattr(database_migrations, "alembic_config", lambda _settings: config)
+
+    with pytest.raises(DatabaseVersionError, match="does not recognize"):
+        upgrade_database(settings)
 
 
 def _trigger_definitions(database: Path) -> dict[str, str]:
