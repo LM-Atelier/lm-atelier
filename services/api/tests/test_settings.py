@@ -304,6 +304,49 @@ def test_a_workflow_that_declared_nothing_is_left_alone() -> None:
         assert by_key["frames"].unavailable_reason is None, schema
 
 
+def test_a_workflow_that_takes_loras_is_offered_them_without_declaring_them() -> None:
+    """The panel and the run have to answer one question the same way.
+
+    A revision can provide a LoRA insertion point and declare no setting for
+    it. The run reads the insertion point, so a stack arriving through a prompt
+    is applied; the panel reads only the schema, so it offered no way to choose
+    one by hand. The caller passes what the run decides, and the control
+    follows it.
+    """
+
+    for schema in (None, {}, {"properties": {}}):
+        offered = workflow_settings(IMAGE_SETTINGS, schema, accepts_added_loras=True)
+        loras = [field for field in offered if field.key == "loras"]
+        assert len(loras) == 1, schema
+        assert loras[0].available is True, schema
+        assert not [
+            field for field in workflow_settings(IMAGE_SETTINGS, schema) if field.key == "loras"
+        ], schema
+
+
+def test_a_declared_lora_setting_is_not_replaced_by_the_offered_one() -> None:
+    """A workflow that described this setting itself is obeyed, and gets one."""
+
+    declared = {
+        "properties": {
+            "loras": {
+                "type": "array",
+                "title": "Adapters",
+                "description": "The ones this graph was built around.",
+                "default": [],
+                "maxItems": 4,
+            },
+        }
+    }
+    offered = workflow_settings(IMAGE_SETTINGS, declared, accepts_added_loras=True)
+    loras = [field for field in offered if field.key == "loras"]
+    assert len(loras) == 1
+    # The workflow's own words survive, which is how we know the offered
+    # setting is a fallback rather than an override.
+    assert loras[0].label == "Adapters"
+    assert loras[0].help == "The ones this graph was built around."
+
+
 def test_workflow_read_only_controls_drop_obsolete_overrides() -> None:
     fields = workflow_settings(
         IMAGE_SETTINGS,

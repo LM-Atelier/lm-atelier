@@ -21,6 +21,7 @@ import { useComposerUploads, type ComposerAttachment } from "./useComposerUpload
 import { useDraftClassification } from "./useDraftClassification";
 import { drawerRoleView, roleForMode } from "./viewHelpers";
 import { useWorkflowRevisionSchema } from "./useWorkflowRevisionSchema";
+import { useWorkflowLoraControls } from "./useWorkflowLoraControls";
 import { operationForTurn } from "./turnWorkflow";
 import { initialTurnEditorState, useTurnEditorState, type TurnEditorState } from "./useTurnEditorState";
 export type { TurnEditorState } from "./useTurnEditorState";
@@ -304,6 +305,13 @@ export function TurnEditor({
       ? operationForTurn(drawerMode, hasWorkflowAttachments) : null);
   const workflowSchema = workflowSchemaOverride !== undefined
     ? workflowSchemaOverride ?? undefined : workflowRead.schema;
+  // The fields built below decide which of the chosen settings survive to the
+  // request, and a key with no field behind it is dropped. A revision that
+  // takes added LoRAs without declaring a setting for them offers the control
+  // in the panel, so without the same answer here the stack a person picked
+  // would be thrown away on the way out.
+  const { controls: loraControls } = useWorkflowLoraControls(workflowRevisionId);
+  const acceptsAddedLoras = loraControls?.accepts_added_loras ?? false;
   const drawerWorkflowSchema = workflowSchemaOverride !== undefined
     ? workflowSchemaOverride ?? undefined : drawerWorkflowRead.schema;
   const clearAcceptedDraft = () => {
@@ -321,7 +329,7 @@ export function TurnEditor({
     }
     const selectedMode = currentMode();
     const role = roleForMode(selectedMode);
-    const fields = resolveWorkflowSettings(resolveCapabilitySettings(engines.find((item) => item.roles.includes(role)), role), workflowSchema);
+    const fields = resolveWorkflowSettings(resolveCapabilitySettings(engines.find((item) => item.roles.includes(role)), role), workflowSchema, acceptsAddedLoras);
     const requestedOutputCount = mediaOutputCountForTurn(selectedMode, outputCount);
     const references = turnReferences(survivingMentions(text, state.mentions));
     const promptSource = promptSourceForTurn(draft, selectedMode, attachments.length, references.length, requestedOutputCount);
@@ -490,7 +498,7 @@ export function TurnEditor({
       {studioOpen && <EditingStudio currentInstruction={text} onClose={() => setStudioOpen(false)} onPick={(instruction, template) => { setText(instruction); setTemplateSettings(Object.keys(template.settings_json).length ? { name: template.name, settings: template.settings_json } : null); setStudioOpen(false); window.setTimeout(() => textInput.current?.focus(), 0); }} imageCount={attachments.filter((item) => item.kind === "image").length} onApplyToEach={onAccept ? undefined : (instruction, template) => {
         const role = roleForMode("image");
         const engine = engines.find((item) => item.roles.includes(role));
-        const fields = resolveWorkflowSettings(resolveCapabilitySettings(engine, role), workflowSchema);
+        const fields = resolveWorkflowSettings(resolveCapabilitySettings(engine, role), workflowSchema, acceptsAddedLoras);
         const merged = normalizeSettingsForFields({ ...settings, ...template.settings_json }, fields);
         // One ordinary edit turn per image: each queues, verifies, and retries
         // alone; the pending-work bound errs clearly rather than truncating.

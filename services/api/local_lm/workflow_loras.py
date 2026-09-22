@@ -16,7 +16,7 @@ from typing import Any, Literal, cast
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .auxiliary_assets import workflow_model_family
+from .auxiliary_assets import revision_accepts_added_loras, workflow_model_family
 from .comfy_package_widgets import (
     POWER_LORA_LOADER,
     PackageClaim,
@@ -121,6 +121,15 @@ class WorkflowLoraControlsProjection:
     #: slot, and this is about whether a LoRA chosen for the stack can be
     #: checked against the workflow at all.
     base_model_family: str | None
+    #: Whether a stack added to this revision would be applied or refused,
+    #: which is the run's own answer rather than a second one derived from the
+    #: schema. A revision can carry an insertion point in its graph and declare
+    #: no `loras` property, and then a stack reaching the run through a prompt
+    #: is applied while the settings panel, which reads only the schema, offers
+    #: no way to choose one by hand. Two answers to one question is the defect
+    #: this exists to remove, so it is computed the way the run computes it,
+    #: refusals included: see `revision_accepts_added_loras`.
+    accepts_added_loras: bool
     slots: tuple[WorkflowLoraSlot, ...]
 
 
@@ -243,6 +252,7 @@ def workflow_lora_controls(
         ordering_authority=extracted.ordering_authority,
         evidence_gaps=tuple(sorted(gaps)),
         base_model_family=workflow_model_family(session, revision),
+        accepts_added_loras=revision_accepts_added_loras(revision),
         slots=extracted.slots,
     )
 

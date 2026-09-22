@@ -351,6 +351,25 @@ def derived_lora_extension(graph: dict[str, Any]) -> dict[str, Any] | None:
     return extension
 
 
+def lora_setting_property() -> dict[str, object]:
+    """The LoRA setting as a workflow declares it.
+
+    A revision that provides an insertion point but declares no setting is
+    offered this one, so the control a person sees is the control a declaring
+    workflow would have given them, down to the cap the contract validates
+    against. Returned fresh each time because callers put it into a schema
+    they then own.
+    """
+
+    return {
+        "type": "array",
+        "title": "LoRAs",
+        "description": "Optional verified LoRAs applied in order.",
+        "default": [],
+        "maxItems": MAX_LORA_STACK_SIZE,
+    }
+
+
 def workflow_lora_extension(revision: WorkflowRevision) -> dict[str, Any] | None:
     dependencies = revision.dependencies_json
     extensions = dependencies.get("extensions") if isinstance(dependencies, dict) else None
@@ -450,6 +469,31 @@ def validate_lora_workflow_contract(
             raise ValueError(
                 "The LoRA workflow extension must feed both model and CLIP graph inputs."
             )
+
+
+def revision_accepts_added_loras(revision: WorkflowRevision) -> bool:
+    """Whether a stack added to this revision would be applied or refused.
+
+    One definition, because the run and the settings panel have to answer this
+    the same way and they reach it by different routes. It is the run's own
+    two steps in order, and both of them matter. The contract refuses a
+    revision that records an extension point while declaring no setting, or
+    the reverse, so such a workflow accepts nothing and a control offered for
+    it would be one the run cannot honour. Past that, the insertion point is
+    what decides: one the revision records, or one read from its graph when it
+    records none, which is the case the contract passes over in silence and
+    the case this question was asked for.
+    """
+
+    try:
+        validate_lora_workflow_contract(
+            revision.api_graph_json,
+            revision.input_schema_json,
+            revision.dependencies_json,
+        )
+    except ValueError:
+        return False
+    return workflow_lora_extension(revision) is not None
 
 
 def resolve_lora_stack(

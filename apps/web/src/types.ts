@@ -1489,6 +1489,7 @@ export interface WorkflowLoraControls {
   >;
   /** The one model family the workflow runs, or null when that is not known. */
   base_model_family: string | null;
+  accepts_added_loras: boolean;
   slots: WorkflowLoraControlSlot[];
 }
 
