@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import wait_for_terminal_status
 
 from local_lm.config import Settings
 
@@ -81,16 +82,11 @@ async def test_a_configured_runtime_queues_and_fails_closed_on_the_probe(
     job_id = response.json()["id"]
     assert response.json()["kind"] == "registry_prepare"
 
-    import asyncio
-
-    job = None
-    for _ in range(200):
+    async def read_job() -> dict:  # type: ignore[type-arg]
         jobs = (await client.get("/api/jobs")).json()
-        job = next(item for item in jobs if item["id"] == job_id)
-        if job["status"] in {"failed", "complete", "cancelled"}:
-            break
-        await asyncio.sleep(0.05)
-    assert job is not None
+        return next(item for item in jobs if item["id"] == job_id)
+
+    job = await wait_for_terminal_status(read_job, what=f"preparation job {job_id}", expected=None)
     assert job["status"] == "failed"
     assert job["payload_json"]["error_code"] == "interpreter_probe_unavailable"
     assert job["error"]

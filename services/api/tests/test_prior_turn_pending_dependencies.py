@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator
 from copy import deepcopy
 from typing import Any
@@ -8,6 +7,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import wait_for_terminal_status
 from sqlalchemy import select
 
 from local_lm.adapters.base import ChatEvent, ChatRequest
@@ -118,18 +118,23 @@ async def test_ordered_edit_consumes_its_own_pending_producer_after_source_chang
             cancelled = await client.post(f"/api/work-plans/{source['run']['work_plan_id']}/cancel")
             assert cancelled.status_code == 200, cancelled.text
 
-    for _ in range(200):
+    async def read_consumer() -> dict[str, Any]:
         with SessionLocal() as session:
             consumer = session.get(Run, consumer_id)
             assert consumer is not None
-            if consumer.status in {"complete", "failed", "cancelled"}:
-                assert consumer.status == "complete", consumer.error
-                chat = session.get(Chat, chat_id)
-                assert chat is not None and chat.active_head_message_id == active_head
-                break
-        await asyncio.sleep(0.05)
-    else:
-        pytest.fail("The edited ordered consumer did not settle")
+            chat = session.get(Chat, chat_id)
+            assert chat is not None
+            return {
+                "status": consumer.status,
+                "error": consumer.error,
+                "head": chat.active_head_message_id,
+            }
+
+    settled = await wait_for_terminal_status(
+        read_consumer, what="the edited ordered consumer", expected=None
+    )
+    assert settled["status"] == "complete", settled["error"]
+    assert settled["head"] == active_head
 
     assert len(producer_output) == 1 and "wooden kite" in producer_output[0]
     messages = seen[consumer_id]
