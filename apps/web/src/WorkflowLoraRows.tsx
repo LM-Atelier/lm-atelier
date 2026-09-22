@@ -243,6 +243,14 @@ function RevisionLorasSection({
       {/* Unreadable is only worth saying where the section is shown anyway. */}
       <WorkflowLoraRows controls={controls} unavailable={unavailable && Boolean(added)} editing={editing} />
       {added}
+      {/* Said about the workflow rather than about each LoRA: every row already
+          shows its own family, and the half that is missing is the other one. */}
+      {controls && controls.base_model_family === null && (
+        <small className="muted">
+          This workflow does not say which model family it runs, so a LoRA made for another
+          family is not refused here. Check that each one matches.
+        </small>
+      )}
     </Section>
   );
 }

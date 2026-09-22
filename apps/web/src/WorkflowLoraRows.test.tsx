@@ -58,6 +58,7 @@ async function controls(slots: WorkflowLoraControlSlot[], revisionId = REVISION)
     dependency_contract_sha256: "f".repeat(64),
     activation_binding_sha256: null,
     ordering_authority: "presentation_only",
+    base_model_family: "krea2",
     evidence_gaps: [],
     slots,
   };
@@ -144,6 +145,24 @@ it("shows nothing for a workflow without LoRAs that takes none, and asks nothing
   withQueries(<LorasSection revisionId={null}><p>Added LoRAs</p></LorasSection>);
   expect(screen.getByRole("region", { name: "LoRAs" })).toHaveTextContent("Added LoRAs");
   expect(api.workflowLoraControls).toHaveBeenCalledTimes(1);
+});
+
+it("says when the workflow names no family, so nothing checks the LoRAs against it", async () => {
+  const unknown = { ...(await controls([slot()])), base_model_family: null };
+  vi.mocked(api.workflowLoraControls).mockResolvedValue(unknown);
+  withQueries(<LorasSection revisionId={REVISION} />);
+
+  const section = await screen.findByRole("region", { name: "LoRAs" });
+  expect(section).toHaveTextContent("does not say which model family it runs");
+  expect(section).toHaveTextContent("Check that each one matches");
+});
+
+it("says nothing about families when the workflow names one", async () => {
+  vi.mocked(api.workflowLoraControls).mockResolvedValue(await controls([slot()]));
+  withQueries(<LorasSection revisionId={REVISION} />);
+
+  const section = await screen.findByRole("region", { name: "LoRAs" });
+  expect(section).not.toHaveTextContent("does not say which model family it runs");
 });
 
 it("keeps the added LoRAs and says the workflow's own could not be read", async () => {
