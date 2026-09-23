@@ -45,6 +45,17 @@ export function studioApplyPlan(
       sendsLightMap: true,
     };
   }
+  if (tools.kind === "isolate") {
+    return {
+      words: defaultInstruction(tools),
+      // Nothing to set: the workflow finds the subject and returns only it.
+      // It always runs the workflow the report names, never the studio's
+      // chosen one, which would answer with an ordinary edit instead.
+      workflowRevisionId: activeTool?.workflow_revision_id ?? undefined,
+      blendSelection: false,
+      sendsLightMap: false,
+    };
+  }
   // Text takes its words from its own fields. Enhance and Extend ask for no
   // words, and the turn requires some: both were reaching the server and being
   // refused before anything ran. Otherwise the user's words win.
