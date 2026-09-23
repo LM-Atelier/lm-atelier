@@ -4,8 +4,8 @@ import type { StudioToolAction, StudioToolState } from "./studioToolState";
 /** The panel's tool-specific control: what this tool needs said before it runs.
  *
  * Extend and Enhance are a drag or a number, Text is the words before and
- * after, and every other tool is described in words. Kept apart from the
- * studio view so each tool's control reads in one place.
+ * after, Isolate needs nothing, and every other tool is described in words.
+ * Kept apart from the studio view so each tool's control reads in one place.
  */
 export function StudioToolOptions({
   tools,
@@ -104,6 +104,16 @@ export function StudioToolOptions({
             </button>
           ))}
         </div>
+      </div>
+    );
+  }
+  if (tools.kind === "isolate") {
+    return (
+      <div className="studio-tool-options">
+        <small>
+          Keeps the subject and makes everything behind it transparent. There is nothing to
+          select or describe: the workflow finds the subject itself.
+        </small>
       </div>
     );
   }

@@ -6,6 +6,7 @@ import {
   Maximize2,
   PaintBucket,
   Redo2,
+  Scissors,
   Sparkles,
   Square,
   SunMedium,
@@ -28,6 +29,7 @@ const TOOLS: Array<{ kind: StudioToolKind; label: string; icon: typeof Brush }> 
   { kind: "extend", label: "Extend past the edge", icon: Maximize2 },
   { kind: "text", label: "Replace words in the picture", icon: LetterText },
   { kind: "relight", label: "Relight from a direction", icon: SunMedium },
+  { kind: "isolate", label: "Cut the subject out", icon: Scissors },
 ];
 
 /** The studio's left rail: pick how you point at the image.
