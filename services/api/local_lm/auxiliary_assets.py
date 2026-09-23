@@ -192,10 +192,11 @@ def select_automatic_lora_stack(
             ModelAssetInstall.verified_at.is_not(None),
         )
     ).all()
+    base_keys = {_family_key(family) for family in base_families}
     ranked: list[tuple[int, float, int, str, str, ModelAssetInstall, list[str], str]] = []
     for asset in assets:
-        family = asset.family.casefold() if asset.family else None
-        if not family or family not in base_families:
+        family = _family_key(asset.family) if asset.family else ""
+        if not family or family not in base_keys:
             continue
         comfy_name = asset.manifest_json.get("comfy_name")
         sha256 = asset.manifest_json.get("sha256")
@@ -553,6 +554,7 @@ def _normalize_lora_stack(
     )
     if workflow_activation_id is not None and not base_families:
         raise ValueError("The workflow activation does not identify exactly one model family.")
+    base_keys = {_family_key(family) for family in base_families}
     seen: set[str] = set()
     settings: list[dict[str, Any]] = []
     provenance: list[dict[str, Any]] = []
@@ -579,7 +581,7 @@ def _normalize_lora_stack(
             raise ValueError(
                 "A selected LoRA is unavailable or no longer verified. Choose an installed LoRA."
             )
-        if asset.family and base_families and asset.family.casefold() not in base_families:
+        if asset.family and base_keys and _family_key(asset.family) not in base_keys:
             raise ValueError(
                 f"{asset.name} targets {asset.family}, which is incompatible with this workflow."
             )
@@ -853,8 +855,9 @@ def workflow_model_family(session: Session, revision: WorkflowRevision) -> str |
     A revision with a dependency contract answers only through its current ready
     activation, the same binding automatic LoRA selection reads; one without a
     contract falls back to its legacy install ids, or, declaring none, to the
-    installed model its checkpoint loader names. Anything partial, mixed or
-    invalid is unknown rather than a guess.
+    installed model its checkpoint loader names or, with no checkpoint loader,
+    the registered diffusion model its model loader names. Anything partial,
+    mixed or invalid is unknown rather than a guess.
     """
 
     activation_id: str | None = None
@@ -887,9 +890,12 @@ def _workflow_families(
     An activation is the authoritative local binding for a portable workflow.
     Legacy install IDs are only a fallback for revisions without a typed
     activation, and a revision without a contract that declares none answers
-    through the one installed model its checkpoint loader names. Every model
-    binding must resolve and agree: an empty, partial, or mixed-family answer
-    cannot safely authorize an automatic LoRA.
+    through the one installed model its checkpoint loader names or, with no
+    checkpoint loader, the one registered diffusion model its model loader
+    names. Every model binding must resolve and agree: an empty, partial, or
+    mixed-family answer cannot safely authorize an automatic LoRA. Bindings
+    agree when their families differ only in case and punctuation, and the
+    answer is then one of their spellings.
     """
 
     install_ids: list[str] = []
@@ -932,9 +938,13 @@ def _workflow_families(
         raw_ids = revision.dependencies_json.get("model_install_ids")
         if revision.dependency_contract_sha256 is None and (raw_ids is None or raw_ids == []):
             # A hand-built or imported workflow declares no model, but its
-            # graph still names the checkpoint it loads. A declaration that is
-            # present and malformed stays unknown rather than being read past.
+            # graph still names the checkpoint, or the diffusion model, it
+            # loads. A declaration that is present and malformed stays unknown
+            # rather than being read past.
             raw_ids = _checkpoint_install_ids(session, revision)
+            if not raw_ids:
+                family = _diffusion_model_family(session, revision)
+                return {family} if family is not None else set()
         if not isinstance(raw_ids, list) or not raw_ids:
             return set()
         if any(not isinstance(item, str) or not item for item in raw_ids):
@@ -945,10 +955,11 @@ def _workflow_families(
     for install_id in install_ids:
         install = session.get(ModelInstall, install_id)
         family = install.manifest_json.get("family") if install else None
-        if not isinstance(family, str) or not family.strip():
+        if not isinstance(family, str) or not _family_key(family):
             return set()
         families.add(family.strip().casefold())
-    return families if len(families) == 1 else set()
+    keys = {_family_key(family) for family in families}
+    return {min(families)} if len(keys) == 1 else set()
 
 
 def _checkpoint_install_ids(session: Session, revision: WorkflowRevision) -> list[str]:
@@ -988,6 +999,67 @@ def _checkpoint_install_ids(session: Session, revision: WorkflowRevision) -> lis
 
 def _file_name(path: str) -> str:
     return path.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _diffusion_model_family(session: Session, revision: WorkflowRevision) -> str | None:
+    """The family of the one registered diffusion model a graph's model loader names.
+
+    A graph that builds its model from a diffusion-model loader, rather than a
+    checkpoint, names the file by the name the runtime loads it under. A
+    registered diffusion model records exactly that name, beside the digest of
+    the file it measured and the family recorded for it. One such loader in a
+    graph with no checkpoint loader, naming a file exactly one registered
+    diffusion model answers to, is the only answer, and that model has to be
+    active, verified and carry a family. Anything else leaves the family
+    unknown, which is what it was.
+    """
+
+    graph = revision.api_graph_json
+    if not isinstance(graph, dict):
+        return None
+    nodes = [node for node in graph.values() if isinstance(node, dict)]
+    if any(node.get("class_type") == "CheckpointLoaderSimple" for node in nodes):
+        return None
+    loaders = [node for node in nodes if node.get("class_type") == "UNETLoader"]
+    if len(loaders) != 1:
+        return None
+    inputs = loaders[0].get("inputs")
+    named = inputs.get("unet_name") if isinstance(inputs, dict) else None
+    if not isinstance(named, str) or not named.strip():
+        return None
+    wanted = _loader_name(named)
+    holders = [
+        asset
+        for asset in session.scalars(
+            select(ModelAssetInstall).where(ModelAssetInstall.kind == "diffusion_model")
+        ).all()
+        if isinstance(asset.manifest_json.get("comfy_name"), str)
+        and _loader_name(asset.manifest_json["comfy_name"]) == wanted
+    ]
+    if len(holders) != 1:
+        return None
+    asset = holders[0]
+    if not asset.active or asset.verified_at is None or not asset.family:
+        return None
+    return asset.family.strip().casefold() if _family_key(asset.family) else None
+
+
+def _loader_name(name: str) -> str:
+    return name.replace("\\", "/").casefold()
+
+
+def _family_key(family: str) -> str:
+    """The spelling one base model family is compared by.
+
+    Files and installs record a family as each of them spells it: one base
+    model arrives as krea2 and as Krea-2, another as z-image-turbo and as
+    zimage-turbo. Compared as written, a LoRA made for the model a workflow
+    runs would be refused as made for another one. Case and everything but
+    letters and digits are set aside, so only a difference in the name itself
+    makes a different family.
+    """
+
+    return "".join(character for character in family.casefold() if character.isalnum())
 
 
 def _valid_link(value: object) -> bool:
