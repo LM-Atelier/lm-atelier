@@ -38,6 +38,7 @@ from .comfy_templates import (
     COMFY_TEMPLATE_COMPILER_VERSION,
     ComfyTemplateRegistry,
     CompiledComfyTemplate,
+    compile_authored_workflow,
     derive_image_to_image,
 )
 from .config import Settings
@@ -66,6 +67,12 @@ from .gguf import (
     validate_gguf_selection,
 )
 from .install_plan_types import InstallPlanFailureCode
+from .matting_workflows import (
+    built_in_matting_graph,
+    built_in_matting_sha256,
+    declare_matting,
+    runtime_lists_model_file,
+)
 from .model_manifests import (
     COMFY_MODEL_ASSET_KINDS,
     COMFY_MODEL_FOLDERS,
@@ -252,6 +259,10 @@ def _workflow_source_image_count(compiled: CompiledComfyTemplate) -> int:
 
 def _template_workflow_name(template_id: str) -> str:
     return f"ComfyUI template \u00b7 {template_id}"
+
+
+def _matting_workflow_name(model_file: str) -> str:
+    return f"Remove background \u00b7 {model_file}"
 
 
 def download_worker_command() -> list[str]:
@@ -1775,6 +1786,8 @@ class DownloadManager:
                     provisional_asset_id = None
                     provisional_path = None
                     provisional_files = []
+                    if asset_kind == "background_removal":
+                        self._install_matting_workflow(asset_id, object_info)
                     await self.scheduler.publish_job(job_id)
                     await self.events.publish(
                         "download.completed",
@@ -2653,8 +2666,63 @@ class DownloadManager:
                         "Could not refresh ComfyUI workflow for model %s",
                         install.id,
                     )
+            # A background-removal model installed before the built-in existed
+            # gets it here, as does one whose install could not compile it.
+            assets = session.scalars(
+                select(ModelAssetInstall)
+                .where(
+                    ModelAssetInstall.kind == "background_removal",
+                    ModelAssetInstall.active.is_(True),
+                )
+                .order_by(ModelAssetInstall.id)
+            ).all()
+            for asset in assets:
+                try:
+                    before = self._matting_revision_id(session, asset)
+                    revision = self._ensure_matting_workflow(session, asset, object_info)
+                    if revision.id != before:
+                        refreshed += 1
+                except (KeyError, TypeError, ValueError):
+                    logger.exception(
+                        "Could not refresh the background removal workflow for %s",
+                        asset.id,
+                    )
             session.commit()
         return refreshed
+
+    @staticmethod
+    def _matting_revision_id(session: Session, asset: ModelAssetInstall) -> str | None:
+        model_file = (asset.manifest_json or {}).get("comfy_name")
+        if not isinstance(model_file, str) or not model_file:
+            return None
+        return session.scalar(
+            select(WorkflowDefinition.current_revision_id).where(
+                WorkflowDefinition.name == _matting_workflow_name(model_file),
+                WorkflowDefinition.operation == "image_to_image",
+            )
+        )
+
+    def _install_matting_workflow(self, asset_id: str, object_info: dict[str, Any]) -> None:
+        """Give a newly installed background-removal model the workflow that uses it.
+
+        Its own transaction, after the model's: the model is installed whether
+        or not this succeeds, and the next start tries again.
+        """
+        from .db import SessionLocal
+
+        with SessionLocal() as session:
+            asset = session.get(ModelAssetInstall, asset_id)
+            if asset is None or not asset.active:
+                return
+            try:
+                self._ensure_matting_workflow(session, asset, object_info)
+            except (KeyError, TypeError, ValueError):
+                logger.exception(
+                    "Could not install the background removal workflow for %s",
+                    asset_id,
+                )
+                return
+            session.commit()
 
     @staticmethod
     def _deactivate_superseded_chat_installs(
@@ -2881,6 +2949,114 @@ class DownloadManager:
                 operation=compiled.template.operation,
                 engine="comfyui",
                 api_graph=compiled.api_graph,
+                input_schema=input_schema,
+                dependencies=dependencies,
+            ),
+            trusted=True,
+        )
+        session.add(revision)
+        session.flush()
+        persist_dependency_contract(session, revision)
+        definition.current_revision_id = revision.id
+        ensure_workflow_family_ownership(session, definition, revision)
+        return revision
+
+    @staticmethod
+    def _ensure_matting_workflow(
+        session: Session,
+        asset: ModelAssetInstall,
+        object_info: dict[str, Any],
+    ) -> WorkflowRevision:
+        """Install the built-in matting workflow for one background-removal model.
+
+        One workflow per model file, found again by its name, and left alone
+        while the authored graph, the compiler and the model file are all
+        unchanged, so running this at every start costs a lookup.
+
+        The model is recorded as an asset, not declared as a model. A revision
+        that declares model components is bound to a model profile, and a
+        background-removal model has none, so declaring it would make the
+        workflow unrunnable. The provenance sits under its own key rather than
+        the catalog's template keys, which other code rightly reads as naming a
+        template it can rebuild.
+        """
+
+        manifest = asset.manifest_json if isinstance(asset.manifest_json, dict) else {}
+        model_file = manifest.get("comfy_name")
+        model_sha256 = manifest.get("sha256")
+        if not isinstance(model_file, str) or not model_file:
+            raise ValueError("the background-removal model has no file name")
+        name = _matting_workflow_name(model_file)
+        operation = "image_to_image"
+        definition = session.scalar(
+            select(WorkflowDefinition).where(
+                WorkflowDefinition.name == name,
+                WorkflowDefinition.operation == operation,
+            )
+        )
+        current = (
+            session.get(WorkflowRevision, definition.current_revision_id)
+            if definition and definition.current_revision_id
+            else None
+        )
+        built_in = {
+            "workflow": "background_removal",
+            "sha256": built_in_matting_sha256(),
+        }
+        if (
+            definition
+            and current
+            and current.dependencies_json.get("built_in") == built_in
+            and current.dependencies_json.get("compiler_version") == COMFY_TEMPLATE_COMPILER_VERSION
+            and current.dependencies_json.get("model_asset_ids") == [asset.id]
+            and current.dependencies_json.get("model_asset_sha256") == model_sha256
+        ):
+            ensure_workflow_family_ownership(session, definition, current)
+            return current
+        # Checked and compiled before anything is written, so a runtime that
+        # cannot run the graph leaves no half-made workflow behind it.
+        if not runtime_lists_model_file(object_info, model_file):
+            raise ValueError(f"the runtime does not list the background-removal model {model_file}")
+        ui_graph = built_in_matting_graph(model_file)
+        api_graph, compiled_schema = compile_authored_workflow(
+            ui_graph,
+            object_info,
+            operation=operation,
+        )
+        input_schema = declare_matting(compiled_schema)
+        validate_workflow_edit_calibration(input_schema)
+        dependencies = {
+            "built_in": built_in,
+            "compiler_version": COMFY_TEMPLATE_COMPILER_VERSION,
+            "model_asset_ids": [asset.id],
+            "model_asset_sha256": model_sha256,
+            "model_files": [],
+            "custom_nodes": [],
+            "extensions": {},
+        }
+        if not definition:
+            definition = WorkflowDefinition(
+                name=name,
+                operation=operation,
+                description=(
+                    "Built into LM Atelier: cuts the subject out of a picture "
+                    "onto a transparent background."
+                ),
+            )
+            session.add(definition)
+            session.flush()
+        revision = WorkflowRevision(
+            workflow_id=definition.id,
+            version=max((item.version for item in definition.revisions), default=0) + 1,
+            engine="comfyui",
+            ui_graph_json=ui_graph,
+            api_graph_json=api_graph,
+            input_schema_json=input_schema,
+            dependencies_json=dependencies,
+            artifact_sha256=workflow_artifact_contract(
+                operation=operation,
+                engine="comfyui",
+                api_graph=api_graph,
                 input_schema=input_schema,
                 dependencies=dependencies,
             ),

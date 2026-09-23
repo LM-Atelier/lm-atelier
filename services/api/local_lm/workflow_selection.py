@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .domain import Operation
+from .matting_workflows import workflow_declares_matting
 from .models import (
     ModelInstall,
     ModelProfile,
@@ -279,21 +280,27 @@ def resolve_workflow_family(
         if not _automatic_family_eligible(session, family, preference):
             continue
         try:
-            candidates.append(
-                _candidate(
-                    session,
-                    family,
-                    preference,
-                    capability=capability,
-                    operation=operation,
-                    prompt=prompt,
-                    engine=engine,
-                    required_capabilities=required,
-                    legacy_revision_resolver=legacy_revision_resolver,
-                )
+            candidate = _candidate(
+                session,
+                family,
+                preference,
+                capability=capability,
+                operation=operation,
+                prompt=prompt,
+                engine=engine,
+                required_capabilities=required,
+                legacy_revision_resolver=legacy_revision_resolver,
             )
         except WorkflowFamilySelectionError:
             continue
+        # A workflow that only cuts a subject out is never chosen for a request:
+        # it answers the one tool that asks for a cutout, and picked for any other
+        # edit it would return a cutout instead of the edit.
+        if candidate.revision is not None and workflow_declares_matting(
+            candidate.revision.input_schema_json
+        ):
+            continue
+        candidates.append(candidate)
     if not candidates:
         raise _error(capability, operation, "no_ready_workflow")
     candidates.sort(
