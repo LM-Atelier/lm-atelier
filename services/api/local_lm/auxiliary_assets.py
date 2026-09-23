@@ -852,7 +852,8 @@ def workflow_model_family(session: Session, revision: WorkflowRevision) -> str |
 
     A revision with a dependency contract answers only through its current ready
     activation, the same binding automatic LoRA selection reads; one without a
-    contract falls back to its legacy install ids. Anything partial, mixed or
+    contract falls back to its legacy install ids, or, declaring none, to the
+    installed model its checkpoint loader names. Anything partial, mixed or
     invalid is unknown rather than a guess.
     """
 
@@ -885,8 +886,10 @@ def _workflow_families(
 
     An activation is the authoritative local binding for a portable workflow.
     Legacy install IDs are only a fallback for revisions without a typed
-    activation. Every declared model binding must resolve and agree: an empty,
-    partial, or mixed-family answer cannot safely authorize an automatic LoRA.
+    activation, and a revision without a contract that declares none answers
+    through the one installed model its checkpoint loader names. Every model
+    binding must resolve and agree: an empty, partial, or mixed-family answer
+    cannot safely authorize an automatic LoRA.
     """
 
     install_ids: list[str] = []
@@ -927,6 +930,11 @@ def _workflow_families(
             return set()
     else:
         raw_ids = revision.dependencies_json.get("model_install_ids")
+        if revision.dependency_contract_sha256 is None and (raw_ids is None or raw_ids == []):
+            # A hand-built or imported workflow declares no model, but its
+            # graph still names the checkpoint it loads. A declaration that is
+            # present and malformed stays unknown rather than being read past.
+            raw_ids = _checkpoint_install_ids(session, revision)
         if not isinstance(raw_ids, list) or not raw_ids:
             return set()
         if any(not isinstance(item, str) or not item for item in raw_ids):
@@ -941,6 +949,45 @@ def _workflow_families(
             return set()
         families.add(family.strip().casefold())
     return families if len(families) == 1 else set()
+
+
+def _checkpoint_install_ids(session: Session, revision: WorkflowRevision) -> list[str]:
+    """The installed model a workflow's one checkpoint loader names, as its install id.
+
+    The family then comes from what was recorded about that model when it was
+    installed, not from anything the graph claims. One loader naming a file
+    that exactly one installed model holds is the only answer: no loader,
+    several, a name that is not text, or a file no model or several models
+    hold, leaves the family unknown, which is what it was before.
+    """
+
+    graph = revision.api_graph_json
+    if not isinstance(graph, dict):
+        return []
+    loaders = [
+        node
+        for node in graph.values()
+        if isinstance(node, dict) and node.get("class_type") == "CheckpointLoaderSimple"
+    ]
+    if len(loaders) != 1:
+        return []
+    inputs = loaders[0].get("inputs")
+    named = inputs.get("ckpt_name") if isinstance(inputs, dict) else None
+    if not isinstance(named, str) or not named.strip():
+        return []
+    wanted = _file_name(named)
+    holders: list[str] = []
+    for install in session.scalars(select(ModelInstall)).all():
+        files = install.manifest_json.get("files")
+        if isinstance(files, list) and any(
+            isinstance(entry, str) and _file_name(entry) == wanted for entry in files
+        ):
+            holders.append(install.id)
+    return holders if len(holders) == 1 else []
+
+
+def _file_name(path: str) -> str:
+    return path.replace("\\", "/").rsplit("/", 1)[-1]
 
 
 def _valid_link(value: object) -> bool:
