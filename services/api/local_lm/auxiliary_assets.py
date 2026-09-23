@@ -114,6 +114,70 @@ def _installed_lora_trigger_words(metadata: object) -> list[str]:
     return words
 
 
+def lora_trigger_words(asset: ModelAssetInstall) -> list[str]:
+    """Return every trigger word a LoRA carries: the file's own, then the typed ones.
+
+    One list, because a run applies a word the same way whichever place it came
+    from. The two stay apart where they are stored: the manifest holds only
+    what the file declared, and what a person typed lives beside it.
+    """
+
+    words = _installed_lora_trigger_words(asset.manifest_json.get("metadata"))
+    typed = asset.typed_trigger_words
+    if typed is None:
+        return words
+    if not isinstance(typed, list):
+        raise _invalid_lora_trigger_words()
+    seen = {word.casefold() for word in words}
+    for value in typed:
+        if not isinstance(value, str):
+            raise _invalid_lora_trigger_words()
+        word = value.strip()
+        if not word or len(word) > MAX_LORA_TRIGGER_WORD_LENGTH:
+            raise _invalid_lora_trigger_words()
+        folded = word.casefold()
+        if folded in seen:
+            continue
+        if len(words) == MAX_LORA_TRIGGER_WORDS:
+            raise _invalid_lora_trigger_words()
+        seen.add(folded)
+        words.append(word)
+    return words
+
+
+def normalize_typed_trigger_words(values: list[str], asset: ModelAssetInstall) -> list[str]:
+    """Return the trigger words a person submitted for a LoRA, cleaned and bounded.
+
+    Blank entries are dropped and repeats collapse in any casing, keeping the
+    first. The bound counts the words the file declares as well, since both are
+    applied together. Errors never repeat a submitted word.
+    """
+
+    typed: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        word = value.strip()
+        if not word:
+            continue
+        if len(word) > MAX_LORA_TRIGGER_WORD_LENGTH:
+            raise ValueError(
+                f"A trigger word can be at most {MAX_LORA_TRIGGER_WORD_LENGTH} characters."
+            )
+        folded = word.casefold()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        typed.append(word)
+    measured = _installed_lora_trigger_words(asset.manifest_json.get("metadata"))
+    combined = {word.casefold() for word in measured} | seen
+    if len(combined) > MAX_LORA_TRIGGER_WORDS:
+        raise ValueError(
+            f"A LoRA can have at most {MAX_LORA_TRIGGER_WORDS} trigger words, "
+            "counting the ones its file declares."
+        )
+    return typed
+
+
 @dataclass(frozen=True, slots=True)
 class _NormalizedLoraStack:
     settings: list[dict[str, Any]]
@@ -598,7 +662,7 @@ def _normalize_lora_stack(
             "clip_strength": clip_strength,
             "enabled": enabled,
         }
-        trigger_words = _installed_lora_trigger_words(asset.manifest_json.get("metadata"))
+        trigger_words = lora_trigger_words(asset)
         settings.append(normalized)
         provenance.append(
             {

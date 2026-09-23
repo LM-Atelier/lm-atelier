@@ -26,6 +26,7 @@ vi.mock("./api", async (importOriginal) => {
       recipes: vi.fn(),
       models: vi.fn(),
       modelAssets: vi.fn(),
+      updateModelAsset: vi.fn(),
       jobs: vi.fn(),
       modelStorage: vi.fn(),
       profiles: vi.fn(),
@@ -99,5 +100,49 @@ describe("stale model catalog source", () => {
       expect.anything(),
       "civitai",
     ));
+  });
+});
+
+describe("trigger words on an installed LoRA", () => {
+  it("shows the file's words and the typed ones apart, and records new ones", async () => {
+    const stamp = "2026-09-23T00:00:00Z";
+    const asset = {
+      id: "asset-ink",
+      source_id: null,
+      name: "Atelier Ink",
+      kind: "lora" as const,
+      family: "sdxl",
+      size_bytes: 1024,
+      manifest_json: { metadata: { trigger_words: ["ink wash"] } },
+      active: true,
+      use_case: "",
+      auto_apply: false,
+      default_model_strength: 1,
+      default_clip_strength: 1,
+      typed_trigger_words: ["studio glow"],
+      verified_at: stamp,
+      created_at: stamp,
+      updated_at: stamp,
+    };
+    vi.mocked(api.modelAssets).mockResolvedValue([asset]);
+    vi.mocked(api.updateModelAsset).mockReset().mockResolvedValue({
+      ...asset,
+      typed_trigger_words: ["studio glow", "soft edge"],
+    });
+    show();
+
+    expect(await screen.findByText("From the file: ink wash · Yours: studio glow")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Edit trigger words" }));
+    // The open editor lists the file's words in full, in place of the row's glance.
+    expect(screen.queryByText("From the file: ink wash · Yours: studio glow")).not.toBeInTheDocument();
+    expect(screen.getByText("From the file: ink wash")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Trigger words for Atelier Ink"), {
+      target: { value: "studio glow, soft edge" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(api.updateModelAsset).toHaveBeenCalledWith("asset-ink", {
+      typed_trigger_words: ["studio glow", "soft edge"],
+    }));
   });
 });

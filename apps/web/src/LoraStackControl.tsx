@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { ArrowDown, ArrowUp, Plus, X } from "lucide-react";
 import { api } from "./api";
+import { loraTriggerWords } from "./loraTriggerWords";
 
 type LoraSetting = {
   asset_id: string;
@@ -56,11 +57,8 @@ export function LoraStackControl({
       <div className="lora-stack">
         {stack.map((item, index) => {
           const asset = installed.find((candidate) => candidate.id === item.asset_id);
-          const metadata = asset?.manifest_json.metadata;
-          const triggerWords = metadata && typeof metadata === "object"
-            && Array.isArray((metadata as Record<string, unknown>).trigger_words)
-            ? (metadata as Record<string, unknown>).trigger_words as string[]
-            : [];
+          // The words a run adds for it, typed ones included, in the order it adds them.
+          const triggerWords = asset ? loraTriggerWords(asset) : [];
           return (
             <div className={`lora-stack-item${asset ? "" : " unavailable"}`} key={`${item.asset_id}:${index}`}>
               <select

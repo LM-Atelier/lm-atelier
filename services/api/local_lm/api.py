@@ -57,7 +57,11 @@ from .artifacts import (
     RetentionCleanupSummary,
 )
 from .asset_adoption import AssetAdoptionError, adoptable_roots, measure_adoptable_file
-from .auxiliary_assets import AUXILIARY_ASSET_KINDS, validate_lora_workflow_contract
+from .auxiliary_assets import (
+    AUXILIARY_ASSET_KINDS,
+    normalize_typed_trigger_words,
+    validate_lora_workflow_contract,
+)
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
 from .capability_probe import probe_structured_tools
 from .catalog_sources import CatalogSource, CatalogSourceNotFound, WorkflowCatalogSource
@@ -7815,6 +7819,20 @@ async def update_model_asset(
     if not values:
         return asset
     _refuse_lora_only_settings(asset.kind, set(values) & LORA_ONLY_ASSET_SETTINGS)
+    if "typed_trigger_words" in values:
+        # A trigger word is something a LoRA answers to; nothing else reads one.
+        if asset.kind != "lora":
+            raise api_error(
+                422,
+                "trigger-words-lora-only",
+                "trigger words can only be recorded for a LoRA",
+            )
+        try:
+            values["typed_trigger_words"] = normalize_typed_trigger_words(
+                values["typed_trigger_words"], asset
+            )
+        except ValueError as exc:
+            raise api_error(422, "trigger-words-invalid", str(exc)) from exc
     if "use_case" in values:
         values["use_case"] = values["use_case"].strip()
     for field in ("default_model_strength", "default_clip_strength"):

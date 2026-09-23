@@ -2899,6 +2899,7 @@ class ModelAssetOut(ApiModel):
     auto_apply: bool
     default_model_strength: float
     default_clip_strength: float
+    typed_trigger_words: list[str]
     verified_at: datetime | None
     created_at: datetime
     updated_at: datetime
@@ -2910,6 +2911,8 @@ class ModelAssetUpdate(ApiModel):
     auto_apply: bool | None = None
     default_model_strength: float | None = Field(default=None, ge=-4, le=4)
     default_clip_strength: float | None = Field(default=None, ge=-4, le=4)
+    # Replaces the whole recorded list; an empty list clears it.
+    typed_trigger_words: list[str] | None = Field(default=None, max_length=100)
 
 
 class AdapterPromptGrammarReview(ApiModel):
