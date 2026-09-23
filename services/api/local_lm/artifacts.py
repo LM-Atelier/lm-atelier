@@ -9,6 +9,7 @@ import secrets
 import shutil
 import stat
 import tempfile
+import time
 import uuid
 from collections.abc import Callable
 from collections.abc import Set as AbstractSet
@@ -243,6 +244,24 @@ class _DeletionBudget:
             self.report_removed()
 
 
+class _BoundedWalk:
+    """How long one batch may walk the store's shards before it stops.
+
+    Listing every shard of a large store takes seconds, and the walk runs with
+    the database writer held, so an automatic batch walks for its clock and the
+    next batch goes on from the last leaf shard this one finished. At least one
+    leaf is walked each time, so even a clock of zero moves the walk forward.
+    """
+
+    def __init__(self, seconds: float) -> None:
+        self.seconds = seconds
+        self.started = time.monotonic()
+        self.leaves = 0
+
+    def over(self) -> bool:
+        return self.leaves > 0 and time.monotonic() - self.started >= self.seconds
+
+
 @dataclass(frozen=True)
 class StagedArtifactFile:
     path: Path
@@ -283,6 +302,9 @@ class ArtifactStore:
         self.root = requested.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self._verified_files: dict[Path, tuple[int, int]] = {}
+        # The last leaf shard a bounded walk finished, so the next batch goes
+        # on from there; cleared when a walk reaches the end of the store.
+        self._walk_resume_after: tuple[str, str] | None = None
 
     def _destination(self, digest: str) -> Path:
         if not _SHA256.fullmatch(digest):
@@ -793,6 +815,7 @@ class ArtifactStore:
         max_deletions: int | None = None,
         should_stop: Callable[[], bool] | None = None,
         report_phase: Callable[[str], None] | None = None,
+        walk_seconds: float | None = None,
     ) -> RetentionCleanupSummary:
         """Remove expired unretained artifacts within the caller's stop/budget.
 
@@ -802,6 +825,13 @@ class ArtifactStore:
         observed immediately before an actual deletion. Metadata updates survive
         truncated passes; orphan cleanup runs only after a complete row pass.
         Callers may commit each bounded pass to preserve completed work.
+
+        With `walk_seconds`, the walk of the store's files for unindexed ones
+        stops after that long even when it has removed nothing, and the next
+        call goes on from the last shard this one finished, so a store too
+        large to walk in one batch is walked across several. Without it, a
+        walk runs to the end of the store, as a preview and a person's own
+        request need it to.
 
         The windows are given either as `retention_days` and `temporary_hours`,
         or as `windows_from`, which returns both and is called once the writer
@@ -912,8 +942,15 @@ class ArtifactStore:
             # answers to the same stop request, so the final batch of a pass
             # is bounded exactly like the ones before it.
             remaining = None if max_deletions is None else max(max_deletions - removed_count, 0)
+            walk = None if walk_seconds is None or dry_run else _BoundedWalk(walk_seconds)
+
+            def stop_walking() -> bool:
+                if should_stop is not None and should_stop():
+                    return True
+                return walk is not None and walk.over()
+
             budget = _DeletionBudget(
-                remaining, should_stop, report_removed=lambda: phase("orphan-file-removed")
+                remaining, stop_walking, report_removed=lambda: phase("orphan-file-removed")
             )
             if budget.allow():
                 phase("cleanup-orphan-files")
@@ -923,6 +960,7 @@ class ArtifactStore:
                     temporary_hours=temporary_hours,
                     dry_run=dry_run,
                     budget=budget,
+                    walk=walk,
                 )
             truncated = budget.truncated
         return RetentionCleanupSummary(
@@ -1200,6 +1238,7 @@ class ArtifactStore:
         temporary_hours: int,
         dry_run: bool,
         budget: _DeletionBudget | None = None,
+        walk: _BoundedWalk | None = None,
     ) -> tuple[int, int]:
         """Remove aged temporaries and unindexed files through held directories.
 
@@ -1223,18 +1262,33 @@ class ArtifactStore:
         than one enumeration may report - prunes nothing rather than pruning
         something else. What that leaves unsaid is the gap the store root
         already has: the refusal is not reported to anyone.
+
+        A bounded `walk` starts after the last leaf shard an earlier bounded
+        walk finished and records each leaf it finishes, so walking a store
+        too large for one batch goes on across batches. Reaching the end of
+        the store clears that place, and the next walk starts at the top.
         """
 
         indexed = {artifact.relative_path for artifact in session.scalars(select(Artifact)).all()}
         cutoff = current - timedelta(hours=temporary_hours)
         allowance = budget or _DeletionBudget(None, None)
+        resume_after = self._walk_resume_after if walk is not None else None
         try:
             with AnchoredDirectory(self.root) as anchor:
-                return self._sweep_orphans(
-                    anchor, indexed=indexed, cutoff=cutoff, dry_run=dry_run, budget=allowance
+                counted = self._sweep_orphans(
+                    anchor,
+                    indexed=indexed,
+                    cutoff=cutoff,
+                    dry_run=dry_run,
+                    budget=allowance,
+                    walk=walk,
+                    resume_after=resume_after,
                 )
         except (AnchoredDirectoryError, OSError):
             return 0, 0
+        if walk is not None and not allowance.truncated:
+            self._walk_resume_after = None
+        return counted
 
     def _sweep_orphans(
         self,
@@ -1244,8 +1298,14 @@ class ArtifactStore:
         cutoff: datetime,
         dry_run: bool,
         budget: _DeletionBudget,
+        walk: _BoundedWalk | None = None,
+        resume_after: tuple[str, str] | None = None,
     ) -> tuple[int, int]:
-        """One enumeration of the held root, read twice for its two jobs."""
+        """One enumeration of the held root, read twice for its two jobs.
+
+        Shards are walked in name order, so a walk that resumes after a leaf
+        shard has already seen every one before it.
+        """
 
         removed_count = 0
         reclaimed_bytes = 0
@@ -1268,13 +1328,29 @@ class ArtifactStore:
             budget.spend()
             removed_count += 1
             reclaimed_bytes += size
-        for entry in entries:
-            if entry.kind is not AnchoredEntryKind.DIRECTORY or not _SHARD.fullmatch(entry.name):
+        shards = sorted(
+            entry.name
+            for entry in entries
+            if entry.kind is AnchoredEntryKind.DIRECTORY and _SHARD.fullmatch(entry.name)
+        )
+        for first in shards:
+            if resume_after is not None and first < resume_after[0]:
                 continue
             if budget.truncated:
                 return removed_count, reclaimed_bytes
             count, reclaimed = self._sweep_first_shard(
-                anchor, entry.name, indexed=indexed, cutoff=cutoff, dry_run=dry_run, budget=budget
+                anchor,
+                first,
+                indexed=indexed,
+                cutoff=cutoff,
+                dry_run=dry_run,
+                budget=budget,
+                walk=walk,
+                skip_through=(
+                    resume_after[1]
+                    if resume_after is not None and first == resume_after[0]
+                    else None
+                ),
             )
             removed_count += count
             reclaimed_bytes += reclaimed
@@ -1289,28 +1365,36 @@ class ArtifactStore:
         cutoff: datetime,
         dry_run: bool,
         budget: _DeletionBudget,
+        walk: _BoundedWalk | None = None,
+        skip_through: str | None = None,
     ) -> tuple[int, int]:
         """Sweep one first-level shard, then drop it if this pass emptied it.
 
         A shard is dropped only when the walk through it ran to the end; a
         walk cut short by the budget may have left entries it never reached.
+        Leaf shards named up to `skip_through` were finished by an earlier
+        bounded walk and are not walked again; each leaf a bounded walk
+        finishes here becomes the place the next one resumes after.
         """
 
         removed_count = 0
         reclaimed_bytes = 0
         try:
             with open_child_directory(anchor, first) as held:
-                for entry in list_entries(held, should_stop=lambda: not budget.allow()):
-                    if entry.kind is not AnchoredEntryKind.DIRECTORY or not _SHARD.fullmatch(
-                        entry.name
-                    ):
+                leaves = sorted(
+                    entry.name
+                    for entry in list_entries(held, should_stop=lambda: not budget.allow())
+                    if entry.kind is AnchoredEntryKind.DIRECTORY and _SHARD.fullmatch(entry.name)
+                )
+                for second in leaves:
+                    if skip_through is not None and second <= skip_through:
                         continue
                     if budget.truncated:
                         return removed_count, reclaimed_bytes
                     count, reclaimed = self._sweep_second_shard(
                         held,
                         first,
-                        entry.name,
+                        second,
                         indexed=indexed,
                         cutoff=cutoff,
                         dry_run=dry_run,
@@ -1318,6 +1402,9 @@ class ArtifactStore:
                     )
                     removed_count += count
                     reclaimed_bytes += reclaimed
+                    if walk is not None and not budget.truncated:
+                        walk.leaves += 1
+                        self._walk_resume_after = (first, second)
         except (AnchoredDirectoryError, OSError):
             return removed_count, reclaimed_bytes
         if removed_count and not dry_run and not budget.truncated:
