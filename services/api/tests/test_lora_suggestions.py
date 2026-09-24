@@ -69,6 +69,7 @@ def _revision_with_family(
         ("sdxl", ("SDXL 1.0",), None),
         ("stable-diffusion", ("SD 1.5",), None),
         ("flux", ("Flux.1 D", "Flux.1 S"), None),
+        ("krea2", ("Krea 2",), None),
         ("z-image", (), "family_unsupported"),
         (None, (), "family_unknown"),
     ],

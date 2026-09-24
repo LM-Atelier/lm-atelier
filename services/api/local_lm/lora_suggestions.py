@@ -22,13 +22,16 @@ MAX_LORA_SUGGESTIONS = 12
 
 # Local model families, as installs record them, to the base-model labels
 # CivitAI files LoRAs under. Both SDXL spellings appear: repository inspection
-# records "stable-diffusion-xl" and component inspection records "sdxl".
-# A family missing here gets no suggestions rather than LoRAs for another model.
+# records "stable-diffusion-xl" and component inspection records "sdxl". Krea 2
+# weights declare "krea2" in their own header, and CivitAI files them as
+# "Krea 2". A family missing here gets no suggestions rather than LoRAs for
+# another model.
 CIVITAI_BASE_MODELS_BY_FAMILY: dict[str, tuple[str, ...]] = {
     "stable-diffusion-xl": ("SDXL 1.0",),
     "sdxl": ("SDXL 1.0",),
     "stable-diffusion": ("SD 1.5",),
     "flux": ("Flux.1 D", "Flux.1 S"),
+    "krea2": ("Krea 2",),
 }
 
 LoraSuggestionGap = Literal["family_unknown", "family_unsupported"]
