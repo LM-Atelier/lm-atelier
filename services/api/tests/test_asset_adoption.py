@@ -26,14 +26,20 @@ from local_lm.models import ModelAssetInstall, ModelInstall
 PAYLOAD = b"neutral weights for a test, not a model" * 64
 
 
-def _safetensors(path: Path, metadata: dict[str, str] | None = None) -> bytes:
-    """A minimal safetensors file: a length-prefixed header, then bytes."""
+def _raw_safetensors(header: object, data: bytes) -> bytes:
+    encoded = json.dumps(header).encode("utf-8")
+    return struct.pack("<Q", len(encoded)) + encoded + data
 
-    header: dict[str, object] = {"weight": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]}}
+
+def _safetensors(path: Path, metadata: dict[str, str] | None = None) -> bytes:
+    """A minimal safetensors file a loader can read: one tensor covering the bytes after it."""
+
+    header: dict[str, object] = {
+        "weight": {"dtype": "F32", "shape": [len(PAYLOAD) // 4], "data_offsets": [0, len(PAYLOAD)]}
+    }
     if metadata is not None:
         header["__metadata__"] = metadata
-    encoded = json.dumps(header).encode("utf-8")
-    content = struct.pack("<Q", len(encoded)) + encoded + PAYLOAD
+    content = _raw_safetensors(header, PAYLOAD)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(content)
     return content
@@ -191,17 +197,64 @@ def test_an_oversized_header_is_not_read_into_memory(runtime_settings: Settings)
     assert read_safetensors_metadata(path) == {}
 
 
-def test_a_file_that_will_not_describe_itself_is_still_adoptable(
-    runtime_settings: Settings,
-) -> None:
+def test_a_file_that_describes_nothing_is_still_adoptable(runtime_settings: Settings) -> None:
     folder = _loras(runtime_settings)
-    (folder / "bare.safetensors").write_bytes(b"not a header at all")
+    content = _safetensors(folder / "bare.safetensors")
 
     measured = measure_adoptable_file([folder], "bare.safetensors")
 
     assert measured.metadata == {}
     assert measured.declared_family is None
-    assert len(measured.sha256) == 64
+    assert measured.sha256 == hashlib.sha256(content).hexdigest()
+
+
+_WEIGHT = {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]}
+UNLOADABLE = {
+    "not a header at all": b"not a header at all",
+    "shorter than its length prefix": bytes([1, 2, 3]),
+    "a length beyond the file": struct.pack("<Q", 4096) + b"{}",
+    "a header that is not JSON": struct.pack("<Q", 9) + b"{not json",
+    "a header that is not an object": _raw_safetensors([1, 2], b""),
+    "data cut short": _raw_safetensors({"weight": {**_WEIGHT, "data_offsets": [0, 64]}}, bytes(32)),
+    "bytes the header does not account for": _raw_safetensors({"weight": _WEIGHT}, PAYLOAD),
+    "a gap between tensors": _raw_safetensors(
+        {"first": _WEIGHT, "second": {**_WEIGHT, "data_offsets": [8, 12]}}, bytes(12)
+    ),
+    # The data is exactly what the one complete tensor covers, so only the
+    # entry that says nothing of where it lies is wrong.
+    "a tensor without byte offsets": _raw_safetensors(
+        {"weight": _WEIGHT, "bias": {"dtype": "F32", "shape": [1]}}, bytes(4)
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(UNLOADABLE))
+def test_a_file_no_loader_can_read_is_refused(runtime_settings: Settings, case: str) -> None:
+    """Recorded as verified, it would fail only when someone ran it."""
+
+    folder = _loras(runtime_settings)
+    (folder / "broken.safetensors").write_bytes(UNLOADABLE[case])
+
+    with pytest.raises(AssetAdoptionError) as refusal:
+        measure_adoptable_file([folder], "broken.safetensors")
+
+    assert refusal.value.code == "asset-file-not-loadable"
+
+
+async def test_a_failed_download_under_a_model_name_is_refused_at_the_door(
+    client: AsyncClient, runtime_settings: Settings
+) -> None:
+    folder = _loras(runtime_settings)
+    page = b"<html><body>The download did not complete.</body></html>" * 150
+    (folder / "slider.safetensors").write_bytes(page)
+
+    refused = await client.post(
+        "/api/model-assets", json={"kind": "lora", "comfy_name": "slider.safetensors"}
+    )
+
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["code"] == "asset-file-not-loadable"
+    assert (await client.get("/api/model-assets")).json() == []
 
 
 async def test_adopting_a_lora_records_what_it_measured(
