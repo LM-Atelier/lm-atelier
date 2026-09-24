@@ -511,6 +511,11 @@ async def sweep_artifact_retention(
                     max_deletions=deletions,
                     should_stop=should_stop,
                     report_phase=progress.phase,
+                    # The walk of the store's files keeps a clock even when the
+                    # rows' comes off, and goes on next batch from where it
+                    # stopped: walking every shard of a large store at once
+                    # held the writer past every other writer's patience.
+                    walk_seconds=batch_seconds,
                 )
                 progress.phase("commit")
                 session.commit()
