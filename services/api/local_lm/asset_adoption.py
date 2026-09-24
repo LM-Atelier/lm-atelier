@@ -47,6 +47,11 @@ from .models import ModelAssetInstall, ModelInstall
 #: than read into memory.
 MAX_HEADER_BYTES = 2 * 1024 * 1024
 
+#: The longest header a loader will read. The reference safetensors reader
+#: refuses one longer than this, so a file claiming more cannot be loaded at all,
+#: whatever the metadata cap above says about how much of it is worth describing.
+MAX_LOADABLE_HEADER_BYTES = 100_000_000
+
 #: How much of a file to read at once while measuring its digest.
 _DIGEST_BLOCK = 1024 * 1024
 
@@ -226,9 +231,10 @@ def read_safetensors_metadata(path: Path) -> dict[str, Any]:
     """The ``__metadata__`` a safetensors file carries, or nothing.
 
     Read rather than trusted: the length prefix is bounded before it is used,
-    and anything unreadable answers with no metadata instead of refusing the
-    adoption. A file that will not describe itself is still a file the runtime
-    can load.
+    and anything unreadable answers with no metadata. Whether the file can be
+    loaded at all is settled before this is asked, by
+    `require_loadable_safetensors`; a header that parses and simply carries no
+    metadata answers with nothing here and is still adopted.
     """
 
     if path.suffix.casefold() not in {".safetensors", ".sft"}:
@@ -252,16 +258,76 @@ def read_safetensors_metadata(path: Path) -> dict[str, Any]:
     )
 
 
+def require_loadable_safetensors(path: Path, size_bytes: int) -> None:
+    """Refuse a safetensors file no loader could read, before it is recorded.
+
+    A loader reads the length prefix, parses the header it bounds as a JSON
+    object, and maps each tensor's byte range onto the data that follows, which
+    the ranges must cover exactly, with no gap and nothing left over. A file
+    failing any of that is not a model the runtime can load, whatever its name
+    says; a failed download saved under a model's name is the usual case.
+    Recording one as verified only moves the failure to the moment someone runs
+    it, where it surfaces as a decoding error inside the runtime.
+    """
+
+    refusal = AssetAdoptionError(
+        "asset-file-not-loadable",
+        "This file is not a model the runtime can load. "
+        "It may be an incomplete or failed download.",
+    )
+    try:
+        with path.open("rb") as handle:
+            prefix = handle.read(8)
+            length = int.from_bytes(prefix, "little") if len(prefix) == 8 else 0
+            fits = 0 < length <= MAX_LOADABLE_HEADER_BYTES and 8 + length <= size_bytes
+            raw = handle.read(length) if fits else b""
+    except OSError as exc:
+        raise AssetAdoptionError("asset-file-unreadable", "The file could not be read.") from exc
+    if not fits:
+        raise refusal
+    try:
+        header = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        raise refusal from exc
+    if not isinstance(header, dict):
+        raise refusal
+    ranges: list[tuple[int, int]] = []
+    for key, entry in header.items():
+        if key == "__metadata__":
+            continue
+        offsets = entry.get("data_offsets") if isinstance(entry, dict) else None
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("dtype"), str)
+            or not isinstance(entry.get("shape"), list)
+            or not isinstance(offsets, list)
+            or len(offsets) != 2
+            or any(type(value) is not int for value in offsets)
+            or not 0 <= offsets[0] <= offsets[1]
+        ):
+            raise refusal
+        ranges.append((offsets[0], offsets[1]))
+    covered = 0
+    for start, stop in sorted(ranges):
+        if start != covered:
+            raise refusal
+        covered = stop
+    if 8 + length + covered != size_bytes:
+        raise refusal
+
+
 def measure_adoptable_file(roots: Sequence[Path], comfy_name: str) -> AdoptedFile:
     """Measure a file already in place: its digest, its size, what it says."""
 
     path = resolve_adoptable_path(roots, comfy_name)
     digest = hashlib.sha256()
     try:
+        size_bytes = path.stat().st_size
+        if path.suffix.casefold() in {".safetensors", ".sft"}:
+            require_loadable_safetensors(path, size_bytes)
         with path.open("rb") as handle:
             for block in iter(lambda: handle.read(_DIGEST_BLOCK), b""):
                 digest.update(block)
-        size_bytes = path.stat().st_size
     except OSError as exc:
         raise AssetAdoptionError("asset-file-unreadable", "The file could not be read.") from exc
     return AdoptedFile(
