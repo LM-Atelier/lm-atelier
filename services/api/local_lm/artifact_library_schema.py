@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 ENTRY_INSERT_TRIGGER = """
 CREATE TRIGGER artifact_library_entry_insert_guard
 BEFORE INSERT ON artifact_library_entries
@@ -90,7 +92,53 @@ def _quoted(values: tuple[str, ...]) -> str:
     return ", ".join(f"'{value}'" for value in values)
 
 
-def _common_invalid(expression: str, root_type: str) -> str:
+def _json_tree_depth(expression: str) -> str:
+    """SQL that finds a JSON document's deepest level by joining its tree to itself.
+
+    Every step rescans the whole tree for the children of each node, so the
+    cost grows with the square of the document. The write triggers use this
+    form, and it stays exactly as written so that the triggers an existing
+    database already holds still match.
+    """
+
+    return f"""(
+        WITH RECURSIVE depth(id, level) AS (
+          SELECT id, 0 FROM json_tree({expression}) WHERE parent IS NULL
+          UNION ALL
+          SELECT child.id, depth.level + 1
+          FROM json_tree({expression}) AS child
+          JOIN depth ON child.parent = depth.id
+        )
+        SELECT COALESCE(max(level), 0) FROM depth
+      )"""
+
+
+def _member_depth(expression: str) -> str:
+    """SQL that finds the same deepest level by reading each container's members once.
+
+    It costs about as much as the document is long. Checking every stored
+    document the other way took seconds on a large store, all of it while a
+    deletion held the database writer.
+    """
+
+    return f"""(
+        WITH RECURSIVE depth(value, type, level) AS (
+          SELECT {expression}, json_type({expression}), 0
+          UNION ALL
+          SELECT member.value, member.type, depth.level + 1
+          FROM depth, json_each(depth.value) AS member
+          WHERE depth.type IN ('object', 'array')
+        )
+        SELECT COALESCE(max(level), 0) FROM depth
+      )"""
+
+
+def _common_invalid(
+    expression: str,
+    root_type: str,
+    *,
+    depth: Callable[[str], str] = _json_tree_depth,
+) -> str:
     return f"""CASE
       WHEN NOT json_valid({expression}) THEN 1
       WHEN length(CAST({expression} AS BLOB)) > {MAX_JSON_BYTES} THEN 1
@@ -102,16 +150,7 @@ def _common_invalid(expression: str, root_type: str) -> str:
         WHERE container.type IN ('array', 'object')
           AND (SELECT count(*) FROM json_each(container.value)) > {MAX_JSON_MEMBERS}
       ) THEN 1
-      WHEN (
-        WITH RECURSIVE depth(id, level) AS (
-          SELECT id, 0 FROM json_tree({expression}) WHERE parent IS NULL
-          UNION ALL
-          SELECT child.id, depth.level + 1
-          FROM json_tree({expression}) AS child
-          JOIN depth ON child.parent = depth.id
-        )
-        SELECT COALESCE(max(level), 0) FROM depth
-      ) > {MAX_JSON_DEPTH} THEN 1
+      WHEN {depth(expression)} > {MAX_JSON_DEPTH} THEN 1
       WHEN (SELECT COALESCE(sum(length(CAST(value AS BLOB))), 0)
             FROM json_tree({expression}) WHERE type = 'text') > {MAX_JSON_TEXT_BYTES} THEN 1
       ELSE 0
@@ -335,11 +374,12 @@ JSON_WRITE_TRIGGER_SQL = (
 )
 
 
-def _stored_json_invalid() -> str:
+def _stored_json_invalid(*, depth: Callable[[str], str] = _json_tree_depth) -> str:
     checks = []
     for table, columns in _TABLE_COLUMNS.items():
         structural_invalid = [
-            _common_invalid(f"{table}.{column}", root_type) for column, root_type in columns
+            _common_invalid(f"{table}.{column}", root_type, depth=depth)
+            for column, root_type in columns
         ]
         semantic_invalid = list(_table_invalid(table, table))
         invalid = (
@@ -351,7 +391,11 @@ def _stored_json_invalid() -> str:
     return " OR\n    ".join(checks)
 
 
-STORED_JSON_INVALID_SQL = f"SELECT CASE WHEN {_stored_json_invalid()} THEN 1 ELSE 0 END"
+# Run over every stored document while a deletion holds the database writer,
+# so it measures depth the way that stays proportional to the document.
+STORED_JSON_INVALID_SQL = (
+    f"SELECT CASE WHEN {_stored_json_invalid(depth=_member_depth)} THEN 1 ELSE 0 END"
+)
 
 
 def _stored_reference_missing() -> str:
