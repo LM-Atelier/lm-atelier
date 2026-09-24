@@ -7817,6 +7817,16 @@ async def update_model_asset(
     _refuse_lora_only_settings(asset.kind, set(values) & LORA_ONLY_ASSET_SETTINGS)
     if "use_case" in values:
         values["use_case"] = values["use_case"].strip()
+    if "family" in values:
+        # Any kind carries one: a LoRA is admitted by it, and a diffusion
+        # model is where a workflow built around one reads its own. A value
+        # with nothing to compare by is refused rather than stored.
+        family = values["family"].strip()
+        if family and not any(character.isalnum() for character in family):
+            raise api_error(
+                422, "asset-family-invalid", "A model family needs at least one letter or digit."
+            )
+        values["family"] = family or None
     for field in ("default_model_strength", "default_clip_strength"):
         value = values.get(field)
         if value is not None and not math.isfinite(value):
