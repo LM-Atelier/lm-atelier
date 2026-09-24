@@ -2906,6 +2906,9 @@ class ModelAssetOut(ApiModel):
 
 class ModelAssetUpdate(ApiModel):
     active: bool | None = None
+    #: The base model the asset is for. An empty string clears it; a file
+    #: registered without declaring one otherwise never gets one.
+    family: str | None = Field(default=None, max_length=100)
     use_case: str | None = Field(default=None, max_length=1_000)
     auto_apply: bool | None = None
     default_model_strength: float | None = Field(default=None, ge=-4, le=4)
