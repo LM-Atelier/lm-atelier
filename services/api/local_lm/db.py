@@ -1,12 +1,29 @@
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import AsyncGenerator
 
 from sqlalchemy import Engine, create_engine, event
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from . import artifact_deletion_authority as _artifact_deletion_authority  # noqa: F401
 from .config import Settings, get_settings
+
+
+def database_is_contended(error: OperationalError) -> bool:
+    """Whether this failure is another writer holding the database, not damage.
+
+    A writer that outlasts the busy timeout produces an ordinary
+    OperationalError, the same class a missing column produces, so the
+    difference has to be read from SQLite's own error code rather than from the
+    message. The low byte carries the primary code; the extended codes share it.
+    """
+
+    code = getattr(error.orig, "sqlite_errorcode", None)
+    if not isinstance(code, int):
+        return False
+    return code & 0xFF in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
 
 
 class Base(DeclarativeBase):
