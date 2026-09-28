@@ -315,16 +315,17 @@ async def test_reference_copy_failure_rolls_back_the_whole_fork(
         assert {row.message_id for row in rows} == set(source_message_ids)
 
 
-async def test_forking_walks_the_artifact_reference_graph_once_not_once_per_message(
+async def test_forking_does_not_walk_the_artifact_reference_graph(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Carrying references must not buy a whole-graph walk per copied message.
 
-    A pending MessageReference that pins an asset makes the before_flush guard
-    walk the entire artifact reference graph, so carrying references costs one
-    full walk for every flush taken while a carry is pending. A fork must pay
-    that walk once, however many messages the lineage holds.
+    A pending MessageReference that pins an asset still takes the writer and
+    still has its artifacts checked for existence, but the before_flush guard
+    walks the whole artifact reference graph only for a flush that deletes an
+    artifact. A fork deletes none, so however many messages the lineage holds,
+    it pays no walk at all.
     """
 
     from local_lm import artifact_library
@@ -378,7 +379,7 @@ async def test_forking_walks_the_artifact_reference_graph_once_not_once_per_mess
         fork_chat_from_message(session, leaf_id)
         session.commit()
 
-    assert calls == 1, (
+    assert calls == 0, (
         f"forking a six-message lineage walked the reference graph {calls} times; "
-        f"a fork pays exactly one walk however long the lineage is"
+        f"a fork deletes nothing, so it walks none however long the lineage is"
     )

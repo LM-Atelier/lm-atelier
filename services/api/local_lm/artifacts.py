@@ -171,8 +171,12 @@ def _removed(anchor: AnchoredDirectory, name: str, *, counted: int, cutoff: date
 # One required reference snapshot precedes that clock; the writer reservation
 # includes its fixed cost too. The ceiling lets fast authorized deletions
 # amortize that snapshot while the time budget still bounds slower deletion work.
+# The clock is short because every other writer gives up after five seconds,
+# and a batch holds the writer for its snapshot, this clock and its commit
+# together: on a library of some twelve thousand items the snapshot alone is
+# about two seconds.
 RETENTION_BATCH_DELETIONS = 1000
-RETENTION_BATCH_SECONDS = 2.0
+RETENTION_BATCH_SECONDS = 0.5
 # What a batch may delete once the sweep has seen one remove nothing inside
 # its budget: a row pass that finds nothing to remove, followed by a walk of
 # the unindexed files that spends the whole budget without removing one,

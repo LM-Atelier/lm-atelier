@@ -621,8 +621,14 @@ def guard_artifact_reference_flush(
         if lent is not None:
             validate_complete_reference_snapshot(session, lent)
             known = cast(AbstractSet[str], lent)
-        else:
+        elif deleted:
             known = referenced_artifact_ids(session)
+        else:
+            # The graph answers one question here: whether an artifact this
+            # flush deletes is still retained. A flush that deletes none has
+            # nothing to ask, and walking the whole store for it held every
+            # other writer out for as long as the walk took.
+            known = frozenset()
     if deleted & known:
         raise ArtifactReferenceDataError(REFERENCE_CORRUPT)
     available = {
@@ -634,6 +640,41 @@ def guard_artifact_reference_flush(
     available.difference_update(deleted)
     if referenced - available:
         raise ArtifactReferenceDataError(REFERENCE_CORRUPT)
+
+
+_METADATA_READ_CHUNK = 500
+
+
+def _artifact_metadata(session: Session, artifact_ids: list[str]) -> dict[str, object]:
+    """Read these artifacts' metadata as looking each one up would, in a few queries.
+
+    An artifact the session already holds is read from the session, so a
+    change it has not flushed yet counts exactly as before. The rest are read
+    a chunk at a time: one primary-key query per retained artifact was most of
+    what the graph cost on a large store. An id with no artifact is left out.
+    """
+
+    held = {
+        state.identity[0]
+        for state in session.identity_map.all_states()
+        if state.identity is not None and issubclass(state.class_, Artifact)
+    }
+    metadata: dict[str, object] = {}
+    unread: list[str] = []
+    for artifact_id in artifact_ids:
+        if artifact_id not in held:
+            unread.append(artifact_id)
+            continue
+        artifact = session.get(Artifact, artifact_id)
+        if artifact is not None:
+            metadata[artifact_id] = artifact.metadata_json
+    for start in range(0, len(unread), _METADATA_READ_CHUNK):
+        chunk = unread[start : start + _METADATA_READ_CHUNK]
+        for artifact_id, value in session.execute(
+            select(Artifact.id, Artifact.metadata_json).where(Artifact.id.in_(chunk))
+        ):
+            metadata[artifact_id] = value
+    return metadata
 
 
 def referenced_artifact_ids(
@@ -730,25 +771,29 @@ def referenced_artifact_ids(
         retain(_job_ids(payload))
         retain(_job_ids(result))
 
-    pending = list(found)
+    # Follow metadata links out of every retained artifact, one level at a
+    # time, so each level is read in a few queries rather than one each.
     visited: set[str] = set()
-    while pending:
-        artifact_id = pending.pop()
-        if artifact_id in visited:
-            continue
-        visited.add(artifact_id)
+    frontier = list(found)
+    while frontier:
+        level = [
+            artifact_id for artifact_id in dict.fromkeys(frontier) if artifact_id not in visited
+        ]
+        visited.update(level)
         if len(visited) > MAX_REFERENCE_VALUES:
             _fail()
-        artifact = session.get(Artifact, artifact_id)
-        if artifact is None:
-            continue
-        metadata = _mapping(artifact.metadata_json)
-        for key in ARTIFACT_METADATA_REFERENCE_KEYS:
-            if key in metadata:
-                linked = _optional_id(metadata[key])
-                for linked_id in linked - found:
-                    retain({linked_id})
-                    pending.append(linked_id)
+        metadata_by_id = _artifact_metadata(session, level)
+        frontier = []
+        for artifact_id in level:
+            if artifact_id not in metadata_by_id:
+                continue
+            metadata = _mapping(metadata_by_id[artifact_id])
+            for key in ARTIFACT_METADATA_REFERENCE_KEYS:
+                if key in metadata:
+                    linked = _optional_id(metadata[key])
+                    for linked_id in linked - found:
+                        retain({linked_id})
+                        frontier.append(linked_id)
     if not for_deletion:
         return frozenset(found)
     referrers: dict[str, set[str]] = {}
