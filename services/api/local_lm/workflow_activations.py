@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, cast
 
@@ -54,6 +54,7 @@ from .workflow_dependencies import (
 
 if TYPE_CHECKING:
     from .runtime_provisioning import RuntimeProvisioner
+    from .workflow_activation_files import VerifiedWorkflowFiles
 
 WORKFLOW_ACTIVATION_RESOLVER_VERSION = "workflow-activation-v1"
 MAX_NODE_TYPE_LENGTH = 200
@@ -97,6 +98,19 @@ class WorkflowAssetLaunchBinding:
     loader_folder: str
     runtime_reference: str
     sha256: str
+
+
+@dataclass(frozen=True)
+class _ModelLaunchInput:
+    binding: WorkflowModelLaunchBinding
+    identity_json: str
+    files: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class _AssetLaunchInput:
+    binding: WorkflowAssetLaunchBinding
+    identity_json: str
 
 
 @dataclass(frozen=True)
@@ -216,6 +230,7 @@ def activate_workflow_revision(
     resolver_version: str = WORKFLOW_ACTIVATION_RESOLVER_VERSION,
     custom_node_root: Path | None = None,
     registry_environment_root: Path | None = None,
+    file_verification: VerifiedWorkflowFiles | None = None,
 ) -> WorkflowActivationLaunchScope:
     """Resolve and persist one exact activation without committing the caller's transaction."""
 
@@ -248,6 +263,7 @@ def activate_workflow_revision(
             selections,
             custom_node_root=custom_node_root,
             registry_environment_root=registry_environment_root,
+            file_verification=file_verification,
         )
         if existing is not None:
             if existing.dependency_contract_sha256 != revision_row.dependency_contract_sha256:
@@ -312,6 +328,7 @@ def revalidate_workflow_activation(
     runtime_materializer: WorkflowRuntimeMaterializer | None = None,
     custom_node_root: Path | None = None,
     registry_environment_root: Path | None = None,
+    file_verification: VerifiedWorkflowFiles | None = None,
 ) -> WorkflowActivationLaunchScope:
     """Revalidate a stored snapshot and mark it stale, never active, on drift."""
 
@@ -351,6 +368,7 @@ def revalidate_workflow_activation(
             selections,
             custom_node_root=custom_node_root,
             registry_environment_root=registry_environment_root,
+            file_verification=file_verification,
         )
     except WorkflowActivationError as exc:
         _mark_stale(session, activation_row, exc.code, str(exc))
@@ -519,6 +537,7 @@ def _launch_resources(
     *,
     custom_node_root: Path | None,
     registry_environment_root: Path | None,
+    file_verification: VerifiedWorkflowFiles | None = None,
 ) -> _LaunchResources:
     selected = {(item.slot_name, item.requirement_key): item for item in selections}
     model_ids: set[str] = set()
@@ -532,7 +551,7 @@ def _launch_resources(
         if selection.local_kind == "model_install":
             model_ids.add(selection.local_id)
         elif selection.local_kind == "model_profile":
-            profile = session.get(ModelProfile, selection.local_id)
+            profile = session.get(ModelProfile, selection.local_id, populate_existing=True)
             if profile is None or profile.model_install_id is None:
                 raise WorkflowActivationError(
                     "dependency_unavailable", "Selected model profile is no longer bound"
@@ -559,8 +578,18 @@ def _launch_resources(
                 )
             runtime_bindings[selection.local_id] = candidate
 
-    models = tuple(_model_launch_binding(session, item) for item in sorted(model_ids))
-    assets = tuple(_asset_launch_binding(session, item) for item in sorted(asset_ids))
+    models = tuple(
+        file_verification.model_binding(session, item)
+        if file_verification is not None
+        else _model_launch_binding(session, item)
+        for item in sorted(model_ids)
+    )
+    assets = tuple(
+        file_verification.asset_binding(session, item)
+        if file_verification is not None
+        else _asset_launch_binding(session, item)
+        for item in sorted(asset_ids)
+    )
     custom_nodes = tuple(
         _custom_node_launch_binding(session, item, custom_node_root) for item in sorted(custom_ids)
     )
@@ -600,9 +629,25 @@ def _launch_resources(
 
 
 def _model_launch_binding(session: Session, install_id: str) -> WorkflowModelLaunchBinding:
-    install = session.get(ModelInstall, install_id)
+    return _verify_model_launch_input(_model_launch_input(session, install_id))
+
+
+def _model_launch_input(session: Session, install_id: str) -> _ModelLaunchInput:
+    """Read the current model and component identities without opening their files."""
+
+    install = session.get(ModelInstall, install_id, populate_existing=True)
     if install is None:
         raise WorkflowActivationError("dependency_unavailable", "Selected model is unavailable")
+    rows = list(
+        session.scalars(
+            select(ModelComponentManifest)
+            .where(
+                ModelComponentManifest.model_install_id == install.id,
+                ModelComponentManifest.required.is_(True),
+            )
+            .execution_options(populate_existing=True)
+        ).all()
+    )
     try:
         identity = materialize_model_install(session, install).identity
     except WorkflowBindingError as exc:
@@ -634,32 +679,42 @@ def _model_launch_binding(session: Session, install_id: str) -> WorkflowModelLau
         raise WorkflowActivationError(
             "invalid_dependency_identity", "Selected model component identity is invalid"
         )
-    base_path = _directory(Path(install.local_path), "Selected model directory is unavailable")
-    rows = list(
-        session.scalars(
-            select(ModelComponentManifest).where(
-                ModelComponentManifest.model_install_id == install.id,
-                ModelComponentManifest.required.is_(True),
-            )
-        ).all()
-    )
+    base_path = Path(install.local_path)
     if len(rows) != len(components):
         raise WorkflowActivationError(
             "dependency_content_drift", "Selected model component closure has changed"
         )
+    files: list[tuple[str, str]] = []
     for row in rows:
         if not isinstance(row.sha256, str) or not _DIGEST.fullmatch(row.sha256.lower()):
             raise WorkflowActivationError(
                 "invalid_dependency_identity", "Selected model component hash is invalid"
             )
-        path = _contained_file(base_path, row.relative_path)
-        _verify_file_digest(path, row.sha256.lower(), "Selected model component bytes changed")
+        files.append((row.relative_path, row.sha256.lower()))
     comfy_paths = _comfy_paths(install)
-    return WorkflowModelLaunchBinding(install.id, base_path, comfy_paths, components)
+    return _ModelLaunchInput(
+        WorkflowModelLaunchBinding(install.id, base_path, comfy_paths, components),
+        _canonical_json(identity),
+        tuple(sorted(files)),
+    )
+
+
+def _verify_model_launch_input(value: _ModelLaunchInput) -> WorkflowModelLaunchBinding:
+    root = _directory(value.binding.base_path, "Selected model directory is unavailable")
+    for relative, digest in value.files:
+        path = _contained_file(root, relative)
+        _verify_file_digest(path, digest, "Selected model component bytes changed")
+    return replace(value.binding, base_path=root)
 
 
 def _asset_launch_binding(session: Session, asset_id: str) -> WorkflowAssetLaunchBinding:
-    asset = session.get(ModelAssetInstall, asset_id)
+    return _verify_asset_launch_input(_asset_launch_input(session, asset_id))
+
+
+def _asset_launch_input(session: Session, asset_id: str) -> _AssetLaunchInput:
+    """Read the current asset identity without opening its file."""
+
+    asset = session.get(ModelAssetInstall, asset_id, populate_existing=True)
     if asset is None:
         raise WorkflowActivationError(
             "dependency_unavailable", "Selected model asset is unavailable"
@@ -668,7 +723,7 @@ def _asset_launch_binding(session: Session, asset_id: str) -> WorkflowAssetLaunc
         identity = materialize_model_asset(asset).identity
     except WorkflowBindingError as exc:
         raise WorkflowActivationError(exc.code, str(exc)) from exc
-    root = _directory(Path(asset.local_path), "Selected model asset directory is unavailable")
+    root = Path(asset.local_path)
     runtime_reference = _identity_text(identity, "runtime_reference")
     digest = _identity_digest(identity, "sha256")
     loader_folder = comfy_folder_for_kind(asset.kind)
@@ -676,15 +731,18 @@ def _asset_launch_binding(session: Session, asset_id: str) -> WorkflowAssetLaunc
         raise WorkflowActivationError(
             "invalid_dependency_identity", "Selected model asset loader is invalid"
         )
-    path = _contained_file(root, runtime_reference)
-    _verify_file_digest(path, digest, "Selected model asset bytes changed")
-    return WorkflowAssetLaunchBinding(
-        asset.id,
-        root,
-        loader_folder,
-        runtime_reference,
-        digest,
+    return _AssetLaunchInput(
+        WorkflowAssetLaunchBinding(asset.id, root, loader_folder, runtime_reference, digest),
+        _canonical_json(identity),
     )
+
+
+def _verify_asset_launch_input(value: _AssetLaunchInput) -> WorkflowAssetLaunchBinding:
+    binding = value.binding
+    root = _directory(binding.base_path, "Selected model asset directory is unavailable")
+    path = _contained_file(root, binding.runtime_reference)
+    _verify_file_digest(path, binding.sha256, "Selected model asset bytes changed")
+    return replace(binding, base_path=root)
 
 
 def _custom_node_launch_binding(

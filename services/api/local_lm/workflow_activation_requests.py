@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field
 from sqlalchemy.orm import Session
@@ -25,6 +25,9 @@ from .workflow_dependencies import (
     workflow_dependency_contract_sha256,
 )
 from .workflow_revision_reviews import review_is_current
+
+if TYPE_CHECKING:
+    from .workflow_activation_files import VerifiedWorkflowFiles
 
 
 class WorkflowActivationSelectionIn(ApiModel):
@@ -133,6 +136,7 @@ def activate_reviewed_revision(
     runtime_materializer: WorkflowRuntimeMaterializer | None = None,
     custom_node_root: Path | None = None,
     registry_environment_root: Path | None = None,
+    file_verification: VerifiedWorkflowFiles | None = None,
 ) -> WorkflowActivationOut:
     revision = _eligible_revision(session, workflow_id, revision_id)
     _assert_requested_identity(revision, payload)
@@ -143,6 +147,7 @@ def activate_reviewed_revision(
         runtime_materializer=runtime_materializer,
         custom_node_root=custom_node_root,
         registry_environment_root=registry_environment_root,
+        file_verification=file_verification,
     )
     # The activation writer now owns the transaction. Re-read durable approval
     # and content before the caller commits; an earlier read is not authority.
