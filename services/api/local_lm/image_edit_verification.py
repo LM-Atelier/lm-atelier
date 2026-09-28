@@ -69,6 +69,7 @@ class VerificationReason(StrEnum):
     DIRECTION_UNSUPPORTED = "direction_unsupported"
     REQUEST_ALREADY_VISIBLE = "request_already_visible"
     CONTENT_ALREADY_PRESERVED = "content_already_preserved"
+    REQUEST_NOT_VISIBLE = "request_not_visible"
     STRENGTH_UNAVAILABLE = "strength_unavailable"
     STRENGTH_AT_BOUND = "strength_at_bound"
     RETRY_LIMIT_REACHED = "retry_limit_reached"
@@ -616,7 +617,8 @@ def _inventory_assessment(
         retry_recommended=not (visible and preserved),
         # Content that was not asked about has changed: another attempt with more
         # strength would change more of it, so that case asks for less whether or
-        # not the requested change also failed to take.
+        # not the requested change also failed to take. Where it also failed,
+        # decide_image_edit_retry makes no attempt at all.
         direction=(
             VerificationDirection.DECREASE
             if not preserved
@@ -717,6 +719,19 @@ def decide_image_edit_retry(
         return ImageEditRetryDecision(
             False,
             VerificationReason.CONTENT_ALREADY_PRESERVED,
+            attempt,
+        )
+    if (
+        assessment.direction == VerificationDirection.DECREASE
+        and not assessment.requested_change_visible
+    ):
+        # The edit missed what was asked and changed what was not. Less
+        # strength keeps more of the picture but cannot make a change that more
+        # strength did not make, and more would redraw still more of what was
+        # not asked about, so no step in either direction can help.
+        return ImageEditRetryDecision(
+            False,
+            VerificationReason.REQUEST_NOT_VISIBLE,
             attempt,
         )
     return _adjusted_strength(
