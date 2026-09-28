@@ -9,6 +9,8 @@ import { AccessibleDialog } from "./AccessibleDialog";
 import { ErrorCallout } from "./ErrorCallout";
 import { FirstFailure } from "./FirstFailure";
 import { InstallConfirmDialog } from "./InstallConfirmDialog";
+import { LoraTriggerWordsEditor } from "./LoraTriggerWordsEditor";
+import { measuredTriggerWords } from "./loraTriggerWords";
 import { useCatalogInstall } from "./useCatalogInstall";
 import { ModelCard } from "./ModelCard";
 import { ModelUpdatesPanel } from "./ModelUpdatesPanel";
@@ -95,6 +97,7 @@ function InstalledModelRow({
 type ModelAssetUpdateValues = Partial<Pick<
   ModelAssetInstall,
   "active" | "use_case" | "auto_apply" | "default_model_strength" | "default_clip_strength"
+  | "typed_trigger_words"
 >>;
 
 function InstalledAssetRow({
@@ -111,6 +114,8 @@ function InstalledAssetRow({
   onDelete: () => void;
 }) {
   const [editing, setEditing] = useState(false);
+  const [editingWords, setEditingWords] = useState(false);
+  const measuredWords = measuredTriggerWords(asset);
   const [useCase, setUseCase] = useState(asset.use_case);
   const [autoApply, setAutoApply] = useState(asset.auto_apply);
   const [modelStrength, setModelStrength] = useState(String(asset.default_model_strength));
@@ -151,6 +156,15 @@ function InstalledAssetRow({
         {asset.kind === "lora" && asset.auto_apply && asset.use_case && (
           <small>Auto · {asset.use_case}</small>
         )}
+        {/* A glance that may be cut short; the open editor shows the words in full instead. */}
+        {asset.kind === "lora" && !editingWords && (measuredWords.length > 0 || asset.typed_trigger_words.length > 0) && (
+          <small>
+            {[
+              measuredWords.length > 0 ? `From the file: ${measuredWords.join(", ")}` : "",
+              asset.typed_trigger_words.length > 0 ? `Yours: ${asset.typed_trigger_words.join(", ")}` : "",
+            ].filter(Boolean).join(" · ")}
+          </small>
+        )}
       </span>
       <span className="model-install-size">{formatBytes(asset.size_bytes)}</span>
       <span className="row-actions">
@@ -164,6 +178,11 @@ function InstalledAssetRow({
         {asset.kind === "lora" && (
           <button className="secondary compact-button" disabled={editing || saving} onClick={beginEditing}>
             Edit Auto rules
+          </button>
+        )}
+        {asset.kind === "lora" && (
+          <button className="secondary compact-button" disabled={editingWords || saving} onClick={() => setEditingWords(true)}>
+            Edit trigger words
           </button>
         )}
         <button className="secondary compact-button danger" disabled={deleting} onClick={onDelete}>Delete</button>
@@ -191,6 +210,18 @@ function InstalledAssetRow({
             <button type="submit" className="primary compact-button" disabled={saving || unchanged || !strengthsValid || (autoApply && !useCase.trim())}>{saving ? "Saving…" : "Save"}</button>
           </span>
         </form>
+      )}
+      {editingWords && asset.kind === "lora" && (
+        <LoraTriggerWordsEditor
+          asset={asset}
+          saving={saving}
+          onCancel={() => setEditingWords(false)}
+          onSave={(typedTriggerWords) => {
+            void onUpdate({ typed_trigger_words: typedTriggerWords }).then((saved) => {
+              if (saved) setEditingWords(false);
+            });
+          }}
+        />
       )}
     </div>
   );

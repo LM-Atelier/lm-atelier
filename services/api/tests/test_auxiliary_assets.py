@@ -4,7 +4,7 @@ import hashlib
 import json
 from copy import deepcopy
 from types import MappingProxyType
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from httpx2 import AsyncClient
@@ -786,6 +786,75 @@ async def test_lora_without_declared_trigger_words_keeps_an_empty_vocabulary(
         resolved = resolve_lora_stack(session, revision, stack)
 
     assert resolved.provenance[0]["trigger_words"] == []
+
+
+async def test_typed_trigger_words_follow_the_file_s_own_and_are_applied_the_same_way(
+    client: AsyncClient,
+) -> None:
+    del client
+    with SessionLocal() as session:
+        revision = _workflow(session)
+        asset = _asset(session, "Ink", "c" * 64)
+        asset.manifest_json["metadata"] = {"trigger_words": ["ink wash"]}
+        asset.typed_trigger_words = ["Studio Glow", "INK WASH"]
+        stack = [{"asset_id": asset.id, "model_strength": 1, "clip_strength": 1}]
+
+        resolved = resolve_lora_stack(session, revision, stack)
+
+    # The file's words first, then the typed ones, one of each in any casing.
+    assert resolved.provenance[0]["trigger_words"] == ["ink wash", "Studio Glow"]
+    assert prompt_trigger_word_provenance(None, resolved.provenance, "A portrait") == {
+        "model_trigger_words_applied": [],
+        "lora_trigger_words_applied": ["ink wash", "Studio Glow"],
+        "trigger_words_applied": ["ink wash", "Studio Glow"],
+    }
+
+
+async def test_typed_trigger_words_survive_the_manifest_being_rewritten(
+    client: AsyncClient,
+) -> None:
+    del client
+    with SessionLocal() as session:
+        revision = _workflow(session)
+        asset = _asset(session, "Ink", "c" * 64)
+        asset.typed_trigger_words = ["studio glow"]
+        # A new record of the file's own words, as measuring it again would write.
+        asset.manifest_json = {
+            **asset.manifest_json,
+            "metadata": {"network_type": "networks.lora"},
+        }
+        stack = [{"asset_id": asset.id, "model_strength": 1, "clip_strength": 1}]
+
+        resolved = resolve_lora_stack(session, revision, stack)
+
+    assert resolved.provenance[0]["trigger_words"] == ["studio glow"]
+
+
+@pytest.mark.parametrize(
+    "typed",
+    [
+        "studio glow",
+        ["studio glow", 7],
+        ["x" * 201],
+        [" "],
+        [f"typed-{index}" for index in range(100)],
+    ],
+)
+async def test_stored_typed_trigger_words_are_refused_when_malformed(
+    client: AsyncClient,
+    typed: object,
+) -> None:
+    del client
+    with SessionLocal() as session:
+        revision = _workflow(session)
+        asset = _asset(session, "Ink", "c" * 64)
+        cast(Any, asset).typed_trigger_words = typed
+        stack = [{"asset_id": asset.id, "model_strength": 1, "clip_strength": 1}]
+
+        with pytest.raises(ValueError) as raised:
+            resolve_lora_stack(session, revision, stack)
+
+    assert str(raised.value) == "A selected LoRA has invalid trigger-word metadata."
 
 
 async def test_lora_stack_rejects_duplicates_incompatible_and_unavailable_assets(

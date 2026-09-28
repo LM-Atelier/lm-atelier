@@ -989,6 +989,7 @@ export interface ModelAssetInstall {
   auto_apply: boolean;
   default_model_strength: number;
   default_clip_strength: number;
+  typed_trigger_words: string[];
   verified_at: string | null;
   created_at: string;
   updated_at: string;

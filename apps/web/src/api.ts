@@ -1122,6 +1122,7 @@ export const api = {
     values: Partial<Pick<
       ModelAssetInstall,
       "active" | "use_case" | "auto_apply" | "default_model_strength" | "default_clip_strength"
+      | "typed_trigger_words"
     >>,
   ) =>
     request<ModelAssetInstall>(`/api/model-assets/${id}`, {

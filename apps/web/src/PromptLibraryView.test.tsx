@@ -128,6 +128,7 @@ const installedLoras: ModelAssetInstall[] = installedLoraDigests.map((sha256, in
   updated_at: stamp,
   default_model_strength: 1,
   default_clip_strength: 1,
+  typed_trigger_words: [],
   manifest_json: { sha256 },
 }));
 const contract: PromptTemplateContract = {

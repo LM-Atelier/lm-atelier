@@ -1023,9 +1023,11 @@ html[data-text-size="larger"] { --text-scale: 1.25; font-size: 125%; }
 .model-use-case-editor textarea { width: 100%; resize: vertical; color: var(--ink); border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); padding: calc(8px * var(--spacing-scale, 1)) calc(9px * var(--spacing-scale, 1)); outline: 0; font: inherit; line-height: 1.4; }
 .model-use-case-editor textarea:focus { border-color: var(--accent); }
 .lora-auto-editor { grid-template-columns: minmax(180px, 1fr) 105px 105px auto auto; }
-.lora-auto-editor label { display: grid; gap: calc(4px * var(--spacing-scale, 1)); color: var(--muted); font-size: calc(11px * var(--text-scale, 1)); }
-.lora-auto-editor input[type="number"] { width: 100%; color: var(--ink); border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); padding: calc(8px * var(--spacing-scale, 1)) calc(9px * var(--spacing-scale, 1)); outline: 0; font: inherit; }
-.lora-auto-editor input[type="number"]:focus { border-color: var(--accent); }
+.lora-auto-editor label, .lora-trigger-editor label { display: grid; gap: calc(4px * var(--spacing-scale, 1)); color: var(--muted); font-size: calc(11px * var(--text-scale, 1)); }
+.lora-auto-editor input[type="number"], .lora-trigger-editor input { width: 100%; color: var(--ink); border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); padding: calc(8px * var(--spacing-scale, 1)) calc(9px * var(--spacing-scale, 1)); outline: 0; font: inherit; }
+.lora-auto-editor input[type="number"]:focus, .lora-trigger-editor input:focus { border-color: var(--accent); }
+.lora-trigger-editor { grid-template-columns: minmax(180px, 1fr) auto; }
+.lora-trigger-editor > small { grid-column: 1 / -1; color: var(--muted); }
 .lora-auto-editor .lora-auto-toggle { display: flex; align-items: center; gap: calc(6px * var(--spacing-scale, 1)); min-height: 32px; white-space: nowrap; }
 .preset-create { display: grid; grid-template-columns: minmax(180px, 1fr) 120px auto; gap: calc(8px * var(--spacing-scale, 1)); margin-bottom: 11px; }
 .preset-create input, .preset-create select { color: var(--ink); border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); padding: calc(9px * var(--spacing-scale, 1)); outline: 0; }
@@ -1124,6 +1126,7 @@ html[data-motion="reduced"] .progress-track > div.indeterminate { width: 100% !i
   .model-use-case-editor { grid-column: 1 / -1; grid-template-columns: 1fr auto auto; }
   .lora-auto-editor { grid-template-columns: 1fr 1fr; }
   .lora-auto-editor > label:first-child, .lora-auto-editor > .row-actions { grid-column: 1 / -1; }
+  .lora-trigger-editor { grid-template-columns: 1fr auto; }
   .preset-create { grid-template-columns: 1fr; }
   .messages { padding-inline: calc(16px * var(--spacing-scale, 1)); }
   .composer-wrap { --composer-inline-padding: calc(12px * var(--spacing-scale, 1)); }

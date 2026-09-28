@@ -1334,6 +1334,10 @@ class ModelAssetInstall(TimestampMixin, Base):
     auto_apply: Mapped[bool] = mapped_column(Boolean, default=False)
     default_model_strength: Mapped[float] = mapped_column(Float, default=1.0)
     default_clip_strength: Mapped[float] = mapped_column(Float, default=1.0)
+    #: Trigger words a person recorded for this LoRA. They are stored apart from
+    #: the words measured from the file, which stay in the manifest as the record
+    #: of what the file itself declared, so rewriting the manifest never loses them.
+    typed_trigger_words: Mapped[list[str]] = mapped_column(JSON, default=list)
     verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
