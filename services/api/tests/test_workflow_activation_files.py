@@ -13,6 +13,7 @@ from test_workflow_activations import _asset, _model
 
 from local_lm import workflow_activation_files, workflow_activations
 from local_lm.db import SessionLocal
+from local_lm.filesystem_links import _windows_api
 from local_lm.models import ModelAssetInstall, ModelComponentManifest, ModelInstall
 from local_lm.workflow_activation_files import verify_workflow_files
 from local_lm.workflow_activations import WorkflowActivationError
@@ -141,7 +142,7 @@ def test_windows_verification_refuses_when_change_time_cannot_be_read(
 ) -> None:
     model_id, asset_id = _installs(app, tmp_path)
     proof = verify_workflow_files(SessionLocal, [model_id], [asset_id])
-    native = workflow_activation_files._windows_api()
+    native = _windows_api()
     unavailable = SimpleNamespace(
         ctypes=native.ctypes,
         FileBasicInformation=native.FileBasicInformation,
@@ -151,4 +152,29 @@ def test_windows_verification_refuses_when_change_time_cannot_be_read(
     monkeypatch.setattr(workflow_activation_files, "_windows_api", lambda: unavailable)
     with SessionLocal() as session, pytest.raises(WorkflowActivationError) as raised:
         proof.require_current(session)
+    assert raised.value.code == "dependency_content_drift"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows file metadata query")
+def test_windows_verification_refuses_an_unavailable_initial_change_time(
+    app: FastAPI, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model_id, asset_id = _installs(app, tmp_path)
+    native = _windows_api()
+    queried: list[bool] = []
+
+    def unavailable_query(*_args: object) -> int:
+        queried.append(True)
+        return 0xC0000001
+
+    unavailable = SimpleNamespace(
+        ctypes=native.ctypes,
+        FileBasicInformation=native.FileBasicInformation,
+        IoStatusBlock=native.IoStatusBlock,
+        ntdll=SimpleNamespace(NtQueryInformationFile=unavailable_query),
+    )
+    monkeypatch.setattr(workflow_activation_files, "_windows_api", lambda: unavailable)
+    with pytest.raises(WorkflowActivationError) as raised:
+        verify_workflow_files(SessionLocal, [model_id], [asset_id])
+    assert queried == [True]
     assert raised.value.code == "dependency_content_drift"
