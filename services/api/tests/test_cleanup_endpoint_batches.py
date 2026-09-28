@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -26,6 +27,30 @@ from local_lm.config import Settings
 from local_lm.db import SessionLocal
 from local_lm.domain import ArtifactKind
 from local_lm.models import Artifact
+
+
+class _StationaryClock:
+    """The time module as the endpoint reads it, with a clock that stays put."""
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
+
+    @staticmethod
+    def monotonic() -> float:
+        return 0.0
+
+
+@pytest.fixture(autouse=True)
+def _batches_bound_by_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A batch here stops on its count, not because the runner is slow.
+
+    A real run stops once its time budget has passed since its first deletion,
+    and a slow runner can pass that budget before a three-item batch finishes,
+    so the result reads truncated with nothing left to remove. A case that is
+    about time sets its own clock or a zero budget over this one.
+    """
+
+    monkeypatch.setattr(api_module, "time", _StationaryClock())
 
 
 def _aged_temporary(store: ArtifactStore, session: Session, index: int) -> Artifact:
