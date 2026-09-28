@@ -598,6 +598,10 @@ async def test_orphan_batches_commit_one_at_a_time_through_the_lifespan(
     orphans = [_aged_orphan(store, index) for index in range(5)]
     monkeypatch.setattr(main_module, "RETENTION_BATCH_DELETIONS", 2)
     monkeypatch.setattr(main_module, "RETENTION_BATCH_PAUSE_SECONDS", 0.0)
+    # Count-bound batches must not expire because the test runner is slow.
+    clock = SimpleNamespace(monotonic=lambda: 0.0, perf_counter=time.perf_counter)
+    monkeypatch.setattr(main_module, "time", clock)
+    monkeypatch.setattr(artifacts_module, "time", clock)
 
     left_before: list[int] = []
     real_walk = ArtifactStore._cleanup_orphan_files
