@@ -221,6 +221,8 @@ export function studioToolReducer(
 export function defaultInstruction(state: StudioToolState): string {
   if (state.kind === "enhance") return `Enhance to ${state.upscaleFactor}x`;
   if (state.kind === "text") return replaceWordsInstruction(state);
+  // The workflow reads no words; these are what the history shows it did.
+  if (state.kind === "isolate") return "Cut the subject out onto a transparent background.";
   // The lighting adapter reads its two pictures as figures, and the direction
   // in words must agree with the map or it follows the words.
   if (state.kind === "relight") {

@@ -153,17 +153,19 @@ export function StudioView({
   // Enhance asks for no words: the whole picture is the subject and
   // the size is the whole instruction. Text takes its words from its
   // own fields, and without a box it would change the whole picture.
+  // Isolate asks for nothing and runs only the workflow the report names.
   const applyDisabled =
     (tools.kind === "extend" && !Object.values(tools.margins).some(Boolean)) ||
     (tools.kind === "text" && (!tools.newWords.trim() || selectionCoverage === 0)) ||
-    (!["enhance", "extend", "text", "relight"].includes(tools.kind) && !instruction.trim()) ||
+    (tools.kind === "isolate" && !activeTool?.workflow_revision_id) ||
+    (!["enhance", "extend", "text", "relight", "isolate"].includes(tools.kind) && !instruction.trim()) ||
     busy ||
     !current ||
     Boolean(unavailable) ||
     Boolean(
       workflowUnavailable &&
         !recipe?.workflow_revision_id &&
-        !(tools.kind === "relight" && activeTool?.workflow_revision_id),
+        !(["relight", "isolate"].includes(tools.kind) && activeTool?.workflow_revision_id),
     );
   if (!sourceArtifactId) {
     return (
@@ -287,7 +289,7 @@ export function StudioView({
           ) : (
             <StudioWorkflowOpening selectorId={workflowSelectorId} />
           )}
-          {tools.kind !== "instruct" && tools.kind !== "relight" && (
+          {!["instruct", "relight", "isolate"].includes(tools.kind) && (
             <div className="studio-selection-controls">
               <StudioSelectionTool tools={tools} dispatch={dispatch} colorsUnreadable={readsColors && Boolean(bitmap) && !sourcePixels} />
               <div className="row-actions">
@@ -396,6 +398,8 @@ export function StudioView({
                   ? "Replace words"
                 : tools.kind === "relight"
                   ? "Relight"
+                : tools.kind === "isolate"
+                  ? "Cut out"
                 : tools.kind === "enhance"
                   ? `Enlarge ${tools.upscaleFactor}x`
                 : tools.kind !== "instruct" && selectionCoverage > 0
