@@ -1,11 +1,46 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
+from fastapi import FastAPI
 from httpx2 import AsyncClient
 from sqlalchemy import func, select
 
 from local_lm.db import SessionLocal
 from local_lm.models import Artifact, Job, Message, Run, WorkflowRevision, WorkPlan
+
+
+@pytest.fixture(autouse=True)
+def geometry_runtime(app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def object_info() -> dict[str, Any]:
+        return {
+            "EmptyLatentImage": {
+                "input": {
+                    "required": {name: ["INT"] for name in ("width", "height", "batch_size")}
+                },
+                "output": ["LATENT"],
+            },
+            "KSampler": {
+                "input": {"required": {"latent_image": ["LATENT"]}},
+                "output": ["LATENT"],
+            },
+            "VAEDecode": {
+                "input": {"required": {"samples": ["LATENT"]}},
+                "output": ["IMAGE"],
+            },
+            "SaveImage": {
+                "input": {"required": {"images": ["IMAGE"]}},
+                "output": [],
+                "output_node": True,
+            },
+            "PrivateImageScaleNode": {
+                "input": {"required": {"private-secret": ["STRING"]}},
+                "output": ["IMAGE"],
+            },
+        }
+
+    monkeypatch.setattr(app.state.services.engines.media, "object_info", object_info, raising=False)
 
 
 def _graph() -> dict[str, object]:

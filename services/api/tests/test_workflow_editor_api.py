@@ -11,6 +11,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from workflow_fixtures import seed_workflow_trust
 
+from local_lm import api as api_module
+from local_lm.db import SessionLocal
+from local_lm.schemas import WorkflowCreate
 from local_lm.workflow_editor_sessions import (
     WorkflowEditorSessions,
     workflow_api_graph_sha256,
@@ -158,21 +161,29 @@ async def _create_workflow(
     dependencies: dict[str, Any] | None = None,
     operation: str = "text_to_image",
 ) -> dict[str, Any]:
-    response = await client.post(
-        "/api/workflows",
-        json={
-            "name": "Editable workflow",
-            "operation": operation,
-            "engine": engine,
-            "ui_graph": _ui_graph() if ui_graph is None else ui_graph,
-            "api_graph": _api_graph() if api_graph is None else api_graph,
-            "input_schema": input_schema or {},
-            "dependencies": dependencies or {},
-        },
+    # Existing revisions retain their original graphs when native imports change.
+    with SessionLocal() as session:
+        stored = api_module._persist_workflow_sync(
+            WorkflowCreate.model_validate(
+                {
+                    "name": "Editable workflow",
+                    "operation": operation,
+                    "engine": engine,
+                    "ui_graph": _ui_graph() if ui_graph is None else ui_graph,
+                    "api_graph": _api_graph() if api_graph is None else api_graph,
+                    "input_schema": input_schema or {},
+                    "dependencies": dependencies or {},
+                }
+            ),
+            session,
+            trusted=False,
+        )
+        workflow_id, revision_id = stored.id, stored.current_revision_id
+    assert revision_id is not None
+    seed_workflow_trust(revision_id)
+    payload: dict[str, Any] = next(
+        item for item in (await client.get("/api/workflows")).json() if item["id"] == workflow_id
     )
-    seed_workflow_trust(response.json()["current_revision_id"])
-    assert response.status_code == 201
-    payload: dict[str, Any] = response.json()
     return payload
 
 
@@ -583,7 +594,10 @@ async def test_source_workflow_editor_attests_raw_prompt_and_persists_runtime_bi
     )
     assert draft["ui_graph_json"] == edited_ui
     assert draft["api_graph_json"] == _source_api_graph(filename_prefix="edited")
-    assert draft["input_schema_json"] == input_schema
+    assert draft["input_schema_json"] == {
+        **input_schema,
+        "x-lm-atelier-graph-settings": {"version": 1, "bindings": []},
+    }
 
 
 async def test_legacy_image_operation_without_a_source_binding_keeps_raw_editor_contract(
@@ -864,7 +878,10 @@ async def test_validated_return_creates_one_untrusted_noncurrent_draft(
         revision for revision in after["revisions"] if revision["id"] == result["draft_revision_id"]
     )
     assert draft["ui_graph_json"] == _edited_ui_graph()
-    assert draft["api_graph_json"] == _edited_api_graph()
+    expected_graph = _edited_api_graph()
+    expected_graph["1"]["inputs"]["seed"] = "${seed}"
+    assert draft["api_graph_json"] == expected_graph
+    assert draft["input_schema_json"]["properties"]["seed"]["default"] == 42
     assert draft["trusted"] is False
     assert receipt not in str(draft)
 

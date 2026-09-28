@@ -5,6 +5,7 @@ import threading
 from sqlite3 import Cursor
 
 import pytest
+from fastapi import FastAPI, Request
 from httpx2 import AsyncClient
 from sqlalchemy import Connection, event, func, select
 
@@ -82,7 +83,7 @@ async def test_workflow_writes_allow_the_event_loop_to_release_another_writer(
 @pytest.mark.parametrize("revision", [False, True], ids=["workflow", "revision"])
 @pytest.mark.parametrize("fail", [False, True], ids=["commit", "rollback"])
 async def test_cancelling_a_workflow_write_keeps_its_session_until_the_worker_finishes(
-    client: AsyncClient, revision: bool, fail: bool
+    client: AsyncClient, app: FastAPI, revision: bool, fail: bool
 ) -> None:
     payload = WorkflowCreate(
         name="Cancelled request",
@@ -125,13 +126,17 @@ async def test_cancelling_a_workflow_write_keeps_its_session_until_the_worker_fi
             finished.set()
 
     async def request() -> WorkflowDefinition | WorkflowRevision:
+        http_request = Request({"type": "http", "app": app})
         with SessionLocal() as session:
             try:
                 if revision:
                     return await api.create_workflow_revision(
-                        workflow_id, WorkflowRevisionCreate(api_graph=payload.api_graph), session
+                        workflow_id,
+                        WorkflowRevisionCreate(api_graph=payload.api_graph),
+                        http_request,
+                        session,
                     )
-                return await api.create_workflow(payload, session)
+                return await api.create_workflow(payload, http_request, session)
             finally:
                 closed.set()
 

@@ -34,6 +34,44 @@ from local_lm.image_edit_strength import EditSettingSource, resolve_image_edit_s
 from local_lm.settings_registry import IMAGE_SETTINGS, VIDEO_SETTINGS, workflow_settings
 from local_lm.workflow_edit_calibration import standard_edit_calibration
 
+
+@pytest.fixture(autouse=True)
+def runtime_node_definitions(app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def object_info() -> dict[str, Any]:
+        return {
+            "LoadImage": {
+                "input": {"required": {"image": ["STRING"]}},
+                "output": ["IMAGE"],
+            },
+            "EmptyLatentVideo": {
+                "input": {"required": {"length": ["INT", {"min": 1, "max": 129}]}},
+                "output": ["LATENT"],
+            },
+            "KSampler": {
+                "input": {
+                    "optional": {
+                        "latent_image": ["LATENT"],
+                        "fps": ["INT", {"min": 8, "max": 8}],
+                        "steps": ["INT", {"min": 1, "max": 100}],
+                        "denoise": ["FLOAT", {"min": 0.0, "max": 1.0}],
+                        "seed": ["INT"],
+                    }
+                },
+                "output": ["IMAGE"],
+            },
+            **{
+                name: {
+                    "input": {"required": {"images": ["IMAGE"]}},
+                    "output": [],
+                    "output_node": True,
+                }
+                for name in ("SaveImage", "SaveAnimatedWEBP")
+            },
+        }
+
+    monkeypatch.setattr(app.state.services.engines.media, "object_info", object_info, raising=False)
+
+
 _LENGTH_CONTRACT: dict[str, Any] = {
     "version": 1,
     "frames_parameter": "frames",

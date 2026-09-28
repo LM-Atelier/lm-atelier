@@ -150,6 +150,38 @@ def test_proof_binds_exact_revision_graph_and_schema_limits() -> None:
     assert payload["request_authorized"] is False
 
 
+@pytest.mark.parametrize(
+    "damage", ["none", "node", "input", "parameter", "duplicate", "unbound", "constraint"]
+)
+def test_geometry_proof_validates_generated_settings_bindings(damage: str) -> None:
+    arguments = _arguments()
+    schema = cast(dict[str, Any], arguments["input_schema"])
+    binding = {"parameter": "width", "node_id": "latent", "input_name": "width"}
+    marker: dict[str, Any] = {"version": 1, "bindings": [binding]}
+    if damage == "node":
+        binding["node_id"] = "sampler"
+    elif damage == "input":
+        binding["input_name"] = "height"
+    elif damage == "parameter":
+        binding["parameter"] = "missing_width"
+    elif damage == "duplicate":
+        marker["bindings"].append(dict(binding))
+    elif damage == "unbound":
+        marker["bindings"] = []
+        marker["unbound_parameters"] = ["width"]
+    elif damage == "constraint":
+        marker["maximum_width"] = 512
+    schema["x-lm-atelier-graph-settings"] = marker
+    _rehash(arguments)
+
+    result = _prove(arguments)
+
+    assert result.available is (damage == "none")
+    if result.proof is not None:
+        assert result.proof.width.maximum == 2048
+        assert result.proof.width.node_id == "latent"
+
+
 def test_proof_is_sealed_frozen_and_detached() -> None:
     arguments = _arguments()
     result = _prove(arguments)

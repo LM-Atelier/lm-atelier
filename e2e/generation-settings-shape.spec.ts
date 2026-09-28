@@ -163,7 +163,7 @@ async function installShapeCapableWorkflow(
       description: "Synthetic workflow used only for browser shape certification.",
       engine: "comfyui",
       engine_version: "0.28.0",
-      ui_graph: { version: 0.4, nodes: [], links: [] },
+      ui_graph: {},
       api_graph: apiGraph(),
       input_schema: inputSchema(),
       dependencies: {},

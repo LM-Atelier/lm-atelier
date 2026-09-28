@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, replace
+from typing import Any, Literal
 
 from .comfy_package_widgets import (
     PackageClaim,
@@ -83,9 +85,23 @@ class WorkflowCompilationError(WorkflowPackageError):
 
 
 @dataclass(frozen=True)
+class CompiledWorkflowInput:
+    node_id: str
+    node_type: str
+    node_title: str
+    name: str
+    specification: tuple[object, ...]
+    value: object
+    origin: Literal["widget", "link", "primitive"]
+    reaches_output: bool
+    declared_name: str | None = None
+
+
+@dataclass(frozen=True)
 class ComfyWorkflowCompilation:
     api_graph: dict[str, dict[str, object]]
     execution_order: tuple[str, ...]
+    inputs: tuple[CompiledWorkflowInput, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -105,6 +121,7 @@ class _InputDefinition:
     # An autogrow socket takes a link only, even when its template is a widget
     # kind, because the runtime forces the template to be an input.
     socket_only: bool = False
+    declared_name: str | None = None
 
 
 def compile_comfyui_ui_graph(
@@ -203,7 +220,18 @@ def compile_comfyui_ui_graph(
     )
     order = _topological_order(tuple(runtime_nodes), successors)
 
+    reaches_output = {
+        node_id
+        for node_id, node in runtime_nodes.items()
+        if isinstance((node_info := object_info.get(str(node["type"]))), Mapping)
+        and node_info.get("output_node") is True
+    }
+    for node_id in reversed(order):
+        if any(target in reaches_output for target in successors.get(node_id, ())):
+            reaches_output.add(node_id)
+
     api_graph: dict[str, dict[str, object]] = {}
+    compiled_inputs: list[CompiledWorkflowInput] = []
     for node_id in order:
         node = runtime_nodes[node_id]
         node_type = str(node["type"])
@@ -212,7 +240,7 @@ def compile_comfyui_ui_graph(
             raise WorkflowCompilationError(
                 "invalid_node_definition", f"ComfyUI definition for {node_type} is invalid"
             )
-        inputs = _compile_node_inputs(
+        inputs, compiled_definitions = _compile_node_inputs(
             node_id,
             node,
             node_info,
@@ -226,7 +254,143 @@ def compile_comfyui_ui_graph(
             "class_type": node_type,
             "_meta": {"title": str(title)},
         }
-    return ComfyWorkflowCompilation(api_graph, order)
+        for definition in compiled_definitions:
+            if definition.name not in inputs or not _is_widget_spec(definition.spec):
+                continue
+            key = (node_id, definition.name)
+            origin: Literal["widget", "link", "primitive"] = (
+                "primitive"
+                if key in primitive_values
+                else "link"
+                if key in connections
+                else "widget"
+            )
+            compiled_inputs.append(
+                CompiledWorkflowInput(
+                    node_id,
+                    node_type,
+                    str(title),
+                    definition.name,
+                    tuple(deepcopy(definition.spec)),
+                    deepcopy(inputs[definition.name]),
+                    origin,
+                    node_id in reaches_output,
+                    definition.declared_name or definition.name,
+                )
+            )
+    return ComfyWorkflowCompilation(api_graph, order, tuple(compiled_inputs))
+
+
+def describe_comfyui_api_graph(
+    graph: Mapping[str, Mapping[str, Any]],
+    object_info: Mapping[str, object],
+    input_schema: Mapping[str, Any],
+) -> ComfyWorkflowCompilation:
+    """Read saved API inputs against runtime definitions without inventing a visual graph."""
+    copied = {key: deepcopy(dict(node)) for key, node in graph.items()}
+    successors: dict[str, set[str]] = {key: set() for key in copied}
+    records: list[CompiledWorkflowInput] = []
+    outputs: set[str] = set()
+    properties = input_schema.get("properties", {})
+    if not isinstance(properties, Mapping):
+        raise WorkflowCompilationError("invalid_structure", "Workflow properties must be an object")
+    for node_id, node in copied.items():
+        _identifier(node_id, "node id")
+        node_type = node.get("class_type")
+        info = object_info.get(node_type) if isinstance(node_type, str) else None
+        if not isinstance(node_type, str) or not isinstance(info, Mapping):
+            raise WorkflowCompilationError(
+                "missing_node_type", "The runtime does not describe a workflow node"
+            )
+        values = node.get("inputs")
+        if not isinstance(values, Mapping):
+            raise WorkflowCompilationError("invalid_node", "Workflow node inputs must be an object")
+        meta = node.get("_meta")
+        title = str(meta.get("title") or node_type) if isinstance(meta, Mapping) else node_type
+        if info.get("output_node") is True:
+            outputs.add(node_id)
+        pending = list(_input_definitions(node_type, info))
+        known: set[str] = set()
+        while pending:
+            definition = pending.pop(0)
+            name, spec = definition.name, definition.spec
+            if name in known:
+                raise WorkflowCompilationError(
+                    "invalid_node_definition", "A runtime input is declared more than once"
+                )
+            known.add(name)
+            kind = spec[0]
+            if kind == _AUTOGROW:
+                pending.extend(_autogrow_inputs(node_id, definition))
+                continue
+            if name not in values:
+                if definition.required:
+                    raise WorkflowCompilationError(
+                        "missing_required_input", "A required workflow input is missing"
+                    )
+                continue
+            value = values[name]
+            explicit = isinstance(value, str) and value.startswith("${") and value.endswith("}")
+            if explicit:
+                if kind == _DYNAMIC_COMBO:
+                    raise WorkflowCompilationError(
+                        "unsupported_widget",
+                        "A dynamic input needs a saved choice before its controls can be mapped",
+                    )
+                continue
+            linked = isinstance(value, list) and len(value) == 2 and isinstance(value[0], str)
+            if linked:
+                source_id = value[0]
+                source = copied.get(source_id)
+                source_type = source.get("class_type") if isinstance(source, Mapping) else None
+                source_info = object_info.get(source_type) if isinstance(source_type, str) else None
+                source_outputs = (
+                    source_info.get("output") if isinstance(source_info, Mapping) else None
+                )
+                slot = _slot_index(value[1], "output slot")
+                if (
+                    source is None
+                    or not isinstance(source_outputs, Sequence)
+                    or isinstance(source_outputs, str | bytes)
+                    or slot >= len(source_outputs)
+                ):
+                    raise WorkflowCompilationError(
+                        "invalid_link_slot", "A workflow connection names a missing output"
+                    )
+                successors[source_id].add(node_id)
+            elif definition.socket_only:
+                raise WorkflowCompilationError(
+                    "invalid_link", "An expanded workflow socket requires a connection"
+                )
+            elif kind == _DYNAMIC_COMBO:
+                pending.extend(_dynamic_combo_inputs(node_id, definition, value))
+            if _is_widget_spec(spec):
+                records.append(
+                    CompiledWorkflowInput(
+                        node_id,
+                        node_type,
+                        title,
+                        name,
+                        tuple(deepcopy(spec)),
+                        deepcopy(value),
+                        "link" if linked else "widget",
+                        False,
+                        definition.declared_name or name,
+                    )
+                )
+        if set(values) - known:
+            raise WorkflowCompilationError(
+                "unknown_input_slot", "The runtime does not describe a saved workflow input"
+            )
+    order = _topological_order(tuple(copied), successors)
+    for node_id in reversed(order):
+        if any(target in outputs for target in successors[node_id]):
+            outputs.add(node_id)
+    return ComfyWorkflowCompilation(
+        copied,
+        order,
+        tuple(replace(item, reaches_output=item.node_id in outputs) for item in records),
+    )
 
 
 def _nodes_by_id(workflow: Mapping[str, object]) -> dict[str, Mapping[str, object]]:
@@ -837,7 +1001,7 @@ def _compile_node_inputs(
     input_slots: Sequence[Mapping[str, object]],
     connections: Mapping[tuple[str, str], list[object]],
     primitive_values: Mapping[tuple[str, str], object],
-) -> dict[str, object]:
+) -> tuple[dict[str, object], tuple[_InputDefinition, ...]]:
     definitions = _input_definitions(str(node["type"]), node_info)
     by_name = {definition.name: definition for definition in definitions}
     slots_by_name = {str(slot["name"]): slot for slot in input_slots}
@@ -976,7 +1140,10 @@ def _compile_node_inputs(
                     " which it has no input for",
                 )
             result.update(extras)
-        return _with_connected_inputs(node_id, result, by_name, connections, primitive_values)
+        return (
+            _with_connected_inputs(node_id, result, by_name, connections, primitive_values),
+            tuple(pending),
+        )
     if cursor != len(values):
         try:
             drawn_inputs = package_widget_inputs(
@@ -1008,7 +1175,10 @@ def _compile_node_inputs(
             "unsupported_widget_values",
             f"node {node_id} has widget values that cannot be mapped safely",
         )
-    return _with_connected_inputs(node_id, result, by_name, connections, primitive_values)
+    return (
+        _with_connected_inputs(node_id, result, by_name, connections, primitive_values),
+        tuple(pending),
+    )
 
 
 def _with_connected_inputs(
@@ -1132,7 +1302,12 @@ def _dynamic_combo_inputs(
                     f"ComfyUI definition for input {definition.name}.{name} is invalid",
                 )
             grown.append(
-                _InputDefinition(f"{definition.name}{_DYNAMIC_SEPARATOR}{name}", spec, required)
+                _InputDefinition(
+                    f"{definition.name}{_DYNAMIC_SEPARATOR}{name}",
+                    spec,
+                    required,
+                    declared_name=str(name),
+                )
             )
     return grown
 
@@ -1171,6 +1346,7 @@ def _autogrow_inputs(node_id: str, definition: _InputDefinition) -> list[_InputD
     if not isinstance(sections, Mapping):
         raise invalid
     socket: Sequence[object] | None = None
+    socket_name: str | None = None
     socket_required = True
     for section in ("required", "optional"):
         values = sections.get(section, {})
@@ -1185,6 +1361,7 @@ def _autogrow_inputs(node_id: str, definition: _InputDefinition) -> list[_InputD
             ):
                 raise invalid
             socket, socket_required = candidate, section == "required"
+            socket_name = str(next(iter(values)))
             break
     minimum = template.get("min", 1)
     if socket is None or isinstance(minimum, bool) or not isinstance(minimum, int) or minimum < 0:
@@ -1208,6 +1385,7 @@ def _autogrow_inputs(node_id: str, definition: _InputDefinition) -> list[_InputD
             socket,
             socket_required and index < minimum,
             socket_only=True,
+            declared_name=socket_name,
         )
         for index, label in enumerate(labels)
     ]
