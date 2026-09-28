@@ -4,15 +4,17 @@ import asyncio
 import hashlib
 import io
 import json
+import os
 import platform
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import zipfile
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Never
+from typing import Any, Never
 
 import httpx
 import pytest
@@ -635,6 +637,63 @@ def test_integrity_walk_refuses_a_linked_directory(
 
     with pytest.raises(RuntimeProvisioningError, match="unsupported dependency directory link"):
         provisioner._integrity_file_map(root)
+
+
+def test_an_extracted_runtime_is_refused_at_a_link_before_the_walk_goes_through_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The link is refused where it stands, before the walk lists what is behind it.
+
+    On Windows a recursive glob descends into a junction, so checking each entry
+    for a link only protects the tree if the junction itself comes out of the
+    walk, and is refused, before the folder behind it is listed. Listing that
+    folder at all fails the test, which also catches a walk that gathers every
+    entry before it checks any. The far side holds more entries than the limit,
+    all outside the tree, so the refusal must also come for the link rather than
+    for the count or for containment.
+    """
+
+    destination = tmp_path / "extracted"
+    (destination / "bin").mkdir(parents=True)
+    (destination / "bin" / "server.exe").write_bytes(b"runtime")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    for index in range(20):
+        (elsewhere / f"foreign-{index}.bin").write_bytes(b"x")
+    link = destination / "bin" / "shared"
+    if sys.platform == "win32":
+        made = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(elsewhere)], capture_output=True
+        )
+        if made.returncode != 0:
+            pytest.skip("this host does not allow a directory junction")
+    else:
+        try:
+            link.symlink_to(elsewhere, target_is_directory=True)
+        except OSError:
+            pytest.skip("filesystem links are unavailable in this test environment")
+    far_side = (link, elsewhere, elsewhere.resolve())
+
+    def refusing_the_far_side(list_folder: Callable[..., Any]) -> Callable[..., Any]:
+        def listed(path: Any = ".") -> Any:
+            if not isinstance(path, int):
+                folder = Path(os.path.abspath(os.fspath(path)))
+                if any(folder.is_relative_to(root) for root in far_side):
+                    raise AssertionError(f"the walk listed {folder} before refusing the link")
+            return list_folder(path)
+
+        return listed
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "scandir", refusing_the_far_side(os.scandir))
+        patch.setattr(os, "listdir", refusing_the_far_side(os.listdir))
+        with pytest.raises(
+            RuntimeProvisioningError, match="may not contain links or reparse points"
+        ):
+            RuntimeProvisioner._validate_extracted_tree(
+                destination, max_entries=10, max_uncompressed_bytes=1024 * 1024
+            )
 
 
 def test_integrity_walk_lists_every_ordinary_file(
