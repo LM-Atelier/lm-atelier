@@ -131,6 +131,7 @@ from .image_edit_verification import (
     parse_change_attribution,
     parse_image_inventory,
 )
+from .matting_workflows import workflow_declares_matting
 from .media_references import exceeds_capacity
 from .message_references import (
     carry_message_references_if_absent,
@@ -10756,6 +10757,12 @@ class ConversationOrchestrator:
             revision = session.get(WorkflowRevision, definition.current_revision_id)
             if not revision or not self._workflow_matches_engine(revision):
                 continue
+            # A workflow that only cuts a subject out is chosen by name, by the
+            # tool that asks for a cutout. Picked for an ordinary edit it would
+            # hand back a cutout instead of the edit asked for, and it declares
+            # no model, so without this it would be the first generic choice.
+            if workflow_declares_matting(revision.input_schema_json):
+                continue
             if self._revision_declares_a_model(revision):
                 if self._revision_accepts_install(session, revision, model_install_id):
                     return revision
@@ -10803,6 +10810,31 @@ class ConversationOrchestrator:
                 and self._workflow_matches_engine(revision)
                 and workflow_lora_extension(revision) is not None
                 and exceeds_capacity(revision.api_graph_json, 2) is None
+            ):
+                revision_ids.append(revision.id)
+        return revision_ids
+
+    def installed_matting_workflow_ids(self, session: Session) -> list[str]:
+        """Edit workflows that declare they return the subject on a transparent background.
+
+        In name order, so which one the studio is given is stable and reads the
+        same as the list a person sees.
+        """
+
+        definitions = session.scalars(
+            select(WorkflowDefinition)
+            .where(WorkflowDefinition.operation == Operation.IMAGE_TO_IMAGE.value)
+            .order_by(WorkflowDefinition.name, WorkflowDefinition.id)
+        ).all()
+        revision_ids: list[str] = []
+        for definition in definitions:
+            if not definition.current_revision_id:
+                continue
+            revision = session.get(WorkflowRevision, definition.current_revision_id)
+            if (
+                revision is not None
+                and self._workflow_matches_engine(revision)
+                and workflow_declares_matting(revision.input_schema_json)
             ):
                 revision_ids.append(revision.id)
         return revision_ids

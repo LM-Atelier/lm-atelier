@@ -90,6 +90,7 @@ def tool_capabilities(
     edit_input_schemas: list[dict[str, Any] | None],
     relight_workflow_ids: Sequence[str] = (),
     lighting_adapter_ids: Sequence[str] = (),
+    matting_workflow_ids: Sequence[str] = (),
 ) -> list[ToolCapability]:
     """Judge every tool from the schemas of the installed edit workflows.
 
@@ -98,7 +99,9 @@ def tool_capabilities(
     mask cannot honor a selection, and one called anything at all that does
     can. The declaration is the only thing that decides.
     """
-    can_edit = bool(edit_input_schemas)
+    # A workflow that only cuts a subject out cannot carry out an instruction,
+    # so on its own it does not make the instructed tools usable.
+    can_edit = any(not workflow_declares_matting(schema) for schema in edit_input_schemas)
     can_mask = any(workflow_accepts_mask(schema) for schema in edit_input_schemas)
     can_upscale = any(workflow_declares_upscale(schema) for schema in edit_input_schemas)
     can_outpaint = any(workflow_declares_outpaint(schema) for schema in edit_input_schemas)
@@ -125,9 +128,16 @@ def tool_capabilities(
                 workflow_class=workflow_class,
                 available=ready,
                 reason=reason,
+                # Relight is named only when exactly one edit workflow can do it,
+                # since they differ; otherwise the studio's chosen one runs and
+                # the server checks it can. Every matting workflow does the same
+                # job, and the studio's chosen one never does, so one is always
+                # named: the first, in the order given.
                 workflow_revision_id=(
                     relight_workflow_ids[0]
                     if workflow_class == "relight" and len(relight_workflow_ids) == 1
+                    else matting_workflow_ids[0]
+                    if workflow_class == "matting" and matting_workflow_ids
                     else None
                 ),
                 adapter_asset_id=(

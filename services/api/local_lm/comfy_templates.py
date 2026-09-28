@@ -952,6 +952,34 @@ def derive_image_to_image(
     )
 
 
+def compile_authored_workflow(
+    ui_graph: dict[str, Any],
+    object_info: dict[str, Any],
+    *,
+    operation: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Compile a workflow the application writes itself, exactly as a template compiles.
+
+    The same compiler rather than a second one, so an authored workflow binds
+    its source picture, its runtime settings and its model choices by the rules
+    every catalog workflow already follows. That includes the rule for model
+    choices: one the runtime lists is checked, and an empty list is let
+    through, so a caller that needs one exact file present checks it first.
+    """
+
+    api_graph, input_schema = _compile_ui_graph(
+        deepcopy(ui_graph),
+        object_info,
+        operation=operation,
+    )
+    if not any(
+        bool((object_info.get(str(node.get("class_type"))) or {}).get("output_node"))
+        for node in api_graph.values()
+    ):
+        raise ValueError("authored workflow has no runnable output node")
+    return api_graph, input_schema
+
+
 def _parse_huggingface_url(url: str) -> tuple[str, str, str] | None:
     parsed = urlparse(url)
     if parsed.scheme != "https" or parsed.netloc.lower() != "huggingface.co":
