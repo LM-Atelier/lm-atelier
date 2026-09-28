@@ -46,6 +46,15 @@ SELECTED_LEVEL = 127
 WORKING_LONG_SIDE = 512
 #: The parts an edit check compares separately: this many across and down.
 LOCAL_GRID = 32
+
+#: How strongly some part of an area must have changed for the area to count as
+#: a change of its own. A model that redraws the whole picture to make one edit
+#: leaves faint differences scattered just past the unchanged threshold: on a
+#: synthetic scene, a requested recolour peaked at 142 while six stray areas
+#: peaked between 2.0 and 2.1, and counting those made an edit that did exactly
+#: what was asked look as if it had changed seven things. Twice the unchanged
+#: threshold keeps that scatter out and every real edit in.
+DISTINCT_AREA_THRESHOLD = 2 * UNCHANGED_THRESHOLD
 #: How finely a mask of another size is sampled per source pixel, so a
 #: selection that covers part of a pixel still counts that pixel.
 MASK_SAMPLES = 4
@@ -91,7 +100,9 @@ class ImageDifference:
     #: How many separate areas of the picture changed, counted by compare_edit
     #: from its own grid. A reader that knows how many things were reported
     #: changed can tell "everything that moved was named" from "something else
-    #: moved too"; an aggregate difference cannot say that.
+    #: moved too"; an aggregate difference cannot say that. An area counts only
+    #: when some part of it passes DISTINCT_AREA_THRESHOLD, so a picture can be
+    #: `changed` by faint scatter alone and still hold no area of change.
     changed_regions: int | None = None
     #: Where each of those areas sits. Counting told a reader that something
     #: unnamed moved; this says where to look, which is what lets a reader ask
@@ -215,7 +226,11 @@ def _changed_areas(
 
     Each area is returned as the box enclosing its parts, in fractions of the
     picture, ordered from the top left so that two runs over the same picture
-    describe its areas in the same order.
+    describe its areas in the same order. An area whose strongest part stays
+    under DISTINCT_AREA_THRESHOLD is left out: that is the scatter a redrawing
+    model leaves across a picture, not a thing that changed. Its parts still
+    trace the extent of an area that does count, so a real change keeps its
+    faint edges.
     """
 
     across, down = grid
@@ -245,6 +260,8 @@ def _changed_areas(
                         changed.remove(neighbour)
                         frontier.append(neighbour)
                         members.append(neighbour)
+        if max(parts[index] for index in members) <= DISTINCT_AREA_THRESHOLD:
+            continue
         rows = [index // across for index in members]
         columns = [index % across for index in members]
         areas.append(

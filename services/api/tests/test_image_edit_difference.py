@@ -8,6 +8,7 @@ import pytest
 from PIL import Image
 
 from local_lm.image_edit_difference import (
+    DISTINCT_AREA_THRESHOLD,
     UNCHANGED_THRESHOLD,
     ChangedArea,
     compare_edit,
@@ -316,6 +317,80 @@ def test_one_subject_spanning_many_parts_is_still_one_area() -> None:
     assert len(difference.changed_areas) == 1
     area = difference.changed_areas[0]
     assert area.right - area.left > area.bottom - area.top
+
+
+def _shifted(picture: Image.Image, box: tuple[int, int, int, int], amount: int) -> None:
+    """Brighten one box of a grey picture evenly, the way faint redraw scatter does."""
+
+    value = GREY[0] + amount
+    picture.paste((value, value, value), box)
+
+
+def test_faint_scatter_around_one_real_change_is_not_counted_as_more_changes() -> None:
+    """A model that redraws the picture leaves faint differences past the threshold.
+
+    Counted as areas, they made an edit that changed exactly one thing look as
+    if it had changed several, and the review could not tell what was asked for
+    from what was not.
+    """
+
+    source = _solid(GREY)
+    result = source.copy()
+    result.paste(RED, (96, 96, 160, 160))
+    for box in ((0, 0, 8, 8), (248, 40, 256, 48), (16, 232, 24, 240)):
+        _shifted(result, box, 3)
+
+    difference = compare_edit(_encode(source), _encode(result))
+
+    assert difference.changed
+    assert difference.largest_local_difference is not None
+    assert difference.largest_local_difference > 100
+    assert difference.changed_regions == 1
+    assert difference.changed_areas is not None
+    (area,) = difference.changed_areas
+    assert (area.left, area.top, area.right, area.bottom) == (0.375, 0.375, 0.625, 0.625)
+
+
+def test_faint_scatter_alone_changes_the_picture_but_makes_no_area() -> None:
+    source = _solid(GREY)
+    result = source.copy()
+    _shifted(result, (0, 0, 8, 8), 3)
+    _shifted(result, (248, 248, 256, 256), 3)
+
+    difference = compare_edit(_encode(source), _encode(result))
+
+    # Past the unchanged threshold, so the picture is not called unchanged ...
+    assert difference.changed
+    # ... but nothing in it changed strongly enough to be a thing that changed.
+    assert difference.changed_regions == 0
+    assert difference.changed_areas == ()
+
+
+def test_a_real_change_keeps_its_faint_edges() -> None:
+    """The floor decides whether an area counts, not how far it reaches."""
+
+    source = _solid(GREY)
+    result = source.copy()
+    _shifted(result, (88, 88, 168, 168), 3)
+    result.paste(RED, (96, 96, 160, 160))
+
+    difference = compare_edit(_encode(source), _encode(result))
+
+    assert difference.changed_areas is not None
+    (area,) = difference.changed_areas
+    assert (area.left, area.top, area.right, area.bottom) == (0.34375, 0.34375, 0.65625, 0.65625)
+
+
+@pytest.mark.parametrize(("amount", "regions"), [(4, 0), (5, 1)])
+def test_an_area_counts_once_its_strongest_part_passes_the_floor(amount: int, regions: int) -> None:
+    source = _solid(GREY)
+    result = source.copy()
+    _shifted(result, (96, 96, 104, 104), amount)
+
+    difference = compare_edit(_encode(source), _encode(result))
+
+    assert DISTINCT_AREA_THRESHOLD == 4.0
+    assert difference.changed_regions == regions
 
 
 def test_a_crop_covers_its_area_and_a_margin_around_it() -> None:
