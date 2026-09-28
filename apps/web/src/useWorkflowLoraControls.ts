@@ -17,6 +17,7 @@ async function sha256Hex(text: string): Promise<string> {
 export function useWorkflowLoraControls(revisionId: string | null): {
   controls: WorkflowLoraControls | null;
   unavailable: boolean;
+  retry: () => void;
 } {
   const query = useQuery({
     queryKey: ["workflows", "lora-controls", revisionId],
@@ -32,5 +33,6 @@ export function useWorkflowLoraControls(revisionId: string | null): {
   return {
     controls: query.isSuccess ? query.data : null,
     unavailable: query.isError,
+    retry: () => { void query.refetch(); },
   };
 }
