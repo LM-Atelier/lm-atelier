@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
+import gc
 import os
 import socket
 import sys
@@ -28,6 +29,7 @@ from typing import Any, cast
 
 import pytest
 
+from local_lm import windows_listener
 from local_lm.windows_listener import belongs_to_the_connection, listener_preserving_loop
 
 windows_only = pytest.mark.skipif(
@@ -96,9 +98,17 @@ def test_the_network_name_error_the_standard_loop_dies_on_is_recognised() -> Non
     assert belongs_to_the_connection(OSError(errno.EACCES, "denied")) is False
 
 
-def _serving(loop: asyncio.AbstractEventLoop, accept: Any) -> tuple[bool, int]:
-    """Serve on `loop` with `accept` standing in, and report what survived.
+def _proactor_class() -> Any:
+    """The Windows proactor under test, which exists only on Windows."""
 
+    return windows_listener.ListenerPreservingProactor
+
+
+def _serving(loop: asyncio.AbstractEventLoop, accept: Any) -> tuple[bool, int]:
+    """Serve on `loop` with `accept` standing in for each single accept attempt.
+
+    It replaces the one attempt the retrying accept makes each time, so a
+    stand-in's failure reaches the retry exactly as a real completion's would.
     Returns whether the listening socket was still open at the end, and the port
     it listened on. Everything is bounded by a timeout, because the failure this
     guards against is a retry that never stops, and a test that hangs reports
@@ -131,12 +141,13 @@ def _serving(loop: asyncio.AbstractEventLoop, accept: Any) -> tuple[bool, int]:
             with contextlib.suppress(OSError, TimeoutError):
                 await asyncio.wait_for(server.wait_closed(), timeout=2)
 
-    original = asyncio.IocpProactor.accept
-    asyncio.IocpProactor.accept = accept  # type: ignore[method-assign]
+    proactor = _proactor_class()
+    original = proactor._accept_once
+    proactor._accept_once = accept
     try:
         return loop.run_until_complete(asyncio.wait_for(scenario(), timeout=30))
     finally:
-        asyncio.IocpProactor.accept = original  # type: ignore[method-assign]
+        proactor._accept_once = original
         loop.close()
 
 
@@ -149,7 +160,7 @@ def test_an_accept_that_fails_for_the_connection_leaves_the_listener_serving() -
     """One connection's error must cost the listener nothing."""
 
     attempts: list[int] = []
-    original = asyncio.IocpProactor.accept
+    original = _proactor_class()._accept_once
 
     def failing_once(self: Any, listener: Any) -> Any:
         attempts.append(1)
@@ -212,6 +223,73 @@ def test_a_retry_that_cannot_rearm_hands_its_error_to_the_caller() -> None:
 
     assert len(calls) == 2, "the re-arm has to have been attempted"
     assert not still_listening, "a re-arm that failed left the listener waiting"
+
+
+@windows_only
+def test_an_absorbed_reset_is_closed_and_reported_to_nobody() -> None:
+    """A reset the retry absorbs leaves no socket open and no stray report.
+
+    The standard accept prepares a socket and starts a helper that closes it
+    only on cancellation, raising any other failure where nothing awaits it.
+    Every reset the retry absorbs was then logged later as an exception never
+    retrieved, with a traceback, and its prepared socket stayed open until it
+    was collected. Here a real client connects and the completion fails where a
+    reset before the read makes it fail, in reading the peer's address, so the
+    accept, its completion and its helper are all the real ones.
+    """
+
+    class ResetBeforeRead(socket.socket):
+        def getpeername(self) -> Any:
+            raise _network_name_deleted()
+
+    loop = listener_preserving_loop()
+    proactor = cast(Any, loop)._proactor
+    reports: list[dict[str, Any]] = []
+    loop.set_exception_handler(lambda _loop, context: reports.append(context))
+    prepared: list[socket.socket] = []
+    prepare = proactor._get_accept_socket
+
+    def preparing(family: int) -> socket.socket:
+        # Held here until the end, so an unclosed socket stays visibly open
+        # rather than being closed when the collector happens to reach it.
+        connection = ResetBeforeRead(family) if not prepared else prepare(family)
+        connection.settimeout(0)
+        prepared.append(connection)
+        return connection
+
+    proactor._get_accept_socket = preparing
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    client = socket.socket()
+
+    async def scenario() -> None:
+        accepted = proactor.accept(listener)
+        client.connect(listener.getsockname())
+        for _ in range(50):
+            if len(prepared) == 2:
+                break
+            await asyncio.sleep(0.01)
+        accepted.cancel()
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+        # A task's unretrieved exception is reported when the task is collected.
+        gc.collect()
+        await asyncio.sleep(0)
+
+    try:
+        loop.run_until_complete(asyncio.wait_for(scenario(), timeout=10))
+    finally:
+        client.close()
+        listener.close()
+        loop.close()
+
+    assert len(prepared) == 2, "the reset has to have been absorbed and the accept re-armed"
+    assert [connection.fileno() for connection in prepared] == [-1, -1], "a socket was left open"
+    never_retrieved = [
+        report for report in reports if "never retrieved" in str(report.get("message"))
+    ]
+    assert not never_retrieved, "the absorbed reset was reported as an unretrieved exception"
 
 
 @windows_only

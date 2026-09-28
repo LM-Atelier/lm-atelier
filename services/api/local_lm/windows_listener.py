@@ -19,6 +19,13 @@ below is otherwise the standard proactor loop, and it is still a PROACTOR loop:
 the selector loop would fix this and cannot be used, because it does not support
 subprocesses on Windows and the engines are subprocesses.
 
+Each accept is also closed quietly when it fails. The standard accept starts a
+task whose only job is to close the socket it prepared if the accept is
+cancelled; on any other failure that task raises the error again where nothing
+awaits it, so every retried reset was later reported as an exception that was
+never retrieved, with a traceback, and the prepared socket stayed open until it
+was collected.
+
 The same loop closes connections the standard one can leave half-closed. When a
 connection ends, the standard transport shuts its socket down inside a finally,
 and if that raises, as WinError 10022 does once the peer has already gone, the
@@ -33,7 +40,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
+import importlib
 import socket
+import struct
 import sys
 from typing import Any
 
@@ -55,10 +64,50 @@ def belongs_to_the_connection(error: OSError) -> bool:
 
 
 if sys.platform == "win32":
-    from asyncio import proactor_events
+    from asyncio import proactor_events, windows_events
 
     class ListenerPreservingProactor(asyncio.IocpProactor):
         """Retry an accept whose completion failed for the connection."""
+
+        def _accept_once(self, listener: Any) -> Any:
+            """The standard accept, with its helper task closing a failed accept quietly.
+
+            The standard helper closes the prepared socket only when the accept
+            is cancelled, and raises any other failure again where nothing awaits
+            it. The caller learns of a failure from the returned future either
+            way, so here the helper closes the socket and ends.
+            """
+
+            # The standard accept's own internals, which the stubs do not declare.
+            proactor: Any = self
+            overlapped: Any = importlib.import_module("_overlapped")
+            proactor._register_with_iocp(listener)
+            connection = proactor._get_accept_socket(listener.family)
+            operation = overlapped.Overlapped(windows_events.NULL)
+            operation.AcceptEx(listener.fileno(), connection.fileno())
+
+            def finish_accept(transport: Any, key: Any, completed: Any) -> Any:
+                completed.getresult()
+                # SO_UPDATE_ACCEPT_CONTEXT, so getsockname() and the rest work.
+                handle = struct.pack("@P", listener.fileno())
+                connection.setsockopt(
+                    socket.SOL_SOCKET, overlapped.SO_UPDATE_ACCEPT_CONTEXT, handle
+                )
+                connection.settimeout(listener.gettimeout())
+                return connection, connection.getpeername()
+
+            async def close_unless_accepted(future: Any) -> None:
+                try:
+                    await future
+                except asyncio.CancelledError:
+                    connection.close()
+                    raise
+                except OSError:
+                    connection.close()
+
+            future = proactor._register(operation, listener, finish_accept)
+            asyncio.ensure_future(close_unless_accepted(future), loop=proactor._loop)
+            return future
 
         def accept(self, listener: Any) -> Any:
             # The serving loop schedules its accept through call_soon, so this
@@ -71,7 +120,7 @@ if sys.platform == "win32":
             def attempt() -> None:
                 if outer.cancelled():
                     return
-                inner = asyncio.IocpProactor.accept(self, listener)
+                inner = self._accept_once(listener)
                 inner_holder[0] = inner
                 inner.add_done_callback(settled)
 
