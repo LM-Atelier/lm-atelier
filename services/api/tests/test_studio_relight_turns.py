@@ -436,7 +436,7 @@ async def test_an_automatic_retry_keeps_the_relight_and_the_selection_apart() ->
         (Job, image_edit_verification_job_id(source_run.id)): SimpleNamespace(status="running"),
         (Message, assistant.id): assistant,
         (WorkflowRevision, "workflow-revision"): SimpleNamespace(
-            input_schema_json={"type": "object"}
+            api_graph_json={}, input_schema_json={"type": "object"}, dependencies_json={}
         ),
         (ModelProfile, "profile-image"): SimpleNamespace(engine="comfyui"),
     }

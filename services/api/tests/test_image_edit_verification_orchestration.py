@@ -625,7 +625,9 @@ async def test_automatic_retry_reuses_source_turn_as_a_response_revision() -> No
         },
     )
     retry_run = SimpleNamespace(id="run-retry", work_plan_id="plan-retry", provenance_json={})
-    workflow_revision = SimpleNamespace(input_schema_json={"type": "object"})
+    workflow_revision = SimpleNamespace(
+        api_graph_json={}, input_schema_json={"type": "object"}, dependencies_json={}
+    )
     profile = SimpleNamespace(engine="comfyui")
     accepted_run = SimpleNamespace(
         id=retry_run.id,

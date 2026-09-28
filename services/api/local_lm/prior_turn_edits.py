@@ -10,14 +10,19 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from .accepted_turn_context import AcceptedContext, accepted_context, capture_image_edit_strength
+from .accepted_turn_context import (
+    AcceptedContext,
+    accepted_context,
+    capture_image_edit_strength,
+    settings_workflow,
+)
+from .auxiliary_assets import revision_accepts_added_loras
 from .domain import MessageRole, Operation, RoutingMode
 from .models import (
     Artifact,
     Message,
     ModelProfile,
     Run,
-    WorkflowRevision,
     WorkPlan,
     WorkStep,
     WorkStepDependency,
@@ -103,7 +108,9 @@ def _edit_result(
 
 def _configuration(
     session: Session, prior: Run, snapshot: AcceptedContext | None
-) -> tuple[PriorTurnEditConfiguration, str | None]:
+) -> tuple[PriorTurnEditConfiguration, str | None, bool]:
+    """A turn's configuration, its engine, and whether its workflow takes a LoRA stack."""
+
     operation = Operation(snapshot.operation if snapshot is not None else prior.operation)
     role = (
         "chat"
@@ -115,16 +122,10 @@ def _configuration(
     revision_id = (
         snapshot.workflow_revision_id if snapshot is not None else prior.workflow_revision_id
     )
-    revision = session.get(WorkflowRevision, revision_id) if revision_id else None
+    workflow = settings_workflow(session, prior, snapshot)
     profile_id = snapshot.profile_id if snapshot is not None else prior.profile_id
     profile = session.get(ModelProfile, profile_id) if profile_id else None
-    input_schema = (
-        copy.deepcopy(snapshot.workflow.input_schema_json)
-        if snapshot and snapshot.workflow
-        else copy.deepcopy(revision.input_schema_json)
-        if revision
-        else None
-    )
+    input_schema = copy.deepcopy(workflow.input_schema_json) if workflow is not None else None
     resolved_settings = copy.deepcopy(
         snapshot.settings if snapshot is not None else prior.settings_json
     )
@@ -140,46 +141,50 @@ def _configuration(
     )
     selection = copy.deepcopy(prior.provenance_json.get("model_selection") or {})
     output = prior.provenance_json.get("media_output") or {}
-    return PriorTurnEditConfiguration(
-        image_edit_strength=(
-            snapshot.image_edit_strength
-            if snapshot is not None and "image_edit_strength" in snapshot.model_fields_set
-            else capture_image_edit_strength(prior)
-        ),
-        operation=operation.value,
-        profile_engine=engine,
-        settings=copy.deepcopy(resolved_settings),
-        resolved_settings=resolved_settings,
-        settings_role=role,
-        output_count=output.get("count", 1),
-        profile_id=profile_id,
-        vision_profile_id=snapshot.vision_profile_id
-        if snapshot is not None
-        else prior.vision_profile_id,
-        preset_id=preset.get("id") if isinstance(preset, dict) else None,
-        preset=preset if isinstance(preset, dict) else None,
-        model_selection=selection,
-        workflow_selection=WorkflowSelectionOut(
-            selector_capability="chat"
-            if role == "chat"
-            else "image"
-            if role == "image"
-            else "video",
-            mode="revision" if revision_id else "legacy",
-            workflow_family_id=selection.get("workflow_family_id"),
+    return (
+        PriorTurnEditConfiguration(
+            image_edit_strength=(
+                snapshot.image_edit_strength
+                if snapshot is not None and "image_edit_strength" in snapshot.model_fields_set
+                else capture_image_edit_strength(prior)
+            ),
+            operation=operation.value,
+            profile_engine=engine,
+            settings=copy.deepcopy(resolved_settings),
+            resolved_settings=resolved_settings,
+            settings_role=role,
+            output_count=output.get("count", 1),
+            profile_id=profile_id,
+            vision_profile_id=snapshot.vision_profile_id
+            if snapshot is not None
+            else prior.vision_profile_id,
+            preset_id=preset.get("id") if isinstance(preset, dict) else None,
+            preset=preset if isinstance(preset, dict) else None,
+            model_selection=selection,
+            workflow_selection=WorkflowSelectionOut(
+                selector_capability="chat"
+                if role == "chat"
+                else "image"
+                if role == "image"
+                else "video",
+                mode="revision" if revision_id else "legacy",
+                workflow_family_id=selection.get("workflow_family_id"),
+                workflow_revision_id=revision_id,
+                legacy_profile_id=profile_id,
+            ),
             workflow_revision_id=revision_id,
-            legacy_profile_id=profile_id,
+            workflow_schema=input_schema,
+            profile_settings=copy.deepcopy(
+                {**snapshot.profile.load_settings_json, **snapshot.profile.request_settings_json}
+                if snapshot and snapshot.profile
+                else {**profile.load_settings_json, **profile.request_settings_json}
+                if profile
+                else {}
+            ),
         ),
-        workflow_revision_id=revision_id,
-        workflow_schema=input_schema,
-        profile_settings=copy.deepcopy(
-            {**snapshot.profile.load_settings_json, **snapshot.profile.request_settings_json}
-            if snapshot and snapshot.profile
-            else {**profile.load_settings_json, **profile.request_settings_json}
-            if profile
-            else {}
-        ),
-    ), engine
+        engine,
+        workflow is not None and revision_accepts_added_loras(workflow),
+    )
 
 
 def _source_view(
@@ -187,7 +192,7 @@ def _source_view(
     session: Session,
     message_id: str,
     source_run_id: str | None = None,
-) -> tuple[PriorTurnEditSource, str | None]:
+) -> tuple[PriorTurnEditSource, str | None, bool]:
     source, prior = _source(session, message_id, source_run_id)
     snapshot = accepted_context(session, prior)
     operation = Operation(snapshot.operation if snapshot is not None else prior.operation)
@@ -207,7 +212,7 @@ def _source_view(
         if artifact is None:
             raise EditRequestConflict("A source input is no longer available.")
         artifacts.append(ArtifactOut.model_validate(artifact))
-    configuration, engine = _configuration(session, prior, snapshot)
+    configuration, engine, takes_added_loras = _configuration(session, prior, snapshot)
     work_plan = session.get(WorkPlan, prior.work_plan_id) if prior.work_plan_id else None
     summary = work_plan.summary_json if work_plan else {}
     recorded_mode = snapshot.routing_mode if snapshot is not None else None
@@ -229,7 +234,7 @@ def _source_view(
         for step, run in rows:
             if run is None or run.user_message_id != source.id:
                 raise EditRequestConflict("A source step is no longer available.")
-            selected, _ = _configuration(session, run, accepted_context(session, run))
+            selected, _, _ = _configuration(session, run, accepted_context(session, run))
             step_sources.append(
                 PriorTurnEditStepSource(
                     **selected.model_dump(),
@@ -328,7 +333,7 @@ def _source_view(
             "utf-8"
         )
     ).hexdigest()
-    return result, engine
+    return result, engine, takes_added_loras
 
 
 def classify_prior_turn_edit(
@@ -340,7 +345,7 @@ def classify_prior_turn_edit(
     text: str,
     mode: RoutingMode | None,
 ) -> bool:
-    source, _ = _source_view(
+    source, _, _ = _source_view(
         orchestrator, session, binding.source_message_id, binding.source_run_id
     )
     if source.chat_id != chat_id:
@@ -358,26 +363,32 @@ async def prior_turn_edit_source(
     message_id: str,
     source_run_id: str | None = None,
 ) -> PriorTurnEditSource:
-    result, engine = _source_view(orchestrator, session, message_id, source_run_id)
+    result, engine, takes_added_loras = _source_view(
+        orchestrator, session, message_id, source_run_id
+    )
     result.settings = await orchestrator.request_settings_for_operation(
         Operation(result.operation),
         result.resolved_settings,
         input_schema=result.workflow_schema,
         engine=engine,
+        accepts_added_loras=takes_added_loras,
     )
     for step in result.steps:
         run = session.get(Run, step.source_run_id)
         if run is None:
             raise EditRequestConflict("A source step is no longer available.")
-        _, step_engine = _configuration(session, run, accepted_context(session, run))
+        _, step_engine, step_takes_added_loras = _configuration(
+            session, run, accepted_context(session, run)
+        )
         step.settings = await orchestrator.request_settings_for_operation(
             Operation(step.operation),
             step.resolved_settings,
             input_schema=step.workflow_schema,
             engine=step_engine,
+            accepts_added_loras=step_takes_added_loras,
         )
     session.expire_all()
-    current, _ = _source_view(orchestrator, session, message_id, result.source_run_id)
+    current, _, _ = _source_view(orchestrator, session, message_id, result.source_run_id)
     if current.source_snapshot_sha256 != result.source_snapshot_sha256:
         raise EditRequestConflict("The source changed while loading. Reload the edited version.")
     return result
@@ -402,7 +413,7 @@ async def queue_prior_turn_edit(
             return _edit_result(
                 session, orchestrator._accepted_for_run(session, replay), fingerprint
             )
-        editor_source, _ = _source_view(orchestrator, session, message_id, prior.id)
+        editor_source, _, _ = _source_view(orchestrator, session, message_id, prior.id)
         source_digest = editor_source.source_snapshot_sha256
         if (
             payload.source_snapshot_sha256 is not None
@@ -474,24 +485,21 @@ async def queue_prior_turn_edit(
         if same_role and not workflow_override:
             values["workflow_revision_id"] = workflow_id
         if same_role and payload.preset_id is None:
-            revision = session.get(WorkflowRevision, workflow_id) if workflow_id else None
+            workflow = settings_workflow(session, prior, snapshot)
             profile_id = snapshot.profile_id if snapshot is not None else prior.profile_id
             profile = session.get(ModelProfile, profile_id) if profile_id else None
             values["settings"] = await orchestrator.request_settings_for_operation(
                 prior_operation,
                 settings,
-                input_schema=(
-                    snapshot.workflow.input_schema_json
-                    if snapshot and snapshot.workflow
-                    else revision.input_schema_json
-                    if revision
-                    else None
-                ),
+                input_schema=workflow.input_schema_json if workflow is not None else None,
                 engine=snapshot.profile.engine
                 if snapshot and snapshot.profile
                 else profile.engine
                 if profile
                 else None,
+                accepts_added_loras=(
+                    workflow is not None and revision_accepts_added_loras(workflow)
+                ),
             )
             values["settings"] = {**values["settings"], **payload.settings}
         if same_role and "output_count" not in payload.model_fields_set:
@@ -520,7 +528,7 @@ async def queue_prior_turn_edit(
             # This hook runs after all awaits, inside the acceptance transaction.
             transaction.flush()
             transaction.expire_all()
-            current, _ = _source_view(orchestrator, transaction, message_id, prior_id)
+            current, _, _ = _source_view(orchestrator, transaction, message_id, prior_id)
             if current.source_snapshot_sha256 != source_digest:
                 raise EditRequestConflict("The source changed. Reload it before queuing this edit.")
             runs = transaction.scalars(
