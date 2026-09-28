@@ -21,7 +21,7 @@ import { useComposerUploads, type ComposerAttachment } from "./useComposerUpload
 import { useDraftClassification } from "./useDraftClassification";
 import { drawerRoleView, roleForMode } from "./viewHelpers";
 import { useWorkflowRevisionSchema } from "./useWorkflowRevisionSchema";
-import { useWorkflowLoraControls } from "./useWorkflowLoraControls";
+import { useComposerLoraControls } from "./useComposerLoraControls";
 import { operationForTurn } from "./turnWorkflow";
 import { initialTurnEditorState, useTurnEditorState, type TurnEditorState } from "./useTurnEditorState";
 export type { TurnEditorState } from "./useTurnEditorState";
@@ -305,13 +305,7 @@ export function TurnEditor({
       ? operationForTurn(drawerMode, hasWorkflowAttachments) : null);
   const workflowSchema = workflowSchemaOverride !== undefined
     ? workflowSchemaOverride ?? undefined : workflowRead.schema;
-  // The fields built below decide which of the chosen settings survive to the
-  // request, and a key with no field behind it is dropped. A revision that
-  // takes added LoRAs without declaring a setting for them offers the control
-  // in the panel, so without the same answer here the stack a person picked
-  // would be thrown away on the way out.
-  const { controls: loraControls } = useWorkflowLoraControls(workflowRevisionId);
-  const acceptsAddedLoras = loraControls?.accepts_added_loras ?? false;
+  const { acceptsAddedLoras, canSend: canSendLoras, error: loraError } = useComposerLoraControls(workflowRevisionId);
   const drawerWorkflowSchema = workflowSchemaOverride !== undefined
     ? workflowSchemaOverride ?? undefined : drawerWorkflowRead.schema;
   const clearAcceptedDraft = () => {
@@ -330,12 +324,12 @@ export function TurnEditor({
     const selectedMode = currentMode();
     const role = roleForMode(selectedMode);
     const fields = resolveWorkflowSettings(resolveCapabilitySettings(engines.find((item) => item.roles.includes(role)), role), workflowSchema, acceptsAddedLoras);
+    const chosenSettings = { ...settings, ...templateSettings?.settings };
+    if (!onAccept && selectedMode !== "auto" && !canSendLoras(chosenSettings, fields)) return;
     const requestedOutputCount = mediaOutputCountForTurn(selectedMode, outputCount);
     const references = turnReferences(survivingMentions(text, state.mentions));
     const promptSource = promptSourceForTurn(draft, selectedMode, attachments.length, references.length, requestedOutputCount);
-    const selectedSettings = onAccept ? { ...settings, ...templateSettings?.settings } : selectedMode === "auto" ? {} : normalizeSettingsForFields(
-      templateSettings ? { ...settings, ...templateSettings.settings } : settings, fields,
-    );
+    const selectedSettings = onAccept ? chosenSettings : selectedMode === "auto" ? {} : normalizeSettingsForFields(chosenSettings, fields);
     if (!onAccept) {
       const dispatch = stopCurrent ? onStopAndSend : onSend;
       dispatch(text.trim(), selectedMode, attachments.map((item) => item.id), selectedSettings, references, requestedOutputCount, promptSource);
@@ -401,6 +395,7 @@ export function TurnEditor({
         {dropActive && <div className="drop-hint">Drop images or videos to attach</div>}
         {uploadError && <ErrorCallout message={uploadError} />}
         {acceptanceError && <ErrorCallout message={acceptanceError} />}
+        {loraError}
         {(workflowRead.error || drawerWorkflowRead.error) && <div>
           <ErrorCallout message="The selected workflow settings could not be loaded." />
           <button type="button" onClick={() => {
