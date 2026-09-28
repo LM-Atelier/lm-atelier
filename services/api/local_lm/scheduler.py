@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import secrets
 import time
@@ -12,9 +13,10 @@ from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import and_, false, func, or_, select, update
 from sqlalchemy.engine import CursorResult
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
-from .db import SessionLocal
+from .db import SessionLocal, database_is_contended
 from .domain import JobKind, JobStatus, MessageStatus, PartType, RunStatus, utcnow
 from .models import (
     Job,
@@ -49,6 +51,9 @@ _QUEUE_POLL_SECONDS = 0.2
 #: scan duration plus the residency and has no poll-interval bound at all.
 _ELIGIBILITY_SHARE_SECONDS = _QUEUE_POLL_SECONDS / 4
 _AGING_SECONDS = 30
+
+logger = logging.getLogger(__name__)
+
 _TERMINAL_STATUSES = {
     JobStatus.COMPLETE.value,
     JobStatus.FAILED.value,
@@ -88,6 +93,8 @@ class ResourceScheduler:
         self._locks: dict[str, asyncio.Semaphore] = resource_pool._locks if resource_pool else {}
         self._capacities: dict[str, int] = resource_pool._capacities if resource_pool else {}
         self._queue_events: dict[str, asyncio.Event] = {}
+        #: Groups already reported as waiting on a held database.
+        self._contended_groups: set[str] = set()
         self._eligibility: dict[str, tuple[float, tuple[str, ...]]] = {}
         self._owner = f"dispatcher_{secrets.token_hex(16)}"
         # Claims this dispatcher took whose release could not be written.
@@ -243,6 +250,22 @@ class ResourceScheduler:
         self._eligibility[group] = (time.monotonic(), ids)
         return ids
 
+    def _note_contended_queue(self, group: str) -> None:
+        """Say once per episode that the queue is waiting for the database.
+
+        Once, because the wait repeats every poll for as long as the writer is
+        held, and a line per poll would bury the reason it started. Not once per
+        process: the flag is dropped again by the first pass that gets through,
+        so a later sweep is reported as its own episode rather than passing in
+        silence. Saying nothing at all would leave a queue that is merely
+        waiting looking exactly like a queue that is stuck.
+        """
+
+        if group in self._contended_groups:
+            return
+        self._contended_groups.add(group)
+        logger.info("Queue %s is waiting for another writer to release the database", group)
+
     async def _acquire_job(
         self,
         job_id: str,
@@ -259,222 +282,241 @@ class ResourceScheduler:
                 await self._publish_job(expired_job_id)
             changed = False
             should_try_claim = False
-            with self.session_factory() as session:
-                job = session.get(Job, job_id)
-                if not job or job.status in _TERMINAL_STATUSES:
-                    raise asyncio.CancelledError
-                now = utcnow()
-                if not job.enqueued_at:
-                    job.enqueued_at = now
-                job.queue_resource = resource
-                job.queue_group = group
-                job.queue_priority = priority
-                job.queue_ticket = job.queue_ticket or job.id
+            try:
+                with self.session_factory() as session:
+                    job = session.get(Job, job_id)
+                    if not job or job.status in _TERMINAL_STATUSES:
+                        raise asyncio.CancelledError
+                    now = utcnow()
+                    if not job.enqueued_at:
+                        job.enqueued_at = now
+                    job.queue_resource = resource
+                    job.queue_group = group
+                    job.queue_priority = priority
+                    job.queue_ticket = job.queue_ticket or job.id
 
-                candidates = self._eligible_job_ids(session, group, now)
-                position = next(
-                    (index for index, candidate in enumerate(candidates) if candidate == job.id),
-                    None,
-                )
-                control = job_controls(session, [job.id])[job.id]
-                dispatches = queue_dispatches(session)
-                lane = lane_for_kind(job.kind)
-                if lane is not None and not dispatches[lane].open:
-                    position = None
-                    update_job_progress(
-                        job,
-                        stage=f"{lane} paused",
-                        queue_resource=resource,
-                        queue_position=None,
-                        queue_length=len(candidates),
-                        indeterminate=True,
-                        now=now,
-                    )
-                elif position is None and (not control.valid or control.state == "held"):
-                    update_job_progress(
-                        job,
-                        stage="held" if control.state == "held" else "waiting for queue state",
-                        queue_resource=resource,
-                        queue_position=None,
-                        queue_length=len(candidates),
-                        indeterminate=True,
-                        now=now,
-                    )
-                elif position is None:
-                    failed_dependencies = self._failed_dependencies(
-                        session,
-                        job.work_step_id,
-                    )
-                    blocked_by = self._blocking_steps(session, job.work_step_id)
-                    step = session.get(WorkStep, job.work_step_id) if job.work_step_id else None
-                    plan = session.get(WorkPlan, job.work_plan_id) if job.work_plan_id else None
-                    if step:
-                        step.status = (
-                            BLOCKED_WORK_STATUS if failed_dependencies else JobStatus.QUEUED.value
-                        )
-                        step.error = (
-                            "Blocked by unsuccessful required work."
-                            if failed_dependencies
-                            else None
-                        )
-                    if plan:
-                        session.flush()
-                        refresh_plan_status(session, plan.id)
-                        plan.summary_json = {
-                            **plan.summary_json,
-                            "status_counts": plan_status_summary(session, plan.id),
-                        }
-                    update_job_progress(
-                        job,
-                        stage=(
-                            "blocked by unsuccessful dependency"
-                            if failed_dependencies
-                            else "waiting for dependencies"
+                    candidates = self._eligible_job_ids(session, group, now)
+                    position = next(
+                        (
+                            index
+                            for index, candidate in enumerate(candidates)
+                            if candidate == job.id
                         ),
-                        queue_resource=resource,
-                        queue_position=None,
-                        queue_length=len(candidates),
-                        blocked_by=blocked_by,
-                        indeterminate=True,
-                        now=now,
+                        None,
                     )
-                else:
-                    step = session.get(WorkStep, job.work_step_id) if job.work_step_id else None
-                    if step and step.status == BLOCKED_WORK_STATUS:
-                        step.status = JobStatus.QUEUED.value
-                        step.error = None
-                        if job.work_plan_id:
+                    control = job_controls(session, [job.id])[job.id]
+                    dispatches = queue_dispatches(session)
+                    lane = lane_for_kind(job.kind)
+                    if lane is not None and not dispatches[lane].open:
+                        position = None
+                        update_job_progress(
+                            job,
+                            stage=f"{lane} paused",
+                            queue_resource=resource,
+                            queue_position=None,
+                            queue_length=len(candidates),
+                            indeterminate=True,
+                            now=now,
+                        )
+                    elif position is None and (not control.valid or control.state == "held"):
+                        update_job_progress(
+                            job,
+                            stage="held" if control.state == "held" else "waiting for queue state",
+                            queue_resource=resource,
+                            queue_position=None,
+                            queue_length=len(candidates),
+                            indeterminate=True,
+                            now=now,
+                        )
+                    elif position is None:
+                        failed_dependencies = self._failed_dependencies(
+                            session,
+                            job.work_step_id,
+                        )
+                        blocked_by = self._blocking_steps(session, job.work_step_id)
+                        step = session.get(WorkStep, job.work_step_id) if job.work_step_id else None
+                        plan = session.get(WorkPlan, job.work_plan_id) if job.work_plan_id else None
+                        if step:
+                            step.status = (
+                                BLOCKED_WORK_STATUS
+                                if failed_dependencies
+                                else JobStatus.QUEUED.value
+                            )
+                            step.error = (
+                                "Blocked by unsuccessful required work."
+                                if failed_dependencies
+                                else None
+                            )
+                        if plan:
                             session.flush()
-                            refresh_plan_status(session, job.work_plan_id)
-                            plan = session.get(WorkPlan, job.work_plan_id)
-                            if plan:
-                                plan.summary_json = {
-                                    **plan.summary_json,
-                                    "status_counts": plan_status_summary(session, plan.id),
-                                }
-                    update_job_progress(
-                        job,
-                        stage="queued",
-                        queue_resource=resource,
-                        queue_position=position,
-                        queue_length=len(candidates),
-                        indeterminate=True,
-                        now=now,
-                    )
-                session.commit()
-                changed = True
-
-                active_claims = (
-                    session.scalar(
-                        select(func.count(Job.id)).where(
-                            Job.queue_group == group,
-                            Job.status == JobStatus.RUNNING.value,
-                            Job.claim_owner.is_not(None),
-                        )
-                    )
-                    or 0
-                )
-                should_try_claim = position is not None and position < max(
-                    0, capacity - active_claims
-                )
-
-            if should_try_claim:
-                # A compute slot can remain occupied for minutes. Never keep a
-                # SQLite session (and its read transaction) open while waiting.
-                await local_lock.acquire()
-                claimed = False
-                claimed_attempt = 0
-                try:
-                    with self.session_factory() as session:
-                        current = session.get(Job, job_id)
-                        control_snapshot = job_controls(session, [job_id]).get(job_id)
-                        dispatch_snapshots = queue_dispatches(session)
-                        claimed_at = utcnow()
-                        # Fresh, never shared: this decides whether the job
-                        # STARTS. The final update also compares the control
-                        # revision captured before ranking, including Hold/Release.
-                        candidates = self._fresh_eligible_job_ids(session, group, claimed_at)
-                        position = next(
-                            (
-                                index
-                                for index, candidate in enumerate(candidates)
-                                if current and candidate == current.id
+                            refresh_plan_status(session, plan.id)
+                            plan.summary_json = {
+                                **plan.summary_json,
+                                "status_counts": plan_status_summary(session, plan.id),
+                            }
+                        update_job_progress(
+                            job,
+                            stage=(
+                                "blocked by unsuccessful dependency"
+                                if failed_dependencies
+                                else "waiting for dependencies"
                             ),
-                            None,
+                            queue_resource=resource,
+                            queue_position=None,
+                            queue_length=len(candidates),
+                            blocked_by=blocked_by,
+                            indeterminate=True,
+                            now=now,
                         )
-                        active_claims = (
-                            session.scalar(
-                                select(func.count(Job.id)).where(
-                                    Job.queue_group == group,
-                                    Job.status == JobStatus.RUNNING.value,
-                                    Job.claim_owner.is_not(None),
-                                )
-                            )
-                            or 0
+                    else:
+                        step = session.get(WorkStep, job.work_step_id) if job.work_step_id else None
+                        if step and step.status == BLOCKED_WORK_STATUS:
+                            step.status = JobStatus.QUEUED.value
+                            step.error = None
+                            if job.work_plan_id:
+                                session.flush()
+                                refresh_plan_status(session, job.work_plan_id)
+                                plan = session.get(WorkPlan, job.work_plan_id)
+                                if plan:
+                                    plan.summary_json = {
+                                        **plan.summary_json,
+                                        "status_counts": plan_status_summary(session, plan.id),
+                                    }
+                        update_job_progress(
+                            job,
+                            stage="queued",
+                            queue_resource=resource,
+                            queue_position=position,
+                            queue_length=len(candidates),
+                            indeterminate=True,
+                            now=now,
                         )
-                        if (
-                            position is not None
-                            and position < max(0, capacity - active_claims)
-                            and control_snapshot is not None
-                        ):
-                            result = cast(
-                                CursorResult[Any],
-                                session.execute(
-                                    update(Job)
-                                    .where(
-                                        Job.id == job_id,
-                                        Job.status == JobStatus.QUEUED.value,
-                                        Job.claim_owner.is_(None),
-                                        claim_control_predicate(control_snapshot),
-                                        *[
-                                            lane_claim_predicate(snapshot)
-                                            for snapshot in dispatch_snapshots.values()
-                                        ],
-                                    )
-                                    .values(
-                                        status=JobStatus.RUNNING.value,
-                                        claim_owner=token,
-                                        claim_expires_at=claimed_at
-                                        + timedelta(seconds=_CLAIM_SECONDS),
-                                        heartbeat_at=claimed_at,
-                                        started_at=claimed_at,
-                                        attempt=Job.attempt + 1,
-                                    )
-                                    .execution_options(synchronize_session="fetch")
-                                ),
-                            )
-                            if result.rowcount == 1:
-                                claimed_job = session.get(Job, job_id)
-                                if claimed_job:
-                                    # The ORM-enabled UPDATE synchronizes the
-                                    # identity map using the returned row, so the
-                                    # cached row already shows the incremented
-                                    # attempt; a refresh here would re-read
-                                    # what the session already holds.
-                                    claimed_attempt = claimed_job.attempt
-                                    update_job_progress(
-                                        claimed_job,
-                                        stage="starting",
-                                        queue_resource=resource,
-                                        queue_position=0,
-                                        queue_length=len(candidates),
-                                        indeterminate=True,
-                                        now=claimed_at,
-                                    )
-                                session.commit()
-                                claimed = True
-                                self._invalidate_eligibility(group)
-                            else:
-                                session.rollback()
-                finally:
-                    if not claimed:
-                        local_lock.release()
-                if claimed:
-                    await self._publish_job(job_id)
-                    return JobClaim(token=token, attempt=claimed_attempt)
+                    session.commit()
+                    changed = True
 
-            if changed:
-                await self._publish_job(job_id)
+                    active_claims = (
+                        session.scalar(
+                            select(func.count(Job.id)).where(
+                                Job.queue_group == group,
+                                Job.status == JobStatus.RUNNING.value,
+                                Job.claim_owner.is_not(None),
+                            )
+                        )
+                        or 0
+                    )
+                    should_try_claim = position is not None and position < max(
+                        0, capacity - active_claims
+                    )
+
+                if should_try_claim:
+                    # A compute slot can remain occupied for minutes. Never keep a
+                    # SQLite session (and its read transaction) open while waiting.
+                    await local_lock.acquire()
+                    claimed = False
+                    claimed_attempt = 0
+                    try:
+                        with self.session_factory() as session:
+                            current = session.get(Job, job_id)
+                            control_snapshot = job_controls(session, [job_id]).get(job_id)
+                            dispatch_snapshots = queue_dispatches(session)
+                            claimed_at = utcnow()
+                            # Fresh, never shared: this decides whether the job
+                            # STARTS. The final update also compares the control
+                            # revision captured before ranking, including Hold/Release.
+                            candidates = self._fresh_eligible_job_ids(session, group, claimed_at)
+                            position = next(
+                                (
+                                    index
+                                    for index, candidate in enumerate(candidates)
+                                    if current and candidate == current.id
+                                ),
+                                None,
+                            )
+                            active_claims = (
+                                session.scalar(
+                                    select(func.count(Job.id)).where(
+                                        Job.queue_group == group,
+                                        Job.status == JobStatus.RUNNING.value,
+                                        Job.claim_owner.is_not(None),
+                                    )
+                                )
+                                or 0
+                            )
+                            if (
+                                position is not None
+                                and position < max(0, capacity - active_claims)
+                                and control_snapshot is not None
+                            ):
+                                result = cast(
+                                    CursorResult[Any],
+                                    session.execute(
+                                        update(Job)
+                                        .where(
+                                            Job.id == job_id,
+                                            Job.status == JobStatus.QUEUED.value,
+                                            Job.claim_owner.is_(None),
+                                            claim_control_predicate(control_snapshot),
+                                            *[
+                                                lane_claim_predicate(snapshot)
+                                                for snapshot in dispatch_snapshots.values()
+                                            ],
+                                        )
+                                        .values(
+                                            status=JobStatus.RUNNING.value,
+                                            claim_owner=token,
+                                            claim_expires_at=claimed_at
+                                            + timedelta(seconds=_CLAIM_SECONDS),
+                                            heartbeat_at=claimed_at,
+                                            started_at=claimed_at,
+                                            attempt=Job.attempt + 1,
+                                        )
+                                        .execution_options(synchronize_session="fetch")
+                                    ),
+                                )
+                                if result.rowcount == 1:
+                                    claimed_job = session.get(Job, job_id)
+                                    if claimed_job:
+                                        # The ORM-enabled UPDATE synchronizes the
+                                        # identity map using the returned row, so the
+                                        # cached row already shows the incremented
+                                        # attempt; a refresh here would re-read
+                                        # what the session already holds.
+                                        claimed_attempt = claimed_job.attempt
+                                        update_job_progress(
+                                            claimed_job,
+                                            stage="starting",
+                                            queue_resource=resource,
+                                            queue_position=0,
+                                            queue_length=len(candidates),
+                                            indeterminate=True,
+                                            now=claimed_at,
+                                        )
+                                    session.commit()
+                                    claimed = True
+                                    self._invalidate_eligibility(group)
+                                else:
+                                    session.rollback()
+                    finally:
+                        if not claimed:
+                            local_lock.release()
+                    if claimed:
+                        await self._publish_job(job_id)
+                        return JobClaim(token=token, attempt=claimed_attempt)
+            except OperationalError as error:
+                if not database_is_contended(error):
+                    raise
+                # Another writer held the database past the busy timeout:
+                # the startup retention sweep does exactly this, batch after
+                # batch. For a job that is only waiting its turn that is a
+                # reason to wait longer, not a reason to fail, and this loop
+                # already knows how to wait. Nothing above was committed, so
+                # the next pass reads the queue again rather than trusting
+                # anything measured against a transaction that rolled back.
+                self._note_contended_queue(group)
+            else:
+                self._contended_groups.discard(group)
+                if changed:
+                    await self._publish_job(job_id)
             event = self._queue_event(group)
             event.clear()
             with suppress(TimeoutError):
