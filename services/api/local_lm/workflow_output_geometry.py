@@ -23,6 +23,8 @@ from .output_geometry import (
 )
 from .settings_registry import IMAGE_SETTINGS, VIDEO_SETTINGS, workflow_settings
 from .video_length import VIDEO_LENGTH_SCHEMA_KEY
+from .workflow_graph_settings import generated_workflow_setting_paths
+from .workflow_graph_settings_v1 import GRAPH_SETTINGS_SCHEMA_KEY
 
 WORKFLOW_OUTPUT_GEOMETRY_VERSION: Literal[1] = 1
 WORKFLOW_OUTPUT_GEOMETRY_UNAVAILABLE = "unsupported_workflow_geometry"
@@ -381,6 +383,7 @@ def _prove(**values: object) -> WorkflowOutputGeometryProof:
     )
     if calculated != artifact_sha256:
         _refuse()
+    generated_workflow_setting_paths(input_schema, api_graph)
 
     video_chain: H3VideoOutputChain | None = None
     if operation == "text_to_image":
@@ -494,11 +497,12 @@ def _schema_capability(
     # Anything at the top level that is not understood can narrow width or height
     # without changing their own bounds - a composition, or a whole-object const
     # or enum - so the advertised range would stop being a subset of what the
-    # workflow accepts. A video's length contract is the one addition: it names
-    # the frame and rate inputs and constrains nothing about the frame size, and
-    # its contents are still validated when the settings are read below.
-    understood = _UNDERSTOOD_SCHEMA_KEYWORDS | (
-        {VIDEO_LENGTH_SCHEMA_KEY} if mode == "video" else set()
+    # workflow accepts. Generated settings have already been checked against the
+    # graph. A video's length contract is validated when its settings are read.
+    understood = (
+        _UNDERSTOOD_SCHEMA_KEYWORDS
+        | ({VIDEO_LENGTH_SCHEMA_KEY} if mode == "video" else set())
+        | {GRAPH_SETTINGS_SCHEMA_KEY}
     )
     if set(schema) - understood - _HARMLESS_ANNOTATION_KEYWORDS:
         _refuse()

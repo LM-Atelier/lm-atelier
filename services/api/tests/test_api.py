@@ -4579,7 +4579,13 @@ async def test_workflow_vram_requirement_uses_device_capacity(
 async def test_workflow_validation_requires_trust_and_active_model_dependencies(
     client: AsyncClient,
     tmp_path: Path,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    async def object_info() -> dict[str, Any]:
+        return {"SaveImage": {"input": {}, "output": [], "output_node": True}}
+
+    monkeypatch.setattr(app.state.services.engines.media, "object_info", object_info, raising=False)
     inactive_path = tmp_path / "inactive-model.safetensors"
     inactive_path.write_bytes(b"inactive")
     with SessionLocal() as session:
@@ -4661,12 +4667,19 @@ async def test_project_pins_an_immutable_media_workflow_revision(client: AsyncCl
 
 async def test_a_project_pin_that_cannot_run_is_named_rather_than_replaced(
     client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A pin is a lockfile, so a broken one is reported, not quietly swapped.
 
     Falling through to generic selection would produce output from a different
     graph than the project pinned, and the pin would stay broken and unmentioned.
     """
+
+    async def object_info() -> dict[str, Any]:
+        return {"SaveImage": {"input": {}, "output": [], "output_node": True}}
+
+    monkeypatch.setattr(app.state.services.engines.media, "object_info", object_info, raising=False)
     # Trusted and well-formed, but built for an engine this install does not run.
     other_engine = (
         await client.post(

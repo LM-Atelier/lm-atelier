@@ -484,6 +484,7 @@ async def test_a_ready_draft_finalizes_in_place_and_retry_is_idempotent(
     assert current["input_schema_json"] == {
         "type": "object",
         "properties": {"input_image": {"type": "string"}},
+        "x-lm-atelier-graph-settings": {"version": 1, "bindings": []},
     }
     assert current["ui_graph_json"]["nodes"][0]["widgets_values"] == [
         "author-source.png",
@@ -614,6 +615,7 @@ async def test_a_source_operation_binds_the_chat_image_not_the_authors_file(
     assert revision["input_schema_json"] == {
         "type": "object",
         "properties": {"input_image": {"type": "string"}},
+        "x-lm-atelier-graph-settings": {"version": 1, "bindings": []},
     }
 
 

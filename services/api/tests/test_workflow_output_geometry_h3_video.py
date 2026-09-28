@@ -15,6 +15,7 @@ import copy
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
 from httpx2 import AsyncClient
 
 from local_lm.db import SessionLocal
@@ -346,7 +347,55 @@ def test_proofs_of_one_kind_are_not_carried_by_a_graph_of_the_other() -> None:
 # ---- through the application -------------------------------------------------------
 
 
-async def test_a_stored_h3_revision_reports_its_video_geometry(client: AsyncClient) -> None:
+async def test_a_stored_h3_revision_reports_its_video_geometry(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def object_info() -> dict[str, Any]:
+        return {
+            "CLIPLoader": {
+                "input": {"required": {"clip_name": ["STRING"]}},
+                "output": ["CLIP"],
+            },
+            "VAELoader": {
+                "input": {"required": {"vae_name": ["STRING"]}},
+                "output": ["VAE"],
+            },
+            "MiniMaxH3ImageToVideo": {
+                "input": {
+                    "required": {
+                        "clip": ["CLIP"],
+                        "vae": ["VAE"],
+                        "width": ["INT"],
+                        "height": ["INT"],
+                        "length": ["INT"],
+                    }
+                },
+                "output": ["CONDITIONING", "LATENT"],
+            },
+            "SamplerCustomAdvanced": {
+                "input": {"required": {"latent_image": ["LATENT"]}},
+                "output": ["LATENT"],
+            },
+            "VAEDecode": {
+                "input": {"required": {"samples": ["LATENT"], "vae": ["VAE"]}},
+                "output": ["IMAGE"],
+            },
+            "VAEDecodeAudio": {
+                "input": {"required": {"samples": ["LATENT"], "vae": ["VAE"]}},
+                "output": ["AUDIO"],
+            },
+            "CreateVideo": {
+                "input": {"required": {"images": ["IMAGE"], "audio": ["AUDIO"], "fps": ["INT"]}},
+                "output": ["VIDEO"],
+            },
+            "SaveVideo": {
+                "input": {"required": {"video": ["VIDEO"]}},
+                "output": [],
+                "output_node": True,
+            },
+        }
+
+    monkeypatch.setattr(app.state.services.engines.media, "object_info", object_info, raising=False)
     created = await client.post(
         "/api/workflows",
         json={

@@ -96,11 +96,21 @@ export function SettingControl({
     );
   }
   if (field.type === "enum") {
+    const allStrings = field.choices.every((choice) => typeof choice === "string");
+    const options = field.choices.map((choice, index) => ({
+      choice, value: allStrings ? String(choice) : String(index),
+    }));
+    const selected = options.find((option) => option.choice === (value ?? field.default));
     return (
       <label className="setting-row">
         <span><strong>{field.label}</strong>{field.help && <small>{field.help}</small>}</span>
-        <select value={String(value ?? "")} disabled={fixed} onChange={(event) => onChange(event.target.value)}>
-          {field.choices.map((choice) => <option key={String(choice)}>{String(choice)}</option>)}
+        <select value={selected?.value ?? ""} disabled={fixed} onChange={(event) => {
+          const option = options.find((option) => option.value === event.target.value);
+          if (option) onChange(option.choice);
+        }}>
+          {options.map((option) => (
+            <option key={option.value} value={option.value}>{String(option.choice)}</option>
+          ))}
         </select>
       </label>
     );

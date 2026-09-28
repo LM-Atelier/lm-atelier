@@ -35,6 +35,7 @@ from .workflow_completion_jobs import (
     running_workflow_completion_job,
     workflow_completion_job,
 )
+from .workflow_graph_settings import bind_compiled_workflow_settings
 from .workflow_offer_completion import (
     WorkflowOfferCompletionError,
     _accepted_results,
@@ -181,6 +182,12 @@ def _compile(source: AcceptedSource, info: dict[str, Any]) -> WorkflowRevisionCr
     payload = source.payload
     prepared = prepare_workflow_package_compilation(payload.ui_graph, info, payload.operation)
     compilation = compile_comfyui_ui_graph(prepared.ui_graph, prepared.object_info)
+    bound_settings = bind_compiled_workflow_settings(
+        compilation,
+        prepared.bind(compilation.api_graph),
+        prepared.input_schema,
+        operation=payload.operation,
+    )
     with SessionLocal() as session:
         offer = session.get(WorkflowInstallOffer, source.offer_id)
         if offer is None or _accepted_source(session, source.offer_id) != source:
@@ -189,8 +196,8 @@ def _compile(source: AcceptedSource, info: dict[str, Any]) -> WorkflowRevisionCr
         dependencies = compiled_workflow_source_dependencies(session, offer, saved, payload)
     return WorkflowRevisionCreate(
         ui_graph=payload.ui_graph,
-        api_graph=prepared.bind(compilation.api_graph),
-        input_schema=prepared.input_schema,
+        api_graph=bound_settings.api_graph,
+        input_schema=bound_settings.input_schema,
         dependencies=dependencies,
     )
 

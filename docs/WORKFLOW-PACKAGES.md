@@ -17,6 +17,31 @@ the app never loads. Opening the review changes nothing; installation starts
 only when you choose **Install and enable** for a pinned package or approve
 the model files it needs.
 
+## Settings from the graph
+
+When a workflow is created or imported, LM Atelier maps supported graph controls
+to generation settings using the media runtime's node definitions. Saved values
+become defaults, and controls retain the node's supported ranges and choices.
+The application also applies its own limits; a saved value outside those limits
+must be changed explicitly rather than silently replaced during import.
+
+This includes size controls, sampling controls and supported video controls. A
+workflow that uses an aspect-ratio choice, a megapixel budget and a rounding
+multiple keeps those controls instead of gaining unrelated width and height
+fields. Separate stages keep separate settings. Existing explicit input bindings
+and the dedicated LoRA controls retain their own behavior.
+
+Connections inside the graph are preserved. A value supplied by another node,
+fixed by a primitive node or disconnected from the output is shown with an
+explanation instead of an ineffective control. A dynamic choice that changes a
+node's inputs must be changed in the native editor.
+
+The media worker must be available when mapping a new workflow or changed graph.
+This applies to both visual workflows and API-only graphs. An unchanged workflow
+with saved mappings can be exported, imported or cloned while the worker is
+offline. Saving a changed graph derives its mappings again, so controls do not
+keep references to a previous revision.
+
 ## Preparing an exact version
 
 When a needed package is not installed and pins exactly one version, the

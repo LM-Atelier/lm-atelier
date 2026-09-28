@@ -19,6 +19,7 @@ from test_workflow_source_completion import source_runtime as source_runtime
 
 from local_lm import models
 from local_lm.comfy_registry_lifecycle import ComfyRegistryPreparation
+from local_lm.comfy_workflow_compiler import compile_comfyui_ui_graph
 from local_lm.config import Settings
 from local_lm.db import SessionLocal
 from local_lm.main import create_app
@@ -100,9 +101,13 @@ async def test_startup_reports_changed_installation_and_keeps_stopped_work_inert
         job.status = status
         session.commit()
     if change == "revision":
+        graph = _ui_graph()
         changed = await client.post(
             f"/api/workflows/{workflow_id}/revisions",
-            json={"api_graph": {}, "ui_graph": _ui_graph()},
+            json={
+                "api_graph": compile_comfyui_ui_graph(graph, source_runtime).api_graph,
+                "ui_graph": graph,
+            },
         )
         assert changed.status_code == 201, changed.text
 

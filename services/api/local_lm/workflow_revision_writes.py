@@ -19,6 +19,7 @@ from .workflow_edit_calibration import (
     edit_calibration_reaches_graph,
     validate_workflow_edit_calibration,
 )
+from .workflow_graph_settings import generated_workflow_setting_paths
 from .workflow_ownership import ensure_workflow_family_ownership
 
 
@@ -32,6 +33,7 @@ def build_workflow_revision(
 ) -> WorkflowRevision:
     """Validate the same execution fields for previews and durable revision writes."""
 
+    generated_workflow_setting_paths(payload.input_schema, payload.api_graph)
     validate_lora_workflow_contract(payload.api_graph, payload.input_schema, payload.dependencies)
     validate_workflow_edit_calibration(payload.input_schema)
     validate_workflow_input_schema(payload.input_schema)

@@ -1,3 +1,7 @@
+from typing import Any
+
+import pytest
+from fastapi import FastAPI
 from httpx2 import AsyncClient
 
 from local_lm.db import SessionLocal
@@ -6,7 +10,13 @@ from local_lm.models import WorkflowDefinition
 
 async def test_workflow_responses_keep_the_family_identity_after_archiving(
     client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    async def object_info() -> dict[str, Any]:
+        return {}
+
+    monkeypatch.setattr(app.state.services.engines.media, "object_info", object_info, raising=False)
     created = await client.post(
         "/api/workflows",
         json={

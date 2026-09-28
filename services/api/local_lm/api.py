@@ -124,7 +124,10 @@ from .comfy_templates import (
     ComfyTemplate,
     ComfyTemplateRegistry,
 )
-from .comfy_workflow_compiler import WorkflowCompilationError, compile_comfyui_ui_graph
+from .comfy_workflow_compiler import (
+    WorkflowCompilationError,
+    compile_comfyui_ui_graph,
+)
 from .comfy_workflow_packages import (
     ComfyWorkflowPackageAnalysis,
     WorkflowPackageError,
@@ -697,6 +700,12 @@ from .workflow_editor_shell import (
     workflow_editor_shell_document,
 )
 from .workflow_family_dependencies import workflow_family_dependency_summaries
+from .workflow_graph_settings import (
+    bind_compiled_workflow_settings,
+    generated_workflow_setting_paths,
+    rebind_workflow_graph_settings,
+)
+from .workflow_graph_settings_v1 import GRAPH_SETTINGS_SCHEMA_KEY
 from .workflow_install_offers import (
     WorkflowInstallOfferError,
     bind_workflow_offer_downloads,
@@ -800,6 +809,7 @@ from .workflow_summary_reads import (
     load_workflow_detail,
     load_workflow_revision_schema,
 )
+from .workflow_supplied_settings import bind_api_workflow_settings, bind_supplied_workflow_settings
 from .workflow_trust import (
     TRUST_DERIVATION_VERSION,
     TrustDecision,
@@ -10052,8 +10062,73 @@ async def list_workflows(session: SessionDep) -> list[WorkflowDefinition]:
 
 
 @router.post("/workflows", response_model=WorkflowOut, status_code=201)
-async def create_workflow(payload: WorkflowCreate, session: SessionDep) -> WorkflowDefinition:
+async def create_workflow(
+    payload: WorkflowCreate, request: Request, session: SessionDep
+) -> WorkflowDefinition:
+    payload = await _map_workflow_write(payload, request, payload.operation, payload.engine)
     return await _persist_workflow(payload, session, trusted=False)
+
+
+async def _map_workflow_write[T: (WorkflowCreate, WorkflowRevisionCreate)](
+    payload: T,
+    request: Request,
+    operation: Operation | str,
+    engine: str,
+    *,
+    changed_native_graph: bool = False,
+) -> T:
+    if engine != "comfyui":
+        return payload
+    code = (
+        "workflow-revision-invalid"
+        if isinstance(payload, WorkflowRevisionCreate)
+        else "workflow-invalid"
+    )
+    try:
+        video_length_reaches_graph(payload.api_graph, payload.input_schema)
+        edit_calibration_reaches_graph(payload.api_graph, payload.input_schema)
+    except ValueError as exc:
+        raise api_error(422, code, str(exc)) from exc
+    if GRAPH_SETTINGS_SCHEMA_KEY in payload.input_schema:
+        try:
+            generated_workflow_setting_paths(payload.input_schema, payload.api_graph)
+        except WorkflowPackageInputError as exc:
+            raise api_error(422, code, str(exc)) from exc
+        if not changed_native_graph:
+            return payload
+    describe_nodes = getattr(_services(request).engines.media, "object_info", None)
+    if not callable(describe_nodes):
+        raise api_error(
+            503, "media-runtime-unavailable", "Start the media worker to map workflow settings"
+        )
+    try:
+        object_info = await describe_nodes()
+    except (httpx.HTTPError, OSError, RuntimeError, ValueError) as exc:
+        raise api_error(
+            503, "media-runtime-unavailable", "Start the media worker to map workflow settings"
+        ) from exc
+    if not isinstance(object_info, Mapping):
+        raise api_error(
+            503, "media-runtime-unavailable", "The media runtime returned an invalid node inventory"
+        )
+    try:
+        if payload.ui_graph:
+            prepared = prepare_workflow_revision_compilation(
+                payload.ui_graph, object_info, operation, payload.api_graph, payload.input_schema
+            )
+            compilation = compile_comfyui_ui_graph(prepared.ui_graph, prepared.object_info)
+            bound = bind_supplied_workflow_settings(
+                compilation, payload.api_graph, payload.input_schema, operation=operation
+            )
+        else:
+            bound = bind_api_workflow_settings(
+                payload.api_graph, object_info, payload.input_schema, operation=operation
+            )
+    except (WorkflowCompilationError, WorkflowPackageError, WorkflowPackageInputError) as exc:
+        raise api_error(422, code, str(exc)) from exc
+    return payload.model_copy(
+        update={"api_graph": bound.api_graph, "input_schema": bound.input_schema}
+    )
 
 
 async def _persist_workflow(
@@ -10089,6 +10164,7 @@ def _persist_workflow_sync(
     payload: WorkflowCreate, session: Session, *, trusted: bool
 ) -> WorkflowDefinition:
     try:
+        generated_workflow_setting_paths(payload.input_schema, payload.api_graph)
         validate_lora_workflow_contract(
             payload.api_graph,
             payload.input_schema,
@@ -10435,7 +10511,14 @@ async def start_workflow_editor_session(
             prepared.ui_graph,
             prepared.object_info,
         )
-        compiled_api_graph = prepared.bind(compilation.api_graph)
+        bound_settings = rebind_workflow_graph_settings(
+            compilation,
+            prepared.bind(compilation.api_graph),
+            revision.api_graph_json,
+            revision.input_schema_json,
+            operation=definition.operation,
+        )
+        compiled_api_graph = bound_settings.api_graph
         compiled_sha256 = workflow_api_graph_sha256(compiled_api_graph)
         stored_sha256 = workflow_api_graph_sha256(revision.api_graph_json)
     except (
@@ -10456,7 +10539,10 @@ async def start_workflow_editor_session(
             "This workflow cannot be opened for verified native editing.",
             reason_code=exc.code,
         ) from exc
-    if compiled_sha256 != stored_sha256:
+    if compiled_sha256 != stored_sha256 or (
+        GRAPH_SETTINGS_SCHEMA_KEY in revision.input_schema_json
+        and bound_settings.input_schema != revision.input_schema_json
+    ):
         raise api_error(
             409,
             "workflow-editor-graph-prompt-mismatch",
@@ -10580,7 +10666,7 @@ async def consume_workflow_editor_session(
         )
 
     try:
-        workflow_ui_graph_sha256(payload.ui_graph)
+        returned_graph_sha256 = workflow_ui_graph_sha256(payload.ui_graph)
         returned_prompt_sha256 = workflow_api_graph_sha256(payload.api_prompt)
     except WorkflowEditorSessionError as exc:
         raise api_error(
@@ -10628,7 +10714,15 @@ async def consume_workflow_editor_session(
         )
         raw_compiled_api_graph = {key: dict(value) for key, value in compilation.api_graph.items()}
         raw_compiled_prompt_sha256 = workflow_api_graph_sha256(raw_compiled_api_graph)
-        compiled_api_graph = prepared.bind(raw_compiled_api_graph)
+        bound_settings = rebind_workflow_graph_settings(
+            compilation,
+            prepared.bind(raw_compiled_api_graph),
+            base_revision.api_graph_json,
+            base_revision.input_schema_json,
+            operation=definition.operation,
+            map_unmapped=returned_graph_sha256 != base_graph_sha256,
+        )
+        compiled_api_graph = bound_settings.api_graph
     except (
         WorkflowCompilationError,
         WorkflowPackageError,
@@ -10677,6 +10771,7 @@ async def consume_workflow_editor_session(
             returned_ui_graph=payload.ui_graph,
             returned_api_graph=compiled_api_graph,
             runtime_identity=runtime_identity,
+            returned_input_schema=bound_settings.input_schema,
         )
     except WorkflowEditorSessionError as exc:
         if exc.code == "workflow-editor-session-not-found":
@@ -10856,13 +10951,22 @@ async def create_workflow_editor_draft(
     try:
         returned_ui_graph = json.loads(validated.returned_ui_graph_json)
         returned_api_graph = json.loads(validated.returned_api_graph_json)
+        input_schema = (
+            json.loads(validated.returned_input_schema_json)
+            if validated.returned_input_schema_json is not None
+            else dict(base_revision.input_schema_json)
+        )
     except json.JSONDecodeError as exc:
         raise api_error(
             409,
             "workflow-editor-validated-return-corrupt",
             "The validated editor return can no longer be read.",
         ) from exc
-    if not isinstance(returned_ui_graph, dict) or not isinstance(returned_api_graph, dict):
+    if (
+        not isinstance(returned_ui_graph, dict)
+        or not isinstance(returned_api_graph, dict)
+        or not isinstance(input_schema, dict)
+    ):
         raise api_error(
             409,
             "workflow-editor-validated-return-corrupt",
@@ -10886,9 +10990,21 @@ async def create_workflow_editor_draft(
             "workflow-editor-draft-dependencies-changed",
             "Review and prepare dependency-changing edits before saving them as a revision.",
         )
-    if _workflow_runtime_binding_paths(
-        base_revision.api_graph_json
-    ) != _workflow_runtime_binding_paths(returned_api_graph):
+    try:
+        base_settings_paths = generated_workflow_setting_paths(
+            base_revision.input_schema_json, base_revision.api_graph_json
+        )
+        returned_settings_paths = generated_workflow_setting_paths(input_schema, returned_api_graph)
+    except WorkflowPackageInputError as exc:
+        raise api_error(
+            422,
+            "workflow-editor-draft-contract-invalid",
+            "The generated settings cannot be verified.",
+        ) from exc
+    if (
+        _workflow_runtime_binding_paths(base_revision.api_graph_json) - base_settings_paths
+        != _workflow_runtime_binding_paths(returned_api_graph) - returned_settings_paths
+    ):
         raise api_error(
             422,
             "workflow-editor-draft-bindings-changed",
@@ -10897,10 +11013,14 @@ async def create_workflow_editor_draft(
     try:
         validate_lora_workflow_contract(
             returned_api_graph,
-            base_revision.input_schema_json,
+            input_schema,
             base_revision.dependencies_json,
         )
-        validate_workflow_edit_calibration(base_revision.input_schema_json)
+        validate_workflow_edit_calibration(input_schema)
+        validate_workflow_input_schema(input_schema)
+        workflow_video_length(input_schema)
+        video_length_reaches_graph(returned_api_graph, input_schema)
+        edit_calibration_reaches_graph(returned_api_graph, input_schema)
     except ValueError as exc:
         raise api_error(
             422,
@@ -10933,7 +11053,6 @@ async def create_workflow_editor_draft(
 
     capabilities: list[str] = []
     dependencies = _workflow_editor_draft_dependencies(base_revision.dependencies_json)
-    input_schema = dict(base_revision.input_schema_json)
     artifact_sha256 = workflow_artifact_contract(
         operation=definition.operation,
         engine=base_revision.engine,
@@ -12668,14 +12787,20 @@ async def import_workflow_package(
             payload.operation,
         )
         compilation = compile_comfyui_ui_graph(prepared.ui_graph, prepared.object_info)
-        compiled_api_graph = prepared.bind(compilation.api_graph)
+        bound_settings = bind_compiled_workflow_settings(
+            compilation,
+            prepared.bind(compilation.api_graph),
+            prepared.input_schema,
+            operation=payload.operation,
+        )
+        compiled_api_graph = bound_settings.api_graph
     except (
         WorkflowCompilationError,
         WorkflowPackageError,
         WorkflowPackageInputError,
     ) as exc:
         raise api_error(422, exc.code, str(exc)) from exc
-    input_schema = prepared.input_schema
+    input_schema = bound_settings.input_schema
     if draft:
         definition, initial_revision = draft
         current_revision = session.get(WorkflowRevision, definition.current_revision_id)
@@ -12713,7 +12838,7 @@ async def import_workflow_package(
         definition.operation = payload.operation.value
         definition.description = payload.description
         session.flush()
-        await create_workflow_revision(
+        await _persist_workflow_revision(
             definition.id,
             WorkflowRevisionCreate(
                 ui_graph=payload.ui_graph,
@@ -12722,9 +12847,10 @@ async def import_workflow_package(
                 dependencies=dependencies,
             ),
             session,
+            trusted=False,
         )
         return _workflow_with_revisions(session, definition.id)
-    return await create_workflow(
+    return await _persist_workflow(
         WorkflowCreate(
             name=payload.name,
             operation=payload.operation,
@@ -12736,6 +12862,7 @@ async def import_workflow_package(
             dependencies=dependencies,
         ),
         session,
+        trusted=False,
     )
 
 
@@ -12858,7 +12985,9 @@ async def analyze_workflow_package(
 
 
 @router.post("/workflows/import", response_model=WorkflowOut, status_code=201)
-async def import_workflow(payload: WorkflowBundle, session: SessionDep) -> WorkflowDefinition:
+async def import_workflow(
+    payload: WorkflowBundle, request: Request, session: SessionDep
+) -> WorkflowDefinition:
     return await create_workflow(
         WorkflowCreate(
             name=payload.name,
@@ -12871,6 +13000,7 @@ async def import_workflow(payload: WorkflowBundle, session: SessionDep) -> Workf
             input_schema=payload.input_schema,
             dependencies=payload.dependencies,
         ),
+        request,
         session,
     )
 
@@ -12911,8 +13041,18 @@ async def clone_workflow(
     status_code=201,
 )
 async def create_workflow_revision(
-    workflow_id: str, payload: WorkflowRevisionCreate, session: SessionDep
+    workflow_id: str, payload: WorkflowRevisionCreate, request: Request, session: SessionDep
 ) -> WorkflowRevision:
+    definition, current = _workflow_and_revision(session, workflow_id)
+    payload = await _map_workflow_write(
+        payload,
+        request,
+        definition.operation,
+        current.engine,
+        changed_native_graph=(
+            payload.ui_graph != current.ui_graph_json or payload.api_graph != current.api_graph_json
+        ),
+    )
     return await _persist_workflow_revision(workflow_id, payload, session, trusted=False)
 
 

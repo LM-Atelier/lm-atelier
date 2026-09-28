@@ -11,10 +11,10 @@ from fastapi import FastAPI
 from httpx2 import AsyncClient
 from sqlalchemy import MetaData, Table, func, select
 from test_workflow_install_offer_api import DIGEST, REFERENCE, _graph, _offer_payload
-from test_workflow_revision_review import _GRAPH
 from test_workflow_revision_review import reviewed_runtime as reviewed_runtime
 
 from local_lm import api as api_module
+from local_lm.comfy_workflow_compiler import compile_comfyui_ui_graph
 from local_lm.db import SessionLocal
 from local_lm.downloads import DownloadManager
 from local_lm.model_planner import INSTALL_RESOLVER_VERSION
@@ -28,6 +28,21 @@ pytestmark = pytest.mark.asyncio
 async def _created_offer(app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> str:
     # Only the remote install plan and runtime metadata are fixture data.
     # Workflow identity, review and offer acceptance use production endpoints.
+    original_info = app.state.services.engines.media.object_info
+
+    async def object_info() -> dict[str, Any]:
+        return {
+            **await original_info(),
+            "LoraLoader": {
+                "python_module": "nodes",
+                "input": {"required": {"lora_name": [[REFERENCE]]}},
+                "output": [],
+            },
+        }
+
+    monkeypatch.setattr(app.state.services.engines.media, "object_info", object_info)
+    graph = _graph()
+    compiled = compile_comfyui_ui_graph(graph, await object_info())
     with SessionLocal() as session:
         session.add(
             InstallPlan(
@@ -68,8 +83,8 @@ async def _created_offer(app: FastAPI, client: AsyncClient, monkeypatch: pytest.
             "name": "Neutral download acceptance",
             "operation": "text_to_image",
             "engine": "comfyui",
-            "api_graph": _GRAPH,
-            "ui_graph": _graph(),
+            "api_graph": compiled.api_graph,
+            "ui_graph": graph,
             "dependencies": {"version": 1, "slots": []},
         },
     )
@@ -87,12 +102,6 @@ async def _created_offer(app: FastAPI, client: AsyncClient, monkeypatch: pytest.
         },
     )
     assert approved.status_code == 200 and approved.json()["trusted"], approved.text
-    original_info = app.state.services.engines.media.object_info
-
-    async def object_info() -> dict[str, Any]:
-        return {**await original_info(), "LoraLoader": {}}
-
-    monkeypatch.setattr(app.state.services.engines.media, "object_info", object_info)
     offer = await client.post(
         f"/api/workflows/{workflow}/revisions/{revision}/install-offers",
         json=_offer_payload("accepted-plan"),

@@ -16,6 +16,8 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
+from httpx2 import AsyncClient
 
 from local_lm.video_length import video_length_reaches_graph
 
@@ -161,8 +163,29 @@ async def test_creation_refuses_a_declared_length_the_graph_never_uses(client) -
     assert "frames" in body["detail"]
 
 
-async def test_creation_accepts_the_same_workflow_once_it_uses_the_count(client) -> None:
+async def test_creation_accepts_the_same_workflow_once_it_uses_the_count(
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The control: only the placeholder differs between this and the refusal."""
+
+    async def object_info() -> dict[str, Any]:
+        return {
+            "EmptyLatentVideo": {
+                "input": {"required": {name: ["INT"] for name in ("width", "height", "length")}},
+                "output": ["LATENT"],
+            },
+            "KSampler": {
+                "input": {"required": {"latent_image": ["LATENT"], "fps": ["INT"]}},
+                "output": ["IMAGE"],
+            },
+            "SaveAnimatedWEBP": {
+                "input": {"required": {"images": ["IMAGE"]}},
+                "output": [],
+                "output_node": True,
+            },
+        }
+
+    monkeypatch.setattr(app.state.services.engines.media, "object_info", object_info, raising=False)
     created = await client.post(
         "/api/workflows",
         json={

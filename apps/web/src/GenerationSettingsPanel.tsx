@@ -1,6 +1,8 @@
 import { useState, type ReactNode } from "react";
 import { OutputRatioControl } from "./OutputRatioControl";
 import { SettingControl } from "./SettingControl";
+import { NativeWorkflowFixedSettings } from "./NativeWorkflowFixedSettings";
+import { nativeWorkflowSettingParameters } from "./nativeWorkflowSettings";
 import { storedSettingDetail } from "./settingDetail";
 import {
   IMAGE_EDIT_STRENGTH_MODE_KEY,
@@ -205,6 +207,8 @@ export function GenerationSettingsPanel({
   // advanced concern.
   const widthField = allFields.find((field) => field.key === "width" && field.available);
   const heightField = allFields.find((field) => field.key === "height" && field.available);
+  const nativeRatios = nativeWorkflowSettingParameters(workflowSchema, "aspect_ratio");
+  const hasNativeRatio = allFields.some((field) => field.available && nativeRatios.includes(field.key));
   const fields = visibleFields.filter((field) => field.key !== "loras");
   // The server resolves this same hierarchy and drops, per layer, any value the
   // field cannot accept - the workflow changed, and a saved sampler or a saved
@@ -290,7 +294,7 @@ export function GenerationSettingsPanel({
             the server about one exact revision, so without an id there is
             nothing to ask about - and rendering it anyway would put a data
             fetch inside every panel that has no workflow at all. */}
-        {workflowRevisionId && <OutputRatioControl
+        {workflowRevisionId && !hasNativeRatio && <OutputRatioControl
           revisionId={workflowRevisionId}
           width={widthField ? effectiveValue(widthField) : undefined}
           height={heightField ? effectiveValue(heightField) : undefined}
@@ -299,6 +303,7 @@ export function GenerationSettingsPanel({
             { ...values, width, height }, ["width", "height"],
           )}
         />}
+        <NativeWorkflowFixedSettings schema={workflowSchema} />
         {fields.map((field) => (
           <SettingControl
             key={`${field.scope}:${field.key}`}

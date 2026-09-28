@@ -19,7 +19,6 @@ from sqlalchemy.orm import Session
 from test_downloads import safetensors_bytes
 from test_workflow_activations import _asset
 from test_workflow_offer_download_acceptance import _created_offer
-from test_workflow_revision_review import _GRAPH
 from test_workflow_revision_review import reviewed_runtime as reviewed_runtime
 
 from local_lm.db import SessionLocal
@@ -121,7 +120,14 @@ async def test_accepted_download_completes_offer_and_activates_exact_installed_d
     original_info = services.engines.media.object_info
 
     async def object_info() -> dict[str, Any]:
-        return {**await original_info(), "LoraLoader": {}}
+        return {
+            **await original_info(),
+            "LoraLoader": {
+                "python_module": "nodes",
+                "input": {"required": {"lora_name": [[filename]]}},
+                "output": [],
+            },
+        }
 
     monkeypatch.setattr(manager, "_download_file", download_file)
     monkeypatch.setattr(manager, "start", lambda _job_id: None)
@@ -137,7 +143,7 @@ async def test_accepted_download_completes_offer_and_activates_exact_installed_d
             "name": "Neutral install completion",
             "operation": "text_to_image",
             "engine": "comfyui",
-            "api_graph": _GRAPH,
+            "api_graph": {"1": {"class_type": "LoraLoader", "inputs": {"lora_name": filename}}},
             "ui_graph": {
                 "version": 0.4,
                 "nodes": [
