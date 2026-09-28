@@ -59,6 +59,7 @@ function controls(slots: WorkflowLoraControlSlot[], target: WorkflowLoraOverride
     activation_binding_sha256: "4".repeat(64),
     ordering_authority: "presentation_only",
     base_model_family: "krea2",
+    accepts_added_loras: false,
     evidence_gaps: [],
     slots,
   };

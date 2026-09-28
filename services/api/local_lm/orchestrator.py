@@ -46,6 +46,7 @@ from .auxiliary_assets import (
     ResolvedLoraStack,
     prompt_trigger_word_provenance,
     resolve_lora_stack,
+    revision_accepts_added_loras,
     select_automatic_lora_stack,
     transform_lora_graph,
     workflow_lora_extension,
@@ -1672,6 +1673,13 @@ class ConversationOrchestrator:
         fields = workflow_settings(
             await self.engines.settings_for_role(role, engine=engine),
             workflow_revision.input_schema_json if workflow_revision else None,
+            # A workflow can carry the insertion point the run reads and
+            # declare no setting for it. Without this the validator below has
+            # no field for a stack the panel does offer, and a turn that chose
+            # one is refused as unsupported.
+            accepts_added_loras=(
+                workflow_revision is not None and revision_accepts_added_loras(workflow_revision)
+            ),
         )
         request_fields = [field for field in fields if field.scope != "load"]
         project = session.get(Project, chat.project_id) if chat.project_id else None
@@ -2943,6 +2951,10 @@ class ConversationOrchestrator:
             fields = workflow_settings(
                 await self.engines.settings_for_role(role, engine=engine),
                 workflow_revision.input_schema_json if workflow_revision else None,
+                accepts_added_loras=(
+                    workflow_revision is not None
+                    and revision_accepts_added_loras(workflow_revision)
+                ),
             )
             request_fields = [field for field in fields if field.scope != "load"]
             default_preset, project_preset, chat_preset, turn_preset = self._presets_for_turn(
@@ -9837,6 +9849,7 @@ class ConversationOrchestrator:
         fields = workflow_settings(
             await self.engines.settings_for_role(role, engine=engine),
             revision.input_schema_json,
+            accepts_added_loras=revision_accepts_added_loras(revision),
         )
         request_fields = [field for field in fields if field.scope != "load"]
         project = session.get(Project, chat.project_id) if chat.project_id else None

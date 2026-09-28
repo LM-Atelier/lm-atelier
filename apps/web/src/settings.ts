@@ -41,12 +41,39 @@ export function resolveCapabilitySettings(
   return engine?.settings_by_role?.[role] ?? engine?.settings ?? [];
 }
 
+/** The LoRA setting as a workflow declares it, mirrored from the server. */
+function addedLoraField(): SettingField | null {
+  return workflowField("loras", {
+    type: "array",
+    title: "LoRAs",
+    description: "Optional verified LoRAs applied in order.",
+    default: [],
+    maxItems: 8,
+  });
+}
+
+/**
+ * Offer the LoRA setting when the workflow takes one and declares none.
+ *
+ * `acceptsAddedLoras` is what the RUN decides: whether the revision provides
+ * an insertion point, declared or read from its graph. Without it the two
+ * disagree, because this function sees only the schema, so a stack reaching
+ * the run through a prompt had no control here to choose one by hand. A
+ * declared setting wins, so a workflow that named its own title keeps it.
+ */
+function withAddedLoras(resolved: SettingField[], acceptsAddedLoras: boolean): SettingField[] {
+  if (!acceptsAddedLoras || resolved.some((field) => field.key === "loras")) return resolved;
+  const offered = addedLoraField();
+  return offered ? [...resolved, offered] : resolved;
+}
+
 export function resolveWorkflowSettings(
   fields: SettingField[],
   inputSchema: Record<string, unknown> | undefined,
+  acceptsAddedLoras = false,
 ): SettingField[] {
   const properties = isRecord(inputSchema?.properties) ? inputSchema.properties : null;
-  if (!inputSchema || !properties) return fields;
+  if (!inputSchema || !properties) return withAddedLoras(fields, acceptsAddedLoras);
 
   const videoLength = workflowVideoLengthField(fields, inputSchema, properties);
   const hiddenVideoKeys = videoLength?.video_length
@@ -81,7 +108,7 @@ export function resolveWorkflowSettings(
     const custom = workflowField(key, property);
     if (custom) resolved.push(custom);
   }
-  return resolved;
+  return withAddedLoras(resolved, acceptsAddedLoras);
 }
 
 /** Whether a workflow says this value is not the caller's to set. */

@@ -21,6 +21,7 @@ import {
 import type { EngineCapabilities, EngineRole, GenerationPreset, SettingField } from "./types";
 import { LoraSuggestions } from "./LoraSuggestions";
 import { LorasSection } from "./WorkflowLoraRows";
+import { useWorkflowLoraControls } from "./useWorkflowLoraControls";
 
 /** The generation settings panel and the strength control it owns.
  *
@@ -170,9 +171,15 @@ export function GenerationSettingsPanel({
   const inheritedPreset = !editSettings ? rolePresets.find((preset) => preset.id === inheritedPresetId) : undefined;
   const selectedPreset = !editSettings ? rolePresets.find((preset) => preset.id === presetId) : undefined;
   const inheritedName = inheritedPreset?.name ?? defaultPreset?.name;
+  // The schema alone cannot say whether this revision takes added LoRAs: it
+  // can provide the insertion point the run reads and declare no setting for
+  // it. The controls projection carries what the run decides, and the query is
+  // the one the LoRAs section below already makes, so this costs no request.
+  const { controls: loraControls } = useWorkflowLoraControls(workflowRevisionId ?? null);
   const allFields = resolveWorkflowSettings(
     resolveCapabilitySettings(engine, role),
     workflowSchema,
+    loraControls?.accepts_added_loras ?? false,
   );
   const editCalibration = workflowImageEditCalibration(workflowSchema);
   const strengthParameter = editCalibration?.parameter ?? "denoise";
