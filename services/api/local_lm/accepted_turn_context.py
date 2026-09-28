@@ -224,6 +224,25 @@ def resolve_accepted_workflow(
     return projection
 
 
+def settings_workflow(
+    session: Session, run: Run, snapshot: AcceptedContext | None
+) -> AcceptedWorkflow | WorkflowRevision | None:
+    """The workflow a turn's stored settings were resolved against.
+
+    The workflow the turn accepted when it recorded one, since that copy is
+    what its settings were checked against; otherwise the stored revision it
+    names. A rebuilt settings layer asks this one workflow both for its input
+    schema and for whether it takes a LoRA stack, so the two cannot disagree.
+    """
+
+    if snapshot is not None and snapshot.workflow is not None:
+        return snapshot.workflow
+    revision_id = (
+        snapshot.workflow_revision_id if snapshot is not None else run.workflow_revision_id
+    )
+    return session.get(WorkflowRevision, revision_id) if revision_id else None
+
+
 def capture_image_edit_strength(run: Run) -> dict[str, Any] | None:
     image_edit = run.provenance_json.get("image_edit")
     strength = image_edit.get("strength") if isinstance(image_edit, dict) else None

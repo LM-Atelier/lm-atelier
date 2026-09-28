@@ -60,6 +60,7 @@ from .asset_adoption import AssetAdoptionError, adoptable_roots, measure_adoptab
 from .auxiliary_assets import (
     AUXILIARY_ASSET_KINDS,
     normalize_typed_trigger_words,
+    revision_accepts_added_loras,
     validate_lora_workflow_contract,
 )
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
@@ -4413,6 +4414,9 @@ async def _regenerate_message_locked(
             prior_run.settings_json,
             input_schema=prior_revision.input_schema_json if prior_revision else None,
             engine=prior_profile.engine if prior_profile else None,
+            accepts_added_loras=(
+                prior_revision is not None and revision_accepts_added_loras(prior_revision)
+            ),
         )
     except EngineNotConfiguredError as exc:
         raise api_error(409, "engine-not-configured", str(exc)) from exc
@@ -4583,6 +4587,9 @@ async def edit_and_branch(
                     prior_run.settings_json,
                     input_schema=(prior_revision.input_schema_json if prior_revision else None),
                     engine=prior_profile.engine if prior_profile else None,
+                    accepts_added_loras=(
+                        prior_revision is not None and revision_accepts_added_loras(prior_revision)
+                    ),
                 )
                 inherited_image_edit_strength = _inherited_auto_image_edit_strength(prior_run)
             except EngineNotConfiguredError as exc:

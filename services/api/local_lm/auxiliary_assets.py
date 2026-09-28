@@ -5,7 +5,7 @@ import hashlib
 import json
 import math
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -47,6 +47,24 @@ _MODEL_SAMPLER_CLASS_TYPES = {
     "SamplerCustom",
     "SamplerCustomAdvanced",
 }
+
+
+class LoraWorkflowDocument(Protocol):
+    """What a workflow says about its LoRAs: its graph, its settings and its dependencies.
+
+    A stored revision answers, and so does the snapshot a turn accepted, which
+    is the one to ask whenever the turn recorded one: a question about a turn's
+    LoRAs has to be put to the same workflow its settings came from.
+    """
+
+    @property
+    def api_graph_json(self) -> dict[str, Any]: ...
+
+    @property
+    def input_schema_json(self) -> dict[str, Any]: ...
+
+    @property
+    def dependencies_json(self) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True)
@@ -435,7 +453,7 @@ def lora_setting_property() -> dict[str, object]:
     }
 
 
-def workflow_lora_extension(revision: WorkflowRevision) -> dict[str, Any] | None:
+def workflow_lora_extension(revision: LoraWorkflowDocument) -> dict[str, Any] | None:
     dependencies = revision.dependencies_json
     extensions = dependencies.get("extensions") if isinstance(dependencies, dict) else None
     if extensions is not None and not isinstance(extensions, dict):
@@ -536,7 +554,7 @@ def validate_lora_workflow_contract(
             )
 
 
-def revision_accepts_added_loras(revision: WorkflowRevision) -> bool:
+def revision_accepts_added_loras(revision: LoraWorkflowDocument) -> bool:
     """Whether a stack added to this revision would be applied or refused.
 
     One definition, because the run and the settings panel have to answer this

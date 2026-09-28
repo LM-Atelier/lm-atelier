@@ -43,6 +43,7 @@ from .artifacts import ArtifactStore
 from .auxiliary_assets import (
     LORA_GRAPH_TRANSFORM_VERSION,
     AutomaticLoraSelection,
+    LoraWorkflowDocument,
     ResolvedLoraStack,
     prompt_trigger_word_provenance,
     resolve_lora_stack,
@@ -7510,6 +7511,12 @@ class ConversationOrchestrator:
             if workflow_revision
             else None
         )
+        # Asked of the workflow the schema above came from, and before the
+        # commit below, so the answer and the schema describe one workflow.
+        answering: LoraWorkflowDocument | None = (
+            snapshot.workflow if snapshot and snapshot.workflow else workflow_revision
+        )
+        takes_added_loras = answering is not None and revision_accepts_added_loras(answering)
         profile_engine = (
             snapshot.profile.engine
             if snapshot and snapshot.profile
@@ -7541,6 +7548,7 @@ class ConversationOrchestrator:
             source_settings,
             input_schema=workflow_schema,
             engine=profile_engine,
+            accepts_added_loras=takes_added_loras,
         )
         verification_job = session.get(Job, image_edit_verification_job_id(source_run_id))
         if not verification_job or verification_job.status == JobStatus.CANCELLED.value:
@@ -10524,11 +10532,19 @@ class ConversationOrchestrator:
         *,
         input_schema: dict[str, Any] | None = None,
         engine: str | None = None,
+        accepts_added_loras: bool = False,
     ) -> dict[str, Any]:
+        """Rebuild a stored settings layer against what the workflow offers now.
+
+        A key with no field behind it is dropped, so a workflow that takes
+        LoRAs without declaring a setting for them has to say so here, from
+        the same workflow as `input_schema`, or the stack chosen for it is lost.
+        """
         role = self._role_for_operation(operation)
         fields = workflow_settings(
             await self.engines.settings_for_role(role, engine=engine),
             input_schema,
+            accepts_added_loras=accepts_added_loras,
         )
         request_fields = [field for field in fields if field.scope != "load"]
         ordinary, workflow_lora_setting = split_inherited_workflow_lora_setting(values, role=role)

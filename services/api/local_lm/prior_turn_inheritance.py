@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy.orm import Session
 
-from .accepted_turn_context import AcceptedContext, accepted_context
+from .accepted_turn_context import AcceptedContext, accepted_context, settings_workflow
+from .auxiliary_assets import revision_accepts_added_loras
 from .domain import Operation
 from .models import GenerationPreset, ModelProfile, Run
 from .schemas import (
@@ -32,6 +33,8 @@ class SourceConfiguration:
     step_id: str | None
     values: PriorTurnEditConfiguration
     snapshot: AcceptedContext | None
+    #: Asked of the workflow `values.workflow_schema` came from.
+    takes_added_loras: bool
 
 
 @dataclass
@@ -65,6 +68,8 @@ class PriorTurnInheritance:
             run = session.get(Run, config.source_run_id)
             if run is None:
                 raise ValueError("A source configuration is no longer available.")
+            snapshot = accepted_context(session, run)
+            workflow = settings_workflow(session, run, snapshot)
             self.sources.append(
                 SourceConfiguration(
                     run.id,
@@ -72,7 +77,8 @@ class PriorTurnInheritance:
                     getattr(config, "ordinal", None),
                     getattr(config, "step_id", None),
                     config,
-                    accepted_context(session, run),
+                    snapshot,
+                    workflow is not None and revision_accepts_added_loras(workflow),
                 )
             )
         known = {item.step_id for item in self.sources if item.step_id is not None}
@@ -182,6 +188,7 @@ class PriorTurnInheritance:
                 source.values.resolved_settings,
                 input_schema=source.values.workflow_schema,
                 engine=source.values.profile_engine,
+                accepts_added_loras=source.takes_added_loras,
             )
             values["settings"] = {**baseline, **request.settings}
         self.bound[ordinal] = inherited
