@@ -846,6 +846,14 @@ def _create_default_app() -> tuple[FastAPI, DataDirectoryLock]:
 app, _default_instance_lock = _create_default_app()
 
 
+#: The loop factory uvicorn imports on Windows, where the standard proactor
+#: loop closes the listening socket over an error that belongs to one
+#: incoming connection, and can leave a finished connection holding up every
+#: later shutdown. Uvicorn takes this as an import string and calls it for
+#: each process it serves from.
+_LISTENER_PRESERVING_LOOP = "local_lm.windows_listener:listener_preserving_loop"
+
+
 def run() -> None:
     settings = get_settings()
     if settings.dev:
@@ -857,4 +865,8 @@ def run() -> None:
         host=settings.host,
         port=settings.port,
         reload=settings.dev,
+        # Named rather than passed, because in development the reload
+        # supervisor serves from a separate process that builds its own loop,
+        # and an import string survives that where a function object would not.
+        loop=_LISTENER_PRESERVING_LOOP if sys.platform == "win32" else "auto",
     )
