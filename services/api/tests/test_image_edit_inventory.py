@@ -19,10 +19,12 @@ from local_lm.image_edit_verification import (
     InventoryChange,
     InventoryEntry,
     VerificationDirection,
+    VerificationReason,
     assess_from_inventories,
     build_change_attribution_prompt,
     build_image_inventory_prompt,
     compare_inventories,
+    decide_image_edit_retry,
     parse_change_attribution,
     parse_image_inventory,
 )
@@ -173,6 +175,52 @@ def test_a_request_naming_something_absent_is_not_confirmed() -> None:
     assert assessment.requested_change_visible is False
     assert assessment.unrelated_content_preserved is False
     assert assessment.direction is VerificationDirection.DECREASE
+
+
+@pytest.mark.parametrize(
+    ("after", "visible", "difference"),
+    [
+        # The request missed and something else changed: no step can help.
+        (DOG_AFTER, False, measured(2.88, True, 102.07)),
+        # The request took and something else changed: less strength can help.
+        (BALL_ALSO_CHANGED, True, measured(12.0, True, 90.0)),
+    ],
+)
+def test_only_an_edit_that_took_is_retried_weaker(
+    after: tuple[InventoryEntry, ...], visible: bool, difference: ImageDifference
+) -> None:
+    """A weaker attempt keeps more of the picture, and that is all it can do.
+
+    On a real runtime a redraw that left the cube red but moved the rest was
+    retried weaker, from 0.50 to 0.38, and the cube stayed red: less strength
+    cannot make a change that more strength did not.
+    """
+
+    changes = compare_inventories(CUBE_BEFORE, after)
+    assessment = assess_from_inventories(
+        changes,
+        ChangeAttribution(
+            subject_present=visible, operation="change", requested=(1,), as_asked=True
+        ),
+        difference,
+    )
+    assert assessment is not None
+    assert assessment.requested_change_visible is visible
+    assert assessment.unrelated_content_preserved is False
+    decision = decide_image_edit_retry(
+        assessment,
+        attempt=0,
+        parameter="denoise",
+        current_strength=0.5,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    assert decision.retry is visible
+    if visible:
+        assert decision.value_after is not None and decision.value_after < 0.5
+    else:
+        assert decision.reason is VerificationReason.REQUEST_NOT_VISIBLE
+        assert decision.value_after is None
 
 
 def test_a_change_that_took_beside_one_that_was_not_asked_for() -> None:
