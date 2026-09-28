@@ -18,6 +18,7 @@ from local_lm.auxiliary_assets import (
     prompt_trigger_word_provenance,
     resolve_lora_stack,
     resolve_lora_stack_against_graph,
+    revision_accepts_added_loras,
     select_automatic_lora_stack,
     transform_lora_graph,
     trigger_words_to_apply,
@@ -226,6 +227,51 @@ def _bind_model(  # type: ignore[no-untyped-def]
         )
     )
     session.flush()
+
+
+async def test_a_workflow_accepts_added_loras_only_where_a_stack_would_be_applied(
+    client: AsyncClient,
+) -> None:
+    """The four states the settings panel has to tell apart.
+
+    The panel offers a LoRA control the workflow's schema does not declare,
+    and it must offer one exactly where a stack would be applied. Declared and
+    recorded is the ordinary workflow. Neither, over a graph a LoRA can be
+    read out of, is the case the contract passes over in silence and the run
+    still applies. One without the other is refused outright by the contract,
+    so such a workflow accepts nothing at all, and a control offered there
+    would be a control the run cannot honour.
+    """
+
+    del client
+    with SessionLocal() as session:
+        revision = _workflow(session)
+        declared = deepcopy(revision.input_schema_json)
+        recorded = deepcopy(revision.dependencies_json)
+        bare = {key: value for key, value in recorded.items() if key != "extensions"}
+        undeclared = {"type": "object", "properties": {}}
+
+        assert revision_accepts_added_loras(revision) is True
+
+        revision.input_schema_json = undeclared
+        revision.dependencies_json = bare
+        assert revision_accepts_added_loras(revision) is True
+
+        revision.input_schema_json = declared
+        revision.dependencies_json = bare
+        assert revision_accepts_added_loras(revision) is False
+
+        revision.input_schema_json = undeclared
+        revision.dependencies_json = recorded
+        assert revision_accepts_added_loras(revision) is False
+
+        # Nothing said and nothing to read: a graph with no checkpoint for a
+        # LoRA to sit behind offers no insertion point to derive.
+        revision.input_schema_json = undeclared
+        revision.dependencies_json = bare
+        revision.api_graph_json = {"9": {"class_type": "SaveImage", "inputs": {}}}
+        assert revision_accepts_added_loras(revision) is False
+        session.rollback()
 
 
 def test_lora_workflow_contract_requires_a_real_typed_extension() -> None:

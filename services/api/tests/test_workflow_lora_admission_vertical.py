@@ -24,6 +24,7 @@ from local_lm import orchestrator as orchestrator_module
 from local_lm import prompt_library
 from local_lm.adapters.base import MediaEvent, MediaRequest
 from local_lm.adapters.mock import MockMediaAdapter
+from local_lm.auxiliary_assets import revision_accepts_added_loras
 from local_lm.db import SessionLocal
 from local_lm.domain import JobStatus, MessageStatus, Operation, RunStatus
 from local_lm.engines import EngineRegistry
@@ -130,6 +131,32 @@ def _plain_revision(session: Session, seeded: SeededWorkflow) -> SeededWorkflow:
     session.add(plain)
     session.commit()
     return replace(seeded, revision_id=plain.id)
+
+
+def _undeclare_lora_setting(session: Session, seeded: SeededWorkflow) -> None:
+    """Say nothing about LoRAs, in a graph that still says where one goes.
+
+    Both the declared setting and the recorded extension point go, because the
+    workflow contract requires those two together and refuses a revision that
+    has one without the other. What is left is the state the contract passes
+    over in silence: nothing declared, nothing recorded, and a graph a LoRA
+    can still be read out of. The revision is edited rather than copied so it
+    keeps the activation and the dependency contract a turn checks first.
+    """
+
+    revision = session.get(WorkflowRevision, seeded.revision_id)
+    assert revision is not None
+    schema = deepcopy(revision.input_schema_json)
+    properties = schema.get("properties")
+    assert isinstance(properties, dict)
+    assert properties.pop("loras", None) is not None
+    revision.input_schema_json = schema
+    dependencies = deepcopy(revision.dependencies_json)
+    extensions = dependencies.get("extensions")
+    assert isinstance(extensions, dict)
+    assert extensions.pop("lora", None) is not None
+    revision.dependencies_json = dependencies
+    session.commit()
 
 
 def _store_chat_setting(chat_id: str, envelope: object) -> None:
@@ -359,6 +386,67 @@ async def test_only_a_target_naming_the_selected_revision_needs_admission(
                 layers=_split_layers(chat=other_revision),
                 added_loras=[],
             )
+
+
+async def test_a_workflow_that_takes_loras_without_declaring_them_accepts_a_stack(
+    client: AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The turn accepts what the settings panel offers for such a workflow.
+
+    The panel decides whether to show a LoRA control from the insertion point
+    rather than from the schema, because the insertion point is what the run
+    reads. A turn's settings are checked against the fields the same function
+    builds, and a value with no field behind it is refused as an unsupported
+    setting. One workflow therefore cannot answer differently in the two
+    places without the control becoming worse than none.
+    """
+
+    with SessionLocal() as session:
+        seeded = _seed_workflow(session, suffix="admission_undeclared")
+        _undeclare_lora_setting(session, seeded)
+    with SessionLocal() as session:
+        revision = session.get(WorkflowRevision, seeded.revision_id)
+        assert revision is not None
+        # Both halves of the case, stated rather than assumed: nothing declares
+        # the setting, and the run still finds somewhere to put a LoRA.
+        assert "loras" not in revision.input_schema_json.get("properties", {})
+        assert revision_accepts_added_loras(revision)
+
+    captured = _force_seeded_workflow(app, monkeypatch, seeded)
+    chat = (await client.post("/api/chats", json={"title": "Undeclared LoRA stack"})).json()
+    response = await client.post(
+        f"/api/chats/{chat['id']}/turns",
+        json={
+            "text": "Create one careful study",
+            "mode": "image",
+            "settings": {
+                "loras": [
+                    {
+                        "asset_id": seeded.added_asset_id,
+                        "model_strength": 0.62,
+                        "clip_strength": 0.51,
+                        "enabled": True,
+                    }
+                ],
+            },
+        },
+    )
+    assert response.status_code == 202, response.text
+    accepted = response.json()
+    plan = await _wait_for_plan(client, accepted["run"]["work_plan_id"])
+    assert plan["status"] == "complete"
+    assert len(captured) == 1
+
+    with SessionLocal() as session:
+        run = session.get(Run, accepted["run"]["id"])
+        assert run is not None
+        # Accepted is not the same as applied, so the stack is read back from
+        # the stored settings rather than inferred from the status code.
+        stored = run.settings_json["loras"]
+        assert [item["asset_id"] for item in stored] == [seeded.added_asset_id]
+        assert stored[0]["model_strength"] == 0.62
 
 
 async def test_ordinary_admission_persists_and_dispatches_native_plus_added(

@@ -354,6 +354,50 @@ describe("resolveWorkflowSettings", () => {
       }),
     ]);
   });
+  it("offers the LoRA control to a workflow that takes one and declares none", () => {
+    // The schema cannot answer this: a revision can provide the insertion
+    // point the run reads and declare no setting for it. The caller passes
+    // what the run decided, and every schema shape has to honour it, including
+    // the ones that return before any property is read.
+    for (const schema of [undefined, {}, { type: "object", properties: {} }]) {
+      const offered = resolveWorkflowSettings([imageField], schema, true).filter(
+        (one) => one.key === "loras",
+      );
+      expect(offered).toHaveLength(1);
+      expect(offered[0].type).toBe("array");
+      expect(resolveWorkflowSettings([imageField], schema).some(
+        (one) => one.key === "loras",
+      )).toBe(false);
+    }
+  });
+
+  it("leaves a workflow that declared its own LoRA setting alone", () => {
+    const declared = {
+      type: "object",
+      properties: {
+        loras: { type: "array", title: "Adapters", default: [], maxItems: 4 },
+      },
+    };
+    const fields = resolveWorkflowSettings([imageField], declared, true).filter(
+      (one) => one.key === "loras",
+    );
+    expect(fields).toHaveLength(1);
+    // The offered setting is a fallback, not an override: a workflow that
+    // described its own surface keeps the name it chose.
+    expect(fields[0].label).toBe("Adapters");
+  });
+
+  it("keeps a chosen stack through the filter a turn runs before it sends", () => {
+    // The panel and the composer build their fields separately, and a value
+    // whose key has no field behind it is dropped on the way out. Offering the
+    // control in one place and not the other would discard the choice in
+    // silence, which is worse than never offering it.
+    const chosen = { loras: [{ asset_id: "asset-1", strength: 1 }] };
+    const offered = resolveWorkflowSettings([imageField], undefined, true);
+    expect(normalizeSettingsForFields(chosen, offered)).toEqual(chosen);
+    expect(normalizeSettingsForFields(chosen, resolveWorkflowSettings([imageField], undefined))).toEqual({});
+  });
+
   it("derives bounded low-cost preview values from capability fields", () => {
     const field = (
       key: string,

@@ -59,6 +59,7 @@ async function controls(slots: WorkflowLoraControlSlot[], revisionId = REVISION)
     activation_binding_sha256: null,
     ordering_authority: "presentation_only",
     base_model_family: "krea2",
+    accepts_added_loras: false,
     evidence_gaps: [],
     slots,
   };

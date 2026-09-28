@@ -1942,6 +1942,7 @@ class WorkflowLoraControlsOut(ApiModel):
     ordering_authority: Literal["presentation_only"]
     evidence_gaps: list[WorkflowLoraEvidenceGap] = Field(max_length=9)
     base_model_family: str | None = Field(default=None, max_length=64)
+    accepts_added_loras: bool = False
     slots: list[WorkflowLoraControlSlotOut] = Field(max_length=64)
 
 

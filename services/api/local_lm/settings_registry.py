@@ -5,6 +5,7 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any, Final, Literal, cast
 
+from .auxiliary_assets import lora_setting_property
 from .saved_settings import MAX_SETTING_FIELDS, unusable_as_a_number
 from .schemas import EngineCapabilities, SettingField
 from .video_length import video_duration_field, workflow_video_length
@@ -855,6 +856,8 @@ DURATION_UNAVAILABLE_REASONS: Final = {
 def workflow_settings(
     fields: Iterable[SettingField],
     input_schema: Mapping[str, Any] | None,
+    *,
+    accepts_added_loras: bool = False,
 ) -> list[SettingField]:
     """Overlay a workflow's declared JSON-Schema controls on engine defaults.
 
@@ -871,8 +874,23 @@ def workflow_settings(
     """
 
     base_fields = list(fields)
+
+    def offered(resolved: list[SettingField]) -> list[SettingField]:
+        """Add the LoRA setting when the workflow takes one and declares none.
+
+        The caller passes what the RUN decides, which is whether the revision
+        provides an insertion point, declared or read from its graph. Without
+        this the two disagree: a stack reaches the run through a prompt while
+        the panel, which sees only the schema, offers no way to choose one.
+        Declared wins, so a workflow that names its own cap or title keeps it.
+        """
+
+        if not accepts_added_loras or any(field.key == "loras" for field in resolved):
+            return resolved
+        return [*resolved, _workflow_setting("loras", lora_setting_property(), None)]
+
     if not input_schema:
-        return base_fields
+        return offered(base_fields)
     properties = input_schema.get("properties")
     if isinstance(properties, Mapping) and len(properties) > MAX_WORKFLOW_SCHEMA_PROPERTIES:
         raise ValueError(
@@ -881,7 +899,7 @@ def workflow_settings(
         )
     _validate_setting_value("workflow input schema", dict(input_schema))
     if not isinstance(properties, Mapping):
-        return base_fields
+        return offered(base_fields)
 
     video_length = workflow_video_length(input_schema)
 
@@ -952,6 +970,7 @@ def workflow_settings(
         _validate_setting_key(key, source="workflow setting")
         _reject_reserved_setting_key(key, source="workflow setting")
         resolved.append(_workflow_setting(key, property_schema, None))
+    resolved = offered(resolved)
     if len(resolved) > MAX_SETTING_FIELDS:
         raise ValueError(
             f"workflow settings must contain at most {MAX_SETTING_FIELDS} fields "
