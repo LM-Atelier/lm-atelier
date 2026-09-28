@@ -4,7 +4,7 @@ import {
   HardDrive,
   Search,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { ErrorCallout } from "./ErrorCallout";
 import { FirstFailure } from "./FirstFailure";
@@ -94,20 +94,34 @@ function InstalledModelRow({
   );
 }
 
-type ModelAssetUpdateValues = Partial<Pick<
-  ModelAssetInstall,
-  "active" | "use_case" | "auto_apply" | "default_model_strength" | "default_clip_strength"
-  | "typed_trigger_words"
->>;
+type ModelAssetUpdateValues = Parameters<typeof api.updateModelAsset>[1];
+
+/** The base models already recorded in the library, one spelling of each.
+ *
+ * Offered while typing so a base model is written the way the library
+ * already writes it. Spellings that differ only in case or punctuation name
+ * the same base model, so the first one met stands for the rest.
+ */
+function recordedBaseModels(assets: ModelAssetInstall[]): string[] {
+  const spellings = new Map<string, string>();
+  for (const asset of assets) {
+    const family = asset.family?.trim() ?? "";
+    const key = family.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+    if (key && !spellings.has(key)) spellings.set(key, family);
+  }
+  return [...spellings.values()].sort((a, b) => a.localeCompare(b));
+}
 
 function InstalledAssetRow({
   asset,
+  baseModels,
   saving,
   deleting,
   onUpdate,
   onDelete,
 }: {
   asset: ModelAssetInstall;
+  baseModels: string[];
   saving: boolean;
   deleting: boolean;
   onUpdate: (values: ModelAssetUpdateValues) => Promise<boolean>;
@@ -116,12 +130,15 @@ function InstalledAssetRow({
   const [editing, setEditing] = useState(false);
   const [editingWords, setEditingWords] = useState(false);
   const measuredWords = measuredTriggerWords(asset);
+  const baseModelList = useId();
   const [useCase, setUseCase] = useState(asset.use_case);
+  const [baseModel, setBaseModel] = useState(asset.family ?? "");
   const [autoApply, setAutoApply] = useState(asset.auto_apply);
   const [modelStrength, setModelStrength] = useState(String(asset.default_model_strength));
   const [clipStrength, setClipStrength] = useState(String(asset.default_clip_strength));
   const beginEditing = () => {
     setUseCase(asset.use_case);
+    setBaseModel(asset.family ?? "");
     setAutoApply(asset.auto_apply);
     setModelStrength(String(asset.default_model_strength));
     setClipStrength(String(asset.default_clip_strength));
@@ -133,14 +150,21 @@ function InstalledAssetRow({
     && Math.abs(parsedModelStrength) <= 4
     && Number.isFinite(parsedClipStrength)
     && Math.abs(parsedClipStrength) <= 4;
+  const typedBaseModel = baseModel.trim();
+  const baseModelChanged = typedBaseModel !== (asset.family ?? "").trim();
+  // The server compares base models by their letters and digits, and refuses one with none.
+  const baseModelValid = !typedBaseModel || /[\p{L}\p{N}]/u.test(typedBaseModel);
   const unchanged = useCase.trim() === asset.use_case
+    && !baseModelChanged
     && autoApply === asset.auto_apply
     && parsedModelStrength === asset.default_model_strength
     && parsedClipStrength === asset.default_clip_strength;
   const save = async () => {
-    if (!strengthsValid || (autoApply && !useCase.trim())) return;
+    if (!strengthsValid || !baseModelValid || (autoApply && !useCase.trim())) return;
     const saved = await onUpdate({
       use_case: useCase.trim(),
+      // Sent only when edited, so the spelling a file declared stays until someone changes it.
+      ...(baseModelChanged ? { family: typedBaseModel } : {}),
       auto_apply: autoApply,
       default_model_strength: parsedModelStrength,
       default_clip_strength: parsedClipStrength,
@@ -193,6 +217,13 @@ function InstalledAssetRow({
             Use case
             <textarea aria-label={`Auto use case for ${asset.name}`} rows={2} value={useCase} onChange={(event) => setUseCase(event.target.value)} placeholder="Watercolor landscapes, product photography…" />
           </label>
+          <label className="lora-base-model">
+            Base model
+            <input aria-label={`Base model for ${asset.name}`} type="text" list={baseModelList} maxLength={100} value={baseModel} onChange={(event) => setBaseModel(event.target.value)} placeholder="The model it was made for" />
+            <datalist id={baseModelList}>
+              {baseModels.map((name) => <option key={name} value={name} />)}
+            </datalist>
+          </label>
           <label>
             Model strength
             <input aria-label={`Default model strength for ${asset.name}`} type="number" min="-4" max="4" step="0.05" value={modelStrength} onChange={(event) => setModelStrength(event.target.value)} />
@@ -207,8 +238,11 @@ function InstalledAssetRow({
           </label>
           <span className="row-actions">
             <button type="button" className="secondary compact-button" disabled={saving} onClick={() => setEditing(false)}>Cancel</button>
-            <button type="submit" className="primary compact-button" disabled={saving || unchanged || !strengthsValid || (autoApply && !useCase.trim())}>{saving ? "Saving…" : "Save"}</button>
+            <button type="submit" className="primary compact-button" disabled={saving || unchanged || !strengthsValid || !baseModelValid || (autoApply && !useCase.trim())}>{saving ? "Saving…" : "Save"}</button>
           </span>
+          {!baseModelValid
+            ? <small>A base model needs at least one letter or digit.</small>
+            : autoApply && !typedBaseModel && <small>Without a base model, it is never chosen automatically.</small>}
         </form>
       )}
       {editingWords && asset.kind === "lora" && (
@@ -265,6 +299,7 @@ export function ModelsView({ initialRole }: { initialRole: EngineRole }) {
   const recipes = useQuery({ queryKey: ["recipes"], queryFn: api.recipes });
   const installed = useQuery({ queryKey: ["models"], queryFn: api.models });
   const modelAssets = useQuery({ queryKey: ["model-assets"], queryFn: () => api.modelAssets() });
+  const baseModels = useMemo(() => recordedBaseModels(modelAssets.data ?? []), [modelAssets.data]);
   const jobs = useQuery({ queryKey: ["jobs"], queryFn: api.jobs, refetchInterval: 3_000 });
   const storage = useQuery({ queryKey: ["model-storage"], queryFn: api.modelStorage });
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
@@ -461,6 +496,7 @@ export function ModelsView({ initialRole }: { initialRole: EngineRole }) {
             <InstalledAssetRow
               key={asset.id}
               asset={asset}
+              baseModels={baseModels}
               saving={updateModelAsset.isPending && updateModelAsset.variables?.id === asset.id}
               deleting={deleteModelAsset.isPending && deleteModelAsset.variables === asset.id}
               onUpdate={async (values) => {

@@ -1123,7 +1123,10 @@ export const api = {
       ModelAssetInstall,
       "active" | "use_case" | "auto_apply" | "default_model_strength" | "default_clip_strength"
       | "typed_trigger_words"
-    >>,
+    >> & {
+      /** The base model the asset is for; an empty string clears it. */
+      family?: string;
+    },
   ) =>
     request<ModelAssetInstall>(`/api/model-assets/${id}`, {
       method: "PATCH",
