@@ -15,6 +15,11 @@ import os
 #: Set by the distribution plugin in each worker process, absent in a plain run.
 WORKER_VARIABLE = "PYTEST_XDIST_WORKER"
 DATA_DIRECTORY_VARIABLE = "LOCAL_LM_DATA_DIR"
+#: Where a worker's folder goes when the caller named none. The application's
+#: own default, data/, is ignored by the repository, but a folder beside it is
+#: not, so data-gw0 and its siblings showed up as untracked files in the
+#: checkout. temp/ is ignored at any depth and is nothing the application reads.
+UNCONFIGURED_PARENT = "temp"
 
 
 def _worker_data_directory() -> None:
@@ -23,8 +28,13 @@ def _worker_data_directory() -> None:
         # A single process keeps whatever the caller chose, so an ordinary run
         # and the gate behave exactly as they did.
         return
-    configured = os.environ.get(DATA_DIRECTORY_VARIABLE) or "data"
-    os.environ[DATA_DIRECTORY_VARIABLE] = f"{configured}-{worker}"
+    configured = os.environ.get(DATA_DIRECTORY_VARIABLE)
+    if configured:
+        # A caller that named a folder, the gate among them, keeps the names
+        # its workers always had.
+        os.environ[DATA_DIRECTORY_VARIABLE] = f"{configured}-{worker}"
+        return
+    os.environ[DATA_DIRECTORY_VARIABLE] = os.path.join(UNCONFIGURED_PARENT, f"test-data-{worker}")
 
 
 _worker_data_directory()
