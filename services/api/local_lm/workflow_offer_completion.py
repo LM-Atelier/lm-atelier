@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Never
+from typing import TYPE_CHECKING, Never
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -33,6 +33,9 @@ from .workflow_activations import WorkflowRuntimeMaterializer, revalidate_workfl
 from .workflow_asset_downloads import install_plan_download_request
 from .workflow_bindings import materialize_model_asset, materialize_model_install
 from .workflow_install_offers import assert_workflow_install_offer_identity
+
+if TYPE_CHECKING:
+    from .workflow_activation_files import VerifiedWorkflowFiles
 
 
 class WorkflowOfferCompletionError(ValueError):
@@ -147,6 +150,7 @@ def complete_workflow_install_offer(
     runtime_materializer: WorkflowRuntimeMaterializer | None = None,
     custom_node_root: Path | None = None,
     registry_environment_root: Path | None = None,
+    file_verification: VerifiedWorkflowFiles | None = None,
 ) -> str | None:
     """Join accepted jobs, installed identities and current review in one transaction.
 
@@ -190,6 +194,7 @@ def complete_workflow_install_offer(
             runtime_materializer=runtime_materializer,
             custom_node_root=custom_node_root,
             registry_environment_root=registry_environment_root,
+            file_verification=file_verification,
         )
         selected = {
             *(("model_install", identity) for identity in scope.model_install_ids),
@@ -223,6 +228,7 @@ def complete_workflow_install_offer(
             runtime_materializer=runtime_materializer,
             custom_node_root=custom_node_root,
             registry_environment_root=registry_environment_root,
+            file_verification=file_verification,
         )
         activation_id = activation.id
     session.expire_all()

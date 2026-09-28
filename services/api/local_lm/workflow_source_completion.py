@@ -21,6 +21,7 @@ from .progress import update_job_progress
 from .runtime_provisioning import RuntimeProvisioningError
 from .runtime_provisioning_plans import RuntimeProvisioningPlan
 from .schemas import WorkflowRevisionCreate
+from .workflow_activation_files import verify_workflow_files
 from .workflow_activations import (
     materialize_comfy_runtime_dependency,
     revalidate_workflow_activation,
@@ -216,6 +217,9 @@ def _finish(
 ) -> str:
     _require_runtime_plan(processes, source)
     batch = prepared.batch.verify_completion(SessionLocal) if prepared.batch is not None else None
+    file_verification = verify_workflow_files(
+        SessionLocal, prepared.scope.model_install_ids, prepared.scope.model_asset_install_ids
+    )
     with SessionLocal() as session:
         # Reserve the writer before rereading consent and downloaded resources.
         # Compilation I/O is finished; all staged rows commit with the activation.
@@ -264,6 +268,7 @@ def _finish(
             else None,
             custom_node_root=settings.custom_node_dir,
             registry_environment_root=registry_wheel_environment_root(settings.registry_dir),
+            file_verification=file_verification,
         )
         if (
             activation_id is None
@@ -283,6 +288,7 @@ def _finish(
             else None,
             custom_node_root=settings.custom_node_dir,
             registry_environment_root=registry_wheel_environment_root(settings.registry_dir),
+            file_verification=file_verification,
         )
         require_workflow_source_resource_match(prepared.scope, final_scope)
         if (
@@ -294,6 +300,7 @@ def _finish(
         if batch is not None:
             batch.complete(session)
         offer.completion_error_code = None
+        file_verification.require_current(session)
         session.commit()
         return activation_id
 
