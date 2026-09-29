@@ -15,11 +15,18 @@ from .comfy_registry_paths import registry_wheel_environment_root
 from .comfy_workflow_compiler import compile_comfyui_ui_graph
 from .config import Settings
 from .db import SessionLocal
-from .models import WorkflowActivation, WorkflowDefinition, WorkflowInstallOffer, WorkflowRevision
+from .models import (
+    Job,
+    WorkflowActivation,
+    WorkflowDefinition,
+    WorkflowInstallOffer,
+    WorkflowRevision,
+)
 from .processes import ProcessSupervisor
 from .progress import update_job_progress
 from .runtime_provisioning import RuntimeProvisioningError
 from .runtime_provisioning_plans import RuntimeProvisioningPlan
+from .scheduler import JobClaim
 from .schemas import WorkflowRevisionCreate
 from .workflow_activation_files import verify_workflow_files
 from .workflow_activations import (
@@ -28,9 +35,9 @@ from .workflow_activations import (
 )
 from .workflow_completion_jobs import (
     WorkflowCompletionResult,
-    begin_workflow_completion,
     complete_workflow_job,
-    fail_workflow_completion,
+    defer_workflow_completion,
+    guard_workflow_completion_claim,
     record_workflow_runtime,
     running_workflow_completion_job,
     workflow_completion_job,
@@ -74,6 +81,7 @@ class AcceptedSource:
     offer_id: str
     job_id: str
     attempt: int
+    claim: JobClaim | None
 
 
 def _accepted_source(session: Session, offer_id: str) -> AcceptedSource | None:
@@ -99,7 +107,17 @@ def _accepted_source(session: Session, offer_id: str) -> AcceptedSource | None:
         offer.id,
         job.id,
         job.attempt,
+        JobClaim(job.claim_owner, job.attempt) if job.claim_owner is not None else None,
     )
+
+
+def _running_source_job(
+    session: Session, offer: WorkflowInstallOffer, source: AcceptedSource
+) -> Job:
+    job = running_workflow_completion_job(session, offer, source.attempt)
+    if source.claim is None or job.claim_owner != source.claim.token:
+        raise WorkflowOfferCompletionError("workflow-completion-unavailable")
+    return job
 
 
 def _require_runtime_plan(processes: ProcessSupervisor, source: AcceptedSource) -> None:
@@ -114,13 +132,14 @@ def _require_runtime_plan(processes: ProcessSupervisor, source: AcceptedSource) 
         offer = session.get(WorkflowInstallOffer, source.offer_id)
         if offer is None:
             raise WorkflowOfferCompletionError("workflow-install-offer-changed")
-        job = running_workflow_completion_job(session, offer, source.attempt)
+        job = _running_source_job(session, offer, source)
         result = WorkflowCompletionResult.model_validate(job.result_json)
     if current != result.runtime_plan or current.operation == "install_managed":
         raise WorkflowOfferCompletionError("workflow-runtime-plan-changed")
 
 
-def _read_source(offer_id: str) -> AcceptedSource | None:
+def prepare_source_completion(offer_id: str) -> str | None:
+    """Join the compute queue only when accepted downloads can be completed."""
     with SessionLocal() as session:
         session.execute(text("UPDATE workflow_install_offers SET status = status WHERE 0"))
         offer = session.get(WorkflowInstallOffer, offer_id)
@@ -133,28 +152,46 @@ def _read_source(offer_id: str) -> AcceptedSource | None:
         ):
             job.status = "queued"
             offer.completion_error_code = None
-        if job.status not in {"queued", "running"}:
+        if job.status != "queued" or job.claim_owner is not None:
             return None
         try:
             source = _accepted_source(session, offer_id)
-        except WorkflowOfferCompletionError as exc:
-            if exc.code == "workflow-download-failed":
-                begin_workflow_completion(session, offer)
-                fail_workflow_completion(session, offer, exc.code)
-                session.commit()
-            raise
+        except ValueError as exc:
+            if getattr(exc, "code", None) == "workflow-download-failed":
+                raise
+            # Refused inputs still need a claim for runtime cleanup. The claimed
+            # reader repeats validation before it prepares or activates anything.
+            session.commit()
+            return job.id
         if source is None:
+            job.queue_group = None
+            session.commit()
             return None
-        started = begin_workflow_completion(session, offer)
-        if started is None:
-            return None
-        attempt = started.attempt
         session.commit()
-        return replace(source, attempt=attempt)
+        return job.id
+
+
+def _read_source(offer_id: str, claim: JobClaim) -> AcceptedSource | None:
+    with SessionLocal() as session:
+        session.execute(text("UPDATE workflow_install_offers SET status = status WHERE 0"))
+        offer = session.get(WorkflowInstallOffer, offer_id)
+        if offer is None or offer.status != "queued" or offer.source_plan_id is None:
+            return None
+        job = running_workflow_completion_job(session, offer, claim.attempt)
+        if job.claim_owner != claim.token:
+            raise WorkflowOfferCompletionError("workflow-completion-unavailable")
+        source = _accepted_source(session, offer_id)
+        if source is None:
+            defer_workflow_completion(session, offer, claim.attempt)
+            session.commit()
+            return None
+        return replace(source, attempt=claim.attempt, claim=claim)
 
 
 async def _prepare_runtime(processes: ProcessSupervisor, source: AcceptedSource) -> None:
-    await asyncio.to_thread(require_workflow_source_attempt, source.offer_id, source.attempt)
+    if source.claim is None:
+        raise WorkflowOfferCompletionError("workflow-completion-unavailable")
+    await asyncio.to_thread(require_workflow_source_attempt, source.offer_id, source.claim)
     provisioner = processes.runtimes
     if provisioner is None or source.runtime_plan is None:
         raise WorkflowOfferCompletionError("workflow-runtime-plan-unavailable")
@@ -241,7 +278,7 @@ def _finish(
         accepted = session.get(WorkflowInstallOffer, offer_id)
         if accepted is None:
             raise WorkflowOfferCompletionError("workflow-install-offer-changed")
-        running_workflow_completion_job(session, accepted, source.attempt)
+        _running_source_job(session, accepted, source)
         definition = _definition(session, source)
         revision = stage_workflow_revision(session, definition, payload)
         fresh = build_review_snapshot(session, definition, revision, object_info=info)
@@ -326,6 +363,8 @@ def _record_restoration_warning(source: AcceptedSource, activation_id: str) -> N
         if (
             job.id != source.job_id
             or job.attempt != source.attempt
+            or source.claim is None
+            or job.claim_owner != source.claim.token
             or job.status != "complete"
             or result.activation_id != activation_id
             or activation is None
@@ -341,20 +380,27 @@ async def complete_workflow_source(
     processes: ProcessSupervisor | None,
     media: MediaAdapter | None,
     offer_id: str,
+    *,
+    claim: JobClaim,
 ) -> str | None:
     """Finish under the caller's primary lease, which outlives cancellation and I/O."""
-    source = await asyncio.to_thread(_read_source, offer_id)
+    source = await asyncio.to_thread(_read_source, offer_id, claim)
     if source is None:
         return None
     if processes is None or media is None:
         raise WorkflowOfferCompletionError("workflow-review-required")
     activation_id: str | None = None
+
+    def require_retained_claim() -> None:
+        with SessionLocal() as session:
+            guard_workflow_completion_claim(session, offer_id, claim, require_running=False)
+
     try:
-        async with workflow_package_runtime(processes):
+        async with workflow_package_runtime(processes, require_claim=require_retained_claim):
             await _prepare_runtime(processes, source)
             await asyncio.to_thread(_require_runtime_plan, processes, source)
             async with prepared_workflow_source_runtime(
-                processes, offer_id, source.attempt
+                processes, offer_id, claim=claim
             ) as prepared:
                 activation_id = await _complete_running_source(
                     settings, processes, media, offer_id, source, prepared
@@ -374,7 +420,7 @@ async def complete_workflow_source(
             offer = session.get(WorkflowInstallOffer, offer_id)
             if offer is None:
                 raise WorkflowOfferCompletionError("workflow-install-offer-changed") from exc
-            job = running_workflow_completion_job(session, offer, source.attempt)
+            job = _running_source_job(session, offer, source)
             job.status = "paused"
             update_job_progress(job, stage="Review extension code to continue", indeterminate=True)
             offer.completion_error_code = exc.code

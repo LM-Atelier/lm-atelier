@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Mapping
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
@@ -117,7 +117,7 @@ from .profile_service import (
 from .profile_use_cases import normalize_provider_use_case_metadata
 from .progress import completed_progress, update_job_progress
 from .revision_dependency_contract import persist_dependency_contract
-from .scheduler import ResourceScheduler
+from .scheduler import JobClaim, ResourceScheduler
 from .schemas import DownloadRequest
 from .subprocess_env import subprocess_environment
 from .upscale_workflows import (
@@ -126,8 +126,10 @@ from .upscale_workflows import (
     upscale_capability,
 )
 from .workflow_completion_jobs import (
+    complete_workflow_job,
     fail_workflow_completion,
     recover_workflow_completion_jobs,
+    workflow_completion_job,
     workflow_download_can_cancel,
 )
 from .workflow_edit_calibration import validate_workflow_edit_calibration
@@ -934,6 +936,12 @@ class DownloadManager:
     async def _reactivate(self, job_id: str) -> None:
         """Re-run the bounded activation probe against the current runtime."""
 
+        async with self.scheduler.job_lease(job_id, resource="primary_compute", group="primary"):
+            await self._reactivate_claimed(job_id)
+
+    async def _reactivate_claimed(self, job_id: str) -> None:
+        """Keep identity measurement, probing and result writes under one claim."""
+
         from .db import SessionLocal
 
         install_id = ""
@@ -994,6 +1002,7 @@ class DownloadManager:
                     install_id=install_id,
                     default_settings=default_settings,
                     component_hashes=component_hashes,
+                    primary_lease_held=True,
                 )
                 if proven is None:
                     raise RuntimeError("the chat activation probe did not complete")
@@ -1112,6 +1121,7 @@ class DownloadManager:
             compiled=compiled,
             default_settings=default_settings,
             prove_capability=True,
+            primary_lease_held=True,
         )
         if activated is None:
             raise RuntimeError("the media activation probe did not complete")
@@ -1143,7 +1153,7 @@ class DownloadManager:
             )
             jobs = session.scalars(
                 select(Job).where(
-                    Job.kind == JobKind.DOWNLOAD.value,
+                    Job.kind.in_((JobKind.DOWNLOAD.value, JobKind.ACTIVATE.value)),
                     Job.id.not_in([job_id for _offer_id, job_id in cancellations]),
                     Job.status.in_(
                         [
@@ -1165,13 +1175,21 @@ class DownloadManager:
                 update_job_progress(
                     job,
                     stage="resuming",
-                    queue_resource=job.queue_resource or "network_transfer",
+                    queue_resource=job.queue_resource
+                    or (
+                        "primary_compute"
+                        if job.kind == JobKind.ACTIVATE.value
+                        else "network_transfer"
+                    ),
                     indeterminate=True,
                 )
             session.commit()
-            job_ids = [job.id for job in jobs]
-        for job_id in job_ids:
-            self.start(job_id)
+            recovered = [(job.id, job.kind) for job in jobs]
+        for job_id, kind in recovered:
+            if kind == JobKind.ACTIVATE.value:
+                self.start_activation(job_id)
+            else:
+                self.start(job_id)
         if self._offer_recovery_task is None or self._offer_recovery_task.done():
             self._offer_recovery_task = asyncio.create_task(
                 self._recover_workflow_installations(cancellations),
@@ -1311,7 +1329,7 @@ class DownloadManager:
         with SessionLocal() as session:
             jobs = session.scalars(
                 select(Job).where(
-                    Job.kind == JobKind.DOWNLOAD.value,
+                    Job.kind.in_((JobKind.DOWNLOAD.value, JobKind.ACTIVATE.value)),
                     Job.status.in_([JobStatus.QUEUED.value, JobStatus.RUNNING.value]),
                 )
             ).all()
@@ -2137,6 +2155,24 @@ class DownloadManager:
         """Try the workflow step after a download reaches its durable result."""
 
         from .db import SessionLocal
+        from .workflow_legacy_completion import prepare_legacy_completion
+        from .workflow_source_completion import prepare_source_completion
+
+        def pending_identity(
+            session: Session, offer: WorkflowInstallOffer | None
+        ) -> tuple[str | None, int, str | None] | None:
+            if offer is None or offer.status != "queued":
+                return None
+            job = session.get(Job, offer.completion_job_id) if offer.completion_job_id else None
+            if job is not None and (
+                job.claim_owner is not None or job.status not in {"queued", "paused"}
+            ):
+                return None
+            return (
+                offer.completion_job_id,
+                job.attempt if job is not None else 0,
+                job.queue_ticket if job is not None else None,
+            )
 
         with SessionLocal() as session:
             statement = select(WorkflowInstallOffer.id).where(
@@ -2157,9 +2193,44 @@ class DownloadManager:
         if not offers:
             return
         for offer_id in offers:
+            source = False
+            claimed = False
+            claim: JobClaim | None = None
+            preflight_identity: tuple[str | None, int, str | None] | None = None
             try:
-                async with self.scheduler.lease("primary"):
-                    completion = asyncio.create_task(self._dispatch_workflow_completion(offer_id))
+                with SessionLocal() as session:
+                    offer = session.get(WorkflowInstallOffer, offer_id)
+                    source = offer is not None and offer.source_plan_id is not None
+                    preflight_identity = pending_identity(session, offer)
+                preflight = asyncio.create_task(
+                    asyncio.to_thread(
+                        prepare_source_completion if source else prepare_legacy_completion, offer_id
+                    )
+                )
+                try:
+                    completion_id = await asyncio.shield(preflight)
+                except asyncio.CancelledError:
+                    # Cancellation cannot stop a database thread. Join it before
+                    # shutdown finishes, without claiming the work it prepared.
+                    while not preflight.done():
+                        try:
+                            await asyncio.shield(preflight)
+                        except asyncio.CancelledError:
+                            continue
+                        except Exception:
+                            break
+                    with suppress(Exception):
+                        preflight.result()
+                    raise
+                if completion_id is None:
+                    continue
+                async with self.scheduler.job_lease(
+                    completion_id, resource="media_compute", group="primary"
+                ) as claim:
+                    claimed = True
+                    completion = asyncio.create_task(
+                        self._dispatch_workflow_completion(offer_id, claim=claim)
+                    )
                     try:
                         activation_id = await asyncio.shield(completion)
                     except asyncio.CancelledError:
@@ -2177,10 +2248,71 @@ class DownloadManager:
                     await self.events.publish("workflow.install.completed", offer_id, {})
             except (ValueError, OSError, SQLAlchemyError) as exc:
                 code = completion_attention_code(getattr(exc, "code", None))
-                await self.events.publish("workflow.install.attention", offer_id, {"code": code})
+                report = False
+                if claimed and claim is not None:
+                    with SessionLocal() as session:
+                        offer = session.get(WorkflowInstallOffer, offer_id)
+                        job = session.get(Job, completion_id)
+                        report = (
+                            offer is not None
+                            and offer.status == "queued"
+                            and offer.completion_job_id == completion_id
+                            and offer.completion_error_code == code
+                            and job is not None
+                            and job.status in {JobStatus.FAILED.value, JobStatus.PAUSED.value}
+                            and job.claim_owner is None
+                            and job.attempt == claim.attempt
+                        )
+                if not claimed:
+                    with SessionLocal() as session:
+                        session.execute(
+                            text("UPDATE workflow_install_offers SET status = status WHERE 0")
+                        )
+                        offer = session.get(WorkflowInstallOffer, offer_id)
+                        current_identity = pending_identity(session, offer)
+                        same_request = preflight_identity is not None and (
+                            current_identity == preflight_identity
+                            or (
+                                preflight_identity == (None, 0, None)
+                                and current_identity is not None
+                                and current_identity[1:] == (0, None)
+                            )
+                        )
+                        if offer is not None and same_request:
+                            offer.completion_error_code = code
+                            if code == "workflow-download-failed":
+                                with suppress(ValueError):
+                                    fail_workflow_completion(session, offer, code, queued=True)
+                            session.commit()
+                            report = True
+                if report:
+                    await self.events.publish(
+                        "workflow.install.attention", offer_id, {"code": code}
+                    )
+            finally:
+                if claimed and claim is not None:
+                    with SessionLocal() as session:
+                        offer = session.get(WorkflowInstallOffer, offer_id)
+                        job = (
+                            session.get(Job, offer.completion_job_id)
+                            if offer is not None and offer.completion_job_id is not None
+                            else None
+                        )
+                        retry_waiting = (
+                            offer is not None
+                            and offer.status == "queued"
+                            and job is not None
+                            and job.status == JobStatus.QUEUED.value
+                            and job.attempt == claim.attempt
+                            and job.claim_owner is None
+                            and job.started_at is None
+                        )
+                    if retry_waiting:
+                        self.start_workflow_installation(offer_id)
 
-    async def _dispatch_workflow_completion(self, offer_id: str) -> str | None:
+    async def _dispatch_workflow_completion(self, offer_id: str, *, claim: JobClaim) -> str | None:
         from .db import SessionLocal
+        from .workflow_legacy_completion import RESOLVABLE_COMPLETION_CODES
         from .workflow_package_activation import media_worker_stopped
         from .workflow_source_completion import complete_workflow_source
         from .workflow_source_extensions import quarantine_workflow_source_extensions
@@ -2188,75 +2320,121 @@ class DownloadManager:
         with SessionLocal() as session:
             offer = session.get(WorkflowInstallOffer, offer_id)
             source = offer is not None and offer.source_plan_id is not None
-        if not source:
-            return await asyncio.to_thread(self._complete_workflow_install_offer, offer_id)
         try:
+            if not source:
+                return await asyncio.to_thread(
+                    self._complete_workflow_install_offer, offer_id, claim=claim
+                )
             return await complete_workflow_source(
-                self.settings, self.processes, self.media_adapter, offer_id
+                self.settings, self.processes, self.media_adapter, offer_id, claim=claim
             )
         except (ValueError, OSError, SQLAlchemyError) as exc:
             # The compilation transaction has rolled back before recording attention.
+            report = False
+            owns_claim = False
             with SessionLocal() as session:
+                session.execute(text("UPDATE workflow_install_offers SET status = status WHERE 0"))
                 offer = session.get(WorkflowInstallOffer, offer_id)
                 if offer is not None and offer.status == "queued":
-                    offer.completion_error_code = completion_attention_code(
-                        getattr(exc, "code", None)
+                    job = session.get(Job, offer.completion_job_id)
+                    owns_claim = (
+                        job is not None
+                        and job.claim_owner == claim.token
+                        and job.attempt == claim.attempt
                     )
-                    with suppress(ValueError):
-                        fail_workflow_completion(session, offer, offer.completion_error_code)
-                    session.commit()
-            if self.processes is not None:
+                    if owns_claim and job is not None and job.status == JobStatus.RUNNING.value:
+                        report = True
+                        offer.completion_error_code = completion_attention_code(
+                            getattr(exc, "code", None)
+                        )
+                        with suppress(ValueError):
+                            fail_workflow_completion(session, offer, offer.completion_error_code)
+                            if (
+                                not source
+                                and offer.completion_error_code in RESOLVABLE_COMPLETION_CODES
+                            ):
+                                job.status = JobStatus.PAUSED.value
+                                job.completed_at = None
+                session.commit()
+            if source and owns_claim and self.processes is not None:
                 await asyncio.to_thread(
                     quarantine_workflow_source_extensions,
                     SessionLocal,
                     offer_id,
                     media_worker_stopped=media_worker_stopped(self.processes),
+                    claim=claim,
                 )
-            raise
+            if report:
+                with SessionLocal() as session:
+                    offer = session.get(WorkflowInstallOffer, offer_id)
+                    job = (
+                        session.get(Job, offer.completion_job_id)
+                        if offer is not None and offer.completion_job_id is not None
+                        else None
+                    )
+                    report = (
+                        offer is not None
+                        and offer.status == "queued"
+                        and offer.completion_error_code
+                        == completion_attention_code(getattr(exc, "code", None))
+                        and job is not None
+                        and job.status in {JobStatus.FAILED.value, JobStatus.PAUSED.value}
+                        and job.claim_owner == claim.token
+                        and job.attempt == claim.attempt
+                    )
+                if report:
+                    raise
+            return None
 
-    def _complete_workflow_install_offer(self, offer_id: str) -> str | None:
+    def _complete_workflow_install_offer(self, offer_id: str, *, claim: JobClaim) -> str | None:
         from .db import SessionLocal
         from .workflow_activations import materialize_comfy_runtime_dependency
         from .workflow_offer_completion import complete_workflow_install_offer
 
         provisioner = self.processes.runtimes if self.processes else None
-        try:
-            with SessionLocal() as session:
-                # Keep the activation savepoint inside the offer transaction.
-                session.connection().exec_driver_sql("BEGIN")
-                activation_id = complete_workflow_install_offer(
-                    session,
-                    offer_id,
-                    runtime_materializer=(
-                        lambda requirement, selection: materialize_comfy_runtime_dependency(
-                            provisioner,
-                            requirement,
-                            selection,
-                        )
+        with SessionLocal() as session:
+            # The writer reservation fences cancellation and claim replacement
+            # through activation and the durable completion result.
+            session.execute(text("UPDATE workflow_install_offers SET status = status WHERE 0"))
+            offer = session.get(WorkflowInstallOffer, offer_id)
+            if offer is None or offer.status != "queued":
+                return None
+            job = workflow_completion_job(session, offer)
+            if (
+                job.status != JobStatus.RUNNING.value
+                or job.claim_owner != claim.token
+                or job.attempt != claim.attempt
+            ):
+                return None
+            activation_id = complete_workflow_install_offer(
+                session,
+                offer_id,
+                runtime_materializer=(
+                    lambda requirement, selection: materialize_comfy_runtime_dependency(
+                        provisioner,
+                        requirement,
+                        selection,
                     )
-                    if provisioner is not None
-                    else None,
-                    custom_node_root=self.settings.custom_node_dir,
-                    registry_environment_root=registry_wheel_environment_root(
-                        self.settings.registry_dir
-                    ),
                 )
-                offer = session.get(WorkflowInstallOffer, offer_id)
-                if offer is not None and offer.status in {"queued", "completed"}:
-                    offer.completion_error_code = None
-                session.commit()
-                return activation_id
-        except (ValueError, OSError, SQLAlchemyError) as exc:
-            # The failed activation transaction has closed and rolled back.
-            # Save its fixed outcome separately while the primary lease is still held.
-            with SessionLocal() as session:
-                offer = session.get(WorkflowInstallOffer, offer_id)
-                if offer is not None and offer.status == "queued":
-                    offer.completion_error_code = completion_attention_code(
-                        getattr(exc, "code", None)
+                if provisioner is not None
+                else None,
+                custom_node_root=self.settings.custom_node_dir,
+                registry_environment_root=registry_wheel_environment_root(
+                    self.settings.registry_dir
+                ),
+            )
+            offer = session.get(WorkflowInstallOffer, offer_id)
+            if offer is not None and offer.status in {"queued", "completed"}:
+                offer.completion_error_code = None
+                if activation_id is not None:
+                    complete_workflow_job(session, offer, claim.attempt, activation_id)
+                else:
+                    job.status = JobStatus.QUEUED.value
+                    update_job_progress(
+                        job, stage="Waiting for workflow dependencies", indeterminate=True
                     )
-                    session.commit()
-            raise
+            session.commit()
+            return activation_id
 
     async def _restore_media_worker(self, was_running: bool | None) -> None:
         if was_running is None or not self.processes:
@@ -2273,6 +2451,7 @@ class DownloadManager:
         install_id: str,
         default_settings: dict[str, Any],
         component_hashes: dict[str, str],
+        primary_lease_held: bool = False,
     ) -> str | None:
         """Prove a downloaded GGUF can launch and complete one bounded turn."""
 
@@ -2280,7 +2459,7 @@ class DownloadManager:
             raise RuntimeError("automatic chat activation is unavailable")
         from .db import SessionLocal
 
-        async with self.scheduler.lease("primary"):
+        async with nullcontext() if primary_lease_held else self.scheduler.lease("primary"):
             previous = next(item for item in self.processes.statuses() if item.name == "chat")
             previous_profile_id = previous.profile_id if previous.running else None
             with SessionLocal() as session:
@@ -2523,6 +2702,7 @@ class DownloadManager:
         compiled: CompiledComfyTemplate,
         default_settings: dict[str, Any],
         prove_capability: bool = False,
+        primary_lease_held: bool = False,
     ) -> tuple[CompiledComfyTemplate, str, str, list[str]] | None:
         """Restart, probe, and commit one media install under the compute lease.
 
@@ -2537,7 +2717,7 @@ class DownloadManager:
             raise RuntimeError("automatic ComfyUI activation is unavailable")
         from .db import SessionLocal
 
-        async with self.scheduler.lease("primary"):
+        async with nullcontext() if primary_lease_held else self.scheduler.lease("primary"):
             await self.processes.start_media((destination, request.comfy_paths))
             invalidate = getattr(self.media_adapter, "invalidate_object_info_cache", None)
             if callable(invalidate):

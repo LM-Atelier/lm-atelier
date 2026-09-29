@@ -21,6 +21,7 @@ from test_workflow_revision_review import reviewed_runtime as reviewed_runtime
 from local_lm import models
 from local_lm.db import SessionLocal
 from local_lm.processes import ProcessSupervisor
+from local_lm.scheduler import JobClaim
 from local_lm.schemas import WorkerStatus
 
 pytestmark = pytest.mark.asyncio
@@ -130,8 +131,8 @@ async def test_runtime_drift_cannot_complete_an_accepted_source(
     if moment == "before-inspection":
         original = workflow_source_completion._read_source
 
-        def read(identifier: str) -> Any:
-            source = original(identifier)
+        def read(identifier: str, claim: JobClaim) -> Any:
+            source = original(identifier, claim)
             if source is not None:
                 executable.write_bytes(b"changed neutral runtime")
             return source

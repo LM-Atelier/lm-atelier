@@ -78,6 +78,8 @@ async def activate_prepared_workflow_package(
     context: PreparationContext,
     processes: ProcessSupervisor,
     session_factory: Callable[[], Session],
+    write_guard: Callable[[Session], None] | None = None,
+    cleanup_guard: Callable[[Session], None] | None = None,
 ) -> WorkflowPackageActivation:
     """Use the verified source and bytes, then apply the ordinary launch checks."""
     install = _prepared_install(session, preparation)
@@ -95,6 +97,8 @@ async def activate_prepared_workflow_package(
     try:
         verified = await target.verify((preparation.install_id,))
         session.expire_all()
+        if write_guard is not None:
+            write_guard(session)
         _prepared_install(session, preparation)
         record_registry_policy_trust(
             session,
@@ -107,6 +111,9 @@ async def activate_prepared_workflow_package(
             media_worker_stopped=media_worker_stopped(processes),
             verified_launch=verified,
         )
+        # An existing trust grant does not commit; release any reserved writer
+        # before activation awaits file verification or runtime startup.
+        session.commit()
         await activate_comfy_registry_install(
             session,
             install_id=preparation.install_id,
@@ -116,6 +123,8 @@ async def activate_prepared_workflow_package(
             start_media=processes.start_media,
             read_node_inventory=processes.comfy_node_inventory,
             verification_target=target,
+            write_guard=write_guard,
+            cleanup_guard=cleanup_guard,
         )
     except ComfyRegistryInstallError as exc:
         session.rollback()

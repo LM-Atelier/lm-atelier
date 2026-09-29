@@ -249,6 +249,75 @@ async def test_queue_query_is_bounded(client: AsyncClient, params: dict[str, str
     assert response.status_code == 422
 
 
+@pytest.mark.parametrize("kind", ["activate", "registry_prepare", "workflow_install"])
+@pytest.mark.parametrize(
+    "status", ["queued", "paused", "complete", "failed", "cancelled", "interrupted"]
+)
+async def test_installation_stays_active_until_cleanup_releases_its_claim(
+    session: Session, client: AsyncClient, kind: str, status: str
+) -> None:
+    job(session, "install-cleanup", kind=kind, status=status)
+    session.flush()
+    session.execute(
+        update(Job)
+        .where(Job.id == "install-cleanup")
+        .values(
+            claim_owner="neutral-execution-token",
+            claim_expires_at=STAMP,
+        )
+    )
+    session.commit()
+    response = await client.get("/api/queue/activity", params={"lane": "install"})
+    assert response.status_code == 200
+    value = response.json()
+    assert value["total"] == value["lane_counts"]["install"] == 1
+    row = value["items"][0]
+    assert row["owner_type"] == "job" and row["owner_id"] == "install-cleanup"
+    assert row["lane"] == "install" and row["status"] == "running"
+    assert row["active_jobs"] == row["running_jobs"] == 1
+    assert row["queued_jobs"] == row["paused_jobs"] == 0
+    assert row["step_count"] == 0 and row["chat_id"] is None
+    assert "neutral-" not in response.text
+    if kind == "workflow_install":
+        assert row["label"] == "Workflow installation"
+
+    session.execute(
+        update(Job)
+        .where(Job.id == "install-cleanup")
+        .values(claim_owner=None, claim_expires_at=None)
+    )
+    session.commit()
+    released = await client.get("/api/queue/activity", params={"lane": "install"})
+    if status in ("queued", "paused"):
+        remaining = released.json()["items"][0]
+        assert remaining["status"] == status and remaining["running_jobs"] == 0
+        assert remaining[status + "_jobs"] == 1
+    else:
+        assert released.json()["items"] == [] and released.json()["total"] == 0
+
+
+async def test_terminal_plan_stays_visible_until_its_child_claim_releases(
+    session: Session, client: AsyncClient
+) -> None:
+    plan(session, "finished-plan", status="complete")
+    job(session, "child-cleanup", plan="finished-plan", status="complete")
+    session.flush()
+    session.execute(
+        update(Job).where(Job.id == "child-cleanup").values(claim_owner="neutral-execution-token")
+    )
+    session.commit()
+    response = await client.get("/api/queue/activity")
+    assert response.status_code == 200
+    assert response.json()["total"] == 1
+    row = response.json()["items"][0]
+    assert row["owner_id"] == "finished-plan" and row["status"] == "running"
+    assert row["active_jobs"] == row["running_jobs"] == 1
+    assert row["queued_jobs"] == row["paused_jobs"] == 0
+    session.execute(update(Job).where(Job.id == "child-cleanup").values(claim_owner=None))
+    session.commit()
+    assert (await client.get("/api/queue/activity")).json()["total"] == 0
+
+
 async def test_empty_queue_is_explicit(client: AsyncClient) -> None:
     response = await client.get("/api/queue/activity")
     assert response.status_code == 200

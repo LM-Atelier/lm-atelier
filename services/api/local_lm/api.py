@@ -367,6 +367,7 @@ from .reference_library import (
 )
 from .reference_review import ReviewOutcome, ReviewRefusal, ReviewRefused, review_asset
 from .references import ReferenceError, ReferenceNotFoundError
+from .registry_preparation_jobs import RegistryPreparationInputs
 from .release_notices import read_third_party_notices, release_bundle_root
 from .retention_policy import RetentionPolicyStale, read_policy, windows_for, write_policy
 from .revision_dependency_contract import (
@@ -377,6 +378,7 @@ from .revision_dependency_contract import (
 from .routing import RouteConfirmationRequired
 from .runtime_config import persist_runtime_values
 from .saved_settings import normalize_saved_settings
+from .scheduler import JobClaim
 from .schemas import (
     AdapterPromptGrammarOut,
     AdapterPromptGrammarReview,
@@ -441,6 +443,7 @@ from .schemas import (
     GenerationIdentityOut,
     GenerationQueuePolicyOut,
     HealthOut,
+    InstallQueuePolicyOut,
     JobActivityOut,
     JobOut,
     LoraSuggestionsOut,
@@ -689,6 +692,7 @@ from .workflow_compatibility import (
 from .workflow_completion_jobs import (
     cancel_workflow_completion,
     retry_workflow_completion,
+    stage_workflow_completion_job,
     workflow_completion_offer,
     workflow_download_jobs,
 )
@@ -5125,6 +5129,51 @@ async def resume_transfer_queue(
     return await _change_transfer_policy(request, "resume", payload, session)
 
 
+@router.get("/queue/lanes/install", response_model=InstallQueuePolicyOut)
+def install_queue_policy(session: ConversationSessionDep) -> InstallQueuePolicyOut:
+    try:
+        result = read_lane_policy(session, "install")
+    except QueueLaneConflict as exc:
+        raise api_error(
+            409,
+            "queue-lane-conflict",
+            "The installation queue changed. Refresh before trying again.",
+        ) from exc
+    return InstallQueuePolicyOut.model_validate(dataclasses.asdict(result))
+
+
+async def _change_install_policy(
+    request: Request,
+    action: Literal["pause_after_current", "resume"],
+    payload: QueueControlCommand,
+    session: Session,
+) -> InstallQueuePolicyOut:
+    try:
+        result = await run_in_threadpool(change_lane_policy, session, "install", action, payload)
+    except QueueLaneConflict as exc:
+        raise api_error(
+            409,
+            "queue-lane-conflict",
+            "The installation queue changed. Refresh before trying again.",
+        ) from exc
+    await _services(request).scheduler.queue_control_changed("install")
+    return InstallQueuePolicyOut.model_validate(dataclasses.asdict(result))
+
+
+@router.post("/queue/lanes/install/pause-after-current", response_model=InstallQueuePolicyOut)
+async def pause_install_queue(
+    request: Request, payload: QueueControlCommand, session: ConversationSessionDep
+) -> InstallQueuePolicyOut:
+    return await _change_install_policy(request, "pause_after_current", payload, session)
+
+
+@router.post("/queue/lanes/install/resume", response_model=InstallQueuePolicyOut)
+async def resume_install_queue(
+    request: Request, payload: QueueControlCommand, session: ConversationSessionDep
+) -> InstallQueuePolicyOut:
+    return await _change_install_policy(request, "resume", payload, session)
+
+
 @router.get("/jobs/activity", response_model=JobActivityOut)
 async def job_activity(
     session: ConversationSessionDep,
@@ -5433,6 +5482,8 @@ async def retry_job(
                 manager.start(download.id)
         manager.start_workflow_installation(source_offer_id)
         return job
+    if job.kind == JobKind.REGISTRY_PREPARE.value:
+        return _retry_registry_preparation(session, _services(request), job_id)
     if job.kind == JobKind.DOWNLOAD.value:
         job.status = "queued"
         job.progress = 0
@@ -11504,20 +11555,33 @@ async def _cancel_registry_preparation(job_id: str) -> bool:
     a later success write COMPLETE over CANCELLED.
     """
 
+    with SessionLocal() as session:
+        initial = session.get(Job, job_id)
+        if initial is None:
+            return False
+        attempt, queue_ticket = initial.attempt, initial.queue_ticket
     task = _REGISTRY_PREPARE_TASKS.get(job_id)
     if task is not None and not task.done():
         task.cancel()
         with suppress(asyncio.CancelledError, Exception):
             await task
     with SessionLocal() as session:
+        session.execute(text("UPDATE jobs SET status = status WHERE 0"))
         job = session.get(Job, job_id)
-        if not job or job.status in {
-            JobStatus.COMPLETE.value,
-            JobStatus.FAILED.value,
-            JobStatus.CANCELLED.value,
-        }:
+        if (
+            job is None
+            or job.attempt != attempt
+            or job.queue_ticket != queue_ticket
+            or job.status
+            in {
+                JobStatus.COMPLETE.value,
+                JobStatus.FAILED.value,
+                JobStatus.CANCELLED.value,
+            }
+        ):
             return False
         job.status = JobStatus.CANCELLED.value
+        job.completed_at = utcnow()
         update_job_progress(job, stage="cancelled", indeterminate=True)
         session.commit()
     return True
@@ -11713,6 +11777,21 @@ def _authorized_workflow_context(
     return revision.id, tuple(sorted(set(analysis.required_node_types))), stored
 
 
+def _current_registry_preparation(
+    session: Session, job_id: str, claim: JobClaim, *, require_running: bool = True
+) -> Job | None:
+    session.execute(text("UPDATE jobs SET status = status WHERE 0"))
+    job = session.get(Job, job_id, populate_existing=True)
+    if (
+        job is None
+        or (require_running and job.status != JobStatus.RUNNING.value)
+        or job.claim_owner != claim.token
+        or job.attempt != claim.attempt
+    ):
+        return None
+    return job
+
+
 async def _run_workflow_package_preparation(
     services: Services,
     job_id: str,
@@ -11724,11 +11803,64 @@ async def _run_workflow_package_preparation(
 ) -> None:
     """One durable preparation job: lease held, worker state told truthfully."""
 
-    def report(name: str, done: int | None, total: int | None) -> None:
-        with SessionLocal() as session:
-            job = session.get(Job, job_id)
-            if not job:
+    with SessionLocal() as session:
+        initial = session.get(Job, job_id)
+        if initial is None:
+            return
+        initial_attempt = initial.attempt
+        initial_ticket = initial.queue_ticket
+    claim: JobClaim | None = None
+
+    def require_current() -> None:
+        if claim is not None:
+            with SessionLocal() as session:
+                current = session.scalar(
+                    select(Job.id).where(
+                        Job.id == job_id,
+                        Job.status == JobStatus.RUNNING.value,
+                        Job.claim_owner == claim.token,
+                        Job.attempt == claim.attempt,
+                    )
+                )
+            if current is not None:
                 return
+        raise WorkflowPackagePreparationError(
+            "registry_preparation_claim_lost",
+            "Package preparation no longer owns its execution. Try again after cleanup.",
+        )
+
+    def guard_write(session: Session) -> None:
+        if claim is None or _current_registry_preparation(session, job_id, claim) is None:
+            raise WorkflowPackagePreparationError(
+                "registry_preparation_claim_lost",
+                "Package preparation no longer owns its execution. Try again after cleanup.",
+            )
+
+    def guard_cleanup(session: Session) -> None:
+        if (
+            claim is None
+            or _current_registry_preparation(session, job_id, claim, require_running=False) is None
+        ):
+            raise WorkflowPackagePreparationError(
+                "registry_preparation_claim_lost",
+                "Package preparation no longer owns its execution. Try again after cleanup.",
+            )
+
+    def require_retained_claim() -> None:
+        with SessionLocal() as session:
+            guard_cleanup(session)
+
+    def report(name: str, done: int | None, total: int | None) -> None:
+        if claim is None:
+            require_current()
+            return
+        with SessionLocal() as session:
+            job = _current_registry_preparation(session, job_id, claim)
+            if job is None:
+                raise WorkflowPackagePreparationError(
+                    "registry_preparation_claim_lost",
+                    "Package preparation no longer owns its execution. Try again after cleanup.",
+                )
             update_job_progress(
                 job,
                 stage=name,
@@ -11740,98 +11872,156 @@ async def _run_workflow_package_preparation(
             session.commit()
 
     try:
-        async with services.scheduler.job_lease(job_id, resource="media_compute", group="primary"):
-            context = PreparationContext.from_settings(services.settings)
-            activation_result: WorkflowPackageActivation | None = None
+        async with services.scheduler.job_lease(
+            job_id, resource="media_compute", group="primary"
+        ) as acquired:
+            claim = acquired
+            try:
+                context = PreparationContext.from_settings(services.settings)
+                activation_result: WorkflowPackageActivation | None = None
 
-            async def finish_preparation(
-                session: Session,
-                preparation: ComfyRegistryPreparation,
-                resolution: ComfyNodeResolution,
-            ) -> None:
-                nonlocal activation_result
-                activation_result = await activate_prepared_workflow_package(
-                    session,
-                    preparation,
-                    resolution,
-                    context=context,
-                    processes=services.processes,
-                    session_factory=SessionLocal,
-                )
+                async def finish_preparation(
+                    session: Session,
+                    preparation: ComfyRegistryPreparation,
+                    resolution: ComfyNodeResolution,
+                ) -> None:
+                    nonlocal activation_result
+                    require_current()
+                    activation_result = await activate_prepared_workflow_package(
+                        session,
+                        preparation,
+                        resolution,
+                        context=context,
+                        processes=services.processes,
+                        session_factory=SessionLocal,
+                        write_guard=guard_write,
+                        cleanup_guard=guard_cleanup,
+                    )
 
-            async with workflow_package_runtime(services.processes, context):
-                media_stopped = _media_worker_truly_stopped(services)
-                # The composition opens its session only around the atomic
-                # prepare step; resolution and closure run session-free.
-                preparation = await prepare_workflow_package(
-                    SessionLocal,
-                    package_id=package_id,
-                    version=version,
-                    node_types=node_types,
-                    context=context,
-                    media_worker_stopped=media_stopped,
-                    interpreter_probe=probe_comfy_registry_runtime_target,
-                    registry_client=ComfyRegistryClient(),
-                    project_client=ComfyRegistryWheelProjectClient(),
-                    metadata_client=ComfyRegistryWheelMetadataClient(),
-                    archive_downloader=ComfyRegistryArchiveDownloader(),
-                    wheel_downloader=ComfyRegistryWheelDownloader(),
-                    phase=report,
-                    renew_install_id=renew_install_id,
-                    authorized_workflow=authorized_workflow,
-                    on_prepared=finish_preparation if renew_install_id is None else None,
-                )
-            with SessionLocal() as session:
-                job = session.get(Job, job_id)
-                if job and job.status != JobStatus.CANCELLED.value:
-                    job.status = JobStatus.COMPLETE.value
-                    job.payload_json = {
-                        **job.payload_json,
-                        "preparation": {
-                            "install_id": preparation.install_id,
-                            "installed_path": preparation.installed_path,
-                            "wheel_environment_path": preparation.wheel_environment_path,
-                            "archive_sha256": preparation.archive_sha256,
-                            "manifest_sha256": preparation.manifest_sha256,
-                            "wheel_closure_sha256": preparation.wheel_closure_sha256,
-                            "wheel_environment_sha256": preparation.wheel_environment_sha256,
-                            "reused_wheel_environment": preparation.reused_wheel_environment,
-                        },
-                    }
-                    if activation_result is not None:
+                require_current()
+                async with workflow_package_runtime(
+                    services.processes, context, require_claim=require_retained_claim
+                ):
+                    media_stopped = _media_worker_truly_stopped(services)
+                    # The composition opens its session only around the atomic
+                    # prepare step; resolution and closure run session-free.
+                    preparation = await prepare_workflow_package(
+                        SessionLocal,
+                        package_id=package_id,
+                        version=version,
+                        node_types=node_types,
+                        context=context,
+                        media_worker_stopped=media_stopped,
+                        interpreter_probe=probe_comfy_registry_runtime_target,
+                        registry_client=ComfyRegistryClient(),
+                        project_client=ComfyRegistryWheelProjectClient(),
+                        metadata_client=ComfyRegistryWheelMetadataClient(),
+                        archive_downloader=ComfyRegistryArchiveDownloader(),
+                        wheel_downloader=ComfyRegistryWheelDownloader(),
+                        phase=report,
+                        renew_install_id=renew_install_id,
+                        authorized_workflow=authorized_workflow,
+                        on_prepared=finish_preparation if renew_install_id is None else None,
+                        write_guard=guard_write,
+                    )
+                with SessionLocal() as session:
+                    job = _current_registry_preparation(session, job_id, claim)
+                    if job is not None:
+                        job.status = JobStatus.COMPLETE.value
+                        job.completed_at = utcnow()
                         job.payload_json = {
                             **job.payload_json,
-                            "activation": activation_result.payload(),
+                            "preparation": {
+                                "install_id": preparation.install_id,
+                                "installed_path": preparation.installed_path,
+                                "wheel_environment_path": preparation.wheel_environment_path,
+                                "archive_sha256": preparation.archive_sha256,
+                                "manifest_sha256": preparation.manifest_sha256,
+                                "wheel_closure_sha256": preparation.wheel_closure_sha256,
+                                "wheel_environment_sha256": preparation.wheel_environment_sha256,
+                                "reused_wheel_environment": preparation.reused_wheel_environment,
+                            },
                         }
-                    update_job_progress(
-                        job,
-                        stage=(
-                            "Dependencies refreshed; trust unchanged"
-                            if renew_install_id is not None
-                            else "Extension installed and active"
-                            if activation_result is not None and activation_result.state == "active"
-                            else "Extension prepared; review required"
-                        ),
+                        if activation_result is not None:
+                            job.payload_json = {
+                                **job.payload_json,
+                                "activation": activation_result.payload(),
+                            }
+                        update_job_progress(
+                            job,
+                            stage=(
+                                "Dependencies refreshed; trust unchanged"
+                                if renew_install_id is not None
+                                else "Extension installed and active"
+                                if activation_result is not None
+                                and activation_result.state == "active"
+                                else "Extension prepared; review required"
+                            ),
+                        )
+                    session.commit()
+            except asyncio.CancelledError:
+                with SessionLocal() as session:
+                    job = _current_registry_preparation(session, job_id, claim)
+                    if job is not None:
+                        job.status = JobStatus.INTERRUPTED.value
+                        job.completed_at = utcnow()
+                        job.error = "The application stopped before preparation completed."
+                        update_job_progress(
+                            job, stage="Preparation interrupted", indeterminate=True
+                        )
+                    session.commit()
+                raise
+            except WorkflowPackagePreparationError as exc:
+                with SessionLocal() as session:
+                    job = _current_registry_preparation(session, job_id, claim)
+                    if job is not None:
+                        job.status = JobStatus.FAILED.value
+                        job.completed_at = utcnow()
+                        job.error = str(exc)
+                        job.payload_json = {**job.payload_json, "error_code": exc.code}
+                        update_job_progress(job, stage="Preparation refused")
+                    session.commit()
+            except Exception as exc:  # noqa: BLE001 - the job must never die silently
+                with SessionLocal() as session:
+                    job = _current_registry_preparation(session, job_id, claim)
+                    if job is not None:
+                        job.status = JobStatus.FAILED.value
+                        job.completed_at = utcnow()
+                        job.error = str(exc)
+                        update_job_progress(job, stage="Preparation failed")
+                    session.commit()
+    except Exception:  # noqa: BLE001 - retain a retryable job when dispatch or release fails
+        with SessionLocal() as session:
+            session.execute(text("UPDATE jobs SET status = status WHERE 0"))
+            job = session.get(Job, job_id, populate_existing=True)
+            if (
+                job is not None
+                and job.kind == JobKind.REGISTRY_PREPARE.value
+                and job.attempt == (claim.attempt if claim is not None else initial_attempt)
+                and (
+                    (
+                        claim is None
+                        and job.status == JobStatus.QUEUED.value
+                        and job.claim_owner is None
+                        and job.queue_ticket in (initial_ticket, initial_ticket or job_id)
                     )
-                session.commit()
-    except asyncio.CancelledError:
-        raise
-    except WorkflowPackagePreparationError as exc:
-        with SessionLocal() as session:
-            job = session.get(Job, job_id)
-            if job and job.status != JobStatus.CANCELLED.value:
-                job.status = JobStatus.FAILED.value
-                job.error = str(exc)
-                job.payload_json = {**job.payload_json, "error_code": exc.code}
-                update_job_progress(job, stage="Preparation refused")
-            session.commit()
-    except Exception as exc:  # noqa: BLE001 - the job must never die silently
-        with SessionLocal() as session:
-            job = session.get(Job, job_id)
-            if job and job.status != JobStatus.CANCELLED.value:
-                job.status = JobStatus.FAILED.value
-                job.error = str(exc)
-                update_job_progress(job, stage="Preparation failed")
+                    or (
+                        claim is not None
+                        and job.status == JobStatus.RUNNING.value
+                        and job.claim_owner in (None, claim.token)
+                    )
+                )
+            ):
+                job.status = (
+                    JobStatus.FAILED.value if claim is None else JobStatus.INTERRUPTED.value
+                )
+                job.error = (
+                    "Package preparation could not start. Try again."
+                    if claim is None
+                    else "Package preparation stopped before its result was saved."
+                )
+                job.completed_at = utcnow()
+                update_job_progress(job, stage="Preparation interrupted", indeterminate=True)
             session.commit()
     await services.scheduler.publish_job(job_id)
 
@@ -11859,6 +12049,7 @@ def _queue_registry_preparation(
         }
     if renew_install_id is not None:
         payload["renew_install_id"] = renew_install_id
+    inputs = RegistryPreparationInputs.model_validate(payload)
     job = Job(
         kind=JobKind.REGISTRY_PREPARE.value,
         status=JobStatus.QUEUED.value,
@@ -11867,25 +12058,126 @@ def _queue_registry_preparation(
     )
     session.add(job)
     session.commit()
+    _start_registry_preparation(services, job.id, inputs)
+    return job
+
+
+def _retry_registry_preparation(session: Session, services: Services, job_id: str) -> Job:
+    session.execute(text("UPDATE jobs SET status = status WHERE 0"))
+    session.expire_all()
+    job = session.get(Job, job_id)
+    task = _REGISTRY_PREPARE_TASKS.get(job_id)
+    child = session.scalar(
+        select(WorkflowInstallOfferPackage.id).where(WorkflowInstallOfferPackage.job_id == job_id)
+    )
+    if (
+        job is None
+        or job.kind != JobKind.REGISTRY_PREPARE.value
+        or job.status not in {"failed", "cancelled", "interrupted"}
+        or job.claim_owner is not None
+        or job.run_id is not None
+        or job.work_plan_id is not None
+        or job.work_step_id is not None
+        or child is not None
+        or (task is not None and not task.done())
+    ):
+        raise api_error(
+            409,
+            "registry-preparation-not-retryable",
+            "Package preparation cannot be retried while its previous work is still active.",
+        )
+    try:
+        inputs = RegistryPreparationInputs.model_validate(
+            {
+                key: value
+                for key, value in job.payload_json.items()
+                if key not in {"error_code", "preparation", "activation"}
+            }
+        )
+    except ValueError as exc:
+        raise api_error(
+            409,
+            "registry-preparation-inputs-unavailable",
+            "The accepted preparation inputs are unavailable.",
+        ) from exc
+    job.payload_json = inputs.model_dump(exclude_none=True)
+    job.queue_ticket = new_id("retry")
+    job.status = JobStatus.QUEUED.value
+    job.progress = 0
+    job.error = None
+    job.started_at = None
+    job.completed_at = None
+    job.enqueued_at = utcnow()
+    job.claim_expires_at = None
+    job.heartbeat_at = None
+    update_job_progress(job, stage="retry queued", indeterminate=True)
+    session.commit()
+    _start_registry_preparation(services, job.id, inputs)
+    return job
+
+
+def _start_registry_preparation(
+    services: Services, job_id: str, inputs: RegistryPreparationInputs
+) -> None:
+    previous = _REGISTRY_PREPARE_TASKS.get(job_id)
+    if previous is not None and not previous.done():
+        return
+    authorized = inputs.authorized_workflow
     task = asyncio.create_task(
         _run_workflow_package_preparation(
             services,
-            job.id,
-            package_id,
-            version,
-            node_types,
-            renew_install_id,
-            authorized_workflow,
+            job_id,
+            inputs.package_id,
+            inputs.version,
+            tuple(inputs.node_types),
+            inputs.renew_install_id,
+            (authorized.workflow_revision_id, tuple(authorized.required_node_types))
+            if authorized is not None
+            else None,
         ),
-        name=f"registry-prepare-{job.id}",
+        name=f"registry-prepare-{job_id}",
     )
-    _REGISTRY_PREPARE_TASKS[job.id] = task
+    _REGISTRY_PREPARE_TASKS[job_id] = task
 
-    def _discard(done: asyncio.Task[None], key: str = job.id) -> None:
-        _REGISTRY_PREPARE_TASKS.pop(key, None)
+    def _discard(done: asyncio.Task[None]) -> None:
+        if _REGISTRY_PREPARE_TASKS.get(job_id) is done:
+            _REGISTRY_PREPARE_TASKS.pop(job_id, None)
 
     task.add_done_callback(_discard)
-    return job
+
+
+def recover_registry_preparations(services: Services) -> None:
+    """Resume queued standalone preparations without replaying interrupted installation work."""
+    queued: list[tuple[str, RegistryPreparationInputs]] = []
+    with SessionLocal() as session:
+        session.execute(text("UPDATE jobs SET status = status WHERE 0"))
+        jobs = session.scalars(
+            select(Job)
+            .outerjoin(WorkflowInstallOfferPackage, WorkflowInstallOfferPackage.job_id == Job.id)
+            .where(
+                Job.kind == JobKind.REGISTRY_PREPARE.value,
+                Job.status == JobStatus.QUEUED.value,
+                Job.claim_owner.is_(None),
+                Job.run_id.is_(None),
+                Job.work_plan_id.is_(None),
+                Job.work_step_id.is_(None),
+                WorkflowInstallOfferPackage.job_id.is_(None),
+            )
+            .order_by(Job.enqueued_at, Job.queue_ticket, Job.created_at, Job.id)
+        ).all()
+        for job in jobs:
+            try:
+                inputs = RegistryPreparationInputs.model_validate(job.payload_json)
+            except ValueError:
+                job.status = JobStatus.FAILED.value
+                job.error = "The accepted preparation inputs are unavailable."
+                job.completed_at = utcnow()
+                update_job_progress(job, stage="Preparation needs attention", indeterminate=True)
+                continue
+            queued.append((job.id, inputs))
+        session.commit()
+    for job_id, inputs in queued:
+        _start_registry_preparation(services, job_id, inputs)
 
 
 @router.post("/workflows/packages/drafts", response_model=WorkflowOut, status_code=201)
@@ -12730,11 +13022,13 @@ async def install_workflow_offer(
     jobs = [manager.stage(session, download) for download in validated]
     bind_workflow_offer_downloads(session, offer, jobs)
     mark_workflow_install_offer_queued(offer)
+    completion = stage_workflow_completion_job(session, offer)
     session.commit()
     for job in jobs:
         if job.status != JobStatus.PAUSED.value:
             manager.start(job.id)
-    return jobs
+    manager.start_workflow_installation(offer.id)
+    return [*jobs, completion]
 
 
 @router.post("/workflows/packages/import", response_model=WorkflowOut, status_code=201)

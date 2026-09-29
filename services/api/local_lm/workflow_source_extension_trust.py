@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
 from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 from .comfy_registry_activation import _apply_registry_policy_trust
 from .comfy_registry_activation_batches import _row
@@ -61,6 +63,7 @@ def trust_workflow_source_extensions(
     context: PreparationContext,
     media_worker_stopped: bool,
     reviewed_inputs: ComfyRegistryReviewedInputContext | None = None,
+    write_guard: Callable[[Session], None] | None = None,
 ) -> WorkflowSourceExtensionTrust:
     """Under the primary lease, verify every package before committing any new grant."""
     if media_worker_stopped is not True:
@@ -87,6 +90,8 @@ def trust_workflow_source_extensions(
     )
     with session_factory() as session:
         session.execute(text("UPDATE workflow_install_offers SET status = status WHERE 0"))
+        if write_guard is not None:
+            write_guard(session)
         session.expire_all()
         _offer, _saved, packages = _accepted(session, offer_id)
         decisions = []

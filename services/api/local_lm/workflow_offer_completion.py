@@ -89,9 +89,10 @@ def _result_resources(
     return resources
 
 
-def _accepted_results(
+def accepted_workflow_offer_downloads(
     session: Session, offer: WorkflowInstallOffer
-) -> list[set[tuple[str, str]]] | None:
+) -> list[tuple[Job, DownloadRequest, InstallPlan]]:
+    """Validate immutable download associations without requiring successful results."""
     links = session.scalars(
         select(WorkflowInstallOfferDownload).where(
             WorkflowInstallOfferDownload.offer_id == offer.id,
@@ -99,8 +100,7 @@ def _accepted_results(
     ).all()
     if len(links) != offer.plan_count:
         _refuse("download-acceptance-unavailable")
-    results: list[set[tuple[str, str]]] = []
-    pending = False
+    accepted: list[tuple[Job, DownloadRequest, InstallPlan]] = []
     for link in links:
         request_json = link.request_json
         digest = hashlib.sha256(
@@ -120,11 +120,6 @@ def _accepted_results(
             or job.payload_json != request_json
         ):
             _refuse("download-acceptance-changed")
-        if job.status in {JobStatus.FAILED.value, JobStatus.CANCELLED.value}:
-            _refuse("workflow-download-failed")
-        if job.status != JobStatus.COMPLETE.value:
-            pending = True
-            continue
         request = DownloadRequest.model_validate(request_json)
         plan = (
             session.get(InstallPlan, request.install_plan_id) if request.install_plan_id else None
@@ -135,10 +130,29 @@ def _accepted_results(
         if (
             not assets
             or any(asset.get("install_plan_hash") != plan.plan_hash for asset in assets)
-            or install_plan_download_request(plan, allow_activated=True).model_dump(mode="json")
+            or install_plan_download_request(
+                plan,
+                allow_activated=True,
+                allow_downloading=job.status in {"queued", "running", "paused"},
+            ).model_dump(mode="json")
             != request_json
         ):
             _refuse("download-plan-changed")
+        accepted.append((job, request, plan))
+    return accepted
+
+
+def _accepted_results(
+    session: Session, offer: WorkflowInstallOffer
+) -> list[set[tuple[str, str]]] | None:
+    results: list[set[tuple[str, str]]] = []
+    pending = False
+    for job, request, plan in accepted_workflow_offer_downloads(session, offer):
+        if job.status in {JobStatus.FAILED.value, JobStatus.CANCELLED.value}:
+            _refuse("workflow-download-failed")
+        if job.status != JobStatus.COMPLETE.value:
+            pending = True
+            continue
         results.append(_result_resources(session, job, request, plan))
     return None if pending else results
 

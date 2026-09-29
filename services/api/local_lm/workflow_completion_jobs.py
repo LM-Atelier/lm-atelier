@@ -11,18 +11,20 @@ from .comfy_registry_activation_batches import (
     deactivate_pending_registry_packages,
     registry_activation_pending,
 )
-from .domain import JobKind, JobStatus, utcnow
+from .domain import JobKind, JobStatus, new_id, utcnow
 from .models import (
     ComfyRegistryInstall,
     Job,
+    WorkflowActivation,
     WorkflowInstallOffer,
     WorkflowInstallOfferDownload,
     WorkflowInstallOfferPackage,
 )
 from .progress import update_job_progress
 from .runtime_provisioning_plans import RuntimeProvisioningPlan
+from .scheduler import JobClaim
 from .schemas import ApiModel
-from .workflow_offer_packages import accepted_workflow_offer_packages
+from .workflow_offer_packages import AcceptedWorkflowPackage, accepted_workflow_offer_packages
 from .workflow_package_install_plans import load_stored_workflow_package_install_plan
 
 
@@ -39,6 +41,11 @@ class WorkflowCompletionResult(ApiModel):
     activation_id: str | None = None
 
 
+class WorkflowActivationResult(ApiModel):
+    version: Literal[1] = 1
+    activation_id: str
+
+
 def _payload(offer: WorkflowInstallOffer) -> dict[str, str | int | None]:
     return {
         "version": 1,
@@ -49,7 +56,7 @@ def _payload(offer: WorkflowInstallOffer) -> dict[str, str | int | None]:
 
 
 def stage_workflow_completion_job(session: Session, offer: WorkflowInstallOffer) -> Job:
-    if offer.source_plan_id is None or offer.completion_job_id is not None:
+    if offer.completion_job_id is not None:
         raise WorkflowCompletionJobError()
     session.flush()
     job = Job(
@@ -68,8 +75,7 @@ def stage_workflow_completion_job(session: Session, offer: WorkflowInstallOffer)
 def workflow_completion_job(session: Session, offer: WorkflowInstallOffer) -> Job:
     job = session.get(Job, offer.completion_job_id) if offer.completion_job_id else None
     if (
-        offer.source_plan_id is None
-        or job is None
+        job is None
         or job.kind != JobKind.WORKFLOW_INSTALL.value
         or job.payload_json != _payload(offer)
         or job.run_id is not None
@@ -79,6 +85,16 @@ def workflow_completion_job(session: Session, offer: WorkflowInstallOffer) -> Jo
     ):
         raise WorkflowCompletionJobError()
     if job.result_json:
+        if offer.source_plan_id is None:
+            activation_result = WorkflowActivationResult.model_validate(job.result_json)
+            activation = session.get(WorkflowActivation, activation_result.activation_id)
+            if (
+                job.status != JobStatus.COMPLETE.value
+                or activation is None
+                or activation.workflow_revision_id != offer.workflow_revision_id
+            ):
+                raise WorkflowCompletionJobError()
+            return job
         result = WorkflowCompletionResult.model_validate(job.result_json)
         _record, saved = load_stored_workflow_package_install_plan(session, offer.source_plan_id)
         if (
@@ -102,6 +118,30 @@ def running_workflow_completion_job(
 ) -> Job:
     job = workflow_completion_job(session, offer)
     if job.status != JobStatus.RUNNING.value or job.attempt != attempt or offer.status != "queued":
+        raise WorkflowCompletionJobError()
+    return job
+
+
+def guard_workflow_completion_claim(
+    session: Session,
+    offer_id: str,
+    claim: JobClaim,
+    *,
+    require_running: bool = True,
+) -> Job:
+    """Reserve the writer before checking the execution that may change this installation."""
+    session.execute(text("UPDATE workflow_install_offers SET status = status WHERE 0"))
+    offer = session.get(WorkflowInstallOffer, offer_id, populate_existing=True)
+    if offer is None:
+        raise WorkflowCompletionJobError()
+    if offer.completion_job_id is not None:
+        session.get(Job, offer.completion_job_id, populate_existing=True)
+    job = (
+        running_workflow_completion_job(session, offer, claim.attempt)
+        if require_running
+        else workflow_completion_job(session, offer)
+    )
+    if job.claim_owner != claim.token or job.attempt != claim.attempt:
         raise WorkflowCompletionJobError()
     return job
 
@@ -158,19 +198,28 @@ def complete_workflow_job(
         or offer.status != "completed"
     ):
         raise WorkflowCompletionJobError()
-    result = WorkflowCompletionResult.model_validate(job.result_json)
-    job.result_json = result.model_copy(update={"activation_id": activation_id}).model_dump(
-        mode="json"
-    )
+    if offer.source_plan_id is None:
+        job.result_json = WorkflowActivationResult(activation_id=activation_id).model_dump(
+            mode="json"
+        )
+    else:
+        result = WorkflowCompletionResult.model_validate(job.result_json)
+        job.result_json = result.model_copy(update={"activation_id": activation_id}).model_dump(
+            mode="json"
+        )
     job.status = JobStatus.COMPLETE.value
     job.progress = 1.0
     job.completed_at = utcnow()
     update_job_progress(job, stage="Workflow installed", overall_progress=1.0)
 
 
-def fail_workflow_completion(session: Session, offer: WorkflowInstallOffer, code: str) -> None:
+def fail_workflow_completion(
+    session: Session, offer: WorkflowInstallOffer, code: str, *, queued: bool = False
+) -> None:
     job = workflow_completion_job(session, offer)
-    if job.status == JobStatus.RUNNING.value:
+    if job.status == JobStatus.RUNNING.value or (
+        queued and job.status == JobStatus.QUEUED.value and job.claim_owner is None
+    ):
         job.status = JobStatus.FAILED.value
         job.error = "Workflow installation needs attention."
         job.completed_at = utcnow()
@@ -178,12 +227,24 @@ def fail_workflow_completion(session: Session, offer: WorkflowInstallOffer, code
         offer.completion_error_code = code
 
 
+def _accepted_children(
+    session: Session, offer: WorkflowInstallOffer
+) -> tuple[list[Job], list[AcceptedWorkflowPackage]]:
+    from .workflow_install_offers import assert_workflow_install_offer_identity
+    from .workflow_offer_completion import accepted_workflow_offer_downloads
+    from .workflow_package_acceptance import accepted_workflow_package_jobs
+
+    if offer.source_plan_id is None:
+        assert_workflow_install_offer_identity(session, offer)
+        return [item[0] for item in accepted_workflow_offer_downloads(session, offer)], []
+    _source, saved, downloads = accepted_workflow_package_jobs(session, offer)
+    return downloads, list(accepted_workflow_offer_packages(session, offer, saved))
+
+
 def cancel_workflow_completion(
     session: Session, offer: WorkflowInstallOffer, *, media_worker_stopped: bool = False
 ) -> Job | None:
-    from .workflow_package_acceptance import accepted_workflow_package_jobs
-
-    _source, saved, _downloads = accepted_workflow_package_jobs(session, offer)
+    _downloads, packages = _accepted_children(session, offer)
     job = workflow_completion_job(session, offer)
     if offer.status != "queued" or job.status not in {
         JobStatus.QUEUED.value,
@@ -196,7 +257,7 @@ def cancel_workflow_completion(
     job.error = None
     update_job_progress(job, stage="Workflow installation cancelled", indeterminate=True)
     offer.completion_error_code = "workflow-completion-unavailable"
-    for package in accepted_workflow_offer_packages(session, offer, saved):
+    for package in packages:
         if package.preparation is None and package.job.status in {"queued", "running", "paused"}:
             package.job.status = JobStatus.CANCELLED.value
             package.job.completed_at = utcnow()
@@ -263,9 +324,7 @@ def deactivate_cancelled_workflow_activations(session: Session) -> None:
 def retry_workflow_completion(
     session: Session, offer: WorkflowInstallOffer
 ) -> tuple[Job, list[Job]]:
-    from .workflow_package_acceptance import accepted_workflow_package_jobs
-
-    _payload, saved, downloads = accepted_workflow_package_jobs(session, offer)
+    downloads, packages = _accepted_children(session, offer)
     job = workflow_completion_job(session, offer)
     if offer.status != "queued" or job.status not in {
         JobStatus.FAILED.value,
@@ -273,7 +332,7 @@ def retry_workflow_completion(
         JobStatus.INTERRUPTED.value,
     }:
         raise WorkflowCompletionJobError()
-    packages = accepted_workflow_offer_packages(session, offer, saved)
+    job.queue_ticket = new_id("retry")
     for child in [*downloads, *(item.job for item in packages), job]:
         if child.status in {
             JobStatus.FAILED.value,
@@ -285,12 +344,12 @@ def retry_workflow_completion(
             child.error = None
             child.started_at = None
             child.completed_at = None
-            child.claim_owner = None
-            child.claim_expires_at = None
-            child.heartbeat_at = None
+            if child is not job:
+                child.claim_owner = None
+                child.claim_expires_at = None
+                child.heartbeat_at = None
             child.enqueued_at = utcnow()
             update_job_progress(child, stage="Retry queued", indeterminate=True)
-    job.attempt += 1
     offer.completion_error_code = None
     return job, downloads
 
@@ -354,14 +413,24 @@ def recover_workflow_completion_jobs(
     offers = session.scalars(
         select(WorkflowInstallOffer).where(
             WorkflowInstallOffer.status == "queued",
-            WorkflowInstallOffer.completion_job_id.is_not(None),
         )
     ).all()
     for offer in offers:
         job = None
         try:
             with session.begin_nested():
+                if offer.source_plan_id is None and offer.completion_job_id is None:
+                    stage_workflow_completion_job(session, offer)
                 job = workflow_completion_job(session, offer)
+                if job.status in {
+                    JobStatus.QUEUED.value,
+                    JobStatus.RUNNING.value,
+                    JobStatus.INTERRUPTED.value,
+                }:
+                    job.claim_owner = None
+                    job.claim_expires_at = None
+                    job.heartbeat_at = None
+                    job.queue_group = None
                 if job.status == JobStatus.RUNNING.value:
                     job.status = JobStatus.INTERRUPTED.value
                 if job.status == JobStatus.INTERRUPTED.value:

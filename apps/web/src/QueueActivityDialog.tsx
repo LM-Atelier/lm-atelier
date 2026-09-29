@@ -57,6 +57,7 @@ export function QueueActivityDialog({ onClose }: { onClose: () => void }) {
       </div>
       <GenerationQueueControls />
       <QueueLaneControls lane="transfer" />
+      <QueueLaneControls lane="install" />
       {activity.error && (
         <div role="alert" className="queue-activity-error">
           {activity.error.message}

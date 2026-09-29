@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy import and_, false, func, or_, select, update
+from sqlalchemy import and_, case, false, func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
@@ -398,7 +398,6 @@ class ResourceScheduler:
                         session.scalar(
                             select(func.count(Job.id)).where(
                                 Job.queue_group == group,
-                                Job.status == JobStatus.RUNNING.value,
                                 Job.claim_owner.is_not(None),
                             )
                         )
@@ -436,7 +435,6 @@ class ResourceScheduler:
                                 session.scalar(
                                     select(func.count(Job.id)).where(
                                         Job.queue_group == group,
-                                        Job.status == JobStatus.RUNNING.value,
                                         Job.claim_owner.is_not(None),
                                     )
                                 )
@@ -640,9 +638,15 @@ class ResourceScheduler:
                         .where(
                             Job.id == job_id,
                             Job.claim_owner == token,
-                            # Completion may precede a slow resource handoff.
-                            # Keep ownership live until job_lease releases it.
-                            Job.status.in_([JobStatus.RUNNING.value, *_TERMINAL_STATUSES]),
+                            # A result or retry may precede a slow handoff.
+                            # Keep its ownership live until job_lease releases it.
+                            Job.status.in_(
+                                [
+                                    JobStatus.QUEUED.value,
+                                    JobStatus.RUNNING.value,
+                                    *_TERMINAL_STATUSES,
+                                ]
+                            ),
                         )
                         .values(
                             heartbeat_at=now,
@@ -669,7 +673,9 @@ class ResourceScheduler:
             jobs = session.scalars(
                 select(Job).where(
                     Job.queue_group == group,
-                    Job.status.in_([JobStatus.RUNNING.value, *_TERMINAL_STATUSES]),
+                    Job.status.in_(
+                        [JobStatus.QUEUED.value, JobStatus.RUNNING.value, *_TERMINAL_STATUSES]
+                    ),
                     Job.claim_owner.is_not(None),
                     or_(
                         and_(
@@ -795,6 +801,16 @@ class ResourceScheduler:
                     claim_owner=None,
                     claim_expires_at=None,
                     heartbeat_at=None,
+                    queue_group=case(
+                        (
+                            and_(
+                                Job.kind == JobKind.WORKFLOW_INSTALL.value,
+                                Job.status == JobStatus.QUEUED.value,
+                            ),
+                            None,
+                        ),
+                        else_=Job.queue_group,
+                    ),
                 )
             )
             reconcile_queue_lanes(session)

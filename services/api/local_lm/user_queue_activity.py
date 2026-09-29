@@ -40,7 +40,8 @@ Lane = Literal["generation", "transfer", "install"]
 Key = tuple[datetime, str, str]
 _ACTIVE = ("queued", "running", "paused")
 _PLAN_ACTIVE = (*_ACTIVE, "blocked")
-_VISIBLE = ("chat", "image", "video", "download", "export", "activate", "registry_prepare")
+_INSTALL = ("activate", "registry_prepare", "workflow_install")
+_VISIBLE = ("chat", "image", "video", "download", "export", *_INSTALL)
 _LABELS = {
     "chat": "Chat generation",
     "image": "Image generation",
@@ -49,6 +50,7 @@ _LABELS = {
     "export": "Export",
     "activate": "Model preparation",
     "registry_prepare": "Package preparation",
+    "workflow_install": "Workflow installation",
 }
 
 
@@ -142,16 +144,22 @@ def list_queue_activity(
     decoded = _decode(cursor, signing_key, lane) if cursor is not None else None
     _begin_read_snapshot(session)
     with session.no_autoflush:
+        # Execution still owns resources while a terminal result or retry drains.
+        claimed = Job.claim_owner.is_not(None)
+        active = or_(Job.status.in_(_ACTIVE), claimed)
+        running = or_(Job.status == "running", claimed)
+        queued = (Job.status == "queued") & ~claimed
+        paused = (Job.status == "paused") & ~claimed
         counts = (
             select(
                 Job.work_plan_id.label("plan_id"),
                 func.count().label("active_jobs"),
-                func.sum(case((Job.status == "running", 1), else_=0)).label("running_jobs"),
-                func.sum(case((Job.status == "queued", 1), else_=0)).label("queued_jobs"),
-                func.sum(case((Job.status == "paused", 1), else_=0)).label("paused_jobs"),
+                func.sum(case((running, 1), else_=0)).label("running_jobs"),
+                func.sum(case((queued, 1), else_=0)).label("queued_jobs"),
+                func.sum(case((paused, 1), else_=0)).label("paused_jobs"),
                 func.max(Job.updated_at).label("updated_at"),
             )
-            .where(Job.status.in_(_ACTIVE), Job.kind.in_(_VISIBLE), Job.work_plan_id.is_not(None))
+            .where(active, Job.kind.in_(_VISIBLE), Job.work_plan_id.is_not(None))
             .group_by(Job.work_plan_id)
             .cte("queue_job_counts")
         )
@@ -187,7 +195,7 @@ def list_queue_activity(
             Job.updated_at.label("updated_at"),
             case(
                 (Job.kind.in_(("download", "export")), "transfer"),
-                (Job.kind.in_(("activate", "registry_prepare")), "install"),
+                (Job.kind.in_(_INSTALL), "install"),
                 else_="generation",
             ).label("lane"),
             Job.status.label("status"),
@@ -196,11 +204,11 @@ def list_queue_activity(
             literal(None).label("chat_title"),
             Job.progress.label("progress"),
             literal(1).label("active_jobs"),
-            case((Job.status == "running", 1), else_=0).label("running_jobs"),
-            case((Job.status == "queued", 1), else_=0).label("queued_jobs"),
-            case((Job.status == "paused", 1), else_=0).label("paused_jobs"),
+            case((running, 1), else_=0).label("running_jobs"),
+            case((queued, 1), else_=0).label("queued_jobs"),
+            case((paused, 1), else_=0).label("paused_jobs"),
         ).where(
-            Job.status.in_(_ACTIVE),
+            active,
             Job.kind.in_(_VISIBLE),
             or_(
                 Job.work_plan_id.is_(None),

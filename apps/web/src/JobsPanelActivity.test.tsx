@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { JobsPanel } from "./JobsPanel";
 import { api } from "./api";
@@ -24,6 +24,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup(); clients.splice(0).forEach((client) => client.clear());
+  vi.useRealTimers();
   localStorage.removeItem(dismissalKey);
 });
 function open() {
@@ -59,18 +60,22 @@ describe("active jobs stay visible independently of recent history", () => {
   });
 
   it("reports the full active count while expanding the bounded visible list", async () => {
+    vi.useFakeTimers();
     const all = Array.from({ length: 601 }, (_, index) => job("active-" + index));
     vi.mocked(api.jobActivity).mockImplementation(async (limit) => ({
       active: all.slice(0, limit), active_count: all.length, recent_issues: [],
     }));
     open();
-    expect(await screen.findByText("601 active jobs")).toBeInTheDocument();
+    await act(() => vi.advanceTimersByTimeAsync(50));
+    expect(screen.getByText("601 active jobs")).toBeInTheDocument();
     const showMore = screen.getByRole("button", { name: "Show more active jobs" });
     for (const count of [100, 200, 300, 400]) {
-      expect(await screen.findByText(`Showing ${count} of 601 active jobs.`)).toBeInTheDocument();
+      expect(screen.getByText(`Showing ${count} of 601 active jobs.`)).toBeInTheDocument();
+      expect(showMore).toBeEnabled();
       fireEvent.click(showMore);
+      await act(() => vi.advanceTimersByTimeAsync(50));
     }
-    expect(await screen.findByText("Showing 500 of 601 active jobs.")).toBeInTheDocument();
+    expect(screen.getByText("Showing 500 of 601 active jobs.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Show more active jobs" })).not.toBeInTheDocument();
     expect(screen.getAllByRole("progressbar", { hidden: true })).toHaveLength(500);
     expect([...new Set(vi.mocked(api.jobActivity).mock.calls.map(([limit]) => limit))]).toEqual([100, 200, 300, 400, 500]);

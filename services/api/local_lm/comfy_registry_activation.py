@@ -224,6 +224,8 @@ async def activate_comfy_registry_install(
     start_media: MediaStarter,
     read_node_inventory: NodeInventoryReader | None = None,
     verification_target: ComfyRegistryVerificationTarget | None = None,
+    write_guard: Callable[[Session], None] | None = None,
+    cleanup_guard: Callable[[Session], None] | None = None,
 ) -> ComfyRegistryActivationState:
     """Activate one trusted package and restore the prior runtime if startup fails.
 
@@ -251,6 +253,13 @@ async def activate_comfy_registry_install(
             media_worker_stopped=media_worker_stopped,
             start_media=start_media,
             read_node_inventory=read_node_inventory,
+            write_guard=write_guard,
+            cleanup_guard=cleanup_guard,
+        )
+    if write_guard is not None or cleanup_guard is not None:
+        raise ComfyRegistryActivationError(
+            "registry_install_verification_failed",
+            "Claimed Registry activation requires a verification target",
         )
     _require_stopped(media_worker_stopped)
     install = _install(session, install_id)
@@ -466,8 +475,16 @@ def _verify_install(
     install.active = original_active
 
 
-def _deactivate(session: Session, install_id: str, *, failure_code: str) -> None:
+def _deactivate(
+    session: Session,
+    install_id: str,
+    *,
+    failure_code: str,
+    write_guard: Callable[[Session], None] | None = None,
+) -> None:
     session.rollback()
+    if write_guard is not None:
+        write_guard(session)
     install = _install(session, install_id)
     install.active = False
     install.review_json = {

@@ -220,6 +220,7 @@ async def prepare_workflow_package(
     on_prepared: PreparationConsumer | None = None,
     expected_plan: WorkflowPackageExecutionPlan | None = None,
     record_preparation: PreparationRecorder | None = None,
+    write_guard: Callable[[Session], None] | None = None,
 ) -> ComfyRegistryPreparation:
     """Resolve, close, and prepare one package; refuse with the source's code.
 
@@ -532,6 +533,7 @@ async def prepare_workflow_package(
                     pending_omission=pending_omission,
                     record_preparation=record_preparation,
                     reviewed_inputs=reviewed_inputs,
+                    write_guard=write_guard,
                 )
             else:
                 preparation = await renew_comfy_registry_install_environment(
@@ -546,6 +548,7 @@ async def prepare_workflow_package(
                     media_worker_stopped=media_worker_stopped,
                     wheel_progress=_wheel_progress,
                     reviewed_inputs=reviewed_inputs,
+                    write_guard=write_guard,
                 )
             staged_archive = None
             if on_prepared is not None:

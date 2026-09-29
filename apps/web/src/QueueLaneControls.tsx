@@ -6,22 +6,23 @@ import "./GenerationQueueControls.css";
 
 type Attempt = { action: GenerationQueueAction; command: QueueControlCommand };
 
-export function QueueLaneControls({ lane }: { lane: "generation" | "transfer" }) {
-  const name = lane === "transfer" ? "transfers" : "generation";
-  const title = lane === "transfer" ? "Transfers" : "Generation";
+export function QueueLaneControls({ lane }: { lane: "generation" | "transfer" | "install" }) {
+  const name = lane === "install" ? "installations" : lane === "transfer" ? "transfers" : "generation";
+  const title = lane === "install" ? "Installations" : lane === "transfer" ? "Transfers" : "Generation";
   const client = useQueryClient();
   const saving = useRef(false);
   const [attempt, setAttempt] = useState<Attempt | null>(null);
   const policy = useQuery({
     queryKey: ["jobs", "queue", lane + "-policy"],
-    queryFn: async ({ signal }) => lane === "transfer"
-      ? api.transferQueuePolicy(signal) : api.generationQueuePolicy(signal),
+    queryFn: async ({ signal }) => lane === "install" ? api.installQueuePolicy(signal)
+      : lane === "transfer" ? api.transferQueuePolicy(signal) : api.generationQueuePolicy(signal),
     refetchInterval: 5_000,
   });
   const refresh = () => void client.invalidateQueries({ queryKey: ["jobs", "queue"] });
   const mutation = useMutation({
-    mutationFn: async (next: Attempt) => lane === "transfer"
-      ? api.transferQueueControl(next.action, next.command)
+    mutationFn: async (next: Attempt) => lane === "install"
+      ? api.installQueueControl(next.action, next.command)
+      : lane === "transfer" ? api.transferQueueControl(next.action, next.command)
       : api.generationQueueControl(next.action, next.command),
     onSuccess: () => {
       setAttempt(null);
@@ -66,7 +67,9 @@ export function QueueLaneControls({ lane }: { lane: "generation" | "transfer" })
               : title + " paused. New submissions stay queued."}
         </p>}
         {value && <p>Active jobs: {value.running_jobs}</p>}
-        <small>{lane === "transfer"
+        <small>{lane === "install"
+          ? "Pausing lets current installations finish. Downloads can finish preparing their own models."
+          : lane === "transfer"
           ? "Pausing lets current downloads and their activation finish. Manually paused downloads stay paused when you resume."
           : "Pausing lets current generation finish. Held work stays held when you resume."}</small>
       </div>

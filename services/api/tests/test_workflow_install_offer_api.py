@@ -187,7 +187,9 @@ async def test_create_and_queue_offer_uses_only_the_opaque_offer_id(
     )
 
     assert queued.status_code == 202
-    assert len(queued.json()) == 1
+    assert len(queued.json()) == 2
+    assert [job["kind"] for job in queued.json()] == ["download", "workflow_install"]
+    assert queued.json()[1]["status"] == "queued"
     assert len(captured) == 1
     assert captured[0].install_plan_id == plan_id
     assert captured[0].expected_sha256 == {REFERENCE: DIGEST}

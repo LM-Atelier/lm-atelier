@@ -1357,6 +1357,14 @@ class TransferQueuePolicyOut(ApiModel):
     allowed_actions: list[Literal["pause_after_current", "resume"]]
 
 
+class InstallQueuePolicyOut(ApiModel):
+    lane: Literal["install"]
+    dispatch_state: Literal["open", "draining", "paused"]
+    revision: int = Field(ge=0)
+    running_jobs: int = Field(ge=0)
+    allowed_actions: list[Literal["pause_after_current", "resume"]]
+
+
 class QueueActivityItemOut(ApiModel):
     owner_type: Literal["work_plan", "job"]
     owner_id: str

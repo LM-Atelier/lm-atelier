@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -94,8 +94,14 @@ def _restore_scope(
         return scope
 
 
-async def _stop(processes: ProcessSupervisor) -> None:
+async def _stop(
+    processes: ProcessSupervisor, require_claim: Callable[[], None] | None = None
+) -> None:
+    if require_claim is not None:
+        require_claim()
     await processes.stop("media")
+    if require_claim is not None:
+        require_claim()
     if not media_worker_stopped(processes):
         raise WorkflowPackagePreparationError(
             "media_worker_running", "The media worker did not stop for extension setup."
@@ -108,24 +114,33 @@ async def _restore(
     was_running: bool,
     activation_id: str | None,
     launch_sha256: str | None,
+    require_claim: Callable[[], None] | None = None,
 ) -> None:
     try:
-        await _stop(processes)
+        await _stop(processes, require_claim)
         if not was_running:
             return
         try:
             if activation_id is not None and launch_sha256 is not None:
                 scope = _restore_scope(activation_id, launch_sha256, context, processes)
+                if require_claim is not None:
+                    require_claim()
                 await processes.start_media(activation_scope=scope)
             else:
+                if require_claim is not None:
+                    require_claim()
                 await processes.start_media()
+            if require_claim is not None:
+                require_claim()
         except Exception as exc:
-            await _stop(processes)
+            await _stop(processes, require_claim)
             raise WorkflowPackagePreparationError(
                 "media_restore_failed",
                 "Extension setup could not restore the previous media worker.",
             ) from exc
     except Exception as exc:
+        if require_claim is not None:
+            require_claim()
         raise WorkflowPackageRestorationError(
             exc.code
             if isinstance(exc, WorkflowPackagePreparationError)
@@ -136,7 +151,10 @@ async def _restore(
 
 @asynccontextmanager
 async def workflow_package_runtime(
-    processes: ProcessSupervisor, context: PreparationContext | None = None
+    processes: ProcessSupervisor,
+    context: PreparationContext | None = None,
+    *,
+    require_claim: Callable[[], None] | None = None,
 ) -> AsyncIterator[None]:
     """Run inside the primary lease and restore exactly the previous launch scope."""
     paths = _RestorationPaths(
@@ -149,12 +167,14 @@ async def workflow_package_runtime(
     launch_sha256 = processes.launch_scope_sha256("media") if was_running else None
     activation_id = _scoped_activation(launch_sha256) if launch_sha256 else None
     try:
+        if require_claim is not None:
+            require_claim()
         if was_running:
-            await _stop(processes)
+            await _stop(processes, require_claim)
         yield
     finally:
         restoration = asyncio.create_task(
-            _restore(processes, paths, was_running, activation_id, launch_sha256)
+            _restore(processes, paths, was_running, activation_id, launch_sha256, require_claim)
         )
         cancelled = False
         while not restoration.done():
