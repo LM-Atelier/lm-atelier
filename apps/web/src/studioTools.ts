@@ -16,6 +16,7 @@ import {
   selectSimilarColor,
   strokeSegment,
   type MaskRaster,
+  type MaskRegion,
 } from "./studioMasks";
 import type { StudioPerspective } from "./types";
 
@@ -49,6 +50,12 @@ export interface PointerTool {
    * gesture start is exactly what makes that work. */
   cancel(): void;
   preview(viewportScale?: number): ToolPreview;
+  /** The part of the mask changed since this was last asked, then forgotten.
+   *
+   * Only a tool that writes while it travels keeps one, so the canvas can
+   * repaint that part of the tint on each move rather than all of it.
+   */
+  takeChanged?(): MaskRegion | null;
 }
 
 /** Brush and eraser: identical gesture, inverse stamp value. */
@@ -57,6 +64,7 @@ export class BrushTool implements PointerTool {
   private last: ImagePoint | null = null;
   private hover: ImagePoint | null = null;
   private touched = false;
+  private changed: MaskRegion | null = null;
 
   constructor(
     private readonly mask: MaskRaster,
@@ -65,7 +73,7 @@ export class BrushTool implements PointerTool {
   ) {}
 
   down(point: ImagePoint, viewportScale = 1): void {
-    strokeSegment(this.mask, point, point, this.imageRadius(viewportScale), this.value);
+    this.stroke(point, point, viewportScale);
     this.last = point;
     this.touched = true;
   }
@@ -73,13 +81,13 @@ export class BrushTool implements PointerTool {
   move(point: ImagePoint, viewportScale = 1): void {
     this.hover = point;
     if (!this.last) return;
-    strokeSegment(this.mask, this.last, point, this.imageRadius(viewportScale), this.value);
+    this.stroke(this.last, point, viewportScale);
     this.last = point;
   }
 
   up(point: ImagePoint, viewportScale = 1): boolean {
     if (this.last) {
-      strokeSegment(this.mask, this.last, point, this.imageRadius(viewportScale), this.value);
+      this.stroke(this.last, point, viewportScale);
     }
     const changed = this.touched;
     this.last = null;
@@ -90,6 +98,34 @@ export class BrushTool implements PointerTool {
   cancel(): void {
     this.last = null;
     this.touched = false;
+  }
+
+  takeChanged(): MaskRegion | null {
+    const changed = this.changed;
+    this.changed = null;
+    return changed;
+  }
+
+  /** Paint one segment, and add the box it can have touched to what has changed. */
+  private stroke(from: ImagePoint, to: ImagePoint, viewportScale: number): void {
+    const radius = this.imageRadius(viewportScale);
+    strokeSegment(this.mask, from, to, radius, this.value);
+    // A pixel past the radius each way, so rounding in the stamp stays inside.
+    const left = Math.max(0, Math.floor(Math.min(from.x, to.x) - radius) - 1);
+    const top = Math.max(0, Math.floor(Math.min(from.y, to.y) - radius) - 1);
+    const right = Math.min(this.mask.width, Math.ceil(Math.max(from.x, to.x) + radius) + 2);
+    const bottom = Math.min(this.mask.height, Math.ceil(Math.max(from.y, to.y) + radius) + 2);
+    if (right <= left || bottom <= top) return;
+    const before = this.changed;
+    const union = before
+      ? {
+          left: Math.min(before.left, left),
+          top: Math.min(before.top, top),
+          right: Math.max(before.left + before.width, right),
+          bottom: Math.max(before.top + before.height, bottom),
+        }
+      : { left, top, right, bottom };
+    this.changed = { left: union.left, top: union.top, width: union.right - union.left, height: union.bottom - union.top };
   }
 
   preview(viewportScale = 1): ToolPreview {

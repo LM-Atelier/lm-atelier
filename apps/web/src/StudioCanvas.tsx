@@ -10,7 +10,7 @@ import {
   type WheelEvent as ReactWheelEvent,
 } from "react";
 import { compareFit } from "./studioComparison";
-import { toAlphaImageData, type MaskRaster } from "./studioMasks";
+import { toAlphaImageData, type MaskRaster, type MaskRegion } from "./studioMasks";
 import { CORNERS } from "./studioPerspective";
 import type { ImagePoint, PointerTool, ToolPreview } from "./studioTools";
 import {
@@ -125,7 +125,7 @@ export function StudioCanvas({
    * Painting is the same work either way, just triggered from two places.
    */
   const paintMask = useCallback(
-    () => drawMarking(maskLayer.current, mask, tint),
+    (stroke?: PointerTool | null) => drawMarking(maskLayer.current, mask, tint, stroke?.takeChanged?.() ?? null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [mask, tint?.rgb[0], tint?.rgb[1], tint?.rgb[2], tint?.opacity],
   );
@@ -202,7 +202,7 @@ export function StudioCanvas({
       // hover otherwise, so this both extends a live selection and shows
       // the caret when there is none.
       tool.move(moved, viewport.scale);
-      if (tool.appliesWhileMoving) paintMask();
+      if (tool.appliesWhileMoving) paintMask(tool);
       drawPreview();
       return;
     }
@@ -219,7 +219,7 @@ export function StudioCanvas({
         onGestureStart?.();
         keyboardStroke.current = true;
         tool.down(at, viewport.scale);
-        if (tool.appliesWhileMoving) paintMask();
+        if (tool.appliesWhileMoving) paintMask(tool);
         drawPreview();
       }
       return;
@@ -294,7 +294,7 @@ export function StudioCanvas({
     drawingPointer.current = event.pointerId;
     onGestureStart?.();
     tool.down(toImagePoint(viewport, screen), viewport.scale);
-    if (tool.appliesWhileMoving) paintMask();
+    if (tool.appliesWhileMoving) paintMask(tool);
     drawPreview();
   };
 
@@ -318,7 +318,7 @@ export function StudioCanvas({
       return;
     }
     tool?.move(toImagePoint(viewport, screen), viewport.scale);
-    if (tool?.appliesWhileMoving) paintMask();
+    if (tool?.appliesWhileMoving) paintMask(tool);
     drawPreview();
   };
 
@@ -429,15 +429,18 @@ function drawMarking(
   layer: HTMLCanvasElement | null,
   mask: MaskRaster | null,
   tint: { rgb: [number, number, number]; opacity: number } | null,
+  /** What a stroke in progress has just changed; the whole marking is drawn without it. */
+  changed: MaskRegion | null = null,
 ): void {
   const context = layer?.getContext("2d");
   if (!layer || !context) return;
-  context.clearRect(0, 0, layer.width, layer.height);
+  if (!changed || !mask) context.clearRect(0, 0, layer.width, layer.height);
   if (!mask) return;
+  const region = changed ?? { left: 0, top: 0, width: mask.width, height: mask.height };
   const marking = tint
-    ? toAlphaImageData(mask, tint.rgb, tint.opacity)
-    : toAlphaImageData(mask, [80, 170, 255]);
-  context.putImageData(new ImageData(marking, mask.width, mask.height), 0, 0);
+    ? toAlphaImageData(mask, tint.rgb, tint.opacity, region)
+    : toAlphaImageData(mask, [80, 170, 255], 1, region);
+  context.putImageData(new ImageData(marking, region.width, region.height), region.left, region.top);
 }
 
 /** What a tool shows over the picture as it works, in the picture's own pixels. */
