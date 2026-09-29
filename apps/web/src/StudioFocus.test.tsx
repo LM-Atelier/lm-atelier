@@ -30,7 +30,7 @@ let session: ReturnType<typeof useStudioSession>;
 
 beforeEach(() => {
   session = {
-    steps: [{ artifactId: "art-1", messageId: "source", instruction: "", isSource: true, generationIdentity: null }],
+    steps: [{ artifactId: "art-1", messageId: "source", instruction: "", beforeArtifactId: null, isSource: true, generationIdentity: null }],
     previewArtifactId: null,
     sessionId: "chat-studio",
     session: null,

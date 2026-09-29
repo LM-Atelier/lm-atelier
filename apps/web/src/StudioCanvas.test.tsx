@@ -337,3 +337,82 @@ describe("StudioCanvas", () => {
     expect(painted).toHaveLength(0);
   });
 });
+
+describe("comparing with an earlier picture", () => {
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  const layer = (container: HTMLElement) =>
+    container.querySelector('canvas[data-layer="before"]') as HTMLCanvasElement | null;
+
+  function recordDraws() {
+    const draws: unknown[][] = [];
+    const context = new Proxy(
+      { drawImage: (...args: unknown[]) => draws.push(args) },
+      {
+        get: (target: Record<string, unknown>, key: string) =>
+          key in target ? target[key] : () => undefined,
+        set: () => true,
+      },
+    );
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
+      context as unknown as CanvasRenderingContext2D,
+    );
+    return draws;
+  }
+
+  it("adds no layer when there is nothing to compare", () => {
+    const { container } = render(<StudioCanvas image={image} mask={null} tool={null} />);
+    expect(layer(container)).toBeNull();
+    expect(container.querySelector(".studio-compare-divider")).toBeNull();
+  });
+
+  it("lays the earlier picture over the result, uncovered from the left edge", () => {
+    const earlier = { width: 800, height: 400 } as ImageBitmap;
+    const { container, rerender } = render(
+      <StudioCanvas image={image} mask={null} tool={null} before={{ image: earlier, reveal: 0 }} />,
+    );
+    // Over the picture and beneath the selection, at the picture's own size.
+    expect([...container.querySelectorAll("canvas")].indexOf(layer(container)!)).toBe(1);
+    expect(layer(container)).toHaveAttribute("width", "400");
+    expect(layer(container)!.style.clipPath).toBe("inset(0 100% 0 0)");
+    expect(container.querySelector(".studio-compare-divider")).toBeNull();
+
+    rerender(<StudioCanvas image={image} mask={null} tool={null} before={{ image: earlier, reveal: 0.25 }} />);
+    expect(layer(container)!.style.clipPath).toBe("inset(0 75% 0 0)");
+    expect((container.querySelector(".studio-compare-divider") as HTMLElement).style.left).toBe("25%");
+
+    rerender(<StudioCanvas image={image} mask={null} tool={null} before={{ image: earlier, reveal: 1 }} />);
+    expect(layer(container)!.style.clipPath).toBe("inset(0 0% 0 0)");
+    expect(container.querySelector(".studio-compare-divider")).toBeNull();
+  });
+
+  it("draws a picture of the same shape edge for edge, and another shape whole and centred", () => {
+    const draws = recordDraws();
+    const same = { width: 800, height: 400 } as ImageBitmap;
+    const { rerender } = render(
+      <StudioCanvas image={image} mask={null} tool={null} before={{ image: same, reveal: 1 }} />,
+    );
+    expect(draws).toContainEqual([same, 0, 0, 400, 200]);
+
+    const square = { width: 200, height: 200 } as ImageBitmap;
+    rerender(<StudioCanvas image={image} mask={null} tool={null} before={{ image: square, reveal: 1 }} />);
+    expect(draws).toContainEqual([square, 100, 0, 200, 200]);
+  });
+
+  it("keeps the divider two pixels wide on screen at any zoom", () => {
+    const earlier = { width: 400, height: 200 } as ImageBitmap;
+    const { container } = render(
+      <StudioCanvas image={image} mask={null} tool={null} before={{ image: earlier, reveal: 0.5 }} />,
+    );
+    const surface = container.querySelector(".studio-canvas") as HTMLElement;
+    const width = () => parseFloat((container.querySelector(".studio-compare-divider") as HTMLElement).style.width);
+    const before = width();
+    fireEvent.keyDown(surface, { key: "+" });
+    // Zoomed in, each of the picture's pixels is larger on screen, so the
+    // divider spans fewer of them.
+    expect(width()).toBeCloseTo(before / 1.2);
+  });
+});

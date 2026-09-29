@@ -8,6 +8,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type WheelEvent as ReactWheelEvent,
 } from "react";
+import { compareFit } from "./studioComparison";
 import { toAlphaImageData, type MaskRaster } from "./studioMasks";
 import type { ImagePoint, PointerTool } from "./studioTools";
 import {
@@ -26,17 +27,23 @@ import {
  * pointer events, forwards them to the active tool, and repaints layers.
  * Space-drag pans, wheel zooms about the cursor, and the container's CSS
  * transform carries the one shared viewport so layers can never disagree.
+ * A fourth layer, above the picture, holds an earlier picture while the two
+ * are compared; it shares that viewport, so a comparison keeps the zoom.
  */
 export function StudioCanvas({
   image,
   mask,
   tool,
   maskVersion,
+  before = null,
   onGestureStart,
   onStrokeEnd,
 }: {
   image: ImageBitmap | null;
   mask: MaskRaster | null;
+  /** An earlier picture laid over this one, uncovered from the left edge
+   * across `reveal` of the width: 0 shows none of it and 1 all of it. */
+  before?: { image: ImageBitmap; reveal: number } | null;
   /** The active pointer tool; null makes the canvas view-only. */
   tool: PointerTool | null;
   /** Bump to trigger a mask repaint after undo/redo or programmatic edits. */
@@ -49,6 +56,7 @@ export function StudioCanvas({
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const imageLayer = useRef<HTMLCanvasElement>(null);
+  const beforeLayer = useRef<HTMLCanvasElement>(null);
   const maskLayer = useRef<HTMLCanvasElement>(null);
   const interactionLayer = useRef<HTMLCanvasElement>(null);
   const caret = useRef<ImagePoint | null>(null);
@@ -82,6 +90,19 @@ export function StudioCanvas({
     context.clearRect(0, 0, layer.width, layer.height);
     context.drawImage(image, 0, 0);
   }, [image, size]);
+
+  // Drawn once per picture and uncovered by clipping, so moving the divider
+  // repaints nothing.
+  const beforeImage = before?.image ?? null;
+  useEffect(() => {
+    const layer = beforeLayer.current;
+    const context = layer?.getContext("2d");
+    if (!layer || !context || !beforeImage) return;
+    context.clearRect(0, 0, layer.width, layer.height);
+    const fit = compareFit(beforeImage, size);
+    context.drawImage(beforeImage, fit.x, fit.y, fit.width, fit.height);
+  }, [beforeImage, size]);
+  const reveal = before ? Math.min(1, Math.max(0, before.reveal)) : 0;
 
   /** Repaint the tint from the raster as it stands right now.
    *
@@ -376,6 +397,15 @@ export function StudioCanvas({
         }}
       >
         <canvas ref={imageLayer} width={size.width} height={size.height} />
+        {before && (
+          <canvas
+            ref={beforeLayer}
+            width={size.width}
+            height={size.height}
+            data-layer="before"
+            style={{ clipPath: `inset(0 ${(1 - reveal) * 100}% 0 0)` }}
+          />
+        )}
         <canvas ref={maskLayer} width={size.width} height={size.height} data-layer="mask" />
         <canvas
           ref={interactionLayer}
@@ -383,6 +413,15 @@ export function StudioCanvas({
           height={size.height}
           data-layer="interaction"
         />
+        {reveal > 0 && reveal < 1 && (
+          // Scaled with the picture, so its width is divided by the zoom to
+          // stay two pixels wide on screen.
+          <div
+            className="studio-compare-divider"
+            style={{ left: `${reveal * 100}%`, width: `${2 / viewport.scale}px` }}
+            aria-hidden="true"
+          />
+        )}
       </div>
     </div>
   );
