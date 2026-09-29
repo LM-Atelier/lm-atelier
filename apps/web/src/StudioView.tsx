@@ -201,6 +201,7 @@ export function StudioView({
       !instruction.trim()) ||
     busy ||
     !current ||
+    (recipe !== null && recipe.mask_mode !== "none" && selectionCoverage === 0) ||
     Boolean(unavailable) ||
     Boolean(
       workflowUnavailable &&
@@ -345,9 +346,11 @@ export function StudioView({
             onApply={(chosen) => {
               setRecipe(chosen);
               setInstruction(chosen.instruction);
+              // Made on a selection, it needs one, and only a selecting tool sends it.
+              if (chosen.mask_mode !== "none" && !toolUsesMask(tools.kind)) dispatch({ type: "select-tool", kind: "brush" });
             }}
           />
-          <StudioRecipeWorkflowNotice recipe={recipe} />
+          <StudioRecipeWorkflowNotice recipe={recipe} selected={selectionCoverage > 0} />
           {unavailable && (
             // Beside the button that would fail, and named by the tools that
             // cannot run, so the sentence arrives before the drawing does.
@@ -381,7 +384,8 @@ export function StudioView({
                       ? {
                           blob: mask,
                           featherPx: tools.featherPx,
-                          invert: false,
+                          // A recipe made on everything outside a selection changes that again.
+                          invert: recipe?.mask_mode === "inverse",
                           ...(plan.blendSelection ? { apply: "blend" as const } : {}),
                         }
                       : undefined,
@@ -493,12 +497,19 @@ function StudioStageLoading({
   );
 }
 
-function StudioRecipeWorkflowNotice({ recipe }: { recipe: EditTemplate | null }) {
-  if (!recipe?.workflow_revision_id) return null;
+function StudioRecipeWorkflowNotice({ recipe, selected }: { recipe: EditTemplate | null; selected: boolean }) {
+  // What the recipe was made on has to be there again before it can run.
+  const needs = recipe && recipe.mask_mode !== "none" && !selected
+    ? recipe.mask_mode === "inverse"
+      ? `${recipe.name} changes everything outside a selection. Select what to keep first.`
+      : `${recipe.name} changes only a selected part. Select it first.`
+    : null;
+  if (!recipe?.workflow_revision_id && !needs) return null;
   return (
-    <small role="status">
-      {recipe.name} supplies the workflow for this edit.
-    </small>
+    <>
+      {recipe?.workflow_revision_id && <small role="status">{recipe.name} supplies the workflow for this edit.</small>}
+      {needs && <small role="status">{needs}</small>}
+    </>
   );
 }
 
