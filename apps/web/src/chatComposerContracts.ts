@@ -87,6 +87,8 @@ export interface ChatViewProps {
   onRemoveItem: (messageId: string) => void;
   onForkThread: (messageId: string) => void;
   libraryEdit?: VisualTarget | null;
+  /** Called once the chat has taken `libraryEdit`, so whoever handed it down can let it go. */
+  onLibraryEditTaken?: () => void;
   composerDraft: ComposerDraft;
   onComposerDraft: (update: ComposerDraftUpdate) => void;
 }

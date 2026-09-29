@@ -2,6 +2,7 @@ import { ChatSidebar } from "./ChatSidebar";
 import { ChatView } from "./ChatView";
 import { useChatPages } from "./useChatPages";
 import { useChatDeletion } from "./useChatDeletion";
+import { useStudioPictureForChat } from "./useStudioPictureForChat";
 import { CURRENT_CHAT_KEY, rememberCurrentChat } from "./currentChat";
 import { useChatFieldUpdate } from "./useChatFieldUpdate";
 import { useAppNavigation } from "./useAppNavigation";
@@ -100,6 +101,18 @@ export default function App() {
       void client.invalidateQueries({ queryKey: ["chats"] });
     },
   });
+  const openChat = useCallback((chatId: string) => {
+    setCurrentChatId(chatId);
+    rememberCurrentChat(chatId);
+    setView("chat");
+    focusMainContent();
+  }, [setView]);
+  const startChatThen = createChat.mutate;
+  const { handOver: studioHandOver, sendToChat: sendStudioPicture, taken: studioPictureTaken } = useStudioPictureForChat({
+    displayedChatId: view === "chat" ? chat.data?.id ?? null : null,
+    openChat,
+    startChat: useCallback((onCreated: (chatId: string) => void) => startChatThen(null, { onSuccess: (created) => onCreated(created.id) }), [startChatThen]),
+  });
   const createProject = useMutation({
     mutationFn: api.createProject,
     onSuccess: () => void client.invalidateQueries({ queryKey: ["projects"] }),
@@ -174,7 +187,8 @@ export default function App() {
           sourceChatId={studioSource?.chatId ?? null}
           onOpenArtifact={(artifactId) => setStudioSource({ artifactId, chatId: null })}
           onOpenWorkflows={openWorkflows}
-          onClose={() => setStudioSource(null)}/>
+          onClose={() => setStudioSource(null)}
+          onUseInChat={(picture) => sendStudioPicture(picture, studioSource?.chatId ?? activeChatId)}/>
       );
     }
     const topLevelView = view === "media" ? <MediaLibraryView onEditImage={openLibraryImage} /> : view === "models" ? <ModelsView key={modelLibraryRole} initialRole={modelLibraryRole} /> : view === "references" ? <ReferencesLibrary /> : view === "prompts" ? <PromptLibraryView /> : view === "workflows" ? <WorkflowsView /> : null;
@@ -204,7 +218,7 @@ export default function App() {
       ));
       updateChat.mutate({ id: displayedChat.id, values });
     };
-    return <ChatView key={displayedChat?.id ?? "empty-chat"} onOpenStudio={(artifactId) => { setStudioSource({ artifactId, chatId: displayedChat?.id ?? null }); setView("studio"); focusMainContent(); }} chat={displayedChat} engines={engines.data ?? []} profiles={profiles.data ?? []} presets={presets.data ?? []} project={allProjects.find((item) => item.id === displayedChat?.project_id)} liveText={liveText} pendingTurns={displayedChat ? pendingTurns[displayedChat.id] ?? [] : []} workPlans={workPlans.data ?? []} settings={scopedSettings} settingsRole={selectedRole} onSettingsRole={(role) => { if (displayedChat) rememberSettingsRole(displayedChat.id, role); }} presetId={presetId} maxMediaOutputsPerPlan={applicationInfo.data?.max_media_outputs_per_plan ?? 1} composerDraft={displayedChat ? composerDrafts[displayedChat.id] ?? EMPTY_COMPOSER_DRAFT : EMPTY_COMPOSER_DRAFT} onComposerDraft={(update) => {
+    return <ChatView key={displayedChat?.id ?? "empty-chat"} libraryEdit={studioHandOver} onLibraryEditTaken={studioPictureTaken} onOpenStudio={(artifactId) => { setStudioSource({ artifactId, chatId: displayedChat?.id ?? null }); setView("studio"); focusMainContent(); }} chat={displayedChat} engines={engines.data ?? []} profiles={profiles.data ?? []} presets={presets.data ?? []} project={allProjects.find((item) => item.id === displayedChat?.project_id)} liveText={liveText} pendingTurns={displayedChat ? pendingTurns[displayedChat.id] ?? [] : []} workPlans={workPlans.data ?? []} settings={scopedSettings} settingsRole={selectedRole} onSettingsRole={(role) => { if (displayedChat) rememberSettingsRole(displayedChat.id, role); }} presetId={presetId} maxMediaOutputsPerPlan={applicationInfo.data?.max_media_outputs_per_plan ?? 1} composerDraft={displayedChat ? composerDrafts[displayedChat.id] ?? EMPTY_COMPOSER_DRAFT : EMPTY_COMPOSER_DRAFT} onComposerDraft={(update) => {
       if (!displayedChat) return;
       setComposerDrafts((current) => updatedComposerDrafts(current, displayedChat.id, update));
     }} onSettings={(settings) => {
@@ -254,7 +268,7 @@ export default function App() {
         send.mutate({ chatId: displayedChat.id, id: crypto.randomUUID(), text, mode, artifacts, settings, references, outputCount, promptSource, sourceFit });
       }
     }} />;
-  }, [openWorkflows, studioSource, view, setView, appearance, settingsDestination, setSettingsDestination, settingsFocusRequest, modelLibraryRole, engines.data, profiles.data, presets.data, applicationInfo.data, allProjects, chat.data, chatDrafts, autoSettingsRoles, rememberSettingsRole, composerDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, removeItem, forkThread, client, openLibraryImage, applyAcceptedTurn]);
+  }, [openWorkflows, studioSource, studioHandOver, sendStudioPicture, studioPictureTaken, activeChatId, view, setView, appearance, settingsDestination, setSettingsDestination, settingsFocusRequest, modelLibraryRole, engines.data, profiles.data, presets.data, applicationInfo.data, allProjects, chat.data, chatDrafts, autoSettingsRoles, rememberSettingsRole, composerDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, removeItem, forkThread, client, openLibraryImage, applyAcceptedTurn]);
 
   if (firstRunSetup && setupReadiness.data) {
     return <FirstRunSetup report={setupReadiness.data} onExit={exitFirstRunSetup} onOpenModels={(role) => { exitFirstRunSetup(); setModelLibraryRole(role); setView("models"); }} onOpenWorkflows={() => { exitFirstRunSetup(); setView("workflows"); }} />;
@@ -262,7 +276,7 @@ export default function App() {
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content">Skip to main content</a>
-      <ChatSidebar projects={allProjects} engines={engines.data ?? []} presets={presets.data ?? []} currentChatId={activeChatId} view={view} setupState={setupReadiness.data?.state} onSetup={() => setSetupOpen(true)} onChat={(id) => { setCurrentChatId(id); rememberCurrentChat(id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={(name) => createProject.mutate(name)} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} sidebar={sidebar} />
+      <ChatSidebar projects={allProjects} engines={engines.data ?? []} presets={presets.data ?? []} currentChatId={activeChatId} view={view} setupState={setupReadiness.data?.state} onSetup={() => setSetupOpen(true)} onChat={openChat} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={(name) => createProject.mutate(name)} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} sidebar={sidebar} />
       <main id="main-content" tabIndex={-1}>{activeContent}</main>
       <SetupSurface
         open={setupOpen}

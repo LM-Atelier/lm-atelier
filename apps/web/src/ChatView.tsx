@@ -58,6 +58,7 @@ export function ChatView({
   onRemoveItem,
   onForkThread,
   libraryEdit,
+  onLibraryEditTaken,
   composerDraft,
   onComposerDraft,
 }: ChatViewProps) {
@@ -91,7 +92,8 @@ export function ChatView({
     if (!libraryEdit || consumedLibraryEdit.current === libraryEdit.requestId) return;
     consumedLibraryEdit.current = libraryEdit.requestId;
     setVisualTarget(libraryEdit);
-  }, [libraryEdit]);
+    onLibraryEditTaken?.();
+  }, [libraryEdit, onLibraryEditTaken]);
   const [quoteTarget, setQuoteTarget] = useState<{ text: string; requestId: number } | null>(null);
   useEffect(() => {
     if (previousChatId.current !== chat?.id) {
