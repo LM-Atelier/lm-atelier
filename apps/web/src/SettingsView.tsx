@@ -27,6 +27,7 @@ import { SettingsNavigation } from "./SettingsNavigation";
 import { AppearanceSettings } from "./AppearanceSettings";
 import { StorageSummary } from "./StorageSummary";
 import { ThirdPartyNotices } from "./ThirdPartyNotices";
+import { OutputShapeSettings } from "./OutputShapeSettings";
 import { SettingDetailSetting } from "./SettingDetailSetting";
 import { storedSettingDetail } from "./settingDetail";
 import type { Appearance } from "./theme";
@@ -394,6 +395,7 @@ export function SettingsView({ engines, appearance, destinationId, onDestination
       </>)}
       {on("models-and-generation") && (<>
       <SettingDetailSetting />
+      <OutputShapeSettings />
       <section>
         <div className="detail-title"><div><h2>Model profiles</h2></div><button className="secondary" onClick={() => profileImport.current?.click()}>Import profile</button></div>
         <input ref={profileImport} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0], "profile"); event.target.value = ""; }} />
