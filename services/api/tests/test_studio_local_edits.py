@@ -1,4 +1,4 @@
-"""Turning, mirroring, cropping and resizing a studio picture, each recorded as a step."""
+"""The edits the studio makes without a model, each recorded as a step."""
 
 from __future__ import annotations
 
@@ -9,7 +9,17 @@ import pytest
 from httpx2 import AsyncClient
 from PIL import Image, ImageCms
 
-from local_lm.studio_local_edits import CropBox, LocalEditError, PictureSize, render_local_edit
+from local_lm.studio_adjustments import ColorAdjustments
+from local_lm.studio_local_edits import (
+    CanvasChange,
+    CaptionOverlay,
+    CropBox,
+    LocalEditError,
+    PictureSize,
+    SelectionBlur,
+    SelectionPaint,
+    render_local_edit,
+)
 
 RED, GREEN, BLUE, WHITE = (200, 0, 0), (0, 200, 0), (0, 0, 200), (250, 250, 250)
 
@@ -120,6 +130,270 @@ def test_a_resize_keeps_a_hidden_colour_from_bleeding_into_the_edge() -> None:
 def test_a_resize_that_cannot_be_made_is_refused(size: PictureSize | None, code: str) -> None:
     with pytest.raises(LocalEditError) as refused:
         render_local_edit(_png(_tiles()), "resize", size=size)
+
+    assert refused.value.code == code
+
+
+def test_an_adjustment_changes_the_colors_and_nothing_else() -> None:
+    result = _open(
+        render_local_edit(_png(_tiles()), "adjust", adjustments=ColorAdjustments(saturation=-100))
+    )
+
+    assert result.size == (3, 2)
+    # Every pixel is its own grey: the colors are gone and the light is kept.
+    assert all(len(set(result.getpixel((x, y)))) == 1 for x in range(3) for y in range(2))
+    assert result.getpixel((1, 1)) == (250, 250, 250)
+
+
+@pytest.mark.parametrize("adjustments", [None, ColorAdjustments()])
+def test_an_adjustment_that_moves_no_slider_is_refused(
+    adjustments: ColorAdjustments | None,
+) -> None:
+    with pytest.raises(LocalEditError) as refused:
+        render_local_edit(_png(_tiles()), "adjust", adjustments=adjustments)
+
+    assert refused.value.code == "studio-adjust-unchanged"
+
+
+def _checkers(mode: str = "RGB") -> Image.Image:
+    """Eight by four in alternating black and white, so any blur shows."""
+
+    picture = Image.new("RGB", (8, 4))
+    picture.putdata(
+        [(255, 255, 255) if (x + y) % 2 else (0, 0, 0) for y in range(4) for x in range(8)]
+    )
+    return picture.convert(mode)
+
+
+def _left_half(width: int = 8, height: int = 4) -> bytes:
+    mask = Image.new("L", (width, height), 0)
+    mask.paste(255, (0, 0, width // 2, height))
+    return _png(mask)
+
+
+def test_a_blur_softens_the_marked_area_and_leaves_the_rest_exact() -> None:
+    blur = SelectionBlur(mask=_left_half(), radius=2, mask_artifact_id="mask")
+
+    result = _open(render_local_edit(_png(_checkers()), "blur", blur=blur))
+
+    source = _checkers()
+    marked = [result.getpixel((x, y)) for y in range(4) for x in range(4)]
+    rest = [
+        (result.getpixel((x, y)), source.getpixel((x, y))) for y in range(4) for x in range(4, 8)
+    ]
+    # Black and white are gone where it was marked: every pixel there is a grey.
+    assert all(0 < pixel[0] < 255 for pixel in marked)
+    assert all(after == before for after, before in rest)
+
+
+def test_a_blur_keeps_transparency_and_hides_no_color_under_it() -> None:
+    picture = Image.new("RGBA", (8, 4), (0, 0, 255, 255))
+    for y in range(4):
+        picture.putpixel((0, y), (255, 0, 0, 0))
+    blur = SelectionBlur(mask=_left_half(), radius=2, mask_artifact_id="mask")
+
+    result = _open(render_local_edit(_png(picture), "blur", blur=blur))
+
+    assert result.mode == "RGBA"
+    shown = [result.getpixel((x, y)) for y in range(4) for x in range(8)]
+    # The red under the transparent column never shows up in its neighbours.
+    assert all(pixel[0] == 0 for pixel in shown if pixel[3] > 0)
+
+
+@pytest.mark.parametrize(
+    ("mask", "code"),
+    [
+        (_png(Image.new("L", (8, 4), 0)), "region-selection-empty"),
+        (b"not a picture", "region-image-unreadable"),
+    ],
+)
+def test_a_blur_with_nothing_usable_marked_is_refused(mask: bytes, code: str) -> None:
+    blur = SelectionBlur(mask=mask, radius=2, mask_artifact_id="mask")
+
+    with pytest.raises(LocalEditError) as refused:
+        render_local_edit(_png(_checkers()), "blur", blur=blur)
+
+    assert refused.value.code == code
+
+
+def _paint(color: tuple[int, int, int], opacity: int, mask: bytes | None = None) -> SelectionPaint:
+    return SelectionPaint(
+        mask=_left_half() if mask is None else mask,
+        color=color,
+        opacity=opacity,
+        mask_artifact_id="mask",
+    )
+
+
+def test_a_paint_covers_the_marked_area_and_leaves_the_rest_exact() -> None:
+    result = _open(render_local_edit(_png(_checkers()), "paint", paint=_paint((0, 0, 0), 100)))
+
+    source = _checkers()
+    assert all(result.getpixel((x, y)) == (0, 0, 0) for y in range(4) for x in range(4))
+    assert all(
+        result.getpixel((x, y)) == source.getpixel((x, y)) for y in range(4) for x in range(4, 8)
+    )
+
+
+def test_a_paint_at_half_opacity_lets_the_picture_show_through() -> None:
+    white = Image.new("RGB", (8, 4), (255, 255, 255))
+
+    result = _open(render_local_edit(_png(white), "paint", paint=_paint((255, 0, 0), 50)))
+
+    red, green, blue = result.getpixel((0, 0))
+    assert red == 255
+    assert 120 <= green <= 135 and green == blue
+    assert result.getpixel((7, 0)) == (255, 255, 255)
+
+
+def test_paint_on_a_transparent_part_shows_as_paint() -> None:
+    clear = Image.new("RGBA", (8, 4), (255, 0, 0, 0))
+
+    result = _open(render_local_edit(_png(clear), "paint", paint=_paint((0, 0, 255), 100)))
+
+    # Nothing of the red hidden under the transparency comes through.
+    assert result.getpixel((0, 0)) == (0, 0, 255, 255)
+    assert result.getpixel((7, 0))[3] == 0
+
+
+def test_a_paint_with_nothing_marked_is_refused() -> None:
+    with pytest.raises(LocalEditError) as missing:
+        render_local_edit(_png(_checkers()), "paint")
+    with pytest.raises(LocalEditError) as empty:
+        render_local_edit(
+            _png(_checkers()),
+            "paint",
+            paint=_paint((0, 0, 0), 100, _png(Image.new("L", (8, 4), 0))),
+        )
+
+    assert missing.value.code == "studio-paint-missing"
+    assert empty.value.code == "region-selection-empty"
+
+
+def _drawn(size: tuple[int, int] = (3, 2)) -> bytes:
+    """What the browser draws: words on transparency, here one opaque and one faint pixel."""
+
+    overlay = Image.new("RGBA", size, (0, 0, 0, 0))
+    overlay.putpixel((1, 0), (0, 0, 255, 255))
+    overlay.putpixel((2, 1), (0, 0, 255, 128))
+    return _png(overlay)
+
+
+def test_drawn_words_are_laid_over_the_picture_as_drawn() -> None:
+    caption = CaptionOverlay(overlay=_drawn(), overlay_artifact_id="words")
+
+    result = _open(render_local_edit(_png(_tiles()), "caption", caption=caption))
+
+    assert result.mode == "RGB"
+    assert result.getpixel((1, 0)) == (0, 0, 255)
+    # Half-covered: half the words' color over the picture beneath.
+    red, green, blue = result.getpixel((2, 1))
+    assert 120 <= red <= 130 and 120 <= green <= 130 and blue > 245
+    # Where nothing was drawn the picture is exactly what it was.
+    assert result.getpixel((0, 0)) == RED
+    assert result.getpixel((2, 0)) == GREEN
+
+
+def test_drawn_words_keep_a_transparent_picture_transparent_around_them() -> None:
+    clear = Image.new("RGBA", (3, 2), (0, 0, 0, 0))
+    caption = CaptionOverlay(overlay=_drawn(), overlay_artifact_id="words")
+
+    result = _open(render_local_edit(_png(clear), "caption", caption=caption))
+
+    assert result.mode == "RGBA"
+    assert result.getpixel((1, 0)) == (0, 0, 255, 255)
+    assert result.getpixel((0, 0))[3] == 0
+
+
+@pytest.mark.parametrize(
+    ("caption", "code"),
+    [
+        (None, "studio-caption-missing"),
+        (
+            CaptionOverlay(overlay=_drawn((4, 2)), overlay_artifact_id="w"),
+            "studio-caption-size-mismatch",
+        ),
+        (
+            CaptionOverlay(overlay=b"not a picture", overlay_artifact_id="w"),
+            "studio-caption-unreadable",
+        ),
+    ],
+)
+def test_words_that_cannot_be_laid_down_are_refused(
+    caption: CaptionOverlay | None, code: str
+) -> None:
+    with pytest.raises(LocalEditError) as refused:
+        render_local_edit(_png(_tiles()), "caption", caption=caption)
+
+    assert refused.value.code == code
+
+
+def test_a_blur_without_a_marked_area_is_refused() -> None:
+    with pytest.raises(LocalEditError) as refused:
+        render_local_edit(_png(_checkers()), "blur")
+
+    assert refused.value.code == "studio-blur-missing"
+
+
+def test_a_larger_canvas_centers_the_picture_on_transparency() -> None:
+    result = _open(render_local_edit(_png(_tiles()), "canvas", canvas=CanvasChange(7, 4)))
+
+    assert result.size == (7, 4)
+    assert result.mode == "RGBA"
+    # Two columns and one row of new ground before the picture.
+    assert result.getpixel((2, 1)) == (*RED, 255)
+    assert result.getpixel((0, 0))[3] == 0
+    assert result.getpixel((6, 3))[3] == 0
+
+
+def test_an_odd_pixel_of_room_goes_after_the_picture() -> None:
+    grown = _open(render_local_edit(_png(_tiles()), "canvas", canvas=CanvasChange(6, 2)))
+    shrunk = _open(render_local_edit(_png(_tiles()), "canvas", canvas=CanvasChange(2, 2)))
+
+    # Growing by three: one column before, two after.
+    assert grown.getpixel((1, 0)) == (*RED, 255)
+    # Shrinking by one: the column cut is the last one.
+    assert shrunk.getpixel((0, 0)) == (*RED, 255)
+
+
+def test_a_smaller_canvas_keeps_the_side_it_is_anchored_to() -> None:
+    result = _open(
+        render_local_edit(_png(_tiles()), "canvas", canvas=CanvasChange(2, 1, anchor="top_right"))
+    )
+
+    assert result.size == (2, 1)
+    assert [result.getpixel((x, 0))[:3] for x in range(2)] == [WHITE, GREEN]
+
+
+def test_a_filled_canvas_colors_only_the_new_ground() -> None:
+    opaque = _open(
+        render_local_edit(_png(_tiles()), "canvas", canvas=CanvasChange(5, 2, fill="black"))
+    )
+    cutout = Image.new("RGBA", (2, 1), (10, 20, 30, 255))
+    cutout.putpixel((0, 0), (0, 0, 0, 0))
+    kept = _open(render_local_edit(_png(cutout), "canvas", canvas=CanvasChange(4, 1, fill="white")))
+
+    assert opaque.mode == "RGB"
+    assert opaque.getpixel((0, 0)) == (0, 0, 0)
+    assert opaque.getpixel((1, 0)) == RED
+    # The picture's own transparency stays transparent; white fills only what is new.
+    assert kept.getpixel((0, 0)) == (255, 255, 255, 255)
+    assert kept.getpixel((1, 0))[3] == 0
+    assert kept.getpixel((2, 0)) == (10, 20, 30, 255)
+
+
+@pytest.mark.parametrize(
+    ("canvas", "code"),
+    [
+        (None, "studio-canvas-missing"),
+        (CanvasChange(3, 2), "studio-canvas-unchanged"),
+        (CanvasChange(0, 2), "studio-canvas-empty"),
+        (CanvasChange(20_000, 20_000), "studio-edit-too-large"),
+    ],
+)
+def test_a_canvas_that_cannot_be_made_is_refused(canvas: CanvasChange | None, code: str) -> None:
+    with pytest.raises(LocalEditError) as refused:
+        render_local_edit(_png(_tiles()), "canvas", canvas=canvas)
 
     assert refused.value.code == code
 
@@ -291,6 +565,153 @@ async def test_a_resize_is_recorded_with_its_size_and_method(client: AsyncClient
     assert detail.json()["original_name"] == "tiles (resized).png"
 
 
+async def test_an_adjustment_is_recorded_with_where_each_slider_stood(
+    client: AsyncClient,
+) -> None:
+    source_id = await _upload(client, "tiles.png", _png(_tiles()))
+    session_id = await _session_over(client, source_id)
+    sliders = {"brightness": 10, "contrast": -20, "saturation": 30, "warmth": -40}
+
+    response = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={"source_artifact_id": source_id, "operation": "adjust", "adjustments": sliders},
+    )
+
+    assert response.status_code == 200, response.text
+    request, answer = response.json()["messages"]
+    assert request["parts"][0]["text"] == "Adjust light and color"
+    image, metadata = answer["parts"]
+    assert metadata["metadata_json"]["provenance"] == {
+        "local_edit": {
+            "operation": "adjust",
+            "source_artifact_id": source_id,
+            "adjustments": sliders,
+        }
+    }
+    detail = await client.get(f"/api/artifacts/{image['artifact_id']}")
+    assert detail.json()["original_name"] == "tiles (adjusted).png"
+
+
+async def test_a_blur_is_recorded_with_its_radius_and_marked_area(client: AsyncClient) -> None:
+    source_id = await _upload(client, "checkers.png", _png(_checkers()))
+    mask_id = await _upload(client, "studio-selection.png", _left_half())
+    session_id = await _session_over(client, source_id)
+
+    response = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={
+            "source_artifact_id": source_id,
+            "operation": "blur",
+            "blur": {"mask_artifact_id": mask_id, "radius": 3},
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    request, answer = response.json()["messages"]
+    assert request["parts"][0]["text"] == "Blur part of the picture"
+    image, metadata = answer["parts"]
+    assert metadata["metadata_json"]["provenance"] == {
+        "local_edit": {
+            "operation": "blur",
+            "source_artifact_id": source_id,
+            "blur": {"radius": 3, "filter": "gaussian", "mask_artifact_id": mask_id},
+        }
+    }
+    blurred = await _content(client, image["artifact_id"])
+    assert blurred.getpixel((7, 0)) == _checkers().getpixel((7, 0))
+    assert 0 < blurred.getpixel((0, 0))[0] < 255
+
+
+async def test_a_canvas_change_is_recorded_with_its_size_anchor_and_fill(
+    client: AsyncClient,
+) -> None:
+    source_id = await _upload(client, "tiles.png", _png(_tiles()))
+    session_id = await _session_over(client, source_id)
+    canvas = {"width": 9, "height": 2, "anchor": "left", "fill": "white"}
+
+    response = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={"source_artifact_id": source_id, "operation": "canvas", "canvas": canvas},
+    )
+
+    assert response.status_code == 200, response.text
+    request, answer = response.json()["messages"]
+    assert request["parts"][0]["text"] == "Change the canvas size"
+    image, metadata = answer["parts"]
+    assert metadata["metadata_json"]["provenance"] == {
+        "local_edit": {"operation": "canvas", "source_artifact_id": source_id, "canvas": canvas}
+    }
+    placed = await _content(client, image["artifact_id"])
+    assert placed.size == (9, 2)
+    assert placed.getpixel((0, 0)) == RED
+    assert placed.getpixel((8, 1)) == (255, 255, 255)
+    detail = await client.get(f"/api/artifacts/{image['artifact_id']}")
+    assert detail.json()["original_name"] == "tiles (canvas changed).png"
+
+
+async def test_a_paint_is_recorded_with_its_color_opacity_and_marked_area(
+    client: AsyncClient,
+) -> None:
+    source_id = await _upload(client, "checkers.png", _png(_checkers()))
+    mask_id = await _upload(client, "studio-selection.png", _left_half())
+    session_id = await _session_over(client, source_id)
+
+    response = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={
+            "source_artifact_id": source_id,
+            "operation": "paint",
+            "paint": {"mask_artifact_id": mask_id, "color": "#112233", "opacity": 100},
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    request, answer = response.json()["messages"]
+    assert request["parts"][0]["text"] == "Paint over part of the picture"
+    image, metadata = answer["parts"]
+    assert metadata["metadata_json"]["provenance"] == {
+        "local_edit": {
+            "operation": "paint",
+            "source_artifact_id": source_id,
+            "paint": {"color": "#112233", "opacity": 100, "mask_artifact_id": mask_id},
+        }
+    }
+    painted = await _content(client, image["artifact_id"])
+    assert painted.getpixel((0, 0)) == (0x11, 0x22, 0x33)
+    assert painted.getpixel((7, 0)) == _checkers().getpixel((7, 0))
+
+
+async def test_added_words_are_recorded_with_the_drawn_overlay(client: AsyncClient) -> None:
+    source_id = await _upload(client, "tiles.png", _png(_tiles()))
+    words_id = await _upload(client, "studio-words.png", _drawn())
+    session_id = await _session_over(client, source_id)
+
+    response = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={
+            "source_artifact_id": source_id,
+            "operation": "caption",
+            "caption": {"overlay_artifact_id": words_id},
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    request, answer = response.json()["messages"]
+    assert request["parts"][0]["text"] == "Add text"
+    image, metadata = answer["parts"]
+    assert metadata["metadata_json"]["provenance"] == {
+        "local_edit": {
+            "operation": "caption",
+            "source_artifact_id": source_id,
+            "caption": {"overlay_artifact_id": words_id},
+        }
+    }
+    captioned = await _content(client, image["artifact_id"])
+    assert captioned.getpixel((1, 0)) == (0, 0, 255)
+    detail = await client.get(f"/api/artifacts/{image['artifact_id']}")
+    assert detail.json()["original_name"] == "tiles (with text).png"
+
+
 async def test_only_a_picture_in_the_session_can_be_edited_through_it(
     client: AsyncClient,
 ) -> None:
@@ -353,6 +774,74 @@ async def test_a_refused_edit_leaves_the_session_as_it_was(client: AsyncClient) 
             "size": {"width": 3, "height": 2},
         },
     )
+    missing_sliders = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={"source_artifact_id": source_id, "operation": "adjust"},
+    )
+    stray_sliders = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={
+            "source_artifact_id": source_id,
+            "operation": "flip_vertical",
+            "adjustments": {"brightness": 10},
+        },
+    )
+    too_far = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={
+            "source_artifact_id": source_id,
+            "operation": "adjust",
+            "adjustments": {"brightness": 101},
+        },
+    )
+    strange_color = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={
+            "source_artifact_id": source_id,
+            "operation": "paint",
+            "paint": {"mask_artifact_id": source_id, "color": "red", "opacity": 50},
+        },
+    )
+    no_words = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={
+            "source_artifact_id": source_id,
+            "operation": "caption",
+            "caption": {"overlay_artifact_id": "sha256:" + "0" * 64},
+        },
+    )
+    stray_canvas = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={
+            "source_artifact_id": source_id,
+            "operation": "flip_vertical",
+            "canvas": {"width": 4, "height": 4},
+        },
+    )
+    strange_anchor = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={
+            "source_artifact_id": source_id,
+            "operation": "canvas",
+            "canvas": {"width": 4, "height": 4, "anchor": "middle"},
+        },
+    )
+    no_mask = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={
+            "source_artifact_id": source_id,
+            "operation": "blur",
+            "blur": {"mask_artifact_id": "sha256:" + "0" * 64, "radius": 3},
+        },
+    )
+    stray_blur = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={
+            "source_artifact_id": source_id,
+            "operation": "flip_vertical",
+            "blur": {"mask_artifact_id": source_id, "radius": 3},
+        },
+    )
     absent = await client.post(
         "/api/studio/sessions/absent/local-edits",
         json={"source_artifact_id": source_id, "operation": "flip_vertical"},
@@ -366,6 +855,17 @@ async def test_a_refused_edit_leaves_the_session_as_it_was(client: AsyncClient) 
     assert stray_size.status_code == 422
     assert unchanged.status_code == 422
     assert unchanged.json()["code"] == "studio-resize-unchanged"
+    assert missing_sliders.status_code == 422
+    assert stray_sliders.status_code == 422
+    assert too_far.status_code == 422
+    assert no_mask.status_code == 422
+    assert no_mask.json()["code"] == "studio-marked-area-missing"
+    assert stray_blur.status_code == 422
+    assert stray_canvas.status_code == 422
+    assert no_words.status_code == 422
+    assert no_words.json()["code"] == "studio-caption-missing"
+    assert strange_color.status_code == 422
+    assert strange_anchor.status_code == 422
     assert absent.status_code == 404
     assert absent.json()["code"] == "studio-session-not-found"
     after = await client.get(f"/api/studio/sessions/{session_id}")

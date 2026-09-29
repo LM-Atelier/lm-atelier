@@ -578,6 +578,11 @@ StudioLocalEditOperation = Literal[
     "flip_vertical",
     "crop",
     "resize",
+    "adjust",
+    "blur",
+    "paint",
+    "caption",
+    "canvas",
 ]
 
 
@@ -597,13 +602,71 @@ class StudioPictureSize(ApiModel):
     height: StrictInt = Field(ge=1, le=MAX_DIMENSION)
 
 
+class StudioColorAdjustments(ApiModel):
+    """Where each light and color slider stands, from -100 to 100, with 0 unchanged."""
+
+    brightness: StrictInt = Field(default=0, ge=-100, le=100)
+    contrast: StrictInt = Field(default=0, ge=-100, le=100)
+    saturation: StrictInt = Field(default=0, ge=-100, le=100)
+    warmth: StrictInt = Field(default=0, ge=-100, le=100)
+
+
+class StudioSelectionBlur(ApiModel):
+    """The marked area to blur, uploaded as a selection, and how far to blur it."""
+
+    mask_artifact_id: str = Field(min_length=1, max_length=80)
+    radius: StrictInt = Field(ge=1, le=100)
+
+
+class StudioSelectionPaint(ApiModel):
+    """The marked area to paint, uploaded as a selection, with its color and opacity."""
+
+    mask_artifact_id: str = Field(min_length=1, max_length=80)
+    color: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
+    opacity: StrictInt = Field(ge=1, le=100)
+
+
+class StudioCaptionOverlay(ApiModel):
+    """Words the browser drew at the picture's size, uploaded as a transparent picture."""
+
+    overlay_artifact_id: str = Field(min_length=1, max_length=80)
+
+
+#: Where the picture sits on a new canvas: a corner, an edge's middle, or the center.
+StudioCanvasAnchor = Literal[
+    "top_left",
+    "top",
+    "top_right",
+    "left",
+    "center",
+    "right",
+    "bottom_left",
+    "bottom",
+    "bottom_right",
+]
+
+
+class StudioCanvasChange(ApiModel):
+    """A new canvas size, where the picture sits on it, and what fills the rest."""
+
+    width: StrictInt = Field(ge=1, le=MAX_DIMENSION)
+    height: StrictInt = Field(ge=1, le=MAX_DIMENSION)
+    anchor: StudioCanvasAnchor = "center"
+    fill: Literal["transparent", "white", "black"] = "transparent"
+
+
 class StudioLocalEditCreate(ApiModel):
-    """Rotate, flip, crop or resize one picture in a studio session, without a model."""
+    """One edit to a picture in a studio session that the studio makes without a model."""
 
     source_artifact_id: str = Field(min_length=1, max_length=80)
     operation: StudioLocalEditOperation
     crop: StudioCropBox | None = None
     size: StudioPictureSize | None = None
+    adjustments: StudioColorAdjustments | None = None
+    blur: StudioSelectionBlur | None = None
+    paint: StudioSelectionPaint | None = None
+    caption: StudioCaptionOverlay | None = None
+    canvas: StudioCanvasChange | None = None
 
     @model_validator(mode="after")
     def details_only_for_their_edit(self) -> Self:
@@ -611,6 +674,16 @@ class StudioLocalEditCreate(ApiModel):
             raise ValueError("A crop names the part to keep, and no other edit does.")
         if (self.operation == "resize") != (self.size is not None):
             raise ValueError("A resize names the new size, and no other edit does.")
+        if (self.operation == "adjust") != (self.adjustments is not None):
+            raise ValueError("An adjustment names its sliders, and no other edit does.")
+        if (self.operation == "blur") != (self.blur is not None):
+            raise ValueError("A blur names the marked area, and no other edit does.")
+        if (self.operation == "paint") != (self.paint is not None):
+            raise ValueError("A paint names the marked area and its color, and no other edit does.")
+        if (self.operation == "caption") != (self.caption is not None):
+            raise ValueError("A caption names its drawn words, and no other edit does.")
+        if (self.operation == "canvas") != (self.canvas is not None):
+            raise ValueError("A canvas change names the new canvas, and no other edit does.")
         return self
 
 

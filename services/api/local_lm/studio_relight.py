@@ -236,20 +236,27 @@ def finish_relight(finish: RelightFinish, result: bytes) -> FinishedPicture:
     )
 
 
-def warmth_grade(picture: Image.Image, kelvin: int) -> Image.Image:
-    """White-balance the picture toward a colour temperature, keeping its brightness.
+def warmth_gains(kelvin: float) -> tuple[float, float, float]:
+    """The red, green and blue gains that white-balance toward `kelvin`.
 
     Each channel is scaled by the blackbody colour at `kelvin` over the colour at
     6500 K, so 6500 K changes nothing, and the gains are normalised by their
-    luma weight so a warmer light is not also a darker one. Transparency is kept.
+    luma weight so a warmer light is not also a darker one.
     """
     target = _blackbody(kelvin)
     neutral = _blackbody(NEUTRAL_KELVIN)
     gains = [target[index] / neutral[index] for index in range(3)]
     luma = 0.2126 * gains[0] + 0.7152 * gains[1] + 0.0722 * gains[2]
+    return (gains[0] / luma, gains[1] / luma, gains[2] / luma)
+
+
+def warmth_grade(picture: Image.Image, kelvin: int) -> Image.Image:
+    """White-balance the picture toward a colour temperature, keeping its brightness.
+
+    Transparency is kept.
+    """
     bands = list(picture.split())
-    for index in range(3):
-        gain = gains[index] / luma
+    for index, gain in enumerate(warmth_gains(kelvin)):
         bands[index] = bands[index].point([min(255, round(value * gain)) for value in range(256)])
     return Image.merge(picture.mode, bands)
 

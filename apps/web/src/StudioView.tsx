@@ -20,6 +20,9 @@ import { cloneMask, coverage, encodeMaskPng, feather, isEmpty, type MaskRaster }
 import { studioApplyPlan } from "./studioApplyPlan";
 import { renderLightMap } from "./studioLightMap";
 import { readSourcePixels } from "./studioSourcePixels";
+import { useAdjustedPreview } from "./useAdjustedPreview";
+import { useCaptionPreview } from "./useCaptionPreview";
+import { paintRgb } from "./studioPaint";
 import {
   initialToolState,
   snapshotBeforeGesture,
@@ -145,9 +148,11 @@ export function StudioView({
   });
   const { bitmap, error: imageError, reload } = useStudioImage(currentArtifactId);
   const compare = useStudioCompare(current, bitmap, Boolean(previewArtifactId));
-  // Read for the wand only, from the picture on the canvas, and again for each new one.
-  const readsColors = tools.kind === "wand";
+  // Read for the wand and the light and color preview, from the picture on the canvas, and again for each new one.
+  const readsColors = tools.kind === "wand" || tools.kind === "adjust";
   const sourcePixels = useMemo(() => (readsColors && bitmap ? readSourcePixels(bitmap) : null), [readsColors, bitmap]);
+  const adjustedPreview = useAdjustedPreview(bitmap, sourcePixels, tools.kind === "adjust" ? tools.adjustments : null);
+  const captionPreview = useCaptionPreview(bitmap, tools.kind === "caption" ? tools.caption : null);
   // The pointer tool is rebuilt whenever the mode or brush changes; each one
   // is a cheap wrapper over the shared raster, never a copy of it.
   const pointerTool = useMemo(
@@ -270,6 +275,8 @@ export function StudioView({
           ) : bitmap ? (
             <StudioCanvas
               image={bitmap}
+              shown={adjustedPreview ?? captionPreview}
+              tint={tools.kind === "paint" ? { rgb: paintRgb(tools.paintColor), opacity: tools.paintOpacity / 100 } : null}
               mask={tools.mask}
               tool={pointerTool}
               maskVersion={tools.maskVersion}
@@ -301,7 +308,7 @@ export function StudioView({
           ) : (
             <StudioWorkflowOpening selectorId={workflowSelectorId} />
           )}
-          {!["instruct", "relight", "isolate", "background", "subject", "transform", "crop", "resize"].includes(tools.kind) && (
+          {!["instruct", "relight", "isolate", "background", "subject", "transform", "crop", "resize", "canvas", "adjust", "caption"].includes(tools.kind) && (
             <StudioSelectionControls tools={tools} dispatch={dispatch} coverage={selectionCoverage}
               colorsUnreadable={readsColors && Boolean(bitmap) && !sourcePixels} />
           )}
@@ -329,7 +336,7 @@ export function StudioView({
             // cannot run, so the sentence arrives before the drawing does.
             <StudioToolGuidance reason={unavailable} onOpenWorkflows={onOpenWorkflows} />
           )}
-          {!["transform", "crop", "resize"].includes(tools.kind) && (
+          {!["transform", "crop", "resize", "canvas", "adjust", "blur", "paint", "caption"].includes(tools.kind) && (
             <button
               className="primary"
               aria-disabled={applyDisabled}

@@ -343,13 +343,16 @@ function clampIndex(value: number, size: number): number {
 export function toAlphaImageData(
   mask: MaskRaster,
   rgb: readonly [number, number, number] = [255, 255, 255],
+  /** How much of each marked pixel's coverage shows, from 0 to 1. */
+  opacity = 1,
 ): Uint8ClampedArray {
   const out = new Uint8ClampedArray(mask.data.length * 4);
   for (let index = 0; index < mask.data.length; index += 1) {
     out[index * 4] = rgb[0];
     out[index * 4 + 1] = rgb[1];
     out[index * 4 + 2] = rgb[2];
-    out[index * 4 + 3] = mask.data[index];
+    // Half rounds up, as the server does when it lays paint down.
+    out[index * 4 + 3] = opacity === 1 ? mask.data[index] : Math.floor(mask.data[index] * opacity + 0.5);
   }
   return out;
 }

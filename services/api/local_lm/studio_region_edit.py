@@ -221,6 +221,24 @@ def decode_picture(payload: bytes, label: str) -> Image.Image:
     return image
 
 
+def selection_alpha(mask: bytes, size: tuple[int, int], orientation: int) -> Image.Image:
+    """A drawn selection as an alpha at the picture's upright size.
+
+    Placed the way a region edit places it, and refused the same ways: a
+    selection drawn on another picture, or one that covers nothing.
+    """
+
+    return _selection_alpha(
+        decode_picture(mask, "selection"), size, invert=False, orientation=orientation
+    ).image
+
+
+def exif_orientation(image: Image.Image) -> int:
+    """The orientation a camera recorded, 1 when it recorded none that is valid."""
+
+    return _orientation(image)
+
+
 def _orientation(image: Image.Image) -> int:
     value = image.getexif().get(_EXIF_ORIENTATION, 1)
     return value if isinstance(value, int) and 1 <= value <= 8 else 1

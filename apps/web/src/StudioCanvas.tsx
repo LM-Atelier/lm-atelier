@@ -32,6 +32,8 @@ import {
  */
 export function StudioCanvas({
   image,
+  shown = null,
+  tint = null,
   mask,
   tool,
   maskVersion,
@@ -40,6 +42,10 @@ export function StudioCanvas({
   onStrokeEnd,
 }: {
   image: ImageBitmap | null;
+  /** Drawn in the picture's place when given, at its size: an adjustment's preview. */
+  shown?: HTMLCanvasElement | null;
+  /** The marking's color and opacity when they stand for paint; the selection's own tint otherwise. */
+  tint?: { rgb: [number, number, number]; opacity: number } | null;
   mask: MaskRaster | null;
   /** An earlier picture laid over this one, uncovered from the left edge
    * across `reveal` of the width: 0 shows none of it and 1 all of it. */
@@ -88,8 +94,8 @@ export function StudioCanvas({
     const context = layer?.getContext("2d");
     if (!layer || !context || !image) return;
     context.clearRect(0, 0, layer.width, layer.height);
-    context.drawImage(image, 0, 0);
-  }, [image, size]);
+    context.drawImage(shown ?? image, 0, 0);
+  }, [image, shown, size]);
 
   // Drawn once per picture and uncovered by clipping, so moving the divider
   // repaints nothing.
@@ -111,15 +117,11 @@ export function StudioCanvas({
    * an effect alone left the selection invisible until the pointer lifted.
    * Painting is the same work either way, just triggered from two places.
    */
-  const paintMask = useCallback(() => {
-    const layer = maskLayer.current;
-    const context = layer?.getContext("2d");
-    if (!layer || !context) return;
-    context.clearRect(0, 0, layer.width, layer.height);
-    if (!mask) return;
-    const tint = new ImageData(toAlphaImageData(mask, [80, 170, 255]), mask.width, mask.height);
-    context.putImageData(tint, 0, 0);
-  }, [mask]);
+  const paintMask = useCallback(
+    () => drawMarking(maskLayer.current, mask, tint),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [mask, tint?.rgb[0], tint?.rgb[1], tint?.rgb[2], tint?.opacity],
+  );
 
   useEffect(() => {
     paintMask();
@@ -425,4 +427,20 @@ export function StudioCanvas({
       </div>
     </div>
   );
+}
+
+/** The marking as the canvas shows it: the selection's own tint, or paint in its color and opacity. */
+function drawMarking(
+  layer: HTMLCanvasElement | null,
+  mask: MaskRaster | null,
+  tint: { rgb: [number, number, number]; opacity: number } | null,
+): void {
+  const context = layer?.getContext("2d");
+  if (!layer || !context) return;
+  context.clearRect(0, 0, layer.width, layer.height);
+  if (!mask) return;
+  const marking = tint
+    ? toAlphaImageData(mask, tint.rgb, tint.opacity)
+    : toAlphaImageData(mask, [80, 170, 255]);
+  context.putImageData(new ImageData(marking, mask.width, mask.height), 0, 0);
 }

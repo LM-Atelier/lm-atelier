@@ -177,11 +177,34 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
   // Turning, flipping, cropping or resizing needs no model: the server makes
   // the picture and answers with the session it now belongs to.
   const localEdit = useMutation({
-    mutationFn: ({ operation, artifactId, details }: { operation: StudioLocalEditOperation; artifactId: string; details?: StudioLocalEditDetails }) => {
+    mutationFn: async ({ operation, artifactId, details }: { operation: StudioLocalEditOperation; artifactId: string; details?: StudioLocalEditDetails }) => {
       if (!sessionId) {
         throw new Error("This picture is still opening. Try that again in a moment.");
       }
-      return api.studioLocalEdit(sessionId, { source_artifact_id: artifactId, operation, ...details });
+      // A marked area uploads first, as a selection, and the edit names it.
+      const { blur, paint, caption, ...rest } = details ?? {};
+      const selection = blur?.selection ?? paint?.selection;
+      const marked = selection
+        ? await api.upload(new File([selection], "studio-selection.png", { type: "image/png" }))
+        : null;
+      return api.studioLocalEdit(sessionId, {
+        source_artifact_id: artifactId,
+        operation,
+        ...rest,
+        ...(blur && marked ? { blur: { mask_artifact_id: marked.id, radius: blur.radius } } : {}),
+        ...(paint && marked
+          ? { paint: { mask_artifact_id: marked.id, color: paint.color, opacity: paint.opacity } }
+          : {}),
+        ...(caption
+          ? {
+              caption: {
+                overlay_artifact_id: (
+                  await api.upload(new File([caption.words], "studio-words.png", { type: "image/png" }))
+                ).id,
+              },
+            }
+          : {}),
+      });
     },
     // Filed under the session that answered, which is not necessarily the one
     // on screen if another picture opened while this one was being turned.

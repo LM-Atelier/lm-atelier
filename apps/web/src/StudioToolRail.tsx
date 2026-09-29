@@ -1,17 +1,22 @@
 import {
   Brush,
+  Captions,
   Crop,
+  Droplet,
   Eraser,
+  Frame,
   Lasso,
   LetterText,
   Maximize2,
   Mountain,
   PaintBucket,
+  Paintbrush,
   PersonStanding,
   Redo2,
   RotateCw,
   Scaling,
   Scissors,
+  SlidersHorizontal,
   Sparkles,
   Square,
   SunMedium,
@@ -22,24 +27,39 @@ import {
 import type { StudioToolKind } from "./studioToolState";
 import type { StudioToolCapability } from "./types";
 
-const TOOLS: Array<{ kind: StudioToolKind; label: string; icon: typeof Brush }> = [
-  { kind: "instruct", label: "Instruct the whole image", icon: Type },
-  { kind: "transform", label: "Rotate or flip", icon: RotateCw },
-  { kind: "crop", label: "Crop the picture", icon: Crop },
-  { kind: "resize", label: "Resize the picture", icon: Scaling },
-  { kind: "brush", label: "Brush a selection", icon: Brush },
-  { kind: "eraser", label: "Erase from the selection", icon: Eraser },
-  { kind: "rect", label: "Select a rectangle", icon: Square },
-  { kind: "lasso", label: "Lasso a selection", icon: Lasso },
-  { kind: "bucket", label: "Fill an area of the selection", icon: PaintBucket },
-  { kind: "wand", label: "Select similar colors", icon: Wand2 },
-  { kind: "enhance", label: "Enlarge and restore detail", icon: Sparkles },
-  { kind: "extend", label: "Extend past the edge", icon: Maximize2 },
-  { kind: "text", label: "Replace words in the picture", icon: LetterText },
-  { kind: "relight", label: "Relight from a direction", icon: SunMedium },
-  { kind: "isolate", label: "Cut the subject out", icon: Scissors },
-  { kind: "background", label: "Replace the background", icon: Mountain },
-  { kind: "subject", label: "Replace the subject", icon: PersonStanding },
+type RailTool = { kind: StudioToolKind; label: string; icon: typeof Brush };
+
+/** The tools in four runs, a divider between each: say what to do to the whole
+ * picture, select a part, change it with a workflow, or change it exactly. */
+const TOOL_GROUPS: RailTool[][] = [
+  [{ kind: "instruct", label: "Instruct the whole image", icon: Type }],
+  [
+    { kind: "brush", label: "Brush a selection", icon: Brush },
+    { kind: "eraser", label: "Erase from the selection", icon: Eraser },
+    { kind: "rect", label: "Select a rectangle", icon: Square },
+    { kind: "lasso", label: "Lasso a selection", icon: Lasso },
+    { kind: "bucket", label: "Fill an area of the selection", icon: PaintBucket },
+    { kind: "wand", label: "Select similar colors", icon: Wand2 },
+  ],
+  [
+    { kind: "enhance", label: "Enlarge and restore detail", icon: Sparkles },
+    { kind: "extend", label: "Extend past the edge", icon: Maximize2 },
+    { kind: "text", label: "Replace words in the picture", icon: LetterText },
+    { kind: "relight", label: "Relight from a direction", icon: SunMedium },
+    { kind: "isolate", label: "Cut the subject out", icon: Scissors },
+    { kind: "background", label: "Replace the background", icon: Mountain },
+    { kind: "subject", label: "Replace the subject", icon: PersonStanding },
+  ],
+  [
+    { kind: "transform", label: "Rotate or flip", icon: RotateCw },
+    { kind: "crop", label: "Crop the picture", icon: Crop },
+    { kind: "resize", label: "Resize the picture", icon: Scaling },
+    { kind: "canvas", label: "Change the canvas size", icon: Frame },
+    { kind: "adjust", label: "Adjust light and color", icon: SlidersHorizontal },
+    { kind: "blur", label: "Blur part of the picture", icon: Droplet },
+    { kind: "paint", label: "Paint over part of the picture", icon: Paintbrush },
+    { kind: "caption", label: "Add text to the picture", icon: Captions },
+  ],
 ];
 
 /** The studio's left rail: pick how you point at the image.
@@ -75,32 +95,35 @@ export function StudioToolRail({
   );
   return (
     <nav className="studio-tool-rail" aria-label="Editing tools">
-      {TOOLS.map(({ kind, label, icon: Icon }) => {
-        // Enabled but guided, never greyed out: a disabled button explains
-        // nothing, and the thing that would fix it is a install away.
-        const unavailable = blocked.get(kind);
-        return (
-          <button
-            key={kind}
-            type="button"
-            className={`icon-button ${active === kind ? "selected" : ""} ${unavailable ? "unavailable" : ""}`}
-            aria-label={unavailable ? `${label} - ${unavailable}` : label}
-            aria-pressed={active === kind}
-            // Only the active tool's reason is on screen, so every other
-            // unavailable button pointed at an element that was not there -
-            // and when it was there, it explained a different tool.
-            aria-describedby={
-              unavailable && active === kind ? "studio-tool-guidance" : undefined
-            }
-            title={unavailable ? `${label}
+      {TOOL_GROUPS.map((group, index) => [
+        index > 0 && <span key={`divider-${index}`} className="studio-rail-divider" aria-hidden="true" />,
+        ...group.map(({ kind, label, icon: Icon }) => {
+          // Enabled but guided, never greyed out: a disabled button explains
+          // nothing, and the thing that would fix it is a install away.
+          const unavailable = blocked.get(kind);
+          return (
+            <button
+              key={kind}
+              type="button"
+              className={`icon-button ${active === kind ? "selected" : ""} ${unavailable ? "unavailable" : ""}`}
+              aria-label={unavailable ? `${label} - ${unavailable}` : label}
+              aria-pressed={active === kind}
+              // Only the active tool's reason is on screen, so every other
+              // unavailable button pointed at an element that was not there -
+              // and when it was there, it explained a different tool.
+              aria-describedby={
+                unavailable && active === kind ? "studio-tool-guidance" : undefined
+              }
+              title={unavailable ? `${label}
 ${unavailable}` : label}
-            disabled={disabled}
-            onClick={() => onSelect(kind)}
-          >
-            <Icon size={18} aria-hidden="true" />
-          </button>
-        );
-      })}
+              disabled={disabled}
+              onClick={() => onSelect(kind)}
+            >
+              <Icon size={18} aria-hidden="true" />
+            </button>
+          );
+        }),
+      ])}
       <span className="studio-rail-divider" aria-hidden="true" />
       <button
         type="button"

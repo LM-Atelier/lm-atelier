@@ -1,4 +1,9 @@
 import type { Dispatch } from "react";
+import { StudioAdjustTool } from "./StudioAdjustTool";
+import { StudioBlurTool } from "./StudioBlurTool";
+import { StudioCanvasSizeTool } from "./StudioCanvasSizeTool";
+import { StudioCaptionTool } from "./StudioCaptionTool";
+import { StudioPaintTool } from "./StudioPaintTool";
 import { StudioCropTool } from "./StudioCropTool";
 import { StudioResizeTool } from "./StudioResizeTool";
 import { StudioTransformTool } from "./StudioTransformTool";
@@ -10,7 +15,10 @@ import type { StudioLocalEditDetails, StudioLocalEditOperation } from "./types";
  * Extend and Enhance are a drag or a number, Text is the words before and
  * after, Isolate needs nothing, replacing a subject needs the picture it comes
  * from, turning and flipping are a press each, a crop is a drawn box, a
- * resize is a width and a height, and every other tool is described in words.
+ * resize is a width and a height, a canvas change is those and a place, light
+ * and color are four sliders, a blur is a marked area and a strength, a paint
+ * is a marked area and a color, added words are the words and their look, and
+ * every other tool is described in words.
  * Kept apart from the studio view so each tool's control reads in one place.
  */
 export function StudioToolOptions({
@@ -36,6 +44,48 @@ export function StudioToolOptions({
     return onLocalEdit ? (
       <StudioCropTool mask={tools.mask} maskVersion={tools.maskVersion} busy={busy}
         onCrop={(box) => onLocalEdit("crop", { crop: box })} />
+    ) : null;
+  }
+  if (tools.kind === "blur") {
+    return onLocalEdit ? (
+      <StudioBlurTool mask={tools.mask} maskVersion={tools.maskVersion} featherPx={tools.featherPx}
+        radius={tools.blurRadius} busy={busy}
+        onRadius={(radius) => dispatch({ type: "set-blur-radius", radius })}
+        onBlur={(selection) => onLocalEdit("blur", { blur: { selection, radius: tools.blurRadius } })} />
+    ) : null;
+  }
+  if (tools.kind === "caption") {
+    const size = tools.mask ? { width: tools.mask.width, height: tools.mask.height } : null;
+    return onLocalEdit ? (
+      <StudioCaptionTool caption={tools.caption} size={size} busy={busy}
+        onChange={(patch) => dispatch({ type: "set-caption", patch })}
+        onAdd={(words) => onLocalEdit("caption", { caption: { words } })} />
+    ) : null;
+  }
+  if (tools.kind === "paint") {
+    return onLocalEdit ? (
+      <StudioPaintTool mask={tools.mask} maskVersion={tools.maskVersion} featherPx={tools.featherPx}
+        color={tools.paintColor} opacity={tools.paintOpacity} busy={busy}
+        onColor={(color) => dispatch({ type: "set-paint-color", color })}
+        onOpacity={(opacity) => dispatch({ type: "set-paint-opacity", opacity })}
+        onPaint={(selection) => onLocalEdit("paint", {
+          paint: { selection, color: tools.paintColor, opacity: tools.paintOpacity },
+        })} />
+    ) : null;
+  }
+  if (tools.kind === "adjust") {
+    return onLocalEdit ? (
+      <StudioAdjustTool adjustments={tools.adjustments} busy={busy}
+        onChange={(key, value) => dispatch({ type: "set-adjustment", key, value })}
+        onReset={() => dispatch({ type: "reset-adjustments" })}
+        onApply={() => onLocalEdit("adjust", { adjustments: tools.adjustments })} />
+    ) : null;
+  }
+  if (tools.kind === "canvas") {
+    const size = tools.mask ? { width: tools.mask.width, height: tools.mask.height } : null;
+    return onLocalEdit && size ? (
+      <StudioCanvasSizeTool key={`${size.width}x${size.height}`} size={size} busy={busy}
+        onChange={(canvas) => onLocalEdit("canvas", { canvas })} />
     ) : null;
   }
   if (tools.kind === "resize") {

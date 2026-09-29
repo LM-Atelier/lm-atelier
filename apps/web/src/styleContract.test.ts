@@ -108,6 +108,15 @@ describe("style contract", () => {
     expect(css).toMatch(/\.studio-header-actions\s*\{[^}]*flex-wrap:\s*wrap/);
   });
 
+  it("keeps every studio tool in view on a wide screen", () => {
+    const css = readFileSync(STYLESHEET, "utf8");
+    // One column of more than twenty tools scrolled, and the last run of them
+    // sat below the fold with nothing to say it was there. Two columns fit
+    // them all, and a divider spans both so the runs still read as runs.
+    expect(css).toMatch(/\.studio-tool-rail\s*\{[^}]*grid-template-columns:\s*repeat\(2, auto\)/);
+    expect(css).toMatch(/\.studio-rail-divider\s*\{[^}]*grid-column:\s*1 \/ -1/);
+  });
+
   it("keeps the light and the theme in Settings rather than floating over the work", () => {
     // A control fixed over every screen sits on whatever is underneath it, and
     // this one was changed rarely and in front of the work all day. It belongs
