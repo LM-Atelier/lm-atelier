@@ -70,6 +70,8 @@ export function useStudioBackground(
       onError(CUTOUT_FAILED);
       return;
     }
+    // Stopped by the person, so there is nothing to say and nothing to redraw.
+    if (outcome.state === "stopped") return;
     const started = active;
     const reference = started.plan.cutout?.reference;
     const subject = started.plan.cutout?.redraw === "subject";
@@ -124,8 +126,9 @@ export function useStudioBackground(
       );
   }, [active, outcome, apply, onError]);
 
-  // A failed cutout has already said so and no longer holds the studio.
-  const busy = active !== null && outcome?.state !== "failed";
+  // A failed cutout has already said so, and a stopped one was stopped on
+  // purpose; neither holds the studio any longer.
+  const busy = active !== null && outcome?.state !== "failed" && outcome?.state !== "stopped";
   return {
     busy,
     start: (

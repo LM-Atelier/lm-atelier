@@ -42,7 +42,7 @@ its own; one failure never abandons the rest.
 
 An edit that runs a model shows, under **Apply**, the step it has reached and a
 bar that fills as the work goes on: the same progress a chat shows for its own
-pictures.
+pictures. **Stop the edit** ends it, and the picture stays as it was.
 
 ## Seeing what changed
 

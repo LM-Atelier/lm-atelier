@@ -35,7 +35,10 @@ describe("cutoutOutcome", () => {
     const empty = session({ status: "complete", parts: [image("art-preview", true)] as Message["parts"] });
     expect(cutoutOutcome(empty, "msg-cutout")).toEqual({ state: "failed" });
     expect(cutoutOutcome(session({ status: "failed" }), "msg-cutout")).toEqual({ state: "failed" });
-    expect(cutoutOutcome(session({ status: "cancelled" }), "msg-cutout")).toEqual({ state: "failed" });
+  });
+
+  it("tells a stopped cutout from a failed one", () => {
+    expect(cutoutOutcome(session({ status: "cancelled" }), "msg-cutout")).toEqual({ state: "stopped" });
   });
 });
 

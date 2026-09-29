@@ -112,7 +112,8 @@ describe("applying an edit", () => {
     expect(screen.getByRole("button", { name: /apply/i })).toHaveAttribute("aria-disabled", "true");
   });
 
-  it("shows how far a running edit has got, beside Apply", async () => {
+  it("shows how far a running edit has got beside Apply, and stops it", async () => {
+    const stop = vi.fn();
     vi.mocked(useStudioSession).mockReturnValue({
       steps: [{ artifactId: "art-1", instruction: null, generationIdentity: null }],
       previewArtifactId: null,
@@ -137,6 +138,8 @@ describe("applying an edit", () => {
       busy: true,
       error: null,
       apply: vi.fn(),
+      stop,
+      stopping: false,
     } as unknown as ReturnType<typeof useStudioSession>);
     render(
       <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
@@ -149,6 +152,8 @@ describe("applying an edit", () => {
     expect(step?.closest(".studio-panel")).not.toBeNull();
     expect(step?.querySelector(".progress-track > div")).toHaveStyle({ width: "40%" });
     expect(screen.getByRole("button", { name: /applying/i })).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Stop the edit" }));
+    expect(stop).toHaveBeenCalledTimes(1);
   });
 
   it("says when a pinned recipe overrides the displayed workflow choice", async () => {

@@ -38,6 +38,8 @@ beforeEach(() => {
     error: null,
     apply: vi.fn(),
     localEdit: vi.fn(),
+    stop: vi.fn(),
+    stopping: false,
   };
   vi.mocked(useStudioSession).mockImplementation(() => session);
 });
