@@ -218,11 +218,49 @@ Controls appear only when the plan supports the action. Work that has already
 started cannot be held. If the queue changes while you click, refresh and use the
 updated action. Holds survive an app restart.
 
-In **Generation**, choose **Pause after current** to let current generation finish
-while new generation waits. You can keep submitting work; accepted settings stay
-intact. The state changes to **Generation paused** when current generation finishes.
-Choose **Resume** to allow generation to start again; held plans still need
-**Release**. The pause survives an app restart. Transfers and installs continue.
+### Pause a work category
+
+In **View accepted work**, choose **Pause after current** under **Generation**,
+**Transfers**, or **Installations**. Current work in that category can finish,
+while new work waits. You can keep submitting work; its
+accepted settings stay intact. The status shows when current work has finished
+and the category is paused. Choose **Resume** to allow it to start work again.
+Each category's pause survives an app restart.
+
+Generation pause leaves transfers and installations available. Pausing transfers
+lets current downloads and their activation finish. Manually paused downloads
+stay paused when you resume the transfer category. Pausing installations lets
+current installations finish; downloads can still finish preparing their own
+models. A pause does not interrupt a running operation. Held plans still need
+**Release** after their category resumes.
+
+### Change dispatch order
+
+Choose **Change dispatch order** in **View accepted work**, then select an **Order
+category**. This view shows positions within groups that share a resource and
+priority. Older work keeps its scheduling priority as it waits, and different
+resources can run at the same time.
+
+The category must be idle before you can move work. Use **Back to accepted work**
+and **Pause after current** to keep it idle once current work finishes. A held
+item needs **Release** before it can move. Other unavailable items explain
+whether they are waiting for prerequisites, need different resources, or do not
+support ordering.
+
+Use **Move earlier** or **Move later** to change an item's position in its group.
+You can also use **Drag to move**, dropping on the top or bottom of another item
+in the same group to place it before or after that item. Use **Next order page**
+and **Previous order page** to browse a long list. Moves preserve the order of a
+plan's steps and never change its accepted settings or submission time.
+
+An **Order saved** message confirms a successful move. Saved order survives
+reloads and app restarts; changing it leaves a paused category paused. The
+accepted-work list continues to show acceptance order.
+
+If the queue changes while you move an item, review the refreshed order before
+trying again. If saving reports a connection error, use **Retry the same move**
+to resolve that attempt before making another move. **Refresh dispatch order**
+loads the current list.
 
 ### Browse workflows
 
