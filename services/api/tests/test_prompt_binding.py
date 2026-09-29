@@ -795,7 +795,8 @@ def test_a_schema_that_is_empty_rather_than_absent_is_still_unreadable() -> None
     back the full set of built-in names on the strength of a value nobody
     intended, so it is treated as unreadable and the shape test stands in.
     """
-    for empty in ([], "", 0, False, 0.0):
+    empties: tuple[object, ...] = ([], "", 0, False, 0.0)
+    for empty in empties:
         assert substitutable_keys("text_to_image", empty) is None, empty
     # And a schema that really does declare nothing is a different answer.
     assert substitutable_keys("text_to_image", {"type": "object", "properties": {}}) is not None

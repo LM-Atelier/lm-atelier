@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from typing import Any, cast
+
 import pytest
 
 from local_lm.message_window_v1 import (
@@ -17,7 +20,7 @@ from local_lm.message_window_v1 import (
 IDS = tuple(f"msg-{i:02d}" for i in range(1, 21))
 
 
-def _refuse(*args, **kwargs) -> None:
+def _refuse(*args: Any, **kwargs: Any) -> None:
     with pytest.raises(MessageWindowError, match=INVALID_WINDOW) as caught:
         plan_message_window(*args, **kwargs)
     assert str(caught.value) == INVALID_WINDOW
@@ -80,12 +83,12 @@ def test_refuses_duplicate_and_hostile_identity() -> None:
 
 
 def test_refuses_hostile_subclasses() -> None:
-    class HostileList(list):
-        def __iter__(self):
+    class HostileList(list[object]):
+        def __iter__(self) -> Iterator[object]:
             raise RuntimeError("private attacker detail")
 
     class HostileStr(str):
-        def __contains__(self, item):
+        def __contains__(self, item: object) -> bool:
             raise RuntimeError("private attacker detail")
 
     _refuse(HostileList(list(IDS)), mode="latest")
@@ -95,7 +98,9 @@ def test_refuses_hostile_subclasses() -> None:
 
 def test_authority_flags_are_not_constructor_settable() -> None:
     with pytest.raises(TypeError):
-        MessageWindowPlan(
+        # Keywords the constructor does not take, passed on purpose: the
+        # refusal is the point, so the call goes around the type.
+        cast(Any, MessageWindowPlan)(
             schema="lm-atelier-message-window-v1",
             schema_version=1,
             mode="latest",
@@ -104,7 +109,9 @@ def test_authority_flags_are_not_constructor_settable() -> None:
             loads_entire_chat=True,
         )
     with pytest.raises(TypeError):
-        MessageWindowPlan(
+        # Keywords the constructor does not take, passed on purpose: the
+        # refusal is the point, so the call goes around the type.
+        cast(Any, MessageWindowPlan)(
             schema="lm-atelier-message-window-v1",
             schema_version=1,
             mode="latest",

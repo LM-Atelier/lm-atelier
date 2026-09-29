@@ -24,6 +24,7 @@ from local_lm.prompt_model_values import (
     PROMPT_MODEL_VALUES_TOOL_NAME,
     PromptModelSlotContract,
     PromptModelSlotSpec,
+    PromptModelValues,
     prompt_model_slot_contract,
     prompt_model_values_sha256,
 )
@@ -164,6 +165,7 @@ async def test_valid_call_returns_codec_values_digest_and_content_free_evidence(
 
     assert result.values.batch_values == (("style", "oil paint"),)
     assert result.values.items[1].values == (("lighting", "hard rim light"),)
+    assert isinstance(result.values, PromptModelValues)
     assert result.values_sha256 == prompt_model_values_sha256(result.values, contract=contract)
     assert result.attempts == (
         invocation_module.PromptModelAttemptEvidence(
@@ -366,6 +368,7 @@ async def test_live_caller_contract_mutation_cannot_change_snapshotted_authority
         assert items["minItems"] == 2
         assert items["maxItems"] == 2
     assert len(result.values.items) == 2
+    assert isinstance(result.values, PromptModelValues)
     assert result.values_sha256 == prompt_model_values_sha256(
         result.values,
         contract=expected_contract,

@@ -23,6 +23,7 @@ from test_install_queue_registry import configured_registry as configured_regist
 from test_workflow_package_execution_plan import _inputs
 
 from local_lm import api as api_module
+from local_lm import comfy_registry_installs as registry_installs
 from local_lm import comfy_registry_lifecycle as lifecycle
 from local_lm import workflow_package_preparation as composition
 from local_lm.comfy_registry_paths import registry_wheel_environment_root
@@ -64,7 +65,7 @@ async def test_registry_preparation_rechecks_its_claim_before_persisting(
     ):
         monkeypatch.setattr(api_module, name, lambda value=value: value)
     entered, release = threading.Event(), threading.Event()
-    original = lifecycle.verify_comfy_registry_wheel_binding
+    original = registry_installs.verify_comfy_registry_wheel_binding
 
     def verify(*args: Any, **kwargs: Any) -> Any:
         result = original(*args, **kwargs)

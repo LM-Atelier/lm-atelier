@@ -63,8 +63,8 @@ async def test_delayed_quarantine_keeps_replacement_packages_active(
     with SessionLocal() as session:
         offer = session.get(WorkflowInstallOffer, offer_id)
         assert offer is not None
-        job = stage_workflow_completion_job(session, offer)
-        job_id = job.id
+        staged = stage_workflow_completion_job(session, offer)
+        job_id = staged.id
         install = session.get(ComfyRegistryInstall, preparation.install_id)
         assert install is not None
         install.active = True

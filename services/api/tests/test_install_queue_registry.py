@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from fastapi import FastAPI
@@ -181,7 +182,8 @@ async def test_registry_retry_refuses_invalid_inputs_or_unfinished_cleanup(
             payload["unrecognized"] = "neutral-marker"
         elif damage == "retained-claim":
             job.claim_owner = "cleaning-up"
-        job.payload_json = [] if damage == "non-object" else payload
+        # Deliberately not an object, which the database must refuse.
+        job.payload_json = cast(Any, []) if damage == "non-object" else payload
         saved_payload = job.payload_json
         if damage == "non-object":
             with pytest.raises(IntegrityError, match="artifact JSON reference is invalid"):

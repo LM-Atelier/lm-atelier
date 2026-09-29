@@ -278,7 +278,7 @@ async def test_source_preflight_finishes_before_its_dispatcher_exits(
             await asyncio.wait_for(closing, timeout=10)
         assert finished.is_set()
         if ending == "complete":
-            assert outcomes == [None]
+            assert list(outcomes) == [None]
             assert _state(offer_id)[0:2] == ("completed", "complete")
             assert _state(offer_id)[4] == 1
         else:
