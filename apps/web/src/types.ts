@@ -2116,7 +2116,18 @@ export interface WorkflowResourceConsumers {
 
 export type StudioToolKind =
   | "instruct" | "brush" | "eraser" | "rect" | "lasso" | "bucket" | "wand" | "enhance" | "extend"
-  | "text" | "relight" | "isolate" | "background" | "subject";
+  | "text" | "relight" | "isolate" | "background" | "subject" | "transform";
+
+/** An edit the studio makes itself, without a model. */
+export type StudioLocalEditOperation =
+  | "rotate_clockwise" | "rotate_counterclockwise" | "flip_horizontal" | "flip_vertical" | "crop";
+
+export interface StudioLocalEditRequest {
+  source_artifact_id: string;
+  operation: StudioLocalEditOperation;
+  /** The part to keep, in the picture's own pixels; given with a crop only. */
+  crop?: { left: number; top: number; width: number; height: number } | null;
+}
 
 export interface StudioToolCapability {
   kind: StudioToolKind;

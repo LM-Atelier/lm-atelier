@@ -13,6 +13,7 @@ import type {
   WebSearch,
   WebSearchConfiguration,
   StudioCapabilityReport,
+  StudioLocalEditRequest,
   ApplicationInfo,
   AppEvent,
   Artifact,
@@ -406,6 +407,11 @@ export const api = {
     }),
   studioSession: (sessionId: string) =>
     request<ChatDetail>(`/api/studio/sessions/${encodeURIComponent(sessionId)}`),
+  studioLocalEdit: (sessionId: string, edit: StudioLocalEditRequest) =>
+    request<ChatDetail>(`/api/studio/sessions/${encodeURIComponent(sessionId)}/local-edits`, {
+      method: "POST",
+      body: JSON.stringify(edit),
+    }),
   createPromptHelper: (sourceChatId: string, draftPrompt: string) =>
     request<PromptHelperDetail>("/api/prompt-helpers", {
       method: "POST",

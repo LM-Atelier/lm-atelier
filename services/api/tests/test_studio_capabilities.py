@@ -26,9 +26,21 @@ def _by_kind(schemas: list[dict[str, Any] | None]) -> dict[str, Any]:
 
 def test_nothing_installed_leaves_every_tool_unavailable_with_a_reason() -> None:
     tools = _by_kind([])
+    needing = {kind: tool for kind, tool in tools.items() if tool.workflow_class != "local"}
 
-    assert not any(tool.available for tool in tools.values())
-    assert all(tool.reason for tool in tools.values())
+    assert needing
+    assert not any(tool.available for tool in needing.values())
+    assert all(tool.reason for tool in needing.values())
+
+
+def test_turning_and_flipping_need_nothing_installed() -> None:
+    """The studio makes those edits itself, so nothing can be missing."""
+    transform = _by_kind([])["transform"]
+
+    assert transform.workflow_class == "local"
+    assert transform.available is True
+    assert transform.reason is None
+    assert transform.workflow_revision_id is None
 
 
 def test_enhance_waits_for_a_workflow_that_can_actually_enlarge() -> None:

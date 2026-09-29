@@ -37,6 +37,7 @@ StudioToolKind = Literal[
     "isolate",
     "background",
     "subject",
+    "transform",
 ]
 
 
@@ -63,6 +64,8 @@ TOOL_WORKFLOW_CLASSES: dict[StudioToolKind, str] = {
     # Replacing a subject redraws it from a second picture, so it needs an edit
     # workflow that reads two, and it cuts the subject out first to find it.
     "subject": "reference_edit",
+    # Turning and flipping are exact pixel operations the studio makes itself.
+    "transform": "local",
 }
 
 _CLASS_GUIDANCE = {
@@ -129,6 +132,8 @@ def tool_capabilities(
         # a LoRA, and the one adapter whose behaviour was checked.
         "relight": bool(relight_workflow_ids) and bool(lighting_adapter_ids),
         "reference_edit": bool(reference_workflow_ids),
+        # Nothing to install: the edit is made here, without a model.
+        "local": True,
     }
     capabilities = []
     for kind, workflow_class in TOOL_WORKFLOW_CLASSES.items():

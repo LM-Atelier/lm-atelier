@@ -75,3 +75,49 @@ export function StudioSelectionTool({
     </>
   );
 }
+
+/** What the panel offers for a selection: how it is drawn, what to do with it
+ * as a whole, and how much of the picture it covers. */
+export function StudioSelectionControls({
+  tools,
+  dispatch,
+  colorsUnreadable,
+  coverage,
+}: {
+  tools: StudioToolState;
+  dispatch: Dispatch<StudioToolAction>;
+  colorsUnreadable: boolean;
+  /** The selected fraction of the picture; 0 when nothing is selected. */
+  coverage: number;
+}) {
+  return (
+    <div className="studio-selection-controls">
+      <StudioSelectionTool tools={tools} dispatch={dispatch} colorsUnreadable={colorsUnreadable} />
+      <div className="row-actions">
+        <button
+          className="secondary compact-button"
+          onClick={() => dispatch({ type: "invert" })}
+        >
+          Invert
+        </button>
+        <button
+          className="secondary compact-button"
+          onClick={() => dispatch({ type: "feather" })}
+        >
+          Soften edges
+        </button>
+        <button
+          className="secondary compact-button"
+          onClick={() => dispatch({ type: "clear" })}
+        >
+          Clear
+        </button>
+      </div>
+      <small>
+        {coverage > 0
+          ? `${(coverage * 100).toFixed(1)}% of the image selected`
+          : "Nothing selected yet - paint over what you want to change."}
+      </small>
+    </div>
+  );
+}

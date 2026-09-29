@@ -2,7 +2,13 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { api } from "./api";
 import { generationIdentityFromProvenance } from "./generationIdentity";
-import type { ChatDetail, GenerationIdentity, Message, TurnAccepted } from "./types";
+import type {
+  ChatDetail,
+  GenerationIdentity,
+  Message,
+  StudioLocalEditOperation,
+  TurnAccepted,
+} from "./types";
 
 const STUDIO_SESSION_KEY = "local-lm-studio-session";
 
@@ -167,13 +173,30 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
     onSuccess: () => void client.invalidateQueries({ queryKey: ["studio-session", sessionId] }),
   });
 
+  // Turning or flipping needs no model: the server makes the picture and
+  // answers with the session it now belongs to.
+  const localEdit = useMutation({
+    mutationFn: ({ operation, artifactId }: { operation: StudioLocalEditOperation; artifactId: string }) => {
+      if (!sessionId) {
+        throw new Error("This picture is still opening. Try that again in a moment.");
+      }
+      return api.studioLocalEdit(sessionId, { source_artifact_id: artifactId, operation });
+    },
+    // Filed under the session that answered, which is not necessarily the one
+    // on screen if another picture opened while this one was being turned.
+    onSuccess: (updated) => client.setQueryData(["studio-session", updated.id], updated),
+  });
+
   return {
     sessionId,
     session: session.data ?? null,
     steps: session.data ? studioSteps(session.data, sourceArtifactId) : [],
     previewArtifactId: session.data ? studioPreviewArtifactId(session.data) : null,
-    busy: open.isPending || apply.isPending || hasPendingWork(session.data),
-    error: open.error ?? session.error ?? apply.error,
+    busy: open.isPending || apply.isPending || localEdit.isPending || hasPendingWork(session.data),
+    error: open.error ?? session.error ?? apply.error ?? localEdit.error,
+    /** Rotate or flip a picture in this session; `onDone` runs once the step exists. */
+    localEdit: (operation: StudioLocalEditOperation, artifactId: string, onDone?: () => void) =>
+      localEdit.mutate({ operation, artifactId }, { onSuccess: () => onDone?.() }),
     /** `onAccepted` runs only once the turn has been taken.
      *
      * The surface clears the instruction and the selection there rather than

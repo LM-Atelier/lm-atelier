@@ -536,6 +536,7 @@ from .schemas import (
     SourceFitRequest,
     StorageCleanupResult,
     StudioCapabilityReport,
+    StudioLocalEditCreate,
     StudioSessionCreate,
     StudioToolCapability,
     SystemInfo,
@@ -640,6 +641,13 @@ from .source_fit_preview import (
     source_fit_capability,
 )
 from .studio_capabilities import tool_capabilities
+from .studio_local_edits import (
+    CropBox,
+    LocalEditError,
+    edited_picture,
+    picture_in_session,
+    record_local_edit,
+)
 from .studio_sessions import (
     STUDIO_SCOPE,
     find_studio_session,
@@ -2775,6 +2783,52 @@ async def get_studio_session(session_id: str, session: ConversationSessionDep) -
     if not studio:
         raise api_error(404, "studio-session-not-found", "This studio session no longer exists")
     return studio
+
+
+@router.post("/studio/sessions/{session_id}/local-edits", response_model=ChatDetail)
+async def apply_studio_local_edit(
+    session_id: str,
+    payload: StudioLocalEditCreate,
+    request: Request,
+    session: ConversationSessionDep,
+) -> Chat:
+    """Rotate, flip or crop a picture in a studio session, without a model.
+
+    The result becomes one more step in the session, after whatever step is
+    newest, so it is taken under the chat's guard like an apply.
+    """
+
+    services = _services(request)
+    async with services.orchestrator.chat_guard(session_id):
+        session.expire_all()
+        studio = session.scalar(
+            select(Chat).where(Chat.id == session_id, Chat.scope == STUDIO_SCOPE)
+        )
+        if studio is None:
+            raise api_error(404, "studio-session-not-found", "This studio session no longer exists")
+        source = session.get(Artifact, payload.source_artifact_id)
+        if source is None:
+            raise api_error(404, "artifact-not-found", "This media item no longer exists")
+        if not _is_editable_image(source) or not picture_in_session(session, studio, source.id):
+            raise api_error(
+                422,
+                "studio-edit-source-not-in-session",
+                "Only a picture in this studio session can be edited here.",
+            )
+        crop = CropBox(**payload.crop.model_dump()) if payload.crop is not None else None
+        try:
+            # Decoding and encoding a large picture takes a while and holds
+            # nothing, so it runs off the loop; everything after it writes.
+            edited = await run_in_threadpool(
+                edited_picture, services.artifacts, source, payload.operation, crop
+            )
+        except LocalEditError as exc:
+            raise api_error(422, exc.code, str(exc)) from exc
+        record_local_edit(
+            session, studio, source, payload.operation, edited, services.artifacts, crop
+        )
+        session.commit()
+    return session.scalar(_studio_session_query(session_id)) or studio
 
 
 def _studio_session_query(session_id: str) -> Select[tuple[Chat]]:
