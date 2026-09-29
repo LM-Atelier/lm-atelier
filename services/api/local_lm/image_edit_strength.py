@@ -60,6 +60,7 @@ class EditSettingSource(StrEnum):
     PROJECT = "project"
     CHAT_PRESET = "chat_preset"
     CHAT = "chat"
+    USE_CASE_PRESET = "use_case_preset"
     TURN = "turn"
 
 
@@ -554,6 +555,7 @@ def resolve_image_edit_strength(
         EditSettingSource.PROJECT,
         EditSettingSource.CHAT_PRESET,
         EditSettingSource.CHAT,
+        EditSettingSource.USE_CASE_PRESET,
         EditSettingSource.TURN,
     }
     for source, layer in reversed(explicit_layers):

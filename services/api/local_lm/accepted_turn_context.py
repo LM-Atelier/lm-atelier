@@ -30,6 +30,10 @@ from .models import (
 from .source_fit_recipe import SourceExtensionRecipe
 from .vision import VisionSamplingPolicy
 from .workflow_revision_reviews import revision_is_trusted
+from .workflow_use_case_preset_provenance import (
+    WorkflowUseCasePresetSnapshot,
+    read_workflow_use_case_preset,
+)
 
 
 class ContextMessage(BaseModel):
@@ -283,6 +287,7 @@ class AcceptedContext(BaseModel):
     settings: dict[str, Any]
     preset: dict[str, Any] | None = None
     preset_layers: list[dict[str, Any]] = Field(default_factory=list)
+    workflow_use_case_preset: WorkflowUseCasePresetSnapshot | None = None
     chat_engine: str
     media_engine: str
     media_prompt: str
@@ -294,6 +299,13 @@ class AcceptedContext(BaseModel):
     verification_profile: AcceptedProfile | None = None
 
     source_fit: SourceExtensionRecipe | None = None
+
+    @model_validator(mode="after")
+    def bind_workflow_use_case_preset(self) -> Self:
+        recipe = self.workflow_use_case_preset
+        if recipe is not None and recipe.workflow_revision_id != self.workflow_revision_id:
+            raise ValueError("workflow-use-case-preset-snapshot-revision-mismatch")
+        return self
 
     @model_validator(mode="after")
     def bind_source_fit(self) -> Self:
@@ -534,6 +546,10 @@ def save_accepted_context(
         image_edit_strength=capture_image_edit_strength(run),
         preset=copy.deepcopy(run.provenance_json.get("preset")),
         preset_layers=copy.deepcopy(run.provenance_json.get("preset_layers") or []),
+        workflow_use_case_preset=read_workflow_use_case_preset(
+            run.provenance_json.get("workflow_use_case_preset"),
+            workflow_revision_id=run.workflow_revision_id,
+        ),
         chat_engine=chat_engine,
         media_engine=media_engine,
         media_prompt=media_prompt,

@@ -28,6 +28,7 @@ WorkflowSelectorCapability = Literal["chat", "vision", "image", "video"]
 WorkflowSelectionMode = Literal["explicit", "default", "automatic"]
 LegacyRevisionResolver = Callable[[Session, ModelProfile, Operation], WorkflowRevision | None]
 RevisionPreference = Callable[[WorkflowRevision], bool]
+RevisionEligibility = Callable[[WorkflowRevision | None], str | None]
 
 _CAPABILITY_ROLE: dict[WorkflowSelectorCapability, str] = {
     "chat": "chat",
@@ -104,11 +105,13 @@ class WorkflowFamilySelectionError(ValueError):
         operation: Operation,
         reason: str,
         workflow_family_id: str | None = None,
+        candidate_reasons: tuple[str, ...] = (),
     ) -> None:
         self.capability = capability
         self.operation = operation
         self.reason = reason
         self.workflow_family_id = workflow_family_id
+        self.candidate_reasons = candidate_reasons
         target = f" {workflow_family_id}" if workflow_family_id else ""
         super().__init__(
             f"{capability} workflow family{target} cannot run {operation.value}: {reason}"
@@ -204,12 +207,17 @@ def resolve_workflow_family(
     required_capabilities: Iterable[str] = (),
     legacy_revision_resolver: LegacyRevisionResolver | None = None,
     preferred_revision: RevisionPreference | None = None,
+    revision_eligibility: RevisionEligibility | None = None,
 ) -> ResolvedWorkflowFamily:
     """Resolve one broad selector to an exact operation variant without guessing.
 
     `preferred_revision` orders automatic candidates it accepts ahead of the
     rest, before any other ranking. It never touches an explicit or default
     choice, and it never makes an unready workflow eligible.
+
+    `revision_eligibility` can refuse a ready revision before variant ambiguity
+    and ranking. Explicit and default choices stay within their chosen family.
+    Graphless compatibility profiles are presented as None to this check.
     """
 
     if operation not in _CAPABILITY_OPERATIONS[capability]:
@@ -233,6 +241,7 @@ def resolve_workflow_family(
             engine=engine,
             required_capabilities=required,
             legacy_revision_resolver=legacy_revision_resolver,
+            revision_eligibility=revision_eligibility,
         )
         return _resolved(candidate, mode)
 
@@ -269,10 +278,12 @@ def resolve_workflow_family(
             engine=engine,
             required_capabilities=required,
             legacy_revision_resolver=legacy_revision_resolver,
+            revision_eligibility=revision_eligibility,
         )
         return _resolved(candidate, mode)
 
     candidates: list[_Candidate] = []
+    candidate_reasons: list[str] = []
     for preference in preferences:
         family = session.get(WorkflowFamily, preference.workflow_family_id)
         if family is None:
@@ -290,8 +301,10 @@ def resolve_workflow_family(
                 engine=engine,
                 required_capabilities=required,
                 legacy_revision_resolver=legacy_revision_resolver,
+                revision_eligibility=revision_eligibility,
             )
-        except WorkflowFamilySelectionError:
+        except WorkflowFamilySelectionError as exc:
+            candidate_reasons.append(exc.reason)
             continue
         # A workflow that only cuts a subject out is never chosen for a request:
         # it answers the one tool that asks for a cutout, and picked for any other
@@ -302,7 +315,12 @@ def resolve_workflow_family(
             continue
         candidates.append(candidate)
     if not candidates:
-        raise _error(capability, operation, "no_ready_workflow")
+        raise WorkflowFamilySelectionError(
+            capability=capability,
+            operation=operation,
+            reason="no_ready_workflow",
+            candidate_reasons=tuple(candidate_reasons),
+        )
     candidates.sort(
         key=lambda item: (
             not (
@@ -349,6 +367,7 @@ def _candidate(
     engine: str | None,
     required_capabilities: frozenset[str],
     legacy_revision_resolver: LegacyRevisionResolver | None,
+    revision_eligibility: RevisionEligibility | None,
 ) -> _Candidate:
     if family.archived:
         raise _error(capability, operation, "family_archived", family.id)
@@ -394,6 +413,10 @@ def _candidate(
             required_capabilities=required_capabilities,
         )
         definition = session.get(WorkflowDefinition, revision.workflow_id) if revision else None
+        if revision_eligibility is not None:
+            reason = revision_eligibility(revision)
+            if reason is not None:
+                raise _error(capability, operation, reason, family.id)
         return _Candidate(
             family,
             preference,
@@ -437,6 +460,11 @@ def _candidate(
         except WorkflowFamilySelectionError as exc:
             failure_reasons.append(exc.reason)
             continue
+        if revision_eligibility is not None:
+            reason = revision_eligibility(revision)
+            if reason is not None:
+                failure_reasons.append(reason)
+                continue
         viable.append((definition, revision, activation))
     if not viable:
         reason = failure_reasons[0] if len(set(failure_reasons)) == 1 else "operation_unavailable"

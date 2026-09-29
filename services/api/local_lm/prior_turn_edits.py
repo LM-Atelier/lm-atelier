@@ -45,6 +45,8 @@ from .schemas import (
 )
 from .source_fit_preview import SourceFitPreviewOut
 from .turn_inheritance import inherited_edit_strength
+from .workflow_use_case_execution import InheritedWorkflowUseCasePreset
+from .workflow_use_case_preset_provenance import read_workflow_use_case_preset
 
 if TYPE_CHECKING:
     from .orchestrator import ConversationOrchestrator
@@ -600,6 +602,18 @@ async def preview_prior_turn_source_fit(
             inherited_prompt_source=prepared.inherited_prompt_source,
             inherited_workflow=snapshot.workflow if snapshot and inherit_workflow else None,
             inherited_source_fit=snapshot.source_fit if snapshot and inherit_workflow else None,
+            inherited_use_case_preset=(
+                InheritedWorkflowUseCasePreset(
+                    snapshot.workflow_use_case_preset
+                    if snapshot
+                    else read_workflow_use_case_preset(
+                        prepared.prior.provenance_json.get("workflow_use_case_preset"),
+                        workflow_revision_id=prepared.prior.workflow_revision_id,
+                    )
+                )
+                if prepared.same_role
+                else None
+            ),
             reference_source_message_id=prepared.source.id
             if "references" not in prepared.payload.model_fields_set
             else None,
@@ -778,6 +792,18 @@ async def queue_prior_turn_edit(
             if "references" not in payload.model_fields_set
             else None,
             before_commit=bind_source,
+            inherited_use_case_preset=(
+                InheritedWorkflowUseCasePreset(
+                    snapshot.workflow_use_case_preset
+                    if snapshot
+                    else read_workflow_use_case_preset(
+                        prepared.prior.provenance_json.get("workflow_use_case_preset"),
+                        workflow_revision_id=prepared.prior.workflow_revision_id,
+                    )
+                )
+                if same_role
+                else None
+            ),
             resolve_source=source_inheritance.resolve if source_inheritance else None,
         )
         return _edit_result(session, accepted, fingerprint)
