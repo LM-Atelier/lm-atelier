@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import json
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 
 import httpx
@@ -275,7 +275,7 @@ async def test_removed_item_creates_one_attributed_adapter_safe_message(
             settings=SimpleNamespace(vision_prior_visual_lookback=0, chat_engine="mock"),
         )
         orchestrator = ConversationOrchestrator(
-            engines=engines,
+            engines=cast(Any, engines),
             artifacts=Mock(),
             events=Mock(),
             scheduler=Mock(),

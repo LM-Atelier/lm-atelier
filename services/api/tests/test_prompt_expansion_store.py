@@ -1437,7 +1437,9 @@ def test_migration_is_self_contained_and_chat_delete_cascades(tmp_path: Path) ->
         )
 
 
-def _seed_partial_model(session: Session):
+def _seed_partial_model(
+    session: Session,
+) -> tuple[Chat, ExpansionRequest, ExpansionPlan, dict[str, object], PromptTemplateContract]:
     from local_lm.prompt_expansion import complete_prompt_expansion_with_model_result
     from local_lm.prompt_model_values import (
         parse_prompt_model_values_result,

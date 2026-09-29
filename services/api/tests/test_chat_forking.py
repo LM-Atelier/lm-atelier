@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Set as AbstractSet
 from typing import Any, cast
 
 import pytest
@@ -367,7 +368,7 @@ async def test_forking_does_not_walk_the_artifact_reference_graph(
     calls = 0
     real = artifact_library.referenced_artifact_ids
 
-    def counted(*args: Any, **kwargs: Any) -> set[str]:
+    def counted(*args: Any, **kwargs: Any) -> AbstractSet[str]:
         nonlocal calls
         calls += 1
         return real(*args, **kwargs)

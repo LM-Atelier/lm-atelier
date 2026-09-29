@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from collections.abc import AsyncIterator
 from typing import Any, cast
 
 import pytest
@@ -35,6 +36,7 @@ from local_lm.models import (
     WorkPlan,
     WorkStep,
 )
+from local_lm.profile_service import AUTO_PROFILE_ID
 from local_lm.prompt_library import PromptLibraryError, create_prompt_template
 from local_lm.prompt_model_invocation import (
     PromptModelInvocationError,
@@ -1316,6 +1318,8 @@ async def test_model_guided_prompt_batch_invokes_once_and_replays_before_readine
     partial: bool,
 ) -> None:
     from local_lm.prompt_model_values import (
+        PromptModelValues,
+        PromptModelValuesResult,
         parse_prompt_model_values_result,
         prompt_model_values_result_sha256,
     )
@@ -1343,13 +1347,15 @@ async def test_model_guided_prompt_batch_invokes_once_and_replays_before_readine
             },
             contract=contract,
         )
+        if partial:
+            assert isinstance(values, PromptModelValuesResult)
+            values_sha256 = prompt_model_values_result_sha256(values, contract=contract)
+        else:
+            assert isinstance(values, PromptModelValues)
+            values_sha256 = prompt_model_values_sha256(values, contract=contract)
         return PromptModelInvocationResult(
             values=values,
-            values_sha256=(
-                prompt_model_values_result_sha256(values, contract=contract)
-                if partial
-                else prompt_model_values_sha256(values, contract=contract)
-            ),
+            values_sha256=values_sha256,
             attempts=(),
         )
 
@@ -2321,7 +2327,7 @@ def _installed_chat_profile(app: FastAPI) -> str:
         )
         session.add(profile)
         session.commit()
-        return cast(str, profile.id)
+        return profile.id
 
 
 def _stopped_workers(
@@ -2535,7 +2541,7 @@ async def test_the_auto_profile_sentinel_is_not_treated_as_a_loadable_profile(
     _fill_slots_with(monkeypatch)
 
     chat = (await client.post("/api/chats", json={"title": "Auto profile"})).json()
-    _select_chat_profile(chat["id"], api_module.AUTO_PROFILE_ID)
+    _select_chat_profile(chat["id"], AUTO_PROFILE_ID)
 
     refused = await _model_slot_batch(client, chat["id"], "auto-sentinel")
 
@@ -2642,14 +2648,14 @@ async def test_model_slot_failure_names_the_stage_without_persisting_partial_wor
     code: str,
     detail: str,
 ) -> None:
-    from local_lm.adapters.base import ChatEvent
+    from local_lm.adapters.base import ChatEvent, ChatRequest
     from local_lm.prompt_expansion import PromptExpansionError
     from local_lm.prompt_model_values import PromptModelValuesError
 
     _ready_chat_model(app, monkeypatch)
     calls = 0
 
-    async def stream(_request):
+    async def stream(_request: ChatRequest) -> AsyncIterator[ChatEvent]:
         nonlocal calls
         calls += 1
         values = {
@@ -2678,7 +2684,7 @@ async def test_model_slot_failure_names_the_stage_without_persisting_partial_wor
 
     monkeypatch.setattr(app.state.services.engines.chat, "stream", stream)
 
-    def refuse(*_args, **_kwargs):
+    def refuse(*_args: object, **_kwargs: object) -> None:
         if failure == "contract_values":
             raise PromptModelValuesError("constructed-value-detail")
         raise PromptExpansionError("constructed-render-detail")

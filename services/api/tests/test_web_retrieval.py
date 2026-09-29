@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
 from local_lm.web_access import (
@@ -17,7 +19,7 @@ from local_lm.web_retrieval import (
 )
 
 
-def _resolves_to(address: str):
+def _resolves_to(address: str) -> Callable[[str, object], list[tuple[object, ...]]]:
     return lambda host, port: [(2, 1, 6, "", (address, 0))]
 
 
@@ -121,7 +123,8 @@ class TestBothGatesMustBeOpen:
         assert may_search(installation_enabled=True, chat_settings=fetch_only) is False
 
     def test_a_malformed_permission_is_no_permission(self) -> None:
-        for value in ("true", 1, [], {"nested": True}):
+        malformed: tuple[object, ...] = ("true", 1, [], {"nested": True})
+        for value in malformed:
             assert (
                 may_fetch_urls(installation_enabled=True, chat_settings={"allow_url_fetch": value})
                 is False
