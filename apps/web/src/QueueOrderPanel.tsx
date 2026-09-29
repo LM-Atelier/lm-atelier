@@ -54,7 +54,7 @@ function QueueOrderLane({ lane }: { lane: QueueLane }) {
     if (focused.current && !focused.current.isConnected && document.activeElement === document.body) {
       refreshButton.current?.focus();
     }
-  }, [page.data]);
+  }, [page.data, attempt]);
   const refresh = async () => {
     setCursors([null]);
     await client.invalidateQueries({ queryKey: ["jobs", "queue"] });
