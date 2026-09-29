@@ -8,6 +8,7 @@ from typing import Any, Literal
 from .catalog_hardware_alternatives import (
     catalog_context_settings,
     catalog_hardware_alternatives,
+    estimated_catalog_model_bytes,
     estimated_catalog_ram,
     with_catalog_context_estimate,
 )
@@ -762,6 +763,9 @@ def assess_catalog_install(
         system,
         estimated_ram_bytes=estimated_ram,
         estimated_vram_bytes=estimated_vram,
+        estimated_model_bytes=estimated_catalog_model_bytes(
+            download_bytes, complete=complete_sizes
+        ),
     )
     checks.append(_hardware_fit_check(hardware_fit))
     pressure = [
@@ -824,6 +828,7 @@ def assess_preflight_hardware_fit(
     *,
     estimated_ram_bytes: int | None,
     estimated_vram_bytes: int | None,
+    estimated_model_bytes: int | None,
 ) -> HardwareFit:
     """Assess calculated catalog fit without turning an estimate into a block."""
 
@@ -833,7 +838,7 @@ def assess_preflight_hardware_fit(
             estimated_system_memory_bytes=estimated_ram_bytes,
             estimated_accelerator_memory_bytes=estimated_vram_bytes,
             settings=(
-                catalog_context_settings(estimated_ram_bytes, system.memory_total_bytes)
+                catalog_context_settings(estimated_model_bytes, system.memory_total_bytes)
                 if request.role == "chat"
                 and request.engine == "llama.cpp"
                 and request.auxiliary_kind is None

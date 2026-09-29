@@ -534,6 +534,7 @@ def test_unknown_estimated_preflight_fit_remains_advisory() -> None:
         system,
         estimated_ram_bytes=4 * _GIB,
         estimated_vram_bytes=8 * _GIB,
+        estimated_model_bytes=None,
     )
 
     assert fit.status == "unknown"

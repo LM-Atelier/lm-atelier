@@ -14,6 +14,7 @@ export interface HardwareFitReason {
     | "architecture_unsupported"
     | "cpu_capabilities_unknown"
     | "cpu_capability_missing"
+    | "chat_context_estimate"
     | "evidence_stale"
     | "platform_unsupported"
     | "runtime_backend_missing"
@@ -22,8 +23,7 @@ export interface HardwareFitReason {
     | "system_memory_declared"
     | "system_memory_estimated"
     | "system_memory_measured"
-    | "system_memory_unknown"
-    | "chat_context_estimate";
+    | "system_memory_unknown";
   severity: "info" | "warning" | "block";
   message: string;
 }

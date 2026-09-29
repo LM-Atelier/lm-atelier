@@ -4,6 +4,7 @@ import re
 from dataclasses import asdict, replace
 
 from .chat_memory import (
+    CHAT_CONTEXT_AT_MINIMUM_MEMORY,
     CHAT_CONTEXT_BYTES_PER_TOKEN,
     DEFAULT_CHAT_CONTEXT,
     MINIMUM_CHAT_CONTEXT_MEMORY,
@@ -28,14 +29,20 @@ from .schemas import (
 )
 
 
+def estimated_catalog_model_bytes(download_bytes: int, *, complete: bool) -> int | None:
+    """Estimate the loaded model's own memory only when every file size is known."""
+
+    return int(download_bytes * 1.2) if complete else None
+
+
 def estimated_catalog_ram(
     download_bytes: int, *, complete: bool, chat_context: bool = False
 ) -> int | None:
     """Estimate load memory only when every selected file has a known size."""
 
-    if not complete:
+    model_bytes = estimated_catalog_model_bytes(download_bytes, complete=complete)
+    if model_bytes is None:
         return None
-    model_bytes = int(download_bytes * 1.2)
     return (
         estimated_chat_memory(model_bytes)
         if chat_context
@@ -44,14 +51,16 @@ def estimated_catalog_ram(
 
 
 def catalog_context_settings(
-    estimated_ram_bytes: int | None, capacity_bytes: int
+    model_bytes: int | None, capacity_bytes: int
 ) -> tuple[BoundedSetting, ...]:
-    """Bound context by the default and a ninety-percent total-RAM budget."""
+    """Bound context by the default and a ninety-percent total-RAM budget.
 
-    if estimated_ram_bytes is None or capacity_bytes <= 0:
-        return ()
-    model_bytes = estimated_ram_bytes - estimated_chat_memory(0)
-    if model_bytes <= 0:
+    The budget is what that share leaves once the model itself is loaded. A
+    tight fit is not told to go below the context the minimum memory already
+    covers, because a shorter one is estimated at the same cost.
+    """
+
+    if model_bytes is None or model_bytes <= 0 or capacity_bytes <= 0:
         return ()
     context_budget = capacity_bytes * 9 // 10 - model_bytes
     if context_budget < MINIMUM_CHAT_CONTEXT_MEMORY:
@@ -67,7 +76,7 @@ def catalog_context_settings(
             maximum=DEFAULT_CHAT_CONTEXT,
             preferred_minimum=min(2048, maximum),
             preferred_maximum=maximum,
-            tight_minimum=512,
+            tight_minimum=min(CHAT_CONTEXT_AT_MINIMUM_MEMORY, maximum),
             tight_maximum=maximum,
         ),
     )
@@ -131,13 +140,17 @@ def catalog_hardware_alternatives(
         total = sum(known)
         key = str(len(choices))
         choices[key] = selected, total, complete
-        estimated_ram = estimated_catalog_ram(total, complete=complete, chat_context=True)
         candidates.append(
             HardwareCandidate(
                 key,
                 FitRequirements(
-                    estimated_system_memory_bytes=estimated_ram,
-                    settings=catalog_context_settings(estimated_ram, system.memory_total_bytes),
+                    estimated_system_memory_bytes=estimated_catalog_ram(
+                        total, complete=complete, chat_context=True
+                    ),
+                    settings=catalog_context_settings(
+                        estimated_catalog_model_bytes(total, complete=complete),
+                        system.memory_total_bytes,
+                    ),
                 ),
             )
         )
