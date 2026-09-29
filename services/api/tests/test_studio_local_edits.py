@@ -1,4 +1,4 @@
-"""Turning, mirroring and cropping a studio picture: exact, and recorded as a step."""
+"""Turning, mirroring, cropping and resizing a studio picture, each recorded as a step."""
 
 from __future__ import annotations
 
@@ -9,9 +9,7 @@ import pytest
 from httpx2 import AsyncClient
 from PIL import Image, ImageCms
 
-from local_lm.studio_local_edits import CropBox, LocalEditError, render_local_edit
-
-pytestmark = pytest.mark.asyncio
+from local_lm.studio_local_edits import CropBox, LocalEditError, PictureSize, render_local_edit
 
 RED, GREEN, BLUE, WHITE = (200, 0, 0), (0, 200, 0), (0, 0, 200), (250, 250, 250)
 
@@ -84,6 +82,46 @@ def test_a_crop_outside_the_picture_is_refused(box: CropBox) -> None:
         render_local_edit(_png(_tiles()), "crop", box)
 
     assert refused.value.code == "studio-crop-outside-picture"
+
+
+@pytest.mark.parametrize("size", [PictureSize(width=6, height=4), PictureSize(width=1, height=1)])
+def test_a_resize_makes_exactly_the_size_asked_for(size: PictureSize) -> None:
+    result = _open(render_local_edit(_png(_tiles()), "resize", size=size))
+
+    assert result.format == "PNG"
+    assert result.size == (size.width, size.height)
+    assert result.mode == "RGB"
+
+
+def test_a_resize_keeps_a_hidden_colour_from_bleeding_into_the_edge() -> None:
+    """Under a transparent pixel there is still a colour, and nobody can see it."""
+    picture = Image.new("RGBA", (2, 1))
+    picture.putpixel((0, 0), (255, 0, 0, 0))
+    picture.putpixel((1, 0), (0, 0, 255, 255))
+
+    result = _open(render_local_edit(_png(picture), "resize", size=PictureSize(width=8, height=1)))
+
+    assert result.mode == "RGBA"
+    seen = [result.getpixel((x, 0)) for x in range(8)]
+    assert any(0 < pixel[3] < 255 for pixel in seen)
+    # Every pixel that shows at all shows blue: none of the hidden red.
+    assert all(pixel[0] == 0 for pixel in seen if pixel[3] > 0)
+
+
+@pytest.mark.parametrize(
+    ("size", "code"),
+    [
+        (None, "studio-resize-missing"),
+        (PictureSize(width=3, height=2), "studio-resize-unchanged"),
+        (PictureSize(width=0, height=2), "studio-resize-empty"),
+        (PictureSize(width=20_000, height=20_000), "studio-edit-too-large"),
+    ],
+)
+def test_a_resize_that_cannot_be_made_is_refused(size: PictureSize | None, code: str) -> None:
+    with pytest.raises(LocalEditError) as refused:
+        render_local_edit(_png(_tiles()), "resize", size=size)
+
+    assert refused.value.code == code
 
 
 def test_a_picture_is_edited_as_it_is_seen_upright() -> None:
@@ -222,6 +260,37 @@ async def test_a_result_already_in_the_session_can_be_turned_again(client: Async
     assert cropped.getpixel((0, 0)) == GREEN
 
 
+async def test_a_resize_is_recorded_with_its_size_and_method(client: AsyncClient) -> None:
+    source_id = await _upload(client, "tiles.png", _png(_tiles()))
+    session_id = await _session_over(client, source_id)
+
+    response = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={
+            "source_artifact_id": source_id,
+            "operation": "resize",
+            "size": {"width": 30, "height": 20},
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    request, answer = response.json()["messages"]
+    assert request["parts"][0]["text"] == "Resize"
+    image, metadata = answer["parts"]
+    assert metadata["metadata_json"]["provenance"] == {
+        "local_edit": {
+            "operation": "resize",
+            "source_artifact_id": source_id,
+            "size": {"width": 30, "height": 20},
+            "resampler": "lanczos",
+        }
+    }
+    resized = await _content(client, image["artifact_id"])
+    assert resized.size == (30, 20)
+    detail = await client.get(f"/api/artifacts/{image['artifact_id']}")
+    assert detail.json()["original_name"] == "tiles (resized).png"
+
+
 async def test_only_a_picture_in_the_session_can_be_edited_through_it(
     client: AsyncClient,
 ) -> None:
@@ -264,6 +333,26 @@ async def test_a_refused_edit_leaves_the_session_as_it_was(client: AsyncClient) 
             "crop": {"left": 0, "top": 0, "width": 1, "height": 1},
         },
     )
+    missing_size = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={"source_artifact_id": source_id, "operation": "resize"},
+    )
+    stray_size = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={
+            "source_artifact_id": source_id,
+            "operation": "rotate_clockwise",
+            "size": {"width": 4, "height": 4},
+        },
+    )
+    unchanged = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={
+            "source_artifact_id": source_id,
+            "operation": "resize",
+            "size": {"width": 3, "height": 2},
+        },
+    )
     absent = await client.post(
         "/api/studio/sessions/absent/local-edits",
         json={"source_artifact_id": source_id, "operation": "flip_vertical"},
@@ -273,6 +362,10 @@ async def test_a_refused_edit_leaves_the_session_as_it_was(client: AsyncClient) 
     assert outside.json()["code"] == "studio-crop-outside-picture"
     assert missing_box.status_code == 422
     assert stray_box.status_code == 422
+    assert missing_size.status_code == 422
+    assert stray_size.status_code == 422
+    assert unchanged.status_code == 422
+    assert unchanged.json()["code"] == "studio-resize-unchanged"
     assert absent.status_code == 404
     assert absent.json()["code"] == "studio-session-not-found"
     after = await client.get(f"/api/studio/sessions/{session_id}")

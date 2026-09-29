@@ -1,14 +1,16 @@
 import type { Dispatch } from "react";
+import { StudioCropTool } from "./StudioCropTool";
+import { StudioResizeTool } from "./StudioResizeTool";
 import { StudioTransformTool } from "./StudioTransformTool";
 import type { StudioToolAction, StudioToolState } from "./studioToolState";
-import type { StudioLocalEditOperation } from "./types";
+import type { StudioLocalEditDetails, StudioLocalEditOperation } from "./types";
 
 /** The panel's tool-specific control: what this tool needs said before it runs.
  *
  * Extend and Enhance are a drag or a number, Text is the words before and
  * after, Isolate needs nothing, replacing a subject needs the picture it comes
- * from, turning and flipping are a press each, and every other tool is
- * described in words.
+ * from, turning and flipping are a press each, a crop is a drawn box, a
+ * resize is a width and a height, and every other tool is described in words.
  * Kept apart from the studio view so each tool's control reads in one place.
  */
 export function StudioToolOptions({
@@ -24,11 +26,25 @@ export function StudioToolOptions({
   instruction: string;
   onInstructionChange: (value: string) => void;
   /** Makes an edit that needs no model, such as a turn or a flip. */
-  onLocalEdit?: (operation: StudioLocalEditOperation) => void;
+  onLocalEdit?: (operation: StudioLocalEditOperation, details?: StudioLocalEditDetails) => void;
   busy?: boolean;
 }) {
   if (tools.kind === "transform") {
     return onLocalEdit ? <StudioTransformTool busy={busy} onEdit={onLocalEdit} /> : null;
+  }
+  if (tools.kind === "crop") {
+    return onLocalEdit ? (
+      <StudioCropTool mask={tools.mask} maskVersion={tools.maskVersion} busy={busy}
+        onCrop={(box) => onLocalEdit("crop", { crop: box })} />
+    ) : null;
+  }
+  if (tools.kind === "resize") {
+    // The selection raster is made at the picture's own size, so it says what that is.
+    const size = tools.mask ? { width: tools.mask.width, height: tools.mask.height } : null;
+    return onLocalEdit && size ? (
+      <StudioResizeTool key={`${size.width}x${size.height}`} size={size} busy={busy}
+        onResize={(next) => onLocalEdit("resize", { size: next })} />
+    ) : null;
   }
   if (tools.kind === "extend") {
     return (

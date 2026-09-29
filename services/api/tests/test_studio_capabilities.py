@@ -33,14 +33,15 @@ def test_nothing_installed_leaves_every_tool_unavailable_with_a_reason() -> None
     assert all(tool.reason for tool in needing.values())
 
 
-def test_turning_and_flipping_need_nothing_installed() -> None:
+def test_the_edits_the_studio_makes_itself_need_nothing_installed() -> None:
     """The studio makes those edits itself, so nothing can be missing."""
-    transform = _by_kind([])["transform"]
+    tools = _by_kind([])
 
-    assert transform.workflow_class == "local"
-    assert transform.available is True
-    assert transform.reason is None
-    assert transform.workflow_revision_id is None
+    for kind in ("transform", "crop", "resize"):
+        assert tools[kind].workflow_class == "local"
+        assert tools[kind].available is True
+        assert tools[kind].reason is None
+        assert tools[kind].workflow_revision_id is None
 
 
 def test_enhance_waits_for_a_workflow_that_can_actually_enlarge() -> None:

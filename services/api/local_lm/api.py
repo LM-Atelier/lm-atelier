@@ -644,6 +644,7 @@ from .studio_capabilities import tool_capabilities
 from .studio_local_edits import (
     CropBox,
     LocalEditError,
+    PictureSize,
     edited_picture,
     picture_in_session,
     record_local_edit,
@@ -2792,7 +2793,7 @@ async def apply_studio_local_edit(
     request: Request,
     session: ConversationSessionDep,
 ) -> Chat:
-    """Rotate, flip or crop a picture in a studio session, without a model.
+    """Rotate, flip, crop or resize a picture in a studio session, without a model.
 
     The result becomes one more step in the session, after whatever step is
     newest, so it is taken under the chat's guard like an apply.
@@ -2816,16 +2817,17 @@ async def apply_studio_local_edit(
                 "Only a picture in this studio session can be edited here.",
             )
         crop = CropBox(**payload.crop.model_dump()) if payload.crop is not None else None
+        size = PictureSize(**payload.size.model_dump()) if payload.size is not None else None
         try:
             # Decoding and encoding a large picture takes a while and holds
             # nothing, so it runs off the loop; everything after it writes.
             edited = await run_in_threadpool(
-                edited_picture, services.artifacts, source, payload.operation, crop
+                edited_picture, services.artifacts, source, payload.operation, crop, size
             )
         except LocalEditError as exc:
             raise api_error(422, exc.code, str(exc)) from exc
         record_local_edit(
-            session, studio, source, payload.operation, edited, services.artifacts, crop
+            session, studio, source, payload.operation, edited, services.artifacts, crop, size
         )
         session.commit()
     return session.scalar(_studio_session_query(session_id)) or studio

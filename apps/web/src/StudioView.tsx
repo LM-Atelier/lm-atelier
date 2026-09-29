@@ -306,7 +306,7 @@ export function StudioView({
           ) : (
             <StudioWorkflowOpening selectorId={workflowSelectorId} />
           )}
-          {!["instruct", "relight", "isolate", "background", "subject", "transform"].includes(tools.kind) && (
+          {!["instruct", "relight", "isolate", "background", "subject", "transform", "crop", "resize"].includes(tools.kind) && (
             <StudioSelectionControls tools={tools} dispatch={dispatch} coverage={selectionCoverage}
               colorsUnreadable={readsColors && Boolean(bitmap) && !sourcePixels} />
           )}
@@ -319,7 +319,7 @@ export function StudioView({
               setRecipe(null);
             }}
             busy={busy}
-            onLocalEdit={(operation) => current && localEdit(operation, current.artifactId, () => setSelectedId(null))}
+            onLocalEdit={(operation, details) => current && localEdit(operation, current.artifactId, () => setSelectedId(null), details)}
           />
           <StudioRecipes
             disabled={busy || !current}
@@ -334,7 +334,7 @@ export function StudioView({
             // cannot run, so the sentence arrives before the drawing does.
             <StudioToolGuidance reason={unavailable} onOpenWorkflows={onOpenWorkflows} />
           )}
-          {tools.kind !== "transform" && (
+          {!["transform", "crop", "resize"].includes(tools.kind) && (
             <button
               className="primary"
               aria-disabled={applyDisabled}

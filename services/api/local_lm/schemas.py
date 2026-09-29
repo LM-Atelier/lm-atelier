@@ -577,6 +577,7 @@ StudioLocalEditOperation = Literal[
     "flip_horizontal",
     "flip_vertical",
     "crop",
+    "resize",
 ]
 
 
@@ -589,17 +590,27 @@ class StudioCropBox(ApiModel):
     height: StrictInt = Field(ge=1)
 
 
+class StudioPictureSize(ApiModel):
+    """The size a picture is resized to, in pixels."""
+
+    width: StrictInt = Field(ge=1, le=MAX_DIMENSION)
+    height: StrictInt = Field(ge=1, le=MAX_DIMENSION)
+
+
 class StudioLocalEditCreate(ApiModel):
-    """Rotate, flip or crop one picture in a studio session, without a model."""
+    """Rotate, flip, crop or resize one picture in a studio session, without a model."""
 
     source_artifact_id: str = Field(min_length=1, max_length=80)
     operation: StudioLocalEditOperation
     crop: StudioCropBox | None = None
+    size: StudioPictureSize | None = None
 
     @model_validator(mode="after")
-    def crop_only_for_a_crop(self) -> Self:
+    def details_only_for_their_edit(self) -> Self:
         if (self.operation == "crop") != (self.crop is not None):
             raise ValueError("A crop names the part to keep, and no other edit does.")
+        if (self.operation == "resize") != (self.size is not None):
+            raise ValueError("A resize names the new size, and no other edit does.")
         return self
 
 

@@ -106,7 +106,8 @@ export class RectTool implements PointerTool {
   private origin: ImagePoint | null = null;
   private current: ImagePoint | null = null;
 
-  constructor(private readonly mask: MaskRaster) {}
+  /** `replace` makes each new box the whole selection, as a crop box is. */
+  constructor(private readonly mask: MaskRaster, private readonly replace = false) {}
 
   down(point: ImagePoint): void {
     this.origin = point;
@@ -123,6 +124,7 @@ export class RectTool implements PointerTool {
     this.origin = null;
     this.current = null;
     if (Math.abs(point.x - from.x) < 1 || Math.abs(point.y - from.y) < 1) return false;
+    if (this.replace) this.mask.data.fill(0);
     fillRect(this.mask, from.x, from.y, point.x, point.y);
     return true;
   }
