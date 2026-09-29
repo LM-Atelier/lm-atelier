@@ -1,3 +1,4 @@
+import type { QueueLane, QueueOrderCommand, QueueOrderPage, QueueOrderResult } from "./queueOrderTypes";
 import { buildTurnRequest, SOURCE_FIT_BINDING_ERROR, type TurnRequestPayload } from "./turnRequest";
 export { buildTurnRequest } from "./turnRequest";
 import type { SourceFitCapability, SourceFitIntent, SourceFitPreviewResult, SourceFitSelection } from "./sourceFit";
@@ -644,6 +645,14 @@ export const api = {
     { method: "POST", body: JSON.stringify(command) }),
   queueControl: (planId: string, action: "hold" | "release", command: QueueControlCommand) =>
     request<QueueControlResult>("/api/queue/items/" + encodeURIComponent(planId) + "/" + action,
+      { method: "POST", body: JSON.stringify(command) }),
+  queueOrder: (lane: QueueLane, options: { cursor?: string | null; limit: number }, signal?: AbortSignal) => {
+    const params = new URLSearchParams({ limit: String(options.limit) });
+    if (options.cursor) params.set("cursor", options.cursor);
+    return request<QueueOrderPage>("/api/queue/lanes/" + lane + "/order?" + params.toString(), { signal });
+  },
+  reorderQueue: (lane: QueueLane, command: QueueOrderCommand) =>
+    request<QueueOrderResult>("/api/queue/lanes/" + lane + "/reorder",
       { method: "POST", body: JSON.stringify(command) }),
   queueActivity: (options: { lane?: QueueActivityItem["lane"]; cursor?: string | null; limit: number }, signal?: AbortSignal) => {
     const params = new URLSearchParams({ limit: String(options.limit) });

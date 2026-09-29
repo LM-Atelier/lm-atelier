@@ -6,6 +6,7 @@ import { clockOptions, useClockChoice } from "./clockPreference";
 import { QueuePlanControls } from "./QueuePlanControls";
 import { GenerationQueueControls } from "./GenerationQueueControls";
 import { QueueLaneControls } from "./QueueLaneControls";
+import { QueueOrderPanel } from "./QueueOrderPanel";
 import { QueuePlanSteps } from "./QueuePlanSteps";
 import type { QueueActivityItem } from "./types";
 import "./QueueActivityDialog.css";
@@ -15,6 +16,7 @@ type Lane = QueueActivityItem["lane"];
 export function QueueActivityDialog({ onClose }: { onClose: () => void }) {
   const client = useQueryClient();
   const clock = useClockChoice();
+  const [ordering, setOrdering] = useState(false);
   const [lane, setLane] = useState<Lane | "all">("all");
   const queryKey = ["jobs", "queue", lane] as const;
   const activity = useInfiniteQuery({
@@ -33,6 +35,12 @@ export function QueueActivityDialog({ onClose }: { onClose: () => void }) {
     if (activity.isFetching) return;
     void client.resetQueries({ queryKey, exact: true });
   };
+  if (ordering) return (
+    <AccessibleDialog title="Dispatch order" eyebrow="Queue activity"
+      closeLabel="Close dispatch order" onClose={onClose} className="queue-activity-dialog">
+      <QueueOrderPanel initialLane={lane === "all" ? "generation" : lane} onBack={() => setOrdering(false)} />
+    </AccessibleDialog>
+  );
   return (
     <AccessibleDialog title="Accepted work" eyebrow="Queue activity"
       closeLabel="Close accepted work" onClose={onClose} className="queue-activity-dialog">
@@ -55,6 +63,9 @@ export function QueueActivityDialog({ onClose }: { onClose: () => void }) {
           {activity.isFetching ? "Refreshing…" : "Refresh"}
         </button>
       </div>
+      <button className="secondary compact-button" onClick={() => setOrdering(true)}>
+        Change dispatch order
+      </button>
       <GenerationQueueControls />
       <QueueLaneControls lane="transfer" />
       <QueueLaneControls lane="install" />

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 import secrets
 import time
 from collections.abc import AsyncIterator, Callable
@@ -36,6 +35,7 @@ from .queue_lane_policy import (
     queue_dispatches,
     reconcile_queue_lanes,
 )
+from .queue_order import apply_manual_order, effective_priority
 from .schemas import JobOut
 from .work_plans import BLOCKED_WORK_STATUS, plan_status_summary, refresh_plan_status
 
@@ -50,7 +50,6 @@ _QUEUE_POLL_SECONDS = 0.2
 #: go on being served. It does not bound the AGE of that answer, which is the
 #: scan duration plus the residency and has no poll-interval bound at all.
 _ELIGIBILITY_SHARE_SECONDS = _QUEUE_POLL_SECONDS / 4
-_AGING_SECONDS = 30
 
 logger = logging.getLogger(__name__)
 
@@ -548,21 +547,20 @@ class ResourceScheduler:
             # reorder foreground jobs, but can never promote a check ahead of
             # a user-requested generation.
             background = job.kind == JobKind.EDIT_VERIFY.value
-            waited = max(0.0, (now - enqueued).total_seconds())
-            effective_priority = (
+            priority = (
                 job.queue_priority
                 if background
-                else job.queue_priority + math.floor(waited / _AGING_SECONDS)
+                else effective_priority(job.queue_priority, enqueued, now)
             )
             return (
                 1 if background else 0,
-                -effective_priority,
+                -priority,
                 enqueued,
                 job.queue_ticket or job.id,
                 job.id,
             )
 
-        return sorted(
+        ranked = sorted(
             (
                 job
                 for job in jobs
@@ -573,6 +571,7 @@ class ResourceScheduler:
             ),
             key=rank,
         )
+        return apply_manual_order(session, ranked, controls, now)
 
     def peek_next_eligible_job(self, group: str) -> tuple[str, str | None] | None:
         """Return the next durable job without claiming or changing it."""
