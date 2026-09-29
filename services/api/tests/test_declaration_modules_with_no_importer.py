@@ -63,7 +63,7 @@ WITHOUT_AN_IMPORTER = frozenset(
         "shared_asset_verify_v1",
         "shared_asset_view_v1",
         "shared_asset_workflow_bundle_v1",
-        "workflow_use_cases_v1",
+        "workflow_use_case_presets_v1",
     }
 )
 

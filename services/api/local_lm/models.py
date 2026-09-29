@@ -1500,6 +1500,69 @@ class GenerationPreset(TimestampMixin, Base):
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class WorkflowUseCasePreset(TimestampMixin, Base):
+    __tablename__ = "workflow_use_case_presets"
+    __table_args__ = (
+        UniqueConstraint("use_case", "name", name="uq_workflow_use_case_preset_name"),
+        UniqueConstraint("id", "use_case", name="uq_workflow_use_case_preset_target"),
+        CheckConstraint(
+            "is_default = 0 OR enabled = 1", name="ck_workflow_use_case_default_enabled"
+        ),
+        Index(
+            "uq_workflow_use_case_default",
+            "use_case",
+            unique=True,
+            sqlite_where=text("is_default = 1"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("wfuc"))
+    name: Mapped[str] = mapped_column(String(200))
+    use_case: Mapped[str] = mapped_column(String(32))
+    settings_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    builtin: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class ProjectWorkflowUseCaseSelection(TimestampMixin, Base):
+    """Persist Automatic as a null target; an absent row inherits the default."""
+
+    __tablename__ = "project_workflow_use_case_selections"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["preset_id", "use_case"],
+            ["workflow_use_case_presets.id", "workflow_use_case_presets.use_case"],
+            ondelete="RESTRICT",
+        ),
+    )
+
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
+    )
+    use_case: Mapped[str] = mapped_column(String(32), primary_key=True)
+    preset_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+
+class ChatWorkflowUseCaseSelection(TimestampMixin, Base):
+    """Persist a chat override without changing its project or role settings."""
+
+    __tablename__ = "chat_workflow_use_case_selections"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["preset_id", "use_case"],
+            ["workflow_use_case_presets.id", "workflow_use_case_presets.use_case"],
+            ondelete="RESTRICT",
+        ),
+    )
+
+    chat_id: Mapped[str] = mapped_column(
+        ForeignKey("chats.id", ondelete="CASCADE"), primary_key=True
+    )
+    use_case: Mapped[str] = mapped_column(String(32), primary_key=True)
+    preset_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+
 class EditTemplate(TimestampMixin, Base):
     """A one-click edit: a named instruction scaffold over an edit workflow.
 

@@ -181,13 +181,15 @@ CONSTRAINED_COLUMNS: frozenset[tuple[str, str]] = frozenset(
         ("workflow_trust_attestations", "node_inventory_sha256"),
         ("workflow_trust_attestations", "runtime_contract_sha256"),
         ("workflow_trust_attestations", "whitelist_sha256"),
+        ("workflow_use_case_presets", "enabled"),
+        ("workflow_use_case_presets", "is_default"),
     }
 )
 
 #: The number of ``CheckConstraint`` objects in the schema. Pinned alongside the
 #: columns so that a constraint naming no column at all, or one constraint
 #: replaced by two over the same columns, still fails.
-CHECK_CONSTRAINT_COUNT = 105
+CHECK_CONSTRAINT_COUNT = 106
 
 
 def _mapped_tables() -> dict[str, Table]:

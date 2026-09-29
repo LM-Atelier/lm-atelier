@@ -48,6 +48,7 @@ from .models import (
     ChatComposerDraft,
     ChatItemRemovalReceipt,
     ChatWorkflowSelection,
+    ChatWorkflowUseCaseSelection,
     EmptyChatDeletion,
     EmptyChatPreviewRecord,
     Job,
@@ -121,8 +122,9 @@ WORK_PRODUCERS = (
 #: Tables with a foreign key to `chats.id` whose rows are not work: nothing was
 #: sent or ran. An unsent composer draft is text and attachments somebody left
 #: there, so it makes an otherwise empty chat configured (`has_draft`), which is
-#: listed but never selected for deletion without acknowledgement.
-CONFIGURATION_TABLES = (ChatComposerDraft,)
+#: listed but never selected for deletion without acknowledgement. A recipe
+#: choice, including Automatic, likewise records a deliberate configuration.
+CONFIGURATION_TABLES = (ChatComposerDraft, ChatWorkflowUseCaseSelection)
 
 #: Old enough that a chat opened and abandoned minutes ago is not offered while
 #: the person who opened it may still be looking at it. That is a choice about
@@ -344,6 +346,7 @@ def configured_reasons(session: Session, chat: Chat) -> tuple[str, ...]:
         chat.generation_settings_json
         or chat.generation_preset_ids_json
         or _vision_settings_differ(chat.vision_settings_json)
+        or session.scalar(select(exists().where(ChatWorkflowUseCaseSelection.chat_id == chat.id)))
     ):
         found.append("settings_overridden")
     if _is_named_as_a_source(session, chat.id):
@@ -524,6 +527,14 @@ def chat_state_fingerprint(session: Session, row: Chat) -> str:
             "attachments": [attachment.artifact_id for attachment in draft.attachments],
         }
     )
+    state["workflow_use_case_choices"] = [
+        dict(choice)
+        for choice in session.execute(
+            select(ChatWorkflowUseCaseSelection.__table__)
+            .where(ChatWorkflowUseCaseSelection.chat_id == row.id)
+            .order_by(ChatWorkflowUseCaseSelection.use_case)
+        ).mappings()
+    ]
     canonical = json.dumps(
         state, default=_jsonable, ensure_ascii=True, sort_keys=True, separators=(",", ":")
     )
