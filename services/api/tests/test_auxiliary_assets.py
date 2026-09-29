@@ -1397,3 +1397,21 @@ async def test_a_carried_over_workflow_runs_a_lora_stack(
     assert detached.graph["16"]["inputs"]["model"] == ["lma_lora_001", 0]
     # Model-only insertion leaves the text encoder reading the graph's own CLIP.
     assert detached.graph["15"]["inputs"]["clip"] == ["12", 1]
+
+
+@pytest.mark.parametrize("derived", [True, False])
+async def test_automatic_lora_selection_records_the_saved_use_case_origin(
+    client: AsyncClient, derived: bool
+) -> None:
+    del client
+    with SessionLocal() as session:
+        revision = _workflow(session)
+        asset = _asset(session, "Watercolor", "d" * 64)
+        asset.use_case = "watercolor landscapes"
+        asset.use_case_derived = derived
+        asset.auto_apply = True
+        session.flush()
+        selection = select_automatic_lora_stack(session, revision, "Watercolor landscapes")
+    assert [item["asset_id"] for item in selection.settings] == [asset.id]
+    assert selection.provenance["selected"][0]["use_case"] == "watercolor landscapes"
+    assert selection.provenance["selected"][0]["use_case_derived"] is derived
