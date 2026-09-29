@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -40,25 +40,31 @@ from local_lm.vision import VisionInputError
 def _orchestrator(*, session_factory=None) -> ConversationOrchestrator:  # type: ignore[no-untyped-def]
     session_factory = session_factory or Mock()
     return ConversationOrchestrator(
-        engines=SimpleNamespace(
-            settings=SimpleNamespace(),
-            chat=SimpleNamespace(cancel=AsyncMock()),
-            media=SimpleNamespace(cancel=AsyncMock()),
+        engines=cast(
+            Any,
+            SimpleNamespace(
+                settings=SimpleNamespace(),
+                chat=SimpleNamespace(cancel=AsyncMock()),
+                media=SimpleNamespace(cancel=AsyncMock()),
+            ),
         ),
         artifacts=Mock(),
-        events=SimpleNamespace(publish=AsyncMock()),
-        scheduler=SimpleNamespace(publish_job=AsyncMock()),
-        processes=SimpleNamespace(
-            statuses=Mock(
-                return_value=[
-                    WorkerStatus(
-                        name="chat",
-                        state="stopped",
-                        managed=False,
-                        running=False,
-                    )
-                ]
-            )
+        events=cast(Any, SimpleNamespace(publish=AsyncMock())),
+        scheduler=cast(Any, SimpleNamespace(publish_job=AsyncMock())),
+        processes=cast(
+            Any,
+            SimpleNamespace(
+                statuses=Mock(
+                    return_value=[
+                        WorkerStatus(
+                            name="chat",
+                            state="stopped",
+                            managed=False,
+                            running=False,
+                        )
+                    ]
+                )
+            ),
         ),
         session_factory=session_factory,
     )
@@ -67,7 +73,9 @@ def _orchestrator(*, session_factory=None) -> ConversationOrchestrator:  # type:
 _TEST_CLAIM = JobClaim(token="attempt-token-a", attempt=1)
 
 
-def test_successful_edit_queues_one_detached_low_priority_verifier(monkeypatch) -> None:
+def test_successful_edit_queues_one_detached_low_priority_verifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     source = SimpleNamespace(id="artifact-source", media_type="image/png")
     result = SimpleNamespace(id="artifact-result", media_type="image/png")
     chat = SimpleNamespace(
@@ -178,7 +186,7 @@ def test_successful_edit_queues_one_detached_low_priority_verifier(monkeypatch) 
 
 
 async def test_verifier_starts_after_media_handoff_and_inside_primary_lease(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     order: list[str] = []
     job = SimpleNamespace(
@@ -231,7 +239,8 @@ async def test_verifier_starts_after_media_handoff_and_inside_primary_lease(
         order.append("lease released")
 
     orchestrator = _orchestrator(session_factory=FakeSession)
-    orchestrator.scheduler.job_lease = lease
+    # The stand-in scheduler has no lease until the test gives it one.
+    monkeypatch.setattr(orchestrator.scheduler, "job_lease", lease, raising=False)
     orchestrator._resolve_step_inputs = Mock()  # type: ignore[method-assign]
     orchestrator._set_work_status = Mock()  # type: ignore[method-assign]
     orchestrator._arm_step_prewarm = Mock()  # type: ignore[method-assign]
@@ -244,8 +253,8 @@ async def test_verifier_starts_after_media_handoff_and_inside_primary_lease(
     async def complete_handoff(_profile_id: str) -> None:
         order.append("chat restored")
 
-    orchestrator._execute_media = execute_media  # type: ignore[method-assign]
-    orchestrator._complete_media_handoff = complete_handoff  # type: ignore[method-assign]
+    monkeypatch.setattr(orchestrator, "_execute_media", execute_media)
+    monkeypatch.setattr(orchestrator, "_complete_media_handoff", complete_handoff)
     orchestrator.start = Mock(side_effect=lambda *_args: order.append("verifier started"))  # type: ignore[method-assign]
     orchestrator._finalize_setup_verification_run = AsyncMock()  # type: ignore[method-assign]
     monkeypatch.setattr("local_lm.orchestrator.mark_setup_verification_running", Mock())
@@ -261,7 +270,9 @@ async def test_verifier_starts_after_media_handoff_and_inside_primary_lease(
     ]
 
 
-async def test_foreground_dispatch_preempts_a_running_image_edit_check() -> None:
+async def test_foreground_dispatch_preempts_a_running_image_edit_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     verification_job = Job(
         id="job-running-check",
         kind=JobKind.EDIT_VERIFY.value,
@@ -301,8 +312,9 @@ async def test_foreground_dispatch_preempts_a_running_image_edit_check() -> None
         await asyncio.Event().wait()
 
     orchestrator = _orchestrator(session_factory=FakeSession)
-    orchestrator.scheduler.job_lease = lease
-    orchestrator._execute_image_edit_verification = block  # type: ignore[method-assign]
+    # The stand-in scheduler has no lease until the test gives it one.
+    monkeypatch.setattr(orchestrator.scheduler, "job_lease", lease, raising=False)
+    monkeypatch.setattr(orchestrator, "_execute_image_edit_verification", block)
     task = asyncio.create_task(orchestrator._execute(verification_job.id, None))
     await started.wait()
 
@@ -323,7 +335,11 @@ async def test_foreground_dispatch_preempts_a_running_image_edit_check() -> None
 
 async def test_preemption_cancels_the_running_check_before_foreground_execution() -> None:
     verification_job_id = "job-running-check"
-    blocker = asyncio.create_task(asyncio.Event().wait())
+
+    async def wait_forever() -> None:
+        await asyncio.Event().wait()
+
+    blocker = asyncio.create_task(wait_forever())
 
     class Result:
         @staticmethod
@@ -346,7 +362,7 @@ async def test_preemption_cancels_the_running_check_before_foreground_execution(
     await orchestrator._preempt_running_image_edit_verifications()
 
     assert blocker.cancelled()
-    orchestrator.engines.chat.cancel.assert_awaited_once_with(verification_job_id)
+    cast(AsyncMock, orchestrator.engines.chat.cancel).assert_awaited_once_with(verification_job_id)
     assert orchestrator._preempted_image_edit_verifications == set()
 
 
@@ -446,9 +462,9 @@ async def test_cancelling_runless_verifier_emits_no_run_event() -> None:
 
     assert await orchestrator.cancel(job.id) is True
     assert job.status == JobStatus.CANCELLED.value
-    orchestrator.engines.chat.cancel.assert_awaited_once_with(job.id)
-    orchestrator.engines.media.cancel.assert_not_called()
-    orchestrator.events.publish.assert_not_awaited()
+    cast(AsyncMock, orchestrator.engines.chat.cancel).assert_awaited_once_with(job.id)
+    cast(AsyncMock, orchestrator.engines.media.cancel).assert_not_called()
+    cast(AsyncMock, orchestrator.events.publish).assert_not_awaited()
 
 
 def test_late_verification_updates_its_revision_without_replacing_current_media() -> None:
@@ -639,7 +655,7 @@ async def test_automatic_retry_reuses_source_turn_as_a_response_revision() -> No
             }
         },
     )
-    accepted = SimpleNamespace(run=accepted_run)
+    accepted: Any = SimpleNamespace(run=accepted_run)
     verification_job = SimpleNamespace(status=JobStatus.RUNNING.value)
     commits: list[bool] = []
 
@@ -708,6 +724,7 @@ async def test_automatic_retry_reuses_source_turn_as_a_response_revision() -> No
     assert result is accepted
     assert commits == [True], "the retry provenance is written in the creation transaction"
     call = orchestrator.create_turn.await_args
+    assert call is not None
     hook = call.kwargs.get("before_commit")
     assert callable(hook), "the retry did not bind its durable turn to the claim"
     hook(FakeSession(), retry_run)
@@ -871,13 +888,14 @@ def _verification_world(  # type: ignore[no-untyped-def]
             )
 
     orchestrator = _orchestrator(session_factory=FakeSession)
-    orchestrator.engines = SimpleNamespace(
+    engines: Any = SimpleNamespace(
         settings=SimpleNamespace(
             chat_engine="llama.cpp", media_engine="comfyui", vision_bridge_max_tokens=256
         ),
         chat=SimpleNamespace(cancel=AsyncMock()),
         media=SimpleNamespace(cancel=AsyncMock()),
     )
+    orchestrator.engines = engines
 
     loads: list[object] = []
 
@@ -900,7 +918,7 @@ def _verification_world(  # type: ignore[no-untyped-def]
 
     world["loads"] = loads
 
-    orchestrator.processes = SimpleNamespace(
+    processes: Any = SimpleNamespace(
         statuses=Mock(
             return_value=[
                 WorkerStatus(
@@ -912,12 +930,13 @@ def _verification_world(  # type: ignore[no-untyped-def]
         stop=AsyncMock(side_effect=stop_worker),
         load_chat=AsyncMock(side_effect=load_chat),
     )
+    orchestrator.processes = processes
     orchestrator._profile_has_verified_vision = Mock(return_value=True)  # type: ignore[method-assign]
     orchestrator._schedule_media_restart = Mock()  # type: ignore[method-assign]
     orchestrator._release_deferred_media_restart = Mock()  # type: ignore[method-assign]
     orchestrator._persist_image_edit_verification = Mock(return_value=True)  # type: ignore[method-assign]
 
-    async def prepare(artifacts: list[object], **_kwargs: object) -> object:
+    async def prepare(artifacts: list[Any], **_kwargs: object) -> object:
         if lose_at == "preparation":
             world["owned"] = False
             world["lost_at"] = "preparation"
@@ -925,7 +944,7 @@ def _verification_world(  # type: ignore[no-untyped-def]
         # whichever one it was handed.
         return SimpleNamespace(inspected_artifact_ids=[item.id for item in artifacts])
 
-    regions: list[list[tuple[float, float, float, float]]] = []
+    regions: list[list[tuple[str, Any]]] = []
 
     def region_context(crops):  # type: ignore[no-untyped-def]
         # One call per changed area, carrying the part of the source and the
@@ -942,7 +961,7 @@ def _verification_world(  # type: ignore[no-untyped-def]
     async def chat_capabilities() -> object:
         return SimpleNamespace(input_modalities=["text", "image"])
 
-    orchestrator.engines.chat_capabilities = chat_capabilities  # type: ignore[attr-defined]
+    engines.chat_capabilities = chat_capabilities
     consumed: list[str] = []
 
     asked: list[str] = []
@@ -964,7 +983,7 @@ def _verification_world(  # type: ignore[no-untyped-def]
         consumed.append("complete")
         yield ChatEvent(type="complete", text="", data={})
 
-    orchestrator.engines.chat.stream = stream  # type: ignore[attr-defined]
+    engines.chat.stream = stream
     world["consumed"] = consumed
     world["asked"] = asked
     world["questions"] = questions
@@ -986,7 +1005,7 @@ async def test_a_verification_that_never_loaded_chat_restores_nothing() -> None:
     async def refuse(*_args: object, **_kwargs: object) -> object:
         raise VisionInputError("the source and result could not be read together")
 
-    orchestrator.vision.prepare = AsyncMock(side_effect=refuse)  # type: ignore[attr-defined]
+    orchestrator.vision.prepare = AsyncMock(side_effect=refuse)
 
     await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
 
@@ -1122,7 +1141,7 @@ async def test_a_verification_that_loses_its_claim_restoring_chat_schedules_no_r
 async def test_failed_verification_load_restores_displaced_chat() -> None:
     """A startup failure can follow stopping the previous chat worker."""
     job, orchestrator, world = _verification_world(lose_at="never")
-    running_profile = "profile-chat"
+    running_profile: str | None = "profile-chat"
 
     async def load(profile, *_args, **_kwargs):  # type: ignore[no-untyped-def]
         nonlocal running_profile
@@ -1225,13 +1244,13 @@ async def test_a_confident_yes_does_not_accept_a_picture_whose_pixels_did_not_ch
         lose_at="never", answers=_SAW_THE_CHANGE_AND_LOOKED
     )
     pictures = {"artifact-source": _picture(None), "artifact-result": _picture(patch)}
-    orchestrator.artifacts.verified_bytes = Mock(  # type: ignore[method-assign]
+    orchestrator.artifacts.verified_bytes = Mock(
         side_effect=lambda artifact, *, maximum_bytes: pictures[artifact.id]
     )
     retry = SimpleNamespace(
         run=SimpleNamespace(id="run-retry", work_plan_id="plan-retry", provenance_json={})
     )
-    orchestrator._create_image_edit_verification_retry = AsyncMock(return_value=retry)  # type: ignore[method-assign]
+    orchestrator._create_image_edit_verification_retry = AsyncMock(return_value=retry)
 
     await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
 
@@ -1253,18 +1272,6 @@ async def test_a_confident_yes_does_not_accept_a_picture_whose_pixels_did_not_ch
         assert record["automatic_retry_executed"] is True
 
 
-def _selection(box: tuple[int, int, int, int]) -> bytes:
-    import io
-
-    from PIL import Image
-
-    mask = Image.new("L", (64, 64), 0)
-    mask.paste(255, box)
-    buffer = io.BytesIO()
-    mask.save(buffer, "PNG")
-    return buffer.getvalue()
-
-
 @pytest.mark.parametrize(
     ("patch", "stored", "reason"),
     [
@@ -1280,7 +1287,10 @@ def _selection(box: tuple[int, int, int, int]) -> bytes:
 async def test_a_selection_is_measured_where_it_selects_through_the_real_check(
     patch: tuple[int, int, int, int] | None, stored: bool, reason: str
 ) -> None:
-    selection = {"artifact_id": "artifact-mask" if stored else "artifact-gone", "invert": True}
+    selection: dict[str, object] = {
+        "artifact_id": "artifact-mask" if stored else "artifact-gone",
+        "invert": True,
+    }
     job, orchestrator, _world = _verification_world(
         lose_at="never", answers=_SAW_THE_CHANGE_AND_LOOKED, mask=selection
     )
@@ -1289,13 +1299,13 @@ async def test_a_selection_is_measured_where_it_selects_through_the_real_check(
         "artifact-result": _picture(patch),
         "artifact-mask": _selection((24, 24, 40, 40)),
     }
-    orchestrator.artifacts.verified_bytes = Mock(  # type: ignore[method-assign]
+    orchestrator.artifacts.verified_bytes = Mock(
         side_effect=lambda artifact, *, maximum_bytes: pictures[artifact.id]
     )
     retry = SimpleNamespace(
         run=SimpleNamespace(id="run-retry", work_plan_id="plan-retry", provenance_json={})
     )
-    orchestrator._create_image_edit_verification_retry = AsyncMock(return_value=retry)  # type: ignore[method-assign]
+    orchestrator._create_image_edit_verification_retry = AsyncMock(return_value=retry)
 
     await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
 
@@ -1329,7 +1339,7 @@ async def test_the_review_asks_about_one_picture_at_a_time_then_about_the_lists(
 
     job, orchestrator, world = _verification_world(lose_at="never", answers=_SAW_THE_CHANGE)
     pictures = {"artifact-source": _picture(None), "artifact-result": _picture((16, 16, 48, 48))}
-    orchestrator.artifacts.verified_bytes = Mock(  # type: ignore[method-assign]
+    orchestrator.artifacts.verified_bytes = Mock(
         side_effect=lambda artifact, *, maximum_bytes: pictures[artifact.id]
     )
 
@@ -1351,7 +1361,7 @@ async def test_the_review_asks_about_one_picture_at_a_time_then_about_the_lists(
     # attached: the two readings agreed, and agreement is what has to be
     # checked against the picture rather than taken.
     assert "Two crops of the same region are attached" in questions[3]
-    regions: list[list[tuple[float, float, float, float]]] = world["regions"]
+    regions: list[list[tuple[str, Any]]] = world["regions"]
     assert len(regions) == 1
     shown = regions[0]
     assert [artifact_id for artifact_id, _box in shown] == ["artifact-source", "artifact-result"]
@@ -1394,13 +1404,13 @@ async def test_a_retry_steps_by_the_schedule_the_source_ran_with(
     # Nothing was seen to change and nothing measurably did: the two signals
     # agree, which is the edit that earns the one stronger retry.
     pictures = {"artifact-source": _picture(None), "artifact-result": _picture(None)}
-    orchestrator.artifacts.verified_bytes = Mock(  # type: ignore[method-assign]
+    orchestrator.artifacts.verified_bytes = Mock(
         side_effect=lambda artifact, *, maximum_bytes: pictures[artifact.id]
     )
     retry = SimpleNamespace(
         run=SimpleNamespace(id="run-retry", work_plan_id="plan-retry", provenance_json={})
     )
-    orchestrator._create_image_edit_verification_retry = AsyncMock(return_value=retry)  # type: ignore[method-assign]
+    orchestrator._create_image_edit_verification_retry = AsyncMock(return_value=retry)
 
     await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
 
@@ -1423,13 +1433,13 @@ async def test_an_area_holding_something_unlisted_refuses_the_edit() -> None:
         lose_at="never", answers=_SAW_THE_CHANGE + (_AREA_HOLDS_SOMETHING_ELSE,)
     )
     pictures = {"artifact-source": _picture(None), "artifact-result": _picture((16, 16, 48, 48))}
-    orchestrator.artifacts.verified_bytes = Mock(  # type: ignore[method-assign]
+    orchestrator.artifacts.verified_bytes = Mock(
         side_effect=lambda artifact, *, maximum_bytes: pictures[artifact.id]
     )
     retry = SimpleNamespace(
         run=SimpleNamespace(id="run-retry", work_plan_id="plan-retry", provenance_json={})
     )
-    orchestrator._create_image_edit_verification_retry = AsyncMock(return_value=retry)  # type: ignore[method-assign]
+    orchestrator._create_image_edit_verification_retry = AsyncMock(return_value=retry)
 
     await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
 
@@ -1445,7 +1455,7 @@ async def test_an_uncertain_area_decides_nothing_rather_than_passing_the_edit() 
         lose_at="never", answers=_SAW_THE_CHANGE + ('{"uncertain": true}',)
     )
     pictures = {"artifact-source": _picture(None), "artifact-result": _picture((16, 16, 48, 48))}
-    orchestrator.artifacts.verified_bytes = Mock(  # type: ignore[method-assign]
+    orchestrator.artifacts.verified_bytes = Mock(
         side_effect=lambda artifact, *, maximum_bytes: pictures[artifact.id]
     )
 
@@ -1468,13 +1478,13 @@ async def test_a_review_that_would_retry_anyway_asks_about_no_areas() -> None:
         lose_at="never", answers=_SAW_NO_CHANGE + (_AREA_HOLDS_THE_REQUEST,)
     )
     pictures = {"artifact-source": _picture(None), "artifact-result": _picture(None)}
-    orchestrator.artifacts.verified_bytes = Mock(  # type: ignore[method-assign]
+    orchestrator.artifacts.verified_bytes = Mock(
         side_effect=lambda artifact, *, maximum_bytes: pictures[artifact.id]
     )
     retry = SimpleNamespace(
         run=SimpleNamespace(id="run-retry", work_plan_id="plan-retry", provenance_json={})
     )
-    orchestrator._create_image_edit_verification_retry = AsyncMock(return_value=retry)  # type: ignore[method-assign]
+    orchestrator._create_image_edit_verification_retry = AsyncMock(return_value=retry)
 
     await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
 
@@ -1502,13 +1512,13 @@ async def test_a_selected_edit_does_not_certify_the_corner_it_never_looked_at() 
         "artifact-result": _picture((24, 24, 40, 40), (2, 2, 10, 10)),
         "artifact-mask": _selection((20, 20, 44, 44)),
     }
-    orchestrator.artifacts.verified_bytes = Mock(  # type: ignore[method-assign]
+    orchestrator.artifacts.verified_bytes = Mock(
         side_effect=lambda artifact, *, maximum_bytes: pictures[artifact.id]
     )
     retry = SimpleNamespace(
         run=SimpleNamespace(id="run-retry", work_plan_id="plan-retry", provenance_json={})
     )
-    orchestrator._create_image_edit_verification_retry = AsyncMock(return_value=retry)  # type: ignore[method-assign]
+    orchestrator._create_image_edit_verification_retry = AsyncMock(return_value=retry)
 
     await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
 
