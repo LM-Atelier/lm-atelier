@@ -24,6 +24,7 @@ import { cloneMask, coverage, encodeMaskPng, feather, isEmpty, type MaskRaster }
 import { studioApplyPlan } from "./studioApplyPlan";
 import { studioStepOrigin } from "./studioStepOrigin";
 import { renderLightMap } from "./studioLightMap";
+import { studioRecipeSource } from "./studioRecipeSource";
 import { readSourcePixels } from "./studioSourcePixels";
 import { useAdjustedPreview } from "./useAdjustedPreview";
 import { useCaptionPreview } from "./useCaptionPreview";
@@ -343,6 +344,7 @@ export function StudioView({
           />
           <StudioRecipes
             disabled={busy || !current}
+            from={studioRecipeSource(session, current)}
             onApply={(chosen) => {
               setRecipe(chosen);
               setInstruction(chosen.instruction);

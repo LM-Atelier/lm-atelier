@@ -5,7 +5,7 @@ import { StudioRecipes } from "./StudioRecipes";
 import { api } from "./api";
 import type { EditTemplate } from "./types";
 
-vi.mock("./api", () => ({ api: { editTemplates: vi.fn() } }));
+vi.mock("./api", () => ({ api: { editTemplates: vi.fn(), createEditTemplate: vi.fn() } }));
 
 function recipe(overrides: Partial<EditTemplate> = {}): EditTemplate {
   return {
@@ -26,11 +26,11 @@ function recipe(overrides: Partial<EditTemplate> = {}): EditTemplate {
   };
 }
 
-function renderRecipes(onApply = vi.fn()) {
+function renderRecipes(onApply = vi.fn(), from: { runId: string; instruction: string } | null = null) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <StudioRecipes onApply={onApply} />
+      <StudioRecipes onApply={onApply} from={from} />
     </QueryClientProvider>,
   );
   return onApply;
@@ -76,5 +76,43 @@ describe("StudioRecipes", () => {
     await waitFor(() =>
       expect(screen.queryByRole("button", { name: "Watercolor" })).not.toBeInTheDocument(),
     );
+  });
+
+  it("saves the chosen result's edit as a recipe, read from the run that made it", async () => {
+    vi.mocked(api.editTemplates).mockResolvedValue([]);
+    vi.mocked(api.createEditTemplate).mockResolvedValue(recipe({ id: "tpl-2", name: "Soft watercolor" }));
+    renderRecipes(vi.fn(), { runId: "run-7", instruction: "make it a watercolor painting" });
+
+    fireEvent.change(await screen.findByRole("textbox", { name: "Save this edit as a recipe" }), {
+      target: { value: "  Soft watercolor " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save recipe" }));
+
+    await waitFor(() =>
+      expect(api.createEditTemplate).toHaveBeenCalledWith({
+        name: "Soft watercolor",
+        instruction: "make it a watercolor painting",
+        from_run_id: "run-7",
+      }),
+    );
+    expect(await screen.findByRole("status")).toHaveTextContent("Saved.");
+    // The list is asked again, so the new recipe appears with the others.
+    await waitFor(() => expect(api.editTemplates).toHaveBeenCalledTimes(2));
+  });
+
+  it("saves nothing without a name, and says why a save was refused", async () => {
+    vi.mocked(api.editTemplates).mockResolvedValue([]);
+    vi.mocked(api.createEditTemplate).mockRejectedValue(new Error("A template with this name already exists."));
+    renderRecipes(vi.fn(), { runId: "run-7", instruction: "make it a watercolor painting" });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Save recipe" }));
+    expect(api.createEditTemplate).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Save this edit as a recipe" }), {
+      target: { value: "Watercolor" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save recipe" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("A template with this name already exists.");
   });
 });

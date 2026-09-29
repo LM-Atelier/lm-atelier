@@ -1397,6 +1397,7 @@ html[data-motion="reduced"] .progress-track > div.indeterminate { width: 100% !i
 .studio-extend-handle.left { left: 0; top: 12%; bottom: 12%; }
 .studio-extend-handle.right { right: 0; top: 12%; bottom: 12%; }
 .studio-tool-options { display: flex; flex-direction: column; gap: calc(6px * var(--spacing-scale, 1)); }
+.studio-recipe-save { display: flex; flex-direction: column; gap: calc(6px * var(--spacing-scale, 1)); }
 /* Recipes offered where the edit is being made, rather than in a dialog that
    predates this view. */
 .studio-recipes { display: flex; flex-direction: column; gap: calc(6px * var(--spacing-scale, 1)); }
