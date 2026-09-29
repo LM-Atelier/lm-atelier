@@ -2,12 +2,13 @@
 
 The studio shows an adjustment on the picture while its sliders move, so the
 arithmetic here is the arithmetic the browser runs, in the same order: one
-lookup table per channel for warmth, tint, brightness and contrast, then
-saturation as a mix toward each pixel's grey, then sharpness as a mix away
-from a softened copy of the picture. Every step is integer arithmetic or
-floating-point arithmetic with a stated rounding, which the browser repeats
-exactly, so the preview is the picture an apply makes. The browser's copy lives
-in studioAdjustments.ts, and the two are checked against the same pixels.
+lookup table per channel for shadows, highlights, warmth, tint, brightness and
+contrast, then saturation as a mix toward each pixel's grey, then sharpness as
+a mix away from a softened copy of the picture. Every step is integer
+arithmetic or floating-point arithmetic with a stated rounding, which the
+browser repeats exactly, so the preview is the picture an apply makes. The
+browser's copy lives in studioAdjustments.ts, and the two are checked against
+the same pixels.
 """
 
 from __future__ import annotations
@@ -40,6 +41,8 @@ class ColorAdjustments:
 
     brightness: int = 0
     contrast: int = 0
+    highlights: int = 0
+    shadows: int = 0
     saturation: int = 0
     warmth: int = 0
     tint: int = 0
@@ -49,6 +52,8 @@ class ColorAdjustments:
         return not (
             self.brightness
             or self.contrast
+            or self.highlights
+            or self.shadows
             or self.saturation
             or self.warmth
             or self.tint
@@ -79,13 +84,31 @@ def tint_gains(tint: int) -> tuple[float, float, float]:
     return (gains[0] / luma, gains[1] / luma, gains[2] / luma)
 
 
-def channel_tables(adjustments: ColorAdjustments) -> tuple[list[int], list[int], list[int]]:
-    """The red, green and blue lookup tables for warmth, tint, brightness and contrast.
+def toned(value: int, shadows: float, highlights: float) -> float:
+    """A level moved by the shadows and highlights sliders, each from -1 to 1.
 
-    Brightness scales every channel by two to the power of its slider over 100,
-    so 100 doubles the light and -100 halves it. Contrast does the same to the
-    distance from middle grey. Nothing is clamped until the one rounding at
-    the end, so the steps do not lose detail to each other.
+    Taking the level as a share of white, shadows moves it by the share times
+    the square of what is left above it, which reaches furthest a third of the
+    way up, and highlights by the square of the share times what is left,
+    which reaches furthest two thirds of the way up. Either slider alone moves
+    no level by more than 4/27 of the range. Black and white stay where they
+    are, and however the two are set together, no two levels swap places.
+    """
+
+    share = value / 255
+    left = 1 - share
+    return value + 255 * (shadows * share * left * left + highlights * share * share * left)
+
+
+def channel_tables(adjustments: ColorAdjustments) -> tuple[list[int], list[int], list[int]]:
+    """The red, green and blue lookup tables for tone, color, brightness and contrast.
+
+    Each level is first moved by the shadows and highlights, so they act on the
+    picture's own tones, then by the warmth and tint gains. Brightness scales
+    every channel by two to the power of its slider over 100, so 100 doubles
+    the light and -100 halves it. Contrast does the same to the distance from
+    middle grey. Nothing is clamped until the one rounding at the end, so the
+    steps do not lose detail to each other.
     """
 
     warmth = warmth_gains(NEUTRAL_KELVIN - KELVIN_PER_WARMTH_STEP * adjustments.warmth)
@@ -93,11 +116,13 @@ def channel_tables(adjustments: ColorAdjustments) -> tuple[list[int], list[int],
     gains = [warmth[index] * tint[index] for index in range(3)]
     brightness = 2 ** (adjustments.brightness / ADJUSTMENT_LIMIT)
     contrast = 2 ** (adjustments.contrast / ADJUSTMENT_LIMIT)
+    shadows = adjustments.shadows / ADJUSTMENT_LIMIT
+    highlights = adjustments.highlights / ADJUSTMENT_LIMIT
     tables: list[list[int]] = []
     for gain in gains:
         table = []
         for value in range(256):
-            lit = value * gain * brightness
+            lit = toned(value, shadows, highlights) * gain * brightness
             table.append(_rounded((lit - 127.5) * contrast + 127.5))
         tables.append(table)
     return (tables[0], tables[1], tables[2])

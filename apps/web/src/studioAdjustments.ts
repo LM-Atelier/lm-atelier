@@ -4,15 +4,18 @@ import type { StudioColorAdjustments } from "./types";
  *
  * The canvas shows an adjustment while its sliders move, and an apply asks the
  * server to make the same picture. So this is the server's arithmetic step for
- * step (studio_adjustments.py): one lookup table per channel for warmth, tint,
- * brightness and contrast, then saturation as a mix toward each pixel's grey,
- * then sharpness as a mix away from a softened copy of the picture, with the
- * same roundings. Both copies are checked against the same pixels.
+ * step (studio_adjustments.py): one lookup table per channel for shadows,
+ * highlights, warmth, tint, brightness and contrast, then saturation as a mix
+ * toward each pixel's grey, then sharpness as a mix away from a softened copy
+ * of the picture, with the same roundings. Both copies are checked against the
+ * same pixels.
  */
 
 export const NEUTRAL_ADJUSTMENTS: StudioColorAdjustments = {
   brightness: 0,
   contrast: 0,
+  highlights: 0,
+  shadows: 0,
   saturation: 0,
   warmth: 0,
   tint: 0,
@@ -27,8 +30,8 @@ const TINT_REACH = 0.15;
 
 export function isNeutral(adjustments: StudioColorAdjustments): boolean {
   return !(
-    adjustments.brightness || adjustments.contrast || adjustments.saturation || adjustments.warmth
-    || adjustments.tint || adjustments.sharpness
+    adjustments.brightness || adjustments.contrast || adjustments.highlights || adjustments.shadows
+    || adjustments.saturation || adjustments.warmth || adjustments.tint || adjustments.sharpness
   );
 }
 
@@ -68,17 +71,33 @@ function rounded(value: number): number {
   return Math.min(255, Math.max(0, Math.floor(value + 0.5)));
 }
 
-/** The red, green and blue lookup tables for warmth, tint, brightness and contrast. */
+/** A level moved by the shadows and highlights sliders, each from -1 to 1.
+ *
+ * Taking the level as a share of white, shadows moves it by the share times
+ * the square of what is left above it, and highlights by the square of the
+ * share times what is left. Black and white stay where they are, and no two
+ * levels swap places. Written as the server writes it, so the two agree to the
+ * last bit.
+ */
+export function toned(value: number, shadows: number, highlights: number): number {
+  const share = value / 255;
+  const left = 1 - share;
+  return value + 255 * (shadows * share * left * left + highlights * share * share * left);
+}
+
+/** The red, green and blue lookup tables for tone, color, brightness and contrast. */
 export function channelTables(adjustments: StudioColorAdjustments): [Uint8Array, Uint8Array, Uint8Array] {
   const warmth = warmthGains(NEUTRAL_KELVIN - KELVIN_PER_WARMTH_STEP * adjustments.warmth);
   const tint = tintGains(adjustments.tint);
   const gains = [0, 1, 2].map((index) => warmth[index] * tint[index]);
   const brightness = Math.pow(2, adjustments.brightness / ADJUSTMENT_LIMIT);
   const contrast = Math.pow(2, adjustments.contrast / ADJUSTMENT_LIMIT);
+  const shadows = adjustments.shadows / ADJUSTMENT_LIMIT;
+  const highlights = adjustments.highlights / ADJUSTMENT_LIMIT;
   const tables = gains.map((gain) => {
     const table = new Uint8Array(256);
     for (let value = 0; value < 256; value += 1) {
-      const lit = value * gain * brightness;
+      const lit = toned(value, shadows, highlights) * gain * brightness;
       table[value] = rounded((lit - 127.5) * contrast + 127.5);
     }
     return table;

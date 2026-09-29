@@ -66,10 +66,12 @@ describe("the light and color panel", () => {
 
     expect(screen.getByText("-15")).toBeInTheDocument();
     fireEvent.change(screen.getByRole("slider", { name: "Contrast" }), { target: { value: "30" } });
+    fireEvent.change(screen.getByRole("slider", { name: "Highlights" }), { target: { value: "-20" } });
     fireEvent.click(screen.getByRole("button", { name: "Apply adjustments" }));
     fireEvent.click(screen.getByRole("button", { name: "Reset" }));
 
     expect(onChange).toHaveBeenCalledWith("contrast", 30);
+    expect(onChange).toHaveBeenCalledWith("highlights", -20);
     expect(onApply).toHaveBeenCalledTimes(1);
     expect(onReset).toHaveBeenCalledTimes(1);
   });
@@ -177,6 +179,7 @@ describe("adjusting in the studio", () => {
     expect(screen.queryByRole("button", { name: "Apply edit" })).toBeNull();
     act(() => {
       fireEvent.change(screen.getByRole("slider", { name: "Brightness" }), { target: { value: "25" } });
+      fireEvent.change(screen.getByRole("slider", { name: "Shadows" }), { target: { value: "40" } });
       fireEvent.change(screen.getByRole("slider", { name: "Sharpness" }), { target: { value: "-30" } });
     });
     fireEvent.click(screen.getByRole("button", { name: "Apply adjustments" }));
@@ -185,7 +188,9 @@ describe("adjusting in the studio", () => {
     expect(api.studioLocalEdit).toHaveBeenCalledWith("chat-studio", {
       source_artifact_id: "art-1",
       operation: "adjust",
-      adjustments: { brightness: 25, contrast: 0, saturation: 0, warmth: 0, tint: 0, sharpness: -30 },
+      adjustments: {
+        brightness: 25, contrast: 0, highlights: 0, shadows: 40, saturation: 0, warmth: 0, tint: 0, sharpness: -30,
+      },
     });
   });
 });

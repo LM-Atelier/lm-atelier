@@ -636,6 +636,8 @@ class StudioColorAdjustments(ApiModel):
 
     brightness: StrictInt = Field(default=0, ge=-100, le=100)
     contrast: StrictInt = Field(default=0, ge=-100, le=100)
+    highlights: StrictInt = Field(default=0, ge=-100, le=100)
+    shadows: StrictInt = Field(default=0, ge=-100, le=100)
     saturation: StrictInt = Field(default=0, ge=-100, le=100)
     warmth: StrictInt = Field(default=0, ge=-100, le=100)
     tint: StrictInt = Field(default=0, ge=-100, le=100)

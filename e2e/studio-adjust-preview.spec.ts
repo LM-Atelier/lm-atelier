@@ -39,6 +39,33 @@ async function neutralPicture(page: Page): Promise<Buffer> {
   return Buffer.from(dataUrl.split(",")[1], "base64");
 }
 
+/** Every tone from black to white, above a dark-to-light band of color.
+ *
+ * A picture of its own, so it opens a studio session of its own too: the same
+ * picture again would reopen the history another test left.
+ */
+async function tonesPicture(page: Page): Promise<Buffer> {
+  const dataUrl = await page.evaluate(() => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 96;
+    canvas.height = 64;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("no canvas");
+    const greys = context.createLinearGradient(0, 0, 96, 0);
+    greys.addColorStop(0, "#000000");
+    greys.addColorStop(1, "#ffffff");
+    context.fillStyle = greys;
+    context.fillRect(0, 0, 96, 32);
+    const colors = context.createLinearGradient(0, 0, 96, 0);
+    colors.addColorStop(0, "#1d3557");
+    colors.addColorStop(1, "#f1c4a8");
+    context.fillStyle = colors;
+    context.fillRect(0, 32, 96, 32);
+    return canvas.toDataURL("image/png");
+  });
+  return Buffer.from(dataUrl.split(",")[1], "base64");
+}
+
 /** A cutout: two shapes on a transparent background.
  *
  * Whole-pixel rectangles only, so every pixel is wholly opaque or wholly
@@ -119,6 +146,22 @@ test("shows exactly the picture that applying the adjustment keeps", async ({ pa
   await page.getByRole("slider", { name: "Tint" }).fill("-35");
   await page.getByRole("slider", { name: "Sharpness" }).fill("45");
   // The preview is drawn on the next frame after the sliders settle.
+  await expect.poll(async () => (await shownPixels(page)).join() !== before.join()).toBe(true);
+  const preview = await shownPixels(page);
+
+  const kept = await applyAndReadKept(page);
+
+  expect(kept.length).toBe(preview.length);
+  const differing = kept.filter((value, index) => value !== preview[index]).length;
+  expect(differing).toBe(0);
+});
+
+test("lifts the shadows and holds back the highlights exactly as the preview shows", async ({ page }) => {
+  await page.goto("/");
+  await dismissSetup(page);
+  const before = await openToAdjust(page, "neutral-tones.png", await tonesPicture(page), 96 * 64);
+  await page.getByRole("slider", { name: "Shadows" }).fill("70");
+  await page.getByRole("slider", { name: "Highlights" }).fill("-55");
   await expect.poll(async () => (await shownPixels(page)).join() !== before.join()).toBe(true);
   const preview = await shownPixels(page);
 

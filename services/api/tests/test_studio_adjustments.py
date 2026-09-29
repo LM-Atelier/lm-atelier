@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from itertools import pairwise
 from typing import Any
 
 import pytest
@@ -90,6 +91,36 @@ CASES: list[tuple[str, dict[str, int], str]] = [
         {"brightness": -20, "contrast": 35, "saturation": 25, "warmth": -40},
         "200,69,7 0,251,114 102,107,124 255,0,255 0,0,0 "
         "238,247,255 0,66,250 0,168,0 186,252,95 166,1,177",
+    ),
+    (
+        "lifted shadows",
+        {"shadows": 100},
+        "209,137,82 19,241,160 160,160,160 255,0,255 0,0,0 "
+        "255,255,255 64,129,211 0,189,0 217,253,158 188,76,180",
+    ),
+    (
+        "deeper shadows",
+        {"shadows": -60},
+        "194,78,31 4,240,109 109,109,109 255,0,255 0,0,0 "
+        "255,255,255 21,68,198 0,159,0 206,253,107 157,27,142",
+    ),
+    (
+        "recovered highlights",
+        {"highlights": -100},
+        "166,76,42 10,227,96 96,96,96 255,0,255 0,0,0 "
+        "255,255,255 32,70,170 0,132,0 179,251,95 131,38,119",
+    ),
+    (
+        "brighter highlights",
+        {"highlights": 45},
+        "215,111,54 10,246,142 142,142,142 255,0,255 0,0,0 "
+        "255,255,255 39,100,218 0,187,0 224,254,140 186,48,173",
+    ),
+    (
+        "toned and graded",
+        {"shadows": 50, "highlights": -40, "contrast": 20, "saturation": -30, "warmth": 25},
+        "184,112,74 48,222,136 135,131,127 210,31,210 0,0,0 "
+        "255,255,255 54,95,164 29,148,29 223,247,156 151,62,134",
     ),
 ]
 
@@ -209,8 +240,31 @@ def test_the_pixels_the_preview_promises(name: str, sliders: dict[str, Any], exp
 def test_every_slider_at_zero_changes_nothing() -> None:
     assert ColorAdjustments().is_neutral()
     assert not ColorAdjustments(sharpness=1).is_neutral()
+    assert not ColorAdjustments(highlights=-1).is_neutral()
+    assert not ColorAdjustments(shadows=1).is_neutral()
     for table in channel_tables(ColorAdjustments()):
         assert table == list(range(256))
+
+
+def test_shadows_move_the_dark_tones_most_and_highlights_the_light_ones() -> None:
+    # 85 is a third of white and 170 two thirds. Shadows at 100 adds
+    # 255 * 1/3 * (2/3)^2 = 37.8 to 85 and 255 * 2/3 * (1/3)^2 = 18.9 to 170;
+    # highlights at -100 takes the same amounts the other way round.
+    lifted = channel_tables(ColorAdjustments(shadows=100))[1]
+    recovered = channel_tables(ColorAdjustments(highlights=-100))[1]
+
+    assert [lifted[level] for level in (0, 85, 170, 255)] == [0, 123, 189, 255]
+    assert [recovered[level] for level in (0, 85, 170, 255)] == [0, 66, 132, 255]
+
+
+@pytest.mark.parametrize("shadows", [-100, -37, 0, 64, 100])
+@pytest.mark.parametrize("highlights", [-100, -51, 0, 23, 100])
+def test_no_two_levels_swap_places_however_the_tone_sliders_are_set(
+    shadows: int, highlights: int
+) -> None:
+    for table in channel_tables(ColorAdjustments(shadows=shadows, highlights=highlights)):
+        assert table[0] == 0 and table[255] == 255
+        assert all(low <= high for low, high in pairwise(table))
 
 
 def test_transparency_is_kept_as_it_was() -> None:
