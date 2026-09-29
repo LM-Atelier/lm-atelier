@@ -1,5 +1,7 @@
 """Exercise recipe management through authenticated HTTP requests."""
 
+from typing import Any, cast
+
 import pytest
 from httpx2 import AsyncClient
 
@@ -10,13 +12,13 @@ ROOT = "/api/workflow-use-case-presets"
 DEFAULT = "/api/workflow-use-case-defaults/image_generation"
 
 
-async def _create(client: AsyncClient, name: str = "Example", **values: object) -> dict:
+async def _create(client: AsyncClient, name: str = "Example", **values: object) -> dict[str, Any]:
     response = await client.post(
         ROOT,
         json={"name": name, "use_case": "image_generation", "settings_json": {"seed": 9}, **values},
     )
     assert response.status_code == 201, response.text
-    return response.json()
+    return cast(dict[str, Any], response.json())
 
 
 @pytest.mark.asyncio
@@ -150,7 +152,7 @@ async def test_built_in_default_is_selectable_but_content_is_immutable(client: A
     ],
 )
 async def test_invalid_choices_do_not_echo_or_write_input(
-    client: AsyncClient, choice: dict
+    client: AsyncClient, choice: dict[str, Any]
 ) -> None:
     response = await client.put(
         "/api/chats/missing/workflow-use-case-presets/image_generation", json=choice
@@ -179,7 +181,7 @@ async def test_missing_scopes_refuse_inheritance_and_changes(
     "query", [{"limit": 0}, {"limit": 201}, {"offset": -1}, {"use_case": "missing"}]
 )
 async def test_recipe_listing_rejects_invalid_bounds_and_cases(
-    client: AsyncClient, query: dict
+    client: AsyncClient, query: dict[str, Any]
 ) -> None:
     response = await client.get(ROOT, params=query)
     assert response.status_code == 422

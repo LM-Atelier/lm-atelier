@@ -6,6 +6,7 @@ from importlib import import_module
 from importlib.util import find_spec
 from threading import Event, local
 from types import ModuleType
+from typing import Any, cast
 
 import pytest
 from sqlalchemy import Engine, event, select
@@ -53,7 +54,7 @@ def test_create_and_replace_preserve_detached_recipe_values(session: Session) ->
     first = service.create_preset(session, payload)
     assert first.name == "First" and first.use_case == WorkflowUseCase.IMAGE_GENERATION
     assert first.enabled and not first.builtin and not first.is_default
-    payload.settings_json["options"]["sizes"].append(512)
+    cast(dict[str, Any], payload.settings_json)["options"]["sizes"].append(512)
     assert first.settings_json == {"options": {"sizes": [256]}}
     changed = service.replace_preset(session, first.id, _payload("Renamed"))
     assert changed.id == first.id and changed.name == "Renamed"
@@ -104,8 +105,10 @@ def test_inheritance_automatic_and_explicit_choices_remain_distinct(
             == value
         )
         session.rollback()
-    assert session.get(Chat, "chat").generation_preset_ids_json == {}
-    assert session.get(Project, "project").generation_preset_ids_json == {}
+    chat, project = session.get(Chat, "chat"), session.get(Project, "project")
+    assert chat is not None and project is not None
+    assert chat.generation_preset_ids_json == {}
+    assert project.generation_preset_ids_json == {}
 
 
 @pytest.mark.parametrize("scope", ["chat", "project"])
@@ -327,11 +330,25 @@ def test_concurrent_selection_and_recipe_changes_remain_consistent(
     acquired, contending = Event(), Event()
     worker = local()
 
-    def before_execute(conn, cursor, statement, parameters, context, executemany):
+    def before_execute(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
         if statement == "BEGIN IMMEDIATE" and getattr(worker, "order", None) == "second":
             contending.set()
 
-    def after_execute(conn, cursor, statement, parameters, context, executemany):
+    def after_execute(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
         if statement == "BEGIN IMMEDIATE" and getattr(worker, "order", None) == "first":
             acquired.set()
             assert contending.wait(10), "The competing writer did not reach the database."
@@ -355,7 +372,7 @@ def test_concurrent_selection_and_recipe_changes_remain_consistent(
                 else:
                     service.delete_preset(separate, recipe.id)
             except service.WorkflowUseCasePresetServiceError as exc:
-                return exc.code
+                return cast(str, exc.code)
         return "saved"
 
     event.listen(engine, "before_cursor_execute", before_execute)

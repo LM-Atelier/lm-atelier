@@ -3,13 +3,14 @@
 from importlib import import_module
 from importlib.util import find_spec
 from types import ModuleType
+from typing import Any, Literal
 
 import pytest
 
 from local_lm.models import WorkflowRevision
 from local_lm.schemas import SettingField
 from local_lm.settings_registry import builtin_settings_for_role
-from local_lm.workflow_use_case_preset_resolution import ResolvedWorkflowUseCasePreset
+from local_lm.workflow_use_case_preset_resolution import PresetScope, ResolvedWorkflowUseCasePreset
 from local_lm.workflow_use_cases_v1 import WorkflowUseCase
 
 
@@ -25,7 +26,7 @@ def _preset(**values: object) -> ResolvedWorkflowUseCasePreset:
     )
 
 
-def _revision(schema: dict | None = None) -> WorkflowRevision:
+def _revision(schema: dict[str, Any] | None = None) -> WorkflowRevision:
     return WorkflowRevision(id="revision", workflow_id="workflow", input_schema_json=schema or {})
 
 
@@ -33,7 +34,7 @@ def _admit(
     preset: ResolvedWorkflowUseCasePreset,
     revision: WorkflowRevision | None = None,
     fields: list[SettingField] | None = None,
-):
+) -> Any:
     return _validator().validate_workflow_use_case_preset_settings(
         preset,
         revision or _revision(),
@@ -53,7 +54,9 @@ def test_stored_prompt_settings_are_refused_with_a_fixed_reason(key: str) -> Non
 
 
 def test_recipe_settings_are_bound_to_an_exact_revision_and_detached() -> None:
-    schema = {"properties": {"options": {"type": "object", "default": {"sizes": [256]}}}}
+    schema: dict[str, Any] = {
+        "properties": {"options": {"type": "object", "default": {"sizes": [256]}}}
+    }
     recipe = _preset(seed=9, options={"sizes": [512]})
     result = _admit(recipe, _revision(schema))
     assert result.workflow_revision_id == "revision"
@@ -65,7 +68,7 @@ def test_recipe_settings_are_bound_to_an_exact_revision_and_detached() -> None:
 
 
 @pytest.mark.parametrize("values", [{"unknown_control": 3}, {"seed": 4, "unknown_control": 3}])
-def test_unknown_recipe_settings_refuse_the_entire_layer(values: dict) -> None:
+def test_unknown_recipe_settings_refuse_the_entire_layer(values: dict[str, Any]) -> None:
     module = _validator()
     with pytest.raises(module.WorkflowUseCasePresetSettingsError) as caught:
         _admit(_preset(**values))
@@ -170,7 +173,9 @@ def test_wrong_revision_and_use_case_are_refused() -> None:
 @pytest.mark.parametrize(
     "mode,scope", [("automatic", "chat"), ("automatic", "project"), ("unconfigured", None)]
 )
-def test_automatic_and_unconfigured_contribute_no_settings(mode: str, scope: str | None) -> None:
+def test_automatic_and_unconfigured_contribute_no_settings(
+    mode: Literal["automatic", "unconfigured"], scope: PresetScope | None
+) -> None:
     recipe = ResolvedWorkflowUseCasePreset(WorkflowUseCase.IMAGE_GENERATION, mode, scope)
     result = _admit(recipe)
     assert result.preset.mode == mode and result.preset.scope == scope
