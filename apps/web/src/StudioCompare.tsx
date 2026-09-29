@@ -1,4 +1,4 @@
-import { Columns2, Eye } from "lucide-react";
+import { Columns2, Diff, Eye } from "lucide-react";
 import type { KeyboardEvent, PointerEvent } from "react";
 
 /** Comparing a result with the picture it was made from, on the canvas itself.
@@ -6,8 +6,10 @@ import type { KeyboardEvent, PointerEvent } from "react";
  * Holding shows the earlier picture in the result's place for as long as the
  * button is held, which is how a change too small to point at gets seen: the
  * eye catches what moves. Split lays the two across a divider instead, for a
- * change worth studying rather than spotting. Both keep the canvas's zoom, so
- * a detail is compared at the size it was edited at.
+ * change worth studying rather than spotting. What changed tints every pixel
+ * the edit changed, and says how much of the picture that is, for an edit
+ * meant to leave most of it alone. All keep the canvas's zoom, so a detail is
+ * compared at the size it was edited at.
  */
 export function StudioCompare({
   holding,
@@ -15,6 +17,10 @@ export function StudioCompare({
   split,
   onSplit,
   canSplit,
+  difference = false,
+  onDifference,
+  canDiffer = false,
+  changed = null,
 }: {
   holding: boolean;
   onHold: (held: boolean) => void;
@@ -23,6 +29,13 @@ export function StudioCompare({
   onSplit: (split: number | null) => void;
   /** Only two pictures of one shape line up across a divider. */
   canSplit: boolean;
+  /** Whether the changed pixels are tinted over the result. */
+  difference?: boolean;
+  onDifference?: (on: boolean) => void;
+  /** Only two pictures of exactly one size compare pixel for pixel. */
+  canDiffer?: boolean;
+  /** How much of the picture changed, once that is known. */
+  changed?: string | null;
 }) {
   const release = () => onHold(false);
   const holds = (key: string) => key === " " || key === "Enter";
@@ -77,6 +90,18 @@ export function StudioCompare({
           onChange={(event) => onSplit(Number(event.target.value) / 100)}
         />
       )}
+      {canDiffer && onDifference && (
+        <button
+          type="button"
+          className="secondary compact-button"
+          aria-pressed={difference}
+          title="Tints every pixel the edit changed"
+          onClick={() => onDifference(!difference)}
+        >
+          <Diff size={14} aria-hidden="true" /> What changed
+        </button>
+      )}
+      {canDiffer && difference && <small aria-live="polite">{changed ?? "Comparing…"}</small>}
     </div>
   );
 }

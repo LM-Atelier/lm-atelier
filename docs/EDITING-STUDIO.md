@@ -54,6 +54,12 @@ pictures. **Stop the edit** ends it, and the picture stays as it was.
 
 - **Compare** slides the edited result over its source, so differences show
   where they are.
+- In Image Studio, **Hold to compare** shows the picture a result was made
+  from while it is held, **Split** lays the two across a divider, and **What
+  changed** tints every pixel the edit changed, from amber for a slight change
+  to red for a large one, and says how much of the picture that is. What
+  changed is offered when the result and the picture it was made from are
+  exactly the same size, since only then do their pixels line up one to one.
 - **Lineage** appears once a result is at least two edits deep and walks the
   whole chain, oldest first: the image that entered each step and the exact
   instruction that transformed it, ending at the current result. A chat
