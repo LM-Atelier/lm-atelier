@@ -1,8 +1,9 @@
-/** Blurring a marked area: brushed or selected, then blurred with one press. */
+/** Blurring or pixelating a marked area: brushed or selected, then changed with one press. */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useEffect } from "react";
+import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { StudioBlurTool } from "./StudioBlurTool";
 import { StudioView } from "./StudioView";
@@ -43,6 +44,14 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+function panel(props: Partial<ComponentProps<typeof StudioBlurTool>>) {
+  return render(
+    <StudioBlurTool mask={createMask(40, 20)} maskVersion={0} featherPx={0} style="blur" radius={12}
+      block={12} busy={false} onStyle={vi.fn()} onRadius={vi.fn()} onBlock={vi.fn()} onBlur={vi.fn()}
+      onPixelate={vi.fn()} {...props} />,
+  );
+}
+
 function marked() {
   const mask = createMask(40, 20);
   mask.data.fill(255, 0, 40 * 10);
@@ -52,8 +61,7 @@ function marked() {
 describe("the blur panel", () => {
   it("asks for a marked area before it will blur", () => {
     const onBlur = vi.fn();
-    render(<StudioBlurTool mask={createMask(40, 20)} maskVersion={0} featherPx={0} radius={12} busy={false}
-      onRadius={vi.fn()} onBlur={onBlur} />);
+    panel({ onBlur });
 
     fireEvent.click(screen.getByRole("button", { name: "Blur the marked area" }));
 
@@ -65,8 +73,7 @@ describe("the blur panel", () => {
     const onBlur = vi.fn();
     const selection = new Blob(["mask"], { type: "image/png" });
     vi.mocked(encodeMaskPng).mockResolvedValueOnce(selection).mockResolvedValueOnce(null);
-    render(<StudioBlurTool mask={marked()} maskVersion={1} featherPx={0} radius={12} busy={false}
-      onRadius={vi.fn()} onBlur={onBlur} />);
+    panel({ mask: marked(), maskVersion: 1, onBlur });
     const blur = screen.getByRole("button", { name: "Blur the marked area" });
 
     fireEvent.click(blur);
@@ -79,13 +86,40 @@ describe("the blur panel", () => {
 
   it("reports the strength as it moves", () => {
     const onRadius = vi.fn();
-    render(<StudioBlurTool mask={null} maskVersion={0} featherPx={0} radius={30} busy={false}
-      onRadius={onRadius} onBlur={vi.fn()} />);
+    panel({ mask: null, radius: 30, onRadius });
 
     fireEvent.change(screen.getByRole("slider", { name: "Blur strength" }), { target: { value: "45" } });
 
     expect(screen.getByText("30 px")).toBeInTheDocument();
     expect(onRadius).toHaveBeenCalledWith(45);
+  });
+
+  it("switches to pixelating, with its own block size", () => {
+    const onStyle = vi.fn();
+    const onBlock = vi.fn();
+    panel({ mask: null, style: "pixelate", block: 16, onStyle, onBlock });
+
+    fireEvent.change(screen.getByRole("slider", { name: "Block size" }), { target: { value: "24" } });
+    fireEvent.click(screen.getByRole("button", { name: "Blur" }));
+
+    expect(screen.getByRole("button", { name: "Pixelate" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByRole("slider", { name: "Blur strength" })).toBeNull();
+    expect(screen.getByText("16 px")).toBeInTheDocument();
+    expect(onBlock).toHaveBeenCalledWith(24);
+    expect(onStyle).toHaveBeenCalledWith("blur");
+  });
+
+  it("hands the marked area to the pixelation, not the blur, while pixelating", async () => {
+    const onBlur = vi.fn();
+    const onPixelate = vi.fn();
+    const selection = new Blob(["mask"], { type: "image/png" });
+    vi.mocked(encodeMaskPng).mockResolvedValueOnce(selection);
+    panel({ mask: marked(), maskVersion: 1, style: "pixelate", onBlur, onPixelate });
+
+    fireEvent.click(screen.getByRole("button", { name: "Pixelate the marked area" }));
+
+    await waitFor(() => expect(onPixelate).toHaveBeenCalledWith(selection));
+    expect(onBlur).not.toHaveBeenCalled();
   });
 });
 
@@ -98,29 +132,42 @@ describe("marking an area to blur", () => {
     expect(state.blurRadius).toBe(100);
     expect(toolFor(state, null)).toBeInstanceOf(BrushTool);
   });
+
+  it("keeps pixelation blocks at two pixels or more", () => {
+    let state = studioToolReducer(initialToolState(), { type: "set-blur-style", style: "pixelate" });
+    state = studioToolReducer(state, { type: "set-pixel-block", block: 1 });
+
+    expect(state.blurStyle).toBe("pixelate");
+    expect(state.pixelBlock).toBe(2);
+    expect(studioToolReducer(state, { type: "set-pixel-block", block: 500 }).pixelBlock).toBe(100);
+  });
 });
+
+function openStudio() {
+  const session = { id: "chat-studio", messages: [] } as never;
+  vi.mocked(api.openStudioSession).mockResolvedValue(session);
+  vi.mocked(api.studioSession).mockResolvedValue(session);
+  vi.mocked(api.studioLocalEdit).mockResolvedValue(session);
+  vi.mocked(api.upload).mockResolvedValue({ id: "sha256:mask" } as never);
+  vi.mocked(api.artifact).mockResolvedValue({ id: "art-1", favorite: false } as never);
+  vi.mocked(api.editTemplates).mockResolvedValue([]);
+  vi.mocked(api.studioCapabilities).mockResolvedValue({ tools: [] });
+  vi.mocked(encodeMaskPng).mockResolvedValue(new Blob(["mask"], { type: "image/png" }));
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+  const bitmap = { width: 400, height: 200, close: vi.fn() } as unknown as ImageBitmap;
+  vi.mocked(useStudioImage).mockReturnValue({ bitmap, error: null, reload: vi.fn() });
+  render(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      <StudioView sourceArtifactId="art-1" onOpenArtifact={vi.fn()} onOpenWorkflows={vi.fn()} onClose={vi.fn()} />
+    </QueryClientProvider>,
+  );
+}
 
 describe("blurring in the studio", () => {
   it("uploads the marked area and sends it with the strength", async () => {
-    const session = { id: "chat-studio", messages: [] } as never;
-    vi.mocked(api.openStudioSession).mockResolvedValue(session);
-    vi.mocked(api.studioSession).mockResolvedValue(session);
-    vi.mocked(api.studioLocalEdit).mockResolvedValue(session);
-    vi.mocked(api.upload).mockResolvedValue({ id: "sha256:mask" } as never);
-    vi.mocked(api.artifact).mockResolvedValue({ id: "art-1", favorite: false } as never);
-    vi.mocked(api.editTemplates).mockResolvedValue([]);
-    vi.mocked(api.studioCapabilities).mockResolvedValue({ tools: [] });
-    vi.mocked(encodeMaskPng).mockResolvedValue(new Blob(["mask"], { type: "image/png" }));
-    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
-    const bitmap = { width: 400, height: 200, close: vi.fn() } as unknown as ImageBitmap;
-    vi.mocked(useStudioImage).mockReturnValue({ bitmap, error: null, reload: vi.fn() });
-    render(
-      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-        <StudioView sourceArtifactId="art-1" onOpenArtifact={vi.fn()} onOpenWorkflows={vi.fn()} onClose={vi.fn()} />
-      </QueryClientProvider>,
-    );
+    openStudio();
 
-    fireEvent.click(await screen.findByRole("button", { name: /^Blur part of the picture/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Blur or pixelate part of the picture/ }));
     expect(screen.queryByRole("button", { name: "Apply edit" })).toBeNull();
     // One dab of the brush in the middle of the picture, from the keyboard.
     const canvas = screen.getByRole("application");
@@ -135,6 +182,24 @@ describe("blurring in the studio", () => {
       source_artifact_id: "art-1",
       operation: "blur",
       blur: { mask_artifact_id: "sha256:mask", radius: 12 },
+    });
+  });
+
+  it("sends a pixelation of the marked area with its block size", async () => {
+    openStudio();
+
+    fireEvent.click(await screen.findByRole("button", { name: /^Blur or pixelate part of the picture/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Pixelate" }));
+    const canvas = screen.getByRole("application");
+    fireEvent.keyDown(canvas, { key: "Enter" });
+    fireEvent.keyDown(canvas, { key: "Enter" });
+    fireEvent.click(await screen.findByRole("button", { name: "Pixelate the marked area" }));
+
+    await waitFor(() => expect(api.studioLocalEdit).toHaveBeenCalledTimes(1));
+    expect(api.studioLocalEdit).toHaveBeenCalledWith("chat-studio", {
+      source_artifact_id: "art-1",
+      operation: "pixelate",
+      pixelate: { mask_artifact_id: "sha256:mask", block: 12 },
     });
   });
 });

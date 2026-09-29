@@ -182,8 +182,8 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
         throw new Error("This picture is still opening. Try that again in a moment.");
       }
       // A marked area uploads first, as a selection, and the edit names it.
-      const { blur, paint, caption, ...rest } = details ?? {};
-      const selection = blur?.selection ?? paint?.selection;
+      const { blur, pixelate, paint, caption, ...rest } = details ?? {};
+      const selection = blur?.selection ?? pixelate?.selection ?? paint?.selection;
       const marked = selection
         ? await api.upload(new File([selection], "studio-selection.png", { type: "image/png" }))
         : null;
@@ -192,6 +192,9 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
         operation,
         ...rest,
         ...(blur && marked ? { blur: { mask_artifact_id: marked.id, radius: blur.radius } } : {}),
+        ...(pixelate && marked
+          ? { pixelate: { mask_artifact_id: marked.id, block: pixelate.block } }
+          : {}),
         ...(paint && marked
           ? { paint: { mask_artifact_id: marked.id, color: paint.color, opacity: paint.opacity } }
           : {}),

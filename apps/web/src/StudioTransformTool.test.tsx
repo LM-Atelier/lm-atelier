@@ -1,10 +1,12 @@
-/** Turning and flipping: a press is the whole edit, and it arrives as the next step. */
+/** Turning, straightening and flipping: each arrives as the next step. */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { useEffect, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { StudioView } from "./StudioView";
+import { keptSize } from "./studioStraighten";
+import { initialToolState, studioToolReducer } from "./studioToolState";
 import { api } from "./api";
 import { useStudioImage } from "./useStudioImage";
 import { useStudioSession } from "./useStudioSession";
@@ -118,7 +120,7 @@ describe("the rotate or flip tool", () => {
   it("turns the picture on screen with one press, with nothing to select or apply", async () => {
     openStudio();
     vi.mocked(api.studioLocalEdit).mockResolvedValue(session([]));
-    fireEvent.click(await screen.findByRole("button", { name: /^Rotate or flip/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Rotate, straighten or flip/ }));
 
     expect(screen.queryByRole("button", { name: "Apply edit" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Invert" })).toBeNull();
@@ -138,7 +140,7 @@ describe("the rotate or flip tool", () => {
   it("refuses another press while an edit is still arriving", async () => {
     openStudio();
     vi.mocked(api.studioLocalEdit).mockReturnValue(new Promise(() => {}) as never);
-    fireEvent.click(await screen.findByRole("button", { name: /^Rotate or flip/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Rotate, straighten or flip/ }));
     const flip = screen.getByRole("button", { name: "Flip horizontally" });
     await waitFor(() => expect(flip).toHaveAttribute("aria-disabled", "false"));
     fireEvent.click(flip);
@@ -148,5 +150,55 @@ describe("the rotate or flip tool", () => {
     fireEvent.click(screen.getByRole("button", { name: "Flip vertically" }));
     expect(api.studioLocalEdit).toHaveBeenCalledTimes(1);
     expect(vi.mocked(api.studioLocalEdit).mock.calls[0][1].operation).toBe("flip_horizontal");
+  });
+
+  it("straightens by the angle on the slider, and only once there is one", async () => {
+    openStudio();
+    vi.mocked(api.studioLocalEdit).mockResolvedValue(session([]));
+    fireEvent.click(await screen.findByRole("button", { name: /^Rotate, straighten or flip/ }));
+    const straighten = screen.getByRole("button", { name: "Straighten" });
+    expect(straighten).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByText("level")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("slider", { name: "Straighten" }), { target: { value: "-2.5" } });
+
+    expect(screen.getByText("2.5° counterclockwise")).toBeInTheDocument();
+    await waitFor(() => expect(straighten).toHaveAttribute("aria-disabled", "false"));
+    fireEvent.click(straighten);
+    await waitFor(() => expect(api.studioLocalEdit).toHaveBeenCalledTimes(1));
+    expect(api.studioLocalEdit).toHaveBeenCalledWith("chat-studio", {
+      source_artifact_id: "art-1",
+      operation: "straighten",
+      straighten: { degrees: -2.5 },
+    });
+  });
+
+  it("puts the picture level again without a step", async () => {
+    openStudio();
+    fireEvent.click(await screen.findByRole("button", { name: /^Rotate, straighten or flip/ }));
+    fireEvent.change(screen.getByRole("slider", { name: "Straighten" }), { target: { value: "4" } });
+    expect(screen.getByText("4° clockwise")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Level" }));
+
+    expect(screen.getByText("level")).toBeInTheDocument();
+    expect(api.studioLocalEdit).not.toHaveBeenCalled();
+  });
+});
+
+describe("straightening", () => {
+  it("keeps the angle in tenths of a degree, within its limit, and starts level on a new picture", () => {
+    let state = studioToolReducer(initialToolState(), { type: "set-straighten", degrees: 12.345 });
+    expect(state.straightenDegrees).toBe(12.3);
+    expect(studioToolReducer(state, { type: "set-straighten", degrees: -90 }).straightenDegrees).toBe(-45);
+
+    state = studioToolReducer(state, { type: "image-changed", width: 40, height: 20 });
+    expect(state.straightenDegrees).toBe(0);
+  });
+
+  it("keeps the same size the server cuts", () => {
+    // The server keeps 292 by 146 of a 400 by 200 picture turned ten degrees.
+    expect(keptSize(400, 200, 10)).toEqual({ width: 292, height: 146 });
+    expect(keptSize(400, 200, -10)).toEqual({ width: 292, height: 146 });
   });
 });

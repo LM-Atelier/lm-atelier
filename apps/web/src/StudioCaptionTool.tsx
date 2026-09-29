@@ -15,8 +15,8 @@ const FONTS: Array<{ font: CaptionFont; label: string }> = [
  * The words are drawn at the picture's own size in a typeface the app ships,
  * shown on the canvas as they are written, and that same drawing is what is
  * added, so the preview is the result. They sit at one of nine places with a
- * margin from the edges, and an outline in the opposite shade keeps them
- * readable over a busy picture.
+ * margin from the edges, and an outline in the opposite shade or a soft
+ * shadow keeps them readable over a busy picture.
  */
 export function StudioCaptionTool({
   caption,
@@ -124,6 +124,11 @@ export function StudioCaptionTool({
         <input type="checkbox" checked={caption.outline}
           onChange={(event) => onChange({ outline: event.target.checked })} />
         <span>Outline</span>
+      </label>
+      <label>
+        <input type="checkbox" checked={caption.shadow}
+          onChange={(event) => onChange({ shadow: event.target.checked })} />
+        <span>Shadow</span>
       </label>
       <StudioAnchorPicker value={caption.anchor} label="Where the words sit" onChange={(anchor) => onChange({ anchor })} />
       <small role={refusal ? "alert" : undefined}>

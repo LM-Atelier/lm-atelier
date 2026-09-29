@@ -54,6 +54,7 @@ test("shows the words as adding them lays them down", async ({ page }) => {
   await page.getByRole("button", { name: "Add text to the picture" }).click();
   await expect.poll(() => shownPixels(page).then((pixels) => pixels.length)).toBe(160 * 100 * 4);
   const before = await shownPixels(page);
+  await page.getByRole("checkbox", { name: "Shadow" }).check();
   await page.getByRole("textbox", { name: "Words" }).fill("Harbour");
   await expect.poll(async () => (await shownPixels(page)).join() !== before.join()).toBe(true);
   const preview = await shownPixels(page);

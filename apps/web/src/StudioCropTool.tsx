@@ -1,25 +1,32 @@
 import { Crop } from "lucide-react";
 import { useMemo } from "react";
+import { CROP_SHAPES, type CropShape } from "./studioCropShape";
 import { maskBounds, type MaskRaster } from "./studioMasks";
 import type { StudioCropBox } from "./types";
 
 /** Keeping one part of the picture, cut exactly and without a model.
  *
  * The box is drawn on the canvas, and a new one replaces the last, so what is
- * shown here is always what the press will keep. Nothing happens until then:
- * cropping discards the rest, which is worth one deliberate press.
+ * shown here is always what the press will keep. It can be held to a shape
+ * while it is drawn, and a box already drawn takes a newly chosen shape at
+ * once. Nothing happens until the press: cropping discards the rest, which
+ * is worth one deliberate press.
  */
 export function StudioCropTool({
   mask,
   maskVersion,
+  shape,
   busy,
+  onShape,
   onCrop,
 }: {
   /** What has been drawn, at the picture's own size. */
   mask: MaskRaster | null;
   /** Changes when a box is drawn, since the raster changes in place. */
   maskVersion: number;
+  shape: CropShape;
   busy: boolean;
+  onShape: (shape: CropShape) => void;
   onCrop: (box: StudioCropBox) => void;
 }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -28,6 +35,17 @@ export function StudioCropTool({
   const ready = box !== null && !busy;
   return (
     <div className="studio-tool-options">
+      <label className="studio-adjust-slider">
+        <span>
+          <strong>Box shape</strong>
+        </span>
+        <select aria-label="Box shape" value={shape}
+          onChange={(event) => onShape(event.target.value as CropShape)}>
+          {CROP_SHAPES.map((option) => (
+            <option key={option.shape} value={option.shape}>{option.label}</option>
+          ))}
+        </select>
+      </label>
       <small>
         {busy
           ? "Applying…"

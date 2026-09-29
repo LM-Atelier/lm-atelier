@@ -9,11 +9,15 @@
  * not a reducer action: see its note for why.
  */
 
+import { cropRatio, fittedBox, type CropShape } from "./studioCropShape";
+import { STRAIGHTEN_LIMIT } from "./studioStraighten";
 import {
   createMask,
   feather as featherMask,
+  fillRect,
   invert as invertMask,
   MAX_FEATHER_PX,
+  maskBounds,
   MaskHistory,
   type MaskRaster,
 } from "./studioMasks";
@@ -83,6 +87,14 @@ export type StudioToolState = {
   readonly adjustments: StudioColorAdjustments;
   /** How far a blur spreads, in the picture's own pixels. */
   readonly blurRadius: number;
+  /** Whether the blur tool blurs the marked area or breaks it into blocks. */
+  readonly blurStyle: "blur" | "pixelate";
+  /** The shape a crop box is held to while it is drawn. */
+  readonly cropShape: CropShape;
+  /** How far to turn the picture to straighten it, in degrees, clockwise when positive. */
+  readonly straightenDegrees: number;
+  /** The side of each block a pixelation makes, in the picture's own pixels. */
+  readonly pixelBlock: number;
   /** The paint's color as "#rrggbb", and how much of it covers the picture, in percent. */
   readonly paintColor: string;
   readonly paintOpacity: number;
@@ -113,6 +125,10 @@ export type StudioToolAction =
   | { type: "set-adjustment"; key: keyof StudioColorAdjustments; value: number }
   | { type: "reset-adjustments" }
   | { type: "set-blur-radius"; radius: number }
+  | { type: "set-blur-style"; style: "blur" | "pixelate" }
+  | { type: "set-crop-shape"; shape: CropShape }
+  | { type: "set-straighten"; degrees: number }
+  | { type: "set-pixel-block"; block: number }
   | { type: "set-paint-color"; color: string }
   | { type: "set-paint-opacity"; opacity: number }
   | { type: "set-caption"; patch: Partial<StudioCaption> }
@@ -141,6 +157,10 @@ export function initialToolState(): StudioToolState {
     lightKelvin: null,
     adjustments: NEUTRAL_ADJUSTMENTS,
     blurRadius: 12,
+    blurStyle: "blur",
+    cropShape: "free",
+    straightenDegrees: 0,
+    pixelBlock: 12,
     paintColor: "#000000",
     paintOpacity: 100,
     caption: DEFAULT_CAPTION,
@@ -198,6 +218,32 @@ export function studioToolReducer(
       return { ...state, adjustments: NEUTRAL_ADJUSTMENTS };
     case "set-blur-radius":
       return { ...state, blurRadius: clamp(action.radius, 1, 100) };
+    case "set-straighten":
+      // Tenths of a degree, the finest the slider offers.
+      return {
+        ...state,
+        straightenDegrees:
+          Math.round(Math.min(STRAIGHTEN_LIMIT, Math.max(-STRAIGHTEN_LIMIT, action.degrees)) * 10) / 10,
+      };
+    case "set-crop-shape": {
+      // A box already drawn takes the new shape at once, as the largest box
+      // of that shape inside it, so the box shown is always the one kept.
+      const ratio = state.mask ? cropRatio(action.shape, state.mask) : null;
+      const box = state.mask && ratio ? maskBounds(state.mask) : null;
+      if (!state.mask || !ratio || !box) return { ...state, cropShape: action.shape };
+      state.history.push(state.mask);
+      const fitted = fittedBox(box, ratio);
+      const mask = createMask(state.mask.width, state.mask.height);
+      if (fitted) {
+        fillRect(mask, fitted.left, fitted.top, fitted.left + fitted.width, fitted.top + fitted.height);
+      }
+      return { ...state, cropShape: action.shape, mask, maskVersion: state.maskVersion + 1 };
+    }
+    case "set-blur-style":
+      return { ...state, blurStyle: action.style };
+    case "set-pixel-block":
+      // One-pixel blocks would change nothing, so the smallest is two.
+      return { ...state, pixelBlock: clamp(action.block, 2, 100) };
     case "set-paint-color":
       return /^#[0-9a-f]{6}$/.test(action.color) ? { ...state, paintColor: action.color } : state;
     case "set-paint-opacity":
@@ -217,6 +263,7 @@ export function studioToolReducer(
       return {
         ...state,
         adjustments: NEUTRAL_ADJUSTMENTS,
+        straightenDegrees: 0,
         // Added words are in the new picture; keeping them would draw them twice.
         caption: { ...state.caption, text: "" },
         mask: createMask(action.width, action.height),
@@ -365,7 +412,7 @@ export function toolFor(
       return null;
     // A crop is one box: drawing another replaces it rather than adding to it.
     case "crop":
-      return new RectTool(state.mask, true);
+      return new RectTool(state.mask, true, cropRatio(state.cropShape, state.mask));
     // A resize is two numbers for the whole picture, a canvas change two and
     // a place, and an adjustment four.
     case "resize":

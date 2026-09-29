@@ -2,8 +2,8 @@
 
 The studio shows an adjustment on the picture while its sliders move, so the
 arithmetic here is the arithmetic the browser runs, in the same order: one
-lookup table per channel for warmth, brightness and contrast, then saturation
-as a mix toward each pixel's grey. Every step is integer arithmetic or
+lookup table per channel for warmth, tint, brightness and contrast, then
+saturation as a mix toward each pixel's grey. Every step is integer arithmetic or
 floating-point arithmetic with a stated rounding, which the browser repeats
 exactly, so the preview is the picture an apply makes. The browser's copy lives
 in studioAdjustments.ts, and the two are checked against the same pixels.
@@ -24,6 +24,9 @@ ADJUSTMENT_LIMIT = 100
 #: How far one step of the warmth slider moves the white point, in kelvin. At
 #: 100 the picture is balanced for 4000 K light, and at -100 for 9000 K.
 KELVIN_PER_WARMTH_STEP = 25
+#: How far the tint slider at either end moves green against red and blue,
+#: before the gains are evened out to keep the brightness.
+TINT_REACH = 0.15
 
 
 @dataclass(frozen=True)
@@ -34,9 +37,10 @@ class ColorAdjustments:
     contrast: int = 0
     saturation: int = 0
     warmth: int = 0
+    tint: int = 0
 
     def is_neutral(self) -> bool:
-        return not (self.brightness or self.contrast or self.saturation or self.warmth)
+        return not (self.brightness or self.contrast or self.saturation or self.warmth or self.tint)
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -48,8 +52,22 @@ def _rounded(value: float) -> int:
     return min(255, max(0, math.floor(value + 0.5)))
 
 
+def tint_gains(tint: int) -> tuple[float, float, float]:
+    """The red, green and blue gains that move the picture toward magenta or green.
+
+    A positive tint raises red and blue against green, which is magenta, and a
+    negative one does the reverse. The gains are evened out by their luma
+    weight, as warmth's are, so a tint changes the color and not the light.
+    """
+
+    shift = TINT_REACH * tint / ADJUSTMENT_LIMIT
+    gains = (1 + shift, 1 - shift, 1 + shift)
+    luma = 0.2126 * gains[0] + 0.7152 * gains[1] + 0.0722 * gains[2]
+    return (gains[0] / luma, gains[1] / luma, gains[2] / luma)
+
+
 def channel_tables(adjustments: ColorAdjustments) -> tuple[list[int], list[int], list[int]]:
-    """The red, green and blue lookup tables for warmth, brightness and contrast.
+    """The red, green and blue lookup tables for warmth, tint, brightness and contrast.
 
     Brightness scales every channel by two to the power of its slider over 100,
     so 100 doubles the light and -100 halves it. Contrast does the same to the
@@ -57,7 +75,9 @@ def channel_tables(adjustments: ColorAdjustments) -> tuple[list[int], list[int],
     the end, so the steps do not lose detail to each other.
     """
 
-    gains = warmth_gains(NEUTRAL_KELVIN - KELVIN_PER_WARMTH_STEP * adjustments.warmth)
+    warmth = warmth_gains(NEUTRAL_KELVIN - KELVIN_PER_WARMTH_STEP * adjustments.warmth)
+    tint = tint_gains(adjustments.tint)
+    gains = [warmth[index] * tint[index] for index in range(3)]
     brightness = 2 ** (adjustments.brightness / ADJUSTMENT_LIMIT)
     contrast = 2 ** (adjustments.contrast / ADJUSTMENT_LIMIT)
     tables: list[list[int]] = []

@@ -1,14 +1,16 @@
 """Edits the studio makes to a picture itself, without a model.
 
-Rotating, flipping, cropping, resizing, adjusting light and color, blurring or
-painting a marked area, adding words and changing the canvas all happen here.
-They need no workflow and no graphics card, and they should not look as though
-one ran. Each result is made from the stored bytes of the picture being edited.
-Turns, flips, crops and canvas changes move pixels exactly; a resize resamples
-them once, by a recorded method; an adjustment maps each pixel's color by the
-arithmetic the studio previews it with; a blur or a paint changes only the
-marked area, through the same selection a region edit uses; and words are the
-very overlay the browser drew and showed, laid over the picture.
+Rotating, straightening, flipping, cropping, resizing, adjusting light and
+color, blurring, pixelating or painting a marked area, adding words and
+changing the canvas all happen here. They need no workflow and no graphics card, and they should not
+look as though one ran. Each result is made from the stored bytes of the
+picture being edited. Turns, flips, crops and canvas changes move pixels
+exactly; a resize resamples them once, by a recorded method, and so does a
+straightening, which then keeps the box the turned picture still covers; an adjustment maps
+each pixel's color by the arithmetic the studio previews it with; a blur, a
+pixelation or a paint changes only the marked area, through the same selection
+a region edit uses; and words are the very overlay the browser drew and
+showed, laid over the picture.
 
 The result is stored like any other picture and recorded in the session as one
 more step, so the filmstrip, compare and a later edit all treat it the same
@@ -18,6 +20,7 @@ because none ran.
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass
 from pathlib import PurePath
 from typing import Any
@@ -48,10 +51,12 @@ _DESCRIPTIONS: dict[StudioLocalEditOperation, str] = {
     "rotate_counterclockwise": "Rotate left",
     "flip_horizontal": "Flip horizontally",
     "flip_vertical": "Flip vertically",
+    "straighten": "Straighten",
     "crop": "Crop",
     "resize": "Resize",
     "adjust": "Adjust light and color",
     "blur": "Blur part of the picture",
+    "pixelate": "Pixelate part of the picture",
     "paint": "Paint over part of the picture",
     "caption": "Add text",
     "canvas": "Change the canvas size",
@@ -62,10 +67,12 @@ _NAME_SUFFIXES: dict[StudioLocalEditOperation, str] = {
     "rotate_counterclockwise": "rotated left",
     "flip_horizontal": "flipped",
     "flip_vertical": "flipped vertically",
+    "straighten": "straightened",
     "crop": "cropped",
     "resize": "resized",
     "adjust": "adjusted",
     "blur": "blurred",
+    "pixelate": "pixelated",
     "paint": "painted",
     "caption": "with text",
     "canvas": "canvas changed",
@@ -166,6 +173,16 @@ class SelectionBlur:
     mask_artifact_id: str
 
 
+@dataclass(frozen=True)
+class SelectionPixelate:
+    """The marked area as uploaded selection bytes, and the block size in pixels."""
+
+    mask: bytes
+    block: int
+    #: The uploaded selection, named in the step so the pixelation can be retraced.
+    mask_artifact_id: str
+
+
 def render_local_edit(
     payload: bytes,
     operation: StudioLocalEditOperation,
@@ -176,6 +193,8 @@ def render_local_edit(
     canvas: CanvasChange | None = None,
     paint: SelectionPaint | None = None,
     caption: CaptionOverlay | None = None,
+    pixelate: SelectionPixelate | None = None,
+    straighten: float | None = None,
 ) -> bytes:
     """The edited picture as PNG, made from the stored bytes without a model."""
 
@@ -212,6 +231,8 @@ def render_local_edit(
                 "studio-crop-outside-picture", "The part to keep must lie inside the picture."
             )
         result = picture.crop((crop.left, crop.top, crop.left + crop.width, crop.top + crop.height))
+    elif operation == "straighten":
+        result = _straightened(picture, straighten)
     elif operation == "resize":
         result = _resized(picture, size)
     elif operation == "adjust":
@@ -220,6 +241,8 @@ def render_local_edit(
         result = adjust_colors(picture, adjustments)
     elif operation == "blur":
         result = _blurred(picture, blur, orientation)
+    elif operation == "pixelate":
+        result = _pixelated(picture, pixelate, orientation)
     elif operation == "canvas":
         result = _on_canvas(picture, canvas)
     elif operation == "paint":
@@ -232,6 +255,36 @@ def render_local_edit(
     # its profile when none is given, so a dropped profile would come back.
     result.info = {}
     return encode_png(result, profile if isinstance(profile, bytes) else None)
+
+
+def _straightened(picture: Image.Image, degrees: float | None) -> Image.Image:
+    if degrees is None or degrees == 0:
+        raise LocalEditError(
+            "studio-straighten-unchanged", "Turn the picture by some angle to straighten it."
+        )
+    width, height = picture.size
+    turn = math.radians(abs(degrees))
+    # The turned picture still covers a box of its own shape centered where it
+    # turns; this is the largest such box.
+    scale = min(
+        width / (width * math.cos(turn) + height * math.sin(turn)),
+        height / (width * math.sin(turn) + height * math.cos(turn)),
+    )
+    # Two pixels in from each side, so the resampling never reaches the
+    # empty corners the turn leaves outside the picture.
+    scale -= 4 / min(width, height)
+    kept_width = max(1, math.floor(width * scale))
+    kept_height = max(1, math.floor(height * scale))
+    # Turned with its colors premultiplied, as a blur is, so no hidden color
+    # under a transparent pixel is carried into its neighbours.
+    premultiplied = picture.mode == "RGBA"
+    source = picture.convert("RGBa") if premultiplied else picture
+    # Pillow turns counterclockwise for a positive angle.
+    turned = source.rotate(-degrees, resample=Image.Resampling.BICUBIC)
+    left = (width - kept_width) // 2
+    top = (height - kept_height) // 2
+    kept = turned.crop((left, top, left + kept_width, top + kept_height))
+    return kept.convert("RGBA") if premultiplied else kept
 
 
 def _blurred(picture: Image.Image, blur: SelectionBlur | None, orientation: int) -> Image.Image:
@@ -247,6 +300,27 @@ def _blurred(picture: Image.Image, blur: SelectionBlur | None, orientation: int)
     source = picture.convert("RGBa") if premultiplied else picture
     blurred = source.filter(ImageFilter.GaussianBlur(blur.radius))
     return Image.composite(blurred.convert("RGBA") if premultiplied else blurred, picture, alpha)
+
+
+def _pixelated(
+    picture: Image.Image, pixelate: SelectionPixelate | None, orientation: int
+) -> Image.Image:
+    if pixelate is None:
+        raise LocalEditError("studio-pixelate-missing", "Mark the part of the picture to pixelate.")
+    try:
+        alpha = selection_alpha(pixelate.mask, picture.size, orientation)
+    except RegionEditError as exc:
+        raise LocalEditError(exc.code, str(exc)) from exc
+    # Blocks start at the picture's top-left corner, and each takes the mean of
+    # the pixels it covers, so a block cut short by the edge averages only what
+    # it has. Premultiplied, as for a blur, so no hidden color comes through.
+    premultiplied = picture.mode == "RGBA"
+    source = picture.convert("RGBa") if premultiplied else picture
+    means = source.reduce(pixelate.block)
+    blocks = means.resize(
+        (means.width * pixelate.block, means.height * pixelate.block), Image.Resampling.NEAREST
+    ).crop((0, 0, picture.width, picture.height))
+    return Image.composite(blocks.convert("RGBA") if premultiplied else blocks, picture, alpha)
 
 
 def _painted(picture: Image.Image, paint: SelectionPaint | None, orientation: int) -> Image.Image:
@@ -375,6 +449,8 @@ def record_local_edit(
     canvas: CanvasChange | None = None,
     paint: SelectionPaint | None = None,
     caption: CaptionOverlay | None = None,
+    pixelate: SelectionPixelate | None = None,
+    straighten: float | None = None,
 ) -> Artifact:
     """Store the edited picture and append it to the session as one more step.
 
@@ -387,6 +463,8 @@ def record_local_edit(
     record: dict[str, Any] = {"operation": operation, "source_artifact_id": source.id}
     if crop is not None:
         record["crop"] = asdict(crop)
+    if straighten is not None:
+        record["straighten"] = {"degrees": straighten, "resampler": "bicubic"}
     if size is not None:
         record["size"] = asdict(size)
         record["resampler"] = RESIZE_RESAMPLER
@@ -397,6 +475,11 @@ def record_local_edit(
             "radius": blur.radius,
             "filter": "gaussian",
             "mask_artifact_id": blur.mask_artifact_id,
+        }
+    if pixelate is not None:
+        record["pixelate"] = {
+            "block": pixelate.block,
+            "mask_artifact_id": pixelate.mask_artifact_id,
         }
     if canvas is not None:
         record["canvas"] = asdict(canvas)
@@ -482,6 +565,8 @@ def edited_picture(
     canvas: CanvasChange | None = None,
     paint: SelectionPaint | None = None,
     caption: CaptionOverlay | None = None,
+    pixelate: SelectionPixelate | None = None,
+    straighten: float | None = None,
 ) -> bytes:
     """Read the source's verified bytes and make the edited picture from them.
 
@@ -494,5 +579,15 @@ def edited_picture(
     except (ValueError, OSError) as exc:
         raise LocalEditError("studio-edit-unreadable", "This picture could not be read.") from exc
     return render_local_edit(
-        payload, operation, crop, size, adjustments, blur, canvas, paint, caption
+        payload,
+        operation,
+        crop,
+        size,
+        adjustments,
+        blur,
+        canvas,
+        paint,
+        caption,
+        pixelate,
+        straighten,
     )

@@ -86,6 +86,7 @@ describe("the words panel", () => {
     fireEvent.change(screen.getByRole("slider", { name: "Size" }), { target: { value: "12" } });
     fireEvent.click(screen.getByRole("button", { name: "Yellow" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "Outline" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Shadow" }));
     fireEvent.click(screen.getByRole("button", { name: "Top right" }));
     fireEvent.click(screen.getByRole("button", { name: "Add the words" }));
 
@@ -95,6 +96,7 @@ describe("the words panel", () => {
       { sizePercent: 12 },
       { color: "#fdd835" },
       { outline: false },
+      { shadow: true },
       { anchor: "top_right" },
     ]);
     await waitFor(() => expect(onAdd).toHaveBeenCalledWith(words));

@@ -4,7 +4,7 @@ import type { StudioColorAdjustments } from "./types";
  *
  * The canvas shows an adjustment while its sliders move, and an apply asks the
  * server to make the same picture. So this is the server's arithmetic step for
- * step (studio_adjustments.py): one lookup table per channel for warmth,
+ * step (studio_adjustments.py): one lookup table per channel for warmth, tint,
  * brightness and contrast, then saturation as a mix toward each pixel's grey,
  * with the same roundings. Both copies are checked against the same pixels.
  */
@@ -14,15 +14,20 @@ export const NEUTRAL_ADJUSTMENTS: StudioColorAdjustments = {
   contrast: 0,
   saturation: 0,
   warmth: 0,
+  tint: 0,
 };
 
 /** Each slider runs from -100 to 100, with 0 changing nothing. */
 export const ADJUSTMENT_LIMIT = 100;
 const NEUTRAL_KELVIN = 6500;
 const KELVIN_PER_WARMTH_STEP = 25;
+const TINT_REACH = 0.15;
 
 export function isNeutral(adjustments: StudioColorAdjustments): boolean {
-  return !(adjustments.brightness || adjustments.contrast || adjustments.saturation || adjustments.warmth);
+  return !(
+    adjustments.brightness || adjustments.contrast || adjustments.saturation || adjustments.warmth
+    || adjustments.tint
+  );
 }
 
 function channel(value: number): number {
@@ -49,13 +54,23 @@ export function warmthGains(kelvin: number): [number, number, number] {
   return [gains[0] / luma, gains[1] / luma, gains[2] / luma];
 }
 
+/** The red, green and blue gains that move the picture toward magenta or green, keeping brightness. */
+export function tintGains(tint: number): [number, number, number] {
+  const shift = TINT_REACH * tint / ADJUSTMENT_LIMIT;
+  const gains = [1 + shift, 1 - shift, 1 + shift];
+  const luma = 0.2126 * gains[0] + 0.7152 * gains[1] + 0.0722 * gains[2];
+  return [gains[0] / luma, gains[1] / luma, gains[2] / luma];
+}
+
 function rounded(value: number): number {
   return Math.min(255, Math.max(0, Math.floor(value + 0.5)));
 }
 
-/** The red, green and blue lookup tables for warmth, brightness and contrast. */
+/** The red, green and blue lookup tables for warmth, tint, brightness and contrast. */
 export function channelTables(adjustments: StudioColorAdjustments): [Uint8Array, Uint8Array, Uint8Array] {
-  const gains = warmthGains(NEUTRAL_KELVIN - KELVIN_PER_WARMTH_STEP * adjustments.warmth);
+  const warmth = warmthGains(NEUTRAL_KELVIN - KELVIN_PER_WARMTH_STEP * adjustments.warmth);
+  const tint = tintGains(adjustments.tint);
+  const gains = [0, 1, 2].map((index) => warmth[index] * tint[index]);
   const brightness = Math.pow(2, adjustments.brightness / ADJUSTMENT_LIMIT);
   const contrast = Math.pow(2, adjustments.contrast / ADJUSTMENT_LIMIT);
   const tables = gains.map((gain) => {

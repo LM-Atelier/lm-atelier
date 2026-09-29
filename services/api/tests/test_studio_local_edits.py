@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import io
+import math
 from typing import Any
 
 import pytest
 from httpx2 import AsyncClient
-from PIL import Image, ImageCms
+from PIL import Image, ImageCms, ImageDraw
 
 from local_lm.studio_adjustments import ColorAdjustments
 from local_lm.studio_local_edits import (
@@ -18,6 +19,7 @@ from local_lm.studio_local_edits import (
     PictureSize,
     SelectionBlur,
     SelectionPaint,
+    SelectionPixelate,
     render_local_edit,
 )
 
@@ -92,6 +94,69 @@ def test_a_crop_outside_the_picture_is_refused(box: CropBox) -> None:
         render_local_edit(_png(_tiles()), "crop", box)
 
     assert refused.value.code == "studio-crop-outside-picture"
+
+
+def test_straightening_keeps_the_largest_box_of_the_pictures_own_shape() -> None:
+    result = _open(
+        render_local_edit(_png(Image.new("RGB", (400, 200), WHITE)), "straighten", straighten=10)
+    )
+
+    # Turned ten degrees, a 400 by 200 picture still covers a centered box of
+    # its own shape 0.75 of its size, less two pixels a side: 292 by 146.
+    assert result.size == (292, 146)
+
+
+def test_a_leaning_line_stands_upright_once_straightened() -> None:
+    picture = Image.new("L", (200, 200), 255)
+    # From the bottom middle, leaning five degrees to the right toward the top.
+    lean = math.tan(math.radians(5))
+    ImageDraw.Draw(picture).line([(100, 190), (100 + 180 * lean, 10)], fill=0, width=3)
+
+    result = _open(render_local_edit(_png(picture.convert("RGB")), "straighten", straighten=-5))
+
+    width, height = result.size
+
+    def middle_of_the_line(y: int) -> float:
+        ink = [255 - result.getpixel((x, y))[0] for x in range(width)]
+        return sum(x * amount for x, amount in enumerate(ink)) / sum(ink)
+
+    # Over these rows the line leaned about nine pixels sideways, and turning
+    # the wrong way would make that fifteen. Upright, its middle moves by about
+    # one, which is how finely a drawn line three pixels wide lands.
+    middles = [middle_of_the_line(y) for y in range(height // 4, 3 * height // 4)]
+    assert max(middles) - min(middles) < 2
+
+
+def test_straightening_leaves_no_empty_corner() -> None:
+    solid = render_local_edit(_png(Image.new("RGB", (120, 80), WHITE)), "straighten", straighten=30)
+    clear = render_local_edit(
+        _png(Image.new("RGBA", (120, 80), (0, 0, 200, 255))), "straighten", straighten=-30
+    )
+
+    solid_picture = _open(solid)
+    assert (
+        min(
+            solid_picture.getpixel((x, y))[0]
+            for x in range(solid_picture.width)
+            for y in range(solid_picture.height)
+        )
+        >= 249
+    )
+    clear_picture = _open(clear)
+    assert clear_picture.mode == "RGBA"
+    assert {
+        clear_picture.getpixel((x, y))[3]
+        for x in range(clear_picture.width)
+        for y in range(clear_picture.height)
+    } == {255}
+
+
+@pytest.mark.parametrize("degrees", [None, 0])
+def test_straightening_by_no_angle_is_refused(degrees: float | None) -> None:
+    with pytest.raises(LocalEditError) as refused:
+        render_local_edit(_png(_tiles()), "straighten", straighten=degrees)
+
+    assert refused.value.code == "studio-straighten-unchanged"
 
 
 @pytest.mark.parametrize("size", [PictureSize(width=6, height=4), PictureSize(width=1, height=1)])
@@ -214,6 +279,78 @@ def test_a_blur_with_nothing_usable_marked_is_refused(mask: bytes, code: str) ->
         render_local_edit(_png(_checkers()), "blur", blur=blur)
 
     assert refused.value.code == code
+
+
+def _ramp() -> Image.Image:
+    """Five by three, each pixel its own grey, so every block's mean is known."""
+
+    picture = Image.new("RGB", (5, 3))
+    for y in range(3):
+        for x in range(5):
+            shade = 10 * (x + 5 * y)
+            picture.putpixel((x, y), (shade, shade, shade))
+    return picture
+
+
+def _all_marked(width: int = 5, height: int = 3) -> bytes:
+    return _png(Image.new("L", (width, height), 255))
+
+
+def test_a_pixelation_fills_each_block_with_its_mean() -> None:
+    pixelate = SelectionPixelate(mask=_all_marked(), block=2, mask_artifact_id="mask")
+
+    result = _open(render_local_edit(_png(_ramp()), "pixelate", pixelate=pixelate))
+
+    rows = [[result.getpixel((x, y))[0] for x in range(5)] for y in range(3)]
+    # Blocks start at the top-left corner. The last column and the last row are
+    # blocks cut short by the edge, averaged over the pixels they have: 40 and
+    # 90 make 65, 100 and 110 make 105, and the corner is 140 alone.
+    assert rows == [
+        [30, 30, 50, 50, 65],
+        [30, 30, 50, 50, 65],
+        [105, 105, 125, 125, 140],
+    ]
+
+
+def test_a_pixelation_changes_only_the_marked_area() -> None:
+    marked_left = Image.new("L", (5, 3), 0)
+    marked_left.paste(255, (0, 0, 4, 3))
+    pixelate = SelectionPixelate(mask=_png(marked_left), block=2, mask_artifact_id="mask")
+
+    result = _open(render_local_edit(_png(_ramp()), "pixelate", pixelate=pixelate))
+
+    assert [result.getpixel((4, y)) for y in range(3)] == [
+        _ramp().getpixel((4, y)) for y in range(3)
+    ]
+    assert result.getpixel((0, 0)) == (30, 30, 30)
+
+
+def test_a_pixelation_keeps_transparency_and_hides_no_color_under_it() -> None:
+    picture = Image.new("RGBA", (8, 4), (0, 0, 255, 255))
+    for y in range(4):
+        picture.putpixel((0, y), (255, 0, 0, 0))
+    pixelate = SelectionPixelate(mask=_left_half(), block=2, mask_artifact_id="mask")
+
+    result = _open(render_local_edit(_png(picture), "pixelate", pixelate=pixelate))
+
+    assert result.mode == "RGBA"
+    # The block over the transparent column is half covered, and blue only.
+    assert result.getpixel((0, 0)) == (0, 0, 255, 128)
+    shown = [result.getpixel((x, y)) for y in range(4) for x in range(8)]
+    assert all(pixel[0] == 0 for pixel in shown if pixel[3] > 0)
+
+
+def test_a_pixelation_without_a_usable_marked_area_is_refused() -> None:
+    with pytest.raises(LocalEditError) as missing:
+        render_local_edit(_png(_ramp()), "pixelate")
+    empty = SelectionPixelate(
+        mask=_png(Image.new("L", (5, 3), 0)), block=2, mask_artifact_id="mask"
+    )
+    with pytest.raises(LocalEditError) as unmarked:
+        render_local_edit(_png(_ramp()), "pixelate", pixelate=empty)
+
+    assert missing.value.code == "studio-pixelate-missing"
+    assert unmarked.value.code == "region-selection-empty"
 
 
 def _paint(color: tuple[int, int, int], opacity: int, mask: bytes | None = None) -> SelectionPaint:
@@ -534,6 +671,38 @@ async def test_a_result_already_in_the_session_can_be_turned_again(client: Async
     assert cropped.getpixel((0, 0)) == GREEN
 
 
+async def test_a_straightening_is_recorded_with_its_angle_and_method(
+    client: AsyncClient,
+) -> None:
+    source_id = await _upload(client, "wide.png", _png(Image.new("RGB", (400, 200), WHITE)))
+    session_id = await _session_over(client, source_id)
+
+    response = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={
+            "source_artifact_id": source_id,
+            "operation": "straighten",
+            "straighten": {"degrees": 10},
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    request, answer = response.json()["messages"]
+    assert request["parts"][0]["text"] == "Straighten"
+    image, metadata = answer["parts"]
+    assert metadata["metadata_json"]["provenance"] == {
+        "local_edit": {
+            "operation": "straighten",
+            "source_artifact_id": source_id,
+            "straighten": {"degrees": 10.0, "resampler": "bicubic"},
+        }
+    }
+    straightened = await _content(client, image["artifact_id"])
+    assert straightened.size == (292, 146)
+    detail = await client.get(f"/api/artifacts/{image['artifact_id']}")
+    assert detail.json()["original_name"] == "wide (straightened).png"
+
+
 async def test_a_resize_is_recorded_with_its_size_and_method(client: AsyncClient) -> None:
     source_id = await _upload(client, "tiles.png", _png(_tiles()))
     session_id = await _session_over(client, source_id)
@@ -570,7 +739,7 @@ async def test_an_adjustment_is_recorded_with_where_each_slider_stood(
 ) -> None:
     source_id = await _upload(client, "tiles.png", _png(_tiles()))
     session_id = await _session_over(client, source_id)
-    sliders = {"brightness": 10, "contrast": -20, "saturation": 30, "warmth": -40}
+    sliders = {"brightness": 10, "contrast": -20, "saturation": 30, "warmth": -40, "tint": 25}
 
     response = await client.post(
         f"/api/studio/sessions/{session_id}/local-edits",
@@ -620,6 +789,40 @@ async def test_a_blur_is_recorded_with_its_radius_and_marked_area(client: AsyncC
     blurred = await _content(client, image["artifact_id"])
     assert blurred.getpixel((7, 0)) == _checkers().getpixel((7, 0))
     assert 0 < blurred.getpixel((0, 0))[0] < 255
+
+
+async def test_a_pixelation_is_recorded_with_its_block_and_marked_area(
+    client: AsyncClient,
+) -> None:
+    source_id = await _upload(client, "ramp.png", _png(_ramp()))
+    mask_id = await _upload(client, "studio-selection.png", _all_marked())
+    session_id = await _session_over(client, source_id)
+
+    response = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={
+            "source_artifact_id": source_id,
+            "operation": "pixelate",
+            "pixelate": {"mask_artifact_id": mask_id, "block": 2},
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    request, answer = response.json()["messages"]
+    assert request["parts"][0]["text"] == "Pixelate part of the picture"
+    image, metadata = answer["parts"]
+    assert metadata["metadata_json"]["provenance"] == {
+        "local_edit": {
+            "operation": "pixelate",
+            "source_artifact_id": source_id,
+            "pixelate": {"block": 2, "mask_artifact_id": mask_id},
+        }
+    }
+    pixelated = await _content(client, image["artifact_id"])
+    assert pixelated.getpixel((0, 0)) == (30, 30, 30)
+    assert pixelated.getpixel((4, 2)) == (140, 140, 140)
+    detail = await client.get(f"/api/artifacts/{image['artifact_id']}")
+    assert detail.json()["original_name"] == "ramp (pixelated).png"
 
 
 async def test_a_canvas_change_is_recorded_with_its_size_anchor_and_fill(
@@ -842,6 +1045,54 @@ async def test_a_refused_edit_leaves_the_session_as_it_was(client: AsyncClient) 
             "blur": {"mask_artifact_id": source_id, "radius": 3},
         },
     )
+    stray_pixelation = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={
+            "source_artifact_id": source_id,
+            "operation": "blur",
+            "pixelate": {"mask_artifact_id": source_id, "block": 4},
+        },
+    )
+    one_pixel_blocks = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={
+            "source_artifact_id": source_id,
+            "operation": "pixelate",
+            "pixelate": {"mask_artifact_id": source_id, "block": 1},
+        },
+    )
+    no_pixelation_mask = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={
+            "source_artifact_id": source_id,
+            "operation": "pixelate",
+            "pixelate": {"mask_artifact_id": "sha256:" + "0" * 64, "block": 4},
+        },
+    )
+    stray_angle = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={
+            "source_artifact_id": source_id,
+            "operation": "flip_vertical",
+            "straighten": {"degrees": 5},
+        },
+    )
+    too_steep = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={
+            "source_artifact_id": source_id,
+            "operation": "straighten",
+            "straighten": {"degrees": 50},
+        },
+    )
+    level = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={
+            "source_artifact_id": source_id,
+            "operation": "straighten",
+            "straighten": {"degrees": 0},
+        },
+    )
     absent = await client.post(
         "/api/studio/sessions/absent/local-edits",
         json={"source_artifact_id": source_id, "operation": "flip_vertical"},
@@ -861,6 +1112,14 @@ async def test_a_refused_edit_leaves_the_session_as_it_was(client: AsyncClient) 
     assert no_mask.status_code == 422
     assert no_mask.json()["code"] == "studio-marked-area-missing"
     assert stray_blur.status_code == 422
+    assert stray_angle.status_code == 422
+    assert too_steep.status_code == 422
+    assert level.status_code == 422
+    assert level.json()["code"] == "studio-straighten-unchanged"
+    assert stray_pixelation.status_code == 422
+    assert one_pixel_blocks.status_code == 422
+    assert no_pixelation_mask.status_code == 422
+    assert no_pixelation_mask.json()["code"] == "studio-marked-area-missing"
     assert stray_canvas.status_code == 422
     assert no_words.status_code == 422
     assert no_words.json()["code"] == "studio-caption-missing"

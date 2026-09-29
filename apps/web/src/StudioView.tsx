@@ -22,6 +22,7 @@ import { renderLightMap } from "./studioLightMap";
 import { readSourcePixels } from "./studioSourcePixels";
 import { useAdjustedPreview } from "./useAdjustedPreview";
 import { useCaptionPreview } from "./useCaptionPreview";
+import { useStraightenPreview } from "./useStraightenPreview";
 import { paintRgb } from "./studioPaint";
 import {
   initialToolState,
@@ -153,12 +154,13 @@ export function StudioView({
   const sourcePixels = useMemo(() => (readsColors && bitmap ? readSourcePixels(bitmap) : null), [readsColors, bitmap]);
   const adjustedPreview = useAdjustedPreview(bitmap, sourcePixels, tools.kind === "adjust" ? tools.adjustments : null);
   const captionPreview = useCaptionPreview(bitmap, tools.kind === "caption" ? tools.caption : null);
+  const straightenPreview = useStraightenPreview(bitmap, tools.kind === "transform" ? tools.straightenDegrees : null);
   // The pointer tool is rebuilt whenever the mode or brush changes; each one
   // is a cheap wrapper over the shared raster, never a copy of it.
   const pointerTool = useMemo(
     () => toolFor(tools, sourcePixels),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tools.kind, tools.brushRadius, tools.mask, tools.selectionMode, tools.colorTolerance, sourcePixels],
+    [tools.kind, tools.brushRadius, tools.cropShape, tools.mask, tools.selectionMode, tools.colorTolerance, sourcePixels],
   );
   useEffect(() => {
     if (bitmap) {
@@ -275,7 +277,7 @@ export function StudioView({
           ) : bitmap ? (
             <StudioCanvas
               image={bitmap}
-              shown={adjustedPreview ?? captionPreview}
+              shown={adjustedPreview ?? captionPreview ?? straightenPreview}
               tint={tools.kind === "paint" ? { rgb: paintRgb(tools.paintColor), opacity: tools.paintOpacity / 100 } : null}
               mask={tools.mask}
               tool={pointerTool}
