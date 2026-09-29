@@ -100,6 +100,14 @@ describe("style contract", () => {
     expect(css).toMatch(/\.studio-stage\s*\{[^}]*position:\s*relative/);
   });
 
+  it("lets the studio header's controls wrap rather than run off a narrow window", () => {
+    const css = readFileSync(STYLESHEET, "utf8");
+    // In a narrow window the page header stacks, and the row of compare,
+    // favorite, export and close controls kept its full width, so the last
+    // of them sat past the edge of a phone screen with no way to scroll to it.
+    expect(css).toMatch(/\.studio-header-actions\s*\{[^}]*flex-wrap:\s*wrap/);
+  });
+
   it("keeps the light and the theme in Settings rather than floating over the work", () => {
     // A control fixed over every screen sits on whatever is underneath it, and
     // this one was changed rarely and in front of the work all day. It belongs
@@ -178,7 +186,10 @@ describe("style contract", () => {
     expect(view).toContain("favoriteArtifact");
     expect(view).toMatch(/aria-pressed=\{isFavorite\}/);
     expect(view).not.toContain("Save to library");
-    expect(view).toMatch(/download/);
+    // Export is its own control beside the mark, and it is still a download.
+    expect(view).toContain("<StudioExportLink");
+    const exporter = readFileSync(join(SOURCE_DIR, "StudioExportLink.tsx"), "utf8");
+    expect(exporter).toMatch(/download/);
   });
 
   it("keeps the composer above the transcript it floats over", () => {

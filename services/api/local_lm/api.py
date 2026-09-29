@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from itertools import islice
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
+from urllib.parse import quote
 
 import httpx
 from fastapi import (
@@ -270,6 +271,14 @@ from .orchestrator import (
     ResponseRevisionConflict,
 )
 from .ordered_planning import OrderedPlanConfirmationRequired
+from .picture_export import (
+    DEFAULT_EXPORT_QUALITY,
+    EXPORT_FORMATS,
+    ExportFormat,
+    PictureExportError,
+    export_file_name,
+    export_stored_picture,
+)
 from .platforms import list_platform_matrix
 from .preflight import (
     ExactCivitaiFileSelectionError,
@@ -6172,6 +6181,47 @@ async def artifact_content(
             "Content-Security-Policy": "sandbox; default-src 'none'",
             "Cross-Origin-Resource-Policy": "same-origin",
             "ETag": f'"{artifact.sha256}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.get("/artifacts/{artifact_id}/export")
+async def export_artifact(
+    artifact_id: str,
+    request: Request,
+    session: ConversationSessionDep,
+    file_format: Annotated[ExportFormat, Query(alias="format")],
+    quality: Annotated[int, Query(ge=1, le=100)] = DEFAULT_EXPORT_QUALITY,
+) -> Response:
+    """A picture written out as PNG, JPEG or WebP, upright and with its color profile.
+
+    Made from the stored bytes on each request and never stored itself, so
+    exporting cannot change the picture or add to the library.
+    """
+
+    artifact = session.get(Artifact, artifact_id)
+    if artifact is None:
+        raise api_error(404, "artifact-not-found", "artifact not found")
+    if not _is_editable_image(artifact):
+        raise api_error(
+            422, "artifact-not-a-picture", "Only a picture can be exported in another format."
+        )
+    try:
+        content = await run_in_threadpool(
+            export_stored_picture, _services(request).artifacts, artifact, file_format, quality
+        )
+    except PictureExportError as exc:
+        raise api_error(422, exc.code, str(exc)) from exc
+    name = quote(export_file_name(artifact.original_name, file_format), safe="")
+    return Response(
+        content,
+        media_type=EXPORT_FORMATS[file_format][1],
+        headers={
+            "Content-Disposition": f"attachment; filename*=utf-8''{name}",
+            "Cache-Control": "private, no-store",
+            "Content-Security-Policy": "sandbox; default-src 'none'",
+            "Cross-Origin-Resource-Policy": "same-origin",
             "X-Content-Type-Options": "nosniff",
         },
     )
