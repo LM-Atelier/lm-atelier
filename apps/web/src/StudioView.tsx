@@ -6,6 +6,7 @@ import { GenerationIdentitySummary } from "./GenerationIdentitySummary";
 import { StudioOpenImage } from "./StudioOpenImage";
 import { ErrorCallout } from "./ErrorCallout";
 import { StudioCanvas } from "./StudioCanvas";
+import { StudioCompare } from "./StudioCompare";
 import { StudioExtendHandles } from "./StudioExtendHandles";
 import { StudioRecipes } from "./StudioRecipes";
 import { StudioSelectionTool } from "./StudioSelectionTool";
@@ -26,6 +27,7 @@ import {
   toolUsesMask,
   type StudioToolKind,
 } from "./studioToolState";
+import { useStudioCompare } from "./useStudioCompare";
 import { useStudioImage } from "./useStudioImage";
 import { useStudioSession, type StudioStep } from "./useStudioSession";
 import { useStudioBackground } from "./useStudioBackground";
@@ -141,6 +143,7 @@ export function StudioView({
     },
   });
   const { bitmap, error: imageError, reload } = useStudioImage(currentArtifactId);
+  const compare = useStudioCompare(current, bitmap, Boolean(previewArtifactId));
   // Read for the wand only, from the picture on the canvas, and again for each new one.
   const readsColors = tools.kind === "wand";
   const sourcePixels = useMemo(() => (readsColors && bitmap ? readSourcePixels(bitmap) : null), [readsColors, bitmap]);
@@ -195,6 +198,7 @@ export function StudioView({
         <div className="studio-header-actions">
           {current && !previewArtifactId && (
             <>
+              {compare.layer && <StudioCompare {...compare.controls} />}
               {/* Every result is already in the library - the close dialog
                   beside this says so. What this does is mark one, which is
                   what makes it findable among hundreds, and it is named for
@@ -274,6 +278,7 @@ export function StudioView({
               mask={tools.mask}
               tool={pointerTool}
               maskVersion={tools.maskVersion}
+              before={compare.layer}
               onGestureStart={() => snapshotBeforeGesture(tools)}
               onStrokeEnd={() => dispatch({ type: "stroke-end" })}
             />

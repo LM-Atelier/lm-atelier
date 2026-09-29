@@ -45,6 +45,9 @@ export type StudioStep = {
   artifactId: string;
   /** The instruction that produced this result; empty for the source. */
   instruction: string;
+  /** The picture this result was made from: the first one its turn was given.
+   * Null for the source, and for a turn that recorded no picture. */
+  beforeArtifactId: string | null;
   isSource: boolean;
   generationIdentity: GenerationIdentity | null;
 };
@@ -244,6 +247,7 @@ export function studioSteps(
       messageId: "source",
       artifactId: sourceArtifactId,
       instruction: "",
+      beforeArtifactId: null,
       isSource: true,
       generationIdentity: null,
     });
@@ -255,10 +259,14 @@ export function studioSteps(
     );
     if (!image?.artifact_id) continue;
     const metadata = message.parts.find((part) => part.type === "generation_metadata");
+    const turn = producingTurn(session.messages, message);
     steps.push({
       messageId: message.id,
       artifactId: image.artifact_id,
-      instruction: instructionFor(session.messages, message),
+      instruction: turn?.parts.find((part) => part.type === "text" && part.text)?.text ?? "",
+      // Every studio edit sends the picture it changes first; a light map or
+      // a subject's picture only ever follows it.
+      beforeArtifactId: turn?.parts.find((part) => part.type === "image" && part.artifact_id)?.artifact_id ?? null,
       isSource: false,
       generationIdentity: generationIdentityFromProvenance(metadata?.metadata_json.provenance),
     });
@@ -266,12 +274,11 @@ export function studioSteps(
   return steps;
 }
 
-function instructionFor(messages: Message[], result: Message): string {
+/** The request a result answers: the nearest user turn before it. */
+function producingTurn(messages: Message[], result: Message): Message | null {
   const index = messages.findIndex((message) => message.id === result.id);
   for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
-    const message = messages[cursor];
-    if (message.role !== "user") continue;
-    return message.parts.find((part) => part.type === "text" && part.text)?.text ?? "";
+    if (messages[cursor].role === "user") return messages[cursor];
   }
-  return "";
+  return null;
 }
