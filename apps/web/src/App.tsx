@@ -1,6 +1,8 @@
 import { ChatSidebar } from "./ChatSidebar";
 import { ChatView } from "./ChatView";
-import { changeChatPages, restoreChatPages, snapshotChatPages, useChatPages } from "./useChatPages";
+import { useChatPages } from "./useChatPages";
+import { useChatDeletion } from "./useChatDeletion";
+import { CURRENT_CHAT_KEY, rememberCurrentChat } from "./currentChat";
 import { useChatFieldUpdate } from "./useChatFieldUpdate";
 import { useAppNavigation } from "./useAppNavigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -22,7 +24,6 @@ import type { PendingTurn } from "./chatComposerContracts";
 import {
   EMPTY_COMPOSER_DRAFT,
   updatedComposerDrafts,
-  withoutComposerDraft,
   type ComposerDraft,
 } from "./composerPromptSource";
 import { regenerateWithRetry } from "./regenerationRequest";
@@ -43,7 +44,6 @@ import { focusMainContent, roleForMode } from "./viewHelpers";
 export { MessageBubble } from "./MessageBubble";
 
 const SETUP_DISMISSED_KEY = "lm-atelier-setup-dismissed";
-const CURRENT_CHAT_KEY = "local-lm-chat";
 
 export default function App() {
   const client = useQueryClient();
@@ -94,7 +94,7 @@ export default function App() {
     mutationFn: (projectId?: string | null) => api.createChat(projectId),
     onSuccess: (created) => {
       setCurrentChatId(created.id);
-      localStorage.setItem(CURRENT_CHAT_KEY, created.id);
+      rememberCurrentChat(created.id);
       setView("chat");
       focusMainContent();
       void client.invalidateQueries({ queryKey: ["chats"] });
@@ -144,48 +144,14 @@ export default function App() {
       void client.invalidateQueries({ queryKey: ["chats"] });
     },
   });
-  const deleteChat = useMutation({
-    mutationFn: ({ id, deleteGeneratedMedia }: { id: string; deleteGeneratedMedia: boolean }) => api.deleteChat(id, deleteGeneratedMedia),
-    onMutate: async ({ id: deletedId }) => {
-      await client.cancelQueries({ queryKey: ["chats"] });
-      const previousChats = snapshotChatPages(client);
-      const remainingChats = (chats.data ?? []).filter((candidate) => candidate.id !== deletedId);
-      const previousCurrentChatId = currentChatId;
-      changeChatPages(client, (item) => item.id === deletedId ? null : item);
-      if (activeChatId === deletedId) {
-        const nextChatId = remainingChats.find((candidate) => !candidate.archived)?.id ?? null;
-        setCurrentChatId(nextChatId);
-        if (nextChatId) localStorage.setItem(CURRENT_CHAT_KEY, nextChatId);
-        else localStorage.removeItem(CURRENT_CHAT_KEY);
-      }
-      client.removeQueries({ queryKey: ["chat", deletedId], exact: true });
-      return { previousChats, previousCurrentChatId };
-    },
-    onSuccess: (_value, { id: deletedId }) => {
-      setChatDrafts((current) => {
-        const next = { ...current };
-        delete next[deletedId];
-        return next;
-      });
-      setComposerDrafts((current) => withoutComposerDraft(current, deletedId));
-      void client.invalidateQueries({ queryKey: ["artifacts"] });
-      void client.invalidateQueries({ queryKey: ["artifact-storage"] });
-      void client.invalidateQueries({ queryKey: ["jobs"] });
-    },
-    onError: (_error, _deletedChat, context) => {
-      if (!context) return;
-      restoreChatPages(client, context.previousChats);
-      setCurrentChatId(context.previousCurrentChatId);
-      if (context.previousCurrentChatId) localStorage.setItem(CURRENT_CHAT_KEY, context.previousCurrentChatId);
-      else localStorage.removeItem(CURRENT_CHAT_KEY);
-    },
-    onSettled: () => void client.invalidateQueries({ queryKey: ["chats"] }),
+  const deleteChat = useChatDeletion({
+    client, chats: chats.data, currentChatId, activeChatId, setCurrentChatId, setChatDrafts, setComposerDrafts,
   });
   const { updateProject, deleteProject, exportProject, importProject } = useProjectMutations({
     client,
     onImportedChat: (chatId) => {
       setCurrentChatId(chatId);
-      localStorage.setItem(CURRENT_CHAT_KEY, chatId);
+      rememberCurrentChat(chatId);
       setView("chat");
     },
   });
@@ -296,7 +262,7 @@ export default function App() {
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content">Skip to main content</a>
-      <ChatSidebar projects={allProjects} engines={engines.data ?? []} presets={presets.data ?? []} currentChatId={activeChatId} view={view} setupState={setupReadiness.data?.state} onSetup={() => setSetupOpen(true)} onChat={(id) => { setCurrentChatId(id); localStorage.setItem(CURRENT_CHAT_KEY, id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={(name) => createProject.mutate(name)} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} sidebar={sidebar} />
+      <ChatSidebar projects={allProjects} engines={engines.data ?? []} presets={presets.data ?? []} currentChatId={activeChatId} view={view} setupState={setupReadiness.data?.state} onSetup={() => setSetupOpen(true)} onChat={(id) => { setCurrentChatId(id); rememberCurrentChat(id); setView("chat"); focusMainContent(); }} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={(name) => createProject.mutate(name)} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} sidebar={sidebar} />
       <main id="main-content" tabIndex={-1}>{activeContent}</main>
       <SetupSurface
         open={setupOpen}

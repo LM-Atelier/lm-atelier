@@ -1,12 +1,11 @@
 /** Reviewing empty chats and deleting a chosen few, all or none. */
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, api } from "./api";
-import { CURRENT_CHAT_STORAGE_KEY, EmptyChatMaintenance } from "./EmptyChatMaintenance";
+import { EmptyChatMaintenance } from "./EmptyChatMaintenance";
+import { rememberCurrentChat } from "./currentChat";
 import type { EmptyChatEntry, EmptyChatPage, EmptyChatPreview } from "./types";
 
 vi.mock("./api", async (importOriginal) => {
@@ -88,7 +87,7 @@ describe("EmptyChatMaintenance", () => {
   });
 
   it("selects only untouched chats, and never the chat open in the workspace", async () => {
-    localStorage.setItem(CURRENT_CHAT_STORAGE_KEY, "chat_open");
+    rememberCurrentChat("chat_open");
     vi.mocked(api.emptyChats).mockResolvedValue(
       page([
         entry("chat_untouched"),
@@ -215,12 +214,5 @@ describe("EmptyChatMaintenance", () => {
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("changed while you were deciding");
     expect(screen.queryByText(/^Deleted/)).toBeNull();
-  });
-
-  it("reads the open chat under the key the workspace writes it", () => {
-    // The key is duplicated rather than imported, because the workspace keeps it
-    // private; this is what stops the two from drifting apart silently.
-    const app = readFileSync(join(__dirname, "App.tsx"), "utf8");
-    expect(app).toContain(`const CURRENT_CHAT_KEY = "${CURRENT_CHAT_STORAGE_KEY}";`);
   });
 });

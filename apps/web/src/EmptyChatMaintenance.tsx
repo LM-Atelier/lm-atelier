@@ -3,10 +3,8 @@ import { useState } from "react";
 
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ApiError, api } from "./api";
+import { CURRENT_CHAT_KEY } from "./currentChat";
 import type { EmptyChatEntry, EmptyChatPreview } from "./types";
-
-/** The key the workspace keeps the open chat under, so it is never offered as safe. */
-export const CURRENT_CHAT_STORAGE_KEY = "local-lm-chat";
 
 /** Why an empty chat is listed as somebody's choice rather than untouched.
  *
@@ -82,9 +80,10 @@ function ageText(hours: number): string {
   return `${whole} ${whole === 1 ? "hour" : "hours"} old`;
 }
 
+/** The chat the workspace has open, so it is never offered as safe. */
 function openChatId(): string | null {
   try {
-    return localStorage.getItem(CURRENT_CHAT_STORAGE_KEY);
+    return localStorage.getItem(CURRENT_CHAT_KEY);
   } catch {
     return null;
   }
