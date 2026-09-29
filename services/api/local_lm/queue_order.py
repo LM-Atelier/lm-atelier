@@ -62,6 +62,14 @@ class QueueOrderConflict(Exception):
     """The lane or observed neighbourhood cannot accept this relative move."""
 
 
+class QueueOrderLimit(QueueOrderConflict):
+    """The current category exceeds the supported size for manual ordering."""
+
+    def __init__(self, maximum_jobs: int) -> None:
+        self.maximum_jobs = maximum_jobs
+        super().__init__("Maximum queue ordering size exceeded.")
+
+
 def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
@@ -75,15 +83,32 @@ def effective_priority(priority: int, enqueued: datetime, now: datetime) -> int:
 def manual_order_positions(
     session: Session, jobs: list[Job], controls: dict[str, JobQueueControl]
 ) -> dict[str, tuple[int, int]]:
-    identifiers = {controls[job.id].owner_id or job.id for job in jobs}
-    if not identifiers:
+    """Read current positions without scanning records retained for retries."""
+    lookup_ids: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for job in jobs:
+        job_lane = next((lane for lane, kinds in _KINDS.items() if job.kind in kinds), None)
+        if job_lane is None or job.kind == "edit_verify":
+            continue
+        owner = controls[job.id].owner_id
+        lookup_ids[(job_lane, "work_plan" if owner else "job")].add(owner or job.id)
+    if not lookup_ids:
         return {}
-    entries = {
-        (entry.lane, entry.owner_type, entry.owner_id): entry
-        for entry in session.scalars(
-            select(QueueOrderEntry).where(QueueOrderEntry.owner_id.in_(identifiers))
-        )
-    }
+    entries: dict[tuple[str, str, str], QueueOrderEntry] = {}
+    # Keep every primary-key prefix bound so retained history does not become
+    # a table scan on each dispatch. Batch identifiers without dropping any.
+    for (entry_lane, entry_type), identifiers in lookup_ids.items():
+        ordered_ids = sorted(identifiers)
+        for offset in range(0, len(ordered_ids), 500):
+            for stored_entry in session.scalars(
+                select(QueueOrderEntry).where(
+                    QueueOrderEntry.lane == entry_lane,
+                    QueueOrderEntry.owner_type == entry_type,
+                    QueueOrderEntry.owner_id.in_(ordered_ids[offset : offset + 500]),
+                )
+            ):
+                entries[(stored_entry.lane, stored_entry.owner_type, stored_entry.owner_id)] = (
+                    stored_entry
+                )
     result = {}
     for job in jobs:
         owner = controls[job.id].owner_id
@@ -211,7 +236,7 @@ def _snapshot(session: Session, lane: QueueLane, now: datetime) -> _Snapshot:
         .limit(_MAX_JOBS + 1)
     ).all()
     if len(rows) > _MAX_JOBS:
-        raise QueueOrderConflict
+        raise QueueOrderLimit(_MAX_JOBS)
     jobs = [_Job(*row) for row in rows]
     controls = job_controls(session, [job.id for job in jobs])
     plan_ids = {job.work_plan_id for job in jobs if job.work_plan_id}
@@ -265,6 +290,7 @@ def _snapshot(session: Session, lane: QueueLane, now: datetime) -> _Snapshot:
     }
     cohorts: dict[CohortKey, list[tuple[OwnerKey, datetime, str, int | None]]] = defaultdict(list)
     unavailable = []
+    ranks: dict[OwnerKey, tuple[str, int, datetime, str, str]] = {}
     for owner_key, members in owners.items():
         reason: Literal["lane-busy", "held", "blocked", "mixed-resources", "unsupported"] | None = (
             None
@@ -325,6 +351,13 @@ def _snapshot(session: Session, lane: QueueLane, now: datetime) -> _Snapshot:
             first.priority,
             effective_priority(first.priority, eligible_time(first), now),
         )
+        ranks[owner_key] = (
+            first.group,
+            -cohort_key[3],
+            eligible_time(first),
+            first.ticket or first.id,
+            first.id,
+        )
         entry = entries.get(owner_key)
         position = (
             entry.position
@@ -347,7 +380,7 @@ def _snapshot(session: Session, lane: QueueLane, now: datetime) -> _Snapshot:
             separators=(",", ":"),
         ).encode()
     ).hexdigest()
-    for cohort_key, cohort_members in sorted(cohorts.items()):
+    for cohort_key, cohort_members in cohorts.items():
         cohort_members.sort(
             key=lambda item: (item[3] is None, item[3] or 0, item[1], item[2], item[0])
         )
@@ -376,7 +409,19 @@ def _snapshot(session: Session, lane: QueueLane, now: datetime) -> _Snapshot:
                     unavailable_reason=None if idle else "lane-busy",
                 )
             )
-    return _Snapshot(revision, idle, [*items, *unavailable], groups, group_keys)
+    by_owner = {_key(item.owner): item for item in items}
+    ranked = sorted(by_owner, key=ranks.__getitem__)
+    slots: dict[str, list[int]] = defaultdict(list)
+    for index, key in enumerate(ranked):
+        row_cohort_id = by_owner[key].cohort_id
+        assert row_cohort_id is not None
+        slots[row_cohort_id].append(index)
+    for cohort_id, indices in slots.items():
+        for index, key in zip(indices, groups[cohort_id], strict=True):
+            ranked[index] = key
+    return _Snapshot(
+        revision, idle, [*[by_owner[key] for key in ranked], *unavailable], groups, group_keys
+    )
 
 
 def read_queue_order(
@@ -390,9 +435,11 @@ def read_queue_order(
         if not bool(getattr(driver, "in_transaction", False)):
             connection.exec_driver_sql("BEGIN")
     snapshot = _snapshot(session, lane, utcnow())
+    # Page cursors protect traversal order. Aging may refresh cohorts without
+    # moving rows; move commands still compare the current cohort and neighbours.
     digest = hashlib.sha256(
         json.dumps(
-            [item.model_dump(mode="json") for item in snapshot.items], sort_keys=True
+            [[item.owner.type, item.owner.id, item.unavailable_reason] for item in snapshot.items]
         ).encode()
     ).hexdigest()
     offset = 0
@@ -431,6 +478,7 @@ def read_queue_order(
 def change_queue_order(
     session: Session, lane: QueueLane, command: QueueOrderCommand
 ) -> QueueOrderResultOut:
+    """Replay successful moves even after the work completes or the queue grows."""
     if session.in_transaction():
         raise QueueOrderConflict
     try:

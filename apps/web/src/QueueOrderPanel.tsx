@@ -67,13 +67,14 @@ function QueueOrderLane({ lane }: { lane: QueueLane }) {
     onError: async (error) => {
       if (error instanceof ApiError && error.status === 409) {
         setAttempt(null);
-        setNotice("The queue changed. Review its latest order before moving work again.");
+        setNotice(error.code === "queue-order-limit-exceeded"
+          ? error.message : "The queue changed. Review its latest order before moving work again.");
         await refresh();
       }
     },
     onSettled: () => { sending.current = false; },
   });
-  const unavailable = page.isFetching || page.isError || mutation.isPending || attempt !== null;
+  const unavailable = page.isError || mutation.isPending || attempt !== null;
   const submit = (command: QueueOrderCommand | null) => {
     if (!command || sending.current) return;
     sending.current = true;
@@ -102,6 +103,7 @@ function QueueOrderLane({ lane }: { lane: QueueLane }) {
       <p role="status" aria-live="polite">{mutation.isPending ? "Saving order..." : notice}</p>
       {page.isPending && <p role="status">Loading dispatch order...</p>}
       {page.error && <p role="alert">{page.error instanceof ApiError && page.error.status === 409
+        && page.error.code !== "queue-order-limit-exceeded"
         ? "This page changed. Refresh dispatch order to load it again." : page.error.message}</p>}
       {mutation.error && !conflict && <div className="queue-activity-error">
         <p role="alert">{mutation.error.message}</p>
