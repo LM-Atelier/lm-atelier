@@ -335,11 +335,18 @@ export function StudioCanvas({
     if (endDrawing(screen)) onStrokeEnd?.();
   };
 
-  /** Cancellation and lost capture must not leave a half-drawn gesture. */
+  /** Cancellation and lost capture must not leave a half-drawn gesture, nor finish one.
+   *
+   * The pointer never came up, so a rectangle or a lasso still being drawn is
+   * dropped, as Escape drops it, rather than closed where the pointer was lost.
+   * What a brush has already painted stays, and Undo takes it back.
+   */
   const onPointerCancel = (event: ReactPointerEvent) => {
     activePointers.current.delete(event.pointerId);
     if (drawingPointer.current === event.pointerId) {
-      endDrawing(screenPoint(event));
+      drawingPointer.current = null;
+      tool?.cancel();
+      drawPreview();
       onStrokeEnd?.();
     }
     if (activePointers.current.size === 0) {
