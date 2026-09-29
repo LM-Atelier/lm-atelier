@@ -17,6 +17,7 @@ import httpx
 import psutil
 import pytest
 from httpx2 import AsyncClient
+from run_waits import wait_until
 from sqlalchemy.orm import Session, object_session
 
 import local_lm.comfy_registry_interpreter as registry_interpreter_module
@@ -743,10 +744,14 @@ async def test_stopping_worker_terminates_descendant_process_tree(
     settings.worker_shutdown_seconds = 1
     supervisor = ProcessSupervisor(settings)
     child_pid_file = tmp_path / "child.pid"
+    # Written under another name and renamed into place: writing the file where
+    # it is read creates it empty first, and a read in that moment finds no id.
+    unfinished = tmp_path / "child.pid.part"
     script = (
         "import pathlib, subprocess, sys, time; "
         "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
-        f"pathlib.Path({str(child_pid_file)!r}).write_text(str(child.pid)); "
+        f"pathlib.Path({str(unfinished)!r}).write_text(str(child.pid)); "
+        f"pathlib.Path({str(unfinished)!r}).replace({str(child_pid_file)!r}); "
         "time.sleep(60)"
     )
 
@@ -765,12 +770,15 @@ async def test_stopping_worker_terminates_descendant_process_tree(
             [sys.executable, "-c", script],
             "http://127.0.0.1:12341/health",
         )
-        for _attempt in range(100):
-            if child_pid_file.is_file():
-                child_pid = int(child_pid_file.read_text())
-                break
-            await asyncio.sleep(0.02)
-        assert child_pid is not None
+
+        async def written_id() -> str:
+            return child_pid_file.read_text() if child_pid_file.is_file() else ""
+
+        # Two interpreters start before the id is written, which on a busy
+        # runner takes seconds, so this waits with the suite's usual patience.
+        child_pid = int(
+            await wait_until(written_id, bool, what="the worker's child process id", interval=0.02)
+        )
         assert psutil.pid_exists(child_pid)
 
         await supervisor.stop("chat")
