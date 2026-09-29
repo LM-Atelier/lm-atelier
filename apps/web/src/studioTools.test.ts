@@ -241,3 +241,29 @@ describe("paint bucket and magic wand tools", () => {
     expect(Array.from(mask.data)).toEqual([255, 255, 0, 0]);
   });
 });
+
+describe("a crop box", () => {
+  it("replaces the last box rather than adding to it", () => {
+    const mask = createMask(100, 60);
+    const box = new RectTool(mask, true);
+    box.down({ x: 10, y: 10 });
+    box.up({ x: 30, y: 30 });
+    box.down({ x: 50, y: 20 });
+    box.up({ x: 70, y: 40 });
+
+    expect(mask.data[15 * 100 + 15]).toBe(0);
+    expect(mask.data[25 * 100 + 60]).toBe(255);
+  });
+
+  it("keeps an ordinary rectangle selection adding boxes together", () => {
+    const mask = createMask(100, 60);
+    const rect = new RectTool(mask);
+    rect.down({ x: 10, y: 10 });
+    rect.up({ x: 30, y: 30 });
+    rect.down({ x: 50, y: 20 });
+    rect.up({ x: 70, y: 40 });
+
+    expect(mask.data[15 * 100 + 15]).toBe(255);
+    expect(mask.data[25 * 100 + 60]).toBe(255);
+  });
+});

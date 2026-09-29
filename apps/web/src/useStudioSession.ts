@@ -6,6 +6,7 @@ import type {
   ChatDetail,
   GenerationIdentity,
   Message,
+  StudioLocalEditDetails,
   StudioLocalEditOperation,
   TurnAccepted,
 } from "./types";
@@ -173,14 +174,14 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
     onSuccess: () => void client.invalidateQueries({ queryKey: ["studio-session", sessionId] }),
   });
 
-  // Turning or flipping needs no model: the server makes the picture and
-  // answers with the session it now belongs to.
+  // Turning, flipping, cropping or resizing needs no model: the server makes
+  // the picture and answers with the session it now belongs to.
   const localEdit = useMutation({
-    mutationFn: ({ operation, artifactId }: { operation: StudioLocalEditOperation; artifactId: string }) => {
+    mutationFn: ({ operation, artifactId, details }: { operation: StudioLocalEditOperation; artifactId: string; details?: StudioLocalEditDetails }) => {
       if (!sessionId) {
         throw new Error("This picture is still opening. Try that again in a moment.");
       }
-      return api.studioLocalEdit(sessionId, { source_artifact_id: artifactId, operation });
+      return api.studioLocalEdit(sessionId, { source_artifact_id: artifactId, operation, ...details });
     },
     // Filed under the session that answered, which is not necessarily the one
     // on screen if another picture opened while this one was being turned.
@@ -194,9 +195,9 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
     previewArtifactId: session.data ? studioPreviewArtifactId(session.data) : null,
     busy: open.isPending || apply.isPending || localEdit.isPending || hasPendingWork(session.data),
     error: open.error ?? session.error ?? apply.error ?? localEdit.error,
-    /** Rotate or flip a picture in this session; `onDone` runs once the step exists. */
-    localEdit: (operation: StudioLocalEditOperation, artifactId: string, onDone?: () => void) =>
-      localEdit.mutate({ operation, artifactId }, { onSuccess: () => onDone?.() }),
+    /** Rotate, flip, crop or resize a picture in this session; `onDone` runs once the step exists. */
+    localEdit: (operation: StudioLocalEditOperation, artifactId: string, onDone?: () => void, details?: StudioLocalEditDetails) =>
+      localEdit.mutate({ operation, artifactId, details }, { onSuccess: () => onDone?.() }),
     /** `onAccepted` runs only once the turn has been taken.
      *
      * The surface clears the instruction and the selection there rather than

@@ -1,5 +1,6 @@
 import {
   Brush,
+  Crop,
   Eraser,
   Lasso,
   LetterText,
@@ -9,6 +10,7 @@ import {
   PersonStanding,
   Redo2,
   RotateCw,
+  Scaling,
   Scissors,
   Sparkles,
   Square,
@@ -23,6 +25,8 @@ import type { StudioToolCapability } from "./types";
 const TOOLS: Array<{ kind: StudioToolKind; label: string; icon: typeof Brush }> = [
   { kind: "instruct", label: "Instruct the whole image", icon: Type },
   { kind: "transform", label: "Rotate or flip", icon: RotateCw },
+  { kind: "crop", label: "Crop the picture", icon: Crop },
+  { kind: "resize", label: "Resize the picture", icon: Scaling },
   { kind: "brush", label: "Brush a selection", icon: Brush },
   { kind: "eraser", label: "Erase from the selection", icon: Eraser },
   { kind: "rect", label: "Select a rectangle", icon: Square },

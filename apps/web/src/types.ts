@@ -2116,17 +2116,37 @@ export interface WorkflowResourceConsumers {
 
 export type StudioToolKind =
   | "instruct" | "brush" | "eraser" | "rect" | "lasso" | "bucket" | "wand" | "enhance" | "extend"
-  | "text" | "relight" | "isolate" | "background" | "subject" | "transform";
+  | "text" | "relight" | "isolate" | "background" | "subject" | "transform" | "crop" | "resize";
 
 /** An edit the studio makes itself, without a model. */
 export type StudioLocalEditOperation =
-  | "rotate_clockwise" | "rotate_counterclockwise" | "flip_horizontal" | "flip_vertical" | "crop";
+  | "rotate_clockwise" | "rotate_counterclockwise" | "flip_horizontal" | "flip_vertical" | "crop"
+  | "resize";
 
 export interface StudioLocalEditRequest {
   source_artifact_id: string;
   operation: StudioLocalEditOperation;
   /** The part to keep, in the picture's own pixels; given with a crop only. */
-  crop?: { left: number; top: number; width: number; height: number } | null;
+  crop?: StudioCropBox | null;
+  /** The new size in pixels; given with a resize only. */
+  size?: StudioPictureSize | null;
+}
+
+/** What an edit needs besides the picture and the operation: a box, or a size. */
+export type StudioLocalEditDetails = Pick<StudioLocalEditRequest, "crop" | "size">;
+
+/** A picture's size in its own pixels. */
+export interface StudioPictureSize {
+  width: number;
+  height: number;
+}
+
+/** A box in a picture's own pixels, as the picture is seen upright. */
+export interface StudioCropBox {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
 }
 
 export interface StudioToolCapability {

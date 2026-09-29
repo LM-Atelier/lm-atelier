@@ -316,6 +316,12 @@ export function toolFor(
     // Turning and flipping act on the whole picture, chosen by a press.
     case "transform":
       return null;
+    // A crop is one box: drawing another replaces it rather than adding to it.
+    case "crop":
+      return new RectTool(state.mask, true);
+    // A resize is two numbers for the whole picture.
+    case "resize":
+      return null;
   }
 }
 

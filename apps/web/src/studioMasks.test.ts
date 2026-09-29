@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  maskBounds,
   cloneMask,
   coverage,
   createMask,
@@ -391,5 +392,26 @@ describe("magic wand", () => {
   it("refuses pixels that are not the selection's size", () => {
     expect(() => selectSimilarColor(createMask(4, 4), new Uint8ClampedArray(4 * 3 * 4), 1, 1, 8))
       .toThrow("do not match");
+  });
+});
+
+describe("maskBounds", () => {
+  it("is nothing when nothing is selected", () => {
+    expect(maskBounds(createMask(40, 30))).toBeNull();
+  });
+
+  it("is exactly the box that was filled", () => {
+    const mask = createMask(40, 30);
+    fillRect(mask, 5, 4, 25, 14);
+
+    expect(maskBounds(mask)).toEqual({ left: 5, top: 4, width: 20, height: 10 });
+  });
+
+  it("covers everything selected, however it is spread", () => {
+    const mask = createMask(40, 30);
+    fillRect(mask, 2, 20, 4, 22);
+    fillRect(mask, 30, 3, 33, 5);
+
+    expect(maskBounds(mask)).toEqual({ left: 2, top: 3, width: 31, height: 19 });
   });
 });

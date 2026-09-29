@@ -495,3 +495,25 @@ export async function encodeMaskPng(mask: MaskRaster): Promise<Blob | null> {
   );
   return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), "image/png"));
 }
+
+/** The smallest box around everything selected, in the raster's own pixels,
+ * or null when nothing is. */
+export function maskBounds(
+  mask: MaskRaster,
+): { left: number; top: number; width: number; height: number } | null {
+  let left = mask.width;
+  let top = mask.height;
+  let right = -1;
+  let bottom = -1;
+  for (let y = 0; y < mask.height; y += 1) {
+    const row = y * mask.width;
+    for (let x = 0; x < mask.width; x += 1) {
+      if (mask.data[row + x] === 0) continue;
+      if (x < left) left = x;
+      if (x > right) right = x;
+      if (y < top) top = y;
+      if (y > bottom) bottom = y;
+    }
+  }
+  return right < 0 ? null : { left, top, width: right - left + 1, height: bottom - top + 1 };
+}
