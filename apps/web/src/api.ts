@@ -1,4 +1,5 @@
 import type { QueueLane, QueueOrderCommand, QueueOrderPage, QueueOrderResult } from "./queueOrderTypes";
+import type { WorkflowRecipeTarget, WorkflowUseCase, WorkflowUseCaseChoice, WorkflowUseCaseDefault, WorkflowUseCasePreset, WorkflowUseCasePresetCreate } from "./workflowUseCaseTypes";
 import { buildTurnRequest, SOURCE_FIT_BINDING_ERROR, type TurnRequestPayload } from "./turnRequest";
 export { buildTurnRequest } from "./turnRequest";
 import type { SourceFitCapability, SourceFitIntent, SourceFitPreviewResult, SourceFitSelection } from "./sourceFit";
@@ -1258,6 +1259,25 @@ export const api = {
     const query = parameters.toString();
     return request<WorkflowFamily[]>(`/api/workflow-families${query ? `?${query}` : ""}`);
   },
+  workflowUseCasePresets: (useCase?: WorkflowUseCase, offset = 0, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ limit: "200", offset: String(offset) });
+    if (useCase) query.set("use_case", useCase);
+    return request<WorkflowUseCasePreset[]>(`/api/workflow-use-case-presets?${query}`, { signal });
+  },
+  createWorkflowUseCasePreset: (payload: WorkflowUseCasePresetCreate) =>
+    request<WorkflowUseCasePreset>("/api/workflow-use-case-presets", { method: "POST", body: JSON.stringify(payload) }),
+  replaceWorkflowUseCasePreset: (id: string, payload: WorkflowUseCasePresetCreate) =>
+    request<WorkflowUseCasePreset>(`/api/workflow-use-case-presets/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(payload) }),
+  deleteWorkflowUseCasePreset: (id: string) =>
+    request<void>(`/api/workflow-use-case-presets/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  workflowUseCaseDefault: (useCase: WorkflowUseCase, signal?: AbortSignal) =>
+    request<WorkflowUseCaseDefault>(`/api/workflow-use-case-defaults/${useCase}`, { signal }),
+  setWorkflowUseCaseDefault: (useCase: WorkflowUseCase, payload: WorkflowUseCaseDefault) =>
+    request<WorkflowUseCaseDefault>(`/api/workflow-use-case-defaults/${useCase}`, { method: "PUT", body: JSON.stringify(payload) }),
+  workflowUseCaseChoice: (scope: WorkflowRecipeTarget, useCase: WorkflowUseCase, signal?: AbortSignal) =>
+    request<WorkflowUseCaseChoice>(`/api/${scope.kind === "chat" ? "chats" : "projects"}/${encodeURIComponent(scope.id)}/workflow-use-case-presets/${useCase}`, { signal }),
+  setWorkflowUseCaseChoice: (scope: WorkflowRecipeTarget, useCase: WorkflowUseCase, payload: WorkflowUseCaseChoice) =>
+    request<WorkflowUseCaseChoice>(`/api/${scope.kind === "chat" ? "chats" : "projects"}/${encodeURIComponent(scope.id)}/workflow-use-case-presets/${useCase}`, { method: "PUT", body: JSON.stringify(payload) }),
   chatWorkflowSelections: (chatId: string) =>
     request<WorkflowSelection[]>(
       `/api/chats/${encodeURIComponent(chatId)}/workflow-selections`,

@@ -35,6 +35,7 @@ from local_lm.orchestrator import ConversationOrchestrator
 from local_lm.scheduler import JobClaim
 from local_lm.schemas import WorkerStatus
 from local_lm.vision import VisionInputError
+from local_lm.workflow_use_case_execution import InheritedWorkflowUseCasePreset
 
 
 def _orchestrator(*, session_factory=None) -> ConversationOrchestrator:  # type: ignore[no-untyped-def]
@@ -738,6 +739,7 @@ async def test_automatic_retry_reuses_source_turn_as_a_response_revision() -> No
     assert request.input_artifact_ids == ["artifact-original"]
     assert request.settings == {"steps": 8, "denoise": 0.62}
     assert {k: v for k, v in call.kwargs.items() if k != "before_commit"} == {
+        "inherited_use_case_preset": InheritedWorkflowUseCasePreset(None),
         "resolve_source": None,
         "use_explicit_parent": True,
         "replacement_message_id": source_assistant.id,

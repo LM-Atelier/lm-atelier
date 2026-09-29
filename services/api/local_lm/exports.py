@@ -67,6 +67,7 @@ from .prompt_helpers import STANDARD_CHAT_SCOPE
 from .saved_settings import normalize_saved_settings
 from .schemas import ChatDetail, ProjectOut, RunOut, SettingField, VisionSettings
 from .settings_registry import validate_settings
+from .workflow_use_case_preset_provenance import read_workflow_use_case_preset
 
 _CAS_IMPORT_SESSION_KEY = "lm_atelier_project_import_cas"
 
@@ -2095,6 +2096,10 @@ class ProjectExporter:
                 strict=strict_portability,
             )
             provenance["imported_from_run_id"] = run_data.get("id")
+            source_recipe = read_workflow_use_case_preset(
+                provenance.get("workflow_use_case_preset"),
+                workflow_revision_id=run_data.get("workflow_revision_id"),
+            )
             imported_run = Run(
                 chat_id=imported_chat.id,
                 user_message_id=user_message.id,
@@ -2134,6 +2139,19 @@ class ProjectExporter:
                     1_000_000,
                 ),
             )
+            if source_recipe is not None:
+                imported_recipe = read_workflow_use_case_preset(
+                    {
+                        **source_recipe.model_dump(mode="json"),
+                        "workflow_revision_id": imported_run.workflow_revision_id,
+                    },
+                    workflow_revision_id=imported_run.workflow_revision_id,
+                )
+                assert imported_recipe is not None
+                imported_run.provenance_json = {
+                    **provenance,
+                    "workflow_use_case_preset": imported_recipe.model_dump(mode="json"),
+                }
             session.add(imported_run)
             session.flush()
             imported_runs[str(run_data["id"])] = imported_run

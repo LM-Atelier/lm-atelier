@@ -14,6 +14,7 @@ from .domain import Operation
 from .models import ModelProfile
 from .schemas import TurnRequest
 from .source_fit_recipe import SourceExtensionRecipe
+from .workflow_use_case_execution import InheritedWorkflowUseCasePreset
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,7 @@ class TurnInheritance:
     workflow: AcceptedWorkflow | None = None
     source_fit: SourceExtensionRecipe | None = None
     image_edit_strength: dict[str, Any] | None = None
+    use_case_preset: InheritedWorkflowUseCasePreset | None = None
 
 
 TurnSourceResolver = Callable[

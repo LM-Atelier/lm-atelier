@@ -306,6 +306,8 @@ def import_accepted_contexts(
         if old_revision is not None and new_revision is None:
             new_revision = missing.setdefault(old_revision, new_id("missing"))
         payload["workflow_revision_id"] = new_revision
+        if snapshot.workflow_use_case_preset is not None:
+            payload["workflow_use_case_preset"]["workflow_revision_id"] = new_revision
         workflow = payload["workflow"]
         if workflow is not None:
             workflow["id"] = new_revision

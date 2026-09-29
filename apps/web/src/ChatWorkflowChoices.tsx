@@ -1,4 +1,5 @@
 import { ActiveChatWorkflowSelector } from "./ActiveChatWorkflowSelector";
+import { ChatWorkflowRecipes } from "./WorkflowRecipeChoices";
 import type { RoutingMode } from "./types";
 import "./ChatWorkflowChoices.css";
 
@@ -10,5 +11,6 @@ export function ChatWorkflowChoices({ chatId, routingMode }: { chatId: string; r
       <ActiveChatWorkflowSelector chatId={chatId} routingMode="video" label="Video workflow" />
     </div>
     {routingMode === "auto" && <small>Auto chooses the request type at send.</small>}
+    <ChatWorkflowRecipes key={chatId} chatId={chatId} />
   </div>;
 }

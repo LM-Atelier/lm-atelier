@@ -295,6 +295,10 @@ you want to find or restore one.
 See [Workflow packages](WORKFLOW-PACKAGES.md) before importing code or activating
 custom nodes.
 
+Use **Manage recipes** to save settings for a request type and choose workspace,
+project, or chat overrides. [Workflow recipes](WORKFLOW-RECIPES.md) explains how
+inheritance, Automatic, and individual request settings interact.
+
 ### Reuse a prompt
 
 **Prompt Templates** let you save a reusable request with selectable values and

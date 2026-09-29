@@ -23,6 +23,7 @@ import { WorkflowActivationPanel } from "./WorkflowActivationPanel";
 import { useWorkflowPackageImport } from "./useWorkflowPackageImport";
 import { useWorkflowInstallReview } from "./useWorkflowInstallReview";
 import { WorkflowDiscover } from "./WorkflowDiscover";
+import { WorkflowRecipeManagerAction } from "./WorkflowRecipeManager";
 import { WorkflowDestinations } from "./WorkflowDestinations";
 import { useWorkflowDestination } from "./useWorkflowDestination";
 import { downloadJson } from "./format";
@@ -345,7 +346,7 @@ export function WorkflowsView() {
       <header className="page-header"><div><h1>Workflows</h1></div>
         <WorkflowDestinations current={destination} onChoose={showDestination} />
         {/* Library actions show the library first: a dialog under a hidden region would lock the page invisibly. */}
-        <div className="storage-actions"><input ref={importInput} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0]); event.target.value = ""; }} /><button className="secondary" onClick={() => { showDestination("library"); importInput.current?.click(); }}>Import bundle</button><button className="primary" onClick={() => { showDestination("library"); openCreate(); }}><Plus size={17} />New workflow</button></div></header>
+        <div className="storage-actions"><WorkflowRecipeManagerAction /><input ref={importInput} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0]); event.target.value = ""; }} /><button className="secondary" onClick={() => { showDestination("library"); importInput.current?.click(); }}>Import bundle</button><button className="primary" onClick={() => { showDestination("library"); openCreate(); }}><Plus size={17} />New workflow</button></div></header>
       <div hidden={destination !== "library"}>
       {/* A list that could not be read is not an empty list, and a family
           list that failed is not "no preferences". Both used to render as

@@ -20,6 +20,8 @@ from .schemas import (
     TurnRequest,
 )
 from .turn_inheritance import TurnInheritance, inherited_edit_strength
+from .workflow_use_case_execution import InheritedWorkflowUseCasePreset
+from .workflow_use_case_preset_provenance import read_workflow_use_case_preset
 
 if TYPE_CHECKING:
     from .orchestrator import ConversationOrchestrator
@@ -35,6 +37,7 @@ class SourceConfiguration:
     snapshot: AcceptedContext | None
     #: Asked of the workflow `values.workflow_schema` came from.
     takes_added_loras: bool
+    use_case_preset: InheritedWorkflowUseCasePreset
 
 
 @dataclass
@@ -79,6 +82,14 @@ class PriorTurnInheritance:
                     config,
                     snapshot,
                     workflow is not None and revision_accepts_added_loras(workflow),
+                    InheritedWorkflowUseCasePreset(
+                        snapshot.workflow_use_case_preset
+                        if snapshot
+                        else read_workflow_use_case_preset(
+                            run.provenance_json.get("workflow_use_case_preset"),
+                            workflow_revision_id=run.workflow_revision_id,
+                        )
+                    ),
                 )
             )
         known = {item.step_id for item in self.sources if item.step_id is not None}
@@ -208,6 +219,7 @@ class PriorTurnInheritance:
             workflow=context.workflow if context and inherited.inherit_workflow else None,
             source_fit=context.source_fit if context and inherited.inherit_workflow else None,
             image_edit_strength=inherited_strength,
+            use_case_preset=source.use_case_preset,
         )
 
     def validate_consumed(self) -> None:

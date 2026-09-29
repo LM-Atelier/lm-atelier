@@ -861,6 +861,10 @@ from .workflow_trust import (
     derive_trust,
     recorded_template_identity,
 )
+from .workflow_use_case_errors import workflow_use_case_error
+from .workflow_use_case_execution import InheritedWorkflowUseCasePreset
+from .workflow_use_case_preset_api import router as workflow_use_case_preset_router
+from .workflow_use_case_preset_provenance import read_workflow_use_case_preset
 
 if TYPE_CHECKING:
     from .main import Services
@@ -884,6 +888,7 @@ def _services(request: Request) -> Services:
 
 
 router = APIRouter(prefix="/api")
+router.include_router(workflow_use_case_preset_router)
 logger = logging.getLogger(__name__)
 
 
@@ -4208,6 +4213,7 @@ async def _accept_turn(
     chat_guard_held: bool = False,
     before_commit: Callable[[Session, Run], None] | None = None,
     resolve_source: TurnSourceResolver | None = None,
+    inherited_use_case_preset: InheritedWorkflowUseCasePreset | None = None,
 ) -> TurnAccepted:
     try:
         if edit_source_message_id is not None and isinstance(payload, PriorTurnEditRequest):
@@ -4231,6 +4237,7 @@ async def _accept_turn(
             reference_source_message_id=reference_source_message_id,
             before_commit=before_commit,
             resolve_source=resolve_source,
+            inherited_use_case_preset=inherited_use_case_preset,
         )
     except EditRequestConflict as exc:
         raise api_error(409, "edit-request-conflict", str(exc)) from exc
@@ -4296,6 +4303,10 @@ async def _accept_turn(
     except WorkflowLoraAdmissionError as exc:
         raise api_error(409 if exc.conflict else 422, exc.code, str(exc)) from exc
     except ValueError as exc:
+        recipe_error = workflow_use_case_error(exc)
+        if recipe_error is not None:
+            code, message = recipe_error
+            raise api_error(422, code, message) from exc
         raise api_error(422, "turn-invalid", str(exc)) from exc
 
 
@@ -4696,6 +4707,7 @@ async def _regenerate_message_locked(
             workflow=source_context.workflow,
             source_fit=source_context.source_fit,
             image_edit_strength=inherited_image_edit_strength,
+            use_case_preset=InheritedWorkflowUseCasePreset(source_context.workflow_use_case_preset),
         )
 
     def bind_request(_transaction: Session, run: Run) -> None:
@@ -4736,6 +4748,14 @@ async def _regenerate_message_locked(
         use_explicit_parent=True,
         replacement_message_id=message_id,
         source_action="regenerate",
+        inherited_use_case_preset=InheritedWorkflowUseCasePreset(
+            prior_context.workflow_use_case_preset
+            if prior_context
+            else read_workflow_use_case_preset(
+                prior_run.provenance_json.get("workflow_use_case_preset"),
+                workflow_revision_id=prior_run.workflow_revision_id,
+            )
+        ),
         inherited_image_edit_strength=inherited_image_edit_strength,
         inherited_prompt_source=inherited_prompt_source,
         reference_source_message_id=user_message.id,

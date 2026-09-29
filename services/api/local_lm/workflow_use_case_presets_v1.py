@@ -50,6 +50,15 @@ class InheritedWorkflowUseCaseChoice(_PresetContract):
     mode: Literal["inherit"]
 
 
+class WorkflowUseCasePresetOut(WorkflowUseCasePresetCreate):
+    id: PresetId
+    builtin: bool
+
+
+class WorkflowUseCaseDefault(_PresetContract):
+    preset_id: PresetId | None
+
+
 class AutomaticWorkflowUseCaseChoice(_PresetContract):
     mode: Literal["automatic"]
 

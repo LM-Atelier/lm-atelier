@@ -1,0 +1,21 @@
+.workflow-recipe-manager { max-width: 96vw; }
+.workflow-recipe-manager p { overflow-wrap: anywhere; font-size: 12px; }
+.workflow-recipe-manager details { margin-top: 16px; }
+.workflow-recipe-manager summary { cursor: pointer; }
+.workflow-recipe-manager label { color: var(--ink-secondary); font-size: 12px; }
+.workflow-recipe-manager select, .workflow-recipe-manager input:not([type="checkbox"]) { width: 100%; min-width: 0; }
+.workflow-recipe-manager input[type="checkbox"] { width: auto; margin: 0; }
+.workflow-recipe-editor { display: grid; gap: calc(12px * var(--spacing-scale, 1)); }
+.workflow-recipe-editor > label { display: grid; gap: calc(5px * var(--spacing-scale, 1)); }
+.workflow-recipe-editor > label:has(input[type="checkbox"]) { display: flex; align-items: center; }
+.workflow-recipe-fields { min-width: 0; padding: calc(12px * var(--spacing-scale, 1)); border: 1px solid var(--line-control); border-radius: 8px; }
+.workflow-recipe-field { margin-bottom: 12px; }
+.workflow-recipe-manager .workflow-recipe-field > label:not(.setting-row) { display: flex; align-items: center; gap: calc(8px * var(--spacing-scale, 1)); }
+.workflow-recipe-fields li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: calc(8px * var(--spacing-scale, 1)); overflow-wrap: anywhere; }
+.workflow-recipe-list { padding: 0; list-style: none; }
+.workflow-recipe-list > li { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: calc(8px * var(--spacing-scale, 1)); padding-block: calc(10px * var(--spacing-scale, 1)); border-bottom: 1px solid var(--line); }
+.workflow-recipe-list strong { overflow-wrap: anywhere; }
+.workflow-recipe-list small { display: block; color: var(--ink-muted); font-size: 12px; }
+.workflow-recipe-delete { padding: calc(12px * var(--spacing-scale, 1)); border: 1px solid var(--line-control); border-radius: 8px; }
+.workflow-recipe-manager .row-actions { flex-wrap: wrap; }
+@media (max-width: 600px) { .workflow-recipe-field .setting-row { grid-template-columns: minmax(0, 1fr); } }

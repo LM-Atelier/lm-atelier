@@ -379,12 +379,25 @@ from .workflow_review_runtime import (
 from .workflow_revision_reviews import revision_is_trusted
 from .workflow_selection import (
     ResolvedWorkflowFamily,
+    RevisionEligibility,
     RevisionPreference,
     WorkflowFamilySelectionError,
     WorkflowSelectionMode,
     resolve_exact_workflow_revision,
     resolve_workflow_family,
 )
+from .workflow_use_case_execution import (
+    InheritedWorkflowUseCasePreset,
+    WorkflowUseCaseExecution,
+    prepare_workflow_use_case_execution,
+    workflow_use_case_inputs,
+)
+from .workflow_use_case_preset_admission import AdmittedWorkflowUseCasePreset
+from .workflow_use_case_preset_provenance import (
+    capture_workflow_use_case_preset,
+    read_workflow_use_case_preset,
+)
+from .workflow_use_case_preset_settings import WorkflowUseCasePresetSettingsError
 
 logger = logging.getLogger(__name__)
 
@@ -421,6 +434,7 @@ class _TurnSettingLayers:
     preset_layers: tuple[tuple[str, GenerationPreset, dict[str, Any]], ...]
     effective_settings: dict[str, Any]
     workflow_lora_layers: WorkflowLoraAdmissionLayers
+    use_case_settings: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -437,6 +451,7 @@ class _PromptBatchExecutionContext:
     workflow_lora_outcome: _WorkflowLoraOutcome | None
     model_provenance: dict[str, Any] | None
     workflow_provenance: dict[str, Any]
+    use_case_receipt: dict[str, Any] | None
 
 
 def _fresh_media_seed(excluding: object = None) -> int:
@@ -776,10 +791,27 @@ def _resolve_output_loras(
     return None, resolve_lora_stack(session, revision, loras)
 
 
+def _require_revision_eligibility(
+    operation: Operation,
+    revision: WorkflowRevision | None,
+    eligibility: RevisionEligibility | None,
+) -> None:
+    if eligibility is not None:
+        reason = eligibility(revision)
+        if reason is not None:
+            raise WorkflowFamilySelectionError(
+                capability=operation_selector_capability(operation),
+                operation=operation,
+                reason=reason,
+            )
+
+
 def _chosen_setting_layers(
     profile: ModelProfile | None,
     layers: WorkflowLoraAdmissionLayers,
     turn: dict[str, Any],
+    *,
+    use_case_settings: dict[str, Any] | None = None,
 ) -> tuple[tuple[EditSettingSource, dict[str, Any]], ...]:
     """Return the settings chosen for a turn, lowest precedence first, each named by its source.
 
@@ -787,6 +819,9 @@ def _chosen_setting_layers(
     so they always agree on which layers were chosen and in what order.
     """
 
+    recipe_layers = (
+        ((EditSettingSource.USE_CASE_PRESET, use_case_settings),) if use_case_settings else ()
+    )
     return (
         (EditSettingSource.PROFILE_LOAD, profile.load_settings_json if profile else {}),
         (EditSettingSource.PROFILE_REQUEST, layers.ordinary("profile_request")),
@@ -795,6 +830,7 @@ def _chosen_setting_layers(
         (EditSettingSource.PROJECT, layers.ordinary("project")),
         (EditSettingSource.CHAT_PRESET, layers.ordinary("chat_preset")),
         (EditSettingSource.CHAT, layers.ordinary("chat")),
+        *recipe_layers,
         (EditSettingSource.TURN, turn),
     )
 
@@ -1074,6 +1110,7 @@ class ConversationOrchestrator:
         freeze_context: bool = False,
         activate_branch: bool = True,
         before_commit: Callable[[Session, Run], None] | None = None,
+        inherited_use_case_preset: InheritedWorkflowUseCasePreset | None = None,
         resolve_source: TurnSourceResolver | None = None,
     ) -> TurnAccepted:
         if not self._admission_open:
@@ -1094,6 +1131,7 @@ class ConversationOrchestrator:
                 freeze_context=freeze_context,
                 activate_branch=activate_branch,
                 before_commit=before_commit,
+                inherited_use_case_preset=inherited_use_case_preset,
                 resolve_source=resolve_source,
             )
 
@@ -1181,6 +1219,7 @@ class ConversationOrchestrator:
         freeze_context: bool = False,
         activate_branch: bool = True,
         before_commit: Callable[[Session, Run], None] | None = None,
+        inherited_use_case_preset: InheritedWorkflowUseCasePreset | None = None,
         resolve_source: TurnSourceResolver | None = None,
     ) -> TurnAccepted:
         # Never resolve an idempotency key until its URL-scoped chat has been
@@ -1231,6 +1270,7 @@ class ConversationOrchestrator:
                 freeze_context=freeze_context,
                 activate_branch=activate_branch,
                 before_commit=before_commit,
+                inherited_use_case_preset=inherited_use_case_preset,
                 resolve_source=resolve_source,
             )
 
@@ -1268,6 +1308,7 @@ class ConversationOrchestrator:
                 freeze_context=freeze_context,
                 activate_branch=activate_branch,
                 before_commit=before_commit,
+                inherited_use_case_preset=inherited_use_case_preset,
                 resolve_source=resolve_source,
             )
         finally:
@@ -1405,6 +1446,7 @@ class ConversationOrchestrator:
         freeze_context: bool = False,
         activate_branch: bool = True,
         before_commit: Callable[[Session, Run], None] | None = None,
+        inherited_use_case_preset: InheritedWorkflowUseCasePreset | None = None,
         resolve_source: TurnSourceResolver | None = None,
     ) -> TurnAccepted:
         result = await self._prepare_or_admit_turn(
@@ -1423,6 +1465,7 @@ class ConversationOrchestrator:
             freeze_context=freeze_context,
             activate_branch=activate_branch,
             before_commit=before_commit,
+            inherited_use_case_preset=inherited_use_case_preset,
             resolve_source=resolve_source,
         )
         if not isinstance(result, TurnAccepted):
@@ -1442,6 +1485,7 @@ class ConversationOrchestrator:
         inherited_workflow: AcceptedWorkflow | None = None,
         inherited_source_fit: SourceExtensionRecipe | None = None,
         reference_source_message_id: str | None = None,
+        inherited_use_case_preset: InheritedWorkflowUseCasePreset | None = None,
         resolve_source: TurnSourceResolver | None = None,
     ) -> SourceFitPreviewOut:
         """Use ordinary turn selection, stopping before the admission transaction."""
@@ -1460,6 +1504,7 @@ class ConversationOrchestrator:
                 inherited_workflow=inherited_workflow,
                 inherited_source_fit=inherited_source_fit,
                 reference_source_message_id=reference_source_message_id,
+                inherited_use_case_preset=inherited_use_case_preset,
                 resolve_source=resolve_source,
             )
         if not isinstance(result, SourceFitPreviewOut):
@@ -1485,6 +1530,7 @@ class ConversationOrchestrator:
         freeze_context: bool = False,
         activate_branch: bool = True,
         before_commit: Callable[[Session, Run], None] | None = None,
+        inherited_use_case_preset: InheritedWorkflowUseCasePreset | None = None,
         resolve_source: TurnSourceResolver | None = None,
     ) -> TurnAccepted | SourceFitPreviewOut:
         if preview_only and request.source_fit is None:
@@ -1707,6 +1753,7 @@ class ConversationOrchestrator:
                 freeze_context=freeze_context,
                 activate_branch=activate_branch,
                 before_commit=before_commit,
+                inherited_use_case_preset=inherited_use_case_preset,
                 resolve_source=resolve_source,
             )
         prior_image, prior_image_prompt = self._latest_image_context(
@@ -1783,13 +1830,30 @@ class ConversationOrchestrator:
             inherited_workflow = inherited.workflow
             inherited_source_fit = inherited.source_fit
             inherited_image_edit_strength = inherited.image_edit_strength
+            inherited_use_case_preset = inherited.use_case_preset
 
+        use_case_execution = (
+            await prepare_workflow_use_case_execution(
+                self.session_factory,
+                self.engines,
+                workflow_use_case_inputs(
+                    plan.operation, request, source_present=bool(resolved_input_ids)
+                ),
+                chat_id=chat.id,
+                inherited=inherited_use_case_preset,
+            )
+            if self._setup_verification_workflow_id(session, chat) is None
+            else None
+        )
         profile, model_selection, workflow_revision = self._execution_for_turn(
             session,
             chat,
             plan.operation,
             f"{request.text}\n{plan.standalone_prompt}",
             request,
+            revision_eligibility=(
+                use_case_execution.eligibility(session) if use_case_execution else None
+            ),
         )
         if inherited_profile is not None:
             if profile is None or profile.id != inherited_profile.id:
@@ -1853,8 +1917,19 @@ class ConversationOrchestrator:
         engine = (
             profile.engine if profile else workflow_revision.engine if workflow_revision else None
         )
+        engine_fields = await self.engines.settings_for_role(role, engine=engine)
+        use_case_admission = (
+            use_case_execution.admit(session, workflow_revision, fields=engine_fields)
+            if use_case_execution
+            else None
+        )
+        use_case_receipt = (
+            capture_workflow_use_case_preset(use_case_admission).model_dump(mode="json")
+            if use_case_admission
+            else None
+        )
         fields = workflow_settings(
-            await self.engines.settings_for_role(role, engine=engine),
+            engine_fields,
             workflow_revision.input_schema_json if workflow_revision else None,
             # A workflow can carry the insertion point the run reads and
             # declare no setting for it. Without this the validator below has
@@ -1871,7 +1946,13 @@ class ConversationOrchestrator:
         # and it is checked against its own contract a few lines below, where
         # the workflow is known and can say whether it accepts one at all.
         setting_layers = self.resolve_turn_setting_layers(
-            session, chat, plan.operation, profile, request, fields
+            session,
+            chat,
+            plan.operation,
+            profile,
+            request,
+            fields,
+            use_case_preset=use_case_admission,
         )
         mask = setting_layers.mask
         default_preset, project_preset, chat_preset, turn_preset = setting_layers.presets
@@ -1908,7 +1989,12 @@ class ConversationOrchestrator:
         if relight is not None:
             effective_settings[RELIGHT_SETTING_KEY] = relight
         lora_selection = None
-        chosen_layers = _chosen_setting_layers(profile, workflow_lora_layers, request_settings)
+        chosen_layers = _chosen_setting_layers(
+            profile,
+            workflow_lora_layers,
+            request_settings,
+            use_case_settings=setting_layers.use_case_settings,
+        )
         if (
             plan.operation in {Operation.TEXT_TO_IMAGE, Operation.IMAGE_TO_IMAGE}
             and workflow_revision
@@ -2084,6 +2170,7 @@ class ConversationOrchestrator:
                         request,
                         item.reviewed_prompt,
                         resources,
+                        use_case_execution=use_case_execution,
                     )
                 )
             prompt_batch_execution_contexts = tuple(contexts)
@@ -2570,6 +2657,9 @@ class ConversationOrchestrator:
                 if output_context is not None
                 else workflow_provenance
             )
+            output_use_case_receipt = (
+                output_context.use_case_receipt if output_context is not None else use_case_receipt
+            )
             output_preset_layers = (
                 output_context.preset_layers if output_context is not None else tuple(preset_layers)
             )
@@ -2701,6 +2791,11 @@ class ConversationOrchestrator:
                     for scope, preset, settings in output_preset_layers
                 ],
                 "workflow": output_workflow_provenance,
+                **(
+                    {"workflow_use_case_preset": copy.deepcopy(output_use_case_receipt)}
+                    if output_use_case_receipt is not None
+                    else {}
+                ),
                 **(
                     {"workflow_lora": copy.deepcopy(output_workflow_lora_outcome.receipt)}
                     if output_workflow_lora_outcome is not None
@@ -2919,6 +3014,7 @@ class ConversationOrchestrator:
         freeze_context: bool = False,
         activate_branch: bool = True,
         before_commit: Callable[[Session, Run], None] | None = None,
+        inherited_use_case_preset: InheritedWorkflowUseCasePreset | None = None,
         resolve_source: TurnSourceResolver | None = None,
     ) -> TurnAccepted:
         intent = OrderedPlanCompiler.validate(intent)
@@ -3037,6 +3133,26 @@ class ConversationOrchestrator:
                     session, step_request, operation, index + 1
                 )
 
+            use_case_execution = (
+                await prepare_workflow_use_case_execution(
+                    self.session_factory,
+                    self.engines,
+                    workflow_use_case_inputs(
+                        operation,
+                        step_request,
+                        source_present=(
+                            "image" in artifact_source_modes
+                            or (index == 0 and bool(first_explicit_images))
+                        ),
+                    ),
+                    chat_id=chat.id,
+                    inherited=(
+                        inherited.use_case_preset if inherited else inherited_use_case_preset
+                    ),
+                )
+                if self._setup_verification_workflow_id(session, chat) is None
+                else None
+            )
             (
                 profile,
                 model_selection,
@@ -3048,6 +3164,9 @@ class ConversationOrchestrator:
                 step_intent.prompt,
                 step_request,
                 ordered=True,
+                revision_eligibility=(
+                    use_case_execution.eligibility(session) if use_case_execution else None
+                ),
             )
             if inherited is not None:
                 if inherited.profile is not None:
@@ -3110,8 +3229,19 @@ class ConversationOrchestrator:
                 if workflow_revision
                 else None
             )
+            engine_fields = await self.engines.settings_for_role(role, engine=engine)
+            use_case_admission = (
+                use_case_execution.admit(session, workflow_revision, fields=engine_fields)
+                if use_case_execution
+                else None
+            )
+            use_case_receipt = (
+                capture_workflow_use_case_preset(use_case_admission).model_dump(mode="json")
+                if use_case_admission
+                else None
+            )
             fields = workflow_settings(
-                await self.engines.settings_for_role(role, engine=engine),
+                engine_fields,
                 workflow_revision.input_schema_json if workflow_revision else None,
                 accepts_added_loras=(
                     workflow_revision is not None
@@ -3119,7 +3249,14 @@ class ConversationOrchestrator:
                 ),
             )
             setting_layers = self.resolve_turn_setting_layers(
-                session, chat, operation, profile, step_request, fields, ordered=True
+                session,
+                chat,
+                operation,
+                profile,
+                step_request,
+                fields,
+                ordered=True,
+                use_case_preset=use_case_admission,
             )
             default_preset, project_preset, chat_preset, turn_preset = setting_layers.presets
             step_overrides = setting_layers.request_settings
@@ -3131,7 +3268,12 @@ class ConversationOrchestrator:
                 workflow_revision.input_schema_json if workflow_revision else None,
             )
             lora_selection = None
-            chosen_layers = _chosen_setting_layers(profile, workflow_lora_layers, step_overrides)
+            chosen_layers = _chosen_setting_layers(
+                profile,
+                workflow_lora_layers,
+                step_overrides,
+                use_case_settings=setting_layers.use_case_settings,
+            )
             if (
                 operation in {Operation.TEXT_TO_IMAGE, Operation.IMAGE_TO_IMAGE}
                 and workflow_revision
@@ -3199,6 +3341,7 @@ class ConversationOrchestrator:
                     "vision_profile_id": vision_profile.id if vision_profile else None,
                     "workflow": workflow_revision,
                     "workflow_activation": workflow_activation,
+                    "use_case_receipt": use_case_receipt,
                     "role": role,
                     "settings": effective_settings,
                     "model_selection": model_selection,
@@ -3461,6 +3604,11 @@ class ConversationOrchestrator:
                         for scope, preset, preset_settings in resolved["preset_layers"]
                     ],
                     "workflow": workflow_provenance,
+                    **(
+                        {"workflow_use_case_preset": copy.deepcopy(resolved["use_case_receipt"])}
+                        if resolved["use_case_receipt"] is not None
+                        else {}
+                    ),
                     **(
                         {"workflow_lora": copy.deepcopy(resolved["workflow_lora_outcome"].receipt)}
                         if resolved["workflow_lora_outcome"] is not None
@@ -7813,6 +7961,7 @@ class ConversationOrchestrator:
                 profile=snapshot.profile,
                 workflow=snapshot.workflow,
                 image_edit_strength=inherited_strength,
+                use_case_preset=InheritedWorkflowUseCasePreset(snapshot.workflow_use_case_preset),
             )
 
         def bound_to_claim(turn_session: Session, retry_run: Run) -> None:
@@ -7893,6 +8042,14 @@ class ConversationOrchestrator:
             replacement_message_id=source_assistant_id,
             source_action="image_edit_verification_retry",
             inherited_image_edit_strength=inherited_strength,
+            inherited_use_case_preset=InheritedWorkflowUseCasePreset(
+                snapshot.workflow_use_case_preset
+                if snapshot
+                else read_workflow_use_case_preset(
+                    source_run.provenance_json.get("workflow_use_case_preset"),
+                    workflow_revision_id=source_run.workflow_revision_id,
+                )
+            ),
             reference_source_message_id=source_user.id,
             before_commit=bound_to_claim,
             resolve_source=resolve_retry_source if snapshot is not None else None,
@@ -9842,6 +9999,7 @@ class ConversationOrchestrator:
         request: TurnRequest,
         *,
         ordered: bool = False,
+        revision_eligibility: RevisionEligibility | None = None,
     ) -> tuple[ModelProfile | None, dict[str, Any], WorkflowRevision | None]:
         choice = request.workflow_selection
         if choice is not None and choice.mode == "revision":
@@ -9908,6 +10066,7 @@ class ConversationOrchestrator:
                 if operation == Operation.TEXT
                 else self.engines.settings.media_engine,
             )
+            _require_revision_eligibility(operation, revision, revision_eligibility)
             if bound_profile is not None:
                 if profile_id is not None and bound_profile.id != profile_id:
                     raise ValueError("The selected model does not match the turn workflow.")
@@ -9934,6 +10093,7 @@ class ConversationOrchestrator:
             preferred_revision_id=revision_id,
             preferred_profile_id=profile_id,
             workflow_choice=choice,
+            revision_eligibility=revision_eligibility,
         )
         if revision_id is not None and (result[2] is None or result[2].id != revision_id):
             raise ValueError("The selected turn workflow revision is not ready for this operation.")
@@ -10051,6 +10211,7 @@ class ConversationOrchestrator:
         preferred_revision_id: str | None = None,
         preferred_profile_id: str | None = None,
         workflow_choice: TurnWorkflowSelectionIn | None = None,
+        revision_eligibility: RevisionEligibility | None = None,
     ) -> tuple[ModelProfile | None, dict[str, Any], WorkflowRevision | None]:
         if preferred_revision_id is not None and preferred_profile_id is None:
             preferred_profile_id = self._profile_bound_by_revision(
@@ -10074,6 +10235,7 @@ class ConversationOrchestrator:
                 prompt,
                 preferred_revision_id=preferred_revision_id,
                 workflow_choice=workflow_choice,
+                revision_eligibility=revision_eligibility,
             )
             if selected_workflow is not None:
                 selected_profile = selected_workflow[0]
@@ -10109,6 +10271,7 @@ class ConversationOrchestrator:
                 model_install_id=selected.model_install_id,
                 preferred_revision_id=preferred_revision_id,
             )
+            _require_revision_eligibility(operation, workflow, revision_eligibility)
             return (
                 selected,
                 {
@@ -10126,6 +10289,7 @@ class ConversationOrchestrator:
             prompt,
             preferred_revision_id=preferred_revision_id,
             workflow_choice=workflow_choice,
+            revision_eligibility=revision_eligibility,
         )
         if workflow_first is not None:
             return workflow_first
@@ -10146,6 +10310,7 @@ class ConversationOrchestrator:
             or preferred_revision_id
             or self._project_workflow_pin_id(session, chat.project_id, operation)
         ):
+            _require_revision_eligibility(operation, workflow, revision_eligibility)
             return profile, selection, workflow
 
         role = self._role_for_operation(operation)
@@ -10166,12 +10331,19 @@ class ConversationOrchestrator:
                 operation,
                 model_install_id=candidate.model_install_id,
             )
-            if candidate_workflow and candidate_workflow.trusted:
+            if (
+                candidate_workflow
+                and candidate_workflow.trusted
+                and (
+                    revision_eligibility is None or revision_eligibility(candidate_workflow) is None
+                )
+            ):
                 candidates.append((candidate, candidate_workflow))
 
         workflows_by_profile = {candidate.id: revision for candidate, revision in candidates}
         ranked = self._rank_profiles([candidate for candidate, _ in candidates], prompt)
         if not ranked:
+            _require_revision_eligibility(operation, workflow, revision_eligibility)
             return profile, selection, workflow
         score, fallback_profile, matches = ranked[0]
         fallback_selection = {
@@ -10194,6 +10366,8 @@ class ConversationOrchestrator:
         request: TurnRequest,
         prompt: str,
         resources: PromptSourceResourceOverrides,
+        *,
+        use_case_execution: WorkflowUseCaseExecution | None = None,
     ) -> _PromptBatchExecutionContext:
         revision_id = resources.workflow_revision_id
         if revision_id is None:
@@ -10204,6 +10378,9 @@ class ConversationOrchestrator:
             Operation.TEXT_TO_IMAGE,
             prompt,
             preferred_revision_id=revision_id,
+            revision_eligibility=(
+                use_case_execution.eligibility(session) if use_case_execution else None
+            ),
         )
         if revision is None or revision.id != revision_id:
             raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
@@ -10211,8 +10388,19 @@ class ConversationOrchestrator:
         activation = _queued_workflow_activation(session, revision)
         role = self._role_for_operation(Operation.TEXT_TO_IMAGE)
         engine = profile.engine if profile else revision.engine
+        engine_fields = await self.engines.settings_for_role(role, engine=engine)
+        use_case_admission = (
+            use_case_execution.admit(session, revision, fields=engine_fields)
+            if use_case_execution
+            else None
+        )
+        use_case_receipt = (
+            capture_workflow_use_case_preset(use_case_admission).model_dump(mode="json")
+            if use_case_admission
+            else None
+        )
         fields = workflow_settings(
-            await self.engines.settings_for_role(role, engine=engine),
+            engine_fields,
             revision.input_schema_json,
             accepts_added_loras=revision_accepts_added_loras(revision),
         )
@@ -10292,7 +10480,10 @@ class ConversationOrchestrator:
                 workflow_lora_layers.ordinary("chat_preset"),
                 workflow_lora_layers.ordinary("chat"),
             ),
-            turn_overrides=request_settings,
+            turn_overrides={
+                **(use_case_admission.preset.settings_json if use_case_admission else {}),
+                **request_settings,
+            },
         )
         if OUTPAINT_SETTING_KEY in effective_settings:
             if (
@@ -10306,7 +10497,12 @@ class ConversationOrchestrator:
             effective_settings[OUTPAINT_SETTING_KEY] = normalize_margins(
                 effective_settings[OUTPAINT_SETTING_KEY]
             )
-        chosen_layers = _chosen_setting_layers(profile, workflow_lora_layers, request_settings)
+        chosen_layers = _chosen_setting_layers(
+            profile,
+            workflow_lora_layers,
+            request_settings,
+            use_case_settings=use_case_admission.preset.settings_json if use_case_admission else {},
+        )
         lora_selection = None
         if resources.lora_settings is not None:
             if resources.lora_settings:
@@ -10357,6 +10553,7 @@ class ConversationOrchestrator:
             workflow_lora_outcome=workflow_lora_outcome,
             model_provenance=self._model_provenance(session, profile),
             workflow_provenance=workflow_provenance,
+            use_case_receipt=use_case_receipt,
         )
 
     def _workflow_family_for_operation(
@@ -10368,6 +10565,7 @@ class ConversationOrchestrator:
         *,
         preferred_revision_id: str | None,
         workflow_choice: TurnWorkflowSelectionIn | None = None,
+        revision_eligibility: RevisionEligibility | None = None,
     ) -> tuple[ModelProfile | None, dict[str, Any], WorkflowRevision | None] | None:
         """Resolve new workflow choices before entering the legacy compatibility path."""
 
@@ -10447,8 +10645,14 @@ class ConversationOrchestrator:
                 engine=engine,
                 legacy_revision_resolver=legacy_revision,
                 preferred_revision=self._instruction_edit_preference(operation, prompt),
+                revision_eligibility=revision_eligibility,
             )
         except WorkflowFamilySelectionError as exc:
+            reasons = (
+                set(exc.candidate_reasons) if exc.reason == "no_ready_workflow" else {exc.reason}
+            )
+            if revision_eligibility is not None and reasons != {"engine_mismatch"}:
+                raise
             # A missing workflow default during the additive compatibility
             # window retains the existing role-default behavior. Real explicit
             # choices fail closed; the compatibility cases below retain only
@@ -10795,6 +10999,7 @@ class ConversationOrchestrator:
         fields: list[SettingField],
         *,
         ordered: bool = False,
+        use_case_preset: AdmittedWorkflowUseCasePreset | None = None,
     ) -> _TurnSettingLayers:
         """Resolve common layers after the caller selects workflow and source.
 
@@ -10802,6 +11007,8 @@ class ConversationOrchestrator:
         edits supply their resolved request and accepted profile projection.
         Ordered callers first project the request to its role and step.
         This method does not select a workflow, read prompts or admit work.
+        An admitted recipe overrides saved defaults and yields to turn choices;
+        its values stay separate so their source remains available to consumers.
         """
         role = self._role_for_operation(operation)
         request_fields = [field for field in fields if field.scope != "load"]
@@ -10846,6 +11053,16 @@ class ConversationOrchestrator:
             )
             if preset
         ]
+        use_case_settings: dict[str, Any] = {}
+        if use_case_preset is not None:
+            try:
+                use_case_settings = copy.deepcopy(
+                    validate_settings(use_case_preset.preset.settings_json, request_fields)
+                )
+            except (ValueError, TypeError, OverflowError):
+                raise WorkflowUseCasePresetSettingsError(
+                    "workflow-use-case-preset-settings-invalid"
+                ) from None
         effective_settings = resolve_generation_settings(
             fields,
             request_fields=request_fields,
@@ -10862,7 +11079,7 @@ class ConversationOrchestrator:
                 workflow_lora_layers.ordinary("chat_preset"),
                 workflow_lora_layers.ordinary("chat"),
             ),
-            turn_overrides=request_settings,
+            turn_overrides={**use_case_settings, **request_settings},
         )
         return _TurnSettingLayers(
             project=project,
@@ -10873,6 +11090,7 @@ class ConversationOrchestrator:
             preset_layers=tuple(preset_layers),
             effective_settings=effective_settings,
             workflow_lora_layers=workflow_lora_layers,
+            use_case_settings=use_case_settings,
         )
 
     @staticmethod

@@ -45,6 +45,7 @@ INERT_DOCUMENTS = {
     "docs/merge-queue.md",
     "docs/privacy.md",
     "docs/workflow-packages.md",
+    "docs/workflow-recipes.md",
     "security.md",
     "support.md",
 }
