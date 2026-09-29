@@ -10,6 +10,7 @@
  */
 
 import { cropRatio, fittedBox, type CropShape } from "./studioCropShape";
+import { PerspectiveTool, pictureCorners } from "./studioPerspective";
 import { STRAIGHTEN_LIMIT } from "./studioStraighten";
 import {
   createMask,
@@ -33,7 +34,7 @@ import {
 import type { LightDirection } from "./studioLightMap";
 import { NEUTRAL_ADJUSTMENTS } from "./studioAdjustments";
 import { DEFAULT_CAPTION, type StudioCaption } from "./studioCaption";
-import type { StudioColorAdjustments, StudioToolKind } from "./types";
+import type { StudioColorAdjustments, StudioPerspective, StudioToolKind } from "./types";
 
 export type { StudioToolKind } from "./types";
 
@@ -93,6 +94,8 @@ export type StudioToolState = {
   readonly cropShape: CropShape;
   /** How far to turn the picture to straighten it, in degrees, clockwise when positive. */
   readonly straightenDegrees: number;
+  /** Where the perspective correction's corners stand; null while they are the picture's own. */
+  readonly perspective: StudioPerspective | null;
   /** The side of each block a pixelation makes, in the picture's own pixels. */
   readonly pixelBlock: number;
   /** The paint's color as "#rrggbb", and how much of it covers the picture, in percent. */
@@ -128,6 +131,7 @@ export type StudioToolAction =
   | { type: "set-blur-style"; style: "blur" | "pixelate" }
   | { type: "set-crop-shape"; shape: CropShape }
   | { type: "set-straighten"; degrees: number }
+  | { type: "set-perspective"; corners: StudioPerspective | null }
   | { type: "set-pixel-block"; block: number }
   | { type: "set-paint-color"; color: string }
   | { type: "set-paint-opacity"; opacity: number }
@@ -160,6 +164,7 @@ export function initialToolState(): StudioToolState {
     blurStyle: "blur",
     cropShape: "free",
     straightenDegrees: 0,
+    perspective: null,
     pixelBlock: 12,
     paintColor: "#000000",
     paintOpacity: 100,
@@ -225,6 +230,8 @@ export function studioToolReducer(
         straightenDegrees:
           Math.round(Math.min(STRAIGHTEN_LIMIT, Math.max(-STRAIGHTEN_LIMIT, action.degrees)) * 10) / 10,
       };
+    case "set-perspective":
+      return { ...state, perspective: action.corners };
     case "set-crop-shape": {
       // A box already drawn takes the new shape at once, as the largest box
       // of that shape inside it, so the box shown is always the one kept.
@@ -264,6 +271,8 @@ export function studioToolReducer(
         ...state,
         adjustments: NEUTRAL_ADJUSTMENTS,
         straightenDegrees: 0,
+        // Corners placed on the old picture mean nothing on the new one.
+        perspective: null,
         // Added words are in the new picture; keeping them would draw them twice.
         caption: { ...state.caption, text: "" },
         mask: createMask(action.width, action.height),
@@ -353,11 +362,13 @@ function replaceWordsInstruction(state: StudioToolState): string {
  *
  * `pixels` is the picture as RGBA bytes, needed only by the magic wand. Without
  * them the wand has nothing to compare, so it gives no tool rather than one
- * that selects by guesswork.
+ * that selects by guesswork. `onCorners` hears where a perspective
+ * correction's corners are dragged to.
  */
 export function toolFor(
   state: StudioToolState,
   pixels: Uint8ClampedArray | null = null,
+  onCorners: (corners: StudioPerspective) => void = () => {},
 ): PointerTool | null {
   if (!state.mask) return null;
   const selected = state.selectionMode === "add" ? 255 : 0;
@@ -410,6 +421,11 @@ export function toolFor(
     // Turning and flipping act on the whole picture, chosen by a press.
     case "transform":
       return null;
+    // The corners are dragged on the picture, and none of it is selected.
+    case "perspective": {
+      const size = { width: state.mask.width, height: state.mask.height };
+      return new PerspectiveTool(state.perspective ?? pictureCorners(size.width, size.height), size, onCorners);
+    }
     // A crop is one box: drawing another replaces it rather than adding to it.
     case "crop":
       return new RectTool(state.mask, true, cropRatio(state.cropShape, state.mask));
@@ -432,7 +448,9 @@ export function toolFor(
  * and Undo left the start of every brush stroke behind.
  */
 export function snapshotBeforeGesture(state: StudioToolState): void {
-  if (state.mask) state.history.push(state.mask);
+  // Moving a perspective correction's corner leaves the selection alone,
+  // so it keeps no step for Undo to return to.
+  if (state.mask && state.kind !== "perspective") state.history.push(state.mask);
 }
 
 function clamp(value: number, low: number, high: number): number {

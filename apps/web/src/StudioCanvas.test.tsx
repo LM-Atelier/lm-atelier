@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import { StudioCanvas } from "./StudioCanvas";
 import { createMask } from "./studioMasks";
+import { PerspectiveTool, pictureCorners } from "./studioPerspective";
 import type { ImagePoint, PointerTool, ToolPreview } from "./studioTools";
 
 /** jsdom has no 2D context; the component must tolerate null contexts and
@@ -414,5 +415,28 @@ describe("comparing with an earlier picture", () => {
     // Zoomed in, each of the picture's pixels is larger on screen, so the
     // divider spans fewer of them.
     expect(width()).toBeCloseTo(before / 1.2);
+  });
+
+  it("shows a perspective correction's corners as soon as the tool is in hand", () => {
+    const handles: number[] = [];
+    const context = new Proxy(
+      { arc: (x: number) => handles.push(x) },
+      {
+        get: (target: Record<string, unknown>, key: string) =>
+          key in target ? target[key] : () => undefined,
+        set: () => true,
+      },
+    );
+    vi.stubGlobal("ImageData", class {});
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
+      context as unknown as CanvasRenderingContext2D,
+    );
+    const tool = new PerspectiveTool(pictureCorners(400, 200), { width: 400, height: 200 }, vi.fn());
+
+    render(<StudioCanvas image={image} mask={createMask(400, 200)} tool={tool} />);
+
+    // A handle at each corner, left to right along the top and back along the
+    // bottom, with no pointer on the canvas at all.
+    expect(handles.slice(-4)).toEqual([0, 400, 400, 0]);
   });
 });

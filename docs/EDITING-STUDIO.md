@@ -52,6 +52,10 @@ names what was done rather than a model:
   turns it a few degrees either way, shown on the picture as the slider moves,
   and keeps the largest box of the picture's own shape that the turned picture
   still covers, so no empty corners appear.
+- **Correct the perspective** squares up something photographed at an angle,
+  such as a page or the front of a building. Drag the four corners on the
+  picture onto its corners, and applying makes it the whole picture, upright.
+  The panel names the size first: the longer of each pair of opposite sides.
 - **Crop** keeps a box you draw, which can be held to a shape as you draw it:
   square, 4:3, 3:2 or 16:9 either way up, or the picture's own shape. A box
   already drawn takes a newly chosen shape at once. **Resize** changes the size

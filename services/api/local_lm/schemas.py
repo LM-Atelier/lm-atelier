@@ -577,6 +577,7 @@ StudioLocalEditOperation = Literal[
     "flip_horizontal",
     "flip_vertical",
     "straighten",
+    "perspective",
     "crop",
     "resize",
     "adjust",
@@ -595,6 +596,26 @@ class StudioCropBox(ApiModel):
     top: StrictInt = Field(ge=0)
     width: StrictInt = Field(ge=1)
     height: StrictInt = Field(ge=1)
+
+
+class StudioPoint(ApiModel):
+    """A point on a picture, in its own pixels as it is seen upright."""
+
+    x: StrictInt = Field(ge=0, le=MAX_DIMENSION)
+    y: StrictInt = Field(ge=0, le=MAX_DIMENSION)
+
+
+class StudioPerspective(ApiModel):
+    """Where the corners of something that should be a rectangle lie on the picture.
+
+    Correcting the perspective makes what lies inside them the whole picture,
+    upright and square-cornered.
+    """
+
+    top_left: StudioPoint
+    top_right: StudioPoint
+    bottom_right: StudioPoint
+    bottom_left: StudioPoint
 
 
 class StudioStraighten(ApiModel):
@@ -678,6 +699,7 @@ class StudioLocalEditCreate(ApiModel):
     operation: StudioLocalEditOperation
     crop: StudioCropBox | None = None
     straighten: StudioStraighten | None = None
+    perspective: StudioPerspective | None = None
     size: StudioPictureSize | None = None
     adjustments: StudioColorAdjustments | None = None
     blur: StudioSelectionBlur | None = None
@@ -692,6 +714,10 @@ class StudioLocalEditCreate(ApiModel):
             raise ValueError("A crop names the part to keep, and no other edit does.")
         if (self.operation == "straighten") != (self.straighten is not None):
             raise ValueError("A straightening names its angle, and no other edit does.")
+        if (self.operation == "perspective") != (self.perspective is not None):
+            raise ValueError(
+                "A perspective correction names its four corners, and no other edit does."
+            )
         if (self.operation == "resize") != (self.size is not None):
             raise ValueError("A resize names the new size, and no other edit does.")
         if (self.operation == "adjust") != (self.adjustments is not None):

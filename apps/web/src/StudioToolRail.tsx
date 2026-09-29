@@ -15,6 +15,7 @@ import {
   Redo2,
   RotateCw,
   Scaling,
+  Scan,
   Scissors,
   SlidersHorizontal,
   Sparkles,
@@ -52,6 +53,7 @@ const TOOL_GROUPS: RailTool[][] = [
   ],
   [
     { kind: "transform", label: "Rotate, straighten or flip", icon: RotateCw },
+    { kind: "perspective", label: "Correct the perspective", icon: Scan },
     { kind: "crop", label: "Crop the picture", icon: Crop },
     { kind: "resize", label: "Resize the picture", icon: Scaling },
     { kind: "canvas", label: "Change the canvas size", icon: Frame },

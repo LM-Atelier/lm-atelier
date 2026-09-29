@@ -663,6 +663,7 @@ from .studio_local_edits import (
     edited_picture,
     marked_area,
     paint_color,
+    perspective_corners,
     picture_in_session,
     record_local_edit,
 )
@@ -2835,6 +2836,9 @@ async def apply_studio_local_edit(
             )
         crop = CropBox(**payload.crop.model_dump()) if payload.crop is not None else None
         straighten = payload.straighten.degrees if payload.straighten is not None else None
+        perspective = (
+            perspective_corners(payload.perspective) if payload.perspective is not None else None
+        )
         size = PictureSize(**payload.size.model_dump()) if payload.size is not None else None
         adjustments = (
             ColorAdjustments(**payload.adjustments.model_dump())
@@ -2906,6 +2910,7 @@ async def apply_studio_local_edit(
                 caption,
                 pixelate,
                 straighten,
+                perspective,
             )
         except LocalEditError as exc:
             raise api_error(422, exc.code, str(exc)) from exc
@@ -2925,6 +2930,7 @@ async def apply_studio_local_edit(
             caption,
             pixelate,
             straighten,
+            perspective,
         )
         session.commit()
     return session.scalar(_studio_session_query(session_id)) or studio

@@ -38,6 +38,7 @@ StudioToolKind = Literal[
     "background",
     "subject",
     "transform",
+    "perspective",
     "crop",
     "resize",
     "adjust",
@@ -71,10 +72,12 @@ TOOL_WORKFLOW_CLASSES: dict[StudioToolKind, str] = {
     # Replacing a subject redraws it from a second picture, so it needs an edit
     # workflow that reads two, and it cuts the subject out first to find it.
     "subject": "reference_edit",
-    # Turning, flipping, cropping, resizing, adjusting light and color,
-    # blurring or painting a marked area, adding words and changing the canvas
-    # are pixel operations the studio makes itself.
+    # Turning, flipping, correcting the perspective, cropping, resizing,
+    # adjusting light and color, blurring or painting a marked area, adding
+    # words and changing the canvas are pixel operations the studio makes
+    # itself.
     "transform": "local",
+    "perspective": "local",
     "crop": "local",
     "resize": "local",
     "adjust": "local",
