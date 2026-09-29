@@ -1016,12 +1016,14 @@ async def test_a_batch_that_removed_nothing_continues_in_bulk_not_one_at_a_time(
     # is the state this whole branch exists for, reached through the sweep
     # rather than asserted of it.
     assert summaries[0].removed_count == 0 and summaries[0].truncated is True
-    assert requested[0] == main_module.RETENTION_BATCH_DELETIONS
+    # Nothing here changes the batch sizes, so the sweep used the defined ones.
+    assert requested[0] == artifacts_module.RETENTION_BATCH_DELETIONS
     # The behaviour first: the batch after it may delete in bulk. The ceiling
     # second, so a failure says which of the two is wrong.
     assert requested[1] is not None and requested[1] > 1
     assert requested[1] == min(
-        main_module.RETENTION_BATCH_DELETIONS, main_module.RETENTION_UNTIMED_BATCH_DELETIONS
+        artifacts_module.RETENTION_BATCH_DELETIONS,
+        artifacts_module.RETENTION_UNTIMED_BATCH_DELETIONS,
     )
     assert "continuing without the clock" in caplog.text
     with SessionLocal() as check:

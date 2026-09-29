@@ -5,6 +5,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -36,7 +37,7 @@ def _digest(seed: str) -> str:
 
 
 @pytest.fixture(autouse=True)
-def _release_process_locks() -> None:
+def _release_process_locks() -> Iterator[None]:
     _release_all_for_testing()
     yield
     _release_all_for_testing()

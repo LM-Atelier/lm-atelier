@@ -1515,7 +1515,7 @@ def _lost_reply_backend(*, mine_is_running: bool, during_lookup: Any = None) -> 
                 await during_lookup()
             mine_id = state["client_id"]
             assert mine_id is not None
-            rows = {"queue_running": [], "queue_pending": []}
+            rows: dict[str, list[Any]] = {"queue_running": [], "queue_pending": []}
             if state["running"] is not None:
                 rows["queue_running"].append(
                     _queue_entry(

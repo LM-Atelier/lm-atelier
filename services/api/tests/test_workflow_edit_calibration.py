@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from typing import Any
 
 import pytest
 
@@ -122,7 +123,7 @@ def test_invalid_contracts_fail_closed(mutation, message: str) -> None:  # type:
 
 def test_project_dependency_manifest_preserves_and_validates_contract() -> None:
     schema = _schema()
-    manifest = {
+    manifest: dict[str, Any] = {
         "profiles": [],
         "presets": [],
         "workflows": [

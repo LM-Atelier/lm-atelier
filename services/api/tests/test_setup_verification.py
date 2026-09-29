@@ -444,11 +444,11 @@ async def test_restart_recovery_removes_unclaimed_hidden_verification(
         session.commit()
 
     with SessionLocal() as session:
-        verification = session.scalar(select(SetupVerification))
-        assert verification is not None
-        assert verification.state == "failed"
-        assert verification.failure_code == "application_restarted"
-        assert verification.chat_id is None
+        recovered = session.scalar(select(SetupVerification))
+        assert recovered is not None
+        assert recovered.state == "failed"
+        assert recovered.failure_code == "application_restarted"
+        assert recovered.chat_id is None
         assert session.scalars(select(Artifact)).all() == []
         assert session.scalars(select(Job)).all() == []
         assert (

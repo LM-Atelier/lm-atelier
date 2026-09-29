@@ -35,7 +35,7 @@ def test_publish_file_is_idempotent_and_content_addressed(tmp_path: Path) -> Non
 
 
 def test_publish_file_does_not_write_the_desktop_library(
-    monkeypatch,  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     monkeypatch.setattr(sys, "platform", "win32")

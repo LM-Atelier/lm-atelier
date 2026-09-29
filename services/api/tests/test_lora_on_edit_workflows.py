@@ -9,6 +9,8 @@ template actually gets both. It does; these pin it.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from httpx import AsyncClient
 from run_waits import wait_for_terminal_status
@@ -23,9 +25,10 @@ from local_lm.models import ModelInstall
 pytestmark = pytest.mark.asyncio
 
 
-async def wait_for_run(client: AsyncClient, run_id: str) -> dict:  # type: ignore[type-arg]
-    async def read() -> dict:  # type: ignore[type-arg]
-        return (await client.get(f"/api/runs/{run_id}")).json()
+async def wait_for_run(client: AsyncClient, run_id: str) -> dict[str, Any]:
+    async def read() -> dict[str, Any]:
+        run: dict[str, Any] = (await client.get(f"/api/runs/{run_id}")).json()
+        return run
 
     return dict(await wait_for_terminal_status(read, what=f"run {run_id}", expected=None))
 

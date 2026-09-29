@@ -37,9 +37,9 @@ pytestmark = pytest.mark.asyncio
 
 def _runtime(engine: str, state: str = "ready") -> RuntimeStatus:
     return RuntimeStatus(
-        engine=engine,  # type: ignore[arg-type]
+        engine=engine,
         release=f"{engine}-test",
-        state=state,  # type: ignore[arg-type]
+        state=state,
         supported=state != "unsupported",
         distribution="test",
         license="test",
@@ -50,7 +50,7 @@ def _workers(*, chat_state: str = "ready") -> list[WorkerStatus]:
     return [
         WorkerStatus(
             name="chat",
-            state=chat_state,  # type: ignore[arg-type]
+            state=chat_state,
             managed=True,
             running=chat_state == "ready",
             profile_id="profile_chat",
