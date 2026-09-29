@@ -48,13 +48,65 @@ const CASES: Array<[string, Partial<StudioColorAdjustments>, number[][]]> = [
     [238, 247, 255], [0, 66, 250], [0, 168, 0], [186, 252, 95], [166, 1, 177]]],
 ];
 
+// A picture with edges in it, for sharpness, which reads each pixel's
+// neighbors: the same pixels and results test_studio_adjustments.py checks the
+// server against, opaque and as a cutout. In the cutout some pixels are partly
+// transparent, and some wholly so with a color hidden under them.
+const SHARP_WIDTH = 6;
+const SHARP_COLORS = [
+  [12, 40, 200], [60, 60, 60], [200, 30, 30], [250, 250, 250], [0, 0, 0], [90, 180, 40],
+  [30, 30, 30], [220, 200, 10], [128, 128, 128], [15, 90, 210], [240, 120, 60], [33, 66, 99],
+  [255, 255, 255], [10, 10, 10], [180, 40, 160], [70, 200, 120], [0, 255, 0], [128, 0, 255],
+  [45, 45, 200], [150, 150, 20], [5, 5, 5], [250, 10, 120], [100, 100, 100], [200, 200, 200],
+  [77, 22, 11], [0, 128, 255], [255, 128, 0], [60, 30, 90], [210, 210, 40], [18, 180, 180],
+];
+const SHARP_ALPHAS = [
+  255, 255, 255, 255, 0, 255,
+  255, 128, 255, 64, 255, 255,
+  0, 255, 200, 255, 17, 255,
+  255, 255, 255, 255, 128, 0,
+  255, 255, 0, 255, 255, 255,
+];
+const SHARP_CASES: Array<[string, Partial<StudioColorAdjustments>, boolean, number[][]]> = [
+  ["crisper", { sharpness: 60 }, false, [
+    [12, 40, 200, 255], [60, 60, 60, 255], [200, 30, 30, 255], [250, 250, 250, 255], [0, 0, 0, 255], [90, 180, 40, 255],
+    [30, 30, 30, 255], [255, 255, 0, 255], [125, 138, 138, 255], [0, 66, 255, 255], [255, 119, 39, 255], [33, 66, 99, 255],
+    [255, 255, 255, 255], [0, 0, 0, 255], [221, 15, 199, 255], [50, 247, 126, 255], [0, 255, 0, 255], [128, 0, 255, 255],
+    [45, 45, 200, 255], [184, 186, 0, 255], [0, 0, 0, 255], [255, 0, 142, 255], [85, 79, 94, 255], [200, 200, 200, 255],
+    [77, 22, 11, 255], [0, 128, 255, 255], [255, 128, 0, 255], [60, 30, 90, 255], [210, 210, 40, 255], [18, 180, 180, 255]]],
+  ["softer", { sharpness: -45 }, false, [
+    [12, 40, 200, 255], [60, 60, 60, 255], [200, 30, 30, 255], [250, 250, 250, 255], [0, 0, 0, 255], [90, 180, 40, 255],
+    [30, 30, 30, 255], [176, 155, 37, 255], [130, 119, 120, 255], [59, 108, 175, 255], [177, 120, 75, 255], [33, 66, 99, 255],
+    [255, 255, 255, 255], [57, 48, 41, 255], [148, 58, 130, 255], [84, 164, 115, 255], [44, 202, 47, 255], [128, 0, 255, 255],
+    [45, 45, 200, 255], [124, 122, 51, 255], [54, 32, 33, 255], [196, 43, 102, 255], [111, 115, 104, 255], [200, 200, 200, 255],
+    [77, 22, 11, 255], [0, 128, 255, 255], [255, 128, 0, 255], [60, 30, 90, 255], [210, 210, 40, 255], [18, 180, 180, 255]]],
+  ["crisper, warmer and paler", { sharpness: 100, warmth: 30, saturation: -20 }, false, [
+    [20, 41, 162, 255], [62, 60, 57, 255], [183, 40, 39, 255], [253, 248, 241, 255], [0, 0, 0, 255], [102, 170, 58, 255],
+    [30, 30, 29, 255], [255, 255, 15, 255], [130, 144, 140, 255], [0, 46, 225, 255], [255, 132, 55, 255], [39, 63, 87, 255],
+    [254, 253, 245, 255], [0, 0, 0, 255], [227, 20, 191, 255], [68, 255, 138, 255], [0, 255, 0, 255], [120, 13, 208, 255],
+    [50, 48, 165, 255], [210, 204, 0, 255], [0, 0, 0, 255], [255, 0, 140, 255], [77, 65, 82, 255], [206, 198, 192, 255],
+    [71, 25, 16, 255], [20, 122, 215, 255], [234, 131, 30, 255], [59, 33, 78, 255], [213, 204, 68, 255], [41, 169, 163, 255]]],
+  ["a crisper cutout", { sharpness: 60 }, true, [
+    [12, 40, 200, 255], [60, 60, 60, 255], [200, 30, 30, 255], [250, 250, 250, 255], [0, 0, 0, 0], [90, 180, 40, 255],
+    [30, 30, 30, 255], [255, 255, 0, 128], [122, 140, 141, 255], [0, 57, 253, 64], [255, 117, 27, 255], [33, 66, 99, 255],
+    [255, 255, 255, 0], [0, 0, 0, 255], [223, 17, 203, 200], [36, 255, 125, 255], [0, 255, 0, 17], [128, 0, 255, 255],
+    [45, 45, 200, 255], [199, 195, 0, 255], [0, 0, 0, 255], [255, 0, 138, 255], [78, 95, 91, 128], [255, 255, 255, 0],
+    [77, 22, 11, 255], [0, 128, 255, 255], [255, 204, 0, 0], [60, 30, 90, 255], [210, 210, 40, 255], [18, 180, 180, 255]]],
+  ["the softest cutout", { sharpness: -100 }, true, [
+    [12, 40, 200, 255], [60, 60, 60, 255], [200, 30, 30, 255], [250, 250, 250, 255], [0, 0, 0, 0], [90, 180, 40, 255],
+    [30, 30, 30, 255], [97, 75, 65, 128], [138, 107, 105, 255], [159, 144, 137, 64], [147, 124, 114, 255], [33, 66, 99, 255],
+    [0, 0, 0, 0], [84, 65, 56, 255], [108, 78, 88, 200], [126, 107, 111, 255], [132, 95, 130, 17], [128, 0, 255, 255],
+    [45, 45, 200, 255], [68, 74, 83, 255], [92, 56, 75, 255], [134, 67, 90, 255], [136, 107, 114, 128], [0, 0, 0, 0],
+    [77, 22, 11, 255], [0, 128, 255, 255], [0, 0, 0, 0], [60, 30, 90, 255], [210, 210, 40, 255], [18, 180, 180, 255]]],
+];
+
 function rgba(pixels: number[][], alpha = 255): Uint8ClampedArray {
   return new Uint8ClampedArray(pixels.flatMap(([r, g, b]) => [r, g, b, alpha]));
 }
 
 describe("light and color adjustments", () => {
   it.each(CASES)("makes the server's pixels when %s", (_name, sliders, expected) => {
-    const adjusted = adjustPixels(rgba(PIXELS), { ...NEUTRAL_ADJUSTMENTS, ...sliders });
+    const adjusted = adjustPixels(rgba(PIXELS), PIXELS.length, { ...NEUTRAL_ADJUSTMENTS, ...sliders });
 
     expect(Array.from(adjusted)).toEqual(Array.from(rgba(expected)));
   });
@@ -69,8 +121,24 @@ describe("light and color adjustments", () => {
   it("leaves transparency as it was", () => {
     const pixels = new Uint8ClampedArray([200, 100, 50, 0, 200, 100, 50, 77]);
 
-    const adjusted = adjustPixels(pixels, { ...NEUTRAL_ADJUSTMENTS, brightness: 60, saturation: -50 });
+    const adjusted = adjustPixels(pixels, 2, { ...NEUTRAL_ADJUSTMENTS, brightness: 60, saturation: -50 });
 
     expect([adjusted[3], adjusted[7]]).toEqual([0, 77]);
+  });
+});
+
+describe("sharpness", () => {
+  it.each(SHARP_CASES)("makes the server's pixels for %s", (_name, sliders, cutout, expected) => {
+    const pixels = new Uint8ClampedArray(
+      SHARP_COLORS.flatMap(([r, g, b], index) => [r, g, b, cutout ? SHARP_ALPHAS[index] : 255]),
+    );
+
+    const adjusted = adjustPixels(pixels, SHARP_WIDTH, { ...NEUTRAL_ADJUSTMENTS, ...sliders });
+
+    expect(Array.from(adjusted)).toEqual(expected.flat());
+  });
+
+  it("counts as a change on its own", () => {
+    expect(isNeutral({ ...NEUTRAL_ADJUSTMENTS, sharpness: -1 })).toBe(false);
   });
 });

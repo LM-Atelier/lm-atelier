@@ -6,7 +6,8 @@ import type { StudioColorAdjustments } from "./types";
  * server to make the same picture. So this is the server's arithmetic step for
  * step (studio_adjustments.py): one lookup table per channel for warmth, tint,
  * brightness and contrast, then saturation as a mix toward each pixel's grey,
- * with the same roundings. Both copies are checked against the same pixels.
+ * then sharpness as a mix away from a softened copy of the picture, with the
+ * same roundings. Both copies are checked against the same pixels.
  */
 
 export const NEUTRAL_ADJUSTMENTS: StudioColorAdjustments = {
@@ -15,6 +16,7 @@ export const NEUTRAL_ADJUSTMENTS: StudioColorAdjustments = {
   saturation: 0,
   warmth: 0,
   tint: 0,
+  sharpness: 0,
 };
 
 /** Each slider runs from -100 to 100, with 0 changing nothing. */
@@ -26,7 +28,7 @@ const TINT_REACH = 0.15;
 export function isNeutral(adjustments: StudioColorAdjustments): boolean {
   return !(
     adjustments.brightness || adjustments.contrast || adjustments.saturation || adjustments.warmth
-    || adjustments.tint
+    || adjustments.tint || adjustments.sharpness
   );
 }
 
@@ -84,21 +86,92 @@ export function channelTables(adjustments: StudioColorAdjustments): [Uint8Array,
   return [tables[0], tables[1], tables[2]];
 }
 
-/** One channel moved from its pixel's grey by `keep`, as the server's blend does it.
+/** One channel moved from `base` by `keep`, as the server's blend does it.
  *
- * The blend takes the factor as a single-precision float and works in single
- * precision, product and sum each rounded to it, then truncates. Both are
- * exact in double precision first, so rounding each to single matches it.
+ * The base is the pixel's grey for saturation and the softened copy for
+ * sharpness. The blend takes the factor as a single-precision float and works
+ * in single precision, product and sum each rounded to it, then truncates.
+ * Both are exact in double precision first, so rounding each to single
+ * matches it.
  */
-function mixed(grey: number, value: number, keep: number): number {
+function mixed(base: number, value: number, keep: number): number {
   const factor = Math.fround(keep);
-  const moved = Math.fround(grey + Math.fround(factor * (value - grey)));
+  const moved = Math.fround(base + Math.fround(factor * (value - base)));
   if (factor >= 0 && factor <= 1) return Math.trunc(moved);
   return moved <= 0 ? 0 : moved >= 255 ? 255 : Math.trunc(moved);
 }
 
-/** The adjusted copy of RGBA pixels; transparency is kept as it was. */
-export function adjustPixels(pixels: Uint8ClampedArray, adjustments: StudioColorAdjustments): Uint8ClampedArray {
+/** A color scaled by its opacity, rounded as the server's conversion rounds it. */
+function weighted(value: number, alpha: number): number {
+  const product = value * alpha + 128;
+  return ((product >> 8) + product) >> 8;
+}
+
+/** Opacity-weighted pixels softened as the server's kernel softens them.
+ *
+ * Each channel becomes its neighborhood of nine, weighted 1-2-1 each way,
+ * over 16 and rounded half up. The server sums in single precision, but with
+ * weights over 16 every sum is exact, so these integers give its answer.
+ * The kernel leaves the picture's own edge, and any picture narrower or
+ * shorter than three pixels, as it was.
+ */
+function softened(pixels: Uint8ClampedArray, width: number, height: number): Uint8ClampedArray {
+  const out = new Uint8ClampedArray(pixels);
+  if (width < 3 || height < 3) return out;
+  const row = width * 4;
+  for (let y = 1; y < height - 1; y += 1) {
+    for (let x = 1; x < width - 1; x += 1) {
+      for (let at = y * row + x * 4, end = at + 4; at < end; at += 1) {
+        const above = at - row;
+        const below = at + row;
+        const sum = pixels[above - 4] + 2 * pixels[above] + pixels[above + 4]
+          + 2 * pixels[at - 4] + 4 * pixels[at] + 2 * pixels[at + 4]
+          + pixels[below - 4] + 2 * pixels[below] + pixels[below + 4];
+        out[at] = (sum + 8) >> 4;
+      }
+    }
+  }
+  return out;
+}
+
+/** Each channel moved toward or away from a softened copy by the sharpness slider.
+ *
+ * The copy is made from each color weighted by its opacity and divided back
+ * out, as the server does, so a color hidden under a transparent pixel does
+ * not bleed into the visible ones beside it. Transparency is kept as it was.
+ */
+function sharpened(pixels: Uint8ClampedArray, width: number, sharpness: number): Uint8ClampedArray {
+  const premultiplied = new Uint8ClampedArray(pixels.length);
+  for (let index = 0; index < pixels.length; index += 4) {
+    const alpha = pixels[index + 3];
+    premultiplied[index] = weighted(pixels[index], alpha);
+    premultiplied[index + 1] = weighted(pixels[index + 1], alpha);
+    premultiplied[index + 2] = weighted(pixels[index + 2], alpha);
+    premultiplied[index + 3] = alpha;
+  }
+  const soft = softened(premultiplied, width, pixels.length / 4 / width);
+  const keep = 1 + sharpness / ADJUSTMENT_LIMIT;
+  const out = new Uint8ClampedArray(pixels.length);
+  for (let index = 0; index < pixels.length; index += 4) {
+    const alpha = soft[index + 3];
+    for (let channel = index; channel < index + 3; channel += 1) {
+      // Divided back out as the server's conversion does, in whole numbers.
+      const base = alpha === 0 || alpha === 255
+        ? soft[channel]
+        : Math.min(255, Math.floor((255 * soft[channel]) / alpha));
+      out[channel] = mixed(base, pixels[channel], keep);
+    }
+    out[index + 3] = pixels[index + 3];
+  }
+  return out;
+}
+
+/** The adjusted copy of RGBA pixels, `width` to a row; transparency is kept as it was. */
+export function adjustPixels(
+  pixels: Uint8ClampedArray,
+  width: number,
+  adjustments: StudioColorAdjustments,
+): Uint8ClampedArray {
   const [red, green, blue] = channelTables(adjustments);
   const keep = 1 + adjustments.saturation / ADJUSTMENT_LIMIT;
   const out = new Uint8ClampedArray(pixels.length);
@@ -119,5 +192,5 @@ export function adjustPixels(pixels: Uint8ClampedArray, adjustments: StudioColor
     }
     out[index + 3] = pixels[index + 3];
   }
-  return out;
+  return adjustments.sharpness === 0 ? out : sharpened(out, width, adjustments.sharpness);
 }

@@ -739,7 +739,14 @@ async def test_an_adjustment_is_recorded_with_where_each_slider_stood(
 ) -> None:
     source_id = await _upload(client, "tiles.png", _png(_tiles()))
     session_id = await _session_over(client, source_id)
-    sliders = {"brightness": 10, "contrast": -20, "saturation": 30, "warmth": -40, "tint": 25}
+    sliders = {
+        "brightness": 10,
+        "contrast": -20,
+        "saturation": 30,
+        "warmth": -40,
+        "tint": 25,
+        "sharpness": 35,
+    }
 
     response = await client.post(
         f"/api/studio/sessions/{session_id}/local-edits",
