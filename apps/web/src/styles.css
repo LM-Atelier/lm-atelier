@@ -1221,7 +1221,7 @@ html[data-motion="reduced"] .progress-track > div.indeterminate { width: 100% !i
    the edit history. */
 .studio-view { display: flex; flex-direction: column; gap: calc(12px * var(--spacing-scale, 1)); height: 100%; min-height: 0; }
 .studio-layout { display: grid; flex: 1 0 300px; grid-template-columns: auto minmax(0, 1fr) minmax(240px, 300px); grid-template-rows: minmax(0, 1fr); gap: calc(12px * var(--spacing-scale, 1)); min-height: 300px; }
-.studio-stage { display: grid; place-items: center; min-height: 0; min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: var(--cut); background: var(--bg); }
+.studio-stage { position: relative; display: grid; place-items: center; min-height: 0; min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: var(--cut); background: var(--bg); }
 .studio-generation-preview { position: relative; display: grid; place-items: center; width: 100%; height: 100%; min-height: 0; margin: 0; }
 .studio-generation-preview img { display: block; width: 100%; height: 100%; min-height: 0; object-fit: contain; }
 .studio-generation-preview figcaption { position: absolute; left: 12px; bottom: 12px; border: 1px solid var(--border); border-radius: 999px; background: color-mix(in srgb, var(--panel) 88%, transparent); color: var(--cream); padding: calc(5px * var(--spacing-scale, 1)) calc(9px * var(--spacing-scale, 1)); font-size: calc(12px * var(--text-scale, 1)); }

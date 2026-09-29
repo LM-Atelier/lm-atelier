@@ -90,6 +90,16 @@ describe("style contract", () => {
     expect(css).toMatch(/\.studio-canvas-layers\s*>\s*canvas\s*\{[^}]*position:\s*absolute/);
   });
 
+  it("keeps what floats over the studio picture on the stage", () => {
+    const css = readFileSync(STYLESHEET, "utf8");
+    // The Extend handles cover the stage with inset: 0, which measures from
+    // the nearest positioned ancestor. With none on the stage that was the
+    // whole main area, so the top handle sat above the page header and the
+    // right one over the tool panel, nowhere near the picture.
+    expect(css).toMatch(/\.studio-extend-handles\s*\{[^}]*position:\s*absolute/);
+    expect(css).toMatch(/\.studio-stage\s*\{[^}]*position:\s*relative/);
+  });
+
   it("keeps the light and the theme in Settings rather than floating over the work", () => {
     // A control fixed over every screen sits on whatever is underneath it, and
     // this one was changed rarely and in front of the work all day. It belongs
