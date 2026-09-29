@@ -328,6 +328,43 @@ describe("StudioCanvas", () => {
     expect(painted.length).toBeGreaterThanOrEqual(2);
   });
 
+  it("repaints only what a stroke changed while it is drawn, and the whole tint otherwise", () => {
+    // A context that records where each tint is put; jsdom has none of its own.
+    const puts: Array<[number, number, number, number]> = [];
+    const context = new Proxy(
+      {
+        putImageData: (data: { width: number; height: number }, x: number, y: number) =>
+          puts.push([x, y, data.width, data.height]),
+      },
+      { get: (target, name) => (name in target ? target[name as "putImageData"] : () => undefined) },
+    );
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
+      context as unknown as CanvasRenderingContext2D,
+    );
+    vi.stubGlobal("ImageData", class {
+      constructor(readonly data: Uint8ClampedArray, readonly width: number, readonly height: number) {}
+    });
+    // A tool that writes as it travels and says which part it changed.
+    const stroke: PointerTool = {
+      appliesWhileMoving: true,
+      down: () => undefined,
+      move: () => undefined,
+      up: () => false,
+      cancel: () => undefined,
+      preview: () => ({ kind: "none" }),
+      takeChanged: () => ({ left: 90, top: 95, width: 20, height: 10 }),
+    };
+    const { container } = render(<StudioCanvas image={image} mask={createMask(400, 200)} tool={stroke} />);
+    expect(puts.at(-1)).toEqual([0, 0, 400, 200]);
+    puts.length = 0;
+
+    const surface = container.querySelector(".studio-canvas")!;
+    fireEvent.pointerDown(surface, { pointerType: "mouse", button: 0, pointerId: 1 });
+    fireEvent.pointerMove(surface, { pointerType: "mouse", pointerId: 1 });
+
+    expect(puts).toEqual([[90, 95, 20, 10], [90, 95, 20, 10]]);
+  });
+
   it("leaves the tint alone for a gesture that commits nothing until it closes", () => {
     const painted = recordPaints();
     const stroke = strokeAcross(new SpyTool());

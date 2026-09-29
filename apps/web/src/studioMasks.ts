@@ -339,20 +339,35 @@ function clampIndex(value: number, size: number): number {
   return value < 0 ? 0 : value >= size ? size - 1 : value;
 }
 
-/** RGBA bytes with the mask as alpha, for the tint overlay or PNG export. */
+/** A rectangle of a mask, in its own pixels. */
+export type MaskRegion = { left: number; top: number; width: number; height: number };
+
+/** RGBA bytes with the mask as alpha, for the tint overlay or PNG export.
+ *
+ * Of the whole mask, or of one region of it, row by row, for repainting only
+ * the part a brush has just changed: a whole 12-megapixel tint is 48 MB to
+ * build again on every move of the pointer.
+ */
 export function toAlphaImageData(
   mask: MaskRaster,
   rgb: readonly [number, number, number] = [255, 255, 255],
   /** How much of each marked pixel's coverage shows, from 0 to 1. */
   opacity = 1,
+  region: MaskRegion = { left: 0, top: 0, width: mask.width, height: mask.height },
 ): Uint8ClampedArray {
-  const out = new Uint8ClampedArray(mask.data.length * 4);
-  for (let index = 0; index < mask.data.length; index += 1) {
-    out[index * 4] = rgb[0];
-    out[index * 4 + 1] = rgb[1];
-    out[index * 4 + 2] = rgb[2];
-    // Half rounds up, as the server does when it lays paint down.
-    out[index * 4 + 3] = opacity === 1 ? mask.data[index] : Math.floor(mask.data[index] * opacity + 0.5);
+  const out = new Uint8ClampedArray(region.width * region.height * 4);
+  let index = 0;
+  for (let row = 0; row < region.height; row += 1) {
+    const start = (region.top + row) * mask.width + region.left;
+    for (let column = 0; column < region.width; column += 1) {
+      const coverage = mask.data[start + column];
+      out[index] = rgb[0];
+      out[index + 1] = rgb[1];
+      out[index + 2] = rgb[2];
+      // Half rounds up, as the server does when it lays paint down.
+      out[index + 3] = opacity === 1 ? coverage : Math.floor(coverage * opacity + 0.5);
+      index += 4;
+    }
   }
   return out;
 }

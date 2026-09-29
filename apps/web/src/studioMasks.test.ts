@@ -156,6 +156,23 @@ describe("mask rasters", () => {
     const rgba = toAlphaImageData(mask, [10, 20, 30]);
     expect([...rgba]).toEqual([10, 20, 30, 0, 10, 20, 30, 128]);
   });
+
+  it("exports one region of the mask exactly as the same pixels of the whole", () => {
+    const mask = createMask(9, 7);
+    stampCircle(mask, 4, 3, 3, 200);
+    const whole = toAlphaImageData(mask, [1, 2, 3], 0.5);
+
+    const region = { left: 2, top: 1, width: 4, height: 3 };
+    const part = toAlphaImageData(mask, [1, 2, 3], 0.5, region);
+
+    expect(part).toHaveLength(region.width * region.height * 4);
+    for (let row = 0; row < region.height; row += 1) {
+      const from = ((region.top + row) * mask.width + region.left) * 4;
+      expect([...part.subarray(row * region.width * 4, (row + 1) * region.width * 4)]).toEqual([
+        ...whole.subarray(from, from + region.width * 4),
+      ]);
+    }
+  });
 });
 
 describe("mask history", () => {

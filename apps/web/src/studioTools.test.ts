@@ -70,6 +70,42 @@ describe("brush tool", () => {
   });
 });
 
+describe("what a brush has changed", () => {
+  it("covers every pixel a stroke painted, and starts over once asked", () => {
+    const mask = createMask(200, 100);
+    const brush = new BrushTool(mask, 6);
+    brush.down({ x: 40, y: 50 });
+    brush.move({ x: 90, y: 55 });
+
+    const changed = brush.takeChanged()!;
+    for (let y = 0; y < mask.height; y += 1) {
+      for (let x = 0; x < mask.width; x += 1) {
+        if (mask.data[y * mask.width + x] === 0) continue;
+        expect(x).toBeGreaterThanOrEqual(changed.left);
+        expect(x).toBeLessThan(changed.left + changed.width);
+        expect(y).toBeGreaterThanOrEqual(changed.top);
+        expect(y).toBeLessThan(changed.top + changed.height);
+      }
+    }
+    // Far smaller than the mask: only the stroke's neighbourhood.
+    expect(changed.width * changed.height).toBeLessThan((mask.width * mask.height) / 4);
+    expect(brush.takeChanged()).toBeNull();
+  });
+
+  it("stays inside the mask at its edge", () => {
+    const mask = createMask(50, 30);
+    const brush = new BrushTool(mask, 10, 0);
+    brush.down({ x: 2, y: 28 });
+
+    const changed = brush.takeChanged()!;
+    expect(changed.left).toBe(0);
+    expect(changed.top).toBeGreaterThanOrEqual(0);
+    expect(changed.left + changed.width).toBeLessThanOrEqual(mask.width);
+    // The dab runs past the bottom edge; the box stops there.
+    expect(changed.top + changed.height).toBe(mask.height);
+  });
+});
+
 describe("rect tool", () => {
   it("fills only on release and previews while dragging", () => {
     const mask = createMask(30, 30);
