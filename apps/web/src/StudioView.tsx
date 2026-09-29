@@ -11,6 +11,8 @@ import { StudioExportLink } from "./StudioExportLink";
 import { StudioUseInChat } from "./StudioUseInChat";
 import type { StudioPictureForChat } from "./useStudioPictureForChat";
 import { StudioExtendHandles } from "./StudioExtendHandles";
+import { GenerationProgress } from "./GenerationProgress";
+import { studioApplyProgress } from "./studioApplyProgress";
 import { StudioRecipes } from "./StudioRecipes";
 import { StudioSelectionControls } from "./StudioSelectionTool";
 import { StudioToolGuidance } from "./StudioToolGuidance";
@@ -95,6 +97,7 @@ export function StudioView({
   // Replacing a background or a subject is two applies; the studio stays busy in between.
   const cutoutEdit = useStudioBackground(sessionId, session, apply, setSelectionError);
   const busy = sessionBusy || cutoutEdit.busy;
+  const applyProgress = studioApplyProgress(session);
   // The recipe an apply should run under. Cleared whenever the instruction is
   // edited by hand: at that point the words are no longer the recipe's, and
   // running its workflow would attribute a result to something it did not do.
@@ -425,6 +428,7 @@ export function StudioView({
                     : "Apply edit"}
             </button>
           )}
+          {applyProgress && <GenerationProgress part={applyProgress} />}
         </aside>
       </div>
       <StudioFilmstrip

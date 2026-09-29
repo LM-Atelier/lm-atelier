@@ -112,6 +112,45 @@ describe("applying an edit", () => {
     expect(screen.getByRole("button", { name: /apply/i })).toHaveAttribute("aria-disabled", "true");
   });
 
+  it("shows how far a running edit has got, beside Apply", async () => {
+    vi.mocked(useStudioSession).mockReturnValue({
+      steps: [{ artifactId: "art-1", instruction: null, generationIdentity: null }],
+      previewArtifactId: null,
+      sessionId: "chat-studio",
+      session: {
+        messages: [
+          { id: "request", role: "user", status: "complete", parts: [] },
+          {
+            id: "answer",
+            role: "assistant",
+            status: "pending",
+            parts: [{
+              id: "progress",
+              type: "progress",
+              text: "Sampling",
+              artifact_id: null,
+              metadata_json: { progress: 0.4, phase: "sampling" },
+            }],
+          },
+        ],
+      },
+      busy: true,
+      error: null,
+      apply: vi.fn(),
+    } as unknown as ReturnType<typeof useStudioSession>);
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <StudioView sourceArtifactId="art-1" onOpenArtifact={vi.fn()} onOpenWorkflows={vi.fn()} onClose={vi.fn()} />
+      </QueryClientProvider>,
+    );
+
+    const step = (await screen.findByText("Sampling")).closest("[role='status']");
+    expect(step).not.toBeNull();
+    expect(step?.closest(".studio-panel")).not.toBeNull();
+    expect(step?.querySelector(".progress-track > div")).toHaveStyle({ width: "40%" });
+    expect(screen.getByRole("button", { name: /applying/i })).toHaveAttribute("aria-disabled", "true");
+  });
+
   it("says when a pinned recipe overrides the displayed workflow choice", async () => {
     workflowAvailabilityReason = "Loading the current workflow choice.";
     vi.mocked(api.editTemplates).mockResolvedValue([{
