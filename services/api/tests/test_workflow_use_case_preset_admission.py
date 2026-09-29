@@ -1,6 +1,7 @@
 """The selected recipe must satisfy both input structure and exact settings."""
 
 from dataclasses import replace
+from typing import Any
 
 import pytest
 from sqlalchemy.orm import Session
@@ -12,6 +13,7 @@ from local_lm.models import WorkflowDefinition, WorkflowRevision
 from local_lm.settings_registry import builtin_settings_for_role
 from local_lm.workflow_selection import WorkflowFamilySelectionError
 from local_lm.workflow_use_case_preset_admission import (
+    AdmittedWorkflowUseCasePreset,
     WorkflowUseCasePresetAdmissionError,
     admit_workflow_use_case_preset,
     resolve_workflow_use_case_preset_family,
@@ -24,7 +26,9 @@ from local_lm.workflow_use_cases_v1 import (
 )
 
 
-def _candidate():
+def _candidate() -> tuple[
+    ResolvedWorkflowUseCasePreset, WorkflowUseCaseInputs, WorkflowRevision, WorkflowDefinition
+]:
     recipe = ResolvedWorkflowUseCasePreset(
         WorkflowUseCase.IMAGE_EDIT, "preset", "chat", "recipe", "Example", {"seed": 9}
     )
@@ -40,7 +44,13 @@ def _candidate():
     return recipe, facts, revision, definition
 
 
-def _admit(recipe, facts, revision, definition, expected_revision_id="revision"):
+def _admit(
+    recipe: ResolvedWorkflowUseCasePreset,
+    facts: WorkflowUseCaseInputs,
+    revision: WorkflowRevision | None,
+    definition: WorkflowDefinition | None,
+    expected_revision_id: str = "revision",
+) -> AdmittedWorkflowUseCasePreset:
     return admit_workflow_use_case_preset(
         recipe,
         facts,
@@ -132,7 +142,7 @@ def test_family_resolution_applies_settings_before_ranking(session: Session, mod
         WorkflowUseCase.IMAGE_GENERATION, "preset", "workspace", "recipe", "Example", {"seed": 9}
     )
     facts = WorkflowUseCaseInputs(Operation.TEXT_TO_IMAGE)
-    arguments = dict(
+    arguments: dict[str, Any] = dict(
         mode=mode,
         engine="comfyui",
         fields=iter(builtin_settings_for_role("image")),
