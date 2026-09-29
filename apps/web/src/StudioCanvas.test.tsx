@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import { StudioCanvas } from "./StudioCanvas";
-import { createMask } from "./studioMasks";
+import { createMask, isEmpty } from "./studioMasks";
 import { PerspectiveTool, pictureCorners } from "./studioPerspective";
-import type { ImagePoint, PointerTool, ToolPreview } from "./studioTools";
+import { BrushTool, RectTool, type ImagePoint, type PointerTool, type ToolPreview } from "./studioTools";
 
 /** jsdom has no 2D context; the component must tolerate null contexts and
  * still run its geometry and tool forwarding, which is what these pin. */
@@ -134,7 +134,7 @@ describe("StudioCanvas", () => {
     expect(tool.calls.map(([kind]) => kind)).toEqual(["down", "up"]);
   });
 
-  it("closes a cancelled gesture and clears pan state on lost capture", () => {
+  it("abandons a cancelled gesture rather than finishing it, and clears pan state on lost capture", () => {
     const tool = new SpyTool();
     const onStrokeEnd = vi.fn();
     const { container } = render(
@@ -145,12 +145,36 @@ describe("StudioCanvas", () => {
     fireEvent.pointerDown(surface, { pointerType: "mouse", clientX: 10, clientY: 10, button: 0, pointerId: 3 });
     fireEvent.pointerCancel(surface, { pointerType: "mouse", clientX: 15, clientY: 10, pointerId: 3 });
 
-    expect(tool.calls.map(([kind]) => kind)).toEqual(["down", "up"]);
+    expect(tool.calls.map(([kind]) => kind)).toEqual(["down", "cancel"]);
+    // Told all the same, so what a brush already painted is shown and counted.
     expect(onStrokeEnd).toHaveBeenCalledTimes(1);
 
     // A further move must not continue the cancelled stroke.
     fireEvent.pointerMove(surface, { pointerType: "mouse", clientX: 40, clientY: 10, pointerId: 3 });
     expect(tool.calls.filter(([kind]) => kind === "move")).toHaveLength(1);
+  });
+
+  it("drops a rectangle whose pointer was lost, and keeps what a brush had painted", () => {
+    // jsdom's pointer events carry no coordinates, so these are mouse events
+    // under the pointer events' names, as a mouse delivers them anyway.
+    const at = (target: Element, type: string, x: number, y: number) =>
+      fireEvent(target, new MouseEvent(type, { clientX: x, clientY: y, button: 0, bubbles: true }));
+    const rectangleMask = createMask(400, 200);
+    const { container, rerender } = render(
+      <StudioCanvas image={image} mask={rectangleMask} tool={new RectTool(rectangleMask)} />,
+    );
+    const surface = container.querySelector(".studio-canvas")!;
+    at(surface, "pointerdown", 10, 10);
+    at(surface, "pointermove", 90, 60);
+    at(surface, "lostpointercapture", 90, 60);
+    expect(isEmpty(rectangleMask)).toBe(true);
+
+    const brushMask = createMask(400, 200);
+    rerender(<StudioCanvas image={image} mask={brushMask} tool={new BrushTool(brushMask, 8)} />);
+    at(surface, "pointerdown", 10, 10);
+    at(surface, "pointermove", 60, 10);
+    at(surface, "pointercancel", 60, 10);
+    expect(isEmpty(brushMask)).toBe(false);
   });
 
   it("zooms the layer transform about the wheel cursor", () => {
