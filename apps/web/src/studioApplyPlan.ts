@@ -17,7 +17,14 @@ export type StudioApplyPlan = {
   /** A light map goes with the picture as a second input. */
   sendsLightMap: boolean;
   /** A cutout run first, whose subject decides what the words may redraw. */
-  cutout?: { words: string; workflowRevisionId?: string };
+  cutout?: {
+    words: string;
+    workflowRevisionId?: string;
+    /** Everything around the subject, or the subject itself. */
+    redraw: "surroundings" | "subject";
+    /** The picture a new subject is taken from, sent after the source. */
+    reference?: Blob;
+  };
 };
 
 export function studioApplyPlan(
@@ -25,6 +32,8 @@ export function studioApplyPlan(
   instruction: string,
   recipe: EditTemplate | null,
   activeTool: StudioToolCapability | undefined,
+  /** Isolate's entry in the report, which names the workflow every cutout runs on. */
+  isolateTool?: StudioToolCapability,
 ): StudioApplyPlan {
   if (tools.kind === "relight") {
     const adapter = activeTool?.adapter_asset_id;
@@ -74,6 +83,26 @@ export function studioApplyPlan(
       cutout: {
         words: defaultInstruction({ ...tools, kind: "isolate" }),
         workflowRevisionId: activeTool?.workflow_revision_id ?? undefined,
+        redraw: "surroundings",
+      },
+    };
+  }
+  if (tools.kind === "subject") {
+    const note = instruction.trim();
+    return {
+      // The model sees both pictures and redraws the first; only the
+      // subject's place is kept from what it draws.
+      words: `Replace the subject with ${note ? `${note} from` : "the one in"} the second picture. Keep everything around it exactly as it is.`,
+      // The report names the first workflow that reads a second picture. The
+      // studio's chosen one may read only one, so it is never used here.
+      workflowRevisionId: activeTool?.workflow_revision_id ?? undefined,
+      blendSelection: true,
+      sendsLightMap: false,
+      cutout: {
+        words: defaultInstruction({ ...tools, kind: "isolate" }),
+        workflowRevisionId: isolateTool?.workflow_revision_id ?? undefined,
+        redraw: "subject",
+        reference: tools.subjectPicture ?? undefined,
       },
     };
   }

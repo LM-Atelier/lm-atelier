@@ -1,9 +1,11 @@
-/** Replacing a background: the cutout's own alpha is the selection.
+/** Replacing a background or a subject: the cutout's own alpha is the selection.
  *
  * The cutout workflow finds the subject and returns it on transparency, so its
- * alpha says exactly where the subject is. As a selection, inverted, it covers
- * everything around the subject, and the redraw is placed back through it: the
- * background changes and the subject keeps its own pixels.
+ * alpha says exactly where the subject is. Inverted, it covers everything
+ * around the subject, and a redraw placed back through it changes the
+ * background while the subject keeps its own pixels. As it is, grown a little,
+ * it covers the subject, and a redraw placed back through it changes the
+ * subject while everything around it keeps its own.
  */
 
 import { readSourcePixels } from "./studioSourcePixels";
@@ -25,6 +27,17 @@ export function cutoutOutcome(session: ChatDetail | null, messageId: string): Cu
   return message.status === "complete" && image?.artifact_id
     ? { state: "ready", artifactId: image.artifact_id }
     : { state: "failed" };
+}
+
+/** How far past its outline a subject's selection reaches, in pixels.
+ *
+ * A new subject is rarely the old one's exact shape, and a selection held to
+ * the old outline would clip whatever the new one adds. A small share of the
+ * picture's shorter side gives it room, with a floor so a small picture still
+ * gets some.
+ */
+export function subjectReach(width: number, height: number): number {
+  return Math.max(8, Math.round(Math.min(width, height) * 0.04));
 }
 
 /** The subject's coverage from a cutout's RGBA pixels: its alpha, soft edges and all. */

@@ -80,9 +80,9 @@ export function StudioView({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [instruction, setInstruction] = useState("");
   const [selectionError, setSelectionError] = useState<string | null>(null);
-  // Replacing a background is two applies; the studio stays busy in between.
-  const background = useStudioBackground(sessionId, session, apply, setSelectionError);
-  const busy = sessionBusy || background.busy;
+  // Replacing a background or a subject is two applies; the studio stays busy in between.
+  const cutoutEdit = useStudioBackground(sessionId, session, apply, setSelectionError);
+  const busy = sessionBusy || cutoutEdit.busy;
   // The recipe an apply should run under. Cleared whenever the instruction is
   // edited by hand: at that point the words are no longer the recipe's, and
   // running its workflow would attribute a result to something it did not do.
@@ -118,6 +118,8 @@ export function StudioView({
     refetchOnMount: "always",
   });
   const activeTool = capabilities.data?.tools.find((tool) => tool.kind === tools.kind);
+  // Every cutout runs on the workflow Isolate is given.
+  const isolateTool = capabilities.data?.tools.find((tool) => tool.kind === "isolate");
   const unavailable = activeTool && !activeTool.available ? activeTool.reason : null;
   // Derived, never synced: with nothing chosen the studio shows the newest
   // result, so a finished apply lands on the canvas without an effect.
@@ -158,19 +160,24 @@ export function StudioView({
   // the size is the whole instruction. Text takes its words from its
   // own fields, and without a box it would change the whole picture.
   // Isolate asks for nothing and runs only the workflow the report names.
+  // Replacing a subject needs the picture it comes from, and runs only the
+  // workflows the report names, so the studio's own choice never matters.
   const applyDisabled =
     (tools.kind === "extend" && !Object.values(tools.margins).some(Boolean)) ||
     (tools.kind === "text" && (!tools.newWords.trim() || selectionCoverage === 0)) ||
     (tools.kind === "isolate" && !activeTool?.workflow_revision_id) ||
     (tools.kind === "background" && !activeTool?.workflow_revision_id) ||
-    (!["enhance", "extend", "text", "relight", "isolate"].includes(tools.kind) && !instruction.trim()) ||
+    (tools.kind === "subject" &&
+      (!activeTool?.workflow_revision_id || !isolateTool?.workflow_revision_id || !tools.subjectPicture)) ||
+    (!["enhance", "extend", "text", "relight", "isolate", "subject"].includes(tools.kind) &&
+      !instruction.trim()) ||
     busy ||
     !current ||
     Boolean(unavailable) ||
     Boolean(
       workflowUnavailable &&
         !recipe?.workflow_revision_id &&
-        !(["relight", "isolate"].includes(tools.kind) && activeTool?.workflow_revision_id),
+        !(["relight", "isolate", "subject"].includes(tools.kind) && activeTool?.workflow_revision_id),
     );
   if (!sourceArtifactId) {
     return (
@@ -294,7 +301,7 @@ export function StudioView({
           ) : (
             <StudioWorkflowOpening selectorId={workflowSelectorId} />
           )}
-          {!["instruct", "relight", "isolate", "background"].includes(tools.kind) && (
+          {!["instruct", "relight", "isolate", "background", "subject"].includes(tools.kind) && (
             <div className="studio-selection-controls">
               <StudioSelectionTool tools={tools} dispatch={dispatch} colorsUnreadable={readsColors && Boolean(bitmap) && !sourcePixels} />
               <div className="row-actions">
@@ -354,12 +361,12 @@ export function StudioView({
               const selection = toolUsesMask(tools.kind) && tools.mask && !isEmpty(tools.mask)
                 ? tools.mask
                 : null;
-              const plan = studioApplyPlan(tools, instruction, recipe, activeTool);
+              const plan = studioApplyPlan(tools, instruction, recipe, activeTool, isolateTool);
               if (plan.cutout) {
                 // Drawn at the picture's own size, so the subject lines up with it.
                 if (!bitmap) return;
                 setSelectionError(null);
-                background.start(plan, current.artifactId, { width: bitmap.width, height: bitmap.height }, () => {
+                cutoutEdit.start(plan, current.artifactId, { width: bitmap.width, height: bitmap.height }, () => {
                   setInstruction("");
                   setSelectedId(null);
                 });
@@ -417,6 +424,8 @@ export function StudioView({
                   ? "Cut out"
                 : tools.kind === "background"
                   ? "Replace background"
+                : tools.kind === "subject"
+                  ? "Replace subject"
                 : tools.kind === "enhance"
                   ? `Enlarge ${tools.upscaleFactor}x`
                 : tools.kind !== "instruct" && selectionCoverage > 0

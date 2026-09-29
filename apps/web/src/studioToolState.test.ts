@@ -117,6 +117,17 @@ describe("studio tool state", () => {
     expect(state.history.canUndo).toBe(false);
   });
 
+  it("keeps the picture a subject is taken from when the edited picture changes", () => {
+    const picture = new File(["neutral"], "new-subject.png", { type: "image/png" });
+    let state = studioToolReducer(withImage(), { type: "set-subject-picture", picture });
+    state = studioToolReducer(state, { type: "image-changed", width: 40, height: 20 });
+
+    expect(state.subjectPicture).toBe(picture);
+    // The cutout finds the subject, so there is nothing to point at.
+    expect(toolFor({ ...state, kind: "subject" })).toBeNull();
+    expect(toolUsesMask("subject")).toBe(false);
+  });
+
   it("bumps the repaint version only when the raster actually changes", () => {
     let state = withImage();
     const before = state.maskVersion;
