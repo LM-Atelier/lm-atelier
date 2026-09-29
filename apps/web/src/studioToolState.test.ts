@@ -150,6 +150,16 @@ describe("studio tool state", () => {
     expect(state.featherPx).toBe(0);
   });
 
+  it("restores everything as it stood, the selection and its history with it", () => {
+    let kept = withImage();
+    kept = studioToolReducer(kept, { type: "select-tool", kind: "lasso" });
+    kept = studioToolReducer(kept, { type: "set-margin", side: "top", fraction: 1 });
+
+    const restored = studioToolReducer(initialToolState(), { type: "restore", state: kept });
+
+    expect(restored).toBe(kept);
+  });
+
   it("ignores mask operations before an image is loaded", () => {
     const state = initialToolState();
     for (const action of ["undo", "redo", "invert", "clear"] as const) {

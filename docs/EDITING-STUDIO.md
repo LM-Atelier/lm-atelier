@@ -15,6 +15,13 @@ be reviewed, revised, retried, and compared like any other.
   the whole selection to the composer at once. When no chat exists yet, one
   is created first.
 
+Leaving the studio for another view, for instance to install a workflow a tool
+needs, keeps what you were doing. Come back to the same picture and the tool,
+its selection and settings, and the words you wrote are as you left them. If a
+newer result is on the canvas by then, the words come back and the selection
+does not, since it was drawn on the earlier picture. This lasts while the app
+stays open.
+
 ## Templates
 
 The built-in set covers everyday edits - style transformations like
