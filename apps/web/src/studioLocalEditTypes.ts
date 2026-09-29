@@ -6,8 +6,8 @@
 
 /** An edit the studio makes itself, without a model. */
 export type StudioLocalEditOperation =
-  | "rotate_clockwise" | "rotate_counterclockwise" | "flip_horizontal" | "flip_vertical" | "straighten" | "crop"
-  | "resize" | "adjust" | "blur" | "pixelate" | "paint" | "caption" | "canvas";
+  | "rotate_clockwise" | "rotate_counterclockwise" | "flip_horizontal" | "flip_vertical" | "straighten"
+  | "perspective" | "crop" | "resize" | "adjust" | "blur" | "pixelate" | "paint" | "caption" | "canvas";
 
 export interface StudioLocalEditRequest {
   source_artifact_id: string;
@@ -16,6 +16,8 @@ export interface StudioLocalEditRequest {
   crop?: StudioCropBox | null;
   /** How far to turn the picture; given with a straightening only. */
   straighten?: StudioStraighten | null;
+  /** Where the corners of what should be square lie; given with a perspective correction only. */
+  perspective?: StudioPerspective | null;
   /** The new size in pixels; given with a resize only. */
   size?: StudioPictureSize | null;
   /** Where the light and color sliders stand; given with an adjustment only. */
@@ -74,7 +76,7 @@ export interface StudioSelectionPixelate {
 /** What an edit needs besides the picture and the operation: a box, a size,
  * sliders, or a marked area, which is uploaded before the edit is asked for. */
 export type StudioLocalEditDetails = Pick<
-  StudioLocalEditRequest, "crop" | "straighten" | "size" | "adjustments" | "canvas"
+  StudioLocalEditRequest, "crop" | "straighten" | "perspective" | "size" | "adjustments" | "canvas"
 > & {
   blur?: { selection: Blob; radius: number };
   pixelate?: { selection: Blob; block: number };
@@ -90,6 +92,24 @@ export interface StudioColorAdjustments {
   warmth: number;
   tint: number;
   sharpness: number;
+}
+
+/** A point on a picture, in its own pixels as it is seen upright. */
+export interface StudioPoint {
+  x: number;
+  y: number;
+}
+
+/** Where the corners of something that should be a rectangle lie on the picture.
+ *
+ * Correcting the perspective makes what lies inside them the whole picture,
+ * upright and square-cornered.
+ */
+export interface StudioPerspective {
+  top_left: StudioPoint;
+  top_right: StudioPoint;
+  bottom_right: StudioPoint;
+  bottom_left: StudioPoint;
 }
 
 /** How far to turn a picture to straighten it, in degrees, clockwise when positive. */

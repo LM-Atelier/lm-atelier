@@ -33,7 +33,7 @@ from .artifact_library import ensure_library_entry
 from .artifacts import ArtifactStore
 from .domain import ArtifactKind, MessageRole, MessageStatus, PartType
 from .models import Artifact, Chat, Message, MessagePart
-from .schemas import StudioLocalEditOperation
+from .schemas import StudioLocalEditOperation, StudioPerspective
 from .studio_adjustments import ColorAdjustments, adjust_colors
 from .studio_region_edit import (
     MAX_BLEND_PIXELS,
@@ -52,6 +52,7 @@ _DESCRIPTIONS: dict[StudioLocalEditOperation, str] = {
     "flip_horizontal": "Flip horizontally",
     "flip_vertical": "Flip vertically",
     "straighten": "Straighten",
+    "perspective": "Correct the perspective",
     "crop": "Crop",
     "resize": "Resize",
     "adjust": "Adjust light and color",
@@ -68,6 +69,7 @@ _NAME_SUFFIXES: dict[StudioLocalEditOperation, str] = {
     "flip_horizontal": "flipped",
     "flip_vertical": "flipped vertically",
     "straighten": "straightened",
+    "perspective": "perspective corrected",
     "crop": "cropped",
     "resize": "resized",
     "adjust": "adjusted",
@@ -103,6 +105,42 @@ class CropBox:
     top: int
     width: int
     height: int
+
+
+@dataclass(frozen=True)
+class PerspectiveCorners:
+    """Where the corners of what should be a rectangle lie, in the picture's own
+    pixels as it is seen upright."""
+
+    top_left: tuple[int, int]
+    top_right: tuple[int, int]
+    bottom_right: tuple[int, int]
+    bottom_left: tuple[int, int]
+
+    def in_order(self) -> tuple[tuple[int, int], ...]:
+        """The four corners from the top left, going clockwise."""
+        return (self.top_left, self.top_right, self.bottom_right, self.bottom_left)
+
+    def as_dict(self) -> dict[str, dict[str, int]]:
+        return {
+            name: {"x": point[0], "y": point[1]}
+            for name, point in zip(
+                ("top_left", "top_right", "bottom_right", "bottom_left"),
+                self.in_order(),
+                strict=True,
+            )
+        }
+
+
+def perspective_corners(corners: StudioPerspective) -> PerspectiveCorners:
+    """The four corners a request names, as points."""
+
+    return PerspectiveCorners(
+        (corners.top_left.x, corners.top_left.y),
+        (corners.top_right.x, corners.top_right.y),
+        (corners.bottom_right.x, corners.bottom_right.y),
+        (corners.bottom_left.x, corners.bottom_left.y),
+    )
 
 
 @dataclass(frozen=True)
@@ -195,6 +233,7 @@ def render_local_edit(
     caption: CaptionOverlay | None = None,
     pixelate: SelectionPixelate | None = None,
     straighten: float | None = None,
+    perspective: PerspectiveCorners | None = None,
 ) -> bytes:
     """The edited picture as PNG, made from the stored bytes without a model."""
 
@@ -233,6 +272,8 @@ def render_local_edit(
         result = picture.crop((crop.left, crop.top, crop.left + crop.width, crop.top + crop.height))
     elif operation == "straighten":
         result = _straightened(picture, straighten)
+    elif operation == "perspective":
+        result = _perspective_corrected(picture, perspective)
     elif operation == "resize":
         result = _resized(picture, size)
     elif operation == "adjust":
@@ -285,6 +326,93 @@ def _straightened(picture: Image.Image, degrees: float | None) -> Image.Image:
     top = (height - kept_height) // 2
     kept = turned.crop((left, top, left + kept_width, top + kept_height))
     return kept.convert("RGBA") if premultiplied else kept
+
+
+def perspective_size(corners: PerspectiveCorners) -> tuple[int, int]:
+    """The corrected picture's size: the longer of each pair of opposite sides.
+
+    The longer side is the nearer one, so keeping it keeps the most detail.
+    Each length is the square root of a whole number, which is never a half,
+    so rounding it cannot differ from the size the browser shows.
+    """
+
+    (x0, y0), (x1, y1), (x2, y2), (x3, y3) = corners.in_order()
+    width = max(_length(x1 - x0, y1 - y0), _length(x2 - x3, y2 - y3))
+    height = max(_length(x3 - x0, y3 - y0), _length(x2 - x1, y2 - y1))
+    return (math.floor(width + 0.5), math.floor(height + 0.5))
+
+
+def _length(across: int, down: int) -> float:
+    # The square root of an exact whole number, as the browser takes it.
+    return math.sqrt(across * across + down * down)
+
+
+def _square_to_quad(
+    points: tuple[tuple[int, int], ...], size: tuple[int, int]
+) -> tuple[float, ...]:
+    """Pillow's coefficients taking each point of the corrected picture onto the source.
+
+    The map from a unit square onto four corners, as Heckbert gives it, then
+    scaled so that the corrected picture's own pixels are what it takes in.
+    """
+
+    (x0, y0), (x1, y1), (x2, y2), (x3, y3) = points
+    width, height = size
+    sum_x = x0 - x1 + x2 - x3
+    sum_y = y0 - y1 + y2 - y3
+    across = (x1 - x2) * (y3 - y2) - (x3 - x2) * (y1 - y2)
+    g = (sum_x * (y3 - y2) - (x3 - x2) * sum_y) / across
+    h = ((x1 - x2) * sum_y - sum_x * (y1 - y2)) / across
+    return (
+        (x1 - x0 + g * x1) / width,
+        (x3 - x0 + h * x3) / height,
+        x0,
+        (y1 - y0 + g * y1) / width,
+        (y3 - y0 + h * y3) / height,
+        y0,
+        g / width,
+        h / height,
+    )
+
+
+def _perspective_corrected(picture: Image.Image, corners: PerspectiveCorners | None) -> Image.Image:
+    if corners is None:
+        raise LocalEditError(
+            "studio-perspective-missing", "Place the four corners of what should be square."
+        )
+    width, height = picture.size
+    points = corners.in_order()
+    if any(not (0 <= x <= width and 0 <= y <= height) for x, y in points):
+        raise LocalEditError(
+            "studio-perspective-outside-picture", "Each corner must lie on the picture."
+        )
+    if points == ((0, 0), (width, 0), (width, height), (0, height)):
+        raise LocalEditError(
+            "studio-perspective-unchanged",
+            "Move the corners onto what should be square to correct the perspective.",
+        )
+    # Every turn from one side to the next goes the same way, clockwise as the
+    # picture is seen, which holds only for four corners in order around a
+    # shape whose sides do not cross.
+    for index in range(4):
+        (ax, ay), (bx, by), (cx, cy) = (points[(index + step) % 4] for step in range(3))
+        if (bx - ax) * (cy - by) - (by - ay) * (cx - bx) <= 0:
+            raise LocalEditError(
+                "studio-perspective-crossed",
+                "Keep the corners in their places: top left, top right, bottom right and"
+                " bottom left, with no side crossing another.",
+            )
+    size = perspective_size(corners)
+    if size[0] * size[1] > MAX_BLEND_PIXELS:
+        raise LocalEditError("studio-edit-too-large", "That size is too large to make here.")
+    # Pillow resamples a transparent picture with its colors premultiplied, so
+    # a hidden color under a transparent pixel cannot bleed into the edge.
+    return picture.transform(
+        size,
+        Image.Transform.PERSPECTIVE,
+        _square_to_quad(points, size),
+        Image.Resampling.BICUBIC,
+    )
 
 
 def _blurred(picture: Image.Image, blur: SelectionBlur | None, orientation: int) -> Image.Image:
@@ -451,6 +579,7 @@ def record_local_edit(
     caption: CaptionOverlay | None = None,
     pixelate: SelectionPixelate | None = None,
     straighten: float | None = None,
+    perspective: PerspectiveCorners | None = None,
 ) -> Artifact:
     """Store the edited picture and append it to the session as one more step.
 
@@ -465,6 +594,8 @@ def record_local_edit(
         record["crop"] = asdict(crop)
     if straighten is not None:
         record["straighten"] = {"degrees": straighten, "resampler": "bicubic"}
+    if perspective is not None:
+        record["perspective"] = {"corners": perspective.as_dict(), "resampler": "bicubic"}
     if size is not None:
         record["size"] = asdict(size)
         record["resampler"] = RESIZE_RESAMPLER
@@ -567,6 +698,7 @@ def edited_picture(
     caption: CaptionOverlay | None = None,
     pixelate: SelectionPixelate | None = None,
     straighten: float | None = None,
+    perspective: PerspectiveCorners | None = None,
 ) -> bytes:
     """Read the source's verified bytes and make the edited picture from them.
 
@@ -590,4 +722,5 @@ def edited_picture(
         caption,
         pixelate,
         straighten,
+        perspective,
     )

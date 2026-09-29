@@ -8,6 +8,7 @@
  */
 
 import { constrainedCorner, type CropRatio } from "./studioCropShape";
+import type { Corner } from "./studioPerspective";
 import {
   fillPolygon,
   fillRect,
@@ -16,6 +17,7 @@ import {
   strokeSegment,
   type MaskRaster,
 } from "./studioMasks";
+import type { StudioPerspective } from "./types";
 
 export type ImagePoint = { x: number; y: number };
 
@@ -23,7 +25,9 @@ export type ToolPreview =
   | { kind: "none" }
   | { kind: "brush-cursor"; center: ImagePoint; radius: number }
   | { kind: "rect"; from: ImagePoint; to: ImagePoint }
-  | { kind: "lasso"; points: ImagePoint[] };
+  | { kind: "lasso"; points: ImagePoint[] }
+  /** A perspective correction's four corners, the one in hand or nearest, and its thirds. */
+  | { kind: "corners"; corners: StudioPerspective; active: Corner | null; lines: Array<[ImagePoint, ImagePoint]> };
 
 export interface PointerTool {
   /** Whether the gesture writes to the mask as it travels.

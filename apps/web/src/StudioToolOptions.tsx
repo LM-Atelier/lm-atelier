@@ -4,9 +4,11 @@ import { StudioBlurTool } from "./StudioBlurTool";
 import { StudioCanvasSizeTool } from "./StudioCanvasSizeTool";
 import { StudioCaptionTool } from "./StudioCaptionTool";
 import { StudioPaintTool } from "./StudioPaintTool";
+import { StudioPerspectiveTool } from "./StudioPerspectiveTool";
 import { StudioCropTool } from "./StudioCropTool";
 import { StudioResizeTool } from "./StudioResizeTool";
 import { StudioTransformTool } from "./StudioTransformTool";
+import { pictureCorners } from "./studioPerspective";
 import type { StudioToolAction, StudioToolState } from "./studioToolState";
 import type { StudioLocalEditDetails, StudioLocalEditOperation } from "./types";
 
@@ -14,7 +16,8 @@ import type { StudioLocalEditDetails, StudioLocalEditOperation } from "./types";
  *
  * Extend and Enhance are a drag or a number, Text is the words before and
  * after, Isolate needs nothing, replacing a subject needs the picture it comes
- * from, turning and flipping are a press each, a crop is a drawn box, a
+ * from, turning and flipping are a press each, a perspective correction is
+ * four corners placed on the picture, a crop is a drawn box, a
  * resize is a width and a height, a canvas change is those and a place, light
  * and color are four sliders, a blur is a marked area and a strength, a paint
  * is a marked area and a color, added words are the words and their look, and
@@ -42,6 +45,14 @@ export function StudioToolOptions({
       <StudioTransformTool busy={busy} onEdit={onLocalEdit} degrees={tools.straightenDegrees}
         onDegrees={(degrees) => dispatch({ type: "set-straighten", degrees })}
         onStraighten={() => onLocalEdit("straighten", { straighten: { degrees: tools.straightenDegrees } })} />
+    ) : null;
+  }
+  if (tools.kind === "perspective") {
+    const size = tools.mask ? { width: tools.mask.width, height: tools.mask.height } : null;
+    return onLocalEdit && size ? (
+      <StudioPerspectiveTool corners={tools.perspective ?? pictureCorners(size.width, size.height)} size={size}
+        busy={busy} onReset={() => dispatch({ type: "set-perspective", corners: null })}
+        onApply={(corners) => onLocalEdit("perspective", { perspective: corners })} />
     ) : null;
   }
   if (tools.kind === "crop") {

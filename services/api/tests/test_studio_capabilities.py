@@ -37,7 +37,17 @@ def test_the_edits_the_studio_makes_itself_need_nothing_installed() -> None:
     """The studio makes those edits itself, so nothing can be missing."""
     tools = _by_kind([])
 
-    for kind in ("transform", "crop", "resize", "adjust", "blur", "paint", "caption", "canvas"):
+    for kind in (
+        "transform",
+        "perspective",
+        "crop",
+        "resize",
+        "adjust",
+        "blur",
+        "paint",
+        "caption",
+        "canvas",
+    ):
         assert tools[kind].workflow_class == "local"
         assert tools[kind].available is True
         assert tools[kind].reason is None

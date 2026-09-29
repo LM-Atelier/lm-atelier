@@ -166,9 +166,10 @@ export function StudioView({
   // The pointer tool is rebuilt whenever the mode or brush changes; each one
   // is a cheap wrapper over the shared raster, never a copy of it.
   const pointerTool = useMemo(
-    () => toolFor(tools, sourcePixels),
+    () => toolFor(tools, sourcePixels, (corners) => dispatch({ type: "set-perspective", corners })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tools.kind, tools.brushRadius, tools.cropShape, tools.mask, tools.selectionMode, tools.colorTolerance, sourcePixels],
+    [tools.kind, tools.brushRadius, tools.cropShape, tools.perspective, tools.mask, tools.selectionMode,
+      tools.colorTolerance, sourcePixels],
   );
   useEffect(() => {
     if (bitmap) {

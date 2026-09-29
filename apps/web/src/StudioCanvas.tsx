@@ -10,7 +10,8 @@ import {
 } from "react";
 import { compareFit } from "./studioComparison";
 import { toAlphaImageData, type MaskRaster } from "./studioMasks";
-import type { ImagePoint, PointerTool } from "./studioTools";
+import { CORNERS } from "./studioPerspective";
+import type { ImagePoint, PointerTool, ToolPreview } from "./studioTools";
 import {
   fitViewport,
   identityViewport,
@@ -133,27 +134,14 @@ export function StudioCanvas({
     if (!layer || !context) return;
     context.clearRect(0, 0, layer.width, layer.height);
     const preview = tool?.preview(viewport.scale);
-    if (!preview || preview.kind === "none") return;
-    context.strokeStyle = "rgba(80, 170, 255, 0.9)";
-    context.lineWidth = Math.max(1, 1.5 / viewport.scale);
-    if (preview.kind === "brush-cursor") {
-      context.beginPath();
-      context.arc(preview.center.x, preview.center.y, preview.radius, 0, Math.PI * 2);
-      context.stroke();
-    } else if (preview.kind === "rect") {
-      context.strokeRect(
-        Math.min(preview.from.x, preview.to.x),
-        Math.min(preview.from.y, preview.to.y),
-        Math.abs(preview.to.x - preview.from.x),
-        Math.abs(preview.to.y - preview.from.y),
-      );
-    } else {
-      context.beginPath();
-      preview.points.forEach((point, index) =>
-        index === 0 ? context.moveTo(point.x, point.y) : context.lineTo(point.x, point.y));
-      context.stroke();
-    }
+    if (preview) drawToolPreview(context, preview, viewport.scale);
   }, [tool, viewport.scale]);
+
+  // A tool with something to show before any gesture, such as a perspective
+  // correction's corners, shows it as soon as it is in hand.
+  useEffect(() => {
+    drawPreview();
+  }, [drawPreview]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -443,4 +431,61 @@ function drawMarking(
     ? toAlphaImageData(mask, tint.rgb, tint.opacity)
     : toAlphaImageData(mask, [80, 170, 255]);
   context.putImageData(new ImageData(marking, mask.width, mask.height), 0, 0);
+}
+
+/** What a tool shows over the picture as it works, in the picture's own pixels. */
+function drawToolPreview(context: CanvasRenderingContext2D, preview: ToolPreview, scale: number): void {
+  if (preview.kind === "none") return;
+  context.strokeStyle = "rgba(80, 170, 255, 0.9)";
+  context.lineWidth = Math.max(1, 1.5 / scale);
+  if (preview.kind === "brush-cursor") {
+    context.beginPath();
+    context.arc(preview.center.x, preview.center.y, preview.radius, 0, Math.PI * 2);
+    context.stroke();
+  } else if (preview.kind === "rect") {
+    context.strokeRect(
+      Math.min(preview.from.x, preview.to.x),
+      Math.min(preview.from.y, preview.to.y),
+      Math.abs(preview.to.x - preview.from.x),
+      Math.abs(preview.to.y - preview.from.y),
+    );
+  } else if (preview.kind === "corners") {
+    drawCorners(context, preview, scale);
+  } else {
+    context.beginPath();
+    preview.points.forEach((point, index) =>
+      index === 0 ? context.moveTo(point.x, point.y) : context.lineTo(point.x, point.y));
+    context.stroke();
+  }
+}
+
+/** A perspective correction's corners as handles, joined into their shape, with
+ * the thirds the corrected picture will have drawn where they fall. */
+function drawCorners(
+  context: CanvasRenderingContext2D,
+  preview: Extract<ToolPreview, { kind: "corners" }>,
+  scale: number,
+): void {
+  const points = CORNERS.map((name) => preview.corners[name]);
+  context.beginPath();
+  points.forEach((point, index) => (index === 0 ? context.moveTo(point.x, point.y) : context.lineTo(point.x, point.y)));
+  context.closePath();
+  context.stroke();
+  context.save();
+  context.globalAlpha = 0.5;
+  context.beginPath();
+  for (const [from, to] of preview.lines) {
+    context.moveTo(from.x, from.y);
+    context.lineTo(to.x, to.y);
+  }
+  context.stroke();
+  context.restore();
+  for (const name of CORNERS) {
+    const { x, y } = preview.corners[name];
+    context.beginPath();
+    context.arc(x, y, 7 / scale, 0, Math.PI * 2);
+    context.fillStyle = name === preview.active ? "rgba(80, 170, 255, 0.9)" : "rgba(255, 255, 255, 0.9)";
+    context.fill();
+    context.stroke();
+  }
 }

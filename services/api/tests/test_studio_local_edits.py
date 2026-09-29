@@ -16,6 +16,7 @@ from local_lm.studio_local_edits import (
     CaptionOverlay,
     CropBox,
     LocalEditError,
+    PerspectiveCorners,
     PictureSize,
     SelectionBlur,
     SelectionPaint,
@@ -157,6 +158,107 @@ def test_straightening_by_no_angle_is_refused(degrees: float | None) -> None:
         render_local_edit(_png(_tiles()), "straighten", straighten=degrees)
 
     assert refused.value.code == "studio-straighten-unchanged"
+
+
+#: A card seen at an angle on a dark ground: its corners from the top left, clockwise.
+CARD = ((30, 12), (96, 22), (100, 80), (18, 70))
+CARD_COLOR = (230, 180, 40)
+
+
+def _card_scene() -> Image.Image:
+    scene = Image.new("RGB", (120, 90), (20, 20, 20))
+    ImageDraw.Draw(scene).polygon(CARD, fill=CARD_COLOR)
+    return scene
+
+
+def test_a_card_seen_at_an_angle_fills_the_corrected_picture() -> None:
+    result = _open(
+        render_local_edit(_png(_card_scene()), "perspective", perspective=PerspectiveCorners(*CARD))
+    )
+
+    # The longer of each pair of opposite sides: the bottom, the square root of
+    # 82 squared plus 10 squared, 82.6; and the left, of 12 and 58, 59.2.
+    assert result.size == (83, 59)
+    inside = {
+        result.getpixel((x, y))
+        for x in range(3, result.width - 3)
+        for y in range(3, result.height - 3)
+    }
+    assert inside == {CARD_COLOR}
+
+
+def test_each_corner_of_the_corrected_picture_shows_what_was_at_that_corner() -> None:
+    scene = Image.new("RGB", (120, 90), WHITE)
+    draw = ImageDraw.Draw(scene)
+    for (x, y), color in zip(CARD, (RED, GREEN, BLUE, (0, 0, 0)), strict=True):
+        draw.rectangle((x - 4, y - 4, x + 4, y + 4), fill=color)
+
+    result = _open(
+        render_local_edit(_png(scene), "perspective", perspective=PerspectiveCorners(*CARD))
+    )
+
+    right, bottom = result.width - 1, result.height - 1
+    assert [
+        result.getpixel(corner) for corner in ((0, 0), (right, 0), (right, bottom), (0, bottom))
+    ] == [
+        RED,
+        GREEN,
+        BLUE,
+        (0, 0, 0),
+    ]
+
+
+def test_a_perspective_correction_keeps_transparency_and_hides_no_color_under_it() -> None:
+    cutout = Image.new("RGBA", (60, 40), (255, 255, 255, 0))
+    ImageDraw.Draw(cutout).rectangle((10, 8, 49, 31), fill=(200, 120, 40, 255))
+    corners = PerspectiveCorners((5, 4), (55, 6), (54, 36), (4, 35))
+
+    result = _open(render_local_edit(_png(cutout), "perspective", perspective=corners))
+
+    assert result.mode == "RGBA"
+    assert result.getpixel((0, 0))[3] == 0
+    assert result.getpixel((result.width // 2, result.height // 2)) == (200, 120, 40, 255)
+    # Along the cutout's edge the colors stay the cutout's own: the white under
+    # the transparent pixels would otherwise lighten them.
+    edge = [
+        pixel
+        for x in range(result.width)
+        for y in range(result.height)
+        if 64 <= (pixel := result.getpixel((x, y)))[3] < 255
+    ]
+    assert edge
+    assert all(
+        abs(red - 200) <= 10 and abs(green - 120) <= 10 and blue <= 55
+        for red, green, blue, _ in edge
+    )
+
+
+@pytest.mark.parametrize(
+    ("corners", "code"),
+    [
+        (None, "studio-perspective-missing"),
+        # Where the corners start: the picture's own, which changes nothing.
+        (((0, 0), (120, 0), (120, 90), (0, 90)), "studio-perspective-unchanged"),
+        (((0, 0), (121, 0), (120, 90), (0, 90)), "studio-perspective-outside-picture"),
+        # The top corners swapped, so the top and bottom sides cross.
+        (((96, 22), (30, 12), (100, 80), (18, 70)), "studio-perspective-crossed"),
+        # Every corner in its place but gone round the other way.
+        (((30, 12), (18, 70), (100, 80), (96, 22)), "studio-perspective-crossed"),
+        # One corner pulled inside the shape, so it is not four-sided any more.
+        (((30, 12), (96, 22), (50, 30), (18, 70)), "studio-perspective-crossed"),
+    ],
+)
+def test_corners_that_cannot_be_corrected_are_refused(
+    corners: tuple[tuple[int, int], ...] | None, code: str
+) -> None:
+    with pytest.raises(LocalEditError) as refused:
+        render_local_edit(
+            _png(_card_scene()),
+            "perspective",
+            perspective=PerspectiveCorners(*corners) if corners is not None else None,
+        )
+
+    assert refused.value.code == code
 
 
 @pytest.mark.parametrize("size", [PictureSize(width=6, height=4), PictureSize(width=1, height=1)])
@@ -701,6 +803,83 @@ async def test_a_straightening_is_recorded_with_its_angle_and_method(
     assert straightened.size == (292, 146)
     detail = await client.get(f"/api/artifacts/{image['artifact_id']}")
     assert detail.json()["original_name"] == "wide (straightened).png"
+
+
+async def test_a_perspective_correction_is_recorded_with_its_corners_and_method(
+    client: AsyncClient,
+) -> None:
+    source_id = await _upload(client, "card.png", _png(_card_scene()))
+    session_id = await _session_over(client, source_id)
+    corners = {
+        name: {"x": x, "y": y}
+        for name, (x, y) in zip(
+            ("top_left", "top_right", "bottom_right", "bottom_left"), CARD, strict=True
+        )
+    }
+
+    response = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={
+            "source_artifact_id": source_id,
+            "operation": "perspective",
+            "perspective": corners,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    request, answer = response.json()["messages"]
+    assert request["parts"][0]["text"] == "Correct the perspective"
+    image, metadata = answer["parts"]
+    assert metadata["metadata_json"]["provenance"] == {
+        "local_edit": {
+            "operation": "perspective",
+            "source_artifact_id": source_id,
+            "perspective": {"corners": corners, "resampler": "bicubic"},
+        }
+    }
+    corrected = await _content(client, image["artifact_id"])
+    assert corrected.size == (83, 59)
+    detail = await client.get(f"/api/artifacts/{image['artifact_id']}")
+    assert detail.json()["original_name"] == "card (perspective corrected).png"
+
+
+async def test_a_perspective_correction_needs_its_corners_and_only_it_takes_them(
+    client: AsyncClient,
+) -> None:
+    source_id = await _upload(client, "card.png", _png(_card_scene()))
+    session_id = await _session_over(client, source_id)
+    corners = {
+        "top_left": {"x": 1, "y": 1},
+        "top_right": {"x": 100, "y": 1},
+        "bottom_right": {"x": 100, "y": 80},
+        "bottom_left": {"x": 1, "y": 80},
+    }
+
+    missing = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={"source_artifact_id": source_id, "operation": "perspective"},
+    )
+    stray = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={
+            "source_artifact_id": source_id,
+            "operation": "flip_vertical",
+            "perspective": corners,
+        },
+    )
+    outside = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={
+            "source_artifact_id": source_id,
+            "operation": "perspective",
+            "perspective": {**corners, "bottom_right": {"x": 121, "y": 80}},
+        },
+    )
+
+    assert missing.status_code == 422
+    assert stray.status_code == 422
+    assert outside.status_code == 422
+    assert outside.json()["code"] == "studio-perspective-outside-picture"
 
 
 async def test_a_resize_is_recorded_with_its_size_and_method(client: AsyncClient) -> None:
