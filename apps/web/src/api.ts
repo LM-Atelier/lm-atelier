@@ -1355,7 +1355,14 @@ export const api = {
   importWorkflow: (bundle: WorkflowBundle) =>
     request<Workflow>("/api/workflows/import", { method: "POST", body: JSON.stringify(bundle) }),
   editTemplates: () => request<EditTemplate[]>("/api/edit-templates"),
-  createEditTemplate: (payload: { name: string; description?: string; instruction: string; settings_json?: Record<string, unknown> }) =>
+  createEditTemplate: (payload: {
+    name: string;
+    description?: string;
+    instruction: string;
+    settings_json?: Record<string, unknown>;
+    /** Read the recipe from what this run did, rather than from the words and settings given here. */
+    from_run_id?: string;
+  }) =>
     request<EditTemplate>("/api/edit-templates", { method: "POST", body: JSON.stringify(payload) }),
   deleteEditTemplate: (id: string) =>
     request<void>(`/api/edit-templates/${id}`, { method: "DELETE" }),

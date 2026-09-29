@@ -25,6 +25,12 @@ instruction. Templates you find yourself repeating can be kept: with a draft
 instruction in the composer, the studio offers **Save as template** under the
 name you give it.
 
+In Image Studio, a result a model made can be kept the same way: with it on the
+canvas, **Save this edit as a recipe** under the Recipes list records its words
+and what its run actually used, the workflow, the model and the settings, but
+never the selection or the seed. Exact edits made without a model offer no
+recipe.
+
 ## Editing many images at once
 
 With several images attached, the studio's **Apply to each** sends one
