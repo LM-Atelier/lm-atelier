@@ -4,6 +4,7 @@ from typing import Any
 import pytest
 from test_catalog_hardware_advice import _system
 
+from local_lm.catalog_hardware_alternatives import catalog_context_settings
 from local_lm.config import Settings
 from local_lm.preflight import assess_catalog_install
 from local_lm.processes import ProcessSupervisor
@@ -50,10 +51,43 @@ def test_catalog_context_range_uses_total_capacity_and_the_launch_cost(
     assert len(result.hardware_fit.settings) == 1
     context = result.hardware_fit.settings[0]
     assert context.key == "context_length" and context.unit == "tokens"
-    assert context.minimum == 512 and context.maximum == 7168
+    assert context.minimum == 4096 and context.maximum == 7168
     assert context.advisory_only
     assert result.can_install
     assert request.model_dump() == before
+
+
+def test_a_tight_context_range_starts_where_a_shorter_context_saves_nothing(
+    tmp_path: Path,
+) -> None:
+    system = _system(None, device=False)
+    system.memory_total_bytes = 9 * GIB
+    result = assess_catalog_install(_detail(), _request(), Settings(data_dir=tmp_path), system)
+    assert result.hardware_fit is not None
+    assert result.hardware_fit.status == "tight"
+    lowest = result.hardware_fit.settings[0].minimum
+
+    def launch_cost(context: int) -> int:
+        return ProcessSupervisor._estimate_chat_memory(
+            int(6 * GIB * 1.2), {"context_length": context}
+        )
+
+    assert launch_cost(512) == launch_cost(lowest)
+    assert launch_cost(lowest + 512) > launch_cost(lowest)
+
+
+def test_context_ranges_take_the_model_bytes_as_given() -> None:
+    # Ninety percent of 9 GiB, less a 7.2 GiB model, leaves 0.9 GiB: 7372
+    # tokens at 128 KiB each, or 7168 on a 512-token step.
+    (setting,) = catalog_context_settings(int(6 * GIB * 1.2), 9 * GIB)
+    assert (setting.tight_minimum, setting.tight_maximum) == (4096, 7168)
+    assert (setting.preferred_minimum, setting.preferred_maximum) == (2048, 7168)
+    assert (setting.minimum, setting.maximum) == (512, 8192)
+
+
+@pytest.mark.parametrize("model_bytes", [None, 0, -1])
+def test_an_unknown_or_empty_model_gets_no_context_range(model_bytes: int | None) -> None:
+    assert catalog_context_settings(model_bytes, 9 * GIB) == ()
 
 
 def test_catalog_context_range_does_not_exceed_the_default_context(tmp_path: Path) -> None:
