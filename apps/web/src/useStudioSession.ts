@@ -10,6 +10,7 @@ import type {
   StudioLocalEditOperation,
   TurnAccepted,
 } from "./types";
+import type { StudioReplay } from "./studioReplay";
 
 const STUDIO_SESSION_KEY = "local-lm-studio-session";
 
@@ -45,6 +46,9 @@ type StudioApply = {
   /** A picture sent after the source: the light map the relight tool draws,
    * or the picture a replaced subject is taken from. */
   secondPicture?: Blob;
+  /** Pictures already in the library sent after the source, as an edit made
+   * again sends the ones it was given the first time. */
+  alsoGiven?: string[];
 };
 
 export type StudioStep = {
@@ -146,6 +150,7 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
       settings,
       workflowRevisionId,
       secondPicture,
+      alsoGiven,
     }: StudioApply) => {
       // Refused rather than raced. Between switching pictures and the new
       // session opening there is no session for what is on screen, and the
@@ -174,7 +179,7 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
         sessionId,
         instruction,
         "image",
-        second ? [artifactId, second.id] : [artifactId],
+        second ? [artifactId, second.id] : [artifactId, ...(alsoGiven ?? [])],
         turnSettings,
         undefined,
         undefined,
@@ -260,7 +265,26 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
         { instruction, artifactId, mask, settings, workflowRevisionId, secondPicture },
         { onSuccess: onAccepted, onError: onRefused },
       ),
+    /** The same edit again on the same pictures, as Try another sends it. */
+    again: (replay: StudioReplay, onAccepted?: (accepted: TurnAccepted) => void) =>
+      apply.mutate(
+        {
+          instruction: replay.words,
+          artifactId: replay.inputs[0],
+          alsoGiven: replay.inputs.slice(1),
+          settings: replay.settings,
+          workflowRevisionId: replay.workflowRevisionId,
+        },
+        { onSuccess: onAccepted },
+      ),
   };
+}
+
+/** Every picture the turn that made a result was given, the one it changed first. */
+export function studioTurnPictures(session: ChatDetail | null | undefined, resultMessageId: string): string[] {
+  const result = session?.messages.find((message) => message.id === resultMessageId);
+  const turn = session && result ? producingTurn(session.messages, result) : null;
+  return (turn?.parts ?? []).flatMap((part) => (part.type === "image" && part.artifact_id ? [part.artifact_id] : []));
 }
 
 export const uploadMaskForTest = uploadMask;

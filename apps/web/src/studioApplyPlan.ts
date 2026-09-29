@@ -126,3 +126,31 @@ export function studioApplyPlan(
     sendsLightMap: false,
   };
 }
+
+/** What the apply button says for the tool in hand.
+ *
+ * The tool's own verb where it has one, "Apply to selection" once a selecting
+ * tool has marked something, "Apply edit" otherwise, and "Applying…" while
+ * an edit is arriving, whatever the tool.
+ */
+export function studioApplyLabel(tools: StudioToolState, busy: boolean, selectionCoverage: number): string {
+  if (busy) return "Applying…";
+  switch (tools.kind) {
+    case "extend":
+      return "Extend";
+    case "text":
+      return "Replace words";
+    case "relight":
+      return "Relight";
+    case "isolate":
+      return "Cut out";
+    case "background":
+      return "Replace background";
+    case "subject":
+      return "Replace subject";
+    case "enhance":
+      return `Enlarge ${tools.upscaleFactor}x`;
+    default:
+      return tools.kind !== "instruct" && selectionCoverage > 0 ? "Apply to selection" : "Apply edit";
+  }
+}

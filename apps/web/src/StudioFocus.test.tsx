@@ -37,6 +37,7 @@ beforeEach(() => {
     busy: false,
     error: null,
     apply: vi.fn(),
+    again: vi.fn(),
     localEdit: vi.fn(),
     stop: vi.fn(),
     stopping: false,
