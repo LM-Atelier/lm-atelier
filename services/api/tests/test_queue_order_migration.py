@@ -28,7 +28,7 @@ def test_order_upgrade_preserves_accepted_work_and_can_revert_before_use(tmp_pat
     config = alembic_config(settings)
     command.upgrade(config, PARENT)
     before = snapshot(database)
-    command.upgrade(config, "head")
+    command.upgrade(config, REVISION)
     assert snapshot(database) == before
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT * FROM queue_order_entries").fetchall() == []
@@ -49,7 +49,7 @@ def test_order_downgrade_refuses_to_discard_saved_positions_or_receipts(
 ) -> None:
     settings, database = prepare(tmp_path)
     config = alembic_config(settings)
-    command.upgrade(config, "head")
+    command.upgrade(config, REVISION)
     with sqlite3.connect(database) as connection:
         if retained == "entry":
             connection.execute(
