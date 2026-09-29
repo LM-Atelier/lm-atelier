@@ -236,6 +236,8 @@ describe("applying an edit", () => {
 
     const words = screen.getByRole("textbox");
     fireEvent.change(words, { target: { value: "make it warmer" } });
+    // Offered once the Studio knows the tool can run here.
+    await waitFor(() => expect(screen.getByRole("button", { name: /apply/i })).toHaveAttribute("aria-disabled", "false"));
     fireEvent.click(screen.getByRole("button", { name: /apply/i }));
 
     // Dispatched, not accepted: nothing has called back yet.

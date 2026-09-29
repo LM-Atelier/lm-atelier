@@ -15,7 +15,7 @@ import { StudioRunningEdit } from "./StudioRunningEdit";
 import { studioApplyProgress } from "./studioApplyProgress";
 import { StudioRecipes } from "./StudioRecipes";
 import { StudioSelectionControls } from "./StudioSelectionTool";
-import { StudioToolGuidance } from "./StudioToolGuidance";
+import { StudioCapabilityCheck, StudioToolGuidance } from "./StudioToolGuidance";
 import { StudioToolOptions } from "./StudioToolOptions";
 import { StudioToolRail } from "./StudioToolRail";
 import { StudioWorkflowSelector } from "./StudioWorkflowSelector";
@@ -47,6 +47,10 @@ import { useStudioBackground } from "./useStudioBackground";
 import { useConfirm } from "./useConfirm";
 import type { EditTemplate, GenerationIdentity } from "./types";
 
+/** Tools that make their edit without a model, each from its own panel, so they have no Apply of the model's. */
+const EXACT_EDITS: readonly string[] = [
+  "transform", "perspective", "crop", "resize", "canvas", "adjust", "blur", "paint", "caption",
+];
 const SELECTION_NOT_PREPARED =
   "The selection could not be prepared, so nothing was sent. Try again, or clear the selection to edit the whole picture.";
 const LIGHT_MAP_NOT_PREPARED =
@@ -141,6 +145,9 @@ export function StudioView({
   // Every cutout runs on the workflow Isolate is given.
   const isolateTool = capabilities.data?.tools.find((tool) => tool.kind === "isolate");
   const unavailable = activeTool && !activeTool.available ? activeTool.reason : null;
+  // With no report yet, or none to be had, a model's tool waits rather than
+  // looking ready: the gap would otherwise be found only when the edit failed.
+  const unchecked = capabilities.data ? null : capabilities.isError ? "failed" : "checking";
   // Derived, never synced: with nothing chosen the studio shows the newest
   // result, so a finished apply lands on the canvas without an effect.
   const current = steps.find((step) => step.artifactId === selectedId) ?? steps.at(-1) ?? null;
@@ -191,6 +198,7 @@ export function StudioView({
   // Replacing a subject needs the picture it comes from, and runs only the
   // workflows the report names, so the studio's own choice never matters.
   const applyDisabled =
+    unchecked !== null ||
     (tools.kind === "extend" && !Object.values(tools.margins).some(Boolean)) ||
     (tools.kind === "text" && (!tools.newWords.trim() || selectionCoverage === 0)) ||
     (tools.kind === "isolate" && !activeTool?.workflow_revision_id) ||
@@ -353,7 +361,10 @@ export function StudioView({
             // cannot run, so the sentence arrives before the drawing does.
             <StudioToolGuidance reason={unavailable} onOpenWorkflows={onOpenWorkflows} />
           )}
-          {!["transform", "crop", "resize", "canvas", "adjust", "blur", "paint", "caption"].includes(tools.kind) && (
+          {unchecked && !EXACT_EDITS.includes(tools.kind) && (
+            <StudioCapabilityCheck failed={unchecked === "failed"} onRetry={() => void capabilities.refetch()} />
+          )}
+          {!EXACT_EDITS.includes(tools.kind) && (
             <button
               className="primary"
               aria-disabled={applyDisabled}

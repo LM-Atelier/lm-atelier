@@ -114,7 +114,8 @@ it("says what to install when nothing here can cut a subject out", async () => {
     workflow_revision_id: null,
   });
 
-  expect(await screen.findByRole("status")).toHaveTextContent("Install a background removal workflow");
+  // The guidance, once the report has answered; before it, the Studio says it is checking.
+  await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Install a background removal workflow"));
   const cut = screen.getByRole("button", { name: "Cut out" });
   expect(cut).toHaveAttribute("aria-disabled", "true");
   fireEvent.click(cut);
