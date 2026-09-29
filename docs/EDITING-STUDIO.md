@@ -31,6 +31,12 @@ With several images attached, the studio's **Apply to each** sends one
 independent edit turn per image. Each runs, verifies, and can be retried on
 its own; one failure never abandons the rest.
 
+## While an edit runs
+
+An edit that runs a model shows, under **Apply**, the step it has reached and a
+bar that fills as the work goes on: the same progress a chat shows for its own
+pictures.
+
 ## Seeing what changed
 
 - **Compare** slides the edited result over its source, so differences show

@@ -5,7 +5,6 @@ import {
   GitBranch,
   Quote,
   RotateCcw,
-  Sparkles,
   ThumbsDown,
   ThumbsUp,
   X,
@@ -13,6 +12,7 @@ import {
 import { Fragment, useState } from "react";
 import { ArtifactPart } from "./ArtifactPart";
 import { CopyTextButton } from "./CopyTextButton";
+import { GenerationProgress } from "./GenerationProgress";
 import { MarkdownText } from "./MarkdownText";
 import { MentionText } from "./MentionText";
 import { MessageRemovalConfirmation, UserMessageControls } from "./MessageRemovalControls";
@@ -72,24 +72,7 @@ function PartView({
   if (part.type === "image" || part.type === "video" || part.type === "attachment") {
     return <ArtifactPart part={part} origin={origin} onEditImage={onEditImage} onOpenStudio={onOpenStudio} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} onToggleFavorite={onToggleFavorite} compareSourceUrl={compareSourceUrl} lineage={lineage} />;
   }
-  if (part.type === "progress") {
-    const progress = Number(part.metadata_json.progress ?? 0);
-    const indeterminate = part.metadata_json.indeterminate === true;
-    return (
-      <div className="generation-progress" role="status" aria-live="polite">
-        <Sparkles size={17} />
-        <div>
-          <span>{part.text || "Working"}</span>
-          <div className="progress-track">
-            <div
-              className={indeterminate ? "indeterminate" : undefined}
-              style={indeterminate ? undefined : { width: `${progress * 100}%` }}
-            />
-          </div>
-        </div>
-      </div>
-    );
-  }
+  if (part.type === "progress") return <GenerationProgress part={part} />;
   if (part.type === "error") return <div className="message-error" role="alert">{part.text}</div>;
   return <div className="message-error" role="alert">Unsupported message part: {String(part.type)}</div>;
 }
