@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import { ErrorCallout } from "./ErrorCallout";
@@ -12,6 +12,18 @@ export function WorkflowFamilyMetadata({ family }: { family: WorkflowFamily }) {
   const [useCase, setUseCase] = useState(family.use_case);
   const [useCaseEdited, setUseCaseEdited] = useState(false);
   const [saved, setSaved] = useState(false);
+  const nameInput = useRef<HTMLInputElement>(null);
+  const editButton = useRef<HTMLButtonElement>(null);
+  const opened = useRef(false);
+  useEffect(() => {
+    if (editing) {
+      opened.current = true;
+      nameInput.current?.focus();
+    } else if (opened.current) {
+      opened.current = false;
+      editButton.current?.focus();
+    }
+  }, [editing]);
   // Compatibility families also update the profile that can be exported.
   const nameLimit = family.compatibility ? 200 : 240;
   const useCaseLimit = family.compatibility ? 1000 : 10000;
@@ -46,12 +58,12 @@ export function WorkflowFamilyMetadata({ family }: { family: WorkflowFamily }) {
           }
         }}>
           <label>Family name
-            <input value={name} onChange={(event) => setName(event.target.value)}
-              maxLength={nameLimit} required disabled={save.isPending} />
+            <input ref={nameInput} value={name} onChange={(event) => setName(event.target.value)}
+              maxLength={nameLimit} required readOnly={save.isPending} />
           </label>
           <label>Use case
             <textarea value={useCase} onChange={(event) => { setUseCase(event.target.value); setUseCaseEdited(true); }}
-              maxLength={useCaseLimit} rows={3} disabled={save.isPending} />
+              maxLength={useCaseLimit} rows={3} readOnly={save.isPending} />
           </label>
           {family.use_case_derived && !useCaseEdited && <p className="muted">Derived from model metadata</p>}
           <p className="muted">Describe when this family is useful. Automatic workflow selection uses this description.</p>
@@ -60,11 +72,11 @@ export function WorkflowFamilyMetadata({ family }: { family: WorkflowFamily }) {
           )}
           {save.error && <ErrorCallout message={save.error.message} />}
           <div className="row-actions">
-            <button type="submit" className="secondary compact-button" disabled={!valid || save.isPending}>
+            <button type="submit" className="secondary compact-button" aria-disabled={!valid || save.isPending}>
               {save.isPending ? "Saving family details…" : "Save family details"}
             </button>
-            <button type="button" className="secondary compact-button" disabled={save.isPending}
-              onClick={() => { setEditing(false); save.reset(); }}>
+            <button type="button" className="secondary compact-button" aria-disabled={save.isPending}
+              onClick={() => { if (!save.isPending) { setEditing(false); save.reset(); } }}>
               Cancel family changes
             </button>
           </div>
@@ -73,7 +85,7 @@ export function WorkflowFamilyMetadata({ family }: { family: WorkflowFamily }) {
         <>
           <div className="workflow-family-metadata-header">
             <h3>{family.name}</h3>
-            <button className="secondary compact-button" onClick={() => {
+            <button ref={editButton} className="secondary compact-button" onClick={() => {
               setName(family.name);
               setUseCase(family.use_case);
               setUseCaseEdited(false);
