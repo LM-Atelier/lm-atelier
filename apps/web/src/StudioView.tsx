@@ -355,8 +355,8 @@ export function StudioView({
             onApply={(chosen) => {
               setRecipe(chosen);
               setInstruction(chosen.instruction);
-              // Made on a selection, it needs one, and only a selecting tool sends it.
-              if (chosen.mask_mode !== "none" && !toolUsesMask(tools.kind)) dispatch({ type: "select-tool", kind: "brush" });
+              // Made on a selection, it needs one: select the way last used, as the rail's Select does.
+              if (chosen.mask_mode !== "none" && !toolUsesMask(tools.kind)) dispatch({ type: "select-tool", kind: tools.selectionKind });
             }}
           />
           <StudioRecipeWorkflowNotice recipe={recipe} selected={selectionCoverage > 0} />

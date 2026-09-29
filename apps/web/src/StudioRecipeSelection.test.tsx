@@ -105,6 +105,18 @@ it("switches to selecting for a recipe made on a selection, and holds Apply unti
   expect(apply.mock.calls[0][2]).toEqual(expect.objectContaining({ invert: false }));
 });
 
+it("returns to the way of selecting last used, not always to the brush", async () => {
+  open(recipe({}));
+  fireEvent.click(await screen.findByRole("button", { name: "Select part of the picture" }));
+  fireEvent.click(screen.getByRole("button", { name: "Select a rectangle" }));
+  fireEvent.click(screen.getByRole("button", { name: "Instruct the whole image" }));
+
+  fireEvent.click(await screen.findByRole("button", { name: "Warm sky" }));
+
+  expect(screen.getByRole("button", { name: "Select a rectangle" })).toHaveAttribute("aria-pressed", "true");
+  expect(screen.queryByRole("button", { name: "Brush a selection", pressed: true })).toBeNull();
+});
+
 it("sends the selection inverted for a recipe made on everything outside one", async () => {
   open(recipe({ mask_mode: "inverse", name: "Soft surroundings" }));
   fireEvent.click(await screen.findByRole("button", { name: "Soft surroundings" }));
