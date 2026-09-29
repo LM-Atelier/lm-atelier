@@ -2,7 +2,7 @@
 
 The `_v1` suffix marks a declaration or contract module. It promises that the
 shape it describes is versioned and that a matching `test_*_v1.py` covers it. It
-does NOT promise that anything runs it. Thirty-one of these modules are imported
+does NOT promise that anything runs it. Thirty-two of these modules are imported
 by nothing in the package, in families whose consumers never landed, and each of
 them has a passing test module beside it, which is exactly the evidence a reader
 uses to conclude a feature works.
@@ -28,7 +28,7 @@ from pathlib import Path
 
 PACKAGE = Path(__file__).resolve().parents[1] / "local_lm"
 
-#: Declaration modules no module in the package imports, as of 2026-09-22.
+#: Declaration modules no module in the package imports, as of 2026-09-29.
 #: Strike a name from this list in the same change that gives it an importer.
 WITHOUT_AN_IMPORTER = frozenset(
     {
@@ -63,6 +63,7 @@ WITHOUT_AN_IMPORTER = frozenset(
         "shared_asset_verify_v1",
         "shared_asset_view_v1",
         "shared_asset_workflow_bundle_v1",
+        "workflow_use_cases_v1",
     }
 )
 
