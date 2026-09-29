@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any, cast
 
 import pytest
 
@@ -32,7 +33,7 @@ def tool_delta(*, name: str = "offer_generation", arguments: object) -> dict[str
 
 
 def test_generation_offer_tool_is_bounded_and_non_executing() -> None:
-    function = GENERATION_OFFER_TOOL["function"]
+    function = cast(dict[str, Any], GENERATION_OFFER_TOOL["function"])
     assert function["name"] == "offer_generation"
     assert "never starts generation" in function["description"]
     parameters = function["parameters"]
@@ -266,7 +267,9 @@ def test_the_offer_prompt_bound_stays_grammar_expressible() -> None:
     """
     from local_lm.generation_offers import GENERATION_OFFER_TOOL, MAX_OFFER_PROMPT_CHARS
 
-    items = GENERATION_OFFER_TOOL["function"]["parameters"]["properties"]["items"]
+    items = cast(dict[str, Any], GENERATION_OFFER_TOOL["function"])["parameters"]["properties"][
+        "items"
+    ]
     prompt_field = items["items"]["properties"]["prompt"]
 
     assert prompt_field["maxLength"] == MAX_OFFER_PROMPT_CHARS

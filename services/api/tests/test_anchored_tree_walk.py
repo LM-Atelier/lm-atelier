@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from typing import TypedDict
 
 import pytest
 
@@ -259,12 +260,18 @@ def test_a_directory_swapped_for_a_link_before_its_level_refuses_instead_of_bein
     assert (outside / "foreign.bin").read_bytes() == b"not part of the tree"
 
 
+class _WalkBound(TypedDict, total=False):
+    max_depth: int
+    limit: int
+    level_limit: int
+
+
 @pytest.mark.parametrize(
     "bound",
     [{"max_depth": 2}, {"limit": 5}, {"level_limit": 2}],
     ids=["depth", "total", "level"],
 )
-def test_a_breadth_first_walk_keeps_every_bound(tmp_path: Path, bound: dict[str, int]) -> None:
+def test_a_breadth_first_walk_keeps_every_bound(tmp_path: Path, bound: _WalkBound) -> None:
     root = tmp_path / "tree"
     _tree(root)
 

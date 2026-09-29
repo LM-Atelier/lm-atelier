@@ -29,6 +29,7 @@ from local_lm import main as main_module
 from local_lm.artifacts import ArtifactStore
 from local_lm.config import Settings
 from local_lm.db import Base
+from local_lm.filesystem_links import list_entries as listed_entries
 
 
 @pytest.fixture
@@ -123,11 +124,11 @@ def test_the_resume_point_advances_one_leaf_at_a_time_in_name_order(
     if listing == "reversed":
         # Windows lists a directory in name order, which would hide a walk
         # that follows the listing; a reversed one is how another looks.
-        list_entries = artifacts_module.list_entries
+        # The store lists through the same function the link-safe helpers define.
         monkeypatch.setattr(
             artifacts_module,
             "list_entries",
-            lambda *args, **kwargs: list(reversed(list_entries(*args, **kwargs))),
+            lambda *args, **kwargs: list(reversed(listed_entries(*args, **kwargs))),
         )
 
     places = []

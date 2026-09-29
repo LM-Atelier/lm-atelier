@@ -140,7 +140,9 @@ def test_an_unreadable_contract_is_not_this_check_s_business() -> None:
     assert "never uses it" not in str(raised.value)
 
 
-async def test_creation_refuses_a_declared_length_the_graph_never_uses(client) -> None:
+async def test_creation_refuses_a_declared_length_the_graph_never_uses(
+    client: AsyncClient,
+) -> None:
     """The acceptance case, through POST /api/workflows rather than the validator.
 
     A predicate nobody calls refuses nothing, and the route is where a workflow

@@ -196,7 +196,7 @@ async def test_invalid_step_override_refuses_without_accepting_a_partial_plan(
     async with app.state.services.scheduler.lease("primary"):
         _, view = await _source(client)
         step_id = "missing-step" if case == "unknown" else view["steps"][2]["step_id"]
-        override = (
+        override: dict[str, Any] = (
             {"workflow_selection": {"selector_capability": "chat", "mode": "default"}}
             if case == "wrong_workflow_role"
             else {"settings": {"steps": 7}}

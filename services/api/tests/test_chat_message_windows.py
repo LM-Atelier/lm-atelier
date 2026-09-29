@@ -175,7 +175,7 @@ def _branched(chat_id: str = "chat_branch", *, early_sibling: bool = False) -> d
     with SessionLocal() as session:
         session.add(Chat(id=chat_id, title="Branched"))
         session.flush()
-        rows = [
+        rows: list[tuple[str, str | None, float]] = [
             ("root", None, 0),
             ("kept_one", "root", 1),
             ("kept_two", "kept_one", 2),

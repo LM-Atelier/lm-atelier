@@ -437,10 +437,10 @@ async def test_switch_preserves_active_workflow_profile_bindings(
         assert response.json()["code"] == "profile-update-workflow-bound"
     with SessionLocal() as session:
         profile = session.get(ModelProfile, profile_id)
-        binding = session.get(WorkflowDependencyBinding, binding_id)
-        assert profile is not None and binding is not None
+        stored_binding = session.get(WorkflowDependencyBinding, binding_id)
+        assert profile is not None and stored_binding is not None
         assert profile.model_install_id == (old_id if active else new_id)
-        assert binding.resource_identity_sha256 == "d" * 64
+        assert stored_binding.resource_identity_sha256 == "d" * 64
 
 
 async def test_new_turn_reloads_a_worker_with_the_previous_install(

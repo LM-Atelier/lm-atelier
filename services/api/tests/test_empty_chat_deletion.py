@@ -12,6 +12,7 @@ import threading
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import get_args
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -20,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from local_lm import empty_chats
 from local_lm.db import Base
+from local_lm.domain import MessageRole
 from local_lm.empty_chats import (
     CONFLICT_REASONS,
     PREVIEW_LIFETIME,
@@ -40,7 +42,6 @@ from local_lm.models import (
     EmptyChatDeletion,
     EmptyChatPreviewRecord,
     Message,
-    MessageRole,
 )
 from local_lm.schemas import EmptyChatConflictOut
 
@@ -222,7 +223,7 @@ def test_every_conflict_reason_is_a_value_the_api_can_carry() -> None:
     """The two vocabularies are declared apart, because one module cannot import the other."""
 
     field = EmptyChatConflictOut.model_fields["reason"].annotation
-    assert set(CONFLICT_REASONS) == set(field.__args__)
+    assert set(CONFLICT_REASONS) == set(get_args(field))
 
 
 def test_a_second_preview_does_not_move_the_first_ones_deadline(session: Session) -> None:

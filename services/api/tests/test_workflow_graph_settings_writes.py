@@ -1,4 +1,5 @@
 from copy import deepcopy
+from typing import Any
 
 import pytest
 from httpx2 import AsyncClient
@@ -9,7 +10,7 @@ from httpx2 import AsyncClient
 async def test_workflow_writes_refuse_settings_that_disagree_with_the_executable_graph(
     client: AsyncClient, target: str, damage: str
 ) -> None:
-    payload = {
+    payload: dict[str, Any] = {
         "name": "Declared graph controls",
         "operation": "text_to_image",
         "engine": "comfyui",

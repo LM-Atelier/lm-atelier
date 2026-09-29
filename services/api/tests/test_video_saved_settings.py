@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from httpx2 import AsyncClient
 
@@ -175,7 +177,7 @@ async def test_old_client_can_save_video_defaults(
     ],
 )
 async def test_retired_video_key_does_not_relax_validation(
-    client: AsyncClient, saved_values: dict
+    client: AsyncClient, saved_values: dict[str, Any]
 ) -> None:
     response = await client.post(
         "/api/chats",
@@ -260,7 +262,7 @@ async def test_video_direct_defaults_win_when_preset_is_deleted_or_exported(
         chat.generation_settings_json = {"video": {"guidance": 7.5}}
         chat.generation_preset_ids_json = {"video": preset_id}
         session.commit()
-        record: dict = {}
+        record: dict[str, Any] = {}
         ProjectExporter._snapshot_generation_defaults(
             session, chat, record, DependencySourceIndex({}, {}, {}, {})
         )
