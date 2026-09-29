@@ -330,7 +330,10 @@ async def test_execute_waits_for_chat_guard_then_revalidates_from_fresh_state(
             target.status = "pending"
             session.commit()
 
-    response = await asyncio.wait_for(execution, timeout=2)
+    # Only a bound against a hang. Once the guard is released the request still
+    # has to be scheduled and to reach the database, and on a loaded runner
+    # that has taken longer than two seconds.
+    response = await asyncio.wait_for(execution, timeout=30)
     assert response.status_code == 409
     assert response.json()["code"] == "message-revision-conflict"
     with SessionLocal() as session:
