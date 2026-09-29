@@ -8,6 +8,8 @@ import { ErrorCallout } from "./ErrorCallout";
 import { StudioCanvas } from "./StudioCanvas";
 import { StudioCompare } from "./StudioCompare";
 import { StudioExportLink } from "./StudioExportLink";
+import { StudioUseInChat } from "./StudioUseInChat";
+import type { StudioPictureForChat } from "./useStudioPictureForChat";
 import { StudioExtendHandles } from "./StudioExtendHandles";
 import { StudioRecipes } from "./StudioRecipes";
 import { StudioSelectionControls } from "./StudioSelectionTool";
@@ -57,6 +59,7 @@ export function StudioView({
   onOpenArtifact,
   onOpenWorkflows,
   onClose,
+  onUseInChat,
 }: {
   sourceArtifactId: string | null;
   sourceChatId?: string | null;
@@ -65,6 +68,8 @@ export function StudioView({
   onOpenWorkflows: () => void;
   /** Put the picture down and go back to an empty studio. */
   onClose: () => void;
+  /** Attach the picture on screen to a chat's next message. */
+  onUseInChat?: (picture: StudioPictureForChat) => void;
 }) {
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
@@ -221,6 +226,7 @@ export function StudioView({
                 {isFavorite ? "Favorited" : "Favorite"}
               </button>
               <StudioExportLink artifactId={current.artifactId} />
+              {onUseInChat && <StudioUseInChat ready={Boolean(artifact.data)} onUse={() => onUseInChat({ artifactId: current.artifactId, artifact: artifact.data ?? null, origin: current.isSource ? (artifact.data?.original_name ? "uploaded" : "generated") : "edited" })} />}
             </>
           )}
           <button
