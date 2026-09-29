@@ -22,6 +22,7 @@ import { StudioWorkflowSelector } from "./StudioWorkflowSelector";
 import { artifactSource } from "./messageMedia";
 import { cloneMask, coverage, encodeMaskPng, feather, isEmpty, type MaskRaster } from "./studioMasks";
 import { studioApplyPlan } from "./studioApplyPlan";
+import { studioStepOrigin } from "./studioStepOrigin";
 import { renderLightMap } from "./studioLightMap";
 import { readSourcePixels } from "./studioSourcePixels";
 import { useAdjustedPreview } from "./useAdjustedPreview";
@@ -526,22 +527,26 @@ function StudioFilmstrip({
   return (
     <>
       <div className="studio-filmstrip" role="group" aria-label="Edit history">
-      {steps.map((step, index) => (
-        <button
-          key={`${step.messageId}-${step.artifactId}`}
-          aria-pressed={step.artifactId === selectedId}
-          className={step.artifactId === selectedId ? "selected" : ""}
-          onClick={() => onSelect(step.artifactId)}
-          onFocus={(event) => event.currentTarget.scrollIntoView({ block: "nearest", inline: "nearest" })}
-        >
-          <img
-            src={`/api/artifacts/${encodeURIComponent(step.artifactId)}/content`}
-            alt={step.isSource ? "The original image" : `Result of step ${index}`}
-            loading="lazy"
-          />
-          <small>{step.isSource ? "Original" : step.instruction || `Step ${index}`}</small>
-        </button>
-      ))}
+      {steps.map((step, index) => {
+        const origin = studioStepOrigin(steps, index);
+        return (
+          <button
+            key={`${step.messageId}-${step.artifactId}`}
+            aria-pressed={step.artifactId === selectedId}
+            className={step.artifactId === selectedId ? "selected" : ""}
+            onClick={() => onSelect(step.artifactId)}
+            onFocus={(event) => event.currentTarget.scrollIntoView({ block: "nearest", inline: "nearest" })}
+          >
+            <img
+              src={`/api/artifacts/${encodeURIComponent(step.artifactId)}/content`}
+              alt={step.isSource ? "The original image" : `Result of step ${index}`}
+              loading="lazy"
+            />
+            <small>{step.isSource ? "Original" : step.instruction || `Step ${index}`}</small>
+            {origin && <small className="studio-step-origin">{origin}</small>}
+          </button>
+        );
+      })}
       </div>
       <GenerationIdentitySummary identity={generationIdentity} />
     </>

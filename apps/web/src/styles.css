@@ -1267,6 +1267,8 @@ html[data-motion="reduced"] .progress-track > div.indeterminate { width: 100% !i
 .studio-filmstrip button { flex: 0 0 66px; padding: 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--panel-2); cursor: pointer; }
 .studio-filmstrip button.selected { border-color: var(--atelier); }
 .studio-filmstrip img { display: block; width: 64px; height: 64px; object-fit: cover; }
+/* A result made from an earlier step than the one before it starts a branch, and says so. */
+.studio-filmstrip .studio-step-origin { display: block; color: var(--ink-muted); }
 @media (max-width: 900px) {
   .studio-layout { flex: 0 0 auto; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(240px, 50vh) auto; }
   .studio-tool-rail { display: flex; flex-direction: row; flex-wrap: wrap; justify-self: start; max-height: none; overflow-y: visible; }
