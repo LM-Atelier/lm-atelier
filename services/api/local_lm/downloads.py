@@ -69,6 +69,7 @@ from .gguf import (
     validate_gguf_selection,
 )
 from .install_plan_types import InstallPlanFailureCode
+from .lora_use_cases import derive_lora_use_case
 from .matting_workflows import (
     built_in_matting_graph,
     built_in_matting_sha256,
@@ -1763,6 +1764,14 @@ class DownloadManager:
                         )
                     component = inspection.components[0]
                     planned_trigger_words = self._planned_trigger_words(plan)
+                    use_case_metadata = normalize_provider_use_case_metadata(
+                        plan.runtime_contract_json.get("use_case_metadata")
+                        if plan is not None
+                        else source_metadata
+                    )
+                    use_case = (
+                        derive_lora_use_case(use_case_metadata) if asset_kind == "lora" else ""
+                    )
                     with SessionLocal() as session:
                         model_source = session.scalar(
                             select(ModelSource).where(
@@ -1788,6 +1797,8 @@ class DownloadManager:
                             family=component.family or inspection.family,
                             local_path=str(destination),
                             size_bytes=installed_size,
+                            use_case=use_case,
+                            use_case_derived=bool(use_case),
                             manifest_json={
                                 "remote_id": request.remote_id,
                                 "revision": revision,
@@ -1805,6 +1816,11 @@ class DownloadManager:
                                 "comfy_paths": request.comfy_paths,
                                 "workflow_asset_kind": request.workflow_asset_kind,
                                 "content_rating": request.content_rating,
+                                **(
+                                    {"use_case_metadata": use_case_metadata}
+                                    if asset_kind == "lora"
+                                    else {}
+                                ),
                             },
                             active=False,
                         )

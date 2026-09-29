@@ -945,6 +945,7 @@ export interface ModelAssetInstall {
   manifest_json: Record<string, unknown>;
   active: boolean;
   use_case: string;
+  use_case_derived?: boolean;
   auto_apply: boolean;
   default_model_strength: number;
   default_clip_strength: number;
@@ -1094,11 +1095,16 @@ export interface CatalogPage {
   stale?: boolean;
 }
 
+export interface LoraSuggestion extends CatalogModel {
+  use_case?: string;
+  use_case_derived?: boolean;
+}
+
 /** Well-rated general-audience LoRAs for the model family a workflow runs. */
 export interface LoraSuggestions {
   family: string | null;
   gap: "family_unknown" | "family_unsupported" | null;
-  items: CatalogModel[];
+  items: LoraSuggestion[];
   next_cursor: string | null;
   stale: boolean;
 }

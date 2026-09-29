@@ -50,10 +50,11 @@ export function LoraSuggestions({ revisionId }: { revisionId: string }) {
             const facts = [item.author, count(item.likes, "likes"), count(item.downloads, "downloads")].filter(Boolean);
             const preparing = install.prepare.isPending && install.prepare.variables?.model.remote_id === item.remote_id;
             return (
-              <li key={item.remote_id} className="lora-stack-item">
+              <li key={item.remote_id} className="setting-row">
                 <span>
                   <strong>{name(item)}</strong>
                   {facts.length > 0 && <small>{facts.join(" · ")}</small>}
+                  {item.use_case && <small>{item.use_case_derived ? "Derived · " : ""}{item.use_case}</small>}
                 </span>
                 {queued.includes(item.remote_id) ? (
                   <small role="status">Installing. It can be added once the download finishes.</small>

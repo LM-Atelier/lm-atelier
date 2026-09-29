@@ -116,6 +116,29 @@ determined, the app asks you to check for updates again. Other asset types direc
 you to the catalog. Downloads use the normal installation checks; nothing
 updates itself or silently switches a profile to a newer model.
 
+## Describe when to use a LoRA
+
+New LoRA downloads can start with a use-case description drawn from the provider's
+tags, category and trained words. The Model library labels this text **Derived**;
+LoRA recommendation cards can show the same label before installation. If useful
+metadata is unavailable, the description starts blank. Existing descriptions,
+including ones you deliberately cleared, stay as you left them.
+
+Under **Model library > Installed workflow assets**, choose **Edit Auto rules** to
+review or change a LoRA's description, base model and strengths. Editing the
+description makes it your own and removes **Derived** after you save. Changing
+another setting preserves the description and its label. **Cancel** discards the
+unsaved changes.
+
+Automatic use starts off for new LoRAs. Enable **Use automatically** to let the
+app consider a LoRA whose description matches your request. It still needs to be
+enabled, verified and compatible with the selected workflow's base model.
+
+Use **Edit trigger words** separately for words the LoRA needs during generation.
+Words measured from its file are shown as a record; the words you enter are saved
+as yours. Both editors focus their text field when opened and return focus to
+their launch button after a successful save or cancellation.
+
 ## If a step will not complete
 
 Start with [Troubleshooting](TROUBLESHOOTING.md), which lists the setup states

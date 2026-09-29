@@ -8287,6 +8287,7 @@ async def update_model_asset(
             raise api_error(422, "trigger-words-invalid", str(exc)) from exc
     if "use_case" in values:
         values["use_case"] = values["use_case"].strip()
+        values["use_case_derived"] = False
     if "family" in values:
         # Any kind carries one: a LoRA is admitted by it, and a diffusion
         # model is where a workflow built around one reads its own. A value

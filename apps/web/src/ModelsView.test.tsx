@@ -186,7 +186,6 @@ describe("base model of an installed LoRA", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(api.updateModelAsset).toHaveBeenCalledWith("asset-ink", {
-      use_case: "",
       family: "krea2",
       auto_apply: false,
       default_model_strength: 1,
@@ -235,7 +234,10 @@ describe("base model of an installed LoRA", () => {
     fireEvent.change(field, { target: { value: "--" } });
 
     expect(screen.getByText("A base model needs at least one letter or digit.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    const save = screen.getByRole("button", { name: "Save" });
+    expect(save).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(save);
+    expect(api.updateModelAsset).not.toHaveBeenCalled();
   });
 
   it("says a LoRA used automatically is never chosen without a base model", async () => {
