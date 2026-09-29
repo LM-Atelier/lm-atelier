@@ -5,6 +5,7 @@ import type { PendingTurn } from "./chatComposerContracts";
 import type { ComposerDraft, ComposerPromptSource } from "./composerPromptSource";
 import type { TurnReference } from "./mentionDraft";
 import { recoverPromptSourceSend } from "./promptSourceSendRecovery";
+import type { SourceFitSelection } from "./sourceFit";
 import type { ChatDetail, TurnAccepted } from "./types";
 
 export type SendTurnVariables = PendingTurn & {
@@ -15,6 +16,7 @@ export type SendTurnVariables = PendingTurn & {
   references: TurnReference[];
   outputCount?: number;
   promptSource?: ComposerPromptSource;
+  sourceFit?: SourceFitSelection;
   stopCurrent?: boolean;
 };
 
@@ -58,14 +60,17 @@ export function useTurnSending({
       void client.invalidateQueries({ queryKey: ["edited-branches", chatId] });
     }, [client]);
     const send = useMutation({
-      mutationFn: ({ chatId, id, text, mode, artifacts, settings, references, outputCount, promptSource, stopCurrent }: SendTurnVariables) => {
+      mutationFn: ({ chatId, id, text, mode, artifacts, settings, references, outputCount, promptSource, sourceFit, stopCurrent }: SendTurnVariables) => {
+        // A fitted canvas rides as the last argument only when there is one, so
+        // an ordinary send keeps exactly the call it always made.
+        const fit = sourceFit ? [sourceFit] as const : [] as const;
         if (stopCurrent) return api.stopAndSendTurn(
           chatId, text, mode, artifacts, settings, id, references, outputCount,
-          promptSource, requestTurnConfirmation,
+          promptSource, requestTurnConfirmation, ...fit,
         );
         return api.sendTurn(
           chatId, text, mode, artifacts, settings, id, "turns", undefined,
-          references, outputCount, promptSource, requestTurnConfirmation,
+          references, outputCount, promptSource, requestTurnConfirmation, ...fit,
         );
       },
       onMutate: ({ chatId, id, text, mode }) => {

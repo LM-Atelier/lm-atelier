@@ -74,6 +74,8 @@ def export_accepted_contexts(
             payload["compiled_prompt"] = None
             payload["standalone_prompt"] = ""
             payload["media_prompt"] = ""
+        if payload["unavailable_reason"] is not None:
+            payload["source_fit"] = None
         for field in ("profile", "vision_profile", "verification_profile"):
             profile = payload[field]
             if profile is not None:
@@ -263,6 +265,16 @@ def import_accepted_contexts(
                     artifacts[artifact_id] for artifact_id in source_ids if artifact_id in artifacts
                 ]
             )
+        if payload["unavailable_reason"] is not None:
+            # Missing media or a removed source cannot leave an executable
+            # recipe behind. Preserve the existing unavailable-context state.
+            payload["source_fit"] = None
+        elif snapshot.source_fit is not None:
+            image = payload["source_fit"]["image"]
+            image["source_artifact_id"] = artifacts[snapshot.source_fit.image.source_artifact_id]
+            image["prepared_artifact_id"] = artifacts[
+                snapshot.source_fit.image.prepared_artifact_id
+            ]
         payload["visual_posters"] = {
             artifacts[video_id]: artifacts[poster_id]
             for video_id, poster_id in snapshot.visual_posters.items()

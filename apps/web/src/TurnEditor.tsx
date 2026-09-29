@@ -1,3 +1,7 @@
+import { SourceFitControl } from "./SourceFitControl";
+import { SOURCE_FIT_PREVIEW_REQUIRED, sendWithSourceFit, turnPreviewContext, useTurnEditorSourceFit } from "./useTurnEditorSourceFit";
+import type { SourceFitPreviewContext } from "./useSourceFitCanvas";
+import type { SourceFitSelection } from "./sourceFit";
 import { useCallback, useEffect, useRef, useState, type ReactNode, type SetStateAction, type ComponentType } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, CircleStop, Film, Image as ImageIcon, MessageSquare, Send, SlidersHorizontal, Sparkles, Wand2, Workflow as WorkflowIcon, X } from "lucide-react";
@@ -11,12 +15,12 @@ import { MessageField } from "./MessageField";
 import { OutputCountControl } from "./OutputCountControl";
 import { SettingsDrawer, type EditedVersionSettings } from "./SettingsDrawer";
 import type { ComposerProps } from "./chatComposerContracts";
-import { composerDraftWithText, detachedComposerDraft, promptSourceForTurn, type ComposerPromptSource } from "./composerPromptSource";
+import { composerDraftWithText, detachedComposerDraft, type ComposerPromptSource } from "./composerPromptSource";
 import { artifactSource, mediaOriginLabel } from "./messageMedia";
-import { mediaOutputCountForTurn } from "./mediaOutputCount";
+import { composerSubmission } from "./composerSubmission";
 import { normalizeSettingsForFields, resolveCapabilitySettings, resolveWorkflowSettings } from "./settings";
 import { activeBranchMessages, workflowRevisionForTurn } from "./turnEditorContext";
-import { survivingMentions, turnReferences, type TurnReference } from "./mentionDraft";
+import type { TurnReference } from "./mentionDraft";
 import { useComposerUploads, type ComposerAttachment } from "./useComposerUploads";
 import { useDraftClassification } from "./useDraftClassification";
 import { drawerRoleView, roleForMode } from "./viewHelpers";
@@ -27,6 +31,7 @@ import { initialTurnEditorState, useTurnEditorState, type TurnEditorState } from
 export type { TurnEditorState } from "./useTurnEditorState";
 import type { Artifact, ChatDetail, EngineCapabilities, EngineRole, Message, PriorTurnEditBinding, RoutingMode, WorkflowSelection } from "./types";
 export interface TurnEditorSubmission {
+  sourceFit?: SourceFitSelection | null;
   requestId: string;
   text: string;
   mode: RoutingMode;
@@ -61,6 +66,10 @@ export type TurnEditorProps = ComposerProps & {
   /** Supply a controlled workflow choice when editing one turn in isolation. */
   workflowControl?: ReactNode;
   workflowSelection?: WorkflowSelection;
+  /** Exact image revision for an isolated saved edit; null means unresolved. */
+  sourceCanvasRevisionId?: string | null;
+  /** The submission a canvas preview belongs to, when it is not this composer's own send. */
+  sourceFitPreviewContext?: SourceFitPreviewContext;
   /** Null deliberately suppresses the current chat's workflow schema. */
   workflowSchemaOverride?: Record<string, unknown> | null;
   PromptHelper?: ComponentType<TurnEditorPromptHelperProps>;
@@ -174,7 +183,7 @@ export function TurnEditor({
   editSettings,
   workflowControl,
   workflowSelection,
-  workflowSchemaOverride,
+  workflowSchemaOverride, sourceCanvasRevisionId, sourceFitPreviewContext,
   PromptHelper,
   onAccept,
   submitLabel = "Send",
@@ -192,7 +201,7 @@ export function TurnEditor({
   const setDraftEditorState = useCallback((update: SetStateAction<TurnEditorState>) => onDraftChange(
     (current) => ({ ...current, editor: typeof update === "function" ? update(current.editor ?? seededState) : update }),
   ), [onDraftChange, seededState]);
-  const { state, updateState, setOutputCount, changeMode, currentMode, setTemplateSettings, setAttachments } = useTurnEditorState(
+  const { state, updateState, setOutputCount, changeMode, currentMode, setTemplateSettings, setAttachments, clearAcceptedState } = useTurnEditorState(
     chat.routing_mode, onMode, initialState, editorState ?? draft.editor ?? seededState, onEditorStateChange ?? setDraftEditorState,
   );
   const { outputCount, mode, templateSettings, attachments } = state;
@@ -306,14 +315,18 @@ export function TurnEditor({
   const workflowSchema = workflowSchemaOverride !== undefined
     ? workflowSchemaOverride ?? undefined : workflowRead.schema;
   const { acceptsAddedLoras, canSend: canSendLoras, error: loraError } = useComposerLoraControls(workflowRevisionId);
+  const previewSubmission = composerSubmission({ mode, engines, workflowSchema, acceptsAddedLoras, settings, templateSettings,
+    text, mentions: state.mentions, draft, inputCount: attachments.length, outputCount, accepting: Boolean(onAccept) });
+  const { primarySourceId, canvas: sourceCanvas, shown: sourceFitShown, forSend } = useTurnEditorSourceFit({
+    mode, attachments, value: state.sourceFit, families: families.data, sourceCanvasRevisionId, workflowSelection,
+    selections: selections.data, projectSelections: project ? projectSelections.data : null, updateState, setAcceptanceError,
+    previewContext: sourceFitPreviewContext ?? (onAccept ? undefined : turnPreviewContext(chat.id, text, mode, attachments, previewSubmission, state.sourceFit)),
+  });
   const drawerWorkflowSchema = workflowSchemaOverride !== undefined
     ? workflowSchemaOverride ?? undefined : drawerWorkflowRead.schema;
   const clearAcceptedDraft = () => {
     setText("");
-    updateState((current) => ({
-      ...current, requestId: crypto.randomUUID(), submittedFingerprint: undefined,
-      attachments: [], attachmentIntent: "replace", mentions: [], referenceIntent: "replace", outputCount: 1, templateSettings: null,
-    }));
+    clearAcceptedState();
   };
   const submit = (stopCurrent = false) => {
     if (!text.trim() || uploading || acceptancePending.current) return;
@@ -322,23 +335,22 @@ export function TurnEditor({
       return;
     }
     const selectedMode = currentMode();
-    const role = roleForMode(selectedMode);
-    const fields = resolveWorkflowSettings(resolveCapabilitySettings(engines.find((item) => item.roles.includes(role)), role), workflowSchema, acceptsAddedLoras);
-    const chosenSettings = { ...settings, ...templateSettings?.settings };
-    if (!onAccept && selectedMode !== "auto" && !canSendLoras(chosenSettings, fields)) return;
-    const requestedOutputCount = mediaOutputCountForTurn(selectedMode, outputCount);
-    const references = turnReferences(survivingMentions(text, state.mentions));
-    const promptSource = promptSourceForTurn(draft, selectedMode, attachments.length, references.length, requestedOutputCount);
-    const selectedSettings = onAccept ? chosenSettings : selectedMode === "auto" ? {} : normalizeSettingsForFields(chosenSettings, fields);
+    const submission = composerSubmission({ mode: selectedMode, engines, workflowSchema, acceptsAddedLoras, settings, templateSettings,
+      text, mentions: state.mentions, draft, inputCount: attachments.length, outputCount, accepting: Boolean(onAccept) });
+    if (!onAccept && selectedMode !== "auto" && !canSendLoras(submission.chosenSettings, submission.fields)) return;
+    const { requestedOutputCount, references, promptSource } = submission;
+    const sending = forSend(selectedMode, submission.settings, attachments.map((item) => item.id));
+    if (!sending) { setAcceptanceError(SOURCE_FIT_PREVIEW_REQUIRED); return; }
+    const { sourceFit, settings: selectedSettings, inputArtifactIds } = sending;
     if (!onAccept) {
       const dispatch = stopCurrent ? onStopAndSend : onSend;
-      dispatch(text.trim(), selectedMode, attachments.map((item) => item.id), selectedSettings, references, requestedOutputCount, promptSource);
+      sendWithSourceFit(dispatch, [text.trim(), selectedMode, inputArtifactIds, selectedSettings, references, requestedOutputCount, promptSource], sourceFit);
       clearAcceptedDraft();
       return;
     }
     const payload = {
-      text, mode: selectedMode,
-      inputArtifactIds: state.attachmentIntent === "inherit" ? undefined : attachments.map((item) => item.id),
+      text, mode: selectedMode, sourceFit,
+      inputArtifactIds: !sourceFit && state.attachmentIntent === "inherit" ? undefined : inputArtifactIds,
       settings: selectedSettings,
       references: state.referenceIntent === "inherit" && references.length === state.mentions.length ? undefined : references,
       outputCount: requestedOutputCount ?? 1, promptSource, presetId, settingsRole, workflowSelection,
@@ -367,7 +379,7 @@ export function TurnEditor({
     <fieldset className={workflowControl === undefined ? "turn-editor-with-workflow-choices" : undefined} aria-label="Turn editor" disabled={accepting} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
       <div
         className={`composer-wrap${dropActive ? " drop-active" : ""}`}
-        style={onAccept ? { position: "relative", padding: 0 } : undefined}
+        style={onAccept ? { position: "relative", padding: 0 } : state.sourceFit ? { maxHeight: "100%", overflowY: "auto" } : undefined}
         onDragOver={(event) => {
           if (acceptancePending.current) return;
           if (!Array.from(event.dataTransfer.types).includes("Files")) return;
@@ -407,6 +419,8 @@ export function TurnEditor({
           onFocus={() => textInput.current?.focus()}
           onAnimate={() => { detachPromptSource(); setText((current) => current.trim() ? current : "Animate this image"); }}
           onRemove={(id) => setAttachments((items) => items.filter((item) => item.id !== id))} />}
+        {sourceFitShown && <SourceFitControl canvas={sourceCanvas} sourceUrl={artifactSource(sourceCanvas.preview?.source_artifact_id ?? primarySourceId) ?? ""}
+          initialWidth={settings.width} initialHeight={settings.height} />}
         {templateSettings && (
           <div className="template-settings-chip">
             <span>{templateSettings.name} settings apply to this send</span>

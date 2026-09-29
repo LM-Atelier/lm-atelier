@@ -41,6 +41,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.responses import FileResponse, HTMLResponse
 
 from . import __version__
+from .accepted_turn_context import accepted_context
 from .adapter_grammar_review import review_adapter_grammar
 from .api_errors import ApiError, api_error
 from .artifact_library import (
@@ -279,6 +280,7 @@ from .preflight import (
 from .prior_turn_edits import (
     EditRequestConflict,
     classify_prior_turn_edit,
+    preview_prior_turn_source_fit,
     prior_turn_edit_source,
     queue_prior_turn_edit,
 )
@@ -524,6 +526,7 @@ from .schemas import (
     SettingField,
     SetupReadinessReport,
     SetupVerificationOut,
+    SourceFitRequest,
     StorageCleanupResult,
     StudioCapabilityReport,
     StudioSessionCreate,
@@ -622,12 +625,20 @@ from .setup_verification import (
     setup_verification_settings,
     verification_evidence_key,
 )
+from .source_fit_preview import (
+    SourceFitCapabilityOut,
+    SourceFitPreviewOut,
+    SourceFitPreviewRequest,
+    preview_source_fit,
+    source_fit_capability,
+)
 from .studio_capabilities import tool_capabilities
 from .studio_sessions import (
     STUDIO_SCOPE,
     find_studio_session,
     studio_session_title,
 )
+from .turn_inheritance import TurnInheritance, TurnSourceResolver
 from .user_queue_activity import (
     QueueActivityCursorError,
     QueueStepStateError,
@@ -4034,6 +4045,7 @@ async def _accept_turn(
     edit_source_message_id: str | None = None,
     chat_guard_held: bool = False,
     before_commit: Callable[[Session, Run], None] | None = None,
+    resolve_source: TurnSourceResolver | None = None,
 ) -> TurnAccepted:
     try:
         if edit_source_message_id is not None and isinstance(payload, PriorTurnEditRequest):
@@ -4056,6 +4068,7 @@ async def _accept_turn(
             inherited_prompt_source=inherited_prompt_source,
             reference_source_message_id=reference_source_message_id,
             before_commit=before_commit,
+            resolve_source=resolve_source,
         )
     except EditRequestConflict as exc:
         raise api_error(409, "edit-request-conflict", str(exc)) from exc
@@ -4394,6 +4407,23 @@ async def _regenerate_message_locked(
     if not prior_run:
         raise api_error(404, "assistant-run-not-found", "assistant run not found")
     _require_run_replay_sources(session, prior_run)
+    prior_context = accepted_context(session, prior_run)
+    source_context = (
+        prior_context
+        if prior_context is not None and prior_context.source_fit is not None
+        else None
+    )
+    source_fit = (
+        SourceFitRequest(
+            mode=source_context.source_fit.mode,
+            width=source_context.source_fit.canvas_width,
+            height=source_context.source_fit.canvas_height,
+        )
+        if source_context is not None and source_context.source_fit is not None
+        else None
+    )
+    source_run_id = prior_run.id
+    source_digest = prior_run.provenance_json.get("accepted_context_sha256")
     user_message = session.scalar(
         select(Message)
         .options(selectinload(Message.parts))
@@ -4418,14 +4448,32 @@ async def _regenerate_message_locked(
     prior_profile = (
         session.get(ModelProfile, prior_run.profile_id) if prior_run.profile_id else None
     )
+    # The workflow the settings are rebuilt against also says whether it takes added LoRAs.
+    settings_document = (
+        source_context.workflow
+        if source_context is not None and source_context.workflow is not None
+        else prior_revision
+    )
     try:
         prior_settings = await orchestrator.request_settings_for_operation(
             Operation(prior_run.operation),
-            prior_run.settings_json,
-            input_schema=prior_revision.input_schema_json if prior_revision else None,
-            engine=prior_profile.engine if prior_profile else None,
+            source_context.settings if source_context is not None else prior_run.settings_json,
+            input_schema=(
+                source_context.workflow.input_schema_json
+                if source_context is not None and source_context.workflow is not None
+                else prior_revision.input_schema_json
+                if prior_revision
+                else None
+            ),
+            engine=(
+                source_context.profile.engine
+                if source_context is not None and source_context.profile is not None
+                else prior_profile.engine
+                if prior_profile
+                else None
+            ),
             accepts_added_loras=(
-                prior_revision is not None and revision_accepts_added_loras(prior_revision)
+                settings_document is not None and revision_accepts_added_loras(settings_document)
             ),
         )
     except EngineNotConfiguredError as exc:
@@ -4436,15 +4484,27 @@ async def _regenerate_message_locked(
         raise api_error(409, exc.code, str(exc)) from exc
     except ValueError as exc:
         raise api_error(422, "generation-settings-invalid", str(exc)) from exc
+    if source_fit is not None:
+        prior_settings.pop("width", None)
+        prior_settings.pop("height", None)
     turn = TurnRequest(
+        source_fit=source_fit,
         text=text,
         mode=mode,
         parent_message_id=user_message.parent_id,
-        input_artifact_ids=orchestrator.input_artifact_ids_for_run(session, prior_run),
+        input_artifact_ids=(
+            list(source_context.input_artifact_ids)
+            if source_context is not None
+            else orchestrator.input_artifact_ids_for_run(session, prior_run)
+        ),
         settings={**prior_settings, **payload.settings},
         idempotency_key=payload.idempotency_key,
     )
-    prior_strength = _inherited_auto_image_edit_strength(prior_run)
+    prior_strength = (
+        source_context.image_edit_strength
+        if source_context is not None
+        else _inherited_auto_image_edit_strength(prior_run)
+    )
     inherited_parameter = (
         prior_strength.get("parameter")
         if prior_strength and isinstance(prior_strength.get("parameter"), str)
@@ -4457,7 +4517,49 @@ async def _regenerate_message_locked(
     if inherited_prompt_source is None:
         inherited_prompt_source = _message_prompt_source(user_message)
 
+    async def resolve_regeneration_source(
+        _transaction: Session, resolved: TurnRequest, operation: Operation, ordinal: int | None
+    ) -> tuple[TurnRequest, TurnInheritance]:
+        if source_context is None or operation != Operation.IMAGE_TO_IMAGE or ordinal is not None:
+            raise ValueError("Accepted source-canvas configuration is unavailable.")
+        return resolved.model_copy(
+            update={
+                "profile_id": source_context.profile_id,
+                "workflow_revision_id": source_context.workflow_revision_id,
+                "workflow_selection": None,
+                "preset_id": None,
+            }
+        ), TurnInheritance(
+            profile=source_context.profile,
+            workflow=source_context.workflow,
+            source_fit=source_context.source_fit,
+            image_edit_strength=inherited_image_edit_strength,
+        )
+
     def bind_request(_transaction: Session, run: Run) -> None:
+        if source_context is not None:
+            _transaction.flush()
+            _transaction.expire_all()
+            current = _transaction.get(Run, source_run_id)
+            if current is None or accepted_context(_transaction, current) != source_context:
+                raise ValueError("The accepted regeneration source changed.")
+            _require_run_replay_sources(_transaction, current)
+            run.provenance_json = {
+                **run.provenance_json,
+                "regeneration_source": {
+                    "source_run_id": source_run_id,
+                    "source_message_id": user_message.id,
+                    "source_snapshot_sha256": source_digest,
+                },
+            }
+            orchestrator._freeze_turn_context(
+                _transaction,
+                run,
+                inherited_context=source_context,
+                inherit_profile_configuration=True,
+                inherit_workflow_configuration=True,
+                inherit_vision_configuration=True,
+            )
         if payload.idempotency_key is not None:
             run.provenance_json = {
                 **run.provenance_json,
@@ -4477,6 +4579,7 @@ async def _regenerate_message_locked(
         reference_source_message_id=user_message.id,
         chat_guard_held=True,
         before_commit=bind_request,
+        resolve_source=resolve_regeneration_source if source_context is not None else None,
     )
 
     if payload.idempotency_key is not None:
@@ -13079,6 +13182,121 @@ def _persist_workflow_revision_sync(
     session.commit()
     session.refresh(revision)
     return revision
+
+
+def _stored_source_fit_revision(
+    revision_id: str, session: Session
+) -> tuple[WorkflowDefinition, WorkflowRevision]:
+    revision = session.get(WorkflowRevision, revision_id)
+    if revision is None:
+        raise api_error(404, "workflow-revision-not-found", "workflow revision not found")
+    definition = session.get(WorkflowDefinition, revision.workflow_id)
+    if definition is None:
+        raise api_error(404, "workflow-not-found", "workflow not found")
+    return definition, revision
+
+
+@router.get(
+    "/workflow-revisions/{revision_id}/source-fit",
+    response_model=SourceFitCapabilityOut,
+)
+async def get_workflow_revision_source_fit(
+    revision_id: str,
+    session: SessionDep,
+) -> SourceFitCapabilityOut:
+    definition, revision = _stored_source_fit_revision(revision_id, session)
+    return source_fit_capability(definition, revision)
+
+
+@router.post(
+    "/workflow-revisions/{revision_id}/source-fit/preview",
+    response_model=SourceFitPreviewOut,
+)
+async def preview_workflow_revision_source_fit(
+    revision_id: str,
+    payload: SourceFitPreviewRequest,
+    request: Request,
+    session: ConversationSessionDep,
+) -> SourceFitPreviewOut:
+    """Re-read selected source/revision bytes without retaining media or queuing work."""
+    definition, revision = _stored_source_fit_revision(revision_id, session)
+    source = session.get(Artifact, payload.source_artifact_id)
+    if source is None:
+        raise api_error(404, "artifact-not-found", "source image not found")
+    try:
+        return await run_in_threadpool(
+            preview_source_fit,
+            definition,
+            revision,
+            _services(request).artifacts,
+            source,
+            payload.source_fit,
+        )
+    except ValueError:
+        raise api_error(
+            422,
+            "source-fit-preview-unavailable",
+            "The source image or requested canvas cannot be used with this workflow.",
+        ) from None
+
+
+@router.post("/chats/{chat_id}/source-fit/preview", response_model=SourceFitPreviewOut)
+async def preview_chat_source_fit(
+    chat_id: str, payload: TurnRequest, request: Request, session: ConversationSessionDep
+) -> SourceFitPreviewOut:
+    return await _preview_context_source_fit(
+        _services(request).orchestrator, session, payload, chat_id=chat_id
+    )
+
+
+@router.post("/messages/{message_id}/edits/source-fit/preview", response_model=SourceFitPreviewOut)
+async def preview_edit_source_fit(
+    message_id: str,
+    payload: PriorTurnEditRequest,
+    request: Request,
+    session: ConversationSessionDep,
+) -> SourceFitPreviewOut:
+    return await _preview_context_source_fit(
+        _services(request).orchestrator, session, payload, message_id=message_id
+    )
+
+
+async def _preview_context_source_fit(
+    orchestrator: ConversationOrchestrator,
+    session: Session,
+    payload: TurnRequest,
+    *,
+    chat_id: str | None = None,
+    message_id: str | None = None,
+) -> SourceFitPreviewOut:
+    try:
+        if message_id is not None and isinstance(payload, PriorTurnEditRequest):
+            return await preview_prior_turn_source_fit(orchestrator, session, message_id, payload)
+        if chat_id is None:
+            raise ValueError("A preview requires its conversation context.")
+        return await orchestrator.preview_turn_source_fit(session, chat_id, payload)
+    except EditRequestConflict:
+        raise api_error(
+            409, "source-fit-preview-conflict", "The edit source changed. Reload it."
+        ) from None
+    except LookupError:
+        raise api_error(
+            404, "source-fit-preview-not-found", "The preview source is unavailable."
+        ) from None
+    except (RouteConfirmationRequired, OrderedPlanConfirmationRequired):
+        raise api_error(
+            409, "source-fit-preview-confirmation", "Confirm the selected plan before previewing."
+        ) from None
+    except (EngineNotConfiguredError, EngineSchemaUnavailableError):
+        raise api_error(
+            503, "source-fit-preview-engine-unavailable", "The selected engine is unavailable."
+        ) from None
+    except ValueError:
+        raise api_error(
+            422,
+            "source-fit-preview-unavailable",
+            "The selected source and workflow cannot use this canvas.",
+        ) from None
 
 
 def _prove_stored_revision_geometry(

@@ -1,3 +1,4 @@
+import type { SourceFitSelection } from "./sourceFit";
 import { useCallback, useEffect, useRef, useState, type SetStateAction } from "react";
 import type { RoutingMode } from "./types";
 import type { ComposerAttachment } from "./useComposerUploads";
@@ -5,6 +6,8 @@ import type { TrackedMention } from "./mentionDraft";
 
 /** State that belongs to one draft, including an unacknowledged submission. */
 export interface TurnEditorState {
+  /** Undefined inherits; null deliberately clears a source canvas. */
+  sourceFit?: SourceFitSelection | null;
   requestId: string;
   mode: RoutingMode;
   attachments: ComposerAttachment[];
@@ -59,5 +62,9 @@ export function useTurnEditorState(
     attachmentIntent: "replace",
     attachments: typeof update === "function" ? update(current.attachments) : update,
   })), [updateState]);
-  return { state, updateState, setOutputCount, changeMode, currentMode, setTemplateSettings, setAttachments };
+  const clearAcceptedState = () => updateState((current) => ({
+    ...current, requestId: crypto.randomUUID(), submittedFingerprint: undefined, sourceFit: undefined,
+    attachments: [], attachmentIntent: "replace", mentions: [], referenceIntent: "replace", outputCount: 1, templateSettings: null,
+  }));
+  return { state, updateState, setOutputCount, changeMode, currentMode, setTemplateSettings, setAttachments, clearAcceptedState };
 }

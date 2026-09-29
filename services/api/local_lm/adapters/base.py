@@ -63,6 +63,10 @@ class MediaRequest:
     parameters: dict[str, Any]
     persistence_scope: str = "durable"
     scope_id: str | None = None
+    # Optional bytes parallel input_paths. Callers can retain an exact decoded
+    # source through upload without reopening its pathname. This field is
+    # transport data; accepted-source and workflow authority remain upstream.
+    input_contents: tuple[bytes, ...] | None = field(default=None, repr=False)
 
 
 @dataclass

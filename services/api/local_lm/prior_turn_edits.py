@@ -5,7 +5,8 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -37,10 +38,12 @@ from .schemas import (
     PriorTurnEditRequest,
     PriorTurnEditSource,
     PriorTurnEditStepSource,
+    SourceFitRequest,
     TurnAccepted,
     TurnRequest,
     WorkflowSelectionOut,
 )
+from .source_fit_preview import SourceFitPreviewOut
 from .turn_inheritance import inherited_edit_strength
 
 if TYPE_CHECKING:
@@ -143,6 +146,15 @@ def _configuration(
     output = prior.provenance_json.get("media_output") or {}
     return (
         PriorTurnEditConfiguration(
+            source_fit=(
+                SourceFitRequest(
+                    mode=snapshot.source_fit.mode,
+                    width=snapshot.source_fit.canvas_width,
+                    height=snapshot.source_fit.canvas_height,
+                )
+                if snapshot is not None and snapshot.source_fit is not None
+                else None
+            ),
             image_edit_strength=(
                 snapshot.image_edit_strength
                 if snapshot is not None and "image_edit_strength" in snapshot.model_fields_set
@@ -394,6 +406,217 @@ async def prior_turn_edit_source(
     return result
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedPriorTurnEdit:
+    """Read-only edit configuration, requiring fresh validation at admission."""
+
+    source: Message
+    prior: Run
+    payload: PriorTurnEditRequest
+    snapshot: AcceptedContext | None
+    source_digest: str
+    prior_operation: Operation
+    source_inheritance: PriorTurnInheritance | None
+    same_role: bool
+    workflow_override: bool
+    inherit_preset: bool
+    inherited_preset: dict[str, Any] | None
+    inherited_preset_layers: list[dict[str, Any]]
+    inherited_prompt_source: object | None
+    inherited_strength: dict[str, Any] | None
+    inherited_auxiliary: dict[str, Any]
+    inherit_loras: bool
+    request: TurnRequest
+
+
+async def prepare_prior_turn_edit(
+    orchestrator: ConversationOrchestrator,
+    session: Session,
+    message_id: str,
+    payload: PriorTurnEditRequest,
+) -> PreparedPriorTurnEdit:
+    """Reuse queued-edit selection without admitting work or changing the source."""
+    source, prior = _source(session, message_id, payload.source_run_id)
+    editor_source, _, _ = _source_view(orchestrator, session, message_id, prior.id)
+    source_digest = editor_source.source_snapshot_sha256
+    if (
+        payload.source_snapshot_sha256 is not None
+        and payload.source_snapshot_sha256 != source_digest
+    ):
+        raise EditRequestConflict("The source changed. Reload it before queuing this edit.")
+    snapshot = accepted_context(session, prior)
+    prior_operation = Operation(snapshot.operation if snapshot is not None else prior.operation)
+    prior_mode = (
+        RoutingMode.TEXT
+        if prior_operation == Operation.TEXT
+        else (RoutingMode.VIDEO if "video" in prior_operation.value else RoutingMode.IMAGE)
+    )
+    target_mode = payload.mode or editor_source.original_mode or prior_mode
+    use_source_configurations = (
+        target_mode == RoutingMode.AUTO or bool(editor_source.steps) or bool(payload.step_overrides)
+    )
+    source_inheritance = (
+        PriorTurnInheritance(orchestrator, session, editor_source, payload)
+        if use_source_configurations
+        else None
+    )
+    same_role = target_mode == prior_mode and not use_source_configurations
+    if target_mode != RoutingMode.AUTO:
+        payload = payload.for_role("chat" if target_mode == RoutingMode.TEXT else target_mode.value)
+    values = payload.model_dump(
+        exclude={"source_run_id", "source_snapshot_sha256", "step_overrides"},
+        exclude_unset=True,
+    )
+    values.update(parent_message_id=source.parent_id, mode=target_mode)
+    workflow_override = bool(
+        {"workflow_selection", "workflow_revision_id"} & payload.model_fields_set
+    )
+    if same_role and "source_fit" not in payload.model_fields_set:
+        values["source_fit"] = (
+            editor_source.source_fit.model_dump(mode="json")
+            if editor_source.source_fit is not None
+            else None
+        )
+    if same_role and not workflow_override and "profile_id" not in payload.model_fields_set:
+        values["profile_id"] = snapshot.profile_id if snapshot is not None else prior.profile_id
+    if (
+        same_role
+        and prior_operation == Operation.TEXT
+        and "vision_profile_id" not in payload.model_fields_set
+    ):
+        values["vision_profile_id"] = (
+            snapshot.vision_profile_id if snapshot is not None else prior.vision_profile_id
+        )
+    if "input_artifact_ids" not in payload.model_fields_set:
+        values["input_artifact_ids"] = (
+            list(snapshot.input_artifact_ids)
+            if snapshot is not None
+            else orchestrator.input_artifact_ids_for_run(session, prior)
+        )
+    inherit_preset = same_role and "preset_id" not in payload.model_fields_set
+    inherited_preset = copy.deepcopy(editor_source.preset)
+    inherited_preset_layers = copy.deepcopy(
+        snapshot.preset_layers
+        if snapshot is not None
+        else prior.provenance_json.get("preset_layers") or []
+    )
+    if inherit_preset:
+        # The accepted source already carries the preset's resolved values.
+        # Do not reapply the mutable preset or the chat's newer selection.
+        values["preset_id"] = None
+    settings = snapshot.settings if snapshot is not None else prior.settings_json
+    workflow_id = (
+        snapshot.workflow_revision_id if snapshot is not None else prior.workflow_revision_id
+    )
+    if same_role and not workflow_override:
+        values["workflow_revision_id"] = workflow_id
+    if same_role and payload.preset_id is None:
+        workflow = settings_workflow(session, prior, snapshot)
+        profile_id = snapshot.profile_id if snapshot is not None else prior.profile_id
+        profile = session.get(ModelProfile, profile_id) if profile_id else None
+        values["settings"] = await orchestrator.request_settings_for_operation(
+            prior_operation,
+            settings,
+            input_schema=workflow.input_schema_json if workflow is not None else None,
+            engine=snapshot.profile.engine
+            if snapshot and snapshot.profile
+            else profile.engine
+            if profile
+            else None,
+            accepts_added_loras=(workflow is not None and revision_accepts_added_loras(workflow)),
+        )
+        if values.get("source_fit") is not None:
+            # Legacy resolved dimensions are not a second explicit canvas choice.
+            values["settings"].pop("width", None)
+            values["settings"].pop("height", None)
+        values["settings"] = {**values["settings"], **payload.settings}
+    if same_role and "output_count" not in payload.model_fields_set:
+        output = prior.provenance_json.get("media_output") or {}
+        values["output_count"] = output.get("count", 1)
+    inherited_prompt_source: object | None = None
+    if "prompt_source" not in payload.model_fields_set and target_mode in {
+        RoutingMode.IMAGE,
+        RoutingMode.AUTO,
+    }:
+        inherited_prompt_source = prior.provenance_json.get("prompt_source")
+    inherited_strength = (
+        inherited_edit_strength(editor_source.image_edit_strength, payload, prior_operation)
+        if same_role
+        else None
+    )
+    inherited_auxiliary = copy.deepcopy(
+        snapshot.auxiliary_assets
+        if snapshot is not None
+        else prior.provenance_json.get("auxiliary_assets") or {}
+    )
+    inherit_loras = same_role and payload.preset_id is None and "loras" not in payload.settings
+    # Schema loading may yield. A preview must not return a source projection
+    # assembled across different versions, even though admission rechecks again.
+    session.expire_all()
+    current, _, _ = _source_view(orchestrator, session, message_id, prior.id)
+    if current.source_snapshot_sha256 != source_digest:
+        raise EditRequestConflict("The source changed. Reload it before preparing this edit.")
+    return PreparedPriorTurnEdit(
+        source=source,
+        prior=prior,
+        payload=payload,
+        snapshot=snapshot,
+        source_digest=source_digest,
+        prior_operation=prior_operation,
+        source_inheritance=source_inheritance,
+        same_role=same_role,
+        workflow_override=workflow_override,
+        inherit_preset=inherit_preset,
+        inherited_preset=inherited_preset,
+        inherited_preset_layers=inherited_preset_layers,
+        inherited_prompt_source=inherited_prompt_source,
+        inherited_strength=inherited_strength,
+        inherited_auxiliary=inherited_auxiliary,
+        inherit_loras=inherit_loras,
+        request=TurnRequest.model_validate(values),
+    )
+
+
+async def preview_prior_turn_source_fit(
+    orchestrator: ConversationOrchestrator,
+    session: Session,
+    message_id: str,
+    payload: PriorTurnEditRequest,
+) -> SourceFitPreviewOut:
+    """Preview the same edit selection, then revalidate its source after awaits."""
+    if session.new or session.dirty or session.deleted:
+        raise ValueError("A source preview requires a read-only session.")
+    with session.no_autoflush:
+        prepared = await prepare_prior_turn_edit(orchestrator, session, message_id, payload)
+        snapshot = prepared.snapshot
+        inherit_workflow = prepared.same_role and not prepared.workflow_override
+        result = await orchestrator.preview_turn_source_fit(
+            session,
+            prepared.source.chat_id,
+            prepared.request,
+            use_explicit_parent=True,
+            source_action="edit_and_branch",
+            inherited_image_edit_strength=prepared.inherited_strength,
+            inherited_prompt_source=prepared.inherited_prompt_source,
+            inherited_workflow=snapshot.workflow if snapshot and inherit_workflow else None,
+            inherited_source_fit=snapshot.source_fit if snapshot and inherit_workflow else None,
+            reference_source_message_id=prepared.source.id
+            if "references" not in prepared.payload.model_fields_set
+            else None,
+            resolve_source=prepared.source_inheritance.resolve
+            if prepared.source_inheritance
+            else None,
+        )
+        if prepared.source_inheritance is not None:
+            prepared.source_inheritance.validate_consumed()
+        prior_id = prepared.prior.id
+        session.expire_all()
+        current, _, _ = _source_view(orchestrator, session, message_id, prior_id)
+        if current.source_snapshot_sha256 != prepared.source_digest:
+            raise EditRequestConflict("The source changed. Reload it before previewing this edit.")
+    return result
+
+
 async def queue_prior_turn_edit(
     orchestrator: ConversationOrchestrator,
     session: Session,
@@ -413,115 +636,23 @@ async def queue_prior_turn_edit(
             return _edit_result(
                 session, orchestrator._accepted_for_run(session, replay), fingerprint
             )
-        editor_source, _, _ = _source_view(orchestrator, session, message_id, prior.id)
-        source_digest = editor_source.source_snapshot_sha256
-        if (
-            payload.source_snapshot_sha256 is not None
-            and payload.source_snapshot_sha256 != source_digest
-        ):
-            raise EditRequestConflict("The source changed. Reload it before queuing this edit.")
-        snapshot = accepted_context(session, prior)
-        prior_operation = Operation(snapshot.operation if snapshot is not None else prior.operation)
-        prior_mode = (
-            RoutingMode.TEXT
-            if prior_operation == Operation.TEXT
-            else (RoutingMode.VIDEO if "video" in prior_operation.value else RoutingMode.IMAGE)
-        )
-        target_mode = payload.mode or editor_source.original_mode or prior_mode
-        use_source_configurations = (
-            target_mode == RoutingMode.AUTO
-            or bool(editor_source.steps)
-            or bool(payload.step_overrides)
-        )
-        source_inheritance = (
-            PriorTurnInheritance(orchestrator, session, editor_source, payload)
-            if use_source_configurations
-            else None
-        )
-        same_role = target_mode == prior_mode and not use_source_configurations
-        if target_mode != RoutingMode.AUTO:
-            payload = payload.for_role(
-                "chat" if target_mode == RoutingMode.TEXT else target_mode.value
-            )
-        values = payload.model_dump(
-            exclude={"source_run_id", "source_snapshot_sha256", "step_overrides"},
-            exclude_unset=True,
-        )
-        values.update(parent_message_id=source.parent_id, mode=target_mode)
-        workflow_override = bool(
-            {"workflow_selection", "workflow_revision_id"} & payload.model_fields_set
-        )
-        if same_role and not workflow_override and "profile_id" not in payload.model_fields_set:
-            values["profile_id"] = snapshot.profile_id if snapshot is not None else prior.profile_id
-        if (
-            same_role
-            and prior_operation == Operation.TEXT
-            and "vision_profile_id" not in payload.model_fields_set
-        ):
-            values["vision_profile_id"] = (
-                snapshot.vision_profile_id if snapshot is not None else prior.vision_profile_id
-            )
-        if "input_artifact_ids" not in payload.model_fields_set:
-            values["input_artifact_ids"] = (
-                list(snapshot.input_artifact_ids)
-                if snapshot is not None
-                else orchestrator.input_artifact_ids_for_run(session, prior)
-            )
-        inherit_preset = same_role and "preset_id" not in payload.model_fields_set
-        inherited_preset = copy.deepcopy(editor_source.preset)
-        inherited_preset_layers = copy.deepcopy(
-            snapshot.preset_layers
-            if snapshot is not None
-            else prior.provenance_json.get("preset_layers") or []
-        )
-        if inherit_preset:
-            # The accepted source already carries the preset's resolved values.
-            # Do not reapply the mutable preset or the chat's newer selection.
-            values["preset_id"] = None
-        settings = snapshot.settings if snapshot is not None else prior.settings_json
-        workflow_id = (
-            snapshot.workflow_revision_id if snapshot is not None else prior.workflow_revision_id
-        )
-        if same_role and not workflow_override:
-            values["workflow_revision_id"] = workflow_id
-        if same_role and payload.preset_id is None:
-            workflow = settings_workflow(session, prior, snapshot)
-            profile_id = snapshot.profile_id if snapshot is not None else prior.profile_id
-            profile = session.get(ModelProfile, profile_id) if profile_id else None
-            values["settings"] = await orchestrator.request_settings_for_operation(
-                prior_operation,
-                settings,
-                input_schema=workflow.input_schema_json if workflow is not None else None,
-                engine=snapshot.profile.engine
-                if snapshot and snapshot.profile
-                else profile.engine
-                if profile
-                else None,
-                accepts_added_loras=(
-                    workflow is not None and revision_accepts_added_loras(workflow)
-                ),
-            )
-            values["settings"] = {**values["settings"], **payload.settings}
-        if same_role and "output_count" not in payload.model_fields_set:
-            output = prior.provenance_json.get("media_output") or {}
-            values["output_count"] = output.get("count", 1)
-        inherited_prompt_source: object | None = None
-        if "prompt_source" not in payload.model_fields_set and target_mode in {
-            RoutingMode.IMAGE,
-            RoutingMode.AUTO,
-        }:
-            inherited_prompt_source = prior.provenance_json.get("prompt_source")
-        inherited_strength = (
-            inherited_edit_strength(editor_source.image_edit_strength, payload, prior_operation)
-            if same_role
-            else None
-        )
-        inherited_auxiliary = copy.deepcopy(
-            snapshot.auxiliary_assets
-            if snapshot is not None
-            else prior.provenance_json.get("auxiliary_assets") or {}
-        )
-        inherit_loras = same_role and payload.preset_id is None and "loras" not in payload.settings
+        prepared = await prepare_prior_turn_edit(orchestrator, session, message_id, payload)
+        source = prepared.source
+        prior = prepared.prior
+        payload = prepared.payload
+        snapshot = prepared.snapshot
+        source_digest = prepared.source_digest
+        prior_operation = prepared.prior_operation
+        source_inheritance = prepared.source_inheritance
+        same_role = prepared.same_role
+        workflow_override = prepared.workflow_override
+        inherit_preset = prepared.inherit_preset
+        inherited_preset = prepared.inherited_preset
+        inherited_preset_layers = prepared.inherited_preset_layers
+        inherited_prompt_source = prepared.inherited_prompt_source
+        inherited_strength = prepared.inherited_strength
+        inherited_auxiliary = prepared.inherited_auxiliary
+        inherit_loras = prepared.inherit_loras
         prior_id = prior.id
 
         def bind_source(transaction: Session, first: Run) -> None:
@@ -627,7 +758,7 @@ async def queue_prior_turn_edit(
         accepted = await orchestrator._create_turn(
             session,
             chat_id,
-            TurnRequest.model_validate(values),
+            prepared.request,
             use_explicit_parent=True,
             source_action="edit_and_branch",
             activate_branch=False,
@@ -635,6 +766,11 @@ async def queue_prior_turn_edit(
             inherited_prompt_source=inherited_prompt_source,
             inherited_workflow=(
                 snapshot.workflow
+                if snapshot is not None and same_role and not workflow_override
+                else None
+            ),
+            inherited_source_fit=(
+                snapshot.source_fit
                 if snapshot is not None and same_role and not workflow_override
                 else None
             ),

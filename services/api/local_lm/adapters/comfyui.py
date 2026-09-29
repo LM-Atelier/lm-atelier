@@ -332,7 +332,9 @@ class ComfyUIAdapter:
         return (await self._upload_files(request, [Path(raw_path)], label="mask"))[0]
 
     async def _upload_inputs(self, request: MediaRequest) -> list[str]:
-        return await self._upload_files(request, request.input_paths, label="")
+        return await self._upload_files(
+            request, request.input_paths, label="", contents=request.input_contents
+        )
 
     async def _upload_files(
         self,
@@ -340,11 +342,22 @@ class ComfyUIAdapter:
         paths: list[Path],
         *,
         label: str,
+        contents: tuple[bytes, ...] | None = None,
     ) -> list[str]:
+        if contents is not None and (
+            type(contents) is not tuple
+            or len(contents) != len(paths)
+            or any(type(content) is not bytes for content in contents)
+        ):
+            raise ValueError("The input bytes do not match the conditioning images")
         uploaded: list[str] = []
         upload_subfolder = _UPLOAD_SUBFOLDER
         for index, path in enumerate(paths):
-            content = await asyncio.to_thread(path.read_bytes)
+            content = (
+                contents[index]
+                if contents is not None
+                else await asyncio.to_thread(path.read_bytes)
+            )
             extension, media_type = self._image_format(content)
             suffix = f"{label}-{index}" if label else str(index)
             filename = f"lm-atelier-{request.run_id}-{suffix}{extension}"

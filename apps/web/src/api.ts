@@ -1,3 +1,6 @@
+import { buildTurnRequest, SOURCE_FIT_BINDING_ERROR, type TurnRequestPayload } from "./turnRequest";
+export { buildTurnRequest } from "./turnRequest";
+import type { SourceFitCapability, SourceFitIntent, SourceFitPreviewResult, SourceFitSelection } from "./sourceFit";
 import type { TurnReference } from "./mentionDraft";
 import type { ComposerPromptSource } from "./composerPromptSource";
 import {
@@ -507,28 +510,19 @@ export const api = {
     outputCount?: number,
     promptSource?: ComposerPromptSource,
     confirmTurn?: TurnConfirmationHandler,
+    sourceFit?: SourceFitSelection,
   ) => {
-    // The count belongs to the mode the person explicitly chose. Auto may
-    // later confirm a media route, but that must not resurrect a hidden media
-    // control from an earlier mode.
-    const requestedOutputCount = mode === "image" || mode === "video"
-      ? outputCount
-      : undefined;
-    const submit = (selectedMode: RoutingMode, confirmed = false) => request<TurnAccepted>(`/api/chats/${chatId}/${endpoint}`, {
-      method: "POST",
-      body: JSON.stringify({
-        text,
-        mode: selectedMode,
-        input_artifact_ids: inputArtifactIds,
-        references,
-        settings,
-        workflow_revision_id: workflowRevisionId,
-        output_count: requestedOutputCount,
-        confirm_media: confirmed,
-        idempotency_key: idempotencyKey,
-        prompt_source: promptSource,
-      }),
+    const payload = buildTurnRequest({
+      text, mode, inputArtifactIds, settings, idempotencyKey, workflowRevisionId,
+      references, outputCount, promptSource, sourceFit,
     });
+    const submit = (selectedMode: RoutingMode, confirmed = false) => {
+      if (payload.source_fit && selectedMode !== "image" && selectedMode !== "auto") throw new Error(SOURCE_FIT_BINDING_ERROR);
+      return request<TurnAccepted>(`/api/chats/${chatId}/${endpoint}`, {
+        method: "POST",
+        body: JSON.stringify({ ...payload, mode: selectedMode, confirm_media: confirmed }),
+      });
+    };
     try {
       return await submit(mode);
     } catch (error) {
@@ -548,6 +542,7 @@ export const api = {
     outputCount?: number,
     promptSource?: ComposerPromptSource,
     confirmTurn?: TurnConfirmationHandler,
+    sourceFit?: SourceFitSelection,
   ) => api.sendTurn(
     chatId,
     text,
@@ -561,6 +556,7 @@ export const api = {
     outputCount,
     promptSource,
     confirmTurn,
+    sourceFit,
   ),
   regenerateMessage: (messageId: string, settings: Record<string, unknown>, idempotencyKey?: string) =>
     request<TurnAccepted>(`/api/messages/${messageId}/regenerate`, {
@@ -1179,6 +1175,35 @@ export const api = {
       if (value.revision_id !== revisionId) throw new Error("The selected workflow settings could not be read.");
       return value;
     }),
+  previewTurnSourceFit: (chatId: string, payload: TurnRequestPayload, signal?: AbortSignal) =>
+    request<SourceFitPreviewResult>(
+      "/api/chats/" + encodeURIComponent(chatId) + "/source-fit/preview",
+      { method: "POST", body: JSON.stringify(payload), signal },
+    ),
+  previewPriorTurnSourceFit: (messageId: string, payload: PriorTurnEditRequest, signal?: AbortSignal) =>
+    request<SourceFitPreviewResult>(
+      "/api/messages/" + encodeURIComponent(messageId) + "/edits/source-fit/preview",
+      { method: "POST", body: JSON.stringify(payload), signal },
+    ),
+  workflowRevisionSourceFit: (revisionId: string, signal?: AbortSignal) =>
+    request<SourceFitCapability>(
+      "/api/workflow-revisions/" + encodeURIComponent(revisionId) + "/source-fit",
+      { signal },
+    ),
+  previewWorkflowRevisionSourceFit: (
+    revisionId: string,
+    sourceArtifactId: string,
+    sourceFit: SourceFitIntent,
+    signal?: AbortSignal,
+  ) =>
+    request<SourceFitPreviewResult>(
+      "/api/workflow-revisions/" + encodeURIComponent(revisionId) + "/source-fit/preview",
+      {
+        method: "POST",
+        body: JSON.stringify({ source_artifact_id: sourceArtifactId, source_fit: sourceFit }),
+        signal,
+      },
+    ),
   workflowFamily: (familyId: string) =>
     request<WorkflowFamily>(`/api/workflow-families/${encodeURIComponent(familyId)}`),
   updateWorkflowFamily: (familyId: string, changes: WorkflowFamilyUpdate) =>

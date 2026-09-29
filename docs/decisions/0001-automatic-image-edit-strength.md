@@ -22,6 +22,8 @@ Missing or malformed optional calibration falls back to the general `denoise` po
 
 Explicit profile, preset, project, chat, and per-turn values remain exact and authoritative. Regeneration and inherited branches reuse an earlier Auto value unless the user supplies a new value for the workflow's declared parameter. Text-to-image behavior does not change.
 
+Extending a source picture to a larger canvas is the one exception. The inpainting sampler that fills the new area works only at full strength, so an extension takes no Auto value, and a setting mapped to that sampler's strength runs at full whichever layer supplied it. The accepted settings record the full value.
+
 Single and ordered media paths use the same resolver. Provenance records only bounded mode, scope, confidence, reason codes, estimator version, bounds, value, setting source, optional calibration version/hash, and any bounded schedule adjustment; it never copies prompt text. Classification is linear string processing and performs no model or network call.
 
 ## Limits

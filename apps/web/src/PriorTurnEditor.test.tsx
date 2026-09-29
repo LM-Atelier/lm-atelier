@@ -12,6 +12,7 @@ vi.mock("./api", async (importOriginal) => {
     workflowRevisionChoices: vi.fn(), workflowRevisionSchema: vi.fn(), workflowFamilies: vi.fn(), chatWorkflowSelections: vi.fn(), projectWorkflowSelections: vi.fn(),
     classifyDraft: vi.fn(), references: vi.fn(), modelAssets: vi.fn(),
     getPriorTurnEditSource: vi.fn(), queueEditedMessage: vi.fn(), updateChat: vi.fn(),
+    workflowRevisionSourceFit: vi.fn(), previewWorkflowRevisionSourceFit: vi.fn(), previewPriorTurnSourceFit: vi.fn(),
   } };
 });
 const stamp = "2026-09-07T12:00:00Z";
@@ -45,6 +46,9 @@ beforeEach(() => {
   vi.mocked(api.workflowRevisionChoices).mockResolvedValue([]);
   localStorage.clear();
   vi.mocked(api.workflowFamilies).mockResolvedValue([]);
+  vi.mocked(api.workflowRevisionSourceFit).mockResolvedValue({
+    available: false, reason: "source_fit_workflow_unsupported", modes: [], request_authorized: false,
+  });
   vi.mocked(api.chatWorkflowSelections).mockResolvedValue([]);
   vi.mocked(api.projectWorkflowSelections).mockResolvedValue([]);
   vi.mocked(api.modelAssets).mockResolvedValue([]);
@@ -321,4 +325,69 @@ it.each(["loading", "failed", "missing"])("keeps the pinned revision visible whe
     expect(select.selectedOptions[0].textContent?.trim()).toBe("Example history · version 1");
   }
   expect((await submit()).workflow_selection).toEqual(choice.value);
+});
+
+it.each([
+  ["image", "image"], ["auto", "image"], ["auto", "chat"],
+] as const)("previews the inherited image canvas in %s while viewing %s settings", async (mode, viewedRole) => {
+  vi.mocked(api.getPriorTurnEditSource).mockResolvedValue({
+    ...structuredClone(source), original_mode: mode, operation: "image_to_image",
+    source_fit: { mode: "extend", width: 1200, height: 900 },
+    input_artifact_ids: ["canvas-source"],
+    input_artifacts: [{ id: "canvas-source", sha256: "b".repeat(64), kind: "input", media_type: "image/png",
+      size_bytes: 10, original_name: "landscape.png", metadata_json: {}, created_at: stamp }],
+    workflow_revision_id: "canvas-revision",
+    workflow_selection: { selector_capability: "image", mode: "revision", workflow_revision_id: "canvas-revision",
+      workflow_family_id: null, legacy_profile_id: null },
+  });
+  vi.mocked(api.workflowRevisionSourceFit).mockResolvedValue({
+    available: true, reason: null, modes: ["extend"], request_authorized: false,
+  });
+  vi.mocked(api.previewPriorTurnSourceFit).mockResolvedValue({
+    version: 1, mode: "extend", workflow_revision_id: "canvas-revision", workflow_artifact_sha256: "c".repeat(64),
+    source_artifact_id: "canvas-source", source: { width: 400, height: 300 },
+    canvas: { width: 1200, height: 900 }, margins: { left: 400, top: 300, right: 400, bottom: 300 },
+    source_rectangle: { x: 400, y: 300, width: 400, height: 300 }, request_authorized: false,
+  });
+  await mount();
+  if (viewedRole !== "image") fireEvent.change(screen.getByLabelText("Settings for this version"), { target: { value: "role:" + viewedRole } });
+  fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
+  expect(screen.getByLabelText("Generation mode")).toHaveValue(mode);
+  await screen.findByRole("button", { name: "Extend / preserve all" });
+  fireEvent.click(screen.getByRole("button", { name: "Preview canvas" }));
+  await screen.findByRole("img", { name: /Extension preview/ });
+  const chooseWorkflow = (choice: string) => {
+    fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
+    if (viewedRole !== "image") fireEvent.change(screen.getByLabelText("Settings for this version"), { target: { value: "role:image" } });
+    fireEvent.change(screen.getByLabelText("Workflow for this version"), { target: { value: choice } });
+    if (viewedRole !== "image") fireEvent.change(screen.getByLabelText("Settings for this version"), { target: { value: "role:" + viewedRole } });
+    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
+  };
+  for (const choice of ["current", "automatic"]) {
+    chooseWorkflow(choice);
+    expect(screen.queryByRole("img", { name: /Extension preview/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Preview canvas" })).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Queue edited version" }));
+    expect(api.queueEditedMessage).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Message")).toHaveValue(source.text);
+  }
+  chooseWorkflow("inherit");
+  fireEvent.click(screen.getByRole("button", { name: "Preview canvas" }));
+  await screen.findByRole("img", { name: /Extension preview/ });
+  fireEvent.click(screen.getByRole("button", { name: "Queue edited version" }));
+  await waitFor(() => expect(api.queueEditedMessage).toHaveBeenCalledTimes(1));
+  await screen.findByText("Queue full");
+  expect(vi.mocked(api.queueEditedMessage).mock.calls[0][1]).toMatchObject({
+    mode, input_artifact_ids: ["canvas-source"],
+    source_fit: { mode: "extend", width: 1200, height: 900 },
+  });
+  expect(vi.mocked(api.queueEditedMessage).mock.calls[0][1]).not.toHaveProperty("workflow_selection");
+  expect(vi.mocked(api.queueEditedMessage).mock.calls[0][1]).not.toHaveProperty("workflow_revision_id");
+  // The preview is the edit itself: the same message, mode and canvas the queued version carries.
+  expect(api.previewPriorTurnSourceFit).toHaveBeenLastCalledWith(
+    source.source_user_message_id,
+    expect.objectContaining({ mode, source_fit: { mode: "extend", width: 1200, height: 900 } }),
+    expect.any(AbortSignal),
+  );
+  expect(api.previewWorkflowRevisionSourceFit).not.toHaveBeenCalled();
 });

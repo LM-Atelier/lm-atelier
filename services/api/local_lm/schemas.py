@@ -32,6 +32,7 @@ from .domain import (
 from .install_plan_types import InstallPlanFailureCode
 from .model_asset_types import BoundWorkflowAssetKind, InstalledAssetKind
 from .model_asset_types import WorkflowAssetKind as WorkflowAssetKind
+from .output_geometry import MAX_DIMENSION
 from .references import (
     MAX_REFERENCES_PER_TURN,
     MAX_ROLE,
@@ -880,6 +881,14 @@ TurnWorkflowSelectionIn = Annotated[
 ]
 
 
+class SourceFitRequest(ApiModel):
+    """An explicit canvas choice; source and workflow identity are resolved by the server."""
+
+    mode: Literal["extend"]
+    width: StrictInt = Field(ge=1, le=MAX_DIMENSION)
+    height: StrictInt = Field(ge=1, le=MAX_DIMENSION)
+
+
 class TurnRoleOverrides(ApiModel):
     """Deliberate choices for whichever steps route to this role."""
 
@@ -892,6 +901,7 @@ class TurnRoleOverrides(ApiModel):
 
 
 class TurnRequest(ApiModel):
+    source_fit: SourceFitRequest | None = None
     text: str = Field(min_length=1, max_length=200_000)
     preset_id: str | None = Field(default=None, min_length=1, max_length=40)
     profile_id: str | None = Field(default=None, min_length=1, max_length=40)
@@ -1019,6 +1029,7 @@ class PriorTurnEditRequest(TurnRequest):
 
 
 class PriorTurnEditConfiguration(ApiModel):
+    source_fit: SourceFitRequest | None = None
     image_edit_strength: dict[str, Any] | None = None
     operation: str
     profile_engine: str | None = None

@@ -5,9 +5,9 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from typing import Any, Literal, NamedTuple
+from typing import Any, Literal, NamedTuple, Self
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -27,6 +27,7 @@ from .models import (
     WorkStep,
     WorkStepDependency,
 )
+from .source_fit_recipe import SourceExtensionRecipe
 from .vision import VisionSamplingPolicy
 from .workflow_revision_reviews import revision_is_trusted
 
@@ -292,6 +293,32 @@ class AcceptedContext(BaseModel):
     vision_profile: AcceptedProfile | None
     verification_profile: AcceptedProfile | None = None
 
+    source_fit: SourceExtensionRecipe | None = None
+
+    @model_validator(mode="after")
+    def bind_source_fit(self) -> Self:
+        recipe = self.source_fit
+        if recipe is None:
+            return self
+        if (
+            self.unavailable_reason is not None
+            or self.operation != Operation.IMAGE_TO_IMAGE.value
+            or self.media_engine != "comfyui"
+            or self.workflow is None
+            or self.workflow.engine != "comfyui"
+            or self.workflow.id != self.workflow_revision_id
+            or not self.input_artifact_ids
+            or self.input_artifact_ids[0] != recipe.image.source_artifact_id
+            or not {
+                recipe.image.source_artifact_id,
+                recipe.image.prepared_artifact_id,
+            }
+            <= set(self.artifact_ids)
+        ):
+            raise ValueError("source_fit_context_binding")
+        recipe.route(self.workflow.api_graph_json)
+        return self
+
 
 def _digest(value: dict[str, Any]) -> str:
     encoded = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
@@ -317,6 +344,7 @@ def save_accepted_context(
     media_prompt: str,
     context_artifact_ids: set[str],
     verification_profile_id: str | None = None,
+    source_fit: SourceExtensionRecipe | None = None,
     inherited_context: AcceptedContext | None = None,
     inherited_configuration: AcceptedContext | None = None,
     inherit_profile_configuration: bool = False,
@@ -347,6 +375,7 @@ def save_accepted_context(
         edit_source = (
             run.provenance_json.get("edit_source")
             or run.provenance_json.get("image_edit_verification_retry")
+            or run.provenance_json.get("regeneration_source")
             or {}
         )
         if (
@@ -363,7 +392,9 @@ def save_accepted_context(
         vision_settings = copy.deepcopy(inherited_context.vision_settings)
         vision_sampling = inherited_context.vision_sampling.model_copy(deep=True)
         vision_bridge_max_tokens = inherited_context.vision_bridge_max_tokens
-        if run.provenance_json.get("image_edit_verification_retry"):
+        if run.provenance_json.get("image_edit_verification_retry") or run.provenance_json.get(
+            "regeneration_source"
+        ):
             media_prompt = inherited_context.media_prompt
     compiled = run.provenance_json.get("compiled_step")
     prompt = compiled.get("prompt") if isinstance(compiled, dict) else None
@@ -374,6 +405,7 @@ def save_accepted_context(
     edit_source = (
         run.provenance_json.get("edit_source")
         or run.provenance_json.get("image_edit_verification_retry")
+        or run.provenance_json.get("regeneration_source")
         or {}
     )
     configuration_context = inherited_configuration or inherited_context
@@ -462,6 +494,17 @@ def save_accepted_context(
             artifact_ids.add(poster.id)
             if artifact_id in context_artifact_ids:
                 context_artifact_ids.add(poster.id)
+    if source_fit is not None:
+        # These are ordinary snapshot retention edges. The caller must supply
+        # the recipe validated from the requested transform and verified bytes.
+        # Capturing an image alone does not authorize it as the primary source.
+        retained_source_ids = {
+            source_fit.image.source_artifact_id,
+            source_fit.image.prepared_artifact_id,
+        }
+        if any(session.get(Artifact, artifact_id) is None for artifact_id in retained_source_ids):
+            raise ValueError("source_fit_image_unavailable")
+        artifact_ids = artifact_ids | retained_source_ids
     snapshot = AcceptedContext(
         run_id=run.id,
         chat_id=run.chat_id,
@@ -500,6 +543,7 @@ def save_accepted_context(
         profile=profile,
         vision_profile=vision_profile,
         verification_profile=verification_profile,
+        source_fit=source_fit,
     )
     payload = snapshot.model_dump(mode="json")
     digest = _digest(payload)
