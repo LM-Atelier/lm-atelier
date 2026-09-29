@@ -4,9 +4,10 @@ import asyncio
 import base64
 import io
 import json
+import shutil
 import threading
 import zipfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -64,7 +65,7 @@ from local_lm.models import (
 from local_lm.orchestrator import ConversationOrchestrator
 from local_lm.progress import apply_engine_progress, reduce_progress, update_job_progress
 from local_lm.runtime_provisioning import RuntimeProvisioner
-from local_lm.scheduler import ResourceScheduler
+from local_lm.scheduler import JobClaim, ResourceScheduler
 from local_lm.schemas import (
     ChatCreate,
     DownloadRequest,
@@ -81,7 +82,9 @@ ONE_PIXEL_PNG = base64.b64decode(
 )
 
 
-async def wait_for_assistant(client: AsyncClient, chat_id: str, expected_type: str) -> dict:  # type: ignore[type-arg]
+async def wait_for_assistant(
+    client: AsyncClient, chat_id: str, expected_type: str
+) -> dict[str, Any]:
     async def read() -> dict[str, Any] | None:
         response = await client.get(f"/api/chats/{chat_id}")
         assert response.status_code == 200
@@ -92,7 +95,7 @@ async def wait_for_assistant(client: AsyncClient, chat_id: str, expected_type: s
 
     assistant = await wait_for_terminal_status(read, what=f"the assistant run in chat {chat_id}")
     assert any(part["type"] == expected_type for part in assistant["parts"])
-    return cast(dict, assistant)
+    return cast(dict[str, Any], assistant)
 
 
 async def wait_for_step_statuses(
@@ -109,7 +112,7 @@ async def wait_for_step_statuses(
     )
 
 
-async def wait_for_run(client: AsyncClient, run_id: str) -> dict:  # type: ignore[type-arg]
+async def wait_for_run(client: AsyncClient, run_id: str) -> dict[str, Any]:
     async def read() -> dict[str, Any]:
         response = await client.get(f"/api/runs/{run_id}")
         assert response.status_code == 200
@@ -121,7 +124,7 @@ async def wait_for_run(client: AsyncClient, run_id: str) -> dict:  # type: ignor
     assert isinstance(run["duration_ms"], int)
     assert run["duration_ms"] >= 0
     assert run["provenance_json"]["timings"]["duration_ms"] == run["duration_ms"]
-    return cast(dict, run)
+    return cast(dict[str, Any], run)
 
 
 def extend_capability_role(
@@ -169,9 +172,16 @@ def create_managed_model(
         session.commit()
 
 
-def project_manifest(archive_bytes: bytes) -> dict:  # type: ignore[type-arg]
+def project_manifest(archive_bytes: bytes) -> dict[str, Any]:
     with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
-        return json.loads(archive.read("manifest.json"))
+        return cast(dict[str, Any], json.loads(archive.read("manifest.json")))
+
+
+def _all_present[T](rows: list[T | None]) -> list[T]:
+    """Every row, having checked that none of them is missing."""
+    present = [row for row in rows if row is not None]
+    assert len(present) == len(rows)
+    return present
 
 
 def rewrite_project_archive(
@@ -399,8 +409,8 @@ async def test_project_chat_text_and_inline_image_flow(client: AsyncClient) -> N
 
 
 async def test_replaced_generation_previews_survive_until_retention_cleanup(
-    client: AsyncClient, monkeypatch, settings: Settings
-) -> None:  # type: ignore[no-untyped-def]
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch, settings: Settings
+) -> None:
     first_processed = asyncio.Event()
     allow_second = asyncio.Event()
     second_processed = asyncio.Event()
@@ -444,7 +454,7 @@ async def test_replaced_generation_previews_survive_until_retention_cleanup(
             for part in assistant["parts"]
             if part["type"] == "image" and part["metadata_json"].get("preview")
         )
-        return preview["artifact_id"]
+        return cast(str, preview["artifact_id"])
 
     monkeypatch.setattr(MockMediaAdapter, "generate", staged_generate)
     chat = (await client.post("/api/chats", json={"title": "Preview retention"})).json()
@@ -1774,7 +1784,7 @@ async def test_engine_api_isolates_media_settings_by_role(client: AsyncClient) -
 
 
 async def test_random_media_seed_is_resolved_and_persisted(
-    client: AsyncClient, monkeypatch
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("local_lm.orchestrator.secrets.randbelow", lambda _upper: 8675309)
     chat = (await client.post("/api/chats", json={"title": "Seed provenance"})).json()
@@ -1921,8 +1931,8 @@ async def test_turn_idempotency_never_bypasses_chat_existence(
 async def test_concurrent_orchestrators_converge_before_expensive_turn_planning(
     app: FastAPI,
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     chat = (await client.post("/api/chats", json={"title": "Concurrent claim"})).json()
     services = app.state.services
     first: ConversationOrchestrator = services.orchestrator
@@ -2127,8 +2137,9 @@ async def test_media_variations_create_ordered_independent_output_slots(
             assert keyed.pop(accepted["run"]["id"]) == "four-media-outputs"
             assert all(key is None for key in keyed.values())
             assistant_ids = plan["summary_json"]["assistant_message_ids"]
-            messages = [session.get(Message, message_id) for message_id in assistant_ids]
-            assert all(message is not None for message in messages)
+            messages = _all_present(
+                [session.get(Message, message_id) for message_id in assistant_ids]
+            )
             assert messages[0].parent_id == accepted["user_message"]["id"]
             assert [message.parent_id for message in messages[1:]] == assistant_ids[:-1]
 
@@ -2237,8 +2248,7 @@ async def test_ordered_text_image_video_text_plan_resolves_typed_outputs(
         steps = session.scalars(
             select(WorkStep).where(WorkStep.plan_id == plan_id).order_by(WorkStep.ordinal)
         ).all()
-        runs = [session.get(Run, step.run_id) for step in steps]
-        assert all(run is not None for run in runs)
+        runs = _all_present([session.get(Run, step.run_id) for step in steps])
         assert runs[0].settings_json["max_tokens"] == 64
         assert runs[1].settings_json["width"] == 512
         assert "frames" not in runs[1].settings_json
@@ -2270,6 +2280,7 @@ async def test_ordered_text_image_video_text_plan_resolves_typed_outputs(
             assert resolved_step.workflow_revision_id == resolved_run.workflow_revision_id
             workflow_witness = resolved_run.provenance_json.get("workflow")
             if resolved_run.workflow_revision_id:
+                assert workflow_witness is not None
                 assert workflow_witness["revision_id"] == resolved_run.workflow_revision_id
                 assert workflow_witness["definition_id"]
                 assert workflow_witness["definition_name"]
@@ -2296,8 +2307,8 @@ async def test_ordered_text_image_video_text_plan_resolves_typed_outputs(
 
 async def test_ordered_plan_blocks_dependents_and_resumes_after_retry(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     original_stream = MockChatAdapter.stream
 
     async def fail_first_step(
@@ -2358,8 +2369,8 @@ async def test_ordered_plan_blocks_dependents_and_resumes_after_retry(
 
 async def test_ordered_retry_preserves_completed_predecessor(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     original_generate = MockMediaAdapter.generate
 
     async def fail_media_step(
@@ -2845,8 +2856,8 @@ async def test_active_chat_run_can_be_cancelled_directly(client: AsyncClient) ->
 
 
 async def test_failed_chat_run_preserves_streamed_text_and_reports_error(
-    client: AsyncClient, monkeypatch
-) -> None:  # type: ignore[no-untyped-def]
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     async def fail_after_delta(
         _adapter: MockChatAdapter, _request: ChatRequest
     ) -> AsyncIterator[ChatEvent]:
@@ -2941,8 +2952,8 @@ async def test_restart_recovery_preserves_partial_text_and_appends_error(
 async def test_restart_recovery_requeues_work_that_never_started(
     client: AsyncClient,
     app: FastAPI,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     chat = (await client.post("/api/chats", json={"title": "Queued recovery"})).json()
     turn = (
         await client.post(
@@ -2988,8 +2999,8 @@ async def test_restart_recovery_requeues_work_that_never_started(
 async def test_restart_recovery_preserves_queued_transcript_order(
     client: AsyncClient,
     app: FastAPI,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     chat = (await client.post("/api/chats", json={"title": "Ordered recovery"})).json()
     turns = []
     for index in range(3):
@@ -3035,8 +3046,8 @@ async def test_restart_recovery_preserves_queued_transcript_order(
 async def test_restart_recovery_preserves_media_output_order(
     client: AsyncClient,
     app: FastAPI,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     chat = (await client.post("/api/chats", json={"title": "Media recovery"})).json()
     turn = (
         await client.post(
@@ -3091,8 +3102,8 @@ async def test_restart_recovery_preserves_media_output_order(
 async def test_restart_recovery_does_not_replay_completed_ordered_steps(
     client: AsyncClient,
     app: FastAPI,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     chat = (await client.post("/api/chats", json={"title": "Ordered restart"})).json()
     turn = (
         await client.post(
@@ -3165,8 +3176,8 @@ async def test_restart_recovery_does_not_replay_completed_ordered_steps(
 async def test_retry_clears_stale_error_before_dispatch(
     client: AsyncClient,
     app: FastAPI,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     chat = (await client.post("/api/chats", json={"title": "Clean retry"})).json()
     turn = (
         await client.post(
@@ -3445,8 +3456,8 @@ async def test_regenerating_older_response_preserves_later_history_and_revisions
 
 async def test_failed_regeneration_keeps_the_selected_response(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     chat = (await client.post("/api/chats", json={"title": "Failed revision"})).json()
     original = await client.post(
         f"/api/chats/{chat['id']}/turns",
@@ -3603,7 +3614,7 @@ async def test_long_chat_compacts_context_without_changing_the_transcript(
     assert updated.status_code == 200
     chat = (await client.post("/api/chats", json={"title": "Long context"})).json()
 
-    final_run: dict = {}
+    final_run: dict[str, Any] = {}
     for index in range(6):
         response = await client.post(
             f"/api/chats/{chat['id']}/turns",
@@ -3787,8 +3798,8 @@ async def test_text_turn_after_image_keeps_alternating_chat_context(
 
 async def test_vision_chat_receives_verified_local_image_bytes(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     original_capabilities = MockChatAdapter.capabilities
     captured: list[ChatRequest] = []
 
@@ -3850,8 +3861,8 @@ async def test_vision_chat_receives_verified_local_image_bytes(
 
 async def test_text_only_chat_never_receives_attached_image_bytes(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured: list[ChatRequest] = []
 
     async def capture_stream(
@@ -3899,8 +3910,8 @@ async def test_text_only_chat_never_receives_attached_image_bytes(
 
 async def test_vision_chat_reuses_the_newest_prior_generated_image(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     original_capabilities = MockChatAdapter.capabilities
     captured: list[ChatRequest] = []
 
@@ -3959,8 +3970,8 @@ async def test_vision_chat_reuses_the_newest_prior_generated_image(
 
 async def test_vision_chat_uses_the_poster_for_a_prior_generated_video(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     original_capabilities = MockChatAdapter.capabilities
     captured: list[ChatRequest] = []
 
@@ -4329,8 +4340,8 @@ async def test_chat_delete_keeps_generated_media_referenced_by_another_chat(
 async def test_chat_delete_cancels_all_queued_runs_and_cleans_up_tasks(
     client: AsyncClient,
     app: FastAPI,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     started: set[str] = set()
     finished: set[str] = set()
 
@@ -4392,8 +4403,8 @@ async def test_chat_delete_cancels_all_queued_runs_and_cleans_up_tasks(
 async def test_chat_delete_awaits_active_run_cleanup_before_database_deletion(
     client: AsyncClient,
     app: FastAPI,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     stream_started = asyncio.Event()
     cancellation_started = asyncio.Event()
     allow_cleanup = asyncio.Event()
@@ -4525,7 +4536,7 @@ async def test_workflow_revisions_and_validation(client: AsyncClient) -> None:
 
 
 async def test_workflow_vram_requirement_uses_device_capacity(
-    client: AsyncClient, monkeypatch
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     memory = {
         "total": 16 * 1024**3,
@@ -4781,7 +4792,7 @@ async def _project_pin(client: AsyncClient, project_id: str) -> str | None:
     """Read a project's image pin back. There is no single-project GET."""
     projects = (await client.get("/api/projects")).json()
     match = next(item for item in projects if item["id"] == project_id)
-    return match["image_workflow_revision_id"]
+    return cast(str | None, match["image_workflow_revision_id"])
 
 
 async def _inherit_project_image_workflow(client: AsyncClient, chat_id: str) -> None:
@@ -5171,8 +5182,8 @@ async def test_pinned_workflow_schema_drives_generation_settings(client: AsyncCl
 
 async def test_workflow_seconds_resolve_before_video_dispatch(
     client: AsyncClient,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured: list[MediaRequest] = []
     original_generate = MockMediaAdapter.generate
 
@@ -5277,8 +5288,8 @@ async def test_workflow_seconds_resolve_before_video_dispatch(
 async def test_adapter_capability_settings_cover_profile_preset_scopes_and_turn_reuse(
     client: AsyncClient,
     app: FastAPI,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     adapter_cache = SettingField(
         key="adapter_cache",
         label="Adapter cache",
@@ -5401,8 +5412,8 @@ async def test_adapter_capability_settings_cover_profile_preset_scopes_and_turn_
 async def test_media_capability_settings_stay_isolated_by_role(
     client: AsyncClient,
     app: FastAPI,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     image_detail = SettingField(
         key="image_detail",
         label="Image detail",
@@ -5476,8 +5487,8 @@ async def test_media_capability_settings_stay_isolated_by_role(
 async def test_pinned_workflow_revision_keeps_dynamic_capability_constraints(
     client: AsyncClient,
     app: FastAPI,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     adapter_strength = SettingField(
         key="adapter_strength",
         label="Adapter strength",
@@ -5582,8 +5593,8 @@ async def test_pinned_workflow_revision_keeps_dynamic_capability_constraints(
 async def test_idempotent_replay_survives_capability_outage_without_new_state(
     client: AsyncClient,
     app: FastAPI,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     chat = (await client.post("/api/chats", json={"title": "Capability replay"})).json()
     request_payload = {
         "text": "Create one durable turn",
@@ -6556,7 +6567,7 @@ async def test_model_delete_finalization_runs_off_the_event_loop(
     (managed / "model.gguf").write_bytes(b"threaded")
     model_id = "model_delete_threaded_finalization"
     create_managed_model(model_id=model_id, path=managed, files=["model.gguf"])
-    original_finalize = api_module._finalize_model_quarantine
+    original_finalize = model_quarantine._finalize_model_quarantine
     observed_threads: list[int] = []
     event_loop_thread = threading.get_ident()
 
@@ -6648,7 +6659,7 @@ async def test_model_delete_finalization_failure_is_recoverable_after_commit(
         raise OSError("injected finalization failure")
 
     with monkeypatch.context() as patch:
-        patch.setattr(api_module.shutil, "rmtree", fail_rmtree)
+        patch.setattr(shutil, "rmtree", fail_rmtree)
         deleted = await client.delete(
             f"/api/models/{model_id}",
             params={"delete_profiles": True},
@@ -6905,8 +6916,8 @@ async def test_catalog_generic_detail_rejects_invalid_item_before_inspection(
 
 
 async def test_catalog_preflight_blocks_gated_unsafe_weights(
-    client: AsyncClient, settings: Settings, monkeypatch
-) -> None:  # type: ignore[no-untyped-def]
+    client: AsyncClient, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # The access check is `gated and not settings.hf_token`, and `hf_token` is
     # loaded from the operating system credential vault. Without this the test
     # passes in CI and fails on any machine where a Hugging Face credential has
@@ -6951,8 +6962,8 @@ async def test_catalog_preflight_blocks_gated_unsafe_weights(
 
 
 async def test_catalog_preflight_autoselects_smallest_gguf(
-    client: AsyncClient, monkeypatch
-) -> None:  # type: ignore[no-untyped-def]
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     async def inspect(
         _catalog: HuggingFaceCatalog,
         remote_id: str,
@@ -7008,8 +7019,8 @@ async def test_catalog_preflight_autoselects_smallest_gguf(
 
 
 async def test_catalog_preflight_prefers_balanced_gguf_quantization(
-    client: AsyncClient, monkeypatch
-) -> None:  # type: ignore[no-untyped-def]
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     async def inspect(
         _catalog: HuggingFaceCatalog,
         remote_id: str,
@@ -7047,8 +7058,8 @@ async def test_catalog_preflight_prefers_balanced_gguf_quantization(
 
 
 async def test_catalog_preflight_selects_a_complete_split_gguf_set(
-    client: AsyncClient, monkeypatch
-) -> None:  # type: ignore[no-untyped-def]
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     async def inspect(
         _catalog: HuggingFaceCatalog,
         remote_id: str,
@@ -7172,8 +7183,8 @@ async def test_catalog_preflight_selects_a_complete_split_gguf_set(
 
 
 async def test_catalog_preflight_explains_an_incomplete_split_gguf_set(
-    client: AsyncClient, monkeypatch
-) -> None:  # type: ignore[no-untyped-def]
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     async def inspect(
         _catalog: HuggingFaceCatalog,
         remote_id: str,
@@ -7219,8 +7230,8 @@ async def test_catalog_preflight_explains_an_incomplete_split_gguf_set(
 
 
 async def test_catalog_preflight_autoselects_safe_media_checkpoint(
-    client: AsyncClient, monkeypatch
-) -> None:  # type: ignore[no-untyped-def]
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     async def inspect(
         _catalog: HuggingFaceCatalog,
         remote_id: str,
@@ -7261,8 +7272,8 @@ async def test_comfy_catalog_preflight_offers_a_provisional_adaptive_checkpoint(
     client: AsyncClient,
     settings: Settings,
     tmp_path: Path,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     settings.media_engine = "comfyui"
     external_runtime = tmp_path / "external-comfy"
     external_runtime.mkdir()
@@ -7384,8 +7395,8 @@ async def test_workflow_catalog_preserves_exact_variants_and_preflights_the_chos
     client: AsyncClient,
     settings: Settings,
     tmp_path: Path,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """One repository, several official workflows: the card and the preflight
     must both say which one - ranking silently answered with the
     alphabetically-first variant regardless of what the user picked."""
@@ -7535,8 +7546,8 @@ async def test_comfy_catalog_preflight_pins_a_multirepository_official_bundle(
     client: AsyncClient,
     settings: Settings,
     tmp_path: Path,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     settings.media_engine = "comfyui"
     external_runtime = tmp_path / "external-comfy"
     external_runtime.mkdir()
@@ -7768,8 +7779,8 @@ async def test_comfy_catalog_preflight_pins_a_multirepository_official_bundle(
 async def test_comfy_catalog_preflight_blocks_an_unreviewed_managed_runtime(
     client: AsyncClient,
     settings: Settings,
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     settings.media_engine = "comfyui"
 
     async def inspect(
@@ -7891,7 +7902,7 @@ async def test_workflow_edit_calibration_is_validated_and_portable(
     assert imported.status_code == 201, imported.text
     assert imported.json()["revisions"][0]["input_schema_json"] == input_schema
 
-    invalid_schema = deepcopy(input_schema)
+    invalid_schema: dict[str, Any] = deepcopy(input_schema)
     invalid_schema["x-lm-atelier-edit-calibration"]["edit_strength"]["parameter"] = "missing"
     rejected_create = await client.post(
         "/api/workflows",
@@ -8314,7 +8325,7 @@ async def _stored_image(client: AsyncClient, shade: int, name: str) -> str:
         files={"file": (name, buffer.getvalue(), "image/png")},
     )
     assert response.status_code in (200, 201), response.text
-    return response.json()["id"]
+    return cast(str, response.json()["id"])
 
 
 @pytest.mark.anyio
@@ -8406,7 +8417,7 @@ async def test_an_image_outside_the_store_cannot_be_attached(client: AsyncClient
     assert refused.json()["code"] == "reference-asset-invalid"
 
 
-def _media_worker(payload: list[dict[str, object]]) -> dict[str, object]:
+def _media_worker(payload: list[dict[str, object]]) -> dict[str, Any]:
     return next(worker for worker in payload if worker["name"] == "media")
 
 
@@ -8745,6 +8756,7 @@ async def test_comfyui_pre_submission_events_are_not_engine_sourced(
             parameters={},
         )
     )
+    assert isinstance(stream, AsyncGenerator)
     try:
         first = await stream.__anext__()
     finally:
@@ -8902,7 +8914,7 @@ async def test_an_unreadable_progress_stamp_is_skipped_rather_than_guessed(
     silently degrading everything to None, which would pass a weaker assertion.
     """
 
-    broken_shapes = (
+    broken_shapes: tuple[dict[str, object], ...] = (
         {"engine_reported_at": "not a timestamp"},
         {"engine_reported_at": 12345},
         {"updated_at": datetime.now(UTC).isoformat()},
@@ -8949,7 +8961,7 @@ async def test_an_unreadable_progress_stamp_is_skipped_rather_than_guessed(
     )
 
 
-async def _one_pass_claim_capture(monkeypatch: pytest.MonkeyPatch, job_id: str):  # type: ignore[no-untyped-def]
+async def _one_pass_claim_capture(monkeypatch: pytest.MonkeyPatch, job_id: str) -> JobClaim:
     """Like _one_pass_real_claim, but returns the JobClaim the pass minted.
 
     The claim identity is exactly what the attempt-owner barriers are about:
@@ -9277,8 +9289,8 @@ async def test_real_adapter_backend_events_reach_the_writer_with_provenance(
     ]
 
     class _StubSocket:
-        def __aiter__(self):  # type: ignore[no-untyped-def]
-            async def _frames():  # type: ignore[no-untyped-def]
+        def __aiter__(self) -> AsyncIterator[str]:
+            async def _frames() -> AsyncIterator[str]:
                 for frame in frames:
                     yield frame
 
@@ -9435,7 +9447,7 @@ async def test_a_backend_completion_alone_stamps_the_attempt(
         assert job.progress_json.get("engine_report_attempt") == job.attempt
 
 
-def _queued_media_job(session, ticket: str) -> str:
+def _queued_media_job(session: Session, ticket: str) -> str:
     job = Job(
         kind="image",
         status="queued",
@@ -9450,7 +9462,7 @@ def _queued_media_job(session, ticket: str) -> str:
     return job.id
 
 
-def _row_state(session, job_id: str) -> tuple:  # type: ignore[type-arg]
+def _row_state(session: Session, job_id: str) -> tuple[object, ...]:
     row = session.get(Job, job_id)
     assert row is not None
     return (
@@ -9712,7 +9724,7 @@ async def test_an_old_producer_cannot_complete_the_new_attempt(
     _simulate_claim_expiry(job_id)
     new_claim = await _one_pass_claim_capture(monkeypatch, job_id)
 
-    seam = _TerminalSeam()
+    seam = cast(ConversationOrchestrator, _TerminalSeam())
     with SessionLocal() as session:
         run, assistant = _terminal_graph(session, job_id)
         session.commit()
@@ -9764,7 +9776,7 @@ async def test_an_old_producer_cannot_fail_the_new_attempt(
     _simulate_claim_expiry(job_id)
     new_claim = await _one_pass_claim_capture(monkeypatch, job_id)
 
-    seam = _TerminalSeam()
+    seam = cast(ConversationOrchestrator, _TerminalSeam())
     with SessionLocal() as session:
         run, _assistant = _terminal_graph(session, job_id)
         session.commit()
@@ -9810,7 +9822,7 @@ async def test_terminal_transitions_accept_a_released_but_current_claim(
         row.claim_expires_at = None
         session.commit()
 
-    seam = _TerminalSeam()
+    seam = cast(ConversationOrchestrator, _TerminalSeam())
     with SessionLocal() as session:
         accepted = seam._claim_terminal_transition(session, job_id, claim, status="cancelled")
         assert accepted is True, "a released row refused its own claimant"
@@ -9839,7 +9851,7 @@ async def test_a_stale_stream_cannot_replace_the_new_attempts_text(
     _simulate_claim_expiry(job_id)
     new_claim = await _one_pass_claim_capture(monkeypatch, job_id)
 
-    seam = _TerminalSeam()
+    seam = cast(ConversationOrchestrator, _TerminalSeam())
     with SessionLocal() as session:
         _run, assistant = _terminal_graph(session, job_id)
         session.commit()
@@ -10271,7 +10283,7 @@ async def test_a_stale_execution_cannot_write_provenance_after_its_awaits(
 
 async def _claimed_text_job(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
-) -> tuple[str, str, object]:
+) -> tuple[str, str, JobClaim]:
     """A chat with one queued text turn whose job is claimed by one real
     scheduler pass; returns (chat id, job id, the minted claim)."""
 
@@ -10653,9 +10665,9 @@ async def test_the_retry_hook_binds_the_turn_under_a_current_claim(
         try:
             accepted = await orch._create_image_edit_verification_retry(
                 session,
-                payload,  # type: ignore[arg-type]
-                decision,  # type: ignore[arg-type]
-                claim=claim,  # type: ignore[arg-type]
+                payload,
+                decision,
+                claim=claim,
             )
         finally:
             event.remove(session, "after_commit", after_commit)
@@ -10724,9 +10736,9 @@ async def test_the_retry_hook_refuses_the_turn_under_a_lost_claim(
         with pytest.raises(ClaimLost):
             await orch._create_image_edit_verification_retry(
                 session,
-                payload,  # type: ignore[arg-type]
-                decision,  # type: ignore[arg-type]
-                claim=claim,  # type: ignore[arg-type]
+                payload,
+                decision,
+                claim=claim,
             )
         session.rollback()
 
@@ -10742,7 +10754,7 @@ async def test_the_retry_hook_refuses_the_turn_under_a_lost_claim(
 
 async def _claimed_media_job(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
-) -> tuple[str, str, object]:
+) -> tuple[str, str, JobClaim]:
     """A chat with one queued image turn whose job is claimed by one
     scheduler pass; returns (job id, run id, the minted claim)."""
 
@@ -10825,7 +10837,7 @@ async def test_a_refused_phase_during_the_start_ends_the_execution_before_infere
     monkeypatch.setattr(type(orch), "start", lambda self, *args: None)
     job_id, run_id, claim = await _claimed_media_job(client, monkeypatch)
 
-    async def start_media(*args: object, **kwargs: object) -> None:
+    async def start_media(*args: object, **kwargs: Any) -> None:
         callback = kwargs.get("phase_callback")
         assert callback is not None
         await callback("Launching")
@@ -11179,12 +11191,13 @@ async def test_a_publication_failure_after_the_retry_commit_converges(
     monkeypatch.setattr(orch.events, "publish", failing_first_announcement)
     with SessionLocal() as session:
         runs_before = session.scalar(select(func.count()).select_from(Run))
+        assert runs_before is not None
         with pytest.raises(RuntimeError):
             await orch._create_image_edit_verification_retry(
                 session,
-                payload,  # type: ignore[arg-type]
-                decision,  # type: ignore[arg-type]
-                claim=claim,  # type: ignore[arg-type]
+                payload,
+                decision,
+                claim=claim,
                 source_record={"status": "complete"},
             )
         session.rollback()
@@ -11199,16 +11212,16 @@ async def test_a_publication_failure_after_the_retry_commit_converges(
         assert session.scalar(select(func.count()).select_from(Run)) == runs_before + 1
     assert started == [], "the failed announcement started the retry anyway"
 
-    converged, converged_started = await orch._converge_on_bound_retry(payload)  # type: ignore[arg-type]
+    converged, converged_started = await orch._converge_on_bound_retry(payload)
     assert converged is not None and converged.run.id == bound_run_id
     assert converged_started, "the convergence reported no start it had made"
     assert started, "the bound retry was not started on convergence"
     with SessionLocal() as session:
         again = await orch._create_image_edit_verification_retry(
             session,
-            payload,  # type: ignore[arg-type]
-            decision,  # type: ignore[arg-type]
-            claim=claim,  # type: ignore[arg-type]
+            payload,
+            decision,
+            claim=claim,
         )
         assert again.run.id == bound_run_id, "a second retry was created for the same source"
         assert session.scalar(select(func.count()).select_from(Run)) == runs_before + 1
@@ -11247,15 +11260,15 @@ async def test_a_convergence_that_cannot_announce_reports_no_start(
         with pytest.raises(RuntimeError):
             await orch._create_image_edit_verification_retry(
                 session,
-                payload,  # type: ignore[arg-type]
-                decision,  # type: ignore[arg-type]
-                claim=claim,  # type: ignore[arg-type]
+                payload,
+                decision,
+                claim=claim,
                 source_record={"status": "complete"},
             )
         session.rollback()
     assert started == [], "the failed announcement started the retry anyway"
 
-    converged, converged_started = await orch._converge_on_bound_retry(payload)  # type: ignore[arg-type]
+    converged, converged_started = await orch._converge_on_bound_retry(payload)
 
     assert converged is not None, "the durable binding was lost"
     assert converged_started is False, "the convergence reported a start it never made"
@@ -11298,9 +11311,9 @@ async def test_retry_convergence_keeps_a_durable_binding_when_materialization_fa
         with pytest.raises(RuntimeError):
             await orch._create_image_edit_verification_retry(
                 session,
-                payload,  # type: ignore[arg-type]
-                decision,  # type: ignore[arg-type]
-                claim=claim,  # type: ignore[arg-type]
+                payload,
+                decision,
+                claim=claim,
                 source_record={"status": "complete"},
             )
         session.rollback()
@@ -11326,7 +11339,7 @@ async def test_retry_convergence_keeps_a_durable_binding_when_materialization_fa
     # Patched for the rest of the control: only the first read fails, and an
     # undo here would also remove the start recorder above.
     monkeypatch.setattr(Session, "scalars", failing_first_materialization)
-    converged, _converged_started = await orch._converge_on_bound_retry(payload)  # type: ignore[arg-type]
+    converged, _converged_started = await orch._converge_on_bound_retry(payload)
 
     assert reads["n"] == 1, "the second-stage read was never reached"
     assert converged is not None and converged.run.id == bound_run_id, (
@@ -11342,7 +11355,7 @@ async def test_retry_convergence_keeps_a_durable_binding_when_materialization_fa
 
     # The next pass, with the read healthy, still converges on the same retry.
     started.clear()
-    again, _again_started = await orch._converge_on_bound_retry(payload)  # type: ignore[arg-type]
+    again, _again_started = await orch._converge_on_bound_retry(payload)
     assert again is not None and again.run.id == bound_run_id
     assert started, "the bound retry was not started on the later pass"
 
@@ -11432,8 +11445,8 @@ async def test_a_claim_lost_after_the_completion_stamp_persists_no_asset(
 
 
 async def test_a_queue_of_images_restores_the_chat_model_once_at_the_end(
-    client: AsyncClient, app: FastAPI, monkeypatch
-) -> None:  # type: ignore[no-untyped-def]
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The run's last image must still reach the handoff that puts chat back.
 
     Only the FIRST image of a run displaces chat, because every later one finds
@@ -11547,8 +11560,8 @@ async def test_a_queue_of_images_restores_the_chat_model_once_at_the_end(
 
 
 async def test_a_media_run_that_loses_its_claim_moves_no_worker_on_the_way_out(
-    client: AsyncClient, app: FastAPI, monkeypatch
-) -> None:  # type: ignore[no-untyped-def]
+    client: AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A replaced attempt must not complete the handoff on a successor's behalf.
 
     The dispatch's outer finally runs even when the media execution raises
@@ -11619,7 +11632,7 @@ async def test_a_media_run_that_loses_its_claim_moves_no_worker_on_the_way_out(
     real_pending = orchestrator._pending_chat_restore
 
     def watched_pending(resume_chat_profile: str | None) -> str | None:
-        answer = real_pending(resume_chat_profile)
+        answer: str | None = real_pending(resume_chat_profile)
         decided.set()
         return answer
 
