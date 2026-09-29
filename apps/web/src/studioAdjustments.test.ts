@@ -46,6 +46,21 @@ const CASES: Array<[string, Partial<StudioColorAdjustments>, number[][]]> = [
   ["everything", { brightness: -20, contrast: 35, saturation: 25, warmth: -40 }, [
     [200, 69, 7], [0, 251, 114], [102, 107, 124], [255, 0, 255], [0, 0, 0],
     [238, 247, 255], [0, 66, 250], [0, 168, 0], [186, 252, 95], [166, 1, 177]]],
+  ["lifted shadows", { shadows: 100 }, [
+    [209, 137, 82], [19, 241, 160], [160, 160, 160], [255, 0, 255], [0, 0, 0],
+    [255, 255, 255], [64, 129, 211], [0, 189, 0], [217, 253, 158], [188, 76, 180]]],
+  ["deeper shadows", { shadows: -60 }, [
+    [194, 78, 31], [4, 240, 109], [109, 109, 109], [255, 0, 255], [0, 0, 0],
+    [255, 255, 255], [21, 68, 198], [0, 159, 0], [206, 253, 107], [157, 27, 142]]],
+  ["recovered highlights", { highlights: -100 }, [
+    [166, 76, 42], [10, 227, 96], [96, 96, 96], [255, 0, 255], [0, 0, 0],
+    [255, 255, 255], [32, 70, 170], [0, 132, 0], [179, 251, 95], [131, 38, 119]]],
+  ["brighter highlights", { highlights: 45 }, [
+    [215, 111, 54], [10, 246, 142], [142, 142, 142], [255, 0, 255], [0, 0, 0],
+    [255, 255, 255], [39, 100, 218], [0, 187, 0], [224, 254, 140], [186, 48, 173]]],
+  ["toned and graded", { shadows: 50, highlights: -40, contrast: 20, saturation: -30, warmth: 25 }, [
+    [184, 112, 74], [48, 222, 136], [135, 131, 127], [210, 31, 210], [0, 0, 0],
+    [255, 255, 255], [54, 95, 164], [29, 148, 29], [223, 247, 156], [151, 62, 134]]],
 ];
 
 // A picture with edges in it, for sharpness, which reads each pixel's
@@ -124,6 +139,35 @@ describe("light and color adjustments", () => {
     const adjusted = adjustPixels(pixels, 2, { ...NEUTRAL_ADJUSTMENTS, brightness: 60, saturation: -50 });
 
     expect([adjusted[3], adjusted[7]]).toEqual([0, 77]);
+  });
+});
+
+describe("shadows and highlights", () => {
+  it("move the dark tones most for shadows and the light ones for highlights", () => {
+    // 85 is a third of white and 170 two thirds. Shadows at 100 adds
+    // 255 * 1/3 * (2/3)^2 = 37.8 to 85 and 255 * 2/3 * (1/3)^2 = 18.9 to 170;
+    // highlights at -100 takes the same amounts the other way round.
+    const lifted = channelTables({ ...NEUTRAL_ADJUSTMENTS, shadows: 100 })[1];
+    const recovered = channelTables({ ...NEUTRAL_ADJUSTMENTS, highlights: -100 })[1];
+
+    expect([0, 85, 170, 255].map((level) => lifted[level])).toEqual([0, 123, 189, 255]);
+    expect([0, 85, 170, 255].map((level) => recovered[level])).toEqual([0, 66, 132, 255]);
+  });
+
+  it("never swap two levels, however the two are set", () => {
+    for (const shadows of [-100, -37, 0, 64, 100]) {
+      for (const highlights of [-100, -51, 0, 23, 100]) {
+        for (const table of channelTables({ ...NEUTRAL_ADJUSTMENTS, shadows, highlights })) {
+          expect([table[0], table[255]]).toEqual([0, 255]);
+          expect(table.every((level, index) => index === 0 || table[index - 1] <= level)).toBe(true);
+        }
+      }
+    }
+  });
+
+  it("each count as a change on their own", () => {
+    expect(isNeutral({ ...NEUTRAL_ADJUSTMENTS, highlights: -1 })).toBe(false);
+    expect(isNeutral({ ...NEUTRAL_ADJUSTMENTS, shadows: 1 })).toBe(false);
   });
 });
 

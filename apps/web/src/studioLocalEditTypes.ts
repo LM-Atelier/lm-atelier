@@ -88,6 +88,8 @@ export type StudioLocalEditDetails = Pick<
 export interface StudioColorAdjustments {
   brightness: number;
   contrast: number;
+  highlights: number;
+  shadows: number;
   saturation: number;
   warmth: number;
   tint: number;
