@@ -252,11 +252,19 @@ async def test_http_preflight_keeps_advice_and_explicit_model_choice(
     assert advice["evidence_label"] is None
     if size is None:
         assert advice["resources"] == []
+        assert advice["settings"] == []
     else:
         assert len(advice["resources"]) == 1
         assert advice["resources"][0]["capacity_bytes"] == 32 * _GIB
         assert advice["resources"][0]["available_bytes"] == _GIB
         assert advice["resources"][0]["immediate_pressure"]
+        if size == 2 * _GIB:
+            assert len(advice["settings"]) == 1
+            assert advice["settings"][0]["key"] == "context_length"
+            assert advice["settings"][0]["maximum"] == 8192
+            assert advice["settings"][0]["advisory_only"] is True
+        else:
+            assert advice["settings"] == []
 
     # Hardware advice cannot authorize a different file against the approved plan.
     changed = await client.post(

@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 import httpx
 import psutil
 
+from .chat_memory import DEFAULT_CHAT_CONTEXT, estimated_chat_memory
 from .comfy_editor_bridge import (
     ComfyEditorBridgeError,
     ComfyEditorBridgeSupport,
@@ -2785,9 +2786,8 @@ class ProcessSupervisor:
 
     @staticmethod
     def _estimate_chat_memory(model_bytes: int, settings: dict[str, Any]) -> int:
-        context_length = int(settings.get("context_length", 8192))
-        context_overhead = max(512 * 1024**2, context_length * 128 * 1024)
-        return model_bytes + context_overhead
+        context_length = int(settings.get("context_length", DEFAULT_CHAT_CONTEXT))
+        return estimated_chat_memory(model_bytes, context_length)
 
     @staticmethod
     def _process_tree_rss(pid: int) -> int | None:

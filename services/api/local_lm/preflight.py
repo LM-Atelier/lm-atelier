@@ -5,7 +5,12 @@ from dataclasses import asdict
 from pathlib import PurePosixPath
 from typing import Any, Literal
 
-from .catalog_hardware_alternatives import catalog_hardware_alternatives, estimated_catalog_ram
+from .catalog_hardware_alternatives import (
+    catalog_context_settings,
+    catalog_hardware_alternatives,
+    estimated_catalog_ram,
+    with_catalog_context_estimate,
+)
 from .config import Settings
 from .gguf import (
     GGUFSelectionError,
@@ -740,7 +745,13 @@ def assess_catalog_install(
         )
 
     complete_sizes = bool(download_bytes) and not unknown_sizes
-    estimated_ram = estimated_catalog_ram(download_bytes, complete=complete_sizes)
+    estimated_ram = estimated_catalog_ram(
+        download_bytes,
+        complete=complete_sizes,
+        chat_context=request.role == "chat"
+        and request.engine == "llama.cpp"
+        and request.auxiliary_kind is None,
+    )
     estimated_vram = (
         int(download_bytes * 1.25) + 1024**3
         if complete_sizes and (request.role != "chat" or request.engine == "vllm")
@@ -816,13 +827,23 @@ def assess_preflight_hardware_fit(
 ) -> HardwareFit:
     """Assess calculated catalog fit without turning an estimate into a block."""
 
-    return recommend_hardware_fit(
+    fit = recommend_hardware_fit(
         capacity_from_system_info(system, runtime_backends=(request.engine,)),
         FitRequirements(
             estimated_system_memory_bytes=estimated_ram_bytes,
             estimated_accelerator_memory_bytes=estimated_vram_bytes,
+            settings=(
+                catalog_context_settings(estimated_ram_bytes, system.memory_total_bytes)
+                if request.role == "chat"
+                and request.engine == "llama.cpp"
+                and request.auxiliary_kind is None
+                else ()
+            ),
         ),
     )
+    if request.role == "chat" and request.engine == "llama.cpp" and request.auxiliary_kind is None:
+        return with_catalog_context_estimate(fit)
+    return fit
 
 
 def _hardware_fit_check(fit: HardwareFit) -> CatalogPreflightCheck:

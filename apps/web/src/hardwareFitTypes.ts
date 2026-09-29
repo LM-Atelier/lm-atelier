@@ -22,7 +22,8 @@ export interface HardwareFitReason {
     | "system_memory_declared"
     | "system_memory_estimated"
     | "system_memory_measured"
-    | "system_memory_unknown";
+    | "system_memory_unknown"
+    | "chat_context_estimate";
   severity: "info" | "warning" | "block";
   message: string;
 }
