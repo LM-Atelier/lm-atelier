@@ -37,6 +37,7 @@ beforeEach(() => {
     busy: false,
     error: null,
     apply: vi.fn(),
+    localEdit: vi.fn(),
   };
   vi.mocked(useStudioSession).mockImplementation(() => session);
 });

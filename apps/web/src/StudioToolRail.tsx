@@ -8,6 +8,7 @@ import {
   PaintBucket,
   PersonStanding,
   Redo2,
+  RotateCw,
   Scissors,
   Sparkles,
   Square,
@@ -21,6 +22,7 @@ import type { StudioToolCapability } from "./types";
 
 const TOOLS: Array<{ kind: StudioToolKind; label: string; icon: typeof Brush }> = [
   { kind: "instruct", label: "Instruct the whole image", icon: Type },
+  { kind: "transform", label: "Rotate or flip", icon: RotateCw },
   { kind: "brush", label: "Brush a selection", icon: Brush },
   { kind: "eraser", label: "Erase from the selection", icon: Eraser },
   { kind: "rect", label: "Select a rectangle", icon: Square },

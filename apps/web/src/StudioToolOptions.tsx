@@ -1,11 +1,14 @@
 import type { Dispatch } from "react";
+import { StudioTransformTool } from "./StudioTransformTool";
 import type { StudioToolAction, StudioToolState } from "./studioToolState";
+import type { StudioLocalEditOperation } from "./types";
 
 /** The panel's tool-specific control: what this tool needs said before it runs.
  *
  * Extend and Enhance are a drag or a number, Text is the words before and
  * after, Isolate needs nothing, replacing a subject needs the picture it comes
- * from, and every other tool is described in words.
+ * from, turning and flipping are a press each, and every other tool is
+ * described in words.
  * Kept apart from the studio view so each tool's control reads in one place.
  */
 export function StudioToolOptions({
@@ -13,12 +16,20 @@ export function StudioToolOptions({
   dispatch,
   instruction,
   onInstructionChange,
+  onLocalEdit,
+  busy = false,
 }: {
   tools: StudioToolState;
   dispatch: Dispatch<StudioToolAction>;
   instruction: string;
   onInstructionChange: (value: string) => void;
+  /** Makes an edit that needs no model, such as a turn or a flip. */
+  onLocalEdit?: (operation: StudioLocalEditOperation) => void;
+  busy?: boolean;
 }) {
+  if (tools.kind === "transform") {
+    return onLocalEdit ? <StudioTransformTool busy={busy} onEdit={onLocalEdit} /> : null;
+  }
   if (tools.kind === "extend") {
     return (
       <div className="studio-tool-options">

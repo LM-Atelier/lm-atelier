@@ -14,6 +14,7 @@ from pydantic import (
     StringConstraints,
     field_serializer,
     field_validator,
+    model_validator,
 )
 
 from .comfy_workflow_packages import WorkflowPackageIssueCode
@@ -567,6 +568,39 @@ class StudioSessionCreate(ApiModel):
     # When the studio is entered from a chat, its profile and settings
     # snapshot carry over so applies run with the same models.
     source_chat_id: str | None = Field(default=None, max_length=40)
+
+
+#: The edits the studio makes itself, without a model.
+StudioLocalEditOperation = Literal[
+    "rotate_clockwise",
+    "rotate_counterclockwise",
+    "flip_horizontal",
+    "flip_vertical",
+    "crop",
+]
+
+
+class StudioCropBox(ApiModel):
+    """The part of a picture to keep, in its own pixels as it is seen upright."""
+
+    left: StrictInt = Field(ge=0)
+    top: StrictInt = Field(ge=0)
+    width: StrictInt = Field(ge=1)
+    height: StrictInt = Field(ge=1)
+
+
+class StudioLocalEditCreate(ApiModel):
+    """Rotate, flip or crop one picture in a studio session, without a model."""
+
+    source_artifact_id: str = Field(min_length=1, max_length=80)
+    operation: StudioLocalEditOperation
+    crop: StudioCropBox | None = None
+
+    @model_validator(mode="after")
+    def crop_only_for_a_crop(self) -> Self:
+        if (self.operation == "crop") != (self.crop is not None):
+            raise ValueError("A crop names the part to keep, and no other edit does.")
+        return self
 
 
 class PromptHelperCreate(ApiModel):

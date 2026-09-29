@@ -313,6 +313,9 @@ export function toolFor(
     // what takes its place.
     case "subject":
       return null;
+    // Turning and flipping act on the whole picture, chosen by a press.
+    case "transform":
+      return null;
   }
 }
 

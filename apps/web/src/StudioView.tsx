@@ -8,7 +8,7 @@ import { ErrorCallout } from "./ErrorCallout";
 import { StudioCanvas } from "./StudioCanvas";
 import { StudioExtendHandles } from "./StudioExtendHandles";
 import { StudioRecipes } from "./StudioRecipes";
-import { StudioSelectionTool } from "./StudioSelectionTool";
+import { StudioSelectionControls } from "./StudioSelectionTool";
 import { StudioToolGuidance } from "./StudioToolGuidance";
 import { StudioToolOptions } from "./StudioToolOptions";
 import { StudioToolRail } from "./StudioToolRail";
@@ -63,7 +63,7 @@ export function StudioView({
   useEffect(() => {
     heading.current?.focus();
   }, [sourceArtifactId]);
-  const { sessionId, session, steps, previewArtifactId, busy: sessionBusy, error, apply } = useStudioSession(
+  const { sessionId, session, steps, previewArtifactId, busy: sessionBusy, error, apply, localEdit } = useStudioSession(
     sourceArtifactId,
     sourceChatId,
   );
@@ -301,35 +301,9 @@ export function StudioView({
           ) : (
             <StudioWorkflowOpening selectorId={workflowSelectorId} />
           )}
-          {!["instruct", "relight", "isolate", "background", "subject"].includes(tools.kind) && (
-            <div className="studio-selection-controls">
-              <StudioSelectionTool tools={tools} dispatch={dispatch} colorsUnreadable={readsColors && Boolean(bitmap) && !sourcePixels} />
-              <div className="row-actions">
-                <button
-                  className="secondary compact-button"
-                  onClick={() => dispatch({ type: "invert" })}
-                >
-                  Invert
-                </button>
-                <button
-                  className="secondary compact-button"
-                  onClick={() => dispatch({ type: "feather" })}
-                >
-                  Soften edges
-                </button>
-                <button
-                  className="secondary compact-button"
-                  onClick={() => dispatch({ type: "clear" })}
-                >
-                  Clear
-                </button>
-              </div>
-              <small>
-                {selectionCoverage > 0
-                  ? `${(selectionCoverage * 100).toFixed(1)}% of the image selected`
-                  : "Nothing selected yet - paint over what you want to change."}
-              </small>
-            </div>
+          {!["instruct", "relight", "isolate", "background", "subject", "transform"].includes(tools.kind) && (
+            <StudioSelectionControls tools={tools} dispatch={dispatch} coverage={selectionCoverage}
+              colorsUnreadable={readsColors && Boolean(bitmap) && !sourcePixels} />
           )}
           <StudioToolOptions
             tools={tools}
@@ -339,6 +313,8 @@ export function StudioView({
               setInstruction(value);
               setRecipe(null);
             }}
+            busy={busy}
+            onLocalEdit={(operation) => current && localEdit(operation, current.artifactId, () => setSelectedId(null))}
           />
           <StudioRecipes
             disabled={busy || !current}
@@ -353,85 +329,87 @@ export function StudioView({
             // cannot run, so the sentence arrives before the drawing does.
             <StudioToolGuidance reason={unavailable} onOpenWorkflows={onOpenWorkflows} />
           )}
-          <button
-            className="primary"
-            aria-disabled={applyDisabled}
-            onClick={() => {
-              if (applyDisabled || !current) return;
-              const selection = toolUsesMask(tools.kind) && tools.mask && !isEmpty(tools.mask)
-                ? tools.mask
-                : null;
-              const plan = studioApplyPlan(tools, instruction, recipe, activeTool, isolateTool);
-              if (plan.cutout) {
-                // Drawn at the picture's own size, so the subject lines up with it.
-                if (!bitmap) return;
-                setSelectionError(null);
-                cutoutEdit.start(plan, current.artifactId, { width: bitmap.width, height: bitmap.height }, () => {
-                  setInstruction("");
-                  setSelectedId(null);
-                });
-                return;
-              }
-              const send = (mask: Blob | null, secondPicture?: Blob) => {
-                apply(
-                  plan.words,
-                  current.artifactId,
-                  mask
-                    ? {
-                        blob: mask,
-                        featherPx: tools.featherPx,
-                        invert: false,
-                        ...(plan.blendSelection ? { apply: "blend" as const } : {}),
-                      }
-                    : undefined,
-                  plan.settings,
-                  plan.workflowRevisionId,
-                  () => {
+          {tools.kind !== "transform" && (
+            <button
+              className="primary"
+              aria-disabled={applyDisabled}
+              onClick={() => {
+                if (applyDisabled || !current) return;
+                const selection = toolUsesMask(tools.kind) && tools.mask && !isEmpty(tools.mask)
+                  ? tools.mask
+                  : null;
+                const plan = studioApplyPlan(tools, instruction, recipe, activeTool, isolateTool);
+                if (plan.cutout) {
+                  // Drawn at the picture's own size, so the subject lines up with it.
+                  if (!bitmap) return;
+                  setSelectionError(null);
+                  cutoutEdit.start(plan, current.artifactId, { width: bitmap.width, height: bitmap.height }, () => {
                     setInstruction("");
                     setSelectedId(null);
-                  },
-                  secondPicture,
-                );
-              };
-              setSelectionError(null);
-              if (plan.sendsLightMap) {
-                // Drawn at the picture's own size, so the map and the picture line up.
-                if (!bitmap) return;
-                // Drawing can throw as well as come back empty; both refuse the same way.
-                void renderLightMap(bitmap.width, bitmap.height, tools.lightDirection).then(
-                  (map) => (map ? send(null, map) : setSelectionError(LIGHT_MAP_NOT_PREPARED)),
-                  () => setSelectionError(LIGHT_MAP_NOT_PREPARED),
-                );
-              } else if (selection) {
-                // A selection that cannot be encoded is refused, never sent as an
-                // edit of the whole picture it was drawn to protect.
-                void encodeMaskPng(plan.blendSelection ? softened(selection, tools.featherPx) : selection).then(
-                  (mask) => (mask ? send(mask) : setSelectionError(SELECTION_NOT_PREPARED)),
-                  () => setSelectionError(SELECTION_NOT_PREPARED),
-                );
-              } else send(null);
-            }}
-          >
-            {busy
-              ? "Applying…"
-              : tools.kind === "extend"
-                ? "Extend"
-                : tools.kind === "text"
-                  ? "Replace words"
-                : tools.kind === "relight"
-                  ? "Relight"
-                : tools.kind === "isolate"
-                  ? "Cut out"
-                : tools.kind === "background"
-                  ? "Replace background"
-                : tools.kind === "subject"
-                  ? "Replace subject"
-                : tools.kind === "enhance"
-                  ? `Enlarge ${tools.upscaleFactor}x`
-                : tools.kind !== "instruct" && selectionCoverage > 0
-                  ? "Apply to selection"
-                  : "Apply edit"}
-          </button>
+                  });
+                  return;
+                }
+                const send = (mask: Blob | null, secondPicture?: Blob) => {
+                  apply(
+                    plan.words,
+                    current.artifactId,
+                    mask
+                      ? {
+                          blob: mask,
+                          featherPx: tools.featherPx,
+                          invert: false,
+                          ...(plan.blendSelection ? { apply: "blend" as const } : {}),
+                        }
+                      : undefined,
+                    plan.settings,
+                    plan.workflowRevisionId,
+                    () => {
+                      setInstruction("");
+                      setSelectedId(null);
+                    },
+                    secondPicture,
+                  );
+                };
+                setSelectionError(null);
+                if (plan.sendsLightMap) {
+                  // Drawn at the picture's own size, so the map and the picture line up.
+                  if (!bitmap) return;
+                  // Drawing can throw as well as come back empty; both refuse the same way.
+                  void renderLightMap(bitmap.width, bitmap.height, tools.lightDirection).then(
+                    (map) => (map ? send(null, map) : setSelectionError(LIGHT_MAP_NOT_PREPARED)),
+                    () => setSelectionError(LIGHT_MAP_NOT_PREPARED),
+                  );
+                } else if (selection) {
+                  // A selection that cannot be encoded is refused, never sent as an
+                  // edit of the whole picture it was drawn to protect.
+                  void encodeMaskPng(plan.blendSelection ? softened(selection, tools.featherPx) : selection).then(
+                    (mask) => (mask ? send(mask) : setSelectionError(SELECTION_NOT_PREPARED)),
+                    () => setSelectionError(SELECTION_NOT_PREPARED),
+                  );
+                } else send(null);
+              }}
+            >
+              {busy
+                ? "Applying…"
+                : tools.kind === "extend"
+                  ? "Extend"
+                  : tools.kind === "text"
+                    ? "Replace words"
+                  : tools.kind === "relight"
+                    ? "Relight"
+                  : tools.kind === "isolate"
+                    ? "Cut out"
+                  : tools.kind === "background"
+                    ? "Replace background"
+                  : tools.kind === "subject"
+                    ? "Replace subject"
+                  : tools.kind === "enhance"
+                    ? `Enlarge ${tools.upscaleFactor}x`
+                  : tools.kind !== "instruct" && selectionCoverage > 0
+                    ? "Apply to selection"
+                    : "Apply edit"}
+            </button>
+          )}
         </aside>
       </div>
       <StudioFilmstrip
