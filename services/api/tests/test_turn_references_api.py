@@ -22,13 +22,15 @@ async def _wait_for_run(client: AsyncClient, run_id: str) -> None:
 async def _chat(client: AsyncClient, title: str) -> dict[str, object]:
     response = await client.post("/api/chats", json={"title": title})
     assert response.status_code == 201
-    return response.json()
+    chat: dict[str, object] = response.json()
+    return chat
 
 
 async def _subject(client: AsyncClient, name: str) -> dict[str, object]:
     response = await client.post("/api/references", json={"name": name, "kind": "person"})
     assert response.status_code == 201
-    return response.json()
+    reference: dict[str, object] = response.json()
+    return reference
 
 
 async def test_a_turn_records_its_typed_reference_snapshot(client: AsyncClient) -> None:

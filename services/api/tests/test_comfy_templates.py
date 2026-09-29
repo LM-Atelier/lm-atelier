@@ -552,7 +552,7 @@ def test_performance_contract_uses_metadata_graph_and_runtime_evidence() -> None
         },
         "SaveImage": {"output_node": True},
     }
-    input_schema = {
+    input_schema: dict[str, Any] = {
         "type": "object",
         "properties": {"steps": {"type": "integer", "default": 4}},
     }

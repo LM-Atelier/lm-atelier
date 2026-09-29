@@ -300,9 +300,9 @@ async def test_accepted_media_lora_binding(
             )
             run = session.get(Run, accepted.run.id)
             assert run is not None
-            revision = session.get(WorkflowRevision, revision_id)
-            assert revision is not None
-            resolved = resolve_lora_stack(session, revision, run.settings_json["loras"])
+            stored_revision = session.get(WorkflowRevision, revision_id)
+            assert stored_revision is not None
+            resolved = resolve_lora_stack(session, stored_revision, run.settings_json["loras"])
             expected_graph = transform_lora_graph(
                 graph,
                 extension,
@@ -325,12 +325,12 @@ async def test_accepted_media_lora_binding(
             elif later_change == "provenance":
                 run.provenance_json = {**run.provenance_json, "auxiliary_assets": {}}
             else:
-                asset = session.get(ModelAssetInstall, asset_id)
-                assert asset is not None
+                stored_asset = session.get(ModelAssetInstall, asset_id)
+                assert stored_asset is not None
                 if later_change == "manifest":
-                    asset.manifest_json = {**asset.manifest_json, "sha256": "c" * 64}
+                    stored_asset.manifest_json = {**stored_asset.manifest_json, "sha256": "c" * 64}
                 else:
-                    asset.active = False
+                    stored_asset.active = False
             session.commit()
         if later_change in {"manifest", "unavailable"}:
             with pytest.raises((RuntimeError, ValueError)):

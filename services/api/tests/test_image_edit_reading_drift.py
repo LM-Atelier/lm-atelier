@@ -126,13 +126,13 @@ FLOOR_DRIFT = (
 async def verify(answers: tuple[str, ...], *patches: tuple[int, int, int, int]) -> Any:
     job, orchestrator, world = _verification_world(lose_at="never", answers=answers)
     pictures = {"artifact-source": _picture(None), "artifact-result": _picture(*patches)}
-    orchestrator.artifacts.verified_bytes = Mock(  # type: ignore[method-assign]
+    orchestrator.artifacts.verified_bytes = Mock(
         side_effect=lambda artifact, *, maximum_bytes: pictures[artifact.id]
     )
     retry = SimpleNamespace(
         run=SimpleNamespace(id="run-retry", work_plan_id="plan-retry", provenance_json={})
     )
-    orchestrator._create_image_edit_verification_retry = AsyncMock(return_value=retry)  # type: ignore[method-assign]
+    orchestrator._create_image_edit_verification_retry = AsyncMock(return_value=retry)
     await orchestrator._execute_image_edit_verification(job.id, _TEST_CLAIM)
     return orchestrator._persist_image_edit_verification.call_args.args[2], world
 

@@ -5,13 +5,18 @@ import io
 import os
 import socket
 import uuid
+from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import pytest
+from fastapi import FastAPI
 from httpx2 import AsyncClient
 from PIL import Image
 from test_custom_node_source_identity import _git
 
+from local_lm.adapters.base import MediaEvent, MediaRequest
+from local_lm.config import Settings
 from local_lm.db import SessionLocal
 from local_lm.models import CustomNodeInstall
 
@@ -52,7 +57,7 @@ _GRAPH = {
 
 
 @pytest.fixture
-def settings(settings):
+def settings(settings: Settings) -> Settings:
     executable = os.environ.get("LM_ATELIER_TEST_COMFY_EXECUTABLE")
     directory = os.environ.get("LM_ATELIER_TEST_COMFY_DIRECTORY")
     if not executable or not directory:
@@ -72,7 +77,11 @@ def settings(settings):
 
 @pytest.mark.parametrize("change_source", [False, True], ids=["render", "changed-code-refusal"])
 async def test_reviewed_revision_uses_real_managed_comfy(
-    client: AsyncClient, app, settings, monkeypatch, change_source: bool
+    client: AsyncClient,
+    app: FastAPI,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    change_source: bool,
 ) -> None:
     # This opt-in test uses a disposable runtime and profile. The real supervisor,
     # HTTP adapter, review API, dispatch, renderer and artifact ingest all run.
@@ -115,7 +124,7 @@ async def test_reviewed_revision_uses_real_managed_comfy(
     services = app.state.services
     real_replace = services.processes._replace
 
-    async def cpu_replace(name, command, *args, **kwargs):
+    async def cpu_replace(name: str, command: list[str], *args: Any, **kwargs: Any) -> Any:
         if name == "media":
             command = [*command, "--cpu"]
         return await real_replace(name, command, *args, **kwargs)
@@ -150,10 +159,10 @@ async def test_reviewed_revision_uses_real_managed_comfy(
     )
     assert approved.status_code == 200 and approved.json()["trusted"] is True
 
-    submitted = []
+    submitted: list[MediaRequest] = []
     generate = services.engines.media.generate
 
-    async def capture(request):
+    async def capture(request: MediaRequest) -> AsyncIterator[MediaEvent]:
         submitted.append(request)
         async for event in generate(request):
             yield event

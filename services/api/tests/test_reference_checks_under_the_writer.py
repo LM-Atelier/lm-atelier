@@ -257,7 +257,7 @@ def _depth(value: object, level: int = 0) -> int:
 def _document(randomness: random.Random, level: int, limit: int) -> object:
     if level >= limit:
         return randomness.choice([None, True, 0, 2.5, "", "a.b[c]", 'q"x', "üñ"])
-    side = [
+    side: list[object] = [
         randomness.choice([None, 1, "s", {}, [], {"k": [1, {"z": None}]}])
         for _ in range(randomness.choice([0, 1, 2]))
     ]

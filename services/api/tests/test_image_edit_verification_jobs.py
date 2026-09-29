@@ -58,10 +58,10 @@ async def _wait_for_job(client: AsyncClient, kind: str) -> dict:  # type: ignore
             )
             if matching is None:
                 return None
-            return cast(dict[str, Any], JobOut.model_validate(matching).model_dump(mode="json"))
+            return JobOut.model_validate(matching).model_dump(mode="json")
 
     return cast(
-        dict,
+        dict[str, Any],
         await wait_for_terminal_status(
             read,
             what=f"the {kind} job",

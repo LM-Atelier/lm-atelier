@@ -100,7 +100,9 @@ async def test_stale_claim_cannot_record_failure_activity(
     )
     with SessionLocal() as session:
         assert session.scalar(select(func.count()).select_from(ChatActivityEvent)) == 0
-        assert session.get(Run, run_id).status == "running"
+        run = session.get(Run, run_id)
+        assert run is not None
+        assert run.status == "running"
     await orchestrator._fail(
         job_id, run_id, "Neutral failed attempt", claim=JobClaim(token="current-attempt", attempt=2)
     )

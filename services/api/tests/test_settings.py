@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 
@@ -151,7 +152,10 @@ def test_the_same_number_written_two_ways_answers_the_same() -> None:
     comes back as a whole number. Judging the two differently would change
     whether a workflow is accepted without the workflow changing at all.
     """
-    exponent = {"type": "object", "properties": {"custom": {"type": "number", "maximum": 1e20}}}
+    exponent: dict[str, Any] = {
+        "type": "object",
+        "properties": {"custom": {"type": "number", "maximum": 1e20}},
+    }
     written_out = json.loads(
         '{"type":"object","properties":{"custom":'
         '{"type":"number","maximum":100000000000000000000}}}'
@@ -314,7 +318,8 @@ def test_a_workflow_that_takes_loras_is_offered_them_without_declaring_them() ->
     follows it.
     """
 
-    for schema in (None, {}, {"properties": {}}):
+    schemas: tuple[dict[str, Any] | None, ...] = (None, {}, {"properties": {}})
+    for schema in schemas:
         offered = workflow_settings(IMAGE_SETTINGS, schema, accepts_added_loras=True)
         loras = [field for field in offered if field.key == "loras"]
         assert len(loras) == 1, schema

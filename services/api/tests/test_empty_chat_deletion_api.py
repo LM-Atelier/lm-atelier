@@ -17,7 +17,8 @@ from httpx2 import AsyncClient
 from sqlalchemy.orm import Session
 
 from local_lm.db import SessionLocal
-from local_lm.models import Chat, Message, MessageRole
+from local_lm.domain import MessageRole
+from local_lm.models import Chat, Message
 
 pytestmark = pytest.mark.asyncio
 
@@ -42,7 +43,8 @@ async def _preview(
 ) -> dict[str, object]:
     response = await client.post(PREVIEW, json={"chat_ids": chat_ids, **filters})
     assert response.status_code == 200, response.text
-    return response.json()
+    body: dict[str, object] = response.json()
+    return body
 
 
 def _execute_body(
@@ -167,7 +169,12 @@ async def test_configured_chats_are_deleted_only_with_their_own_acknowledgement(
 async def test_a_selection_is_bounded(client: AsyncClient) -> None:
     too_many = [f"chat_{index:04d}" for index in range(201)]
 
-    for body in ({"chat_ids": []}, {"chat_ids": too_many}, {"chat_ids": ["c" * 41]}):
+    bodies: tuple[dict[str, object], ...] = (
+        {"chat_ids": []},
+        {"chat_ids": too_many},
+        {"chat_ids": ["c" * 41]},
+    )
+    for body in bodies:
         response = await client.post(PREVIEW, json=body)
         assert response.status_code == 422, response.text
 

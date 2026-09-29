@@ -32,9 +32,9 @@ async def test_existing_configuration_needs_current_acknowledgement(
         assert updated.status_code == 200, updated.text
     elif change == "draft":
         with SessionLocal() as session:
-            row = session.get(Chat, chat_id)
-            assert row is not None
-            row.draft_prompt = "A green ceramic bowl beside a window"
+            stored = session.get(Chat, chat_id)
+            assert stored is not None
+            stored.draft_prompt = "A green ceramic bowl beside a window"
             session.commit()
 
     current = await _preview(client, [chat_id], include_configured=True)

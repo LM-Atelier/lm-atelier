@@ -34,7 +34,7 @@ async def _source(client: AsyncClient, chat_id: str | None = None) -> dict[str, 
         json={"text": "Explain how a paper boat floats.", "mode": "text"},
     )
     assert response.status_code == 202, response.text
-    source = response.json()
+    source: dict[str, Any] = response.json()
     await _complete(client, source["run"]["id"])
     return source
 

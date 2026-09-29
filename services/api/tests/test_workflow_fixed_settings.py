@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
@@ -127,7 +129,7 @@ async def test_fixed_graph_inputs_are_explained_and_cannot_receive_settings_over
 @pytest.mark.parametrize("damage", ["reason", "duplicate", "binding-conflict", "input"])
 def test_invalid_fixed_control_records_are_refused(damage: str) -> None:
     fixed = {"node_id": "1", "input_name": "seed", "label": "Seed", "reason": "linked"}
-    marker = {"version": 1, "bindings": [], "fixed": [fixed]}
+    marker: dict[str, Any] = {"version": 1, "bindings": [], "fixed": [fixed]}
     schema = {
         "type": "object",
         "properties": {"seed": {"type": "integer", "default": 42}},
