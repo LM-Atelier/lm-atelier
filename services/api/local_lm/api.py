@@ -649,12 +649,19 @@ from .source_fit_preview import (
     preview_source_fit,
     source_fit_capability,
 )
+from .studio_adjustments import ColorAdjustments
 from .studio_capabilities import tool_capabilities
 from .studio_local_edits import (
+    CanvasChange,
+    CaptionOverlay,
     CropBox,
     LocalEditError,
     PictureSize,
+    SelectionBlur,
+    SelectionPaint,
     edited_picture,
+    marked_area,
+    paint_color,
     picture_in_session,
     record_local_edit,
 )
@@ -2802,7 +2809,7 @@ async def apply_studio_local_edit(
     request: Request,
     session: ConversationSessionDep,
 ) -> Chat:
-    """Rotate, flip, crop or resize a picture in a studio session, without a model.
+    """Make an edit that needs no model to a picture in a studio session.
 
     The result becomes one more step in the session, after whatever step is
     newest, so it is taken under the chat's guard like an apply.
@@ -2827,16 +2834,85 @@ async def apply_studio_local_edit(
             )
         crop = CropBox(**payload.crop.model_dump()) if payload.crop is not None else None
         size = PictureSize(**payload.size.model_dump()) if payload.size is not None else None
+        adjustments = (
+            ColorAdjustments(**payload.adjustments.model_dump())
+            if payload.adjustments is not None
+            else None
+        )
+        canvas = CanvasChange(**payload.canvas.model_dump()) if payload.canvas is not None else None
+        blur = None
+        paint = None
+        caption = None
+        if payload.caption is not None:
+            drawn = session.get(Artifact, payload.caption.overlay_artifact_id)
+            if drawn is None or not _is_editable_image(drawn):
+                raise api_error(
+                    422,
+                    "studio-caption-missing",
+                    "The drawn words could not be found. Write them again.",
+                )
+            try:
+                overlay = await run_in_threadpool(marked_area, services.artifacts, drawn)
+            except LocalEditError as exc:
+                raise api_error(422, exc.code, str(exc)) from exc
+            caption = CaptionOverlay(overlay=overlay, overlay_artifact_id=drawn.id)
+        # A blur and a paint each work through a marked area uploaded first.
+        marking = payload.blur or payload.paint
+        if marking is not None:
+            marked = session.get(Artifact, marking.mask_artifact_id)
+            if marked is None or not _is_editable_image(marked):
+                raise api_error(
+                    422,
+                    "studio-marked-area-missing",
+                    "The marked area could not be found. Mark it again.",
+                )
+            try:
+                mask = await run_in_threadpool(marked_area, services.artifacts, marked)
+            except LocalEditError as exc:
+                raise api_error(422, exc.code, str(exc)) from exc
+            if payload.blur is not None:
+                blur = SelectionBlur(
+                    mask=mask, radius=payload.blur.radius, mask_artifact_id=marked.id
+                )
+            if payload.paint is not None:
+                paint = SelectionPaint(
+                    mask=mask,
+                    color=paint_color(payload.paint.color),
+                    opacity=payload.paint.opacity,
+                    mask_artifact_id=marked.id,
+                )
         try:
             # Decoding and encoding a large picture takes a while and holds
             # nothing, so it runs off the loop; everything after it writes.
             edited = await run_in_threadpool(
-                edited_picture, services.artifacts, source, payload.operation, crop, size
+                edited_picture,
+                services.artifacts,
+                source,
+                payload.operation,
+                crop,
+                size,
+                adjustments,
+                blur,
+                canvas,
+                paint,
+                caption,
             )
         except LocalEditError as exc:
             raise api_error(422, exc.code, str(exc)) from exc
         record_local_edit(
-            session, studio, source, payload.operation, edited, services.artifacts, crop, size
+            session,
+            studio,
+            source,
+            payload.operation,
+            edited,
+            services.artifacts,
+            crop,
+            size,
+            adjustments,
+            blur,
+            canvas,
+            paint,
+            caption,
         )
         session.commit()
     return session.scalar(_studio_session_query(session_id)) or studio

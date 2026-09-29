@@ -40,3 +40,30 @@ its own; one failure never abandons the rest.
   instruction that transformed it, ending at the current result. A chat
   forked from another carries results, not history, and the lineage view
   never pretends otherwise.
+
+## Exact edits in Image Studio
+
+Some changes need no model at all, and Image Studio makes them itself, from
+the picture's stored bytes. They run without a graphics card or an installed
+workflow, each arrives as the next step like any other result, and its record
+names what was done rather than a model:
+
+- **Rotate or flip** turns or mirrors the whole picture.
+- **Crop** keeps a box you draw; **Resize** changes the size in pixels, in
+  proportion unless you switch that off; **Change the canvas size** adds room
+  around the picture or trims it, from one of nine places, filled with
+  transparency, white or black.
+- **Adjust light and color** has brightness, contrast, saturation and warmth
+  sliders, shown on the picture as they move. The preview is the result: the
+  browser and the app work the adjustment out the same way.
+- **Blur** and **Paint** act on a marked area, brushed with the tool itself or
+  selected first with any selection tool. Everything outside the marking is
+  left exactly as it was. Paint shows its color and opacity on the marking
+  while you choose them.
+- **Add text** draws your words in one of the app's typefaces, at a size, color
+  and place you choose, with an optional outline so they read over a busy
+  picture. What the canvas shows is what is added.
+
+**Export** saves the picture as stored, or as PNG, JPEG or WebP. Exports come
+out upright and keep the picture's color profile; JPEG has no transparency, so
+transparent parts come out white.

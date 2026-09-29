@@ -1,12 +1,19 @@
-"""Rotate, flip, crop and resize a Studio picture without a model.
+"""Edits the studio makes to a picture itself, without a model.
 
-These edits need no workflow and no graphics card, and they should not look as
-though one ran. The result is made here, from the stored bytes of the picture
-being edited: turns, flips and crops move pixels exactly, and a resize
-resamples them once, by a recorded method. It is stored like any other picture
-and recorded in the session as one more step, so the filmstrip, compare and a
-later edit all treat it the same way. Its provenance says what was done to
-which picture and names no model, because none ran.
+Rotating, flipping, cropping, resizing, adjusting light and color, blurring or
+painting a marked area, adding words and changing the canvas all happen here.
+They need no workflow and no graphics card, and they should not look as though
+one ran. Each result is made from the stored bytes of the picture being edited.
+Turns, flips, crops and canvas changes move pixels exactly; a resize resamples
+them once, by a recorded method; an adjustment maps each pixel's color by the
+arithmetic the studio previews it with; a blur or a paint changes only the
+marked area, through the same selection a region edit uses; and words are the
+very overlay the browser drew and showed, laid over the picture.
+
+The result is stored like any other picture and recorded in the session as one
+more step, so the filmstrip, compare and a later edit all treat it the same
+way. Its provenance says what was done to which picture and names no model,
+because none ran.
 """
 
 from __future__ import annotations
@@ -15,7 +22,7 @@ from dataclasses import asdict, dataclass
 from pathlib import PurePath
 from typing import Any
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageFilter, ImageOps
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -24,12 +31,15 @@ from .artifacts import ArtifactStore
 from .domain import ArtifactKind, MessageRole, MessageStatus, PartType
 from .models import Artifact, Chat, Message, MessagePart
 from .schemas import StudioLocalEditOperation
+from .studio_adjustments import ColorAdjustments, adjust_colors
 from .studio_region_edit import (
     MAX_BLEND_PIXELS,
     MAX_BLEND_READ_BYTES,
     RegionEditError,
     decode_picture,
     encode_png,
+    exif_orientation,
+    selection_alpha,
 )
 
 #: What each edit is called in the session, which is what the filmstrip shows.
@@ -40,6 +50,11 @@ _DESCRIPTIONS: dict[StudioLocalEditOperation, str] = {
     "flip_vertical": "Flip vertically",
     "crop": "Crop",
     "resize": "Resize",
+    "adjust": "Adjust light and color",
+    "blur": "Blur part of the picture",
+    "paint": "Paint over part of the picture",
+    "caption": "Add text",
+    "canvas": "Change the canvas size",
 }
 #: How the edited picture is named in the library, after the source's own name.
 _NAME_SUFFIXES: dict[StudioLocalEditOperation, str] = {
@@ -49,6 +64,11 @@ _NAME_SUFFIXES: dict[StudioLocalEditOperation, str] = {
     "flip_vertical": "flipped vertically",
     "crop": "cropped",
     "resize": "resized",
+    "adjust": "adjusted",
+    "blur": "blurred",
+    "paint": "painted",
+    "caption": "with text",
+    "canvas": "canvas changed",
 }
 # Pillow names a rotation by its counterclockwise angle.
 _TRANSPOSITIONS = {
@@ -86,11 +106,76 @@ class PictureSize:
     height: int
 
 
+@dataclass(frozen=True)
+class CanvasChange:
+    """A new canvas size, where the picture sits on it, and what fills the rest."""
+
+    width: int
+    height: int
+    anchor: str = "center"
+    fill: str = "transparent"
+
+
+#: Each anchor as a column and a row: 0 at the start, 1 in the middle, 2 at the end.
+_ANCHORS = {
+    "top_left": (0, 0),
+    "top": (1, 0),
+    "top_right": (2, 0),
+    "left": (0, 1),
+    "center": (1, 1),
+    "right": (2, 1),
+    "bottom_left": (0, 2),
+    "bottom": (1, 2),
+    "bottom_right": (2, 2),
+}
+_FILLS = {
+    "transparent": (0, 0, 0, 0),
+    "white": (255, 255, 255, 255),
+    "black": (0, 0, 0, 255),
+}
+
+
+@dataclass(frozen=True)
+class CaptionOverlay:
+    """Words the browser drew at the picture's size, as uploaded picture bytes."""
+
+    overlay: bytes
+    #: The uploaded overlay, named in the step so the words can be retraced.
+    overlay_artifact_id: str
+
+
+@dataclass(frozen=True)
+class SelectionPaint:
+    """The marked area as uploaded selection bytes, and the paint laid over it."""
+
+    mask: bytes
+    color: tuple[int, int, int]
+    #: How much of the paint covers the picture, from 1 to 100 percent.
+    opacity: int
+    #: The uploaded selection, named in the step so the paint can be retraced.
+    mask_artifact_id: str
+
+
+@dataclass(frozen=True)
+class SelectionBlur:
+    """The marked area as uploaded selection bytes, and the blur radius in pixels."""
+
+    mask: bytes
+    radius: int
+    #: The uploaded selection, named in the step so the blur can be retraced.
+    mask_artifact_id: str
+
+
 def render_local_edit(
     payload: bytes,
     operation: StudioLocalEditOperation,
     crop: CropBox | None = None,
     size: PictureSize | None = None,
+    adjustments: ColorAdjustments | None = None,
+    blur: SelectionBlur | None = None,
+    canvas: CanvasChange | None = None,
+    paint: SelectionPaint | None = None,
+    caption: CaptionOverlay | None = None,
 ) -> bytes:
     """The edited picture as PNG, made from the stored bytes without a model."""
 
@@ -104,6 +189,7 @@ def render_local_edit(
             ) from exc
         raise LocalEditError("studio-edit-unreadable", "This picture could not be read.") from exc
     # Upright as the person saw it, since that is the picture they turned or cut.
+    orientation = exif_orientation(decoded)
     upright = ImageOps.exif_transpose(decoded) or decoded
     # A profile describes the colours it came with. Kept only where the pixels
     # stay in that space, since a grey or print profile would misdescribe RGB.
@@ -128,12 +214,106 @@ def render_local_edit(
         result = picture.crop((crop.left, crop.top, crop.left + crop.width, crop.top + crop.height))
     elif operation == "resize":
         result = _resized(picture, size)
+    elif operation == "adjust":
+        if adjustments is None or adjustments.is_neutral():
+            raise LocalEditError("studio-adjust-unchanged", "Move a slider to change the picture.")
+        result = adjust_colors(picture, adjustments)
+    elif operation == "blur":
+        result = _blurred(picture, blur, orientation)
+    elif operation == "canvas":
+        result = _on_canvas(picture, canvas)
+    elif operation == "paint":
+        result = _painted(picture, paint, orientation)
+    elif operation == "caption":
+        result = _captioned(picture, caption)
     else:
         result = picture.transpose(_TRANSPOSITIONS[operation])
     # Conversion carries the source's metadata along, and saving falls back to
     # its profile when none is given, so a dropped profile would come back.
     result.info = {}
     return encode_png(result, profile if isinstance(profile, bytes) else None)
+
+
+def _blurred(picture: Image.Image, blur: SelectionBlur | None, orientation: int) -> Image.Image:
+    if blur is None:
+        raise LocalEditError("studio-blur-missing", "Mark the part of the picture to blur.")
+    try:
+        alpha = selection_alpha(blur.mask, picture.size, orientation)
+    except RegionEditError as exc:
+        raise LocalEditError(exc.code, str(exc)) from exc
+    # Blurred with its colors premultiplied, so the hidden color under a
+    # transparent pixel cannot bleed into the pixels beside it.
+    premultiplied = picture.mode == "RGBA"
+    source = picture.convert("RGBa") if premultiplied else picture
+    blurred = source.filter(ImageFilter.GaussianBlur(blur.radius))
+    return Image.composite(blurred.convert("RGBA") if premultiplied else blurred, picture, alpha)
+
+
+def _painted(picture: Image.Image, paint: SelectionPaint | None, orientation: int) -> Image.Image:
+    if paint is None:
+        raise LocalEditError("studio-paint-missing", "Mark the part of the picture to paint.")
+    try:
+        alpha = selection_alpha(paint.mask, picture.size, orientation)
+    except RegionEditError as exc:
+        raise LocalEditError(exc.code, str(exc)) from exc
+    # Half rounds up, as the canvas's preview of the paint does.
+    cover = alpha.point([(value * paint.opacity + 50) // 100 for value in range(256)])
+    overlay = Image.new("RGBA", picture.size, (*paint.color, 0))
+    overlay.putalpha(cover)
+    # Laid over, so paint on a transparent part shows as paint rather than
+    # mixing with the color hidden under it.
+    painted = Image.alpha_composite(picture.convert("RGBA"), overlay)
+    return painted if picture.mode == "RGBA" else painted.convert("RGB")
+
+
+def _captioned(picture: Image.Image, caption: CaptionOverlay | None) -> Image.Image:
+    if caption is None:
+        raise LocalEditError("studio-caption-missing", "Write the words to add.")
+    try:
+        drawn = decode_picture(caption.overlay, "drawn words")
+    except RegionEditError as exc:
+        raise LocalEditError(
+            "studio-caption-unreadable", "The drawn words could not be read."
+        ) from exc
+    # Drawn over the picture as the person saw it, so it must be that size;
+    # stretching it would move every letter from where the preview put it.
+    if drawn.size != picture.size:
+        raise LocalEditError(
+            "studio-caption-size-mismatch",
+            "The words were drawn for a picture of another size. Write them again.",
+        )
+    words = Image.alpha_composite(picture.convert("RGBA"), drawn.convert("RGBA"))
+    return words if picture.mode == "RGBA" else words.convert("RGB")
+
+
+def _placed(room: int, part: int) -> int:
+    # The share of the room before the picture, rounded toward zero, so an odd
+    # pixel always goes after it, whether the canvas grows or shrinks.
+    return room * part // 2 if room >= 0 else -(-room * part // 2)
+
+
+def _on_canvas(picture: Image.Image, canvas: CanvasChange | None) -> Image.Image:
+    if canvas is None:
+        raise LocalEditError("studio-canvas-missing", "Choose the new canvas size.")
+    if canvas.width < 1 or canvas.height < 1:
+        raise LocalEditError(
+            "studio-canvas-empty", "A canvas needs at least one pixel across and down."
+        )
+    if canvas.width * canvas.height > MAX_BLEND_PIXELS:
+        raise LocalEditError("studio-edit-too-large", "That size is too large to make here.")
+    if (canvas.width, canvas.height) == picture.size:
+        raise LocalEditError("studio-canvas-unchanged", "The canvas is already that size.")
+    # The picture keeps its own transparency; the fill only covers new ground.
+    mode = "RGBA" if canvas.fill == "transparent" or picture.mode == "RGBA" else "RGB"
+    fill = _FILLS[canvas.fill]
+    result = Image.new(mode, (canvas.width, canvas.height), fill if mode == "RGBA" else fill[:3])
+    column, row = _ANCHORS[canvas.anchor]
+    offset = (
+        _placed(canvas.width - picture.width, column),
+        _placed(canvas.height - picture.height, row),
+    )
+    result.paste(picture.convert(mode), offset)
+    return result
 
 
 def _resized(picture: Image.Image, size: PictureSize | None) -> Image.Image:
@@ -190,6 +370,11 @@ def record_local_edit(
     store: ArtifactStore,
     crop: CropBox | None = None,
     size: PictureSize | None = None,
+    adjustments: ColorAdjustments | None = None,
+    blur: SelectionBlur | None = None,
+    canvas: CanvasChange | None = None,
+    paint: SelectionPaint | None = None,
+    caption: CaptionOverlay | None = None,
 ) -> Artifact:
     """Store the edited picture and append it to the session as one more step.
 
@@ -205,6 +390,24 @@ def record_local_edit(
     if size is not None:
         record["size"] = asdict(size)
         record["resampler"] = RESIZE_RESAMPLER
+    if adjustments is not None:
+        record["adjustments"] = adjustments.as_dict()
+    if blur is not None:
+        record["blur"] = {
+            "radius": blur.radius,
+            "filter": "gaussian",
+            "mask_artifact_id": blur.mask_artifact_id,
+        }
+    if canvas is not None:
+        record["canvas"] = asdict(canvas)
+    if paint is not None:
+        record["paint"] = {
+            "color": "#{:02x}{:02x}{:02x}".format(*paint.color),
+            "opacity": paint.opacity,
+            "mask_artifact_id": paint.mask_artifact_id,
+        }
+    if caption is not None:
+        record["caption"] = {"overlay_artifact_id": caption.overlay_artifact_id}
     result = store.ingest_bytes(
         session,
         edited,
@@ -251,12 +454,34 @@ def record_local_edit(
     return result
 
 
+def paint_color(value: str) -> tuple[int, int, int]:
+    """A "#rrggbb" color as its red, green and blue levels."""
+
+    return (int(value[1:3], 16), int(value[3:5], 16), int(value[5:7], 16))
+
+
+def marked_area(store: ArtifactStore, artifact: Artifact) -> bytes:
+    """The uploaded selection's verified bytes, read within the bound a picture is."""
+
+    try:
+        return store.verified_bytes(artifact, maximum_bytes=MAX_BLEND_READ_BYTES)
+    except (ValueError, OSError) as exc:
+        raise LocalEditError(
+            "studio-marked-area-unreadable", "The marked area could not be read."
+        ) from exc
+
+
 def edited_picture(
     store: ArtifactStore,
     source: Artifact,
     operation: StudioLocalEditOperation,
     crop: CropBox | None = None,
     size: PictureSize | None = None,
+    adjustments: ColorAdjustments | None = None,
+    blur: SelectionBlur | None = None,
+    canvas: CanvasChange | None = None,
+    paint: SelectionPaint | None = None,
+    caption: CaptionOverlay | None = None,
 ) -> bytes:
     """Read the source's verified bytes and make the edited picture from them.
 
@@ -268,4 +493,6 @@ def edited_picture(
         payload = store.verified_bytes(source, maximum_bytes=MAX_BLEND_READ_BYTES)
     except (ValueError, OSError) as exc:
         raise LocalEditError("studio-edit-unreadable", "This picture could not be read.") from exc
-    return render_local_edit(payload, operation, crop, size)
+    return render_local_edit(
+        payload, operation, crop, size, adjustments, blur, canvas, paint, caption
+    )

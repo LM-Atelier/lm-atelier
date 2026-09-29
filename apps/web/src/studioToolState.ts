@@ -27,7 +27,9 @@ import {
 } from "./studioTools";
 
 import type { LightDirection } from "./studioLightMap";
-import type { StudioToolKind } from "./types";
+import { NEUTRAL_ADJUSTMENTS } from "./studioAdjustments";
+import { DEFAULT_CAPTION, type StudioCaption } from "./studioCaption";
+import type { StudioColorAdjustments, StudioToolKind } from "./types";
 
 export type { StudioToolKind } from "./types";
 
@@ -77,6 +79,15 @@ export type StudioToolState = {
   readonly lightIntensity: number;
   /** The light's colour temperature in kelvin, or null for no warmth grade. */
   readonly lightKelvin: number | null;
+  /** Where the light and color sliders stand; shown on the canvas until applied. */
+  readonly adjustments: StudioColorAdjustments;
+  /** How far a blur spreads, in the picture's own pixels. */
+  readonly blurRadius: number;
+  /** The paint's color as "#rrggbb", and how much of it covers the picture, in percent. */
+  readonly paintColor: string;
+  readonly paintOpacity: number;
+  /** Words being written to add; shown on the canvas until they are added. */
+  readonly caption: StudioCaption;
   /** The picture a replaced subject is taken from. */
   readonly subjectPicture: File | null;
   readonly mask: MaskRaster | null;
@@ -99,6 +110,12 @@ export type StudioToolAction =
   | { type: "set-light-direction"; direction: LightDirection }
   | { type: "set-light-intensity"; intensity: number }
   | { type: "set-light-kelvin"; kelvin: number | null }
+  | { type: "set-adjustment"; key: keyof StudioColorAdjustments; value: number }
+  | { type: "reset-adjustments" }
+  | { type: "set-blur-radius"; radius: number }
+  | { type: "set-paint-color"; color: string }
+  | { type: "set-paint-opacity"; opacity: number }
+  | { type: "set-caption"; patch: Partial<StudioCaption> }
   | { type: "set-subject-picture"; picture: File | null }
   | { type: "image-changed"; width: number; height: number }
   | { type: "stroke-end" }
@@ -122,6 +139,11 @@ export function initialToolState(): StudioToolState {
     lightDirection: "left",
     lightIntensity: 0.5,
     lightKelvin: null,
+    adjustments: NEUTRAL_ADJUSTMENTS,
+    blurRadius: 12,
+    paintColor: "#000000",
+    paintOpacity: 100,
+    caption: DEFAULT_CAPTION,
     subjectPicture: null,
     mask: null,
     maskVersion: 0,
@@ -168,14 +190,35 @@ export function studioToolReducer(
       };
     case "set-light-kelvin":
       return { ...state, lightKelvin: action.kelvin };
+    case "set-adjustment":
+      return Number.isInteger(action.value) && Math.abs(action.value) <= 100
+        ? { ...state, adjustments: { ...state.adjustments, [action.key]: action.value } }
+        : state;
+    case "reset-adjustments":
+      return { ...state, adjustments: NEUTRAL_ADJUSTMENTS };
+    case "set-blur-radius":
+      return { ...state, blurRadius: clamp(action.radius, 1, 100) };
+    case "set-paint-color":
+      return /^#[0-9a-f]{6}$/.test(action.color) ? { ...state, paintColor: action.color } : state;
+    case "set-paint-opacity":
+      return { ...state, paintOpacity: clamp(action.opacity, 1, 100) };
+    case "set-caption": {
+      const caption = { ...state.caption, ...action.patch };
+      caption.sizePercent = clamp(caption.sizePercent, 2, 30);
+      return /^#[0-9a-f]{6}$/.test(caption.color) ? { ...state, caption } : state;
+    }
     // Kept when the picture changes: the new subject can go into another one.
     case "set-subject-picture":
       return { ...state, subjectPicture: action.picture };
     case "image-changed": {
       // A new image invalidates the mask entirely; carrying it over would
-      // silently apply a selection drawn on different pixels.
+      // silently apply a selection drawn on different pixels. The sliders
+      // start over too: an applied adjustment is already in the new picture.
       return {
         ...state,
+        adjustments: NEUTRAL_ADJUSTMENTS,
+        // Added words are in the new picture; keeping them would draw them twice.
+        caption: { ...state.caption, text: "" },
         mask: createMask(action.width, action.height),
         maskVersion: state.maskVersion + 1,
         history: new MaskHistory(),
@@ -272,7 +315,11 @@ export function toolFor(
   if (!state.mask) return null;
   const selected = state.selectionMode === "add" ? 255 : 0;
   switch (state.kind) {
+    // A blur or a paint is marked with the brush, into the same selection the
+    // other tools draw.
     case "brush":
+    case "blur":
+    case "paint":
       return new BrushTool(state.mask, state.brushRadius);
     case "eraser":
       return new BrushTool(state.mask, state.brushRadius, 0);
@@ -319,8 +366,12 @@ export function toolFor(
     // A crop is one box: drawing another replaces it rather than adding to it.
     case "crop":
       return new RectTool(state.mask, true);
-    // A resize is two numbers for the whole picture.
+    // A resize is two numbers for the whole picture, a canvas change two and
+    // a place, and an adjustment four.
     case "resize":
+    case "canvas":
+    case "adjust":
+    case "caption":
       return null;
   }
 }
