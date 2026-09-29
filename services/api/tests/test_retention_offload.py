@@ -181,6 +181,10 @@ async def test_the_app_serves_while_the_sweep_commits_one_batch_at_a_time(
     monkeypatch.setattr(main_module, "RETENTION_BATCH_PAUSE_SECONDS", 0.0)
 
     stages: list[str] = []
+    # Count-bound commits must not gain extra passes when the runner is slow.
+    clock = SimpleNamespace(monotonic=lambda: 0.0, perf_counter=time.perf_counter)
+    monkeypatch.setattr(main_module, "time", clock)
+    monkeypatch.setattr(artifacts_module, "time", clock)
     real_stage = main_module._startup_stage
 
     def recording_stage(name: str, **kwargs: Any) -> Any:
