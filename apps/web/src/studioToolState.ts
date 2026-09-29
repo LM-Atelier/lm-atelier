@@ -132,6 +132,7 @@ export type StudioToolAction =
   | { type: "set-color-tolerance"; tolerance: number }
   | { type: "set-upscale-factor"; factor: number }
   | { type: "set-margin"; side: "top" | "right" | "bottom" | "left"; fraction: number }
+  | { type: "set-margins"; margins: { top: number; right: number; bottom: number; left: number } }
   | { type: "clear-margins" }
   | { type: "set-current-words"; words: string }
   | { type: "set-new-words"; words: string }
@@ -212,6 +213,16 @@ export function studioToolReducer(
       return {
         ...state,
         margins: { ...state.margins, [action.side]: bounded(action.fraction, 0, 2) },
+      };
+    case "set-margins":
+      return {
+        ...state,
+        margins: {
+          top: bounded(action.margins.top, 0, 2),
+          right: bounded(action.margins.right, 0, 2),
+          bottom: bounded(action.margins.bottom, 0, 2),
+          left: bounded(action.margins.left, 0, 2),
+        },
       };
     case "clear-margins":
       return { ...state, margins: { top: 0, right: 0, bottom: 0, left: 0 } };

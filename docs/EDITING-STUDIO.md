@@ -113,3 +113,12 @@ use the arrow keys; each edge can reach up to twice the picture's width or
 height. The frame is drawn around the picture at whatever zoom you are
 viewing, with the added area tinted, and the panel names the size the extended
 picture will be.
+
+The panel can also set the edges for you. **Extend to a shape** (Square, 4:5,
+3:2, 16:9 or 9:16) adds canvas evenly on the two edges that grow, never cutting
+the picture: a picture wider than the shape grows taller, and a taller one
+wider. A shape the picture already is, or one that would need more than twice
+the picture on an edge, cannot be chosen. **Extend to this size** takes an exact
+width and height, no smaller than the picture, and puts the new room away from
+where you place the picture. Either way the edges can still be dragged
+afterwards.

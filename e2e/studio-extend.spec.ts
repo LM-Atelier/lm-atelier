@@ -126,6 +126,25 @@ test("keeps an edge's grip in view after the edge goes past the view", async ({ 
   await expect(page.getByRole("button", { name: "Extend upward, currently 50 percent" })).toBeVisible();
 });
 
+test("extends to a shape or to an exact size from the panel", async ({ page }) => {
+  await openExtend(page);
+  const shown = await box(picture(page));
+
+  // 100 by 160 is taller than a square, so it gains 30 on either side.
+  await page.getByRole("group", { name: "Extend to a shape" }).getByRole("button", { name: "Square" }).click();
+  await expect(page.getByText("The canvas goes from 100 × 160 to 160 × 160.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Extend to the right, currently 30 percent" })).toBeVisible();
+  await expectFrameAround(page, shown, { top: 0, right: 30, bottom: 0, left: 30 });
+
+  // With the picture at the top left, all the room goes to the right and below.
+  await page.getByRole("spinbutton", { name: "Width" }).fill("150");
+  await page.getByRole("spinbutton", { name: "Height" }).fill("200");
+  await page.getByRole("group", { name: "Where the picture sits" }).getByRole("button", { name: "Top left" }).click();
+  await page.getByRole("button", { name: "Extend to this size" }).click();
+  await expect(page.getByText("The canvas goes from 100 × 160 to 150 × 200.")).toBeVisible();
+  await expectFrameAround(page, shown, { top: 0, right: 50, bottom: 40, left: 0 });
+});
+
 test.describe("on a display with two device pixels to a CSS pixel", () => {
   test.use({ deviceScaleFactor: 2 });
 
