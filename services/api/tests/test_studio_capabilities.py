@@ -72,6 +72,28 @@ def test_isolate_waits_for_a_workflow_that_says_it_cuts_a_subject_out() -> None:
     assert _by_kind([MASK_SCHEMA])["isolate"].available is False
 
 
+def test_replacing_a_background_needs_a_cutout_and_an_editor() -> None:
+    """The cutout finds the subject; an ordinary edit then redraws around it."""
+
+    matting: dict[str, Any] = {
+        "type": "object",
+        "properties": {"matte": {"type": "boolean", "x-lm-atelier-kind": "matting"}},
+    }
+    alone = tool_capabilities(edit_input_schemas=[matting], matting_workflow_ids=["wfrev-matting"])
+    background = next(tool for tool in alone if tool.kind == "background")
+    assert background.available is False
+    assert background.reason == "Install an image editing workflow to change a picture."
+    assert _by_kind([PLAIN_SCHEMA])["background"].available is False
+    assert "background removal" in (_by_kind([PLAIN_SCHEMA])["background"].reason or "")
+    both = tool_capabilities(
+        edit_input_schemas=[matting, PLAIN_SCHEMA], matting_workflow_ids=["wfrev-matting"]
+    )
+    ready = next(tool for tool in both if tool.kind == "background")
+    assert ready.available is True and ready.reason is None
+    # The cutout runs on the workflow the report names, as Isolate does.
+    assert ready.workflow_revision_id == "wfrev-matting"
+
+
 def test_a_plain_editor_runs_instruct_but_not_a_selection() -> None:
     """The live case: an edit workflow that declares no mask input.
 

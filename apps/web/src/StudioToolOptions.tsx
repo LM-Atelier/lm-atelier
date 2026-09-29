@@ -117,6 +117,27 @@ export function StudioToolOptions({
       </div>
     );
   }
+  if (tools.kind === "background") {
+    return (
+      <div className="studio-tool-options">
+        <small>
+          Cuts the subject out first, then redraws everything around it. The subject
+          keeps its own pixels.
+        </small>
+        <label>
+          <span>
+            <strong>Describe the new background</strong>
+          </span>
+          <textarea
+            rows={4}
+            value={instruction}
+            placeholder="e.g. a quiet beach at sunset"
+            onChange={(event) => onInstructionChange(event.target.value)}
+          />
+        </label>
+      </div>
+    );
+  }
   if (tools.kind === "text") {
     return (
       <div className="studio-tool-options">

@@ -297,6 +297,10 @@ export function toolFor(
     // finds, and a gesture would only disagree with it.
     case "isolate":
       return null;
+    // Nor does replacing a background: the cutout finds the subject, and the
+    // words say what goes around it.
+    case "background":
+      return null;
   }
 }
 

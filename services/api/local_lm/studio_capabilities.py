@@ -35,6 +35,7 @@ StudioToolKind = Literal[
     "text",
     "relight",
     "isolate",
+    "background",
 ]
 
 
@@ -55,6 +56,9 @@ TOOL_WORKFLOW_CLASSES: dict[StudioToolKind, str] = {
     "text": "image_to_image",
     "relight": "relight",
     "isolate": "matting",
+    # Replacing a background cuts the subject out first, so it runs the matting
+    # workflow, and then redraws around it, so it needs an edit workflow too.
+    "background": "matting",
 }
 
 _CLASS_GUIDANCE = {
@@ -120,6 +124,9 @@ def tool_capabilities(
     for kind, workflow_class in TOOL_WORKFLOW_CLASSES.items():
         ready = available[workflow_class]
         reason = None if ready else _CLASS_GUIDANCE[workflow_class]
+        if kind == "background" and ready and not can_edit:
+            # The cutout alone replaces nothing: an edit redraws around it.
+            ready, reason = False, _CLASS_GUIDANCE["image_to_image"]
         if workflow_class == "relight" and relight_workflow_ids and not lighting_adapter_ids:
             reason = _NO_LIGHTING_ADAPTER
         capabilities.append(
