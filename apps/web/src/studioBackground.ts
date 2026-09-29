@@ -15,12 +15,15 @@ import type { ChatDetail } from "./types";
 export type CutoutOutcome =
   | { state: "waiting" }
   | { state: "ready"; artifactId: string }
-  | { state: "failed" };
+  | { state: "failed" }
+  | { state: "stopped" };
 
 /** Where the cutout turn stands, read from the session the studio already polls. */
 export function cutoutOutcome(session: ChatDetail | null, messageId: string): CutoutOutcome {
   const message = session?.messages.find((item) => item.id === messageId);
   if (!message || message.status === "pending") return { state: "waiting" };
+  // Stopped on purpose, which is not a failure to report.
+  if (message.status === "cancelled") return { state: "stopped" };
   const image = message.parts.find(
     (part) => part.type === "image" && Boolean(part.artifact_id) && !part.metadata_json.preview,
   );

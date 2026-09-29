@@ -121,6 +121,16 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
     return () => { active = false; };
   }, [sourceArtifactId, sourceChatId, openSession, client]);
 
+  const stop = useMutation({
+    mutationFn: (id: string) => api.cancelChat(id),
+    // Read again at once, so the stopped edit leaves the studio without
+    // waiting for the next check.
+    onSettled: (_job, _error, id) => void client.invalidateQueries({ queryKey: ["studio-session", id] }),
+  });
+  // Refused because the work had already ended by the time the press
+  // arrived: the session read shows that, so it is not an error to report.
+  const stopError = (stop.error as { status?: number } | null)?.status === 409 ? null : stop.error;
+
   const session = useQuery({
     queryKey: ["studio-session", sessionId],
     queryFn: () => api.studioSession(sessionId!),
@@ -220,7 +230,12 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
     steps: session.data ? studioSteps(session.data, sourceArtifactId) : [],
     previewArtifactId: session.data ? studioPreviewArtifactId(session.data) : null,
     busy: open.isPending || apply.isPending || localEdit.isPending || hasPendingWork(session.data),
-    error: open.error ?? session.error ?? apply.error ?? localEdit.error,
+    error: open.error ?? session.error ?? apply.error ?? localEdit.error ?? stopError,
+    /** Stop the edit the session is running; the picture on screen stays as it was. */
+    stop: () => {
+      if (sessionId) stop.mutate(sessionId);
+    },
+    stopping: stop.isPending,
     /** Rotate, flip, crop or resize a picture in this session; `onDone` runs once the step exists. */
     localEdit: (operation: StudioLocalEditOperation, artifactId: string, onDone?: () => void, details?: StudioLocalEditDetails) =>
       localEdit.mutate({ operation, artifactId, details }, { onSuccess: () => onDone?.() }),

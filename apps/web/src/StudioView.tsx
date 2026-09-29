@@ -11,7 +11,7 @@ import { StudioExportLink } from "./StudioExportLink";
 import { StudioUseInChat } from "./StudioUseInChat";
 import type { StudioPictureForChat } from "./useStudioPictureForChat";
 import { StudioExtendHandles } from "./StudioExtendHandles";
-import { GenerationProgress } from "./GenerationProgress";
+import { StudioRunningEdit } from "./StudioRunningEdit";
 import { studioApplyProgress } from "./studioApplyProgress";
 import { StudioRecipes } from "./StudioRecipes";
 import { StudioSelectionControls } from "./StudioSelectionTool";
@@ -77,7 +77,7 @@ export function StudioView({
   useEffect(() => {
     heading.current?.focus();
   }, [sourceArtifactId]);
-  const { sessionId, session, steps, previewArtifactId, busy: sessionBusy, error, apply, localEdit } = useStudioSession(
+  const { sessionId, session, steps, previewArtifactId, busy: sessionBusy, error, apply, localEdit, stop, stopping } = useStudioSession(
     sourceArtifactId,
     sourceChatId,
   );
@@ -428,7 +428,7 @@ export function StudioView({
                     : "Apply edit"}
             </button>
           )}
-          {applyProgress && <GenerationProgress part={applyProgress} />}
+          {applyProgress && <StudioRunningEdit part={applyProgress} stopping={stopping} onStop={stop} />}
         </aside>
       </div>
       <StudioFilmstrip
