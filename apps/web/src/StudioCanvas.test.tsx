@@ -4,6 +4,7 @@ import { StudioCanvas } from "./StudioCanvas";
 import { createMask, isEmpty } from "./studioMasks";
 import { PerspectiveTool, pictureCorners } from "./studioPerspective";
 import { BrushTool, RectTool, type ImagePoint, type PointerTool, type ToolPreview } from "./studioTools";
+import type { ScreenRect } from "./studioViewport";
 
 /** jsdom has no 2D context; the component must tolerate null contexts and
  * still run its geometry and tool forwarding, which is what these pin. */
@@ -132,6 +133,82 @@ describe("StudioCanvas", () => {
 
     fireEvent.pointerMove(surface, { pointerType: "mouse", clientX: 80, clientY: 60, pointerId: 2 });
     expect(tool.calls.map(([kind]) => kind)).toEqual(["down", "up"]);
+  });
+
+  /** One pointer's event at a place. jsdom has no PointerEvent, so it is a
+   * mouse event under the pointer event's name, as a mouse delivers them, with
+   * the pointer's own id set on it. */
+  function pointer(target: Element, type: string, pointerId: number, x: number, y: number) {
+    const event = new MouseEvent(type, { clientX: x, clientY: y, button: 0, bubbles: true });
+    Object.defineProperty(event, "pointerId", { value: pointerId });
+    fireEvent(target, event);
+  }
+
+  function watchShown(tool: PointerTool | null) {
+    const overlay = vi.fn<(shown: ScreenRect) => null>(() => null);
+    const { container } = render(<StudioCanvas image={image} mask={null} tool={tool} overlay={overlay} />);
+    return { surface: container.querySelector(".studio-canvas")!, shown: () => overlay.mock.calls.at(-1)![0] };
+  }
+
+  it("zooms with two fingers, keeping what lay under each finger under it", () => {
+    const tool = new SpyTool();
+    const { surface, shown } = watchShown(tool);
+
+    pointer(surface, "pointerdown", 1, 150, 100);
+    pointer(surface, "pointerdown", 2, 250, 100);
+    // The second finger spreads to twice the distance: twice the zoom, with
+    // the picture's point (150, 100) still under the first finger.
+    pointer(surface, "pointermove", 2, 350, 100);
+    expect(shown()).toEqual({ x: -150, y: -100, width: 800, height: 400 });
+    // Then the first spreads the other way, to three times the distance, and
+    // (250, 100) is still under the second.
+    pointer(surface, "pointermove", 1, 50, 100);
+    expect(shown()).toEqual({ x: -400, y: -200, width: 1200, height: 600 });
+    // The stroke the first finger began ended when the second landed.
+    expect(tool.calls.map(([kind]) => kind)).toEqual(["down", "up"]);
+
+    // Both lifted, one finger draws again, at the picture's point under it.
+    pointer(surface, "pointerup", 1, 50, 100);
+    pointer(surface, "pointerup", 2, 350, 100);
+    pointer(surface, "pointerdown", 3, 200, 100);
+    pointer(surface, "pointerup", 3, 200, 100);
+    expect(tool.calls.map(([kind]) => kind)).toEqual(["down", "up", "down", "up"]);
+    expect(tool.calls[2][1]).toEqual({ x: 200, y: 100 });
+  });
+
+  it("carries the picture the whole length of a drag, and only with pointers that are down", () => {
+    const { surface, shown } = watchShown(null);
+    pointer(surface, "pointerdown", 1, 100, 100);
+    pointer(surface, "pointermove", 1, 110, 105);
+    pointer(surface, "pointermove", 1, 130, 120);
+    pointer(surface, "pointermove", 1, 160, 140);
+    expect(shown()).toEqual({ x: 60, y: 40, width: 400, height: 200 });
+
+    // A pointer hovering over the canvas is not holding the picture.
+    pointer(surface, "pointermove", 9, 300, 10);
+    expect(shown()).toEqual({ x: 60, y: 40, width: 400, height: 200 });
+  });
+
+  it("pans on with the finger that stays when the other lifts, from where it is", () => {
+    const { surface, shown } = watchShown(null);
+    pointer(surface, "pointerdown", 1, 100, 100);
+    pointer(surface, "pointerdown", 2, 200, 100);
+    pointer(surface, "pointerup", 2, 200, 100);
+
+    pointer(surface, "pointermove", 1, 120, 110);
+
+    expect(shown()).toEqual({ x: 20, y: 10, width: 400, height: 200 });
+  });
+
+  it("pinches with the first two fingers down and leaves a third alone", () => {
+    const { surface, shown } = watchShown(null);
+    pointer(surface, "pointerdown", 1, 100, 100);
+    pointer(surface, "pointerdown", 2, 200, 100);
+    pointer(surface, "pointerdown", 3, 300, 100);
+
+    pointer(surface, "pointermove", 3, 360, 140);
+
+    expect(shown()).toEqual({ x: 0, y: 0, width: 400, height: 200 });
   });
 
   it("abandons a cancelled gesture rather than finishing it, and clears pan state on lost capture", () => {

@@ -5,6 +5,7 @@ import {
   MAX_SCALE,
   MIN_SCALE,
   panBy,
+  pinchBy,
   shownRect,
   toImagePoint,
   toScreenPoint,
@@ -43,6 +44,63 @@ describe("studio viewport", () => {
     const viewport = panBy(panBy(identityViewport(), 10, -5), -4, 3);
     expect(viewport.tx).toBe(6);
     expect(viewport.ty).toBe(-2);
+  });
+
+  it("follows two pointers: scaled by their spread, moved with the point between them", () => {
+    const start = { scale: 1.5, tx: 20, ty: -10 };
+    const fingers = [{ x: 100, y: 120 }, { x: 180, y: 120 }] as const;
+    const spread = [{ x: 60, y: 140 }, { x: 220, y: 140 }] as const;
+    const under = fingers.map((finger) => toImagePoint(start, finger));
+
+    const viewport = pinchBy(start, fingers, spread);
+
+    // Twice as far apart, so twice the zoom; the line between them kept its
+    // direction, so what lay under each finger is under it still.
+    expect(viewport.scale).toBeCloseTo(3);
+    spread.forEach((finger, index) => {
+      const now = toImagePoint(viewport, finger);
+      expect(now.x).toBeCloseTo(under[index].x);
+      expect(now.y).toBeCloseTo(under[index].y);
+    });
+  });
+
+  it("pans without zooming when two pointers move together", () => {
+    const viewport = pinchBy(
+      { scale: 2, tx: 0, ty: 0 },
+      [{ x: 10, y: 10 }, { x: 50, y: 30 }],
+      [{ x: 25, y: 5 }, { x: 65, y: 25 }],
+    );
+    expect(viewport).toEqual({ scale: 2, tx: 15, ty: -5 });
+  });
+
+  it("keeps what lay midway between two twisting pointers midway between them", () => {
+    const viewport = pinchBy(
+      identityViewport(),
+      [{ x: 100, y: 100 }, { x: 200, y: 100 }],
+      [{ x: 170, y: 40 }, { x: 170, y: 200 }],
+    );
+    expect(viewport.scale).toBeCloseTo(1.6);
+    const middle = toImagePoint(viewport, { x: 170, y: 120 });
+    expect(middle.x).toBeCloseTo(150);
+    expect(middle.y).toBeCloseTo(100);
+  });
+
+  it("stops at the zoom limit with what lay midway still midway", () => {
+    const start = { scale: MAX_SCALE / 2, tx: 5, ty: 5 };
+    const middle = toImagePoint(start, { x: 100, y: 50 });
+    // Ten times as far apart, about the same middle.
+    const viewport = pinchBy(start, [{ x: 90, y: 50 }, { x: 110, y: 50 }], [{ x: 0, y: 50 }, { x: 200, y: 50 }]);
+    expect(viewport.scale).toBe(MAX_SCALE);
+    const now = toImagePoint(viewport, { x: 100, y: 50 });
+    expect(now.x).toBeCloseTo(middle.x);
+    expect(now.y).toBeCloseTo(middle.y);
+  });
+
+  it("moves but does not scale when the pointers start or end on one spot", () => {
+    expect(pinchBy(identityViewport(), [{ x: 50, y: 50 }, { x: 50, y: 50 }], [{ x: 40, y: 60 }, { x: 80, y: 60 }]))
+      .toEqual({ scale: 1, tx: 10, ty: 10 });
+    expect(pinchBy(identityViewport(), [{ x: 40, y: 60 }, { x: 80, y: 60 }], [{ x: 60, y: 60 }, { x: 60, y: 60 }]))
+      .toEqual({ scale: 1, tx: 0, ty: 0 });
   });
 
   it("fits and centers the image in the container", () => {
