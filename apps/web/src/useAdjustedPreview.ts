@@ -25,7 +25,8 @@ export function useAdjustedPreview(
       canvas.height = bitmap.height;
       const context = canvas.getContext("2d");
       if (!context) return;
-      context.putImageData(new ImageData(adjustPixels(pixels, adjustments), bitmap.width, bitmap.height), 0, 0);
+      const adjusted = adjustPixels(pixels, bitmap.width, adjustments);
+      context.putImageData(new ImageData(adjusted, bitmap.width, bitmap.height), 0, 0);
       setShown({ pixels, canvas });
     });
     return () => cancelAnimationFrame(frame);

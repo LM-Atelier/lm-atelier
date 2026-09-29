@@ -58,10 +58,12 @@ names what was done rather than a model:
   in pixels, in proportion unless you switch that off; **Change the canvas
   size** adds room around the picture or trims it, from one of nine places,
   filled with transparency, white or black.
-- **Adjust light and color** has brightness, contrast, saturation, warmth and
-  tint sliders, shown on the picture as they move. Warmth balances blue against
-  amber, and tint green against magenta. The preview is the result: the browser
-  and the app work the adjustment out the same way.
+- **Adjust light and color** has brightness, contrast, saturation, warmth,
+  tint and sharpness sliders, shown on the picture as they move. Warmth
+  balances blue against amber, and tint green against magenta. Sharpness crisps
+  edges above zero and softens them below; where a picture is transparent,
+  colors hidden there play no part. The preview is the result: the browser and
+  the app work the adjustment out the same way.
 - **Blur**, **Pixelate** and **Paint** act on a marked area, brushed with the
   tool itself or selected first with any selection tool. Everything outside the
   marking is left exactly as it was. Pixelate breaks the area into square

@@ -89,6 +89,7 @@ export interface StudioColorAdjustments {
   saturation: number;
   warmth: number;
   tint: number;
+  sharpness: number;
 }
 
 /** How far to turn a picture to straighten it, in degrees, clockwise when positive. */

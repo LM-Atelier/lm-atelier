@@ -3,7 +3,8 @@
 The studio shows an adjustment on the picture while its sliders move, so the
 arithmetic here is the arithmetic the browser runs, in the same order: one
 lookup table per channel for warmth, tint, brightness and contrast, then
-saturation as a mix toward each pixel's grey. Every step is integer arithmetic or
+saturation as a mix toward each pixel's grey, then sharpness as a mix away
+from a softened copy of the picture. Every step is integer arithmetic or
 floating-point arithmetic with a stated rounding, which the browser repeats
 exactly, so the preview is the picture an apply makes. The browser's copy lives
 in studioAdjustments.ts, and the two are checked against the same pixels.
@@ -15,7 +16,7 @@ import math
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from PIL import Image
+from PIL import Image, ImageFilter
 
 from .studio_relight import NEUTRAL_KELVIN, warmth_gains
 
@@ -27,6 +28,10 @@ KELVIN_PER_WARMTH_STEP = 25
 #: How far the tint slider at either end moves green against red and blue,
 #: before the gains are evened out to keep the brightness.
 TINT_REACH = 0.15
+#: The softened copy sharpness mixes against: each pixel's neighborhood of
+#: nine, weighted 1-2-1 each way. The weights sum to 16, so every sum the
+#: kernel makes in single precision is exact and the browser's integers match.
+_SOFTENED = ImageFilter.Kernel((3, 3), (1, 2, 1, 2, 4, 2, 1, 2, 1), 16)
 
 
 @dataclass(frozen=True)
@@ -38,9 +43,17 @@ class ColorAdjustments:
     saturation: int = 0
     warmth: int = 0
     tint: int = 0
+    sharpness: int = 0
 
     def is_neutral(self) -> bool:
-        return not (self.brightness or self.contrast or self.saturation or self.warmth or self.tint)
+        return not (
+            self.brightness
+            or self.contrast
+            or self.saturation
+            or self.warmth
+            or self.tint
+            or self.sharpness
+        )
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -104,6 +117,27 @@ def saturated(color: Image.Image, saturation: int) -> Image.Image:
     return Image.blend(grey, color, 1 + saturation / ADJUSTMENT_LIMIT)
 
 
+def sharpened(color: Image.Image, alpha: Image.Image | None, sharpness: int) -> Image.Image:
+    """Each channel moved toward or away from a softened copy of the picture.
+
+    -100 leaves the softened copy and 100 doubles every difference from it,
+    which steepens each edge. Pixels on the picture's own edge have no full
+    neighborhood, so the kernel leaves them as they are. Where the picture
+    has transparency, the copy is made from each color weighted by its
+    opacity and divided back out, so a color hidden under a transparent
+    pixel does not bleed into the visible ones beside it.
+    """
+
+    if sharpness == 0:
+        return color
+    if alpha is None:
+        soft = color.filter(_SOFTENED)
+    else:
+        weighted = Image.merge("RGBA", (*color.split(), alpha)).convert("RGBa")
+        soft = weighted.filter(_SOFTENED).convert("RGBA").convert("RGB")
+    return Image.blend(soft, color, 1 + sharpness / ADJUSTMENT_LIMIT)
+
+
 def adjust_colors(picture: Image.Image, adjustments: ColorAdjustments) -> Image.Image:
     """The picture with the adjustments applied; transparency is kept as it was."""
 
@@ -115,6 +149,7 @@ def adjust_colors(picture: Image.Image, adjustments: ColorAdjustments) -> Image.
         "RGB", (red.point(tables[0]), green.point(tables[1]), blue.point(tables[2]))
     )
     adjusted = saturated(adjusted, adjustments.saturation)
+    adjusted = sharpened(adjusted, alpha, adjustments.sharpness)
     if alpha is None:
         return adjusted
     adjusted.putalpha(alpha)

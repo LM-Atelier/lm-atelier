@@ -125,9 +125,33 @@ describe("the preview on the canvas", () => {
     );
 
     expect(result.current).toBeInstanceOf(HTMLCanvasElement);
-    expect(Array.from(drawn[0].data)).toEqual(Array.from(adjustPixels(pixels, sliders)));
+    expect(Array.from(drawn[0].data)).toEqual(Array.from(adjustPixels(pixels, 1, sliders)));
     rerender({ adjustments: NEUTRAL_ADJUSTMENTS });
     expect(result.current).toBeNull();
+  });
+
+  it("sharpens across rows as wide as the picture", () => {
+    const drawn: ImageData[] = [];
+    vi.stubGlobal("ImageData", class {
+      constructor(readonly data: Uint8ClampedArray, readonly width: number, readonly height: number) {}
+    });
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
+      putImageData: (image: ImageData) => drawn.push(image),
+    } as never);
+    // A light pixel in the middle of a dark 3 by 3 picture: only its whole
+    // neighborhood, read three pixels to a row, makes it lighter still.
+    const bitmap = { width: 3, height: 3 } as ImageBitmap;
+    const pixels = new Uint8ClampedArray(Array.from({ length: 9 }, (_, index) => (index === 4 ? [180, 180, 180, 255] : [60, 60, 60, 255])).flat());
+    const sliders = { ...NEUTRAL_ADJUSTMENTS, sharpness: 50 };
+
+    renderHook(() => useAdjustedPreview(bitmap, pixels, sliders));
+
+    expect(Array.from(drawn[0].data)).toEqual(Array.from(adjustPixels(pixels, 3, sliders)));
+    expect(drawn[0].data[16]).toBeGreaterThan(180);
   });
 });
 
@@ -153,6 +177,7 @@ describe("adjusting in the studio", () => {
     expect(screen.queryByRole("button", { name: "Apply edit" })).toBeNull();
     act(() => {
       fireEvent.change(screen.getByRole("slider", { name: "Brightness" }), { target: { value: "25" } });
+      fireEvent.change(screen.getByRole("slider", { name: "Sharpness" }), { target: { value: "-30" } });
     });
     fireEvent.click(screen.getByRole("button", { name: "Apply adjustments" }));
 
@@ -160,7 +185,7 @@ describe("adjusting in the studio", () => {
     expect(api.studioLocalEdit).toHaveBeenCalledWith("chat-studio", {
       source_artifact_id: "art-1",
       operation: "adjust",
-      adjustments: { brightness: 25, contrast: 0, saturation: 0, warmth: 0, tint: 0 },
+      adjustments: { brightness: 25, contrast: 0, saturation: 0, warmth: 0, tint: 0, sharpness: -30 },
     });
   });
 });
