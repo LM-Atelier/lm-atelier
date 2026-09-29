@@ -203,6 +203,41 @@ def selected_catalog_file_metadata(
     ]
 
 
+def with_catalog_file_hashes(
+    result: CatalogPreflight, files: list[dict[str, Any]]
+) -> CatalogPreflight:
+    """Keep download fields and checksum advice aligned with the planned file hashes."""
+    hashes = dict(result.expected_sha256)
+    for item in files:
+        path, digest = item.get("filename"), item.get("sha256")
+        if (
+            isinstance(path, str)
+            and path in result.selected_files
+            and isinstance(digest, str)
+            and _SHA256.fullmatch(digest)
+        ):
+            hashes[path] = digest.lower()
+    sources = {
+        path: source.model_copy(update={"sha256": hashes[path]}) if path in hashes else source
+        for path, source in result.file_sources.items()
+    }
+    complete = bool(result.selected_files) and all(path in hashes for path in result.selected_files)
+    checks = [
+        check.model_copy(
+            update={
+                "status": "pass",
+                "detail": "SHA-256 metadata is available for every selected file.",
+            }
+        )
+        if check.id == "checksum" and complete
+        else check
+        for check in result.checks
+    ]
+    return result.model_copy(
+        update={"expected_sha256": hashes, "file_sources": sources, "checks": checks}
+    )
+
+
 def exact_civitai_file_selection(
     files: list[dict[str, Any]],
     selected_file_ids: list[str],

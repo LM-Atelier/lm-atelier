@@ -66,6 +66,7 @@ from .auxiliary_assets import (
 )
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
 from .capability_probe import probe_structured_tools
+from .catalog_file_identity import hash_selected_catalog_files
 from .catalog_sources import CatalogSource, CatalogSourceNotFound, WorkflowCatalogSource
 from .chat_activity_history import chat_activity_history
 from .chat_activity_reads import chat_work_counts
@@ -276,6 +277,7 @@ from .preflight import (
     catalog_file_index,
     safe_civitai_file_variants,
     selected_catalog_file_metadata,
+    with_catalog_file_hashes,
 )
 from .prior_turn_edits import (
     EditRequestConflict,
@@ -6760,6 +6762,15 @@ async def resolve_catalog_preflight(
             )
         except ExactCivitaiFileSelectionError as exc:
             raise api_error(422, "catalog-file-variant-invalid", str(exc)) from exc
+        if result.can_install and callable(inspect_prefix):
+            selected_metadata = await hash_selected_catalog_files(
+                selected_metadata,
+                provider=source,
+                remote_id=resolved_detail.model.remote_id,
+                revision=resolved_detail.revision,
+                read=inspect_prefix,
+            )
+            result = with_catalog_file_hashes(result, selected_metadata)
         workflow_component_folders: dict[str, str] = {}
         workflow_contract_error: str | None = None
         if result.workflow_template_id:
