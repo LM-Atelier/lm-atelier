@@ -9,16 +9,36 @@
 
 import type { StudioStep } from "./useStudioSession";
 
-/** "From the original", "From step N", or nothing when the step before it is where it came from. */
-export function studioStepOrigin(steps: readonly StudioStep[], index: number): string | null {
+/** The step a result was made from: the nearest earlier appearance of the picture it changed.
+ *
+ * A picture can appear twice when an edit gave back exactly what it was given,
+ * and the nearest one is the one it was made from. Nothing when that picture
+ * is not in the strip.
+ */
+export function studioStepParent(steps: readonly StudioStep[], index: number): number | null {
   const made = steps[index]?.beforeArtifactId;
   if (!made) return null;
-  // The nearest earlier picture it was made from; a picture can appear twice
-  // when an edit gave back exactly what it was given.
   for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
-    if (steps[cursor].artifactId !== made) continue;
-    if (cursor === index - 1) return null;
-    return steps[cursor].isSource ? "From the original" : `From step ${cursor}`;
+    if (steps[cursor].artifactId === made) return cursor;
   }
   return null;
+}
+
+/** "From the original", "From step N", or nothing when the step before it is where it came from. */
+export function studioStepOrigin(steps: readonly StudioStep[], index: number): string | null {
+  const parent = studioStepParent(steps, index);
+  if (parent === null || parent === index - 1) return null;
+  return steps[parent].isSource ? "From the original" : `From step ${parent}`;
+}
+
+/** Every step a result was made from, back to the original: the picture it changed, what that was made from, and so on. */
+export function studioStepAncestors(steps: readonly StudioStep[], index: number): Set<number> {
+  const ancestors = new Set<number>();
+  let current = studioStepParent(steps, index);
+  // A result is always made from a step earlier in the strip, so the walk ends.
+  while (current !== null) {
+    ancestors.add(current);
+    current = studioStepParent(steps, current);
+  }
+  return ancestors;
 }

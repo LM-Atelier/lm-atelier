@@ -22,7 +22,7 @@ import { StudioWorkflowSelector } from "./StudioWorkflowSelector";
 import { artifactSource } from "./messageMedia";
 import { cloneMask, coverage, encodeMaskPng, feather, isEmpty, type MaskRaster } from "./studioMasks";
 import { studioApplyPlan } from "./studioApplyPlan";
-import { studioStepOrigin } from "./studioStepOrigin";
+import { studioStepAncestors, studioStepOrigin } from "./studioStepOrigin";
 import { renderLightMap } from "./studioLightMap";
 import { readSourcePixels } from "./studioSourcePixels";
 import { useAdjustedPreview } from "./useAdjustedPreview";
@@ -526,6 +526,8 @@ function StudioFilmstrip({
   onSelect: (artifactId: string) => void;
 }) {
   if (steps.length === 0) return null;
+  // The results the chosen one was made from, so its path back is visible among the branches.
+  const madeFrom = studioStepAncestors(steps, steps.findIndex((step) => step.artifactId === selectedId));
   // A group of buttons, not a listbox: a real listbox owns focus with a
   // roving tabindex and aria-activedescendant, and role="option" would
   // override the native button role so these stop announcing as activatable.
@@ -538,7 +540,7 @@ function StudioFilmstrip({
           <button
             key={`${step.messageId}-${step.artifactId}`}
             aria-pressed={step.artifactId === selectedId}
-            className={step.artifactId === selectedId ? "selected" : ""}
+            className={step.artifactId === selectedId ? "selected" : madeFrom.has(index) ? "made-from" : ""}
             onClick={() => onSelect(step.artifactId)}
             onFocus={(event) => event.currentTarget.scrollIntoView({ block: "nearest", inline: "nearest" })}
           >
@@ -549,6 +551,7 @@ function StudioFilmstrip({
             />
             <small>{step.isSource ? "Original" : step.instruction || `Step ${index}`}</small>
             {origin && <small className="studio-step-origin">{origin}</small>}
+            {madeFrom.has(index) && <small className="sr-only">Part of how the chosen result was made</small>}
           </button>
         );
       })}
