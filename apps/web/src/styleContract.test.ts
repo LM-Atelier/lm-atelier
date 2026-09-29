@@ -673,6 +673,35 @@ describe("the collapsed sidebar", () => {
     expect(shell).toMatch(/grid-template-columns:[^;]*var\(--sidebar-width[^;]*1fr/);
   });
 
+  it("keeps the work in its own column in a narrower window", () => {
+    // The shell lays three children side by side: the sidebar, its edge and
+    // the work. A rule for narrower windows, written before the edge existed,
+    // gave the grid two tracks, so the edge took the wide one and the work
+    // wrapped into a 220px column under the sidebar with the rest of the
+    // window left empty. Sizing the sidebar from its variable there as well
+    // keeps collapsing it working at that width.
+    const columns = [...css.matchAll(/\.app-shell \{([^}]*)\}/g)]
+      .map((rule) => /grid-template-columns:\s*([^;]+);/.exec(rule[1])?.[1].trim())
+      .filter((value): value is string => Boolean(value));
+    // A phone stacks them instead, in one column.
+    const beside = columns.filter((value) => value !== "1fr");
+    expect(beside.length).toBeGreaterThan(1);
+    for (const value of beside) {
+      expect(value).toMatch(/var\(--sidebar-width[^)]*\).*\sauto\s+1fr$/);
+    }
+  });
+
+  it("stacks the sidebar straight above the work on a phone", () => {
+    // In one column there is no edge to drag, and left in the grid it took
+    // the row meant to grow: a short page such as a new chat sat below a band
+    // of empty space as tall as most of the window.
+    const phone = [...css.matchAll(/@media \(max-width: 680px\) \{([\s\S]*?)\n\}/g)]
+      .map((block) => block[1])
+      .find((block) => block.includes(".app-shell {")) ?? "";
+    expect(phone).toMatch(/\.app-shell \{[^}]*grid-template-rows:\s*auto minmax\(0, 1fr\)/);
+    expect(phone).toMatch(/\.sidebar-resizer \{[^}]*display:\s*none/);
+  });
+
   it("leaves the edge reachable, since it is the only way back", () => {
     // With no separate reveal button, a collapsed sidebar can only be brought
     // back by its own edge - so that edge must still be there and hittable.

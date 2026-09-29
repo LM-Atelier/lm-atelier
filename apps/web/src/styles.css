@@ -1101,7 +1101,7 @@ html[data-motion="reduced"] *, html[data-motion="reduced"] *::before, html[data-
 html[data-motion="reduced"] .progress-track > div.indeterminate { width: 100% !important; opacity: .55; }
 
 @media (max-width: 900px) {
-  .app-shell { grid-template-columns: 220px 1fr; }
+  .app-shell { grid-template-columns: min(var(--sidebar-width, 272px), 220px) auto 1fr; }
   .toolbar { grid-template-columns: 1fr 120px; }.toolbar select:last-child { grid-column: 1 / -1; }
   .metric-grid { grid-template-columns: repeat(2, 1fr); }
   .workflow-layout { grid-template-columns: 230px 1fr; }
@@ -1109,6 +1109,7 @@ html[data-motion="reduced"] .progress-track > div.indeterminate { width: 100% !i
 
 @media (max-width: 680px) {
   .app-shell { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+  .sidebar-resizer { display: none; }
   .sidebar { position: relative; z-index: 20; height: auto; max-height: 100vh; border-right: 0; border-bottom: 1px solid var(--border); overflow-y: auto; }
   main { height: auto; min-height: 0; }
   .workspace-tree { flex: none; min-height: auto; overflow: visible; padding-right: 0; }
