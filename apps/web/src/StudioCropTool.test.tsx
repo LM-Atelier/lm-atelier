@@ -82,4 +82,28 @@ describe("the crop tool", () => {
       crop: { left: 200, top: 100, width: 40, height: 40 },
     });
   });
+
+  it("holds the box to a chosen shape while it is drawn", async () => {
+    openStudio();
+    fireEvent.click(await screen.findByRole("button", { name: /^Crop the picture/ }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Box shape" }), { target: { value: "1:1" } });
+
+    // Two steps right but only one down: the square follows the longer way.
+    const canvas = screen.getByRole("application");
+    fireEvent.keyDown(canvas, { key: "Enter" });
+    for (const key of ["ArrowRight", "ArrowRight", "ArrowDown"]) fireEvent.keyDown(canvas, { key });
+    fireEvent.keyDown(canvas, { key: "Enter" });
+
+    expect(await screen.findByText("Keeps 40 × 40 of 400 × 200.")).toBeInTheDocument();
+    const crop = screen.getByRole("button", { name: "Crop to the box" });
+    await waitFor(() => expect(crop).toHaveAttribute("aria-disabled", "false"));
+    fireEvent.click(crop);
+
+    await waitFor(() => expect(api.studioLocalEdit).toHaveBeenCalledTimes(1));
+    expect(api.studioLocalEdit).toHaveBeenCalledWith("chat-studio", {
+      source_artifact_id: "art-1",
+      operation: "crop",
+      crop: { left: 200, top: 100, width: 40, height: 40 },
+    });
+  });
 });

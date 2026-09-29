@@ -1,11 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
 
-/** Blurring or painting a marked area, through the whole path in a real browser.
+/** Blurring, pixelating or painting a marked area, through the whole path in a real browser.
  *
  * The brush marks the area on the canvas, the browser encodes and uploads it
  * as a selection, and the server works through it. What has to hold at the end
- * is the promise each tool makes: the marked part is softened or painted, and
- * every pixel outside the marking is exactly what it was.
+ * is the promise each tool makes: the marked part is softened, broken into
+ * blocks or painted, and every pixel outside the marking is exactly what it was.
  */
 
 async function dismissSetup(page: Page) {
@@ -80,7 +80,7 @@ test("softens what the brush marked and leaves the rest exact", async ({ page })
     buffer: await stripes(page, 2),
   });
 
-  await page.getByRole("button", { name: "Blur part of the picture" }).click();
+  await page.getByRole("button", { name: "Blur or pixelate part of the picture" }).click();
   // One dab of the default brush in the middle, from the keyboard.
   const canvas = page.getByRole("application");
   await canvas.focus();
@@ -99,6 +99,67 @@ test("softens what the brush marked and leaves the rest exact", async ({ page })
   for (let x = 88; x < 96; x += 1) {
     for (let y = 0; y < 64; y += 1) {
       expect(red(x, y)).toBe(x % 4 < 2 ? 255 : 0);
+    }
+  }
+});
+
+/** A ramp whose red rises by two a column, so a block's mean is known exactly.
+ *
+ * A blur leaves a straight ramp as it was, so only a pixelation makes a run
+ * of columns one level.
+ */
+async function ramp(page: Page): Promise<Buffer> {
+  const dataUrl = await page.evaluate(() => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 96;
+    canvas.height = 64;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("no canvas");
+    const pixels = context.createImageData(96, 64);
+    for (let index = 0; index < 96 * 64; index += 1) {
+      pixels.data.set([(index % 96) * 2, 60, 120, 255], index * 4);
+    }
+    context.putImageData(pixels, 0, 0);
+    return canvas.toDataURL("image/png");
+  });
+  return Buffer.from(dataUrl.split(",")[1], "base64");
+}
+
+test("pixelates what the brush marked and leaves the rest exact", async ({ page }) => {
+  await page.goto("/");
+  await dismissSetup(page);
+  await page.locator(".primary-nav").getByRole("button", { name: "Image Studio" }).click();
+  await page.getByLabel("Choose an image to edit").setInputFiles({
+    name: "ramp.png",
+    mimeType: "image/png",
+    buffer: await ramp(page),
+  });
+
+  await page.getByRole("button", { name: "Blur or pixelate part of the picture" }).click();
+  await page.getByRole("button", { name: "Pixelate", exact: true }).click();
+  await page.getByRole("slider", { name: "Block size" }).fill("8");
+  // As for the paint: a larger brush covers the middle well inside the
+  // feather and still stops short of the columns checked below.
+  await page.getByRole("slider", { name: "Brush size" }).fill("120");
+  const canvas = page.getByRole("application");
+  await canvas.focus();
+  await canvas.press("Enter");
+  await canvas.press("Enter");
+  await page.getByRole("button", { name: "Pixelate the marked area" }).click();
+  await waitForStep(page, "pixelate");
+
+  const { width, data } = await newestPicture(page);
+  const red = (x: number, y: number) => data[(y * width + x) * 4];
+  // The block from (48, 32) to (55, 39) is one level, the mean of its columns'
+  // 96 to 110, where before every column differed.
+  for (let x = 48; x < 56; x += 1) {
+    for (let y = 32; y < 40; y += 1) {
+      expect(red(x, y)).toBe(103);
+    }
+  }
+  for (let x = 88; x < 96; x += 1) {
+    for (let y = 0; y < 64; y += 1) {
+      expect(red(x, y)).toBe(x * 2);
     }
   }
 });

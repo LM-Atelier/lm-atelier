@@ -68,6 +68,24 @@ CASES: list[tuple[str, dict[str, int], str]] = [
         "255,251,235 40,90,187 0,168,0 226,249,116 182,44,144",
     ),
     (
+        "magenta",
+        {"tint": 60},
+        "227,95,57 11,227,145 145,121,145 255,0,255 0,0,0 "
+        "255,241,255 42,86,230 0,161,0 238,240,143 192,43,177",
+    ),
+    (
+        "greener",
+        {"tint": -100},
+        "160,108,40 8,255,102 102,138,102 204,0,204 0,0,0 "
+        "204,255,204 30,98,162 0,184,0 168,255,101 135,49,125",
+    ),
+    (
+        "tinted and warmed",
+        {"tint": 35, "warmth": -45, "brightness": 15},
+        "232,107,66 12,255,169 148,137,169 255,0,255 0,0,0 "
+        "255,255,255 43,98,255 0,183,0 243,255,167 196,48,207",
+    ),
+    (
         "everything",
         {"brightness": -20, "contrast": 35, "saturation": 25, "warmth": -40},
         "200,69,7 0,251,114 102,107,124 255,0,255 0,0,0 "
@@ -118,3 +136,20 @@ def test_warmth_changes_the_color_and_not_the_light() -> None:
     assert cool_blue > cool_red
     for picture in (warm, cool):
         assert abs(ImageStat.Stat(picture.convert("L")).mean[0] - 128) < 2
+
+
+def test_tint_moves_green_against_magenta_and_not_the_light() -> None:
+    grey = Image.new("RGB", (8, 8), (128, 128, 128))
+
+    magenta = adjust_colors(grey, ColorAdjustments(tint=80))
+    green = adjust_colors(grey, ColorAdjustments(tint=-80))
+
+    red, middle, blue = magenta.getpixel((0, 0))
+    assert red == blue > middle
+    red, middle, blue = green.getpixel((0, 0))
+    assert middle > red == blue
+    # Measured with the same luminance weights the gains are evened out by.
+    # Pillow's own grey uses older weights, which count green for less.
+    for picture in (magenta, green):
+        red, middle, blue = picture.getpixel((0, 0))
+        assert abs(0.2126 * red + 0.7152 * middle + 0.0722 * blue - 128) < 1

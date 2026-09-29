@@ -11,6 +11,8 @@ export interface StudioCaption {
   bold: boolean;
   /** A thin edge in the opposite shade, so the words read over a busy picture. */
   outline: boolean;
+  /** A soft dark shadow below and to the right, lifting the words off the picture. */
+  shadow: boolean;
   anchor: StudioCanvasAnchor;
 }
 
@@ -30,6 +32,7 @@ export const DEFAULT_CAPTION: StudioCaption = {
   color: "#ffffff",
   bold: true,
   outline: true,
+  shadow: false,
   anchor: "bottom",
 };
 
@@ -72,6 +75,15 @@ export function captionFontPx(height: number, sizePercent: number): number {
   return Math.max(8, Math.round((height * sizePercent) / 100));
 }
 
+/** Cast a shadow from what is drawn next, or stop casting one. */
+function castShadow(context: CanvasRenderingContext2D, fontPx: number | null): void {
+  context.shadowColor = fontPx === null ? "rgba(0, 0, 0, 0)" : "rgba(0, 0, 0, 0.55)";
+  context.shadowBlur = fontPx === null ? 0 : Math.max(1, Math.round(fontPx / 8));
+  const offset = fontPx === null ? 0 : Math.max(1, Math.round(fontPx / 20));
+  context.shadowOffsetX = offset;
+  context.shadowOffsetY = offset;
+}
+
 function isLight(color: string): boolean {
   const [red, green, blue] = [1, 3, 5].map((start) => Number.parseInt(color.slice(start, start + 2), 16));
   return 0.2126 * red + 0.7152 * green + 0.0722 * blue > 127.5;
@@ -108,7 +120,13 @@ export async function drawCaption(width: number, height: number, caption: Studio
   context.strokeStyle = isLight(caption.color) ? "#000000" : "#ffffff";
   context.lineWidth = Math.max(1, Math.round(fontPx / 10));
   lines.forEach((line, index) => {
-    if (caption.outline) context.strokeText(line, layout.x, layout.tops[index]);
+    // The shadow falls once, from the words' outer edge: the outline when
+    // there is one, and not again from the letters drawn inside it.
+    castShadow(context, caption.shadow ? fontPx : null);
+    if (caption.outline) {
+      context.strokeText(line, layout.x, layout.tops[index]);
+      castShadow(context, null);
+    }
     context.fillText(line, layout.x, layout.tops[index]);
   });
   return canvas;

@@ -7,6 +7,7 @@
  * test: down, moves, up, assert the raster.
  */
 
+import { constrainedCorner, type CropRatio } from "./studioCropShape";
 import {
   fillPolygon,
   fillRect,
@@ -106,21 +107,28 @@ export class RectTool implements PointerTool {
   private origin: ImagePoint | null = null;
   private current: ImagePoint | null = null;
 
-  /** `replace` makes each new box the whole selection, as a crop box is. */
-  constructor(private readonly mask: MaskRaster, private readonly replace = false) {}
+  /** `replace` makes each new box the whole selection, as a crop box is,
+   * and `ratio` holds the box to one shape while it is drawn. */
+  constructor(
+    private readonly mask: MaskRaster,
+    private readonly replace = false,
+    private readonly ratio: CropRatio | null = null,
+  ) {}
 
   down(point: ImagePoint): void {
-    this.origin = point;
-    this.current = point;
+    // A held shape counts whole pixels from a whole pixel.
+    this.origin = this.ratio ? { x: Math.round(point.x), y: Math.round(point.y) } : point;
+    this.current = this.origin;
   }
 
   move(point: ImagePoint): void {
-    if (this.origin) this.current = point;
+    if (this.origin) this.current = this.corner(this.origin, point);
   }
 
-  up(point: ImagePoint): boolean {
+  up(pointer: ImagePoint): boolean {
     if (!this.origin) return false;
     const from = this.origin;
+    const point = this.corner(from, pointer);
     this.origin = null;
     this.current = null;
     if (Math.abs(point.x - from.x) < 1 || Math.abs(point.y - from.y) < 1) return false;
@@ -138,6 +146,10 @@ export class RectTool implements PointerTool {
     return this.origin && this.current
       ? { kind: "rect", from: this.origin, to: this.current }
       : { kind: "none" };
+  }
+
+  private corner(from: ImagePoint, point: ImagePoint): ImagePoint {
+    return this.ratio ? constrainedCorner(from, point, this.ratio, this.mask) : point;
   }
 }
 

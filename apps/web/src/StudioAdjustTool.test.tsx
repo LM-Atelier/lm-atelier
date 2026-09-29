@@ -160,7 +160,7 @@ describe("adjusting in the studio", () => {
     expect(api.studioLocalEdit).toHaveBeenCalledWith("chat-studio", {
       source_artifact_id: "art-1",
       operation: "adjust",
-      adjustments: { brightness: 25, contrast: 0, saturation: 0, warmth: 0 },
+      adjustments: { brightness: 25, contrast: 0, saturation: 0, warmth: 0, tint: 0 },
     });
   });
 });

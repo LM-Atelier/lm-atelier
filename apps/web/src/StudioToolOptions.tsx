@@ -38,20 +38,28 @@ export function StudioToolOptions({
   busy?: boolean;
 }) {
   if (tools.kind === "transform") {
-    return onLocalEdit ? <StudioTransformTool busy={busy} onEdit={onLocalEdit} /> : null;
+    return onLocalEdit ? (
+      <StudioTransformTool busy={busy} onEdit={onLocalEdit} degrees={tools.straightenDegrees}
+        onDegrees={(degrees) => dispatch({ type: "set-straighten", degrees })}
+        onStraighten={() => onLocalEdit("straighten", { straighten: { degrees: tools.straightenDegrees } })} />
+    ) : null;
   }
   if (tools.kind === "crop") {
     return onLocalEdit ? (
-      <StudioCropTool mask={tools.mask} maskVersion={tools.maskVersion} busy={busy}
+      <StudioCropTool mask={tools.mask} maskVersion={tools.maskVersion} shape={tools.cropShape} busy={busy}
+        onShape={(shape) => dispatch({ type: "set-crop-shape", shape })}
         onCrop={(box) => onLocalEdit("crop", { crop: box })} />
     ) : null;
   }
   if (tools.kind === "blur") {
     return onLocalEdit ? (
       <StudioBlurTool mask={tools.mask} maskVersion={tools.maskVersion} featherPx={tools.featherPx}
-        radius={tools.blurRadius} busy={busy}
+        style={tools.blurStyle} radius={tools.blurRadius} block={tools.pixelBlock} busy={busy}
+        onStyle={(style) => dispatch({ type: "set-blur-style", style })}
         onRadius={(radius) => dispatch({ type: "set-blur-radius", radius })}
-        onBlur={(selection) => onLocalEdit("blur", { blur: { selection, radius: tools.blurRadius } })} />
+        onBlock={(block) => dispatch({ type: "set-pixel-block", block })}
+        onBlur={(selection) => onLocalEdit("blur", { blur: { selection, radius: tools.blurRadius } })}
+        onPixelate={(selection) => onLocalEdit("pixelate", { pixelate: { selection, block: tools.pixelBlock } })} />
     ) : null;
   }
   if (tools.kind === "caption") {

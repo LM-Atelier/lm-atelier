@@ -6,20 +6,24 @@
 
 /** An edit the studio makes itself, without a model. */
 export type StudioLocalEditOperation =
-  | "rotate_clockwise" | "rotate_counterclockwise" | "flip_horizontal" | "flip_vertical" | "crop"
-  | "resize" | "adjust" | "blur" | "paint" | "caption" | "canvas";
+  | "rotate_clockwise" | "rotate_counterclockwise" | "flip_horizontal" | "flip_vertical" | "straighten" | "crop"
+  | "resize" | "adjust" | "blur" | "pixelate" | "paint" | "caption" | "canvas";
 
 export interface StudioLocalEditRequest {
   source_artifact_id: string;
   operation: StudioLocalEditOperation;
   /** The part to keep, in the picture's own pixels; given with a crop only. */
   crop?: StudioCropBox | null;
+  /** How far to turn the picture; given with a straightening only. */
+  straighten?: StudioStraighten | null;
   /** The new size in pixels; given with a resize only. */
   size?: StudioPictureSize | null;
   /** Where the light and color sliders stand; given with an adjustment only. */
   adjustments?: StudioColorAdjustments | null;
   /** The uploaded marked area and how far to blur it; given with a blur only. */
   blur?: StudioSelectionBlur | null;
+  /** The uploaded marked area and its block size; given with a pixelation only. */
+  pixelate?: StudioSelectionPixelate | null;
   /** The uploaded marked area and the paint laid over it; given with a paint only. */
   paint?: StudioSelectionPaint | null;
   /** The uploaded drawing of the words; given with a caption only. */
@@ -61,10 +65,19 @@ export interface StudioSelectionBlur {
   radius: number;
 }
 
+/** The marked area to pixelate, uploaded as a selection, and the block size in pixels. */
+export interface StudioSelectionPixelate {
+  mask_artifact_id: string;
+  block: number;
+}
+
 /** What an edit needs besides the picture and the operation: a box, a size,
  * sliders, or a marked area, which is uploaded before the edit is asked for. */
-export type StudioLocalEditDetails = Pick<StudioLocalEditRequest, "crop" | "size" | "adjustments" | "canvas"> & {
+export type StudioLocalEditDetails = Pick<
+  StudioLocalEditRequest, "crop" | "straighten" | "size" | "adjustments" | "canvas"
+> & {
   blur?: { selection: Blob; radius: number };
+  pixelate?: { selection: Blob; block: number };
   paint?: { selection: Blob; color: string; opacity: number };
   caption?: { words: Blob };
 };
@@ -75,6 +88,12 @@ export interface StudioColorAdjustments {
   contrast: number;
   saturation: number;
   warmth: number;
+  tint: number;
+}
+
+/** How far to turn a picture to straighten it, in degrees, clockwise when positive. */
+export interface StudioStraighten {
+  degrees: number;
 }
 
 /** A picture's size in its own pixels. */

@@ -659,6 +659,7 @@ from .studio_local_edits import (
     PictureSize,
     SelectionBlur,
     SelectionPaint,
+    SelectionPixelate,
     edited_picture,
     marked_area,
     paint_color,
@@ -2833,6 +2834,7 @@ async def apply_studio_local_edit(
                 "Only a picture in this studio session can be edited here.",
             )
         crop = CropBox(**payload.crop.model_dump()) if payload.crop is not None else None
+        straighten = payload.straighten.degrees if payload.straighten is not None else None
         size = PictureSize(**payload.size.model_dump()) if payload.size is not None else None
         adjustments = (
             ColorAdjustments(**payload.adjustments.model_dump())
@@ -2841,6 +2843,7 @@ async def apply_studio_local_edit(
         )
         canvas = CanvasChange(**payload.canvas.model_dump()) if payload.canvas is not None else None
         blur = None
+        pixelate = None
         paint = None
         caption = None
         if payload.caption is not None:
@@ -2856,8 +2859,9 @@ async def apply_studio_local_edit(
             except LocalEditError as exc:
                 raise api_error(422, exc.code, str(exc)) from exc
             caption = CaptionOverlay(overlay=overlay, overlay_artifact_id=drawn.id)
-        # A blur and a paint each work through a marked area uploaded first.
-        marking = payload.blur or payload.paint
+        # A blur, a pixelation and a paint each work through a marked area
+        # uploaded first.
+        marking = payload.blur or payload.pixelate or payload.paint
         if marking is not None:
             marked = session.get(Artifact, marking.mask_artifact_id)
             if marked is None or not _is_editable_image(marked):
@@ -2873,6 +2877,10 @@ async def apply_studio_local_edit(
             if payload.blur is not None:
                 blur = SelectionBlur(
                     mask=mask, radius=payload.blur.radius, mask_artifact_id=marked.id
+                )
+            if payload.pixelate is not None:
+                pixelate = SelectionPixelate(
+                    mask=mask, block=payload.pixelate.block, mask_artifact_id=marked.id
                 )
             if payload.paint is not None:
                 paint = SelectionPaint(
@@ -2896,6 +2904,8 @@ async def apply_studio_local_edit(
                 canvas,
                 paint,
                 caption,
+                pixelate,
+                straighten,
             )
         except LocalEditError as exc:
             raise api_error(422, exc.code, str(exc)) from exc
@@ -2913,6 +2923,8 @@ async def apply_studio_local_edit(
             canvas,
             paint,
             caption,
+            pixelate,
+            straighten,
         )
         session.commit()
     return session.scalar(_studio_session_query(session_id)) or studio

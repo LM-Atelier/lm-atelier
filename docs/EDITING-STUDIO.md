@@ -48,21 +48,28 @@ the picture's stored bytes. They run without a graphics card or an installed
 workflow, each arrives as the next step like any other result, and its record
 names what was done rather than a model:
 
-- **Rotate or flip** turns or mirrors the whole picture.
-- **Crop** keeps a box you draw; **Resize** changes the size in pixels, in
-  proportion unless you switch that off; **Change the canvas size** adds room
-  around the picture or trims it, from one of nine places, filled with
-  transparency, white or black.
-- **Adjust light and color** has brightness, contrast, saturation and warmth
-  sliders, shown on the picture as they move. The preview is the result: the
-  browser and the app work the adjustment out the same way.
-- **Blur** and **Paint** act on a marked area, brushed with the tool itself or
-  selected first with any selection tool. Everything outside the marking is
-  left exactly as it was. Paint shows its color and opacity on the marking
-  while you choose them.
+- **Rotate, straighten or flip** turns or mirrors the whole picture. Straighten
+  turns it a few degrees either way, shown on the picture as the slider moves,
+  and keeps the largest box of the picture's own shape that the turned picture
+  still covers, so no empty corners appear.
+- **Crop** keeps a box you draw, which can be held to a shape as you draw it:
+  square, 4:3, 3:2 or 16:9 either way up, or the picture's own shape. A box
+  already drawn takes a newly chosen shape at once. **Resize** changes the size
+  in pixels, in proportion unless you switch that off; **Change the canvas
+  size** adds room around the picture or trims it, from one of nine places,
+  filled with transparency, white or black.
+- **Adjust light and color** has brightness, contrast, saturation, warmth and
+  tint sliders, shown on the picture as they move. Warmth balances blue against
+  amber, and tint green against magenta. The preview is the result: the browser
+  and the app work the adjustment out the same way.
+- **Blur**, **Pixelate** and **Paint** act on a marked area, brushed with the
+  tool itself or selected first with any selection tool. Everything outside the
+  marking is left exactly as it was. Pixelate breaks the area into square
+  blocks of the size you choose, each the average of the pixels it covers.
+  Paint shows its color and opacity on the marking while you choose them.
 - **Add text** draws your words in one of the app's typefaces, at a size, color
-  and place you choose, with an optional outline so they read over a busy
-  picture. What the canvas shows is what is added.
+  and place you choose, with an optional outline or shadow so they read over a
+  busy picture. What the canvas shows is what is added.
 
 **Export** saves the picture as stored, or as PNG, JPEG or WebP. Exports come
 out upright and keep the picture's color profile; JPEG has no transparency, so

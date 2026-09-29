@@ -576,10 +576,12 @@ StudioLocalEditOperation = Literal[
     "rotate_counterclockwise",
     "flip_horizontal",
     "flip_vertical",
+    "straighten",
     "crop",
     "resize",
     "adjust",
     "blur",
+    "pixelate",
     "paint",
     "caption",
     "canvas",
@@ -593,6 +595,12 @@ class StudioCropBox(ApiModel):
     top: StrictInt = Field(ge=0)
     width: StrictInt = Field(ge=1)
     height: StrictInt = Field(ge=1)
+
+
+class StudioStraighten(ApiModel):
+    """How far to turn a picture to straighten it, in degrees, clockwise when positive."""
+
+    degrees: float = Field(ge=-45, le=45)
 
 
 class StudioPictureSize(ApiModel):
@@ -609,6 +617,7 @@ class StudioColorAdjustments(ApiModel):
     contrast: StrictInt = Field(default=0, ge=-100, le=100)
     saturation: StrictInt = Field(default=0, ge=-100, le=100)
     warmth: StrictInt = Field(default=0, ge=-100, le=100)
+    tint: StrictInt = Field(default=0, ge=-100, le=100)
 
 
 class StudioSelectionBlur(ApiModel):
@@ -616,6 +625,13 @@ class StudioSelectionBlur(ApiModel):
 
     mask_artifact_id: str = Field(min_length=1, max_length=80)
     radius: StrictInt = Field(ge=1, le=100)
+
+
+class StudioSelectionPixelate(ApiModel):
+    """The marked area to pixelate, uploaded as a selection, and the block size in pixels."""
+
+    mask_artifact_id: str = Field(min_length=1, max_length=80)
+    block: StrictInt = Field(ge=2, le=100)
 
 
 class StudioSelectionPaint(ApiModel):
@@ -661,9 +677,11 @@ class StudioLocalEditCreate(ApiModel):
     source_artifact_id: str = Field(min_length=1, max_length=80)
     operation: StudioLocalEditOperation
     crop: StudioCropBox | None = None
+    straighten: StudioStraighten | None = None
     size: StudioPictureSize | None = None
     adjustments: StudioColorAdjustments | None = None
     blur: StudioSelectionBlur | None = None
+    pixelate: StudioSelectionPixelate | None = None
     paint: StudioSelectionPaint | None = None
     caption: StudioCaptionOverlay | None = None
     canvas: StudioCanvasChange | None = None
@@ -672,12 +690,16 @@ class StudioLocalEditCreate(ApiModel):
     def details_only_for_their_edit(self) -> Self:
         if (self.operation == "crop") != (self.crop is not None):
             raise ValueError("A crop names the part to keep, and no other edit does.")
+        if (self.operation == "straighten") != (self.straighten is not None):
+            raise ValueError("A straightening names its angle, and no other edit does.")
         if (self.operation == "resize") != (self.size is not None):
             raise ValueError("A resize names the new size, and no other edit does.")
         if (self.operation == "adjust") != (self.adjustments is not None):
             raise ValueError("An adjustment names its sliders, and no other edit does.")
         if (self.operation == "blur") != (self.blur is not None):
             raise ValueError("A blur names the marked area, and no other edit does.")
+        if (self.operation == "pixelate") != (self.pixelate is not None):
+            raise ValueError("A pixelation names the marked area, and no other edit does.")
         if (self.operation == "paint") != (self.paint is not None):
             raise ValueError("A paint names the marked area and its color, and no other edit does.")
         if (self.operation == "caption") != (self.caption is not None):

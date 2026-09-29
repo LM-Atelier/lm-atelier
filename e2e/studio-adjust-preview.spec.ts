@@ -67,6 +67,7 @@ test("shows exactly the picture that applying the adjustment keeps", async ({ pa
   await page.getByRole("slider", { name: "Saturation" }).fill("-41");
   await page.getByRole("slider", { name: "Warmth" }).fill("30");
   await page.getByRole("slider", { name: "Brightness" }).fill("15");
+  await page.getByRole("slider", { name: "Tint" }).fill("-35");
   // The preview is drawn on the next frame after the sliders settle.
   await expect.poll(async () => (await shownPixels(page)).join() !== before.join()).toBe(true);
   const preview = await shownPixels(page);
