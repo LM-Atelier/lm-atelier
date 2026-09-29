@@ -5,12 +5,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 from httpx2 import AsyncClient
+from test_catalog_hardware_advice import _system
+from test_model_planner import _gguf
 
 from local_lm.catalog import HuggingFaceCatalog
 from local_lm.config import Settings
 from local_lm.schemas import CatalogDetail, CatalogModel, SystemInfo
-from tests.test_catalog_hardware_advice import _system
-from tests.test_model_planner import _gguf
 
 
 @pytest.mark.parametrize(
