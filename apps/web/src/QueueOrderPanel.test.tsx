@@ -144,6 +144,27 @@ it("retries an uncertain network result with the exact command and key", async (
   expect(api.reorderQueue).toHaveBeenCalledTimes(2);
 });
 
+it.each([false, true])("keeps focus after retrying unchanged queue data (focus moved: %s)", async (movedFocus) => {
+  vi.mocked(api.reorderQueue)
+    .mockRejectedValueOnce(new Error("Connection interrupted"))
+    .mockResolvedValueOnce({ lane: "transfer", revision: page.revision, owner: owners[2] });
+  open();
+  await advance();
+  fireEvent.click(row("Third transfer").getByRole("button", { name: "Move earlier" }));
+  await advance();
+  const command = vi.mocked(api.reorderQueue).mock.calls[0][1];
+  const retry = screen.getByRole("button", { name: "Retry the same move" });
+  retry.focus();
+  fireEvent.click(retry);
+  const category = screen.getByRole("combobox", { name: "Order category" });
+  if (movedFocus) category.focus();
+  await advance();
+  expect(api.reorderQueue).toHaveBeenLastCalledWith("transfer", command);
+  expect(screen.queryByRole("button", { name: "Retry the same move" })).not.toBeInTheDocument();
+  expect(screen.getByText(/Order saved/)).toBeInTheDocument();
+  expect(movedFocus ? category : screen.getByRole("button", { name: "Refresh dispatch order" })).toHaveFocus();
+});
+
 it("refreshes a conflict without claiming an optimistic move succeeded", async () => {
   vi.mocked(api.reorderQueue).mockImplementation(async () => {
     page = { ...page, revision: 8, items: page.items.map((item) => ({ ...item, unavailable_reason: "lane-busy" })) };
