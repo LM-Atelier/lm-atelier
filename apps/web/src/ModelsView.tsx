@@ -4,7 +4,7 @@ import {
   HardDrive,
   Search,
 } from "lucide-react";
-import { useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { ErrorCallout } from "./ErrorCallout";
 import { FirstFailure } from "./FirstFailure";
@@ -129,15 +129,32 @@ function InstalledAssetRow({
 }) {
   const [editing, setEditing] = useState(false);
   const [editingWords, setEditingWords] = useState(false);
+  const editRulesButton = useRef<HTMLButtonElement>(null);
+  const editWordsButton = useRef<HTMLButtonElement>(null);
+  const useCaseField = useRef<HTMLTextAreaElement>(null);
+  const wasEditing = useRef(false);
+  const wasEditingWords = useRef(false);
+  useEffect(() => {
+    if (editing) useCaseField.current?.focus();
+    else if (wasEditing.current) editRulesButton.current?.focus();
+    wasEditing.current = editing;
+  }, [editing]);
+  useEffect(() => {
+    if (!editingWords && wasEditingWords.current) editWordsButton.current?.focus();
+    wasEditingWords.current = editingWords;
+  }, [editingWords]);
   const measuredWords = measuredTriggerWords(asset);
   const baseModelList = useId();
   const [useCase, setUseCase] = useState(asset.use_case);
+  const [useCaseEdited, setUseCaseEdited] = useState(false);
   const [baseModel, setBaseModel] = useState(asset.family ?? "");
   const [autoApply, setAutoApply] = useState(asset.auto_apply);
   const [modelStrength, setModelStrength] = useState(String(asset.default_model_strength));
   const [clipStrength, setClipStrength] = useState(String(asset.default_clip_strength));
   const beginEditing = () => {
+    if (editing || saving) return;
     setUseCase(asset.use_case);
+    setUseCaseEdited(false);
     setBaseModel(asset.family ?? "");
     setAutoApply(asset.auto_apply);
     setModelStrength(String(asset.default_model_strength));
@@ -154,15 +171,16 @@ function InstalledAssetRow({
   const baseModelChanged = typedBaseModel !== (asset.family ?? "").trim();
   // The server compares base models by their letters and digits, and refuses one with none.
   const baseModelValid = !typedBaseModel || /[\p{L}\p{N}]/u.test(typedBaseModel);
-  const unchanged = useCase.trim() === asset.use_case
+  const unchanged = !useCaseEdited
+    && useCase.trim() === asset.use_case
     && !baseModelChanged
     && autoApply === asset.auto_apply
     && parsedModelStrength === asset.default_model_strength
     && parsedClipStrength === asset.default_clip_strength;
   const save = async () => {
-    if (!strengthsValid || !baseModelValid || (autoApply && !useCase.trim())) return;
+    if (saving || unchanged || !strengthsValid || !baseModelValid || (autoApply && !useCase.trim())) return;
     const saved = await onUpdate({
-      use_case: useCase.trim(),
+      ...(useCaseEdited ? { use_case: useCase.trim() } : {}),
       // Sent only when edited, so the spelling a file declared stays until someone changes it.
       ...(baseModelChanged ? { family: typedBaseModel } : {}),
       auto_apply: autoApply,
@@ -177,8 +195,8 @@ function InstalledAssetRow({
       <span className="model-install-copy">
         <strong>{asset.name}</strong>
         <small>{asset.active ? "Ready" : "Disabled"}{asset.family ? ` · ${asset.family}` : ""}</small>
-        {asset.kind === "lora" && asset.auto_apply && asset.use_case && (
-          <small>Auto · {asset.use_case}</small>
+        {asset.kind === "lora" && (asset.auto_apply || asset.use_case_derived) && asset.use_case && (
+          <small>{asset.auto_apply ? "Auto · " : ""}{asset.use_case_derived ? "Derived · " : ""}{asset.use_case}</small>
         )}
         {/* A glance that may be cut short; the open editor shows the words in full instead. */}
         {asset.kind === "lora" && !editingWords && (measuredWords.length > 0 || asset.typed_trigger_words.length > 0) && (
@@ -200,12 +218,12 @@ function InstalledAssetRow({
           {asset.active ? "Disable" : "Enable"}
         </button>
         {asset.kind === "lora" && (
-          <button className="secondary compact-button" disabled={editing || saving} onClick={beginEditing}>
+          <button ref={editRulesButton} className="secondary compact-button" aria-disabled={editing || saving} onClick={beginEditing}>
             Edit Auto rules
           </button>
         )}
         {asset.kind === "lora" && (
-          <button className="secondary compact-button" disabled={editingWords || saving} onClick={() => setEditingWords(true)}>
+          <button ref={editWordsButton} className="secondary compact-button" aria-disabled={editingWords || saving} onClick={() => { if (!editingWords && !saving) setEditingWords(true); }}>
             Edit trigger words
           </button>
         )}
@@ -215,7 +233,8 @@ function InstalledAssetRow({
         <form className="model-use-case-editor lora-auto-editor" onSubmit={(event) => { event.preventDefault(); void save(); }}>
           <label>
             Use case
-            <textarea aria-label={`Auto use case for ${asset.name}`} rows={2} value={useCase} onChange={(event) => setUseCase(event.target.value)} placeholder="Watercolor landscapes, product photography…" />
+            <textarea ref={useCaseField} aria-label={`Auto use case for ${asset.name}`} rows={2} value={useCase} onChange={(event) => { setUseCase(event.target.value); setUseCaseEdited(true); }} placeholder="Watercolor landscapes, product photography…" />
+            {asset.use_case_derived && !useCaseEdited && <small>Derived from provider metadata. You can edit it.</small>}
           </label>
           <label className="lora-base-model">
             Base model
@@ -237,8 +256,8 @@ function InstalledAssetRow({
             Use automatically
           </label>
           <span className="row-actions">
-            <button type="button" className="secondary compact-button" disabled={saving} onClick={() => setEditing(false)}>Cancel</button>
-            <button type="submit" className="primary compact-button" disabled={saving || unchanged || !strengthsValid || !baseModelValid || (autoApply && !useCase.trim())}>{saving ? "Saving…" : "Save"}</button>
+            <button type="button" className="secondary compact-button" aria-disabled={saving} onClick={() => { if (!saving) setEditing(false); }}>Cancel</button>
+            <button type="submit" className="primary compact-button" aria-disabled={saving || unchanged || !strengthsValid || !baseModelValid || (autoApply && !useCase.trim())}>{saving ? "Saving…" : "Save"}</button>
           </span>
           {!baseModelValid
             ? <small>A base model needs at least one letter or digit.</small>

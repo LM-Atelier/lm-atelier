@@ -159,7 +159,15 @@ async def test_the_route_asks_for_top_rated_loras_for_the_family_and_leaves_inst
 
     async def search(**kwargs: Any) -> CatalogPage:
         asked.append(kwargs)
-        return CatalogPage(items=[_card("1"), _card("2"), _card("3")], next_cursor=None, stale=True)
+        return CatalogPage(
+            items=[
+                _card("1", tags=["LoRA", "Watercolor landscapes"], architecture="SDXL 1.0"),
+                _card("2"),
+                _card("3", tags=["LoRA"], architecture="SDXL 1.0"),
+            ],
+            next_cursor=None,
+            stale=True,
+        )
 
     catalog = app.state.services.catalog_sources.get("civitai")
     assert isinstance(catalog, CivitaiCatalog)
@@ -173,6 +181,10 @@ async def test_the_route_asks_for_top_rated_loras_for_the_family_and_leaves_inst
     assert body["gap"] is None
     assert body["stale"] is True
     assert [item["remote_id"] for item in body["items"]] == ["1", "3"]
+    assert body["items"][0]["use_case"] == "Watercolor landscapes"
+    assert body["items"][0]["use_case_derived"] is True
+    assert body["items"][1]["use_case"] == ""
+    assert body["items"][1]["use_case_derived"] is False
     assert asked == [
         {
             "role": "lora",

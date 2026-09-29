@@ -14,9 +14,10 @@ from typing import Literal
 from sqlalchemy.orm import Session
 
 from .auxiliary_assets import workflow_model_family
+from .lora_use_cases import derive_lora_use_case
 from .model_updates import installed_civitai_identities
 from .models import WorkflowRevision
-from .schemas import CatalogModel, CatalogPage
+from .schemas import CatalogPage, LoraSuggestionOut
 
 MAX_LORA_SUGGESTIONS = 12
 
@@ -58,10 +59,10 @@ def lora_suggestion_scope(session: Session, revision: WorkflowRevision) -> LoraS
     return LoraSuggestionScope(family, base_models, None, installed)
 
 
-def suggested_loras(scope: LoraSuggestionScope, page: CatalogPage) -> list[CatalogModel]:
+def suggested_loras(scope: LoraSuggestionScope, page: CatalogPage) -> list[LoraSuggestionOut]:
     """Keep one installable, not yet installed card per LoRA, in the provider's order."""
 
-    suggestions: list[CatalogModel] = []
+    suggestions: list[LoraSuggestionOut] = []
     seen: set[str] = set()
     for item in page.items:
         model_id = item.parent_model_id or item.remote_id
@@ -74,7 +75,14 @@ def suggested_loras(scope: LoraSuggestionScope, page: CatalogPage) -> list[Catal
         ):
             continue
         seen.add(model_id)
-        suggestions.append(item)
+        use_case = derive_lora_use_case(
+            {"tags": item.tags, "pipeline_tag": item.pipeline_tag, "base_model": item.architecture}
+        )
+        suggestions.append(
+            LoraSuggestionOut(
+                **item.model_dump(), use_case=use_case, use_case_derived=bool(use_case)
+            )
+        )
         if len(suggestions) == MAX_LORA_SUGGESTIONS:
             break
     return suggestions

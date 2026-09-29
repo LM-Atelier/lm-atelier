@@ -2858,12 +2858,19 @@ class CatalogPage(ApiModel):
     stale: bool = False
 
 
+class LoraSuggestionOut(CatalogModel):
+    """Describe a suggested LoRA with the intent derived from its catalog metadata."""
+
+    use_case: str = Field(default="", max_length=1000)
+    use_case_derived: bool = False
+
+
 class LoraSuggestionsOut(ApiModel):
     """Well-rated general-audience LoRAs for the model family a workflow runs."""
 
     family: str | None = Field(default=None, max_length=64)
     gap: Literal["family_unknown", "family_unsupported"] | None = None
-    items: list[CatalogModel] = Field(default_factory=list, max_length=12)
+    items: list[LoraSuggestionOut] = Field(default_factory=list, max_length=12)
     next_cursor: str | None = None
     stale: bool = False
 
@@ -3084,6 +3091,7 @@ class ModelAssetOut(ApiModel):
     manifest_json: dict[str, Any]
     active: bool
     use_case: str
+    use_case_derived: bool = False
     auto_apply: bool
     default_model_strength: float
     default_clip_strength: float

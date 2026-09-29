@@ -955,6 +955,10 @@ async def test_lora_plan_installs_as_a_verified_auxiliary_asset(
         assert asset.active is True
         assert asset.verified_at is not None
         assert asset.kind == "lora"
+        assert asset.use_case == "provider ink"
+        assert getattr(asset, "use_case_derived", False) is True
+        assert asset.auto_apply is False
+        assert asset.manifest_json["use_case_metadata"] == {"trained_words": ["provider ink"]}
         assert asset.manifest_json["sha256"] == digest
         assert asset.manifest_json["comfy_name"] == "adapter.safetensors"
         assert asset.manifest_json["metadata"]["trigger_words"] == [

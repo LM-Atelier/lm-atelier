@@ -235,7 +235,7 @@ def select_automatic_lora_stack(
     *,
     workflow_activation_id: str | None = None,
 ) -> AutomaticLoraSelection:
-    """Select a small deterministic LoRA stack from user-authored use cases."""
+    """Select a small deterministic LoRA stack from saved use cases."""
 
     if not workflow_lora_extension(revision):
         return AutomaticLoraSelection([], _automatic_selection_provenance([]))
@@ -330,6 +330,7 @@ def select_automatic_lora_stack(
                 **setting,
                 "name": asset.name,
                 "use_case": asset.use_case,
+                "use_case_derived": asset.use_case_derived,
                 "matched_terms": matched_terms,
                 "reason": match_type,
             }

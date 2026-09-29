@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { measuredTriggerWords, parseTypedTriggerWords } from "./loraTriggerWords";
 import type { ModelAssetInstall } from "./types";
 
@@ -20,6 +20,8 @@ export function LoraTriggerWordsEditor({
   onCancel: () => void;
 }) {
   const [text, setText] = useState(asset.typed_trigger_words.join(", "));
+  const field = useRef<HTMLInputElement>(null);
+  useEffect(() => { field.current?.focus(); }, []);
   const measured = measuredTriggerWords(asset);
   const typed = parseTypedTriggerWords(text);
   const unchanged = typed.join("\n") === asset.typed_trigger_words.join("\n");
@@ -28,7 +30,7 @@ export function LoraTriggerWordsEditor({
       className="model-use-case-editor lora-trigger-editor"
       onSubmit={(event) => {
         event.preventDefault();
-        if (!unchanged) onSave(typed);
+        if (!saving && !unchanged) onSave(typed);
       }}
     >
       <small>
@@ -39,6 +41,7 @@ export function LoraTriggerWordsEditor({
       <label>
         Your trigger words
         <input
+          ref={field}
           aria-label={`Trigger words for ${asset.name}`}
           value={text}
           onChange={(event) => setText(event.target.value)}
@@ -46,10 +49,10 @@ export function LoraTriggerWordsEditor({
         />
       </label>
       <span className="row-actions">
-        <button type="button" className="secondary compact-button" disabled={saving} onClick={onCancel}>
+        <button type="button" className="secondary compact-button" aria-disabled={saving} onClick={() => { if (!saving) onCancel(); }}>
           Cancel
         </button>
-        <button type="submit" className="primary compact-button" disabled={saving || unchanged}>
+        <button type="submit" className="primary compact-button" aria-disabled={saving || unchanged}>
           {saving ? "Saving…" : "Save"}
         </button>
       </span>

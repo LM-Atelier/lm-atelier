@@ -92,13 +92,16 @@ afterEach(() => {
 });
 
 it("asks for nothing until opened, then lists each LoRA with its maker and how liked it is", async () => {
-  vi.mocked(api.workflowLoraSuggestions).mockResolvedValue(answer());
+  vi.mocked(api.workflowLoraSuggestions).mockResolvedValue(answer({
+    items: [{ ...card("1"), use_case: "Watercolor landscapes", use_case_derived: true }],
+  }));
   show();
   expect(api.workflowLoraSuggestions).not.toHaveBeenCalled();
 
   openSuggestions();
 
   expect(await screen.findByText("Watercolor wash 1")).toBeInTheDocument();
+  expect(screen.getByText("Derived · Watercolor landscapes")).toBeInTheDocument();
   expect(screen.getByText(`garden-studio · ${(850).toLocaleString()} likes · ${(12000).toLocaleString()} downloads`)).toBeInTheDocument();
   expect(api.workflowLoraSuggestions).toHaveBeenCalledWith("wfrev-garden", expect.anything());
 });

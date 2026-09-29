@@ -40,8 +40,9 @@ describe("LoRA trigger words", () => {
 
     expect(screen.getByText("From the file: ink wash, soft edge")).toBeInTheDocument();
     expect(screen.getByLabelText("Trigger words for Atelier Ink")).toHaveValue("");
+    expect(screen.getByLabelText("Trigger words for Atelier Ink")).toHaveFocus();
     const save = screen.getByRole("button", { name: "Save" });
-    expect(save).toBeDisabled();
+    expect(save).toHaveAttribute("aria-disabled", "true");
 
     fireEvent.change(screen.getByLabelText("Trigger words for Atelier Ink"), {
       target: { value: "studio glow, watercolor edge" },
@@ -63,5 +64,29 @@ describe("LoRA trigger words", () => {
 
     expect(screen.getByText("The file declares no trigger words.")).toBeInTheDocument();
     expect(screen.getByLabelText("Trigger words for Plain")).toHaveValue("studio glow");
+  });
+
+  it("keeps pending controls focused and ignores repeated submission and cancellation", () => {
+    const onSave = vi.fn();
+    const onCancel = vi.fn();
+    const { rerender } = render(<LoraTriggerWordsEditor asset={declared} saving={false} onSave={onSave} onCancel={onCancel} />);
+    const field = screen.getByLabelText("Trigger words for Atelier Ink");
+    fireEvent.change(field, { target: { value: "watercolor edge" } });
+    const save = screen.getByRole("button", { name: "Save" });
+    save.focus();
+    fireEvent.click(save);
+    expect(onSave).toHaveBeenCalledWith(["watercolor edge"]);
+    rerender(<LoraTriggerWordsEditor asset={declared} saving onSave={onSave} onCancel={onCancel} />);
+    expect(save).toHaveFocus();
+    expect(save).toHaveAttribute("aria-disabled", "true");
+    fireEvent.submit(field.closest("form")!);
+    fireEvent.click(save);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onSave).toHaveBeenCalledTimes(1);
+    expect(onCancel).not.toHaveBeenCalled();
+    rerender(<LoraTriggerWordsEditor asset={declared} saving={false} onSave={onSave} onCancel={onCancel} />);
+    expect(save).toHaveFocus();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onCancel).toHaveBeenCalledTimes(1);
   });
 });
