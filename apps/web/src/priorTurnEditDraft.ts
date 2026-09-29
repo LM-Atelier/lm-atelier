@@ -53,6 +53,12 @@ function canonical(value: unknown): unknown {
 export function initializePriorTurnEditDraft(source: PriorTurnEditSource): PriorTurnEditDraft {
   const saved = snapshot(source);
   const role = saved.settings_role;
+  const sourceFit = saved.source_fit ? {
+    sourceArtifactId: saved.input_artifact_ids[0],
+    workflowRevisionId: saved.workflow_revision_id,
+    request: snapshot(saved.source_fit),
+  } : undefined;
+  if (sourceFit && !sourceFitShape(sourceFit)) throw new Error("The source canvas is unavailable.");
   if (role !== "chat" && role !== "image" && role !== "video") throw new Error("The source settings role is unavailable.");
   const step = (saved.steps?.length ?? 0) > 1 ? saved.steps?.find((item) => item.source_run_id === saved.source_run_id) : undefined;
   return {
@@ -61,6 +67,7 @@ export function initializePriorTurnEditDraft(source: PriorTurnEditSource): Prior
     composer: { text: saved.text, promptSource: saved.prompt_source as unknown as ComposerPromptSource | null },
     editor: {
       requestId: crypto.randomUUID(), mode: saved.original_mode ?? saved.mode,
+      ...(sourceFit ? { sourceFit } : {}),
       attachments: saved.input_artifact_ids.map((id) => {
         const artifact = saved.input_artifacts.find((item) => item.id === id);
         if (!artifact) throw new Error("A source attachment is unavailable.");
@@ -181,6 +188,25 @@ function buildLegacyPriorTurnEditRequest(draft: PriorTurnEditDraft, submission?:
   if (draft.workflowChoice.kind === "explicit") request.workflow_selection = draft.workflowChoice.value;
   if (draft.profileChoice.kind === "explicit") request.profile_id = draft.profileChoice.value;
   if (draft.visionProfileChoice.kind === "explicit") request.vision_profile_id = draft.visionProfileChoice.value;
+  const fit = submission?.sourceFit !== undefined ? submission.sourceFit : editor.sourceFit;
+  if (fit === null) request.source_fit = null;
+  else if (fit !== undefined) {
+    const inputs = request.input_artifact_ids ?? source.input_artifact_ids;
+    if (!sourceFitShape(fit) || (request.mode !== "image" && request.mode !== "auto") || inputs[0] !== fit.sourceArtifactId) {
+      throw new Error("The source or workflow changed. Preview the canvas again before sending.");
+    }
+    request.source_fit = { ...fit.request };
+    request.input_artifact_ids = [...inputs];
+    // An unchanged accepted revision is already bound by the source snapshot.
+    // Re-selecting it would discard the saved workflow and model configuration.
+    if (draft.workflowChoice.kind !== "inherit" || fit.workflowRevisionId !== source.workflow_revision_id) {
+      request.workflow_revision_id = fit.workflowRevisionId;
+    }
+    delete request.workflow_selection;
+    // The explicit canvas owns both dimensions for this version.
+    delete request.settings?.width;
+    delete request.settings?.height;
+  }
   return snapshot(request);
 }
 
@@ -286,8 +312,16 @@ function sourceShape(value: Record<string, unknown>, chatId: string, messageId: 
     && Array.isArray(value.context_messages) && value.context_messages.every((item) => record(item) && typeof item.role === "string" && typeof item.content === "string");
 }
 
+function sourceFitShape(value: unknown): value is import("./sourceFit").SourceFitSelection {
+  return record(value) && nonempty(value.sourceArtifactId) && nonempty(value.workflowRevisionId)
+    && record(value.request) && value.request.mode === "extend"
+    && count(value.request.width) && (value.request.width as number) <= 1_000_000
+    && count(value.request.height) && (value.request.height as number) <= 1_000_000;
+}
+
 function editorShape(value: Record<string, unknown>): boolean {
   return nonempty(value.requestId) && mode(value.mode) && count(value.outputCount)
+    && (value.sourceFit === undefined || value.sourceFit === null || sourceFitShape(value.sourceFit))
     && ["inherit", "replace"].includes(String(value.attachmentIntent)) && ["inherit", "replace"].includes(String(value.referenceIntent))
     && Array.isArray(value.attachments) && value.attachments.every((item) => record(item) && nonempty(item.id)
       && (item.kind === "image" || item.kind === "video") && ["uploaded", "generated", "edited"].includes(String(item.origin)))
@@ -338,13 +372,14 @@ export function readPriorTurnEditDraft(chatId: string, messageId: string, storag
   }
 }
 
-/** Persist the frozen request before returning it to the caller that sends it. */
-export function preparePriorTurnEditSubmission(draft: PriorTurnEditDraft, submission?: TurnEditorSubmission, storage?: PriorTurnEditStorage): { draft: PriorTurnEditDraft; request: PriorTurnEditRequest } {
+/** Normalize editor values once for both read-only preview and durable submission. */
+function preparePriorTurnEditRequest(draft: PriorTurnEditDraft, submission?: TurnEditorSubmission) {
   const next = snapshot(draft);
   if (submission) {
     next.composer = { text: submission.text, promptSource: submission.promptSource ?? null };
     next.editor.mode = submission.mode;
     next.editor.outputCount = submission.outputCount;
+    if (submission.sourceFit !== undefined) next.editor.sourceFit = snapshot(submission.sourceFit);
     next.settings = snapshot(submission.settings);
     if (next.configurations) for (const name of Object.keys(next.editor.templateSettings?.settings ?? {})) {
       if (Object.hasOwn(draft.settings, name)) next.settings[name] = snapshot(draft.settings[name]);
@@ -352,14 +387,23 @@ export function preparePriorTurnEditSubmission(draft: PriorTurnEditDraft, submis
     }
     next.settingsRole = submission.settingsRole;
   }
-  let request = buildPriorTurnEditRequest(next, submission);
-  const editableFingerprint = priorTurnEditRequestFingerprint(next.source, request);
+  const editable = buildPriorTurnEditRequest(next, submission);
+  const editableFingerprint = priorTurnEditRequestFingerprint(next.source, editable);
   const previousEditable = next.pending?.editableFingerprint ?? next.pending?.fingerprint;
-  if (next.pending && previousEditable === editableFingerprint) {
-    request = snapshot(next.pending.request);
-  } else if (next.pending) {
-    request.idempotency_key = crypto.randomUUID();
-  }
+  const reusesPending = Boolean(next.pending && previousEditable === editableFingerprint);
+  const request = reusesPending ? snapshot(next.pending!.request) : editable;
+  return { draft: next, request, editableFingerprint, reusesPending };
+}
+
+/** Preview has the same request semantics without persisting or rotating a request key. */
+export function buildPriorTurnEditPreviewRequest(draft: PriorTurnEditDraft, submission?: TurnEditorSubmission): PriorTurnEditRequest {
+  return preparePriorTurnEditRequest(draft, submission).request;
+}
+
+/** Persist the frozen request before returning it to the caller that sends it. */
+export function preparePriorTurnEditSubmission(draft: PriorTurnEditDraft, submission?: TurnEditorSubmission, storage?: PriorTurnEditStorage): { draft: PriorTurnEditDraft; request: PriorTurnEditRequest } {
+  const { draft: next, request, editableFingerprint, reusesPending } = preparePriorTurnEditRequest(draft, submission);
+  if (next.pending && !reusesPending) request.idempotency_key = crypto.randomUUID();
   next.editor.requestId = request.idempotency_key;
   next.pending = {
     editableFingerprint, fingerprint: priorTurnEditRequestFingerprint(next.source, request),

@@ -1,3 +1,4 @@
+import type { SourceFitSelection } from "./sourceFit";
 import type { VisualTarget } from "./libraryEditTargets";
 import type { TurnReference } from "./mentionDraft";
 import type {
@@ -17,7 +18,7 @@ import type {
   WorkPlan,
 } from "./types";
 
-type SendFromComposer = (
+export type SendFromComposer = (
   text: string,
   mode: RoutingMode,
   artifacts: string[],
@@ -25,6 +26,7 @@ type SendFromComposer = (
   references: TurnReference[],
   outputCount?: number,
   promptSource?: ComposerPromptSource,
+  sourceFit?: SourceFitSelection,
 ) => void;
 
 export type PendingTurn = { id: string; text: string; mode: RoutingMode };

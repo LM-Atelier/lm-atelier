@@ -102,7 +102,7 @@ def test_async_database_session_boundaries_remain_explicit() -> None:
 WRITER_LOCK_SPANS = {
     (
         "orchestrator.py",
-        "_create_new_turn",
+        "_prepare_or_admit_turn",
         "self._ensure_response_revision",
     ),
 }

@@ -18,6 +18,7 @@ import {
   type MediaOrigin,
 } from "./messageMedia";
 import { sizeDisagreement, sizeDisagreementMessage } from "./outputSizeAgreement";
+import { sourcePixelsChanged } from "./sourceFitAgreement";
 import type { MessagePart } from "./types";
 
 export function ArtifactPart({
@@ -63,6 +64,7 @@ export function ArtifactPart({
   // refuses those, and this is the second half of the same refusal for the
   // streaming previews the part flag marks.
   const sizeNote = preview ? null : sizeDisagreement(part);
+  const sourceChanged = !preview && sourcePixelsChanged(part);
   const label = preview ? "Generation preview" : mediaOriginLabel(
     origin,
     kind,
@@ -155,6 +157,11 @@ export function ArtifactPart({
         {sizeNote && (
           <p className="media-size-note" role="status">
             {sizeDisagreementMessage(sizeNote)}
+          </p>
+        )}
+        {sourceChanged && (
+          <p className="media-size-note" role="status">
+            This image changed pixels in the source area. Extend was asked to preserve them.
           </p>
         )}
       </figure>

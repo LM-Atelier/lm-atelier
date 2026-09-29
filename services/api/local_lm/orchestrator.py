@@ -210,6 +210,8 @@ from .schemas import (
     RoutingPlan,
     RoutingReasonCode,
     RunOut,
+    SettingField,
+    SourceFitRequest,
     TurnAccepted,
     TurnRequest,
     TurnWorkflowSelectionIn,
@@ -229,6 +231,22 @@ from .setup_verification import (
     recover_terminal_setup_verifications,
     setup_verification_for_chat,
 )
+from .source_fit_image import (
+    MAX_SOURCE_BYTES,
+    PreparedSourceImage,
+    SourceFitImageRecord,
+    prepare_source_fit_image,
+    replay_source_fit_image,
+    retain_prepared_source_fit_image,
+)
+from .source_fit_output import SourceFitPixelVerifier
+from .source_fit_preview import (
+    SourceFitPreviewOut,
+    preview_source_fit,
+    source_fit_preview_for_recipe,
+)
+from .source_fit_recipe import SourceExtensionRecipe, plan_source_extension
+from .source_fit_restore import SourceRestore, restore_source, restores
 from .studio_masks import (
     MASK_SETTING_KEY,
     MaskContractError,
@@ -378,6 +396,23 @@ PENDING_OUTPUT_REFERENCE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _TurnSettingLayers:
+    project: Project | None
+    presets: tuple[
+        GenerationPreset | None,
+        GenerationPreset | None,
+        GenerationPreset | None,
+        GenerationPreset | None,
+    ]
+    mask: Any
+    relight: Any
+    request_settings: dict[str, Any]
+    preset_layers: tuple[tuple[str, GenerationPreset, dict[str, Any]], ...]
+    effective_settings: dict[str, Any]
+    workflow_lora_layers: WorkflowLoraAdmissionLayers
 
 
 @dataclass(frozen=True, slots=True)
@@ -1084,6 +1119,7 @@ class ConversationOrchestrator:
         inherited_image_edit_strength: dict[str, Any] | None = None,
         inherited_prompt_source: object | None = None,
         inherited_workflow: AcceptedWorkflow | None = None,
+        inherited_source_fit: SourceExtensionRecipe | None = None,
         reference_source_message_id: str | None = None,
         freeze_context: bool = False,
         activate_branch: bool = True,
@@ -1133,6 +1169,7 @@ class ConversationOrchestrator:
                 inherited_image_edit_strength=inherited_image_edit_strength,
                 inherited_prompt_source=inherited_prompt_source,
                 inherited_workflow=inherited_workflow,
+                inherited_source_fit=inherited_source_fit,
                 reference_source_message_id=reference_source_message_id,
                 freeze_context=freeze_context,
                 activate_branch=activate_branch,
@@ -1169,6 +1206,7 @@ class ConversationOrchestrator:
                 inherited_image_edit_strength=inherited_image_edit_strength,
                 inherited_prompt_source=inherited_prompt_source,
                 inherited_workflow=inherited_workflow,
+                inherited_source_fit=inherited_source_fit,
                 reference_source_message_id=reference_source_message_id,
                 freeze_context=freeze_context,
                 activate_branch=activate_branch,
@@ -1292,7 +1330,7 @@ class ConversationOrchestrator:
             session, user_message_id, resolve_reference_requests(session, requested)
         )
 
-    async def _create_new_turn(  # noqa: C901, PLR0912, PLR0915
+    async def _create_new_turn(
         self,
         session: Session,
         chat_id: str,
@@ -1304,6 +1342,7 @@ class ConversationOrchestrator:
         inherited_image_edit_strength: dict[str, Any] | None = None,
         inherited_prompt_source: object | None = None,
         inherited_workflow: AcceptedWorkflow | None = None,
+        inherited_source_fit: SourceExtensionRecipe | None = None,
         reference_source_message_id: str | None = None,
         prompt_batch_selection: PromptBatchQueueSelection | None = None,
         freeze_context: bool = False,
@@ -1311,6 +1350,88 @@ class ConversationOrchestrator:
         before_commit: Callable[[Session, Run], None] | None = None,
         resolve_source: TurnSourceResolver | None = None,
     ) -> TurnAccepted:
+        result = await self._prepare_or_admit_turn(
+            session,
+            chat_id,
+            request,
+            use_explicit_parent=use_explicit_parent,
+            replacement_message_id=replacement_message_id,
+            source_action=source_action,
+            inherited_image_edit_strength=inherited_image_edit_strength,
+            inherited_prompt_source=inherited_prompt_source,
+            inherited_workflow=inherited_workflow,
+            inherited_source_fit=inherited_source_fit,
+            reference_source_message_id=reference_source_message_id,
+            prompt_batch_selection=prompt_batch_selection,
+            freeze_context=freeze_context,
+            activate_branch=activate_branch,
+            before_commit=before_commit,
+            resolve_source=resolve_source,
+        )
+        if not isinstance(result, TurnAccepted):
+            raise RuntimeError("Turn preparation did not return accepted work.")
+        return result
+
+    async def preview_turn_source_fit(
+        self,
+        session: Session,
+        chat_id: str,
+        request: TurnRequest,
+        *,
+        use_explicit_parent: bool = False,
+        source_action: str = "send",
+        inherited_image_edit_strength: dict[str, Any] | None = None,
+        inherited_prompt_source: object | None = None,
+        inherited_workflow: AcceptedWorkflow | None = None,
+        inherited_source_fit: SourceExtensionRecipe | None = None,
+        reference_source_message_id: str | None = None,
+        resolve_source: TurnSourceResolver | None = None,
+    ) -> SourceFitPreviewOut:
+        """Use ordinary turn selection, stopping before the admission transaction."""
+        if session.new or session.dirty or session.deleted:
+            raise ValueError("A source preview requires a read-only session.")
+        with session.no_autoflush:
+            result = await self._prepare_or_admit_turn(
+                session,
+                chat_id,
+                request,
+                preview_only=True,
+                use_explicit_parent=use_explicit_parent,
+                source_action=source_action,
+                inherited_image_edit_strength=inherited_image_edit_strength,
+                inherited_prompt_source=inherited_prompt_source,
+                inherited_workflow=inherited_workflow,
+                inherited_source_fit=inherited_source_fit,
+                reference_source_message_id=reference_source_message_id,
+                resolve_source=resolve_source,
+            )
+        if not isinstance(result, SourceFitPreviewOut):
+            raise RuntimeError("Source preparation did not return a preview.")
+        return result
+
+    async def _prepare_or_admit_turn(  # noqa: C901, PLR0912, PLR0915
+        self,
+        session: Session,
+        chat_id: str,
+        request: TurnRequest,
+        *,
+        preview_only: bool = False,
+        use_explicit_parent: bool = False,
+        replacement_message_id: str | None = None,
+        source_action: str = "send",
+        inherited_image_edit_strength: dict[str, Any] | None = None,
+        inherited_prompt_source: object | None = None,
+        inherited_workflow: AcceptedWorkflow | None = None,
+        inherited_source_fit: SourceExtensionRecipe | None = None,
+        reference_source_message_id: str | None = None,
+        prompt_batch_selection: PromptBatchQueueSelection | None = None,
+        freeze_context: bool = False,
+        activate_branch: bool = True,
+        before_commit: Callable[[Session, Run], None] | None = None,
+        resolve_source: TurnSourceResolver | None = None,
+    ) -> TurnAccepted | SourceFitPreviewOut:
+        if preview_only and request.source_fit is None:
+            raise ValueError("Choose a source canvas to preview.")
         chat = session.get(Chat, chat_id)
         if not chat:
             raise LookupError("chat not found")
@@ -1510,6 +1631,8 @@ class ConversationOrchestrator:
             raise OrderedPlanConfirmationRequired(ordered_intent)
         if ordered_intent and (has_prompt_source or prompt_batch_selection is not None):
             raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
+        if ordered_intent and request.source_fit is not None:
+            raise ValueError("Choose a single image edit to fit its source canvas.")
         if ordered_intent:
             return await self._create_ordered_turn(
                 session,
@@ -1601,6 +1724,7 @@ class ConversationOrchestrator:
             inherited_profile = inherited.profile
             inherited_vision = inherited.vision_profile
             inherited_workflow = inherited.workflow
+            inherited_source_fit = inherited.source_fit
             inherited_image_edit_strength = inherited.image_edit_strength
 
         profile, model_selection, workflow_revision = self._execution_for_turn(
@@ -1683,68 +1807,22 @@ class ConversationOrchestrator:
                 workflow_revision is not None and revision_accepts_added_loras(workflow_revision)
             ),
         )
-        request_fields = [field for field in fields if field.scope != "load"]
-        project = session.get(Project, chat.project_id) if chat.project_id else None
-        default_preset, project_preset, chat_preset, turn_preset = self._presets_for_turn(
-            session, project, chat, plan.operation, request
-        )
-        workflow_lora_layers = self._workflow_lora_layers(
-            role,
-            profile,
-            project,
-            chat,
-            request.settings,
-            presets=(default_preset, project_preset, chat_preset, turn_preset),
-        )
         # A selection is not a tunable, so it is not in the workflow's setting
         # schema and the generic validator would refuse it as unknown - which
         # is what made every masked edit fail with "unsupported settings: mask".
         # It travels in settings because that is how it reaches the run record,
         # and it is checked against its own contract a few lines below, where
         # the workflow is known and can say whether it accepts one at all.
-        mask, tunables = split_mask_setting(workflow_lora_layers.ordinary("turn"))
-        # A relight request is not a workflow field either, for the same reason.
-        relight, tunables = split_relight_setting(tunables)
-        request_settings = validate_settings(tunables, request_fields)
-        if turn_preset is not None:
-            request_settings = {
-                **compatible_stored_settings(
-                    workflow_lora_layers.ordinary("turn_preset"), request_fields
-                ),
-                **request_settings,
-            }
-        preset_layers = [
-            (
-                scope,
-                preset,
-                compatible_stored_settings(workflow_lora_layers.ordinary(origin), request_fields),
-            )
-            for scope, preset, origin in (
-                ("default", default_preset, "default_preset"),
-                ("project", project_preset, "project_preset"),
-                ("chat", chat_preset, "chat_preset"),
-                ("turn", turn_preset, "turn_preset"),
-            )
-            if preset
-        ]
-        effective_settings = resolve_generation_settings(
-            fields,
-            request_fields=request_fields,
-            profile_defaults=(
-                profile.load_settings_json if profile else {},
-                workflow_lora_layers.ordinary("profile_request"),
-                workflow_lora_layers.ordinary("default_preset"),
-            ),
-            project_defaults=(
-                workflow_lora_layers.ordinary("project_preset"),
-                workflow_lora_layers.ordinary("project"),
-            ),
-            chat_defaults=(
-                workflow_lora_layers.ordinary("chat_preset"),
-                workflow_lora_layers.ordinary("chat"),
-            ),
-            turn_overrides=request_settings,
+        setting_layers = self.resolve_turn_setting_layers(
+            session, chat, plan.operation, profile, request, fields
         )
+        mask = setting_layers.mask
+        default_preset, project_preset, chat_preset, turn_preset = setting_layers.presets
+        request_settings = setting_layers.request_settings
+        preset_layers = setting_layers.preset_layers
+        effective_settings = setting_layers.effective_settings
+        relight = setting_layers.relight
+        workflow_lora_layers = setting_layers.workflow_lora_layers
         effective_settings, video_length_resolution = resolve_video_length_settings(
             effective_settings,
             workflow_revision.input_schema_json if workflow_revision else None,
@@ -1827,6 +1905,7 @@ class ConversationOrchestrator:
             ),
             inherited_auto=inherited_image_edit_strength,
             workflow_schema=(workflow_revision.input_schema_json if workflow_revision else None),
+            extension=request.source_fit is not None,
         )
         # A selection is validated where the workflow is known, so a mask
         # aimed at a workflow that cannot apply one refuses before the turn
@@ -2013,6 +2092,63 @@ class ConversationOrchestrator:
                     f"The saved {scope} setting {key} is not compatible with every "
                     "workflow selected for this prompt batch."
                 )
+        source_preview: SourceFitPreviewOut | None = None
+        if request.source_fit is not None:
+            if (
+                plan.operation != Operation.IMAGE_TO_IMAGE
+                or not resolved_input_ids
+                or workflow_revision is None
+                or workflow_revision.engine != "comfyui"
+                or self.engines.settings.media_engine != "comfyui"
+            ):
+                raise ValueError(
+                    "Source fitting requires an image and a ComfyUI image-edit workflow."
+                )
+            if (
+                effective_settings.get(MASK_SETTING_KEY)
+                or OUTPAINT_SETTING_KEY in effective_settings
+                or any(key in request.settings for key in ("width", "height"))
+            ):
+                raise ValueError(
+                    "Choose the source canvas without a separate mask, margins or size."
+                )
+            # Validate selected bytes before even transient admission writes.
+            # A replay uses its retained normalized pixels; the upload may change.
+            if (
+                inherited_workflow is not None
+                and inherited_source_fit is not None
+                and inherited_source_fit.image.source_artifact_id == resolved_input_ids[0]
+            ):
+                replay_source_fit_image(
+                    session,
+                    self.artifacts,
+                    inherited_source_fit.image,
+                    selected_source_id=resolved_input_ids[0],
+                )
+                preview_recipe = plan_source_extension(
+                    inherited_source_fit.image,
+                    canvas_width=request.source_fit.width,
+                    canvas_height=request.source_fit.height,
+                    api_graph=workflow_revision.api_graph_json,
+                    save_node_id=inherited_source_fit.save_node_id,
+                )
+                source_preview = source_fit_preview_for_recipe(workflow_revision, preview_recipe)
+            else:
+                fit_definition = session.get(WorkflowDefinition, workflow_revision.workflow_id)
+                fit_source = session.get(Artifact, resolved_input_ids[0])
+                if fit_definition is None or fit_source is None:
+                    raise ValueError("Source image or workflow is unavailable.")
+                source_preview = preview_source_fit(
+                    fit_definition,
+                    workflow_revision,
+                    self.artifacts,
+                    fit_source,
+                    request.source_fit,
+                )
+        if preview_only:
+            if source_preview is None:
+                raise ValueError("The selected turn does not provide a source canvas.")
+            return source_preview
         if replacement_message:
             # The baseline revision is written HERE, not beside its conflict checks
             # above, because its flush takes SQLite's single writer lock and every
@@ -2094,6 +2230,13 @@ class ConversationOrchestrator:
             # Each planned output owns its own lifecycle. Prevent an engine-native
             # batch from multiplying the visible output slots a second time.
             effective_settings["batch_size"] = 1
+        estimate_settings = effective_settings
+        if request.source_fit is not None:
+            estimate_settings = {
+                **effective_settings,
+                "width": request.source_fit.width,
+                "height": request.source_fit.height,
+            }
         generation_estimate = (
             self._video_estimate(effective_settings) if "video" in plan.operation.value else None
         )
@@ -2122,7 +2265,7 @@ class ConversationOrchestrator:
             }
         else:
             media_plan_estimate = (
-                self._media_plan_estimate(plan.operation, effective_settings, output_count)
+                self._media_plan_estimate(plan.operation, estimate_settings, output_count)
                 if plan.operation != Operation.TEXT
                 else None
             )
@@ -2555,6 +2698,9 @@ class ConversationOrchestrator:
                 "resolved_settings": output_settings,
                 "generation_estimate": generation_estimate,
                 "video_length": video_length_resolution,
+                "source_fit_request": (
+                    request.source_fit.model_dump(mode="json") if request.source_fit else None
+                ),
                 "media_plan_estimate": (
                     self._media_plan_estimate(plan.operation, output_settings, 1)
                     if output_context is not None
@@ -2720,6 +2866,10 @@ class ConversationOrchestrator:
             # after every await above: the turn becomes durable only if
             # the claim still owns its row at the commit.
             before_commit(session, runs[0])
+        if request.source_fit is not None:
+            for accepted_run in runs:
+                if accepted_context(session, accepted_run) is None:
+                    self._freeze_turn_context(session, accepted_run)
         session.commit()
         accepted = self._accepted_for_run(session, runs[0])
         await self.events.publish(
@@ -2845,7 +2995,6 @@ class ConversationOrchestrator:
         total_work_units = 0
         total_estimated_bytes = 0
         total_video_duration_seconds = 0.0
-        project = session.get(Project, chat.project_id) if chat.project_id else None
         for index, step_intent in enumerate(intent.steps):
             artifact_source_modes = [
                 intent_by_id[binding.source_step_id].mode
@@ -2958,63 +3107,14 @@ class ConversationOrchestrator:
                     and revision_accepts_added_loras(workflow_revision)
                 ),
             )
-            request_fields = [field for field in fields if field.scope != "load"]
-            default_preset, project_preset, chat_preset, turn_preset = self._presets_for_turn(
-                session, project, chat, operation, step_request, ordered=True
+            setting_layers = self.resolve_turn_setting_layers(
+                session, chat, operation, profile, step_request, fields, ordered=True
             )
-            workflow_lora_layers = self._workflow_lora_layers(
-                role,
-                profile,
-                project,
-                chat,
-                step_request.settings,
-                presets=(default_preset, project_preset, chat_preset, turn_preset),
-            )
-            step_overrides = validate_settings(
-                workflow_lora_layers.ordinary("turn"),
-                request_fields,
-            )
-            if turn_preset is not None:
-                step_overrides = {
-                    **compatible_stored_settings(
-                        workflow_lora_layers.ordinary("turn_preset"), request_fields
-                    ),
-                    **step_overrides,
-                }
-            preset_layers = [
-                (
-                    scope,
-                    preset,
-                    compatible_stored_settings(
-                        workflow_lora_layers.ordinary(origin), request_fields
-                    ),
-                )
-                for scope, preset, origin in (
-                    ("default", default_preset, "default_preset"),
-                    ("project", project_preset, "project_preset"),
-                    ("chat", chat_preset, "chat_preset"),
-                    ("turn", turn_preset, "turn_preset"),
-                )
-                if preset
-            ]
-            effective_settings = resolve_generation_settings(
-                fields,
-                request_fields=request_fields,
-                profile_defaults=(
-                    profile.load_settings_json if profile else {},
-                    workflow_lora_layers.ordinary("profile_request"),
-                    workflow_lora_layers.ordinary("default_preset"),
-                ),
-                project_defaults=(
-                    workflow_lora_layers.ordinary("project_preset"),
-                    workflow_lora_layers.ordinary("project"),
-                ),
-                chat_defaults=(
-                    workflow_lora_layers.ordinary("chat_preset"),
-                    workflow_lora_layers.ordinary("chat"),
-                ),
-                turn_overrides=step_overrides,
-            )
+            default_preset, project_preset, chat_preset, turn_preset = setting_layers.presets
+            step_overrides = setting_layers.request_settings
+            workflow_lora_layers = setting_layers.workflow_lora_layers
+            preset_layers = setting_layers.preset_layers
+            effective_settings = setting_layers.effective_settings
             effective_settings, video_length_resolution = resolve_video_length_settings(
                 effective_settings,
                 workflow_revision.input_schema_json if workflow_revision else None,
@@ -6161,11 +6261,15 @@ class ConversationOrchestrator:
         relight: RelightFinish | None,
         region_edit: RegionEdit | None,
         media_engine: str,
+        source_fit: SourceExtensionRecipe | None = None,
+        prepared_source: PreparedSourceImage | None = None,
     ) -> list[GeneratedAsset]:
         """Each kept picture finished against its source, in one fixed order.
 
-        Relight first, because its mix and grade are about the whole picture
-        and its source. The selection blend second, so a selection keeps
+        An extension's source is put back first, on the picture its own save
+        node wrote, so every later step starts from the accepted source.
+        Relight next, because its mix and grade are about the whole picture
+        and its source. The selection blend last, so a selection keeps
         everything outside it as the source, including from the relight. Each
         step writes its own record. A preview a workflow wrote for itself, and
         any video, pass through as produced: neither is the edit that was asked
@@ -6173,16 +6277,24 @@ class ConversationOrchestrator:
         measurement is.
         """
 
+        restore = (
+            SourceRestore(source_fit, prepared_source)
+            if source_fit is not None and prepared_source is not None
+            else None
+        )
         finished: list[GeneratedAsset] = []
         for generated in completed_assets:
-            if generated.kind != "image" or names_a_preview(
-                record_for(generated.origin, media_engine)
-            ):
+            origin = record_for(generated.origin, media_engine)
+            if generated.kind != "image" or names_a_preview(origin):
                 finished.append(generated)
                 continue
             content = generated.content
             records: dict[str, Any] = {}
             try:
+                if restore is not None and restores(restore, origin):
+                    restored = await asyncio.to_thread(restore_source, restore, content)
+                    if restored is not None:
+                        content, records["source_restore"] = restored.content, restored.record
                 if relight is not None:
                     relit = await asyncio.to_thread(finish_relight, relight, content)
                     content, records["relight"] = relit.content, relit.record
@@ -6191,6 +6303,10 @@ class ConversationOrchestrator:
                     content, records["region_edit"] = blended.content, blended.record
             except RegionEditError as exc:
                 raise RuntimeError(str(exc)) from exc
+            if not records:
+                # Nothing finished this one, so it keeps its own bytes and type.
+                finished.append(generated)
+                continue
             finished.append(
                 replace(
                     generated,
@@ -6333,6 +6449,108 @@ class ConversationOrchestrator:
         )
         return evidence.evidence_key
 
+    def _replayed_source_fit(
+        self,
+        session: Session,
+        accepted_inputs: AcceptedContext | None,
+        input_ids: Sequence[str],
+    ) -> tuple[SourceExtensionRecipe | None, PreparedSourceImage | None]:
+        """The source fit the turn accepted, and the picture it prepared, read back exactly.
+
+        The prepared picture belongs to the first input, so a fit with no input
+        to bind it to is refused rather than run against nothing.
+        """
+
+        source_fit = accepted_inputs.source_fit if accepted_inputs is not None else None
+        if source_fit is None:
+            return None, None
+        if not input_ids:
+            raise ValueError("source_fit_context_binding")
+        prepared = replay_source_fit_image(
+            session,
+            self.artifacts,
+            source_fit.image,
+            selected_source_id=input_ids[0],
+        )
+        return source_fit, prepared
+
+    def _media_input_files(
+        self,
+        session: Session,
+        input_ids: Sequence[str],
+        accepted_inputs: AcceptedContext | None,
+        source_fit: SourceExtensionRecipe | None,
+        prepared_source: PreparedSourceImage | None,
+    ) -> tuple[list[Path], list[bytes] | None]:
+        """Each input picture's file, and its checked bytes when a source fit needs them.
+
+        An accepted input that has gone is refused. With a prepared source the
+        first input is the prepared picture, and every input's bytes are read
+        beside its file.
+        """
+
+        input_paths: list[Path] = []
+        input_contents: list[bytes] | None = [] if prepared_source is not None else None
+        for input_index, artifact_id in enumerate(input_ids):
+            artifact = session.get(Artifact, artifact_id)
+            if artifact is None and accepted_inputs is not None:
+                raise RuntimeError("Accepted media input is unavailable.")
+            if not artifact:
+                continue
+            if input_contents is None:
+                input_paths.append(
+                    self.artifacts.verified_path(artifact)
+                    if accepted_inputs is not None
+                    else self.artifacts.resolve(artifact)
+                )
+            elif input_index == 0 and prepared_source is not None and source_fit is not None:
+                path, content = self._prepared_source_input(session, source_fit, prepared_source)
+                input_paths.append(path)
+                input_contents.append(content)
+            else:
+                input_paths.append(self.artifacts.resolve(artifact))
+                input_contents.append(
+                    self.artifacts.verified_bytes(artifact, maximum_bytes=MAX_SOURCE_BYTES)
+                )
+        return input_paths, input_contents
+
+    def _prepared_source_input(
+        self,
+        session: Session,
+        source_fit: SourceExtensionRecipe,
+        prepared_source: PreparedSourceImage,
+    ) -> tuple[Path, bytes]:
+        """The prepared picture that stands in for the first input, and its bytes."""
+
+        prepared_artifact = session.get(Artifact, source_fit.image.prepared_artifact_id)
+        if prepared_artifact is None:
+            raise ValueError("source_fit_image_unavailable")
+        return self.artifacts.resolve(prepared_artifact), prepared_source.content
+
+    async def _source_fit_agreements(
+        self,
+        source_fit: SourceExtensionRecipe | None,
+        prepared_source: PreparedSourceImage | None,
+        workflow: dict[str, Any],
+        media_engine: str,
+        completed_assets: Sequence[GeneratedAsset],
+        measurements: Sequence[dict[str, Any]],
+    ) -> list[dict[str, Any] | None]:
+        """How each output agrees with the accepted source fit; None where none applies."""
+
+        if source_fit is None:
+            return [None] * len(completed_assets)
+        verifier = SourceFitPixelVerifier(source_fit, prepared_source, workflow, media_engine)
+        return [
+            await asyncio.to_thread(
+                verifier.check,
+                generated.content,
+                measurement,
+                record_for(generated.origin, media_engine),
+            )
+            for generated, measurement in zip(completed_assets, measurements, strict=True)
+        ]
+
     async def _execute_media(self, job_id: str, run_id: str, claim: JobClaim) -> str | None:
         activation_scope: WorkflowActivationLaunchScope | None = None
         with self.session_factory() as session:
@@ -6431,17 +6649,12 @@ class ConversationOrchestrator:
             )
             if current_revision_id != validated_revision_id:
                 raise RuntimeError("The selected media workflow changed during verification.")
-            input_paths: list[Path] = []
-            for artifact_id in input_ids:
-                artifact = session.get(Artifact, artifact_id)
-                if artifact is None and accepted_inputs is not None:
-                    raise RuntimeError("Accepted media input is unavailable.")
-                if artifact:
-                    input_paths.append(
-                        self.artifacts.verified_path(artifact)
-                        if accepted_inputs is not None
-                        else self.artifacts.resolve(artifact)
-                    )
+            source_fit, prepared_source = self._replayed_source_fit(
+                session, accepted_inputs, input_ids
+            )
+            input_paths, input_contents = self._media_input_files(
+                session, input_ids, accepted_inputs, source_fit, prepared_source
+            )
             workflow: dict[str, Any] = {}
             revision = (
                 resolve_accepted_workflow(session, accepted_inputs.workflow)
@@ -6515,6 +6728,11 @@ class ConversationOrchestrator:
                         execution_settings[OUTPAINT_SETTING_KEY], *oriented_size(input_paths[0])
                     ),
                 )
+            if source_fit is not None:
+                # The accepted canvas goes into the same source padding, and
+                # the sampler is written at full strength. The saved recipe
+                # alone proves no runtime route, so this graph is traced again.
+                workflow = source_fit.bind_graph(workflow)
             # Asked here, once, because this is where the graph stops changing.
             # The proof is about the STORED revision and the rewrite above is
             # about this run, so the two have to be compared after the rewrite
@@ -6607,6 +6825,7 @@ class ConversationOrchestrator:
                 prompt=execution_prompt,
                 negative_prompt=str(execution_settings.get("negative_prompt", "")) or None,
                 input_paths=input_paths,
+                input_contents=tuple(input_contents) if input_contents is not None else None,
                 workflow=workflow,
                 parameters=parameters,
                 persistence_scope=self.persistence_scope,
@@ -6784,13 +7003,15 @@ class ConversationOrchestrator:
             # ended this execution; the shared bounded close does both.
             await close_iterator(producer)
 
-        if relight_finish is not None or region_edit is not None:
+        if relight_finish is not None or region_edit is not None or source_fit is not None:
             # Before measurement, so the measurement, the library, provenance
             # and verification all describe the picture that is kept.
             completed_assets = await self._studio_finished_outputs(
                 completed_assets,
                 relight=relight_finish,
                 region_edit=region_edit,
+                source_fit=source_fit,
+                prepared_source=prepared_source,
                 media_engine=media_engine,
             )
         media_capabilities = (
@@ -6800,6 +7021,9 @@ class ConversationOrchestrator:
         # transaction across the artifact writes, and a measurement is pure work
         # on bytes that has no business inside one.
         measurements = await self._measured_outputs(completed_assets)
+        source_agreements = await self._source_fit_agreements(
+            source_fit, prepared_source, workflow, media_engine, completed_assets, measurements
+        )
         completed_assistant_id = assistant_id
         verification_job_id: str | None = None
         with self.session_factory() as session:
@@ -6816,7 +7040,9 @@ class ConversationOrchestrator:
             # this run produced for you.
             throwaway_ids: list[str] = []
             output_provenance: list[dict[str, Any]] = []
-            for generated, measurement in zip(completed_assets, measurements, strict=True):
+            for generated, measurement, source_agreement in zip(
+                completed_assets, measurements, source_agreements, strict=True
+            ):
                 # Asserted at the transaction that persists this asset,
                 # never across an await: the ingest and commit follow
                 # with no external work in between.
@@ -6873,11 +7099,24 @@ class ConversationOrchestrator:
                 # a property of the bytes; the judgement cannot.
                 agreement = size_agreement(
                     requested_settings=(
-                        accepted_inputs.settings if accepted_inputs is not None else None
+                        {
+                            "width": source_fit.canvas_width,
+                            "height": source_fit.canvas_height,
+                        }
+                        if source_fit is not None
+                        else accepted_inputs.settings
+                        if accepted_inputs is not None
+                        else None
                     ),
                     measurement=measurement,
                     origin=origin,
-                    binding_confirmed=size_binding_confirmed,
+                    binding_confirmed=(
+                        origin.get("node_id") == source_fit.save_node_id
+                        and origin.get("output_type") == "output"
+                        and origin.get("collection") == "images"
+                        if source_fit is not None
+                        else size_binding_confirmed
+                    ),
                 )
                 output_chat = session.get(Chat, run.chat_id)
                 if (
@@ -6986,6 +7225,18 @@ class ConversationOrchestrator:
                             if relight_finish is not None and "relight" in generated.metadata
                             else {}
                         ),
+                        # How the accepted source was put back into this picture,
+                        # present only when it was.
+                        **(
+                            {"source_restore": generated.metadata["source_restore"]}
+                            if source_fit is not None and "source_restore" in generated.metadata
+                            else {}
+                        ),
+                        **(
+                            {"source_fit_agreement": source_agreement}
+                            if source_agreement is not None
+                            else {}
+                        ),
                     }
                 )
                 parts.append(
@@ -7004,6 +7255,11 @@ class ConversationOrchestrator:
                             # picture stays the judgement that picture's own run
                             # made.
                             "output_size_agreement": agreement,
+                            **(
+                                {"source_fit_agreement": source_agreement}
+                                if source_agreement is not None
+                                else {}
+                            ),
                         },
                     )
                 )
@@ -10448,6 +10704,96 @@ class ConversationOrchestrator:
             turn=turn_settings,
         )
 
+    def resolve_turn_setting_layers(
+        self,
+        session: Session,
+        chat: Chat,
+        operation: Operation,
+        profile: ModelProfile | None,
+        request: TurnRequest,
+        fields: list[SettingField],
+        *,
+        ordered: bool = False,
+    ) -> _TurnSettingLayers:
+        """Resolve common layers after the caller selects workflow and source.
+
+        Preview callers use a fresh session with autoflush disabled. Inherited
+        edits supply their resolved request and accepted profile projection.
+        Ordered callers first project the request to its role and step.
+        This method does not select a workflow, read prompts or admit work.
+        """
+        role = self._role_for_operation(operation)
+        request_fields = [field for field in fields if field.scope != "load"]
+        project = session.get(Project, chat.project_id) if chat.project_id else None
+        default_preset, project_preset, chat_preset, turn_preset = self._presets_for_turn(
+            session, project, chat, operation, request, ordered=ordered
+        )
+        workflow_lora_layers = self._workflow_lora_layers(
+            role,
+            profile,
+            project,
+            chat,
+            request.settings,
+            presets=(default_preset, project_preset, chat_preset, turn_preset),
+        )
+        mask: Any = None
+        relight: Any = None
+        tunables = workflow_lora_layers.ordinary("turn")
+        if not ordered:
+            mask, tunables = split_mask_setting(tunables)
+            # A relight request is not a workflow field either, for the same reason.
+            relight, tunables = split_relight_setting(tunables)
+        request_settings = validate_settings(tunables, request_fields)
+        if turn_preset is not None:
+            request_settings = {
+                **compatible_stored_settings(
+                    workflow_lora_layers.ordinary("turn_preset"), request_fields
+                ),
+                **request_settings,
+            }
+        preset_layers = [
+            (
+                scope,
+                preset,
+                compatible_stored_settings(workflow_lora_layers.ordinary(origin), request_fields),
+            )
+            for scope, preset, origin in (
+                ("default", default_preset, "default_preset"),
+                ("project", project_preset, "project_preset"),
+                ("chat", chat_preset, "chat_preset"),
+                ("turn", turn_preset, "turn_preset"),
+            )
+            if preset
+        ]
+        effective_settings = resolve_generation_settings(
+            fields,
+            request_fields=request_fields,
+            profile_defaults=(
+                profile.load_settings_json if profile else {},
+                workflow_lora_layers.ordinary("profile_request"),
+                workflow_lora_layers.ordinary("default_preset"),
+            ),
+            project_defaults=(
+                workflow_lora_layers.ordinary("project_preset"),
+                workflow_lora_layers.ordinary("project"),
+            ),
+            chat_defaults=(
+                workflow_lora_layers.ordinary("chat_preset"),
+                workflow_lora_layers.ordinary("chat"),
+            ),
+            turn_overrides=request_settings,
+        )
+        return _TurnSettingLayers(
+            project=project,
+            presets=(default_preset, project_preset, chat_preset, turn_preset),
+            mask=mask,
+            relight=relight,
+            request_settings=request_settings,
+            preset_layers=tuple(preset_layers),
+            effective_settings=effective_settings,
+            workflow_lora_layers=workflow_lora_layers,
+        )
+
     @staticmethod
     def _scoped_generation_settings(
         owner: Project | Chat | None,
@@ -11289,6 +11635,71 @@ class ConversationOrchestrator:
         ]
         chat = session.get(Chat, run.chat_id)
         profile = session.get(ModelProfile, run.profile_id) if run.profile_id else None
+        source_fit: SourceExtensionRecipe | None = None
+        fit_value = run.provenance_json.get("source_fit_request")
+        if fit_value is not None:
+            intent = SourceFitRequest.model_validate(fit_value)
+            revision = (
+                session.get(WorkflowRevision, run.workflow_revision_id)
+                if run.workflow_revision_id
+                else None
+            )
+            if (
+                run.operation != Operation.IMAGE_TO_IMAGE.value
+                or not input_ids
+                or revision is None
+                or revision.engine != "comfyui"
+            ):
+                raise ValueError("Source fitting requires an image-edit workflow.")
+            inherited = inherited_configuration or inherited_context
+            recipe = inherited.source_fit if inherited is not None else None
+            if (
+                inherit_workflow_configuration
+                and recipe is not None
+                and recipe.image.source_artifact_id == input_ids[0]
+            ):
+                replay_source_fit_image(
+                    session, self.artifacts, recipe.image, selected_source_id=input_ids[0]
+                )
+                source_fit = plan_source_extension(
+                    recipe.image,
+                    canvas_width=intent.width,
+                    canvas_height=intent.height,
+                    api_graph=revision.api_graph_json,
+                    save_node_id=recipe.save_node_id,
+                )
+            else:
+                graph = revision.api_graph_json
+                saves = [
+                    key
+                    for key, node in graph.items()
+                    if isinstance(node, dict) and node.get("class_type") == "SaveImage"
+                ]
+                if len(saves) != 1:
+                    raise ValueError("Source fitting requires one image output.")
+                source = session.get(Artifact, input_ids[0])
+                if source is None:
+                    raise ValueError("Source image is unavailable.")
+                prepared = prepare_source_fit_image(self.artifacts, source)
+                image = SourceFitImageRecord(
+                    source_artifact_id=prepared.source_artifact_id,
+                    prepared_artifact_id=f"sha256:{prepared.sha256}",
+                    width=prepared.width,
+                    height=prepared.height,
+                )
+                source_fit = plan_source_extension(
+                    image,
+                    canvas_width=intent.width,
+                    canvas_height=intent.height,
+                    api_graph=graph,
+                    save_node_id=saves[0],
+                )
+                retain_prepared_source_fit_image(session, self.artifacts, prepared)
+            # The accepted settings record the strength the sampler actually runs at.
+            run.settings_json = {
+                **run.settings_json,
+                **source_fit.strength_setting(revision.api_graph_json),
+            }
         save_accepted_context(
             session,
             run,
@@ -11304,6 +11715,7 @@ class ConversationOrchestrator:
             inherit_workflow_configuration=inherit_workflow_configuration,
             visual_artifact_ids=[artifact.id for artifact in visuals],
             strict_artifact_ids=strict_ids,
+            source_fit=source_fit,
             verification_profile_id=(
                 verifier.id
                 if chat is not None

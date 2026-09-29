@@ -6,7 +6,7 @@ import { useTurnConfirmation } from "./useTurnConfirmation";
 import type { ComposerProps } from "./chatComposerContracts";
 import { ErrorCallout } from "./ErrorCallout";
 import {
-  confirmPriorTurnEditSubmission, initializePriorTurnEditDraft, preparePriorTurnEditSubmission, readPriorTurnEditDraft,
+  buildPriorTurnEditPreviewRequest, confirmPriorTurnEditSubmission, initializePriorTurnEditDraft, preparePriorTurnEditSubmission, readPriorTurnEditDraft,
   removePriorTurnEditDraft, writePriorTurnEditDraft, priorTurnEditConfigurationSource, selectPriorTurnEditConfiguration,
   type PriorTurnEditDraft,
 } from "./priorTurnEditDraft";
@@ -16,6 +16,8 @@ import type { EngineRole, Message, PriorTurnEditAccepted, RoutingMode, TurnWorkf
 import { workflowRevisionForTurn } from "./turnEditorContext";
 import { operationForTurn } from "./turnWorkflow";
 import { useWorkflowRevisionSchema } from "./useWorkflowRevisionSchema";
+import { priorTurnSourceCanvasRevision } from "./priorTurnSourceCanvas";
+import type { SourceFitPreviewContext } from "./useSourceFitCanvas";
 
 type Props = Pick<ComposerProps, "chat" | "engines" | "profiles" | "presets" | "maxMediaOutputsPerPlan"> & {
   messageId: string;
@@ -34,6 +36,15 @@ function contextMessages(draft: PriorTurnEditDraft): Message[] {
     parts: [{ id: "edit-context-part-" + index, position: 0, type: "text", text: entry.content,
       artifact_id: null, metadata_json: {} }],
   }));
+}
+
+/** The edit a canvas is previewed within, once the workflow that would draw it is known.
+
+Until then there is nothing exact to preview, so the control stays unavailable. */
+function priorEditPreview(
+  messageId: string, draft: PriorTurnEditDraft, revision: string | null | undefined,
+): SourceFitPreviewContext | undefined {
+  return revision ? { kind: "prior-edit", id: messageId, request: buildPriorTurnEditPreviewRequest(draft) } : undefined;
 }
 
 /** One source and one durable draft; every control changes only this request. */
@@ -233,6 +244,8 @@ export function PriorTurnEditor({ chat, messageId, engines, profiles, presets,
             source_run_id: draft.source.source_run_id, source_snapshot_sha256: draft.source.source_snapshot_sha256 }}
           contextMessages={contextMessages(draft)} contextVisualArtifacts={draft.source.context_visual_artifacts ?? []}
           profileValuesOverride={profileValues} workflowSchemaOverride={schema ?? null} workflowSelection={selection}
+          sourceCanvasRevisionId={priorTurnSourceCanvasRevision(draft, families.data ?? [])}
+          sourceFitPreviewContext={priorEditPreview(messageId, draft, priorTurnSourceCanvasRevision(draft, families.data ?? []))}
           workflowControl={<label>Workflow for this version<select aria-label="Workflow for this version" value={workflowValue}
             onChange={(event) => pickWorkflow(event.target.value)}>
             <option value="inherit">{sameRole ? "Original workflow" : "Current workflow selection"}</option>

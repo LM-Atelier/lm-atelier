@@ -166,6 +166,12 @@ class PriorTurnInheritance:
             inherit_loras=request.preset_id is None and "loras" not in request.settings,
         )
         values: dict[str, object] = {}
+        source_fit = request.source_fit
+        if operation == Operation.IMAGE_TO_IMAGE and "source_fit" not in fields_set:
+            source_fit = source.values.source_fit
+            values["source_fit"] = source_fit.model_copy(deep=True) if source_fit else None
+        if ordinal is not None and source_fit is not None:
+            raise ValueError("Choose a single image edit to fit its source canvas.")
         if ordinal is None and "output_count" not in fields_set:
             values["output_count"] = source.values.output_count
         inherited_strength = (
@@ -190,6 +196,9 @@ class PriorTurnInheritance:
                 engine=source.values.profile_engine,
                 accepts_added_loras=source.takes_added_loras,
             )
+            if source_fit is not None:
+                baseline.pop("width", None)
+                baseline.pop("height", None)
             values["settings"] = {**baseline, **request.settings}
         self.bound[ordinal] = inherited
         context = source.snapshot
@@ -197,6 +206,7 @@ class PriorTurnInheritance:
             profile=context.profile if context and inherited.inherit_profile else None,
             vision_profile=context.vision_profile if context and inherited.inherit_vision else None,
             workflow=context.workflow if context and inherited.inherit_workflow else None,
+            source_fit=context.source_fit if context and inherited.inherit_workflow else None,
             image_edit_strength=inherited_strength,
         )
 

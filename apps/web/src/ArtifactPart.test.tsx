@@ -172,3 +172,72 @@ describe("the size note", () => {
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 })
+
+describe("the source preservation note", () => {
+  afterEach(cleanup);
+
+  function withSourceAgreement(agreement: unknown): MessagePart {
+    return { ...imagePart(), metadata_json: { source_fit_agreement: agreement } };
+  }
+
+  it("announces changed source pixels beside their image and keeps the image usable", () => {
+    render(
+      <ArtifactPart
+        part={withSourceAgreement({ v: 1, state: "changed" })}
+        origin="generated"
+        onEditImage={vi.fn()}
+      />,
+    );
+    const note = screen.getByRole("status");
+    expect(note).toHaveTextContent("This image changed pixels in the source area. Extend was asked to preserve them.");
+    expect(note.closest("figure")).toContainElement(screen.getByRole("img", { name: /generated/i }));
+    expect(screen.getByRole("button", { name: "Edit this image" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Download this image" })).toBeInTheDocument();
+  });
+
+  it.each([
+    undefined, null, "changed",
+    { v: 1, state: "preserved" },
+    { v: 1, state: "not_assessed", reason: "over_budget" },
+    { v: 1, state: "not_assessed", reason: "output_unsupported" },
+    { v: 1, state: "not_assessed", reason: "binding_unconfirmed" },
+    { v: 2, state: "changed" },
+    { state: "changed" },
+    { v: 1, state: "unknown" },
+  ])("does not invent a mismatch from %j", (agreement) => {
+    render(<ArtifactPart part={withSourceAgreement(agreement)} origin="generated" />);
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("keeps the judgement with its message when two messages share the same image", () => {
+    const first = withSourceAgreement({ v: 1, state: "changed" });
+    const second = { ...withSourceAgreement({ v: 1, state: "preserved" }), id: "part-2" };
+    render(<>
+      <ArtifactPart part={first} origin="generated" />
+      <ArtifactPart part={second} origin="generated" />
+    </>);
+    const images = screen.getAllByRole("img");
+    expect(images[0].getAttribute("src")).toBe(images[1].getAttribute("src"));
+    expect(screen.getAllByRole("status")).toHaveLength(1);
+    expect(images[0].closest("figure")).toContainElement(screen.getByRole("status"));
+    expect(images[1].closest("figure")).not.toContainElement(screen.getByRole("status"));
+  });
+
+  it("does not attach a final-output judgement to a streaming preview", () => {
+    const part = withSourceAgreement({ v: 1, state: "changed" });
+    part.metadata_json.preview = true;
+    render(<ArtifactPart part={part} origin="generated" />);
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("can report changed source pixels even when the requested dimensions agree", () => {
+    const part = withSourceAgreement({ v: 1, state: "changed" });
+    part.metadata_json.output_size_agreement = {
+      v: 1, state: "agreed",
+      requested_width: 1024, requested_height: 768,
+      raster_width: 1024, raster_height: 768,
+    };
+    render(<ArtifactPart part={part} origin="generated" />);
+    expect(screen.getByRole("status")).toHaveTextContent("changed pixels in the source area");
+  });
+});

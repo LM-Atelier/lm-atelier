@@ -527,6 +527,7 @@ def resolve_image_edit_strength(
     *,
     inherited_auto: Mapping[str, Any] | None = None,
     workflow_schema: Mapping[str, Any] | None = None,
+    extension: bool = False,
 ) -> ImageEditStrengthResolution | None:
     calibration = safe_workflow_edit_calibration(workflow_schema)
     parameter = calibration.parameter if calibration else STRENGTH_PARAMETER
@@ -535,7 +536,9 @@ def resolve_image_edit_strength(
         if field is not None:
             effective_settings[parameter] = field.default
         return None
-    if operation != Operation.IMAGE_TO_IMAGE:
+    # An extension is sampled at full strength, which its accepted source fit
+    # pins, so there is no strength to choose for it.
+    if operation != Operation.IMAGE_TO_IMAGE or extension:
         return None
 
     field = next((item for item in fields if item.key == parameter), None)
