@@ -62,6 +62,19 @@ export function toolUsesMask(kind: StudioToolKind): boolean {
   return MASK_TOOLS.has(kind);
 }
 
+/** The tools that work on a marked part of the picture, and so offer the selection's controls.
+ *
+ * Besides the tools whose drawing goes with the request, Blur and Paint work
+ * inside the marking. Every other tool takes the whole picture, so a brush
+ * size, Invert and Soften edges beside it would change nothing it makes, and
+ * the selection is kept, unused, for the next tool that marks.
+ */
+const MARKING_TOOLS: ReadonlySet<StudioToolKind> = new Set<StudioToolKind>([...MASK_TOOLS, "blur", "paint"]);
+
+export function toolMarksPicture(kind: StudioToolKind): boolean {
+  return MARKING_TOOLS.has(kind);
+}
+
 export type StudioToolState = {
   readonly kind: StudioToolKind;
   readonly brushRadius: number;

@@ -33,6 +33,7 @@ import {
   snapshotBeforeGesture,
   studioToolReducer,
   toolFor,
+  toolMarksPicture,
   toolUsesMask,
   type StudioToolKind,
 } from "./studioToolState";
@@ -320,7 +321,7 @@ export function StudioView({
           ) : (
             <StudioWorkflowOpening selectorId={workflowSelectorId} />
           )}
-          {!["instruct", "relight", "isolate", "background", "subject", "transform", "crop", "resize", "canvas", "adjust", "caption"].includes(tools.kind) && (
+          {toolMarksPicture(tools.kind) && (
             <StudioSelectionControls tools={tools} dispatch={dispatch} coverage={selectionCoverage}
               colorsUnreadable={readsColors && Boolean(bitmap) && !sourcePixels} />
           )}
