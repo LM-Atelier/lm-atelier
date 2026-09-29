@@ -352,7 +352,7 @@ from .prompt_templates import (
 )
 from .queue_control import QueueControlConflict, QueueControlMissing, change_plan_control
 from .queue_lane_policy import QueueLaneConflict, change_lane_policy, read_lane_policy
-from .queue_order import QueueOrderConflict, change_queue_order, read_queue_order
+from .queue_order import QueueOrderConflict, QueueOrderLimit, change_queue_order, read_queue_order
 from .queue_order_v1 import QueueOrderCommand, QueueOrderPageOut, QueueOrderResultOut
 from .recipes import get_reference_recipe, list_reference_recipes
 from .reference_library import (
@@ -5075,6 +5075,13 @@ def queue_order(
 ) -> QueueOrderPageOut:
     try:
         return read_queue_order(session, lane, limit=limit, cursor=cursor)
+    except QueueOrderLimit as exc:
+        raise api_error(
+            409,
+            "queue-order-limit-exceeded",
+            f"Manual ordering supports up to {exc.maximum_jobs:,} unfinished jobs in a category.",
+            maximum_jobs=exc.maximum_jobs,
+        ) from exc
     except QueueOrderConflict as exc:
         raise api_error(
             409, "queue-order-conflict", "The queue changed. Refresh before trying again."
@@ -5090,6 +5097,13 @@ async def reorder_queue(
 ) -> QueueOrderResultOut:
     try:
         result = await run_in_threadpool(change_queue_order, session, lane, payload)
+    except QueueOrderLimit as exc:
+        raise api_error(
+            409,
+            "queue-order-limit-exceeded",
+            f"Manual ordering supports up to {exc.maximum_jobs:,} unfinished jobs in a category.",
+            maximum_jobs=exc.maximum_jobs,
+        ) from exc
     except QueueOrderConflict as exc:
         raise api_error(
             409, "queue-order-conflict", "The queue changed. Refresh before trying again."

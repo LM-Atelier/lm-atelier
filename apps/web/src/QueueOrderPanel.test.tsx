@@ -101,6 +101,33 @@ it("sends one relative move and retains button focus while the server supplies t
   expect(screen.getAllByRole("listitem")[1]).toHaveAccessibleName("Third transfer");
 });
 
+it.each(["accepted", "stale"] as const)("submits a move during a background read and handles the %s result", async (result) => {
+  const client = open();
+  await advance();
+  let finishRead: ((value: QueueOrderPage) => void) | undefined;
+  vi.mocked(api.queueOrder).mockImplementationOnce(() => new Promise((resolve) => { finishRead = resolve; }));
+  if (result === "stale") {
+    vi.mocked(api.reorderQueue).mockRejectedValueOnce(new ApiError(409, "changed", "The queue changed", "queue-order-conflict"));
+  }
+  let refresh = Promise.resolve();
+  await act(async () => { refresh = client.invalidateQueries({ queryKey: ["jobs", "queue"] }); });
+  await advance();
+  expect(client.isFetching()).toBe(1);
+  try {
+    fireEvent.click(row("Third transfer").getByRole("button", { name: "Move earlier" }));
+    await advance();
+    expect(api.reorderQueue).toHaveBeenCalledTimes(1);
+    expect(api.reorderQueue).toHaveBeenCalledWith("transfer", expect.objectContaining({
+      expected_revision: 7, cohort_id: "a".repeat(64),
+      expected_item_neighbors: neighbors[2], expected_anchor_neighbors: neighbors[1],
+    }));
+    expect(screen.getByText(result === "accepted" ? /Order saved/ : /Review its latest order/)).toBeInTheDocument();
+    if (result === "stale") expect(screen.queryByText(/Order saved/)).not.toBeInTheDocument();
+  } finally {
+    await act(async () => { finishRead?.(structuredClone(page)); await refresh; });
+  }
+});
+
 it("retries an uncertain network result with the exact command and key", async () => {
   vi.mocked(api.reorderQueue).mockRejectedValueOnce(new Error("Connection interrupted"));
   open();
@@ -193,6 +220,32 @@ it("requires a fresh page after a stale cursor rather than making stale rows act
   fireEvent.click(screen.getByRole("button", { name: "Refresh dispatch order" }));
   await advance();
   expect(row("First transfer").getByRole("button", { name: "Move later" })).toHaveAttribute("aria-disabled", "false");
+});
+
+it("explains an oversized queue without suggesting that its page merely changed", async () => {
+  vi.mocked(api.queueOrder).mockRejectedValue(new ApiError(409, "too large",
+    "Manual ordering supports up to 10,000 unfinished jobs in a category.", "queue-order-limit-exceeded"));
+  open();
+  await advance();
+  expect(screen.getByRole("alert")).toHaveTextContent("Manual ordering supports up to 10,000 unfinished jobs");
+  expect(screen.queryByText("This page changed. Refresh dispatch order to load it again.")).not.toBeInTheDocument();
+});
+
+it("explains a queue that grows past the ordering limit before a move", async () => {
+  const error = new ApiError(409, "too large",
+    "Manual ordering supports up to 10,000 unfinished jobs in a category.", "queue-order-limit-exceeded");
+  vi.mocked(api.reorderQueue).mockImplementation(async () => {
+    vi.mocked(api.queueOrder).mockRejectedValue(error);
+    throw error;
+  });
+  open();
+  await advance();
+  fireEvent.click(row("Third transfer").getByRole("button", { name: "Move earlier" }));
+  await advance();
+  expect(screen.getByRole("status")).toHaveTextContent("Manual ordering supports up to 10,000 unfinished jobs");
+  expect(screen.getByRole("alert")).toHaveTextContent("Manual ordering supports up to 10,000 unfinished jobs");
+  expect(screen.queryByRole("button", { name: "Retry the same move" })).not.toBeInTheDocument();
+  expect(screen.queryByText(/Order saved/)).not.toBeInTheDocument();
 });
 
 it("drops relative to a visible anchor and sends no browser-supplied full ordering", async () => {
