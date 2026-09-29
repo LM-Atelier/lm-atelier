@@ -96,6 +96,30 @@ describe("the compare controls", () => {
     expect(screen.queryByRole("button", { name: "Split" })).toBeNull();
     expect(screen.queryByRole("slider")).toBeNull();
   });
+
+  it("shows what changed on request, and says how much once it is known", () => {
+    const onDifference = vi.fn();
+    controls({ canDiffer: true, onDifference });
+    fireEvent.click(screen.getByRole("button", { name: "What changed" }));
+    expect(onDifference).toHaveBeenCalledWith(true);
+    cleanup();
+
+    controls({ canDiffer: true, onDifference, difference: true });
+    expect(screen.getByRole("button", { name: "What changed" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText("Comparing…")).toBeInTheDocument();
+    cleanup();
+
+    controls({ canDiffer: true, onDifference, difference: true, changed: "12% of the picture changed." });
+    expect(screen.getByText("12% of the picture changed.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "What changed" }));
+    expect(onDifference).toHaveBeenLastCalledWith(false);
+  });
+
+  it("offers no pixel comparison between pictures of different sizes", () => {
+    controls({ canDiffer: false, onDifference: vi.fn(), difference: true });
+    expect(screen.queryByRole("button", { name: "What changed" })).toBeNull();
+    expect(screen.queryByText("Comparing…")).toBeNull();
+  });
 });
 
 describe("comparing in the studio", () => {
