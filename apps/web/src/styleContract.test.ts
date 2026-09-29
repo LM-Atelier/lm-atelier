@@ -189,6 +189,14 @@ describe("style contract", () => {
     expect(order(".jobs-panel")).toBeGreaterThan(composer);
   });
 
+  it("keeps the jobs panel above the composer's top edge rather than over it", () => {
+    const css = readFileSync(STYLESHEET, "utf8");
+    // Fixed at one height, it covered the text box at every width and, in a
+    // narrow window, the attach and send buttons while work ran.
+    const panel = /\.jobs-panel \{[^}]*\}/.exec(css)?.[0] ?? "";
+    expect(panel).toMatch(/bottom:\s*max\([^;]*var\(--composer-clearance/);
+  });
+
   it("fills a letterboxed picture with itself rather than with a flat bar", () => {
     const css = readFileSync(STYLESHEET, "utf8");
     expect(css).toMatch(/\.media-frame\s*\{[^}]*position:\s*relative/);

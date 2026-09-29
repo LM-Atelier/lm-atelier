@@ -1,4 +1,5 @@
 import { SourceFitControl } from "./SourceFitControl";
+import { useComposerClearance } from "./composerClearance";
 import { SOURCE_FIT_PREVIEW_REQUIRED, sendWithSourceFit, turnPreviewContext, useTurnEditorSourceFit } from "./useTurnEditorSourceFit";
 import type { SourceFitPreviewContext } from "./useSourceFitCanvas";
 import type { SourceFitSelection } from "./sourceFit";
@@ -21,7 +22,7 @@ import { composerSubmission } from "./composerSubmission";
 import { normalizeSettingsForFields, resolveCapabilitySettings, resolveWorkflowSettings } from "./settings";
 import { activeBranchMessages, workflowRevisionForTurn } from "./turnEditorContext";
 import type { TurnReference } from "./mentionDraft";
-import { useComposerUploads, type ComposerAttachment } from "./useComposerUploads";
+import { useComposerDrop, useComposerUploads, type ComposerAttachment } from "./useComposerUploads";
 import { useDraftClassification } from "./useDraftClassification";
 import { drawerRoleView, roleForMode } from "./viewHelpers";
 import { useWorkflowRevisionSchema } from "./useWorkflowRevisionSchema";
@@ -213,7 +214,10 @@ export function TurnEditor({
   const [studioOpen, setStudioOpen] = useState(false);
   const addAttachment = (attachment: ComposerAttachment) => { detachPromptSource(); setAttachments((current) => [...current, attachment]); };
   const { uploading, uploadError, setUploadError, uploadFiles, uploadPastedImages } = useComposerUploads(addAttachment);
-  const [dropActive, setDropActive] = useState(false);
+  const drop = useComposerDrop(acceptancePending, uploadFiles, setUploadError);
+  const composerWrap = useRef<HTMLDivElement>(null);
+  // Only the composer at the foot of the view keeps the jobs panel off itself.
+  useComposerClearance(composerWrap, !onAccept);
   const fileInput = useRef<HTMLInputElement>(null);
   const textInput = useRef<HTMLTextAreaElement>(null);
   const consumedVisualRequest = useRef<number | null>(null);
@@ -378,33 +382,12 @@ export function TurnEditor({
   return (
     <fieldset className={workflowControl === undefined ? "turn-editor-with-workflow-choices" : undefined} aria-label="Turn editor" disabled={accepting} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
       <div
-        className={`composer-wrap${dropActive ? " drop-active" : ""}`}
+        ref={composerWrap}
+        className={`composer-wrap${drop.active ? " drop-active" : ""}`}
         style={onAccept ? { position: "relative", padding: 0 } : state.sourceFit ? { maxHeight: "100%", overflowY: "auto" } : undefined}
-        onDragOver={(event) => {
-          if (acceptancePending.current) return;
-          if (!Array.from(event.dataTransfer.types).includes("Files")) return;
-          event.preventDefault();
-          setDropActive(true);
-        }}
-        onDragLeave={(event) => {
-          if (event.currentTarget.contains(event.relatedTarget as Node)) return;
-          setDropActive(false);
-        }}
-        onDrop={(event) => {
-          event.preventDefault();
-          if (acceptancePending.current) return;
-          setDropActive(false);
-          const dropped = Array.from(event.dataTransfer.files);
-          const files = dropped.filter(
-            (file) => file.type.startsWith("image/") || file.type.startsWith("video/"),
-          );
-          setUploadError(
-            files.length < dropped.length ? "Only images and videos can be attached." : "",
-          );
-          void uploadFiles(files);
-        }}
+        {...drop.handlers}
       >
-        {dropActive && <div className="drop-hint">Drop images or videos to attach</div>}
+        {drop.active && <div className="drop-hint">Drop images or videos to attach</div>}
         {uploadError && <ErrorCallout message={uploadError} />}
         {acceptanceError && <ErrorCallout message={acceptanceError} />}
         {loraError}
