@@ -37,6 +37,7 @@ import {
 import { useStudioCompare } from "./useStudioCompare";
 import { useStudioImage } from "./useStudioImage";
 import { useStudioSession, type StudioStep } from "./useStudioSession";
+import { useStudioDraft } from "./useStudioDraft";
 import { useStudioBackground } from "./useStudioBackground";
 import { useConfirm } from "./useConfirm";
 import type { EditTemplate, GenerationIdentity } from "./types";
@@ -89,8 +90,9 @@ export function StudioView({
   // here or from the library - showed it as unmarked, and the control could
   // only ever mark, never take it back.
   const client = useQueryClient();
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [instruction, setInstruction] = useState("");
+  const draft = useStudioDraft(sessionId);
+  const [selectedId, setSelectedId] = useState<string | null>(draft.selectedId);
+  const [instruction, setInstruction] = useState(draft.instruction);
   const [selectionError, setSelectionError] = useState<string | null>(null);
   // Replacing a background or a subject is two applies; the studio stays busy in between.
   const cutoutEdit = useStudioBackground(sessionId, session, apply, setSelectionError);
@@ -168,10 +170,13 @@ export function StudioView({
     [tools.kind, tools.brushRadius, tools.cropShape, tools.mask, tools.selectionMode, tools.colorTolerance, sourcePixels],
   );
   useEffect(() => {
-    if (bitmap) {
-      dispatch({ type: "image-changed", width: bitmap.width, height: bitmap.height });
-    }
+    if (!bitmap) return;
+    // Back on the picture the Studio was left on: what was drawn there still fits it.
+    const kept = draft.take(currentArtifactId);
+    dispatch(kept ? { type: "restore", state: kept.tools } : { type: "image-changed", width: bitmap.width, height: bitmap.height });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bitmap]);
+  useEffect(() => draft.track({ artifactId: currentArtifactId, tools, instruction, selectedId }));
   // Enhance asks for no words: the whole picture is the subject and
   // the size is the whole instruction. Text takes its words from its
   // own fields, and without a box it would change the whole picture.

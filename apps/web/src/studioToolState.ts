@@ -134,6 +134,8 @@ export type StudioToolAction =
   | { type: "set-caption"; patch: Partial<StudioCaption> }
   | { type: "set-subject-picture"; picture: File | null }
   | { type: "image-changed"; width: number; height: number }
+  /** Everything as it stood when the Studio was left, for the same picture. */
+  | { type: "restore"; state: StudioToolState }
   | { type: "stroke-end" }
   | { type: "invert" }
   | { type: "feather" }
@@ -256,6 +258,8 @@ export function studioToolReducer(
     // Kept when the picture changes: the new subject can go into another one.
     case "set-subject-picture":
       return { ...state, subjectPicture: action.picture };
+    case "restore":
+      return action.state;
     case "image-changed": {
       // A new image invalidates the mask entirely; carrying it over would
       // silently apply a selection drawn on different pixels. The sliders
