@@ -65,7 +65,7 @@ function stroke() {
 }
 
 it("undoes a whole brush stroke, where it started too, and redoes it", () => {
-  fireEvent.click(screen.getByRole("button", { name: "Brush a selection" }));
+  fireEvent.click(screen.getByRole("button", { name: "Select part of the picture" }));
 
   stroke();
   const painted = selection();
@@ -78,7 +78,7 @@ it("undoes a whole brush stroke, where it started too, and redoes it", () => {
 });
 
 it("undoes a whole eraser stroke, where it started too", () => {
-  fireEvent.click(screen.getByRole("button", { name: "Brush a selection" }));
+  fireEvent.click(screen.getByRole("button", { name: "Select part of the picture" }));
   stroke();
   const painted = selection();
   fireEvent.click(screen.getByRole("button", { name: "Erase from the selection" }));
@@ -91,7 +91,7 @@ it("undoes a whole eraser stroke, where it started too", () => {
 });
 
 it("undoes a single dab", () => {
-  fireEvent.click(screen.getByRole("button", { name: "Brush a selection" }));
+  fireEvent.click(screen.getByRole("button", { name: "Select part of the picture" }));
   const canvas = screen.getByRole("application");
   fireEvent.keyDown(canvas, { key: "Enter" });
   fireEvent.keyDown(canvas, { key: "Enter" });

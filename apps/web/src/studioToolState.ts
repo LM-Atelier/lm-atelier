@@ -75,8 +75,19 @@ export function toolMarksPicture(kind: StudioToolKind): boolean {
   return MARKING_TOOLS.has(kind);
 }
 
+/** The ways of drawing a selection: one tool, drawn six ways. */
+export const SELECTION_KINDS = ["brush", "eraser", "rect", "lasso", "bucket", "wand"] as const;
+
+export type SelectionKind = (typeof SELECTION_KINDS)[number];
+
+export function isSelectionKind(kind: StudioToolKind): kind is SelectionKind {
+  return (SELECTION_KINDS as readonly StudioToolKind[]).includes(kind);
+}
+
 export type StudioToolState = {
   readonly kind: StudioToolKind;
+  /** The way of selecting last used, which choosing Select again returns to. */
+  readonly selectionKind: SelectionKind;
   readonly brushRadius: number;
   readonly featherPx: number;
   /** Whether the paint bucket and the magic wand add to the selection or take away from it. */
@@ -164,6 +175,7 @@ export type StudioToolAction =
 export function initialToolState(): StudioToolState {
   return {
     kind: "instruct",
+    selectionKind: "brush",
     brushRadius: 24,
     featherPx: 4,
     selectionMode: "add",
@@ -198,7 +210,11 @@ export function studioToolReducer(
 ): StudioToolState {
   switch (action.type) {
     case "select-tool":
-      return { ...state, kind: action.kind };
+      return {
+        ...state,
+        kind: action.kind,
+        selectionKind: isSelectionKind(action.kind) ? action.kind : state.selectionKind,
+      };
     case "set-brush-radius":
       return { ...state, brushRadius: clamp(action.radius, 1, 512) };
     case "set-feather":

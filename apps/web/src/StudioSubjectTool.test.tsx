@@ -109,7 +109,7 @@ async function openWith(subject: Partial<StudioToolCapability>) {
   mockSession();
   view = render(tree());
   fireEvent.click(screen.getByRole("button", { name: /^Replace the subject/ }));
-  await screen.findByRole("button", { name: `Brush a selection - ${BRUSH_REASON}` });
+  await screen.findByRole("button", { name: `Select part of the picture - ${BRUSH_REASON}` });
 }
 
 function choosePicture() {

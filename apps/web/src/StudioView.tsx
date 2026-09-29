@@ -282,6 +282,7 @@ export function StudioView({
       <div className="studio-layout">
         <StudioToolRail
           active={tools.kind}
+          selectionKind={tools.selectionKind}
           onSelect={(kind: StudioToolKind) => dispatch({ type: "select-tool", kind })}
           onUndo={() => dispatch({ type: "undo" })}
           onRedo={() => dispatch({ type: "redo" })}

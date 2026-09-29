@@ -58,6 +58,17 @@ describe("studio tool state", () => {
     expect(toolUsesMask("wand")).toBe(true);
   });
 
+  it("remembers the way of selecting last used, for when Select is chosen again", () => {
+    let state = initialToolState();
+    expect(state.selectionKind).toBe("brush");
+
+    state = studioToolReducer(state, { type: "select-tool", kind: "lasso" });
+    state = studioToolReducer(state, { type: "select-tool", kind: "crop" });
+
+    expect(state.kind).toBe("crop");
+    expect(state.selectionKind).toBe("lasso");
+  });
+
   it("adds with the bucket and the wand by default, and takes away when asked", () => {
     let state = withImage(4, 4);
     const pixels = new Uint8ClampedArray(4 * 4 * 4);
