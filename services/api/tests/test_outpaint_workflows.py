@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from httpx2 import AsyncClient
 from PIL import Image
 
 from local_lm.outpaint_workflows import (
@@ -143,7 +144,9 @@ def test_the_bound_is_where_the_new_region_dwarfs_the_picture() -> None:
     assert normalize_margins({"left": MAX_MARGIN_FRACTION})["left"] == MAX_MARGIN_FRACTION
 
 
-async def test_a_turn_refuses_margins_the_contract_would_not_accept(client) -> None:
+async def test_a_turn_refuses_margins_the_contract_would_not_accept(
+    client: AsyncClient,
+) -> None:
     """The gap: this contract existed and nothing called it.
 
     Margins arrive as an ordinary object setting, and the schema layer only

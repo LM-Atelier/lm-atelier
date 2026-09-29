@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from httpx2 import AsyncClient
+
 from local_lm.edit_recipes import capture_recipe
 
 
@@ -69,7 +71,9 @@ def test_malformed_provenance_never_raises_into_the_save() -> None:
     assert capture.mask_mode == "none"
 
 
-async def test_saving_from_a_run_reads_that_run_rather_than_the_request(client) -> None:
+async def test_saving_from_a_run_reads_that_run_rather_than_the_request(
+    client: AsyncClient,
+) -> None:
     """Through the route: the payload's settings are ignored when a run is named."""
     from local_lm.db import SessionLocal
     from local_lm.models import Run
@@ -120,7 +124,7 @@ async def test_saving_from_a_run_reads_that_run_rather_than_the_request(client) 
     assert body["settings_json"] == {"denoise": 0.42}
 
 
-async def test_saving_from_a_run_that_no_longer_exists_refuses(client) -> None:
+async def test_saving_from_a_run_that_no_longer_exists_refuses(client: AsyncClient) -> None:
     response = await client.post(
         "/api/edit-templates",
         json={"name": "Gone", "instruction": "anything", "from_run_id": "run_missing"},

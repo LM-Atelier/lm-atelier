@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -52,7 +52,7 @@ def _graphs(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     if instruction:
         # The source picture feeds the encoder that turns the words into conditioning.
-        ui = {
+        ui: dict[str, list[Any]] = {
             "nodes": [
                 _node(1, "LoadImage", "IMAGE"),
                 _node(2, "EditEncoder", "CONDITIONING"),
@@ -160,15 +160,18 @@ def _edit_family(
 
 def _orchestrator() -> ConversationOrchestrator:
     return ConversationOrchestrator(
-        engines=SimpleNamespace(
-            settings=SimpleNamespace(media_engine="comfyui", chat_engine="mock"),
-            chat=SimpleNamespace(cancel=AsyncMock()),
-            media=SimpleNamespace(cancel=AsyncMock()),
+        engines=cast(
+            Any,
+            SimpleNamespace(
+                settings=SimpleNamespace(media_engine="comfyui", chat_engine="mock"),
+                chat=SimpleNamespace(cancel=AsyncMock()),
+                media=SimpleNamespace(cancel=AsyncMock()),
+            ),
         ),
         artifacts=Mock(),
-        events=SimpleNamespace(publish=AsyncMock()),
-        scheduler=SimpleNamespace(publish_job=AsyncMock()),
-        processes=SimpleNamespace(statuses=Mock(return_value=[])),
+        events=cast(Any, SimpleNamespace(publish=AsyncMock())),
+        scheduler=cast(Any, SimpleNamespace(publish_job=AsyncMock())),
+        processes=cast(Any, SimpleNamespace(statuses=Mock(return_value=[]))),
         session_factory=Mock(),
     )
 

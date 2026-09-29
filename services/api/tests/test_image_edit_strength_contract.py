@@ -130,7 +130,9 @@ def vocabularies() -> tuple[dict[str, object], dict[str, object]]:
     return _server_vocabularies(), _browser_vocabularies()
 
 
-def test_every_server_vocabulary_has_a_browser_counterpart(vocabularies) -> None:
+def test_every_server_vocabulary_has_a_browser_counterpart(
+    vocabularies: tuple[dict[str, object], dict[str, object]],
+) -> None:
     server, browser = vocabularies
     assert server, "no server vocabularies were parsed"
 
@@ -141,7 +143,9 @@ def test_every_server_vocabulary_has_a_browser_counterpart(vocabularies) -> None
     )
 
 
-def test_every_browser_vocabulary_has_a_server_counterpart(vocabularies) -> None:
+def test_every_browser_vocabulary_has_a_server_counterpart(
+    vocabularies: tuple[dict[str, object], dict[str, object]],
+) -> None:
     server, browser = vocabularies
     assert browser, "no browser vocabularies were parsed"
 
@@ -153,7 +157,9 @@ def test_every_browser_vocabulary_has_a_server_counterpart(vocabularies) -> None
     )
 
 
-def test_both_copies_hold_the_same_words_and_phrases(vocabularies) -> None:
+def test_both_copies_hold_the_same_words_and_phrases(
+    vocabularies: tuple[dict[str, object], dict[str, object]],
+) -> None:
     server, browser = vocabularies
     differences: dict[str, tuple[object, object]] = {}
     for name, value in server.items():

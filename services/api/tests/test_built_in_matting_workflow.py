@@ -266,9 +266,11 @@ def test_a_workflow_that_cannot_compile_leaves_the_model_installed_and_nothing_b
 
     with SessionLocal() as session:
         added = set(session.scalars(select(WorkflowDefinition.id)).all()) - before
-        assert [session.get(WorkflowDefinition, item).name for item in added] == [
+        definitions = [session.get(WorkflowDefinition, item) for item in added]
+        assert [item.name for item in definitions if item is not None] == [
             f"Remove background · {MODEL_FILE}"
         ]
+        assert None not in definitions
 
 
 def test_isolate_names_its_workflow_and_a_cutout_alone_is_no_edit_workflow() -> None:
@@ -309,15 +311,18 @@ def memory_session() -> Generator[Session]:
 
 def _orchestrator() -> ConversationOrchestrator:
     return ConversationOrchestrator(
-        engines=SimpleNamespace(
-            settings=SimpleNamespace(media_engine="comfyui", chat_engine="mock"),
-            chat=SimpleNamespace(cancel=AsyncMock()),
-            media=SimpleNamespace(cancel=AsyncMock()),
+        engines=cast(
+            Any,
+            SimpleNamespace(
+                settings=SimpleNamespace(media_engine="comfyui", chat_engine="mock"),
+                chat=SimpleNamespace(cancel=AsyncMock()),
+                media=SimpleNamespace(cancel=AsyncMock()),
+            ),
         ),
         artifacts=Mock(),
-        events=SimpleNamespace(publish=AsyncMock()),
-        scheduler=SimpleNamespace(publish_job=AsyncMock()),
-        processes=SimpleNamespace(statuses=Mock(return_value=[])),
+        events=cast(Any, SimpleNamespace(publish=AsyncMock())),
+        scheduler=cast(Any, SimpleNamespace(publish_job=AsyncMock())),
+        processes=cast(Any, SimpleNamespace(statuses=Mock(return_value=[]))),
         session_factory=Mock(),
     )
 
