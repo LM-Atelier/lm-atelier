@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
 
 import httpx
 import pytest
@@ -202,7 +203,7 @@ class _BodyStream(httpx.AsyncByteStream):
         self.stall = stall
         self.closed = False
 
-    async def __aiter__(self):
+    async def __aiter__(self) -> AsyncIterator[bytes]:
         for chunk in self.chunks:
             yield chunk
         if self.stall:

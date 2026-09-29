@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from local_lm.conversation_search_http_message_anchor_v1 import (
@@ -50,7 +52,7 @@ def test_public_constructor_cannot_write_history() -> None:
     with pytest.raises(SearchHttpMessageAnchorError, match=INVALID_HTTP_ANCHOR):
         ConversationSearchHttpMessageAnchorV1()
     with pytest.raises(TypeError):
-        ConversationSearchHttpMessageAnchorV1(
+        cast(Any, ConversationSearchHttpMessageAnchorV1)(
             schema="lm-atelier-conversation-search-http-message-anchor-v1",
             schema_version=1,
             history_write_authorized=True,

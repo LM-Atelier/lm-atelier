@@ -153,12 +153,14 @@ async def execute(case: dict[str, Any], job_id: str, run_id: str) -> None:
 def pending(job_id: str) -> tuple[int, str]:
     with SessionLocal() as session:
         job = session.get(Job, job_id)
+        assert job is not None
         proposal = session.scalar(
             select(WebSearchProposal).where(WebSearchProposal.job_id == job_id)
         )
         assert proposal is not None, "The real chat execution did not retain its proposed search."
         assert job.status == "paused" and job.claim_owner is None
-        assert session.get(Run, job.run_id).status == "queued"
+        run = session.get(Run, job.run_id)
+        assert run is not None and run.status == "queued"
         return proposal.revision, proposal.state
 
 
@@ -173,7 +175,9 @@ async def decide(case: dict[str, Any], job_id: str, revision: int, action: str) 
 def completed(case: dict[str, Any], job_id: str, state: str) -> None:
     with SessionLocal() as session:
         job = session.get(Job, job_id)
+        assert job is not None
         run = session.get(Run, job.run_id)
+        assert run is not None
         assert job.status == "complete" and run.status == "complete"
         assert run.provenance_json["web_search"]["state"] == state
     answers = [request for request in case["requests"] if not request.tools]
@@ -281,6 +285,7 @@ async def test_real_chat_automatic_search_enters_the_cancellable_timer(
     assert state == "scheduled" and case["posts"] == [] and case["resumes"] == [job_id]
     with SessionLocal() as session:
         proposal = session.scalar(select(WebSearchProposal))
+        assert proposal is not None
         deadline = proposal.dispatch_after
 
     async def elapsed(self: Any, moment: Any) -> None:
@@ -308,7 +313,7 @@ async def test_real_chat_provider_timeout_preserves_a_local_answer(
     assert len(case["posts"]) == 1
     with SessionLocal() as session:
         proposal = session.scalar(select(WebSearchProposal))
-        assert proposal.error_code == "search_timeout"
+        assert proposal is not None and proposal.error_code == "search_timeout"
 
 
 async def test_real_chat_with_search_disabled_does_not_offer_the_search_tool(
@@ -319,7 +324,8 @@ async def test_real_chat_with_search_disabled_does_not_offer_the_search_tool(
     job_id, run_id = await accepted(case)
     await execute(case, job_id, run_id)
     with SessionLocal() as session:
-        assert session.get(Job, job_id).status == "complete"
+        job = session.get(Job, job_id)
+        assert job is not None and job.status == "complete"
         assert session.scalar(select(WebSearchProposal)) is None
     assert len(case["requests"]) == 1 and case["requests"][0].tools == []
     assert case["posts"] == []
@@ -347,9 +353,12 @@ async def test_real_chat_cancel_interrupts_a_dispatched_request_without_saved_re
         assert len(case["posts"]) == 1
         assert len(case["requests"]) == 1
         with SessionLocal() as session:
-            assert session.get(Job, job_id).status == "cancelled"
-            assert session.get(Run, run_id).status == "cancelled"
+            job = session.get(Job, job_id)
+            assert job is not None and job.status == "cancelled"
+            run = session.get(Run, run_id)
+            assert run is not None and run.status == "cancelled"
             proposal = session.scalar(select(WebSearchProposal))
+            assert proposal is not None
             assert proposal.state == "dispatching"
             assert proposal.result_json == {}
         history = await case["client"].get(f"/api/chats/{case['chat_id']}")
@@ -380,6 +389,7 @@ async def test_real_chat_lost_claim_cannot_commit_the_http_result_or_answer(
             await case["entered"].wait()
             with SessionLocal() as session:
                 job = session.get(Job, job_id)
+                assert job is not None
                 job.claim_owner = "constructed-successor"
                 job.attempt += 1
                 session.commit()
@@ -388,10 +398,14 @@ async def test_real_chat_lost_claim_cannot_commit_the_http_result_or_answer(
         assert len(case["posts"]) == 1 and len(case["requests"]) == 1
         with SessionLocal() as session:
             job = session.get(Job, job_id)
+            assert job is not None
             assert job.claim_owner == "constructed-successor" and job.status == "running"
             proposal = session.scalar(select(WebSearchProposal))
+            assert proposal is not None
             assert proposal.state == "dispatching" and proposal.result_json == {}
-            assert session.get(Run, run_id).provenance_json["web_search"]["state"] == "dispatching"
+            run = session.get(Run, run_id)
+            assert run is not None
+            assert run.provenance_json["web_search"]["state"] == "dispatching"
     finally:
         case["release"].set()
         if not task.done():
@@ -451,7 +465,9 @@ async def test_stopping_a_turn_durably_revokes_pending_search(
         assert proposal is not None and proposal.state == "cancelled"
         assert proposal.dispatch_after is None
         assert not proposal.approved_automatically
-        assert session.get(Run, run_id).provenance_json["web_search"]["state"] == "cancelled"
+        run = session.get(Run, run_id)
+        assert run is not None
+        assert run.provenance_json["web_search"]["state"] == "cancelled"
     obsolete = await case["client"].post(
         f"/api/jobs/{job_id}/search/decision",
         json={"revision": revision, "action": "approve"},
@@ -541,7 +557,8 @@ async def test_failure_revokes_approved_query_before_retry(execution: dict[str, 
     await decide(case, job_id, revision, "approve")
     await case["orch"]._fail(job_id, run_id, "Constructed failure", claim=None)
     with SessionLocal() as session:
-        assert session.get(Job, job_id).status == "failed"
+        job = session.get(Job, job_id)
+        assert job is not None and job.status == "failed"
         proposal = session.scalar(
             select(WebSearchProposal).where(WebSearchProposal.job_id == job_id)
         )
@@ -576,19 +593,25 @@ async def test_retry_revokes_legacy_approval_left_by_an_older_stop(
         await decide(case, job_id, revision, "approve")
     with SessionLocal() as session:
         row = session.scalar(select(WebSearchProposal).where(WebSearchProposal.job_id == job_id))
+        assert row is not None
         assert row.state == state
         saved = (row.approved_automatically, row.dispatch_after)
-        provenance = dict(session.get(Run, run_id).provenance_json)
+        run = session.get(Run, run_id)
+        assert run is not None
+        provenance = dict(run.provenance_json)
     stopped = await case["client"].post(f"/api/jobs/{job_id}/cancel")
     assert stopped.status_code == 200
     # Model a database written by an older stop path: terminal work, but
     # the proposal and its history still carry their earlier approval.
     with SessionLocal() as session:
         row = session.scalar(select(WebSearchProposal).where(WebSearchProposal.job_id == job_id))
+        assert row is not None
         row.state = state
         row.approved_automatically, row.dispatch_after = saved
         row.error_code = None
-        session.get(Run, run_id).provenance_json = provenance
+        run = session.get(Run, run_id)
+        assert run is not None
+        run.provenance_json = provenance
         session.commit()
     history = await case["client"].get(f"/api/chats/{case['chat_id']}")
     assert history.json()["web_searches"][0]["state"] == "cancelled"
@@ -596,6 +619,7 @@ async def test_retry_revokes_legacy_approval_left_by_an_older_stop(
     assert retried.status_code == 200
     with SessionLocal() as session:
         row = session.scalar(select(WebSearchProposal).where(WebSearchProposal.job_id == job_id))
+        assert row is not None
         assert row.state == "cancelled"
         assert row.dispatch_after is None and not row.approved_automatically
     await execute(case, job_id, run_id)

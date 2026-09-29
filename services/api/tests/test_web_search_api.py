@@ -128,7 +128,8 @@ async def test_search_commands_are_retryable_and_request_execution_resumption(
     assert first.json()["state"] == state
     assert pending["resumed"] == [pending["job_id"], pending["job_id"]]
     with SessionLocal() as session:
-        assert session.get(Job, pending["job_id"]).status == "queued"
+        job = session.get(Job, pending["job_id"])
+        assert job is not None and job.status == "queued"
 
 
 async def test_editing_the_query_requires_approval_of_the_replacement(
@@ -169,9 +170,13 @@ async def test_a_terminal_or_nonstandard_owner_cannot_accept_a_search_command(
 ) -> None:
     with SessionLocal() as session:
         if change == "cancelled":
-            session.get(Job, pending["job_id"]).status = "cancelled"
+            job = session.get(Job, pending["job_id"])
+            assert job is not None
+            job.status = "cancelled"
         else:
-            session.get(Chat, pending["chat_id"]).scope = "prompt_helper"
+            chat = session.get(Chat, pending["chat_id"])
+            assert chat is not None
+            chat.scope = "prompt_helper"
         session.commit()
     response = await client.post(
         f"/api/jobs/{pending['job_id']}/search/decision",
@@ -207,6 +212,7 @@ async def test_imported_history_cannot_supply_an_active_link_or_command(
 ) -> None:
     with SessionLocal() as session:
         run = session.get(Run, pending["run_id"])
+        assert run is not None
         run.provenance_json = {
             "web_search": {
                 "state": "complete",
@@ -332,6 +338,7 @@ async def test_portable_project_import_does_not_transfer_search_permission_or_li
         session.add(project)
         session.flush()
         chat = session.get(Chat, pending["chat_id"])
+        assert chat is not None
         chat.project_id = project.id
         chat.web_settings_json = {"allow_search": True, "allow_search_without_asking": True}
         session.commit()

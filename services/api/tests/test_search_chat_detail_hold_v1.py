@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from local_lm.search_chat_detail_hold_v1 import (
@@ -34,7 +36,7 @@ def test_public_constructor_cannot_authorize_removal() -> None:
     with pytest.raises(SearchChatDetailHoldError, match=INVALID_HOLD):
         SearchChatDetailHoldV1()
     with pytest.raises(TypeError):
-        SearchChatDetailHoldV1(
+        cast(Any, SearchChatDetailHoldV1)(
             schema="lm-atelier-search-chat-detail-hold-v1",
             schema_version=1,
             requested_consumer_count=1,

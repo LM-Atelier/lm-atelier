@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import importlib
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from local_lm.config import Settings
 
 
-def _settings(tmp_path: Path, **values: object) -> Settings:
+def _settings(tmp_path: Path, **values: Any) -> Settings:
     return Settings(_env_file=None, data_dir=tmp_path, **values)
 
 

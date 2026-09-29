@@ -103,7 +103,8 @@ def audit(sessions: sessionmaker[Session]) -> list[tuple[object, ...]]:
 async def snapshot(client: AsyncClient) -> dict[str, Any]:
     response = await client.get(ORDER)
     assert response.status_code == 200, response.text
-    return response.json()
+    body: dict[str, Any] = response.json()
+    return body
 
 
 def move_before(page: dict[str, Any], item_index: int, anchor_index: int) -> dict[str, Any]:

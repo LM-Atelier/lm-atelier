@@ -111,6 +111,7 @@ async def test_search_approval_resumes_after_the_actual_pausing_scope(
             with SessionLocal() as session:
                 assert self._claim_terminal_transition(session, job_id, claim, status="complete")
                 run = session.get(Run, run_id)
+                assert run is not None
                 run.status = "complete"
                 self._set_work_status(session, run, "complete")
                 session.commit()
@@ -120,7 +121,9 @@ async def test_search_approval_resumes_after_the_actual_pausing_scope(
     created = await client.post("/api/chats", json={"title": "Search resumption"})
     assert created.status_code == 201
     with SessionLocal() as session:
-        session.get(Chat, created.json()["id"]).web_settings_json = {"allow_search": True}
+        chat = session.get(Chat, created.json()["id"])
+        assert chat is not None
+        chat.web_settings_json = {"allow_search": True}
         session.commit()
     accepted = await client.post(
         f"/api/chats/{created.json()['id']}/turns",
@@ -198,7 +201,9 @@ async def test_automatic_search_wait_releases_compute_and_uses_normal_task_teard
         if run_id == auto_run[0]:
             claims.append(claim)
             if len(claims) == 1:
-                first_tasks.append(asyncio.current_task())
+                task = asyncio.current_task()
+                assert task is not None
+                first_tasks.append(task)
                 with SessionLocal() as session:
                     proposal.append(
                         pause_for_search(
@@ -229,6 +234,7 @@ async def test_automatic_search_wait_releases_compute_and_uses_normal_task_teard
         with SessionLocal() as session:
             assert self._claim_terminal_transition(session, job_id, claim, status="complete")
             run = session.get(Run, run_id)
+            assert run is not None
             run.status = "complete"
             self._set_work_status(session, run, "complete")
             session.commit()
@@ -247,7 +253,9 @@ async def test_automatic_search_wait_releases_compute_and_uses_normal_task_teard
         created = await client.post("/api/chats", json={"title": "Automatic search lifecycle"})
         assert created.status_code == 201
         with SessionLocal() as session:
-            session.get(Chat, created.json()["id"]).web_settings_json = {
+            chat = session.get(Chat, created.json()["id"])
+            assert chat is not None
+            chat.web_settings_json = {
                 "allow_search": True,
                 "allow_search_without_asking": automatic,
             }
@@ -257,7 +265,8 @@ async def test_automatic_search_wait_releases_compute_and_uses_normal_task_teard
             json={"text": "Compare two neutral materials", "mode": "text"},
         )
         assert accepted.status_code == 202
-        return accepted.json()["run"]["id"]
+        run_id: str = accepted.json()["run"]["id"]
+        return run_id
 
     async with asyncio.timeout(30):
         await submit(True)
@@ -273,6 +282,7 @@ async def test_automatic_search_wait_releases_compute_and_uses_normal_task_teard
         await other_finished.wait()
         with SessionLocal() as session:
             job = session.get(Job, job_id)
+            assert job is not None
             assert job.status == "paused" and job.claim_owner is None
             assert job.attempt == 1 and len(claims) == 1
         if ending == "cancel":
@@ -291,9 +301,9 @@ async def test_automatic_search_wait_releases_compute_and_uses_normal_task_teard
             assert not dispatched.is_set() and len(claims) == 1
         else:
             with SessionLocal() as session:
-                session.scalar(select(WebSearchProposal)).dispatch_after = utcnow() - timedelta(
-                    seconds=1
-                )
+                pending = session.scalar(select(WebSearchProposal))
+                assert pending is not None
+                pending.dispatch_after = utcnow() - timedelta(seconds=1)
                 session.commit()
             release_wait.set()
             await dispatched.wait()

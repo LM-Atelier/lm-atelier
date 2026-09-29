@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from local_lm.search_filters_v1 import (
@@ -86,17 +88,17 @@ def test_refuses_times_that_omit_the_date_dashes() -> None:
 
 def test_refuses_hostile_keys_and_constructor_authority() -> None:
     class HostileKey(str):
-        def __eq__(self, other):
+        def __eq__(self, other: object) -> bool:
             raise RuntimeError("private attacker detail")
 
-        def __hash__(self):
+        def __hash__(self) -> int:
             return str.__hash__(self)
 
     with pytest.raises(SearchFilterError, match=INVALID_FILTER) as caught:
         validate_search_filters({HostileKey("chat_id"): "chat-1"})
     assert "private attacker detail" not in str(caught.value)
     with pytest.raises(TypeError):
-        SearchFiltersV1(
+        cast(Any, SearchFiltersV1)(
             project_id=None,
             chat_id=None,
             role=None,

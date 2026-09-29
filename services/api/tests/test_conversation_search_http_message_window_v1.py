@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from local_lm.conversation_search_http_message_window_v1 import (
@@ -56,7 +58,7 @@ def test_public_constructor_cannot_load_chat() -> None:
     with pytest.raises(SearchHttpMessageWindowError, match=INVALID_HTTP_MESSAGE_WINDOW):
         ConversationSearchHttpMessageWindowV1()
     with pytest.raises(TypeError):
-        ConversationSearchHttpMessageWindowV1(
+        cast(Any, ConversationSearchHttpMessageWindowV1)(
             schema="lm-atelier-conversation-search-http-message-window-v1",
             schema_version=1,
             loads_entire_chat=True,

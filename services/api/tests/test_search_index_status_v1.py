@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from local_lm.search_index_status_v1 import (
@@ -80,7 +82,7 @@ def test_public_constructor_cannot_mint_ready_status() -> None:
     with pytest.raises(SearchIndexStatusError, match=INVALID_STATUS):
         SearchIndexStatusV1()
     with pytest.raises(TypeError):
-        SearchIndexStatusV1(
+        cast(Any, SearchIndexStatusV1)(
             state="ready",
             generation=1,
             indexed_through=1,

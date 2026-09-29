@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 import local_lm.search_fts_projection_v1 as projection_mod
@@ -76,7 +78,7 @@ def test_public_constructor_cannot_authorize_export() -> None:
     with pytest.raises(SearchFtsProjectionError, match=INVALID_PROJECTION):
         SearchFtsProjectionV1()
     with pytest.raises(TypeError):
-        SearchFtsProjectionV1(
+        cast(Any, SearchFtsProjectionV1)(
             schema="lm-atelier-search-fts-projection-v1",
             schema_version=1,
             projection_name="conversation-fts-v1",
