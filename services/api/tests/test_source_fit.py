@@ -12,11 +12,14 @@ are checked by hand rather than only by property.
 from __future__ import annotations
 
 from fractions import Fraction
+from typing import cast
 
 import pytest
 
 from local_lm.source_fit import (
     MAX_FIT_FRACTION,
+    Mode,
+    SourceFit,
     SourceFitError,
     fit_source_to_shape,
 )
@@ -24,13 +27,15 @@ from local_lm.source_fit import (
 SIDES = ("top", "right", "bottom", "left")
 
 
-def fit(source: tuple[int, int], target: tuple[int, int], mode: str):
+def fit(source: tuple[int, int], target: tuple[int, int], mode: str) -> SourceFit:
     return fit_source_to_shape(
         source_width=source[0],
         source_height=source[1],
         target_width=target[0],
         target_height=target[1],
-        mode=mode,
+        # Any string, so a test can hand over a mode the type forbids and see
+        # the function refuse it.
+        mode=cast(Mode, mode),
     )
 
 
