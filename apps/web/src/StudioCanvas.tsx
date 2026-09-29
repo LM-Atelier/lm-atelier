@@ -17,6 +17,7 @@ import {
   fitViewport,
   identityViewport,
   panBy,
+  pinchBy,
   shownRect,
   toImagePoint,
   zoomAbout,
@@ -29,8 +30,9 @@ import {
  * All geometry lives in the pure viewport module and all mask mutation in
  * the pure tools; this component is deliberately thin glue - it unprojects
  * pointer events, forwards them to the active tool, and repaints layers.
- * Space-drag pans, wheel zooms about the cursor, and the container's CSS
- * transform carries the one shared viewport so layers can never disagree.
+ * Space-drag pans, wheel zooms about the cursor, two fingers pinch, and the
+ * container's CSS transform carries the one shared viewport so layers can
+ * never disagree.
  * A fourth layer, above the picture, holds an earlier picture while the two
  * are compared; it shares that viewport, so a comparison keeps the zoom.
  */
@@ -77,7 +79,6 @@ export function StudioCanvas({
   const [viewport, setViewport] = useState<Viewport>(identityViewport);
   const [panning, setPanning] = useState(false);
   const spaceHeld = useRef(false);
-  const lastPointer = useRef<{ x: number; y: number } | null>(null);
   const activePointers = useRef<Map<number, { x: number; y: number }>>(new Map());
   const drawingPointer = useRef<number | null>(null);
 
@@ -157,7 +158,6 @@ export function StudioCanvas({
     const onBlur = () => {
       spaceHeld.current = false;
       setPanning(false);
-      lastPointer.current = null;
     };
     window.addEventListener("keydown", onKey);
     window.addEventListener("keyup", onKey);
@@ -283,12 +283,10 @@ export function StudioCanvas({
         drawPreview();
       }
       setPanning(true);
-      lastPointer.current = screen;
       return;
     }
     if (spaceHeld.current || event.button === 1 || !tool) {
       setPanning(true);
-      lastPointer.current = screen;
       return;
     }
     drawingPointer.current = event.pointerId;
@@ -308,13 +306,22 @@ export function StudioCanvas({
 
   const onPointerMove = (event: ReactPointerEvent) => {
     const screen = screenPoint(event);
-    if (activePointers.current.has(event.pointerId)) {
-      activePointers.current.set(event.pointerId, screen);
-    }
-    if (panning && lastPointer.current) {
-      setViewport((current) =>
-        panBy(current, screen.x - lastPointer.current!.x, screen.y - lastPointer.current!.y));
-      lastPointer.current = screen;
+    const previous = activePointers.current.get(event.pointerId);
+    if (previous) activePointers.current.set(event.pointerId, screen);
+    if (panning) {
+      // Each pointer moves the picture from where that pointer last was, so
+      // a finger landing or lifting never throws the picture across. Both
+      // positions are fixed here: the update may run only when the view is
+      // next drawn, after later moves have replaced them.
+      if (!previous) return;
+      const down = [...activePointers.current.keys()];
+      if (down.length === 1) {
+        setViewport((current) => panBy(current, screen.x - previous.x, screen.y - previous.y));
+      } else if (down.slice(0, 2).includes(event.pointerId)) {
+        // The first two pointers down pinch; a third changes nothing until one lifts.
+        const other = activePointers.current.get(down[0] === event.pointerId ? down[1] : down[0])!;
+        setViewport((current) => pinchBy(current, [previous, other], [screen, other]));
+      }
       return;
     }
     tool?.move(toImagePoint(viewport, screen), viewport.scale);
@@ -326,10 +333,7 @@ export function StudioCanvas({
     const screen = screenPoint(event);
     activePointers.current.delete(event.pointerId);
     if (panning) {
-      if (activePointers.current.size === 0) {
-        setPanning(false);
-        lastPointer.current = null;
-      }
+      if (activePointers.current.size === 0) setPanning(false);
       return;
     }
     if (endDrawing(screen)) onStrokeEnd?.();
@@ -349,10 +353,7 @@ export function StudioCanvas({
       drawPreview();
       onStrokeEnd?.();
     }
-    if (activePointers.current.size === 0) {
-      setPanning(false);
-      lastPointer.current = null;
-    }
+    if (activePointers.current.size === 0) setPanning(false);
   };
 
   const onWheel = (event: ReactWheelEvent) => {

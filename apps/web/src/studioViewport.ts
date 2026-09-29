@@ -60,6 +60,33 @@ export function panBy(viewport: Viewport, dx: number, dy: number): Viewport {
   return { ...viewport, tx: viewport.tx + dx, ty: viewport.ty + dy };
 }
 
+type ScreenPoint = { x: number; y: number };
+
+/** Follow two pointers from where they were to where they are now.
+ *
+ * The picture scales by how far apart they have moved and travels with the
+ * point midway between them, so what lay under that point stays under it.
+ * Unless they twist, which the picture cannot follow since it does not turn,
+ * or the zoom meets its limit, what lay under each pointer stays under it too.
+ */
+export function pinchBy(
+  viewport: Viewport,
+  from: readonly [ScreenPoint, ScreenPoint],
+  to: readonly [ScreenPoint, ScreenPoint],
+): Viewport {
+  const before = midpoint(from);
+  const after = midpoint(to);
+  const apart = Math.hypot(from[1].x - from[0].x, from[1].y - from[0].y);
+  const now = Math.hypot(to[1].x - to[0].x, to[1].y - to[0].y);
+  // Pointers on one spot give no distance to scale by; they still move the picture.
+  const factor = apart > 0 && now > 0 ? now / apart : 1;
+  return panBy(zoomAbout(viewport, before, factor), after.x - before.x, after.y - before.y);
+}
+
+function midpoint([a, b]: readonly [ScreenPoint, ScreenPoint]): ScreenPoint {
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+}
+
 /** Center the image in the container at the largest whole-fit scale. */
 export function fitViewport(
   image: { width: number; height: number },
