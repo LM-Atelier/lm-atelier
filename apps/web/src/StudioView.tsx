@@ -28,6 +28,7 @@ import {
 } from "./studioToolState";
 import { useStudioImage } from "./useStudioImage";
 import { useStudioSession, type StudioStep } from "./useStudioSession";
+import { useStudioBackground } from "./useStudioBackground";
 import { useConfirm } from "./useConfirm";
 import type { EditTemplate, GenerationIdentity } from "./types";
 
@@ -62,7 +63,7 @@ export function StudioView({
   useEffect(() => {
     heading.current?.focus();
   }, [sourceArtifactId]);
-  const { sessionId, steps, previewArtifactId, busy, error, apply } = useStudioSession(
+  const { sessionId, session, steps, previewArtifactId, busy: sessionBusy, error, apply } = useStudioSession(
     sourceArtifactId,
     sourceChatId,
   );
@@ -79,6 +80,9 @@ export function StudioView({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [instruction, setInstruction] = useState("");
   const [selectionError, setSelectionError] = useState<string | null>(null);
+  // Replacing a background is two applies; the studio stays busy in between.
+  const background = useStudioBackground(sessionId, session, apply, setSelectionError);
+  const busy = sessionBusy || background.busy;
   // The recipe an apply should run under. Cleared whenever the instruction is
   // edited by hand: at that point the words are no longer the recipe's, and
   // running its workflow would attribute a result to something it did not do.
@@ -158,6 +162,7 @@ export function StudioView({
     (tools.kind === "extend" && !Object.values(tools.margins).some(Boolean)) ||
     (tools.kind === "text" && (!tools.newWords.trim() || selectionCoverage === 0)) ||
     (tools.kind === "isolate" && !activeTool?.workflow_revision_id) ||
+    (tools.kind === "background" && !activeTool?.workflow_revision_id) ||
     (!["enhance", "extend", "text", "relight", "isolate"].includes(tools.kind) && !instruction.trim()) ||
     busy ||
     !current ||
@@ -289,7 +294,7 @@ export function StudioView({
           ) : (
             <StudioWorkflowOpening selectorId={workflowSelectorId} />
           )}
-          {!["instruct", "relight", "isolate"].includes(tools.kind) && (
+          {!["instruct", "relight", "isolate", "background"].includes(tools.kind) && (
             <div className="studio-selection-controls">
               <StudioSelectionTool tools={tools} dispatch={dispatch} colorsUnreadable={readsColors && Boolean(bitmap) && !sourcePixels} />
               <div className="row-actions">
@@ -350,6 +355,16 @@ export function StudioView({
                 ? tools.mask
                 : null;
               const plan = studioApplyPlan(tools, instruction, recipe, activeTool);
+              if (plan.cutout) {
+                // Drawn at the picture's own size, so the subject lines up with it.
+                if (!bitmap) return;
+                setSelectionError(null);
+                background.start(plan, current.artifactId, { width: bitmap.width, height: bitmap.height }, () => {
+                  setInstruction("");
+                  setSelectedId(null);
+                });
+                return;
+              }
               const send = (mask: Blob | null, secondPicture?: Blob) => {
                 apply(
                   plan.words,
@@ -400,6 +415,8 @@ export function StudioView({
                   ? "Relight"
                 : tools.kind === "isolate"
                   ? "Cut out"
+                : tools.kind === "background"
+                  ? "Replace background"
                 : tools.kind === "enhance"
                   ? `Enlarge ${tools.upscaleFactor}x`
                 : tools.kind !== "instruct" && selectionCoverage > 0

@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { api } from "./api";
 import { generationIdentityFromProvenance } from "./generationIdentity";
-import type { ChatDetail, GenerationIdentity, Message } from "./types";
+import type { ChatDetail, GenerationIdentity, Message, TurnAccepted } from "./types";
 
 const STUDIO_SESSION_KEY = "local-lm-studio-session";
 
@@ -175,12 +175,14 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
       mask?: StudioMaskUpload,
       settings?: Record<string, unknown>,
       workflowRevisionId?: string,
-      onAccepted?: () => void,
+      onAccepted?: (accepted: TurnAccepted) => void,
       secondPicture?: Blob,
+      /** Runs when the turn is refused, so a caller waiting on it can stop. */
+      onRefused?: () => void,
     ) =>
       apply.mutate(
         { instruction, artifactId, mask, settings, workflowRevisionId, secondPicture },
-        { onSuccess: onAccepted },
+        { onSuccess: onAccepted, onError: onRefused },
       ),
   };
 }

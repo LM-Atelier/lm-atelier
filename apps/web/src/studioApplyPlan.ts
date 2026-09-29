@@ -16,6 +16,8 @@ export type StudioApplyPlan = {
   blendSelection: boolean;
   /** A light map goes with the picture as a second input. */
   sendsLightMap: boolean;
+  /** A cutout run first, whose subject decides what the words may redraw. */
+  cutout?: { words: string; workflowRevisionId?: string };
 };
 
 export function studioApplyPlan(
@@ -54,6 +56,25 @@ export function studioApplyPlan(
       workflowRevisionId: activeTool?.workflow_revision_id ?? undefined,
       blendSelection: false,
       sendsLightMap: false,
+    };
+  }
+  if (tools.kind === "background") {
+    const scene = instruction.trim();
+    return {
+      // The whole picture is redrawn and the subject placed back, so the
+      // model is told what goes around the subject and to leave it be.
+      words: scene
+        ? `Replace the background with ${scene}. Keep the subject exactly as it is, in the same place, size and pose.`
+        : "",
+      settings: recipe ? recipe.settings_json : undefined,
+      workflowRevisionId: recipe?.workflow_revision_id ?? undefined,
+      blendSelection: true,
+      sendsLightMap: false,
+      // The cutout runs the workflow the report names, as Isolate does.
+      cutout: {
+        words: defaultInstruction({ ...tools, kind: "isolate" }),
+        workflowRevisionId: activeTool?.workflow_revision_id ?? undefined,
+      },
     };
   }
   // Text takes its words from its own fields. Enhance and Extend ask for no

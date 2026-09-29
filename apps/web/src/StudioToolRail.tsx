@@ -4,6 +4,7 @@ import {
   Lasso,
   LetterText,
   Maximize2,
+  Mountain,
   PaintBucket,
   Redo2,
   Scissors,
@@ -30,6 +31,7 @@ const TOOLS: Array<{ kind: StudioToolKind; label: string; icon: typeof Brush }> 
   { kind: "text", label: "Replace words in the picture", icon: LetterText },
   { kind: "relight", label: "Relight from a direction", icon: SunMedium },
   { kind: "isolate", label: "Cut the subject out", icon: Scissors },
+  { kind: "background", label: "Replace the background", icon: Mountain },
 ];
 
 /** The studio's left rail: pick how you point at the image.
