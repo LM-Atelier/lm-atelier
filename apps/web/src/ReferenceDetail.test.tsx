@@ -345,7 +345,7 @@ describe("reference detail", () => {
     fireEvent.click(screen.getByText("Save details"));
 
     await waitFor(() =>
-      expect(screen.getByText("Save details").hasAttribute("disabled")).toBe(true),
+      expect(screen.getByText("Save details").getAttribute("aria-disabled")).toBe("true"),
     );
     expect(screen.getByLabelText("Other names, separated by commas")).toHaveProperty(
       "value",
@@ -373,11 +373,11 @@ describe("reference detail", () => {
     show();
 
     const save = await screen.findByText("Save details");
-    expect(save.hasAttribute("disabled")).toBe(true);
+    expect(save.getAttribute("aria-disabled")).toBe("true");
 
     fireEvent.change(screen.getByLabelText("Description"), {
       target: { value: "Mathematician" },
     });
-    expect(screen.getByText("Save details").hasAttribute("disabled")).toBe(false);
+    expect(screen.getByText("Save details").getAttribute("aria-disabled")).toBe("false");
   });
 });

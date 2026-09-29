@@ -131,7 +131,10 @@ export function ReferenceDetail({
     },
     onError: fail,
   });
-  const save = () => details.mutate();
+  const save = () => {
+    if (!edited || details.isPending) return;
+    details.mutate();
+  };
 
   // Invalidates the subject list rather than the asset list: the cover lives on
   // the subject, and this view reads the subject from the list it was opened
@@ -245,7 +248,7 @@ export function ReferenceDetail({
             onChange={(event) => setDraft({ ...draft, tags: event.target.value })}
           />
         </label>
-        <button className="secondary" disabled={!edited || details.isPending} onClick={save}>
+        <button className="secondary" aria-disabled={!edited || details.isPending} onClick={save}>
           Save details
         </button>
       </div>
