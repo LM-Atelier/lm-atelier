@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { api } from "./api";
@@ -17,6 +17,12 @@ export function QueueActivityDialog({ onClose }: { onClose: () => void }) {
   const client = useQueryClient();
   const clock = useClockChoice();
   const [ordering, setOrdering] = useState(false);
+  const orderButton = useRef<HTMLButtonElement>(null);
+  const wasOrdering = useRef(false);
+  useEffect(() => {
+    if (wasOrdering.current && !ordering) orderButton.current?.focus();
+    wasOrdering.current = ordering;
+  }, [ordering]);
   const [lane, setLane] = useState<Lane | "all">("all");
   const queryKey = ["jobs", "queue", lane] as const;
   const activity = useInfiniteQuery({
@@ -63,7 +69,7 @@ export function QueueActivityDialog({ onClose }: { onClose: () => void }) {
           {activity.isFetching ? "Refreshing…" : "Refresh"}
         </button>
       </div>
-      <button className="secondary compact-button" onClick={() => setOrdering(true)}>
+      <button ref={orderButton} className="secondary compact-button" onClick={() => setOrdering(true)}>
         Change dispatch order
       </button>
       <GenerationQueueControls />

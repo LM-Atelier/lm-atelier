@@ -9,7 +9,7 @@ import type { QueueActivityItem, QueueActivityPage } from "./types";
 
 vi.mock("./api", async (importOriginal) => ({ ...(await importOriginal<typeof import("./api")>()), api: {
   queueControl: vi.fn(), jobActivity: vi.fn(), queueActivity: vi.fn(), installQueuePolicy: vi.fn(), installQueueControl: vi.fn(), transferQueuePolicy: vi.fn(), transferQueueControl: vi.fn(), generationQueuePolicy: vi.fn(), generationQueueControl: vi.fn(), queuePlanSteps: vi.fn(), cancelJob: vi.fn(),
-  pauseDownload: vi.fn(), resumeDownload: vi.fn(), retryJob: vi.fn(),
+  pauseDownload: vi.fn(), resumeDownload: vi.fn(), retryJob: vi.fn(), queueOrder: vi.fn(),
 } }));
 const clients: QueryClient[] = [];
 const stamp = "2026-09-01T00:00:00Z";
@@ -44,6 +44,33 @@ function open() {
   render(<QueryClientProvider client={client}><AcceptedWorkEntry /><JobsPanel /></QueryClientProvider>);
   return client;
 }
+
+it.each(["entry", "return"])("keeps queue view %s inside the keyboard flow", async (direction) => {
+  vi.mocked(api.queueActivity).mockResolvedValue(page([]));
+  vi.mocked(api.queueOrder).mockResolvedValue({ lane: "transfer", revision: 0, total: 0, next_cursor: null, items: [] });
+  open();
+  const trigger = await screen.findByRole("button", { name: "Accepted work" });
+  trigger.focus();
+  fireEvent.click(trigger);
+  fireEvent.change(screen.getByRole("combobox", { name: "Work category" }), { target: { value: "transfer" } });
+  const change = screen.getByRole("button", { name: "Change dispatch order" });
+  change.focus();
+  fireEvent.click(change);
+  const category = screen.getByRole("combobox", { name: "Order category" });
+  expect(category).toHaveValue("transfer");
+  if (direction === "entry") {
+    expect(category).toHaveFocus();
+  } else {
+    const back = screen.getByRole("button", { name: "Back to accepted work" });
+    back.focus();
+    fireEvent.click(back);
+    expect(screen.getByRole("button", { name: "Change dispatch order" })).toHaveFocus();
+    expect(screen.getByRole("combobox", { name: "Work category" })).toHaveValue("transfer");
+  }
+  fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(trigger).toHaveFocus();
+});
 
 it("opens grouped accepted work even when no standalone jobs are visible and restores focus", async () => {
   vi.mocked(api.queueActivity).mockResolvedValue(page([item("plan")]));
