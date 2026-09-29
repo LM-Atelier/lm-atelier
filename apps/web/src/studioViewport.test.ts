@@ -5,6 +5,7 @@ import {
   MAX_SCALE,
   MIN_SCALE,
   panBy,
+  shownRect,
   toImagePoint,
   toScreenPoint,
   zoomAbout,
@@ -53,5 +54,21 @@ describe("studio viewport", () => {
     const image = toImagePoint(viewport, { x: 400, y: 400 });
     expect(image.x).toBeCloseTo(1000);
     expect(image.y).toBeCloseTo(500);
+  });
+
+  it("says where the picture is shown and how big, at the current zoom", () => {
+    const fitted = fitViewport({ width: 2000, height: 1000 }, { width: 800, height: 800 });
+    const shown = shownRect(fitted, { width: 2000, height: 1000 });
+    expect(shown.x).toBeCloseTo(0);
+    expect(shown.y).toBeCloseTo(200);
+    expect(shown.width).toBeCloseTo(800);
+    expect(shown.height).toBeCloseTo(400);
+
+    // Zooming about the middle grows the picture on screen around that point.
+    const zoomed = shownRect(zoomAbout(fitted, { x: 400, y: 400 }, 2), { width: 2000, height: 1000 });
+    expect(zoomed.x).toBeCloseTo(-400);
+    expect(zoomed.y).toBeCloseTo(0);
+    expect(zoomed.width).toBeCloseTo(1600);
+    expect(zoomed.height).toBeCloseTo(800);
   });
 });

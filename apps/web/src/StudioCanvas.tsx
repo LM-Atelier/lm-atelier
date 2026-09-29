@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
   type PointerEvent as ReactPointerEvent,
   type WheelEvent as ReactWheelEvent,
 } from "react";
@@ -16,8 +17,10 @@ import {
   fitViewport,
   identityViewport,
   panBy,
+  shownRect,
   toImagePoint,
   zoomAbout,
+  type ScreenRect,
   type Viewport,
 } from "./studioViewport";
 
@@ -41,6 +44,7 @@ export function StudioCanvas({
   before = null,
   onGestureStart,
   onStrokeEnd,
+  overlay,
 }: {
   image: ImageBitmap | null;
   /** Drawn in the picture's place when given, at its size: an adjustment's preview. */
@@ -60,6 +64,8 @@ export function StudioCanvas({
    * the first Undo a no-op. */
   onGestureStart?: () => void;
   onStrokeEnd?: () => void;
+  /** Controls laid over the picture at screen scale, given where the picture is shown now. */
+  overlay?: (shown: ScreenRect) => ReactNode;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const imageLayer = useRef<HTMLCanvasElement>(null);
@@ -413,6 +419,7 @@ export function StudioCanvas({
           />
         )}
       </div>
+      {image && overlay?.(shownRect(viewport, size))}
     </div>
   );
 }

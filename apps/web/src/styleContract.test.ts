@@ -90,14 +90,15 @@ describe("style contract", () => {
     expect(css).toMatch(/\.studio-canvas-layers\s*>\s*canvas\s*\{[^}]*position:\s*absolute/);
   });
 
-  it("keeps what floats over the studio picture on the stage", () => {
+  it("keeps what floats over the studio picture in the canvas's own box", () => {
     const css = readFileSync(STYLESHEET, "utf8");
-    // The Extend handles cover the stage with inset: 0, which measures from
-    // the nearest positioned ancestor. With none on the stage that was the
-    // whole main area, so the top handle sat above the page header and the
-    // right one over the tool panel, nowhere near the picture.
+    // The Extend frame covers the canvas with inset: 0, which measures from
+    // the nearest positioned ancestor, and places its edges by where the
+    // canvas shows the picture. With no positioned box around it, inset: 0
+    // once measured the whole main area, so the top handle sat above the page
+    // header and the right one over the tool panel, nowhere near the picture.
     expect(css).toMatch(/\.studio-extend-handles\s*\{[^}]*position:\s*absolute/);
-    expect(css).toMatch(/\.studio-stage\s*\{[^}]*position:\s*relative/);
+    expect(css).toMatch(/\.studio-canvas\s*\{[^}]*position:\s*relative/);
   });
 
   it("lets the studio header's controls wrap rather than run off a narrow window", () => {

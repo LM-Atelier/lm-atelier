@@ -8,6 +8,7 @@ import { StudioPerspectiveTool } from "./StudioPerspectiveTool";
 import { StudioCropTool } from "./StudioCropTool";
 import { StudioResizeTool } from "./StudioResizeTool";
 import { StudioTransformTool } from "./StudioTransformTool";
+import { extendedSize } from "./studioExtend";
 import { pictureCorners } from "./studioPerspective";
 import type { StudioToolAction, StudioToolState } from "./studioToolState";
 import type { StudioLocalEditDetails, StudioLocalEditOperation } from "./types";
@@ -116,6 +117,9 @@ export function StudioToolOptions({
     ) : null;
   }
   if (tools.kind === "extend") {
+    // The selection raster is made at the picture's own size, so it says what that is.
+    const size = tools.mask ? { width: tools.mask.width, height: tools.mask.height } : null;
+    const extended = size && Object.values(tools.margins).some(Boolean) ? extendedSize(tools.margins, size) : null;
     return (
       <div className="studio-tool-options">
         <span>
@@ -129,6 +133,9 @@ export function StudioToolOptions({
                 .join(", ")
             : "Drag an edge of the picture outward, or use the arrow keys on one."}
         </small>
+        {size && extended && (
+          <small>{`The canvas goes from ${size.width} × ${size.height} to ${extended.width} × ${extended.height}.`}</small>
+        )}
         <button
           className="secondary compact-button"
           onClick={() => dispatch({ type: "clear-margins" })}
