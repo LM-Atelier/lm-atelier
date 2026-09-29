@@ -1395,7 +1395,9 @@ html[data-motion="reduced"] .progress-track > div.indeterminate { width: 100% !i
 .catalog-variant-choice p { margin: 0; color: var(--ink-secondary); }
 .catalog-variant-choice ul { display: flex; flex-wrap: wrap; gap: calc(6px * var(--spacing-scale, 1)); margin: 0; padding: 0; list-style: none; }
 /* The studio's picture-level actions, beside its title. */
-.studio-header-actions { display: flex; align-items: center; gap: calc(6px * var(--spacing-scale, 1)); }
+.studio-header-actions { display: flex; flex-wrap: wrap; align-items: center; gap: calc(6px * var(--spacing-scale, 1)); }
+.studio-export { display: inline-flex; align-items: center; gap: calc(6px * var(--spacing-scale, 1)); }
+.studio-export select { height: 30px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); color: var(--ink); font-size: calc(12px * var(--text-scale, 1)); padding: 0 calc(8px * var(--spacing-scale, 1)); }
 /* Attaching from the library: a grid of what is already here. */
 .library-attach-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: calc(8px * var(--spacing-scale, 1)); margin: 0; padding: 0; list-style: none; max-height: 52vh; overflow-y: auto; }
 .library-attach-tile { display: block; width: 100%; padding: 0; border: 2px solid var(--line); border-radius: 10px; background: var(--surface-2); overflow: hidden; cursor: pointer; }

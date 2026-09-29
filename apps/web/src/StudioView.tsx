@@ -1,4 +1,4 @@
-import { Download, Star, X } from "lucide-react";
+import { Star, X } from "lucide-react";
 import { useCallback, useEffect, useId, useMemo, useReducer, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
@@ -7,6 +7,7 @@ import { StudioOpenImage } from "./StudioOpenImage";
 import { ErrorCallout } from "./ErrorCallout";
 import { StudioCanvas } from "./StudioCanvas";
 import { StudioCompare } from "./StudioCompare";
+import { StudioExportLink } from "./StudioExportLink";
 import { StudioExtendHandles } from "./StudioExtendHandles";
 import { StudioRecipes } from "./StudioRecipes";
 import { StudioSelectionControls } from "./StudioSelectionTool";
@@ -212,13 +213,7 @@ export function StudioView({
                 <Star size={14} aria-hidden="true" fill={isFavorite ? "currentColor" : "none"} />
                 {isFavorite ? "Favorited" : "Favorite"}
               </button>
-              <a
-                className="secondary compact-button"
-                href={artifactSource(current.artifactId) ?? undefined}
-                download
-              >
-                <Download size={14} aria-hidden="true" /> Export
-              </a>
+              <StudioExportLink artifactId={current.artifactId} />
             </>
           )}
           <button
