@@ -1578,7 +1578,9 @@ async def test_media_first_use_provisions_missing_runtime(
         *,
         estimated_memory_bytes: int | None = None,
         editor_bridge_support: ComfyEditorBridgeSupport | None = None,
+        environment_overrides: dict[str, str] | None = None,
     ) -> None:
+        assert environment_overrides is None
         del estimated_memory_bytes
         assert editor_bridge_support is not None
         assert not editor_bridge_support.supported
@@ -2018,7 +2020,9 @@ async def test_media_start_disables_unapproved_custom_nodes(
         *,
         estimated_memory_bytes: int | None = None,
         editor_bridge_support: ComfyEditorBridgeSupport | None = None,
+        environment_overrides: dict[str, str] | None = None,
     ) -> None:
+        assert environment_overrides is None
         assert name == "media"
         assert estimated_memory_bytes is None
         assert editor_bridge_support is not None
@@ -2071,7 +2075,9 @@ async def test_media_start_retains_a_bridge_staging_refusal_without_blocking_med
         *,
         estimated_memory_bytes: int | None = None,
         editor_bridge_support: ComfyEditorBridgeSupport | None = None,
+        environment_overrides: dict[str, str] | None = None,
     ) -> None:
+        assert environment_overrides is None
         assert name == "media"
         assert estimated_memory_bytes is None
         captured["command"] = command
@@ -2138,6 +2144,7 @@ async def test_media_start_whitelists_only_the_verified_first_party_editor_bridg
         *,
         estimated_memory_bytes: int | None = None,
         editor_bridge_support: ComfyEditorBridgeSupport | None = None,
+        environment_overrides: dict[str, str] | None = None,
     ) -> None:
         assert estimated_memory_bytes is None
         assert editor_bridge_support is not None
@@ -2146,11 +2153,31 @@ async def test_media_start_whitelists_only_the_verified_first_party_editor_bridg
         assert editor_bridge_support.comfyui_version == "0.28.0"
         assert editor_bridge_support.frontend_version == "1.45.21"
         captured["command"] = command
+        bridge_name = bridge_directory_name(trusted_browser_origins(settings))
+        bridge = runtime / "custom_nodes" / bridge_name / "__init__.py"
+        environment = dict(os.environ)
+        environment.pop("PYTHONDONTWRITEBYTECODE", None)
+        environment.pop("PYTHONPYCACHEPREFIX", None)
+        environment.update(environment_overrides or {})
+        subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import importlib.util, sys; "
+                "spec = importlib.util.spec_from_file_location('editor_bridge', sys.argv[1]); "
+                "module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)",
+                str(bridge),
+            ],
+            env=environment,
+            capture_output=True,
+            check=True,
+        )
 
     monkeypatch.setattr(supervisor, "_trusted_comfy_node_folders", trusted_nodes)
     monkeypatch.setattr(supervisor, "_write_comfy_model_paths", lambda: model_paths)
     monkeypatch.setattr(supervisor, "_replace", replace)
 
+    await supervisor.start_media()
     await supervisor.start_media()
 
     command = captured["command"]
@@ -2202,7 +2229,9 @@ async def test_media_start_retains_the_exact_unsupported_runtime_fact(
         *,
         estimated_memory_bytes: int | None = None,
         editor_bridge_support: ComfyEditorBridgeSupport | None = None,
+        environment_overrides: dict[str, str] | None = None,
     ) -> None:
+        assert environment_overrides is None
         assert estimated_memory_bytes is None
         captured["command"] = command
         captured["support"] = editor_bridge_support
