@@ -25,14 +25,12 @@ from local_lm.models import (
     ComfyRegistrySourceArtifactReview,
     WorkflowInstallOffer,
 )
+from local_lm.scheduler import ResourceScheduler
 from local_lm.workflow_activations import (
     WorkflowSourceLaunchScope,
     materialize_comfy_runtime_dependency,
 )
-from local_lm.workflow_completion_jobs import (
-    begin_workflow_completion,
-    stage_workflow_completion_job,
-)
+from local_lm.workflow_completion_jobs import stage_workflow_completion_job
 from local_lm.workflow_package_preparation import PreparationContext
 from local_lm.workflow_source_launch import revalidate_workflow_source_launch_scope
 
@@ -156,9 +154,14 @@ async def test_source_runtime_keeps_reviewed_context_and_drains_its_workers(
     async def run() -> None:
         nonlocal cleaned
         try:
-            async with workflow_source_runtime.prepared_workflow_source_runtime(
-                processes, offer_id, attempt
-            ) as prepared:
+            async with (
+                ResourceScheduler().job_lease(
+                    job_id, resource="media_compute", group="primary"
+                ) as claim,
+                workflow_source_runtime.prepared_workflow_source_runtime(
+                    processes, offer_id, claim=claim
+                ) as prepared,
+            ):
                 assert prepared.batch is not None
                 assert len(prepared.scope.registry_packages) == 2
                 with SessionLocal() as session:
@@ -177,10 +180,8 @@ async def test_source_runtime_keeps_reviewed_context_and_drains_its_workers(
         with SessionLocal() as session:
             offer = session.get(WorkflowInstallOffer, offer_id)
             assert offer is not None
-            stage_workflow_completion_job(session, offer)
-            job = begin_workflow_completion(session, offer)
-            assert job is not None
-            attempt = job.attempt
+            job = stage_workflow_completion_job(session, offer)
+            job_id = job.id
             session.commit()
         monkeypatch.setattr(
             PreparationContext, "from_settings", classmethod(lambda _cls, _s: context)

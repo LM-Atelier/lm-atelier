@@ -101,7 +101,12 @@ async def _activate_imported(
     proved: dict[str, dict[str, str]] = {}
 
     async def capture(
-        *, job_id: str, install_id: str, default_settings: Any, component_hashes: dict[str, str]
+        *,
+        job_id: str,
+        install_id: str,
+        default_settings: Any,
+        component_hashes: dict[str, str],
+        primary_lease_held: bool = False,
     ) -> str:
         proved["hashes"] = component_hashes
         return "ok"
@@ -246,7 +251,12 @@ async def test_activating_an_imported_model_measures_the_files_it_proves(
     proved: dict[str, dict[str, str]] = {}
 
     async def capture(
-        *, job_id: str, install_id: str, default_settings: Any, component_hashes: dict[str, str]
+        *,
+        job_id: str,
+        install_id: str,
+        default_settings: Any,
+        component_hashes: dict[str, str],
+        primary_lease_held: bool = False,
     ) -> str:
         proved["hashes"] = component_hashes
         return "ok"
@@ -367,7 +377,12 @@ async def test_activating_a_replaced_imported_model_measures_the_new_bytes(
     proved: list[dict[str, str]] = []
 
     async def capture(
-        *, job_id: str, install_id: str, default_settings: Any, component_hashes: dict[str, str]
+        *,
+        job_id: str,
+        install_id: str,
+        default_settings: Any,
+        component_hashes: dict[str, str],
+        primary_lease_held: bool = False,
     ) -> str:
         proved.append(component_hashes)
         return "ok"

@@ -32,6 +32,9 @@ from local_lm.models import (
     WorkflowDependencyBinding,
     WorkflowInstallOffer,
 )
+from local_lm.queue_lane_policy import change_lane_policy, read_lane_policy
+from local_lm.scheduler import JobClaim
+from local_lm.schemas import QueueControlCommand
 from local_lm.workflow_activation_requests import WorkflowActivationOut
 
 pytestmark = pytest.mark.asyncio
@@ -51,6 +54,9 @@ pytestmark = pytest.mark.asyncio
         "cancelled",
         "late-request",
         "cancel-check",
+        "install-paused",
+        "install-retry",
+        "legacy-recover",
         "manual",
         "manual-recover",
         "manual-other",
@@ -246,11 +252,36 @@ async def test_accepted_download_completes_offer_and_activates_exact_installed_d
     )
     assert offer.status_code == 201, offer.text
     offer_id = offer.json()["id"]
+    if change == "install-paused":
+        with SessionLocal() as session:
+            policy = change_lane_policy(
+                session,
+                "install",
+                "pause_after_current",
+                QueueControlCommand(expected_revision=0, idempotency_key="pause-install"),
+            )
+            assert policy.dispatch_state == "paused"
     queued = await client.post(f"/api/workflow-install-offers/{offer_id}/install")
     assert queued.status_code == 202, queued.text
     job_id = queued.json()[0]["id"]
     with SessionLocal() as session:
+        stored_offer = session.get(WorkflowInstallOffer, offer_id)
+        assert stored_offer is not None and stored_offer.completion_job_id is not None
+        completion_job_id = stored_offer.completion_job_id
+        completion_job = session.get(Job, completion_job_id)
+        assert completion_job is not None and completion_job.status == "queued"
+        assert completion_job.kind == "workflow_install" and completion_job.claim_owner is None
+    with SessionLocal() as session:
         assert session.scalar(select(WorkflowActivation)) is None
+    if change == "legacy-recover":
+        with SessionLocal() as session:
+            stored_offer = session.get(WorkflowInstallOffer, offer_id)
+            assert stored_offer is not None
+            stored_offer.completion_job_id = None
+            completion_job = session.get(Job, completion_job_id)
+            assert completion_job is not None
+            session.delete(completion_job)
+            session.commit()
     profile = await client.post(
         "/api/profiles",
         json={
@@ -276,7 +307,9 @@ async def test_accepted_download_completes_offer_and_activates_exact_installed_d
     original_publish = services.events.publish
     attention: list[dict[str, object]] = []
 
-    async def publish(event_type: str, entity_id: str, data: dict[str, object]) -> None:
+    async def publish(
+        event_type: str, entity_id: str, data: dict[str, object] | None = None
+    ) -> None:
         if event_type == "download.completed" and entity_id == job_id:
             if change.startswith(("manual", "preferred")):
                 with SessionLocal() as session:
@@ -325,7 +358,7 @@ async def test_accepted_download_completes_offer_and_activates_exact_installed_d
                         job.status = change
                     session.commit()
         if event_type == "workflow.install.attention":
-            attention.append(data)
+            attention.append(data or {})
         await original_publish(event_type, entity_id, data)
 
     monkeypatch.setattr(services.events, "publish", publish)
@@ -348,21 +381,21 @@ async def test_accepted_download_completes_offer_and_activates_exact_installed_d
 
         monkeypatch.setattr(completion_module, "activate_reviewed_revision", activate_then_change)
     reconcile = getattr(manager, "reconcile_workflow_install_offers", None)
-    if change in {"recover", "replan"} and reconcile is not None:
+    if change in {"recover", "replan", "legacy-recover"} and reconcile is not None:
 
         async def defer_completion(_job_id: str) -> None:
             return None
 
         monkeypatch.setattr(manager, "reconcile_workflow_install_offers", defer_completion)
     complete = getattr(manager, "_complete_workflow_install_offer", None)
-    if change == "cancel-check" and complete is not None:
+    if change in {"cancel-check", "install-retry"} and complete is not None:
         entered = threading.Event()
         release = threading.Event()
 
-        def held_completion(current_offer: str) -> str | None:
+        def held_completion(current_offer: str, *, claim: JobClaim) -> str | None:
             entered.set()
             assert release.wait(10), "Completion was not released"
-            result: str | None = complete(current_offer)
+            result: str | None = complete(current_offer, claim=claim)
             return result
 
         monkeypatch.setattr(manager, "_complete_workflow_install_offer", held_completion)
@@ -370,7 +403,31 @@ async def test_accepted_download_completes_offer_and_activates_exact_installed_d
         observer = None
         try:
             assert await asyncio.to_thread(entered.wait, 10)
-            task.cancel()
+            with SessionLocal() as session:
+                completion_job = session.get(Job, completion_job_id)
+                assert completion_job is not None and completion_job.claim_owner is not None
+                assert completion_job.status == "running" and completion_job.attempt == 1
+            with SessionLocal() as session:
+                policy = change_lane_policy(
+                    session,
+                    "install",
+                    "pause_after_current",
+                    QueueControlCommand(expected_revision=0, idempotency_key="drain-install"),
+                )
+                assert policy.dispatch_state == "draining" and policy.running_jobs == 1
+            if change == "install-retry":
+                cancelled = await client.post(f"/api/jobs/{completion_job_id}/cancel")
+                assert cancelled.status_code == 200, cancelled.text
+                retried = await client.post(f"/api/jobs/{completion_job_id}/retry")
+                assert retried.status_code == 200, retried.text
+                with SessionLocal() as session:
+                    retry_job = session.get(Job, completion_job_id)
+                    assert retry_job is not None and retry_job.status == "queued"
+                    assert retry_job.claim_owner is not None and retry_job.attempt == 1
+                # Let the new dispatcher observe the old attempt's retained claim.
+                await asyncio.wait_for(manager._offer_tasks[offer_id], timeout=10)
+            else:
+                task.cancel()
             acquired: list[bool] = []
 
             async def acquire_after_completion() -> None:
@@ -381,15 +438,72 @@ async def test_accepted_download_completes_offer_and_activates_exact_installed_d
             await asyncio.sleep(0)
             assert not acquired
             release.set()
-            with pytest.raises(asyncio.CancelledError):
+            if change == "install-retry":
                 await task
+            else:
+                with pytest.raises(asyncio.CancelledError):
+                    await task
             await observer
             assert acquired == [True]
+            with SessionLocal() as session:
+                policy = read_lane_policy(session, "install")
+                assert policy.dispatch_state == "paused" and policy.running_jobs == 0
+            if change == "install-retry":
+                with SessionLocal() as session:
+                    stored_offer = session.get(WorkflowInstallOffer, offer_id)
+                    assert stored_offer is not None and stored_offer.completion_error_code is None
+                    assert stored_offer.status == "queued"
+                with SessionLocal() as session:
+                    change_lane_policy(
+                        session,
+                        "install",
+                        "resume",
+                        QueueControlCommand(
+                            expected_revision=policy.revision, idempotency_key="retry-install"
+                        ),
+                    )
+                await services.scheduler.queue_control_changed("install")
+                async with asyncio.timeout(10):
+                    while True:
+                        with SessionLocal() as session:
+                            retry_job = session.get(Job, completion_job_id)
+                            assert retry_job is not None
+                            if retry_job.status == "complete":
+                                assert retry_job.attempt == 2
+                                break
+                        await asyncio.sleep(0.01)
         finally:
             release.set()
             await asyncio.gather(task, return_exceptions=True)
             if observer is not None:
                 await asyncio.gather(observer, return_exceptions=True)
+    elif change == "install-paused":
+        task = asyncio.create_task(manager._download(job_id))
+        try:
+            async with asyncio.timeout(10):
+                while True:
+                    with SessionLocal() as session:
+                        download = session.get(Job, job_id)
+                        completion_job = session.get(Job, completion_job_id)
+                        assert completion_job is not None
+                        assert completion_job.status == "queued"
+                        assert completion_job.claim_owner is None and completion_job.attempt == 0
+                        assert session.scalar(select(WorkflowActivation)) is None
+                        if download is not None and download.status == "complete":
+                            break
+                    await asyncio.sleep(0.01)
+            with SessionLocal() as session:
+                change_lane_policy(
+                    session,
+                    "install",
+                    "resume",
+                    QueueControlCommand(expected_revision=1, idempotency_key="resume-install"),
+                )
+            await services.scheduler.queue_control_changed("install")
+            await asyncio.wait_for(task, timeout=10)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
     else:
         await manager._download(job_id)
     if change.startswith("manual"):
@@ -407,7 +521,7 @@ async def test_accepted_download_completes_offer_and_activates_exact_installed_d
             review_url,
         )
         return
-    if change in {"recover", "replan"}:
+    if change in {"recover", "replan", "legacy-recover"}:
         with SessionLocal() as session:
             stored = session.get(WorkflowInstallOffer, offer_id)
             assert stored is not None and stored.status == "queued"
@@ -432,6 +546,9 @@ async def test_accepted_download_completes_offer_and_activates_exact_installed_d
         "recover",
         "replan",
         "cancel-check",
+        "install-paused",
+        "install-retry",
+        "legacy-recover",
         "preferred",
         "preferred-optional",
         "preferred-any",
@@ -543,6 +660,11 @@ async def test_accepted_download_completes_offer_and_activates_exact_installed_d
         )
         assert activation is not None
         activation_id = activation.id
+        completion_job = session.get(Job, stored.completion_job_id)
+        assert completion_job is not None and completion_job.status == "complete"
+        assert completion_job.claim_owner is None
+        assert completion_job.attempt == (2 if change == "install-retry" else 1)
+        assert completion_job.result_json == {"version": 1, "activation_id": activation_id}
         bindings = session.scalars(
             select(WorkflowDependencyBinding).where(
                 WorkflowDependencyBinding.workflow_activation_id == activation_id,
@@ -598,9 +720,9 @@ async def _check_manual_completion(
     completed_offers: list[str] = []
     complete = manager._complete_workflow_install_offer
 
-    def record_completed_offer(current_offer_id: str) -> str | None:
+    def record_completed_offer(current_offer_id: str, *, claim: JobClaim) -> str | None:
         completed_offers.append(current_offer_id)
-        result: str | None = complete(current_offer_id)
+        result: str | None = complete(current_offer_id, claim=claim)
         return result
 
     monkeypatch.setattr(manager, "_complete_workflow_install_offer", record_completed_offer)

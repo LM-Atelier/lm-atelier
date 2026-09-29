@@ -579,7 +579,7 @@ async def test_source_extensions_finish_or_pause_without_partial_workflow_activa
                 offer.completion_error_code,
                 failures,
             )
-            assert job.status == ("queued" if mode == "refuse-activation-identity" else "failed")
+            assert job.status == "failed"
             assert offer.status == "queued"
             assert not extension.active
             assert not list(session.scalars(select(models.WorkflowActivation)))
@@ -611,11 +611,7 @@ async def test_source_extensions_finish_or_pause_without_partial_workflow_activa
                 "comfyui",
             )
             assert job.attempt == (
-                3
-                if mode.startswith(("retry-", "recover-runtime-"))
-                else 2
-                if mode.startswith("trust-resume")
-                else 1
+                2 if mode.startswith(("retry-", "recover-runtime-", "trust-resume")) else 1
             )
     if mode.startswith("refuse-activation-"):
         await services.processes.stop("media")

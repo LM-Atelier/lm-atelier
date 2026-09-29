@@ -101,8 +101,10 @@ async def test_one_source_approval_installs_and_renders_with_real_comfy(
     with SessionLocal() as session:
         revision = session.get(WorkflowRevision, revision_id)
         assert revision is not None and revision.trusted and revision.ui_graph_json == graph
-        assert revision.api_graph_json["1"]["inputs"]["width"] == 64
-        assert revision.api_graph_json["1"]["inputs"]["height"] == 96
+        assert revision.api_graph_json["1"]["inputs"]["width"] == "${width}"
+        assert revision.api_graph_json["1"]["inputs"]["height"] == "${height}"
+        assert revision.input_schema_json["properties"]["width"]["default"] == 64
+        assert revision.input_schema_json["properties"]["height"]["default"] == 96
         activation = session.scalar(
             select(WorkflowActivation).where(WorkflowActivation.workflow_revision_id == revision_id)
         )

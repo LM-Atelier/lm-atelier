@@ -12,8 +12,8 @@ from sqlalchemy.orm import Session
 
 from .comfy_registry import ComfyRegistryClient
 from .comfy_registry_activation_batches import (
-    _deactivate_pending,
     _worker,
+    deactivate_pending_registry_packages,
     recover_registry_package_batch,
 )
 from .comfy_registry_closure_driver import ComfyRegistryWheelMetadataClient
@@ -34,6 +34,8 @@ from .comfy_registry_wheel_downloads import ComfyRegistryWheelDownloader
 from .comfy_registry_wheel_projects import ComfyRegistryWheelProjectClient
 from .domain import JobKind, utcnow
 from .models import Job, WorkflowInstallOffer, WorkflowInstallOfferPackage
+from .scheduler import JobClaim
+from .workflow_completion_jobs import WorkflowCompletionJobError
 from .workflow_offer_packages import (
     AcceptedWorkflowPackage,
     WorkflowOfferPackageError,
@@ -71,12 +73,30 @@ class PreparedWorkflowExtensions:
 
 
 def quarantine_workflow_source_extensions(
-    session_factory: SessionFactory, offer_id: str, *, media_worker_stopped: bool
+    session_factory: SessionFactory,
+    offer_id: str,
+    *,
+    media_worker_stopped: bool,
+    claim: JobClaim,
 ) -> None:
     """Leave a refused interrupted installation inactive without changing any package files."""
     if media_worker_stopped is not True:
         return
     with session_factory() as session:
+        session.execute(text("UPDATE workflow_install_offers SET status = status WHERE 0"))
+        offer = session.get(WorkflowInstallOffer, offer_id)
+        job = (
+            session.get(Job, offer.completion_job_id)
+            if offer is not None and offer.completion_job_id is not None
+            else None
+        )
+        if (
+            job is None
+            or job.kind != JobKind.WORKFLOW_INSTALL.value
+            or job.claim_owner != claim.token
+            or job.attempt != claim.attempt
+        ):
+            return
         identifiers = tuple(
             session.scalars(
                 select(WorkflowInstallOfferPackage.registry_install_id)
@@ -92,9 +112,10 @@ def quarantine_workflow_source_extensions(
                 )
             )
         )
-    _deactivate_pending(
-        session_factory, [identifier for identifier in identifiers if identifier is not None]
-    )
+        deactivate_pending_registry_packages(
+            session, [identifier for identifier in identifiers if identifier is not None]
+        )
+        session.commit()
 
 
 def _accepted(
@@ -111,15 +132,27 @@ def _accepted(
 
 
 def _failure(
-    session_factory: SessionFactory, job_id: str, payload: dict[str, object], *, cancelled: bool
+    session_factory: SessionFactory,
+    job_id: str,
+    payload: dict[str, object],
+    *,
+    attempt: int,
+    cancelled: bool,
+    cleanup_guard: Callable[[Session], None] | None = None,
 ) -> None:
     with session_factory() as session:
         session.execute(text("UPDATE workflow_install_offers SET status = status WHERE 0"))
+        if cleanup_guard is not None:
+            try:
+                cleanup_guard(session)
+            except WorkflowCompletionJobError:
+                return
         job = session.get(Job, job_id)
         if (
             job is not None
             and job.kind == JobKind.REGISTRY_PREPARE.value
             and job.status == "running"
+            and job.attempt == attempt
             and job.payload_json == payload
         ):
             job.status = "cancelled" if cancelled else "failed"
@@ -135,9 +168,13 @@ async def _prepare_one(
     package_id: str,
     context: PreparationContext,
     services: ExtensionPreparationServices,
+    write_guard: Callable[[Session], None] | None = None,
+    cleanup_guard: Callable[[Session], None] | None = None,
 ) -> None:
     with session_factory() as session:
         session.execute(text("UPDATE workflow_install_offers SET status = status WHERE 0"))
+        if write_guard is not None:
+            write_guard(session)
         _offer, _saved, packages = _accepted(session, offer_id)
         matches = [item for item in packages if item.link.package_id == package_id]
         if len(matches) != 1:
@@ -156,13 +193,16 @@ async def _prepare_one(
         item.job.status = "running"
         item.job.phase = "Preparing extension"
         item.job.attempt += 1
+        job_attempt = item.job.attempt
         item.job.started_at = utcnow()
         session.commit()
 
     def record(session: Session, preparation: ComfyRegistryPreparation) -> None:
+        if write_guard is not None:
+            write_guard(session)
         offer, saved, packages = _accepted(session, offer_id)
         accepted = next((item for item in packages if item.job.id == job_id), None)
-        if accepted is None or accepted.plan != plan:
+        if accepted is None or accepted.plan != plan or accepted.job.attempt != job_attempt:
             raise WorkflowOfferPackageError()
         record_workflow_offer_package(
             session,
@@ -189,15 +229,23 @@ async def _prepare_one(
             wheel_downloader=services.wheels,
             expected_plan=plan,
             record_preparation=record,
+            write_guard=write_guard,
         )
         with session_factory() as session:
+            if write_guard is not None:
+                write_guard(session)
             _offer, _saved, packages = _accepted(session, offer_id)
             stored = next((item for item in packages if item.job.id == job_id), None)
             if stored is None or stored.preparation != result:
                 raise WorkflowOfferPackageError()
     except (Exception, asyncio.CancelledError) as exc:
         _failure(
-            session_factory, job_id, job_payload, cancelled=isinstance(exc, asyncio.CancelledError)
+            session_factory,
+            job_id,
+            job_payload,
+            attempt=job_attempt,
+            cancelled=isinstance(exc, asyncio.CancelledError),
+            cleanup_guard=cleanup_guard,
         )
         raise
 
@@ -209,6 +257,8 @@ async def prepare_workflow_source_extensions(
     context: PreparationContext,
     media_worker_stopped: bool,
     services: ExtensionPreparationServices | None = None,
+    write_guard: Callable[[Session], None] | None = None,
+    cleanup_guard: Callable[[Session], None] | None = None,
 ) -> PreparedWorkflowExtensions:
     """Run under the caller's primary lease; preparation grants no trust or activation."""
     if media_worker_stopped is not True:
@@ -241,7 +291,9 @@ async def prepare_workflow_source_extensions(
             )
         for package_id in missing:
             assert services is not None
-            await _prepare_one(session_factory, offer_id, package_id, context, services)
+            await _prepare_one(
+                session_factory, offer_id, package_id, context, services, write_guard, cleanup_guard
+            )
 
     def snapshot() -> PreparedWorkflowExtensions:
         with session_factory() as session:
@@ -272,7 +324,15 @@ async def prepare_workflow_source_extensions(
             plan.verify_target(reviewed_inputs.marker_environment, reviewed_inputs.supported_tags)
     await _worker(
         lambda: _recover_and_verify(
-            session_factory, offer_id, package_ids, prepared, context, reviewed_inputs, runtime
+            session_factory,
+            offer_id,
+            package_ids,
+            prepared,
+            context,
+            reviewed_inputs,
+            runtime,
+            write_guard,
+            cleanup_guard,
         )
     )
     return replace(prepared, reviewed_inputs=reviewed_inputs)
@@ -302,6 +362,8 @@ def _recover_and_verify(
     context: PreparationContext,
     reviewed_inputs: ComfyRegistryReviewedInputContext | None,
     runtime: tuple[ComfyRegistryRuntimeDistribution, ...],
+    write_guard: Callable[[Session], None] | None = None,
+    cleanup_guard: Callable[[Session], None] | None = None,
 ) -> None:
     environment_root = registry_wheel_environment_root(context.state_root)
     recover_registry_package_batch(
@@ -313,6 +375,8 @@ def _recover_and_verify(
         environment_root=environment_root,
         media_worker_stopped=True,
         reviewed_inputs=reviewed_inputs,
+        write_guard=write_guard,
+        cleanup_guard=cleanup_guard,
     )
     verified = (
         verify_comfy_registry_launch(

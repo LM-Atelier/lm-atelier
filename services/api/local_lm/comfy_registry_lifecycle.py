@@ -129,6 +129,7 @@ class ComfyRegistryPreparation:
 
 
 PreparationRecorder = Callable[[Session, ComfyRegistryPreparation], None]
+PreparationWriteGuard = Callable[[Session], None]
 
 
 @dataclass(frozen=True)
@@ -215,6 +216,7 @@ async def prepare_comfy_registry_install(
     pending_omission: PendingOmission | None = None,
     record_preparation: PreparationRecorder | None = None,
     reviewed_inputs: ComfyRegistryReviewedInputContext | None = None,
+    write_guard: PreparationWriteGuard | None = None,
 ) -> ComfyRegistryPreparation:
     """Prepare one exact Registry package without trusting or activating it.
 
@@ -306,6 +308,8 @@ async def prepare_comfy_registry_install(
                 reviewed_inputs=reviewed_inputs,
             )
         )
+        if write_guard is not None:
+            write_guard(session)
         install = persist_comfy_registry_install(
             session,
             resolution=resolution,
@@ -347,13 +351,19 @@ async def prepare_comfy_registry_install(
         return preparation
     except (Exception, asyncio.CancelledError):
         session.rollback()
-        await _remove_tree(wheel_destination, staging_root)
-        if owns_node_destination and (node_destination.exists() or node_destination.is_symlink()):
-            await _remove_tree(node_destination, node_root)
-        if not environment_preexisting and (
-            environment_destination.exists() or environment_destination.is_symlink()
-        ):
-            await _remove_tree(environment_destination, environment_root)
+
+        async def cleanup() -> None:
+            await _remove_tree(wheel_destination, staging_root)
+            if owns_node_destination and (
+                node_destination.exists() or node_destination.is_symlink()
+            ):
+                await _remove_tree(node_destination, node_root)
+            if not environment_preexisting and (
+                environment_destination.exists() or environment_destination.is_symlink()
+            ):
+                await _remove_tree(environment_destination, environment_root)
+
+        await _finish_cleanup(cleanup())
         raise
 
 
@@ -371,6 +381,7 @@ async def renew_comfy_registry_install_environment(
     wheel_progress: WheelDownloadProgress | None = None,
     environment_assembler: EnvironmentAssembler = assemble_comfy_registry_wheel_environment,
     reviewed_inputs: ComfyRegistryReviewedInputContext | None = None,
+    write_guard: PreparationWriteGuard | None = None,
 ) -> ComfyRegistryPreparation:
     """Rebuild only an inactive package's target-bound wheel environment.
 
@@ -463,6 +474,8 @@ async def renew_comfy_registry_install_environment(
                 reviewed_inputs=reviewed_inputs,
             )
         )
+        if write_guard is not None:
+            write_guard(session)
         if old_environment != environment_destination and old_shared is None:
             if retirement.exists() or retirement.is_symlink():
                 raise ComfyRegistryLifecycleError(
@@ -492,15 +505,19 @@ async def renew_comfy_registry_install_environment(
         session.commit()
     except (Exception, asyncio.CancelledError):
         session.rollback()
-        await _remove_tree(wheel_destination, staging_root)
-        if retired and (retirement.exists() or retirement.is_symlink()):
-            retirement.rename(old_environment)
-        if (
-            not environment_preexisting
-            and environment_destination != old_environment
-            and (environment_destination.exists() or environment_destination.is_symlink())
-        ):
-            await _remove_tree(environment_destination, environment_root)
+
+        async def cleanup() -> None:
+            await _remove_tree(wheel_destination, staging_root)
+            if retired and (retirement.exists() or retirement.is_symlink()):
+                retirement.rename(old_environment)
+            if (
+                not environment_preexisting
+                and environment_destination != old_environment
+                and (environment_destination.exists() or environment_destination.is_symlink())
+            ):
+                await _remove_tree(environment_destination, environment_root)
+
+        await _finish_cleanup(cleanup())
         raise
     if retired:
         try:
@@ -814,6 +831,20 @@ def _existing_managed_child(root: Path, name: str, label: str) -> Path:
     return resolved
 
 
+async def _finish_cleanup(cleanup: Awaitable[None]) -> None:
+    """Retain execution ownership until every rollback cleanup step finishes."""
+    task = asyncio.ensure_future(cleanup)
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    task.result()
+    if cancelled:
+        raise asyncio.CancelledError
+
+
 async def _remove_tree(path: Path, root: Path) -> None:
     if not path.exists() and not path.is_symlink():
         return
@@ -827,7 +858,7 @@ async def _remove_tree(path: Path, root: Path) -> None:
         raise ComfyRegistryLifecycleError(
             "cleanup_failed", "Registry preparation cleanup path is unsafe"
         )
-    await asyncio.to_thread(shutil.rmtree, path)
+    await _environment_work(lambda: shutil.rmtree(path))
 
 
 def _is_link_or_reparse(path: Path) -> bool:

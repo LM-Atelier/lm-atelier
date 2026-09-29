@@ -26,6 +26,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from . import __version__
 from .adapters.comfyui import ComfyUIAdapter
 from .api import (
+    recover_registry_preparations,
     router,
     shutdown_registry_preparations,
 )
@@ -696,6 +697,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 services.orchestrator.recover_interrupted()
             with _startup_stage("download-recovery"):
                 services.downloads.recover_interrupted()
+            with _startup_stage("registry-preparation-recovery"):
+                recover_registry_preparations(services)
             with _startup_stage("generation-queue-recovery"), SessionLocal() as session:
                 recover_queue_lanes(session)
                 session.commit()

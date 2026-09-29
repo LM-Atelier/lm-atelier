@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 
 from sqlalchemy.orm import Session
 
@@ -51,6 +52,8 @@ async def activate_verified_comfy_registry_install(
     media_worker_stopped: bool,
     start_media: MediaStarter,
     read_node_inventory: NodeInventoryReader | None,
+    write_guard: Callable[[Session], None] | None = None,
+    cleanup_guard: Callable[[Session], None] | None = None,
 ) -> ComfyRegistryActivationState:
     """Keep file work outside the writer and recheck authority after the worker starts."""
     _require_stopped(media_worker_stopped)
@@ -74,6 +77,8 @@ async def activate_verified_comfy_registry_install(
         before_start = await _verification_worker(snapshot)
         target.require_configuration()
         session.expire_all()
+        if write_guard is not None:
+            write_guard(session)
         install = _install(session, install_id)
         if not install.trusted:
             raise ComfyRegistryInstallError("Registry trust changed before activation")
@@ -95,6 +100,9 @@ async def activate_verified_comfy_registry_install(
     failure_code = "activation_start_failed"
     try:
         target.require_configuration()
+        if write_guard is not None:
+            write_guard(session)
+            session.rollback()
         await start_media()
         omission_proof = None
         if omission is not None:
@@ -149,6 +157,8 @@ async def activate_verified_comfy_registry_install(
             raise ComfyRegistryInstallError("Registry launch selection changed during startup")
         session.expire_all()
         target.require_configuration()
+        if write_guard is not None:
+            write_guard(session)
         completed.require_current(session)
         activated = _install(session, install_id)
         activated.review_json = {
@@ -171,8 +181,16 @@ async def activate_verified_comfy_registry_install(
             failure_code = exc.code
         elif isinstance(exc, ComfyRegistryInstallError):
             failure_code = "registry_install_verification_failed"
-        _deactivate(session, install_id, failure_code=failure_code)
-        await _restore_after_cancellation(start_media)
+        retained_guard = cleanup_guard or write_guard
+        _deactivate(session, install_id, failure_code=failure_code, write_guard=retained_guard)
+
+        async def restore() -> object:
+            if retained_guard is not None:
+                retained_guard(session)
+                session.rollback()
+            return await start_media()
+
+        await _restore_after_cancellation(restore)
         if isinstance(exc, asyncio.CancelledError):
             raise
         raise ComfyRegistryActivationError(

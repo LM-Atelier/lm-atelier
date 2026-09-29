@@ -3,6 +3,7 @@ export { buildTurnRequest } from "./turnRequest";
 import type { SourceFitCapability, SourceFitIntent, SourceFitPreviewResult, SourceFitSelection } from "./sourceFit";
 import type { TurnReference } from "./mentionDraft";
 import type { ComposerPromptSource } from "./composerPromptSource";
+import type { InstallQueueAction, InstallQueuePolicy } from "./installationQueueTypes";
 import {
   parseArtifactLibraryPage,
   type ArtifactLibraryFilters,
@@ -623,6 +624,12 @@ export const api = {
       if (value.plan_id !== planId) throw new Error("The submitted work steps could not be read.");
       return value;
     }),
+  installQueuePolicy: (signal?: AbortSignal) =>
+    request<InstallQueuePolicy>("/api/queue/lanes/install", { signal }),
+  installQueueControl: (action: InstallQueueAction, command: QueueControlCommand) =>
+    request<InstallQueuePolicy>("/api/queue/lanes/install/"
+      + (action === "pause_after_current" ? "pause-after-current" : "resume"),
+    { method: "POST", body: JSON.stringify(command) }),
   transferQueuePolicy: (signal?: AbortSignal) =>
     request<TransferQueuePolicy>("/api/queue/lanes/transfer", { signal }),
   transferQueueControl: (action: TransferQueueAction, command: QueueControlCommand) =>

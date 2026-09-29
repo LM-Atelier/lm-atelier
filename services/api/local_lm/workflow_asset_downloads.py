@@ -77,11 +77,11 @@ def compose_workflow_asset_download_requests(
 
 
 def install_plan_download_request(
-    plan: InstallPlan, *, allow_activated: bool = False
+    plan: InstallPlan, *, allow_activated: bool = False, allow_downloading: bool = False
 ) -> DownloadRequest:
     """Derive the only download request authorized by an immutable plan."""
 
-    _validate_plan_state(plan, allow_activated=allow_activated)
+    _validate_plan_state(plan, allow_activated=allow_activated, allow_downloading=allow_downloading)
     artifacts = _required_artifacts(plan)
     allow_patterns: list[str] = []
     expected_sha256: dict[str, str] = {}
@@ -174,7 +174,9 @@ def install_plan_download_request(
         ) from exc
 
 
-def _validate_plan_state(plan: InstallPlan, *, allow_activated: bool = False) -> None:
+def _validate_plan_state(
+    plan: InstallPlan, *, allow_activated: bool = False, allow_downloading: bool = False
+) -> None:
     if plan.provider not in _PROVIDERS:
         raise WorkflowAssetDownloadError(
             "unsupported_install_provider", "install plan provider is unsupported"
@@ -192,7 +194,11 @@ def _validate_plan_state(plan: InstallPlan, *, allow_activated: bool = False) ->
         raise WorkflowAssetDownloadError(
             "invalid_install_plan", "install plan lacks immutable identity"
         )
-    if plan.status != "planned" and not (allow_activated and plan.status == "activated"):
+    if not (
+        plan.status == "planned"
+        or (allow_activated and plan.status == "activated")
+        or (allow_downloading and plan.status == "downloading")
+    ):
         raise WorkflowAssetDownloadError(
             "install_plan_not_pending", "install plan is no longer ready to queue"
         )

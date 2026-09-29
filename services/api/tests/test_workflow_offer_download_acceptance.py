@@ -21,8 +21,38 @@ from local_lm.model_planner import INSTALL_RESOLVER_VERSION
 from local_lm.models import InstallPlan, Job, WorkflowInstallOffer
 from local_lm.schemas import DownloadRequest
 from local_lm.workflow_install_offers import revalidate_workflow_install_offer
+from local_lm.workflow_offer_completion import accepted_workflow_offer_downloads
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest.mark.parametrize("status", ["queued", "running", "paused"])
+async def test_accepted_download_in_progress_does_not_start_workflow_completion(
+    app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    offer_id = await _created_offer(app, client, monkeypatch)
+    manager = app.state.services.downloads
+    monkeypatch.setattr(manager, "start", lambda _id: None)
+    monkeypatch.setattr(manager, "start_workflow_installation", lambda _id: None)
+    response = await client.post(f"/api/workflow-install-offers/{offer_id}/install")
+    assert response.status_code == 202, response.text
+    with SessionLocal() as session:
+        plan = session.get(InstallPlan, "accepted-plan")
+        job = session.get(Job, response.json()[0]["id"])
+        assert plan is not None and job is not None
+        plan.status = "downloading"
+        job.status = status
+        session.commit()
+        offer = session.get(WorkflowInstallOffer, offer_id)
+        assert offer is not None
+        assert len(accepted_workflow_offer_downloads(session, offer)) == 1
+    await manager.reconcile_workflow_install_offers(only_offer_id=offer_id)
+    with SessionLocal() as session:
+        offer = session.get(WorkflowInstallOffer, offer_id)
+        assert offer is not None and offer.completion_error_code is None
+        completion = session.get(Job, offer.completion_job_id)
+        assert completion is not None and completion.status == "queued"
+        assert completion.claim_owner is None and completion.attempt == 0
 
 
 async def _created_offer(app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> str:
@@ -217,10 +247,14 @@ async def test_accepted_offer_links_existing_paused_download_without_resuming_it
     started.clear()
     response = await client.post(f"/api/workflow-install-offers/{offer_id}/install")
     assert response.status_code == 202, response.text
-    assert [(job["id"], job["status"]) for job in response.json()] == [(existing_id, "paused")]
+    assert [(job["id"], job["status"]) for job in response.json() if job["kind"] == "download"] == [
+        (existing_id, "paused")
+    ]
+    assert len(response.json()) == 2 and response.json()[1]["kind"] == "workflow_install"
+    assert response.json()[1]["status"] == "queued"
     assert started == []
     with SessionLocal() as session:
-        assert session.scalar(select(func.count()).select_from(Job)) == 1
+        assert session.scalar(select(func.count()).select_from(Job)) == 2
     app.state.services.downloads.recover_interrupted()
     assert started == []
     assert [link["job_id"] for link in _links(offer_id)] == [existing_id]

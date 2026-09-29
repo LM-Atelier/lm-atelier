@@ -64,7 +64,6 @@ def workflow_install_progress(
         completion.id
         if completion is not None
         and offer.status == "queued"
-        and offer.source_plan_id is not None
         and completion.status in {"failed", "cancelled", "interrupted"}
         else None
     )

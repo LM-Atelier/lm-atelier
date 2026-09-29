@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -185,6 +185,8 @@ class RegistryActivationBatch:
     environment_root: Path
     reviewed_inputs: ComfyRegistryReviewedInputContext | None = None
     completion_verification: VerifiedComfyRegistryLaunch | None = None
+    write_guard: Callable[[Session], None] | None = field(default=None, compare=False, repr=False)
+    cleanup_guard: Callable[[Session], None] | None = field(default=None, compare=False, repr=False)
 
     def _rows(self, session: Session, state: str) -> list[ComfyRegistryInstall]:
         rows = [
@@ -239,6 +241,8 @@ class RegistryActivationBatch:
 
     def complete(self, session: Session) -> None:
         """Stage completion in the transaction that accepts the executable workflow."""
+        if self.cleanup_guard is not None:
+            self.cleanup_guard(session)
         if self.completion_verification is None:
             raise _refuse("registry_batch_not_verified")
         self.completion_verification.require_current(session)
@@ -263,6 +267,8 @@ def _begin(
     custom_node_root: Path,
     environment_root: Path,
     reviewed_inputs: ComfyRegistryReviewedInputContext | None = None,
+    write_guard: Callable[[Session], None] | None = None,
+    cleanup_guard: Callable[[Session], None] | None = None,
 ) -> tuple[RegistryActivationBatch, dict[str, tuple[ComfyRegistryRuntimeFile, ...]]]:
     ordered = tuple(sorted(preparations, key=lambda item: item.install_id))
     identifiers = {item.install_id for item in ordered}
@@ -375,6 +381,8 @@ def _begin(
         prepare_installs=prepare,
     )
     with session_factory() as session:
+        if write_guard is not None:
+            write_guard(session)
         verified.require_current(session)
         for install in staged:
             current = session.get(ComfyRegistryInstall, install.id)
@@ -391,6 +399,8 @@ def _begin(
         custom_node_root,
         environment_root,
         reviewed_inputs,
+        write_guard=write_guard,
+        cleanup_guard=cleanup_guard or write_guard,
     ), before
 
 
@@ -441,6 +451,8 @@ def _verified(
         prepare_installs=prepare,
     )
     with session_factory() as session:
+        if batch.write_guard is not None:
+            batch.write_guard(session)
         verified.require_current(session)
         for install in staged:
             current = session.get(ComfyRegistryInstall, install.id)
@@ -462,7 +474,10 @@ async def _rollback(
     except (ValueError, OSError):
         await _worker(
             lambda: _deactivate_pending(
-                session_factory, [item.install_id for item in batch.preparations], force=True
+                session_factory,
+                [item.install_id for item in batch.preparations],
+                force=True,
+                write_guard=batch.cleanup_guard,
             )
         )
         raise
@@ -503,6 +518,8 @@ def _restore_flags(session_factory: SessionFactory, batch: RegistryActivationBat
             continue
     with session_factory() as session:
         _reserve(session)
+        if batch.cleanup_guard is not None:
+            batch.cleanup_guard(session)
         rows = [
             _row(session, item, batch.execution_plans[item.install_id])
             for item in batch.preparations
@@ -539,10 +556,13 @@ def _deactivate_pending(
     install_ids: Sequence[str],
     *,
     force: bool = False,
+    write_guard: Callable[[Session], None] | None = None,
 ) -> None:
     """Quarantine activation flags after the caller proves the media worker stopped."""
     with session_factory() as session:
         _reserve(session)
+        if write_guard is not None:
+            write_guard(session)
         deactivate_pending_registry_packages(session, install_ids, force=force)
         session.commit()
 
@@ -585,6 +605,8 @@ def recover_registry_package_batch(
     environment_root: Path,
     media_worker_stopped: bool,
     reviewed_inputs: ComfyRegistryReviewedInputContext | None = None,
+    write_guard: Callable[[Session], None] | None = None,
+    cleanup_guard: Callable[[Session], None] | None = None,
 ) -> None:
     """Adopt interrupted runtime files before ordinary preparation verifies the package."""
     if media_worker_stopped is not True:
@@ -605,10 +627,16 @@ def recover_registry_package_batch(
             custom_node_root,
             environment_root,
             reviewed_inputs,
+            write_guard,
+            cleanup_guard,
         )
         _restore_flags(session_factory, batch)
     except (ValueError, OSError):
-        _deactivate_pending(session_factory, [item.install_id for item in preparations])
+        _deactivate_pending(
+            session_factory,
+            [item.install_id for item in preparations],
+            write_guard=cleanup_guard or write_guard,
+        )
         raise
 
 
@@ -626,6 +654,8 @@ async def activate_registry_package_batch(
     stop_media: StoppedVerifier,
     read_node_inventory: NodeReader,
     reviewed_inputs: ComfyRegistryReviewedInputContext | None = None,
+    write_guard: Callable[[Session], None] | None = None,
+    cleanup_guard: Callable[[Session], None] | None = None,
 ) -> AsyncIterator[RegistryActivationBatch]:
     """Hold the caller's primary lease through one start, completion or verified rollback."""
     if media_worker_stopped is not True:
@@ -640,6 +670,8 @@ async def activate_registry_package_batch(
             custom_node_root,
             environment_root,
             reviewed_inputs,
+            write_guard,
+            cleanup_guard,
         )
     )
     try:
@@ -654,6 +686,7 @@ async def activate_registry_package_batch(
                         _deactivate_pending,
                         session_factory,
                         [item.install_id for item in preparations],
+                        write_guard=cleanup_guard or write_guard,
                     )
                 )
             )
@@ -662,7 +695,11 @@ async def activate_registry_package_batch(
         raise
     except (ValueError, OSError):
         await _worker(
-            lambda: _deactivate_pending(session_factory, [item.install_id for item in preparations])
+            lambda: _deactivate_pending(
+                session_factory,
+                [item.install_id for item in preparations],
+                write_guard=cleanup_guard or write_guard,
+            )
         )
         raise
     try:

@@ -28,6 +28,7 @@ type JsonSchema = dict[str, Any]
 
 REPOSITORY = Path(__file__).resolve().parents[3]
 TYPES_FILE = REPOSITORY / "apps" / "web" / "src" / "types.ts"
+INSTALLATION_TYPES_FILE = TYPES_FILE.with_name("installationQueueTypes.ts")
 # types.ts re-exports some modules whole; their interfaces are the same surface.
 _RE_EXPORTED = re.compile(r'^export type \* from "\./([A-Za-z0-9_]+)";$', re.M)
 
@@ -90,6 +91,7 @@ CHECKED_CONTRACTS = {
     "QueueControlCommand": "QueueControlCommand",
     "GenerationQueuePolicy": "GenerationQueuePolicyOut",
     "TransferQueuePolicy": "TransferQueuePolicyOut",
+    "InstallQueuePolicy": "InstallQueuePolicyOut",
     "QueueControlResult": "QueueControlResultOut",
     "QueueActivityItem": "QueueActivityItemOut",
     "QueueActivityPage": "QueueActivityPageOut",
@@ -251,7 +253,10 @@ def schemas() -> dict[str, JsonSchema]:
 @pytest.fixture(scope="module")
 def types_source() -> str:
     source = TYPES_FILE.read_text(encoding="utf-8")
-    modules = [TYPES_FILE.with_name(f"{name}.ts") for name in _RE_EXPORTED.findall(source)]
+    modules = [
+        INSTALLATION_TYPES_FILE,
+        *(TYPES_FILE.with_name(f"{name}.ts") for name in _RE_EXPORTED.findall(source)),
+    ]
     return "\n".join([source, *(path.read_text(encoding="utf-8") for path in modules)])
 
 
