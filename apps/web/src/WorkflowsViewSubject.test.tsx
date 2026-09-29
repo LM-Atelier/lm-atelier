@@ -102,6 +102,7 @@ function renderView() {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  vi.useRealTimers();
 });
 
 describe("workflow creation requests", () => {
@@ -420,9 +421,14 @@ describe("the controls a revision declares", () => {
     // that throws away what you put in it is worse than plain text.
     vi.mocked(api.workflows).mockResolvedValue([workflow("wf-a", "Alpha")] as never);
 
+    // Flush query notifications explicitly; wall-clock load must not decide
+    // whether the details arrive before the assertion's polling deadline.
+    vi.useFakeTimers();
     renderView();
-    fireEvent.click(await screen.findByText("Alpha"));
-    await screen.findByRole("button", { name: "New revision" });
+    await act(() => vi.advanceTimersByTimeAsync(50));
+    fireEvent.click(screen.getByText("Alpha"));
+    await act(() => vi.advanceTimersByTimeAsync(50));
+    expect(screen.getByRole("button", { name: "New revision" })).toBeInTheDocument();
 
     expect(screen.getByText("Steps")).toBeTruthy();
     expect(screen.getByText("Default: 20")).toBeTruthy();

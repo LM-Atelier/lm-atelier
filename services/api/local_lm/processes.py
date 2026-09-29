@@ -760,7 +760,9 @@ class ProcessSupervisor:
         output_directory = self.settings.comfy_output_dir.resolve()
         output_directory.mkdir(parents=True, exist_ok=True)
         environment_overrides = (
-            {"PYTHONDONTWRITEBYTECODE": "1"} if registry_contract.site_packages else None
+            {"PYTHONDONTWRITEBYTECODE": "1"}
+            if registry_contract.site_packages or editor_bridge_support.supported
+            else None
         )
         if activation_scope is not None:
             model_paths_config = self._write_scoped_comfy_model_paths(activation_scope)
@@ -844,6 +846,7 @@ class ProcessSupervisor:
                 "media",
                 command,
                 self.worker_health_url("media"),
+                environment_overrides=environment_overrides,
                 editor_bridge_support=editor_bridge_support,
                 **source_checks,
             )

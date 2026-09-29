@@ -11,6 +11,7 @@ const coordinatorOrigins = new Set(COORDINATOR_ORIGINS);
 let editorPort = null;
 let editorNonce = null;
 let saving = false;
+let frontendReady = false;
 const editorCoordinator = window.parent !== window ? window.parent : window.opener;
 
 function isRecord(value) {
@@ -100,6 +101,7 @@ async function receivePortMessage(event) {
 function acceptParent(event) {
   const message = event.data;
   if (
+    !frontendReady ||
     event.source !== editorCoordinator ||
     !coordinatorOrigins.has(event.origin) ||
     editorPort !== null ||
@@ -142,18 +144,24 @@ async function saveToLmAtelier() {
 
 if (editorCoordinator) {
   window.addEventListener("message", acceptParent);
-  editorCoordinator.postMessage(
-    {
-      source: BRIDGE_SOURCE,
-      protocol: PROTOCOL_VERSION,
-      type: "ready",
-    },
-    "*",
-  );
 }
 
 app.registerExtension({
   name: "LMAtelier.WorkflowEditorBridge",
+  setup() {
+    if (frontendReady) {
+      return;
+    }
+    frontendReady = true;
+    editorCoordinator?.postMessage(
+      {
+        source: BRIDGE_SOURCE,
+        protocol: PROTOCOL_VERSION,
+        type: "ready",
+      },
+      "*",
+    );
+  },
   actionBarButtons: [
     {
       icon: "icon-[lucide--save]",

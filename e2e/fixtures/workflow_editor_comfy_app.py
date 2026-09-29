@@ -23,9 +23,7 @@ _bridge_root: Path | None = None
 def _required_environment(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
-        raise RuntimeError(
-            f"{name} is required for the synthetic browser protocol fixture"
-        )
+        raise RuntimeError(f"{name} is required for the synthetic browser protocol fixture")
     return value
 
 
@@ -96,10 +94,7 @@ async def editor() -> HTMLResponse:
                 "    <h1>Synthetic browser protocol editor</h1>",
                 '    <div id="workflow-controls"></div>',
                 '    <div id="action-bar" aria-label="Workflow actions"></div>',
-                (
-                    '    <iframe title="Hostile protocol probe" '
-                    f'src="{attacker_source}"></iframe>'
-                ),
+                (f'    <iframe title="Hostile protocol probe" src="{attacker_source}"></iframe>'),
                 "  </main>",
                 (
                     '  <script type="module" src="/extensions/'
@@ -210,6 +205,7 @@ export const app = {
       button.addEventListener("click", () => action.onClick());
       actionBar.append(button);
     }
+    extension.setup?.();
   },
 };
 """.strip()
