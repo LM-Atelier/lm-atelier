@@ -11,6 +11,13 @@ from PIL import Image, ImageStat
 from local_lm.studio_adjustments import ColorAdjustments, adjust_colors, channel_tables
 
 
+def _pixel(picture: Image.Image, xy: tuple[int, int]) -> tuple[int, ...]:
+    """One pixel's channels: every picture read this way has more than one."""
+    value = picture.getpixel(xy)
+    assert isinstance(value, tuple)
+    return value
+
+
 def _pixels(text: str) -> list[tuple[int, int, int]]:
     """Pixels written as "r,g,b" separated by spaces."""
     triples = [tuple(int(part) for part in pixel.split(",")) for pixel in text.split()]
@@ -275,7 +282,7 @@ def test_transparency_is_kept_as_it_was() -> None:
     result = adjust_colors(picture, ColorAdjustments(brightness=60, saturation=-50))
 
     assert result.mode == "RGBA"
-    assert [result.getpixel((x, 0))[3] for x in range(2)] == [0, 77]
+    assert [_pixel(result, (x, 0))[3] for x in range(2)] == [0, 77]
 
 
 def test_warmth_changes_the_color_and_not_the_light() -> None:
@@ -284,9 +291,9 @@ def test_warmth_changes_the_color_and_not_the_light() -> None:
     warm = adjust_colors(grey, ColorAdjustments(warmth=80))
     cool = adjust_colors(grey, ColorAdjustments(warmth=-80))
 
-    red, _, blue = warm.getpixel((0, 0))
+    red, _, blue = _pixel(warm, (0, 0))
     assert red > blue
-    cool_red, _, cool_blue = cool.getpixel((0, 0))
+    cool_red, _, cool_blue = _pixel(cool, (0, 0))
     assert cool_blue > cool_red
     for picture in (warm, cool):
         assert abs(ImageStat.Stat(picture.convert("L")).mean[0] - 128) < 2
@@ -298,14 +305,14 @@ def test_tint_moves_green_against_magenta_and_not_the_light() -> None:
     magenta = adjust_colors(grey, ColorAdjustments(tint=80))
     green = adjust_colors(grey, ColorAdjustments(tint=-80))
 
-    red, middle, blue = magenta.getpixel((0, 0))
+    red, middle, blue = _pixel(magenta, (0, 0))
     assert red == blue > middle
-    red, middle, blue = green.getpixel((0, 0))
+    red, middle, blue = _pixel(green, (0, 0))
     assert middle > red == blue
     # Measured with the same luminance weights the gains are evened out by.
     # Pillow's own grey uses older weights, which count green for less.
     for picture in (magenta, green):
-        red, middle, blue = picture.getpixel((0, 0))
+        red, middle, blue = _pixel(picture, (0, 0))
         assert abs(0.2126 * red + 0.7152 * middle + 0.0722 * blue - 128) < 1
 
 

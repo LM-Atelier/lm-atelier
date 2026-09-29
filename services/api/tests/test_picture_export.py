@@ -17,6 +17,14 @@ from local_lm.picture_export import (
     export_picture,
 )
 
+
+def _pixel(picture: Image.Image, xy: tuple[int, int]) -> tuple[int, ...]:
+    """One pixel's channels: every picture read this way has more than one."""
+    value = picture.getpixel(xy)
+    assert isinstance(value, tuple)
+    return value
+
+
 RED, WHITE = (200, 0, 0), (255, 255, 255)
 
 
@@ -63,7 +71,7 @@ def test_jpeg_lays_transparency_on_white() -> None:
     assert exported.format == "JPEG"
     assert exported.mode == "RGB"
     # The hidden red under the transparent half does not show; white does.
-    red, green, blue = exported.getpixel((0, 0))
+    red, green, blue = _pixel(exported, (0, 0))
     assert min(red, green, blue) > 240
 
 
@@ -77,7 +85,7 @@ def test_png_and_webp_keep_transparency() -> None:
 
         assert exported.format == expected
         assert exported.mode == "RGBA"
-        assert exported.getpixel((0, 0))[3] == 0
+        assert _pixel(exported, (0, 0))[3] == 0
 
 
 def test_a_color_profile_is_kept_only_where_it_still_describes_the_pixels() -> None:

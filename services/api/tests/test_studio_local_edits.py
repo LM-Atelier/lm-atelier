@@ -24,6 +24,14 @@ from local_lm.studio_local_edits import (
     render_local_edit,
 )
 
+
+def _pixel(picture: Image.Image, xy: tuple[int, int]) -> tuple[int, ...]:
+    """One pixel's channels: every picture read this way has more than one."""
+    value = picture.getpixel(xy)
+    assert isinstance(value, tuple)
+    return value
+
+
 RED, GREEN, BLUE, WHITE = (200, 0, 0), (0, 200, 0), (0, 0, 200), (250, 250, 250)
 
 
@@ -118,7 +126,7 @@ def test_a_leaning_line_stands_upright_once_straightened() -> None:
     width, height = result.size
 
     def middle_of_the_line(y: int) -> float:
-        ink = [255 - result.getpixel((x, y))[0] for x in range(width)]
+        ink = [255 - _pixel(result, (x, y))[0] for x in range(width)]
         return sum(x * amount for x, amount in enumerate(ink)) / sum(ink)
 
     # Over these rows the line leaned about nine pixels sideways, and turning
@@ -137,7 +145,7 @@ def test_straightening_leaves_no_empty_corner() -> None:
     solid_picture = _open(solid)
     assert (
         min(
-            solid_picture.getpixel((x, y))[0]
+            _pixel(solid_picture, (x, y))[0]
             for x in range(solid_picture.width)
             for y in range(solid_picture.height)
         )
@@ -146,7 +154,7 @@ def test_straightening_leaves_no_empty_corner() -> None:
     clear_picture = _open(clear)
     assert clear_picture.mode == "RGBA"
     assert {
-        clear_picture.getpixel((x, y))[3]
+        _pixel(clear_picture, (x, y))[3]
         for x in range(clear_picture.width)
         for y in range(clear_picture.height)
     } == {255}
@@ -216,7 +224,7 @@ def test_a_perspective_correction_keeps_transparency_and_hides_no_color_under_it
     result = _open(render_local_edit(_png(cutout), "perspective", perspective=corners))
 
     assert result.mode == "RGBA"
-    assert result.getpixel((0, 0))[3] == 0
+    assert _pixel(result, (0, 0))[3] == 0
     assert result.getpixel((result.width // 2, result.height // 2)) == (200, 120, 40, 255)
     # Along the cutout's edge the colors stay the cutout's own: the white under
     # the transparent pixels would otherwise lighten them.
@@ -224,7 +232,7 @@ def test_a_perspective_correction_keeps_transparency_and_hides_no_color_under_it
         pixel
         for x in range(result.width)
         for y in range(result.height)
-        if 64 <= (pixel := result.getpixel((x, y)))[3] < 255
+        if 64 <= (pixel := _pixel(result, (x, y)))[3] < 255
     ]
     assert edge
     assert all(
@@ -279,7 +287,7 @@ def test_a_resize_keeps_a_hidden_colour_from_bleeding_into_the_edge() -> None:
     result = _open(render_local_edit(_png(picture), "resize", size=PictureSize(width=8, height=1)))
 
     assert result.mode == "RGBA"
-    seen = [result.getpixel((x, 0)) for x in range(8)]
+    seen = [_pixel(result, (x, 0)) for x in range(8)]
     assert any(0 < pixel[3] < 255 for pixel in seen)
     # Every pixel that shows at all shows blue: none of the hidden red.
     assert all(pixel[0] == 0 for pixel in seen if pixel[3] > 0)
@@ -308,7 +316,7 @@ def test_an_adjustment_changes_the_colors_and_nothing_else() -> None:
 
     assert result.size == (3, 2)
     # Every pixel is its own grey: the colors are gone and the light is kept.
-    assert all(len(set(result.getpixel((x, y)))) == 1 for x in range(3) for y in range(2))
+    assert all(len(set(_pixel(result, (x, y)))) == 1 for x in range(3) for y in range(2))
     assert result.getpixel((1, 1)) == (250, 250, 250)
 
 
@@ -344,7 +352,7 @@ def test_a_blur_softens_the_marked_area_and_leaves_the_rest_exact() -> None:
     result = _open(render_local_edit(_png(_checkers()), "blur", blur=blur))
 
     source = _checkers()
-    marked = [result.getpixel((x, y)) for y in range(4) for x in range(4)]
+    marked = [_pixel(result, (x, y)) for y in range(4) for x in range(4)]
     rest = [
         (result.getpixel((x, y)), source.getpixel((x, y))) for y in range(4) for x in range(4, 8)
     ]
@@ -362,7 +370,7 @@ def test_a_blur_keeps_transparency_and_hides_no_color_under_it() -> None:
     result = _open(render_local_edit(_png(picture), "blur", blur=blur))
 
     assert result.mode == "RGBA"
-    shown = [result.getpixel((x, y)) for y in range(4) for x in range(8)]
+    shown = [_pixel(result, (x, y)) for y in range(4) for x in range(8)]
     # The red under the transparent column never shows up in its neighbours.
     assert all(pixel[0] == 0 for pixel in shown if pixel[3] > 0)
 
@@ -403,7 +411,7 @@ def test_a_pixelation_fills_each_block_with_its_mean() -> None:
 
     result = _open(render_local_edit(_png(_ramp()), "pixelate", pixelate=pixelate))
 
-    rows = [[result.getpixel((x, y))[0] for x in range(5)] for y in range(3)]
+    rows = [[_pixel(result, (x, y))[0] for x in range(5)] for y in range(3)]
     # Blocks start at the top-left corner. The last column and the last row are
     # blocks cut short by the edge, averaged over the pixels they have: 40 and
     # 90 make 65, 100 and 110 make 105, and the corner is 140 alone.
@@ -438,7 +446,7 @@ def test_a_pixelation_keeps_transparency_and_hides_no_color_under_it() -> None:
     assert result.mode == "RGBA"
     # The block over the transparent column is half covered, and blue only.
     assert result.getpixel((0, 0)) == (0, 0, 255, 128)
-    shown = [result.getpixel((x, y)) for y in range(4) for x in range(8)]
+    shown = [_pixel(result, (x, y)) for y in range(4) for x in range(8)]
     assert all(pixel[0] == 0 for pixel in shown if pixel[3] > 0)
 
 
@@ -479,7 +487,7 @@ def test_a_paint_at_half_opacity_lets_the_picture_show_through() -> None:
 
     result = _open(render_local_edit(_png(white), "paint", paint=_paint((255, 0, 0), 50)))
 
-    red, green, blue = result.getpixel((0, 0))
+    red, green, blue = _pixel(result, (0, 0))
     assert red == 255
     assert 120 <= green <= 135 and green == blue
     assert result.getpixel((7, 0)) == (255, 255, 255)
@@ -492,7 +500,7 @@ def test_paint_on_a_transparent_part_shows_as_paint() -> None:
 
     # Nothing of the red hidden under the transparency comes through.
     assert result.getpixel((0, 0)) == (0, 0, 255, 255)
-    assert result.getpixel((7, 0))[3] == 0
+    assert _pixel(result, (7, 0))[3] == 0
 
 
 def test_a_paint_with_nothing_marked_is_refused() -> None:
@@ -526,7 +534,7 @@ def test_drawn_words_are_laid_over_the_picture_as_drawn() -> None:
     assert result.mode == "RGB"
     assert result.getpixel((1, 0)) == (0, 0, 255)
     # Half-covered: half the words' color over the picture beneath.
-    red, green, blue = result.getpixel((2, 1))
+    red, green, blue = _pixel(result, (2, 1))
     assert 120 <= red <= 130 and 120 <= green <= 130 and blue > 245
     # Where nothing was drawn the picture is exactly what it was.
     assert result.getpixel((0, 0)) == RED
@@ -541,7 +549,7 @@ def test_drawn_words_keep_a_transparent_picture_transparent_around_them() -> Non
 
     assert result.mode == "RGBA"
     assert result.getpixel((1, 0)) == (0, 0, 255, 255)
-    assert result.getpixel((0, 0))[3] == 0
+    assert _pixel(result, (0, 0))[3] == 0
 
 
 @pytest.mark.parametrize(
@@ -581,8 +589,8 @@ def test_a_larger_canvas_centers_the_picture_on_transparency() -> None:
     assert result.mode == "RGBA"
     # Two columns and one row of new ground before the picture.
     assert result.getpixel((2, 1)) == (*RED, 255)
-    assert result.getpixel((0, 0))[3] == 0
-    assert result.getpixel((6, 3))[3] == 0
+    assert _pixel(result, (0, 0))[3] == 0
+    assert _pixel(result, (6, 3))[3] == 0
 
 
 def test_an_odd_pixel_of_room_goes_after_the_picture() -> None:
@@ -601,7 +609,7 @@ def test_a_smaller_canvas_keeps_the_side_it_is_anchored_to() -> None:
     )
 
     assert result.size == (2, 1)
-    assert [result.getpixel((x, 0))[:3] for x in range(2)] == [WHITE, GREEN]
+    assert [_pixel(result, (x, 0))[:3] for x in range(2)] == [WHITE, GREEN]
 
 
 def test_a_filled_canvas_colors_only_the_new_ground() -> None:
@@ -617,7 +625,7 @@ def test_a_filled_canvas_colors_only_the_new_ground() -> None:
     assert opaque.getpixel((1, 0)) == RED
     # The picture's own transparency stays transparent; white fills only what is new.
     assert kept.getpixel((0, 0)) == (255, 255, 255, 255)
-    assert kept.getpixel((1, 0))[3] == 0
+    assert _pixel(kept, (1, 0))[3] == 0
     assert kept.getpixel((2, 0)) == (10, 20, 30, 255)
 
 
@@ -657,7 +665,7 @@ def test_transparency_survives_a_turn() -> None:
     result = _open(render_local_edit(_png(picture), "flip_horizontal"))
 
     assert result.mode == "RGBA"
-    assert result.getpixel((0, 0))[3] == 0
+    assert _pixel(result, (0, 0))[3] == 0
     assert result.getpixel((1, 0)) == (10, 20, 30, 255)
 
 
@@ -976,7 +984,7 @@ async def test_a_blur_is_recorded_with_its_radius_and_marked_area(client: AsyncC
     }
     blurred = await _content(client, image["artifact_id"])
     assert blurred.getpixel((7, 0)) == _checkers().getpixel((7, 0))
-    assert 0 < blurred.getpixel((0, 0))[0] < 255
+    assert 0 < _pixel(blurred, (0, 0))[0] < 255
 
 
 async def test_a_pixelation_is_recorded_with_its_block_and_marked_area(
