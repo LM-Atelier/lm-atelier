@@ -1073,7 +1073,10 @@ html[data-text-size="larger"] { --text-scale: 1.25; font-size: 125%; }
 .generation-identity dt { color: var(--cream); font-weight: 600; }
 .generation-identity dd { min-width: 0; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.jobs-panel { position: fixed; right: 16px; bottom: 68px; width: 310px; max-height: min(70vh, 560px); overflow-y: auto; z-index: 15; border: 1px solid var(--border); border-radius: 14px; background: var(--surface-1); backdrop-filter: blur(12px); box-shadow: 0 16px 45px var(--shadow); padding: calc(11px * var(--spacing-scale, 1)); }
+/* Above the composer, which says how far up it reaches: over it, the panel hid
+   the text box, and in a narrow window the attach and send buttons, while
+   work ran. Views without a composer keep the panel at its usual height. */
+.jobs-panel { position: fixed; right: 16px; bottom: max(68px, calc(var(--composer-clearance, 0px) + 12px)); width: 310px; max-height: min(70vh, 560px); overflow-y: auto; z-index: 15; border: 1px solid var(--border); border-radius: 14px; background: var(--surface-1); backdrop-filter: blur(12px); box-shadow: 0 16px 45px var(--shadow); padding: calc(11px * var(--spacing-scale, 1)); }
 .jobs-panel > header { display: flex; align-items: center; gap: calc(6px * var(--spacing-scale, 1)); color: var(--ink-primary); font-size: calc(12px * var(--text-scale, 1)); padding: calc(2px * var(--spacing-scale, 1)) calc(3px * var(--spacing-scale, 1)) calc(9px * var(--spacing-scale, 1)); }
 .jobs-clear { margin-left: auto; border: 0; background: transparent; color: var(--ink-secondary); padding: calc(3px * var(--spacing-scale, 1)) calc(5px * var(--spacing-scale, 1)); font-size: calc(11px * var(--text-scale, 1)); cursor: pointer; }
 .jobs-clear:hover { color: var(--ink-primary); }
