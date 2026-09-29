@@ -17,10 +17,15 @@ from sqlalchemy.orm import Session
 from local_lm import downloads as downloads_module
 from local_lm.capability_evidence import current_capability_evidence, record_capability_evidence
 from local_lm.config import Settings
-from local_lm.db import SessionLocal
+from local_lm.db import Base, SessionLocal
 from local_lm.domain import new_id
-from local_lm.filesystem_links import AnchoredDirectory, AnchoredDirectoryError, WalkedEntry
-from local_lm.models import Base, Job, ModelInstall
+from local_lm.filesystem_links import (
+    AnchoredDirectory,
+    AnchoredDirectoryError,
+    WalkedEntry,
+    open_entry,
+)
+from local_lm.models import Job, ModelInstall
 
 
 @pytest.fixture
@@ -211,7 +216,8 @@ async def test_a_file_that_will_not_open_stops_the_measurement(
     """
 
     install, _outside, _own = _imported_directory(tmp_path)
-    opening = downloads_module.open_entry
+    # The same function the downloads module opens entries with.
+    opening = open_entry
 
     def refusing(anchor: AnchoredDirectory, name: str) -> int | None:
         if name == "part.bin":

@@ -7,9 +7,9 @@ from typing import cast
 
 import pytest
 
+from local_lm.lora_constraints import MAX_LORA_STRENGTH
 from local_lm.prompt_expansion_use import _allocate_resource_policy
 from local_lm.prompt_templates import (
-    MAX_LORA_STRENGTH,
     MAX_TEMPLATE_CHOICES,
     MAX_TEMPLATE_DOCUMENT_DEPTH,
     MAX_TEMPLATE_LORA_STACKS,

@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
-from local_lm.adapters.base import ChatEvent, ChatRequest
+from local_lm.adapters.base import ChatAdapter, ChatEvent, ChatRequest
 from local_lm.domain import Operation
 from local_lm.prompt_grammar import normalize_grammar
 from local_lm.visual_prompt_compiler import (
@@ -190,7 +190,7 @@ def test_a_model_talking_to_the_reader_is_not_a_scene_description(prompt: str) -
 async def test_a_compiled_prompt_replaces_the_pasted_passage() -> None:
     adapter = StubChatAdapter([compiled(SCENE), ChatEvent(type="complete")])
     prompt, reason = await compile_visual_prompt(
-        adapter,
+        cast(ChatAdapter, adapter),
         Operation.TEXT_TO_IMAGE,
         request_text="make an image of the last scene",
         source_text=SCENE,
@@ -227,7 +227,7 @@ async def test_every_compiler_failure_leaves_the_original_prompt_standing(
     expected: CompilationReason,
 ) -> None:
     prompt, reason = await compile_visual_prompt(
-        StubChatAdapter(events),
+        cast(ChatAdapter, StubChatAdapter(events)),
         Operation.TEXT_TO_IMAGE,
         request_text="make an image of the last scene",
         source_text=SCENE,
@@ -239,7 +239,7 @@ async def test_every_compiler_failure_leaves_the_original_prompt_standing(
 @pytest.mark.asyncio
 async def test_a_compiler_that_raises_never_fails_the_generation() -> None:
     prompt, reason = await compile_visual_prompt(
-        StubChatAdapter([], raises=RuntimeError("chat worker died")),
+        cast(ChatAdapter, StubChatAdapter([], raises=RuntimeError("chat worker died"))),
         Operation.TEXT_TO_IMAGE,
         request_text="make an image of the last scene",
         source_text=SCENE,
@@ -258,7 +258,7 @@ async def test_a_fragmented_tool_call_is_reassembled() -> None:
         ]
     )
     prompt, reason = await compile_visual_prompt(
-        adapter,
+        cast(ChatAdapter, adapter),
         Operation.TEXT_TO_IMAGE,
         request_text="draw that",
         source_text=SCENE,

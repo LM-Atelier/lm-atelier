@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import shutil
 import sys
 import threading
 from pathlib import Path
@@ -22,6 +23,7 @@ from test_install_queue_registry import configured_registry as configured_regist
 from test_workflow_package_execution_plan import _inputs
 
 from local_lm import api as api_module
+from local_lm import comfy_registry_installs as registry_installs
 from local_lm import comfy_registry_lifecycle as lifecycle
 from local_lm import workflow_package_preparation as composition
 from local_lm.comfy_registry_paths import registry_wheel_environment_root
@@ -105,7 +107,7 @@ async def test_registry_cleanup_retains_its_claim_through_cancellation(
             )
 
         monkeypatch.setattr(composition, "drive_comfy_registry_wheel_closure", closure)
-    verify = lifecycle.verify_comfy_registry_wheel_binding
+    verify = registry_installs.verify_comfy_registry_wheel_binding
     verifications = 0
 
     def refuse_once(*args: Any, **kwargs: Any) -> Any:
@@ -125,7 +127,7 @@ async def test_registry_cleanup_retains_its_claim_through_cancellation(
         if boundary == "node"
         else registry_wheel_environment_root(settings.registry_dir)
     )
-    remove_tree = lifecycle.shutil.rmtree
+    remove_tree = shutil.rmtree
 
     def remove(path: Any, *args: Any, **kwargs: Any) -> Any:
         if Path(path).parent == target_root and not entered.is_set():
@@ -137,7 +139,7 @@ async def test_registry_cleanup_retains_its_claim_through_cancellation(
                 finished.set()
         return remove_tree(path, *args, **kwargs)
 
-    monkeypatch.setattr(lifecycle.shutil, "rmtree", remove)
+    monkeypatch.setattr(shutil, "rmtree", remove)
     release_job = app.state.services.scheduler._release_job
     early_releases: list[str] = []
 

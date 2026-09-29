@@ -30,7 +30,8 @@ async def test_installation_pause_and_drain_with_a_real_media_worker(
             json={"expected_revision": revision, "idempotency_key": f"live-install-{revision}"},
         )
         assert response.status_code == 200, response.text
-        return response.json()
+        body: dict[str, Any] = response.json()
+        return body
 
     policy = await command("pause-after-current", 0)
     assert policy["dispatch_state"] == "paused" and policy["running_jobs"] == 0

@@ -22,6 +22,8 @@ from test_workflow_revision_review import reviewed_runtime as reviewed_runtime
 from test_workflow_source_completion import source_runtime as source_runtime
 
 from local_lm import comfy_registry_activation_batches as batches
+from local_lm import comfy_registry_installs as registry_installs
+from local_lm import comfy_registry_launch_verification as launch_verification
 from local_lm import comfy_registry_lifecycle as lifecycle
 from local_lm import workflow_source_extension_trust as trust_module
 from local_lm import workflow_source_runtime
@@ -113,21 +115,22 @@ async def test_source_extension_writes_require_the_original_completion_claim(
         return result
 
     if boundary == "prepare":
-        original = lifecycle.verify_comfy_registry_wheel_binding
+        # Read where it is defined; it is the same function the lifecycle calls.
+        original_binding = registry_installs.verify_comfy_registry_wheel_binding
         monkeypatch.setattr(
             lifecycle,
             "verify_comfy_registry_wheel_binding",
-            lambda *args, **kwargs: delayed(original, *args, **kwargs),
+            lambda *args, **kwargs: delayed(original_binding, *args, **kwargs),
         )
     elif boundary == "trust":
-        original = trust_module.verify_comfy_registry_launch
+        original_launch = launch_verification.verify_comfy_registry_launch
         monkeypatch.setattr(
             trust_module,
             "verify_comfy_registry_launch",
-            lambda *args, **kwargs: delayed(original, *args, **kwargs),
+            lambda *args, **kwargs: delayed(original_launch, *args, **kwargs),
         )
     elif boundary in {"batch-begin", "batch-verified", "recovery"}:
-        original_verification = batches._verify_comfy_registry_launch
+        original_verification = launch_verification._verify_comfy_registry_launch
 
         def verify_batch(*args: Any, **kwargs: Any) -> Any:
             result = original_verification(*args, **kwargs)

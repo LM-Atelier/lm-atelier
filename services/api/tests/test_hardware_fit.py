@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Any, cast
 
 import pytest
 
@@ -518,7 +519,9 @@ def test_candidate_ranking_requires_stable_unique_keys(
 
 
 def test_unknown_estimated_preflight_fit_remains_advisory() -> None:
-    system = SystemInfo.model_construct(
+    # Only some facts, as a machine that reports little would give, built
+    # without validation on purpose.
+    system: SystemInfo = cast(Any, SystemInfo).model_construct(
         platform="Windows",
         architecture="AMD64",
         cpu_model="Example CPU",

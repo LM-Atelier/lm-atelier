@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
 from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 from workflow_fixtures import seed_workflow_trust
 
 from local_lm.db import SessionLocal
@@ -41,7 +43,7 @@ async def _portable_request(
     source_name: str,
     destination_name: str,
     resource_policy: dict[str, object] | None = None,
-) -> tuple[dict[str, object], dict[str, object]]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     created = await client.post(
         "/api/prompt-templates",
         json={
@@ -654,7 +656,7 @@ async def test_service_refuses_new_dirty_and_deleted_state_without_clearing_it(
         destination_name="Atomic pending state destination",
     )
 
-    def invoke(session: object) -> None:
+    def invoke(session: Session) -> None:
         commit_prompt_template_import(
             session,
             idempotency_key=payload["idempotency_key"],
