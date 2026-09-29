@@ -750,6 +750,55 @@ def _admit_workflow_loras(
     )
 
 
+def _resolve_output_loras(
+    session: Session,
+    revision: WorkflowRevision | None,
+    activation: dict[str, str] | None,
+    layers: WorkflowLoraAdmissionLayers,
+    loras: object,
+    *,
+    admit: bool,
+) -> tuple[_WorkflowLoraOutcome | None, ResolvedLoraStack | None]:
+    """Resolve the LoRA stack one output runs with.
+
+    ``admit`` says whether the workflow's own LoRA edits take part, and then the
+    stack is composed with them. Otherwise a requested stack is resolved alone,
+    and an empty one resolves to nothing.
+    """
+
+    if admit:
+        outcome = _admit_workflow_loras(session, revision, activation, layers, loras)
+        return outcome, outcome.resolution
+    if not loras:
+        return None, None
+    if not revision:
+        raise ValueError("LoRA settings require a selected media workflow.")
+    return None, resolve_lora_stack(session, revision, loras)
+
+
+def _chosen_setting_layers(
+    profile: ModelProfile | None,
+    layers: WorkflowLoraAdmissionLayers,
+    turn: dict[str, Any],
+) -> tuple[tuple[EditSettingSource, dict[str, Any]], ...]:
+    """Return the settings chosen for a turn, lowest precedence first, each named by its source.
+
+    The automatic LoRA choice and the edit strength both read this one chain,
+    so they always agree on which layers were chosen and in what order.
+    """
+
+    return (
+        (EditSettingSource.PROFILE_LOAD, profile.load_settings_json if profile else {}),
+        (EditSettingSource.PROFILE_REQUEST, layers.ordinary("profile_request")),
+        (EditSettingSource.DEFAULT_PRESET, layers.ordinary("default_preset")),
+        (EditSettingSource.PROJECT_PRESET, layers.ordinary("project_preset")),
+        (EditSettingSource.PROJECT, layers.ordinary("project")),
+        (EditSettingSource.CHAT_PRESET, layers.ordinary("chat_preset")),
+        (EditSettingSource.CHAT, layers.ordinary("chat")),
+        (EditSettingSource.TURN, turn),
+    )
+
+
 class ClaimLost(RuntimeError):
     """The presented claim no longer owns the row at a claim-bound effect."""
 
@@ -1859,22 +1908,13 @@ class ConversationOrchestrator:
         if relight is not None:
             effective_settings[RELIGHT_SETTING_KEY] = relight
         lora_selection = None
-        lora_setting_layers = (
-            profile.load_settings_json if profile else {},
-            workflow_lora_layers.ordinary("profile_request"),
-            workflow_lora_layers.ordinary("default_preset"),
-            workflow_lora_layers.ordinary("project_preset"),
-            workflow_lora_layers.ordinary("project"),
-            workflow_lora_layers.ordinary("chat_preset"),
-            workflow_lora_layers.ordinary("chat"),
-            request_settings,
-        )
+        chosen_layers = _chosen_setting_layers(profile, workflow_lora_layers, request_settings)
         if (
             plan.operation in {Operation.TEXT_TO_IMAGE, Operation.IMAGE_TO_IMAGE}
             and workflow_revision
             and prompt_batch_selection is None
             and (prompt_source_resources is None or prompt_source_resources.lora_settings is None)
-            and not any("loras" in layer for layer in lora_setting_layers)
+            and not any("loras" in layer for _source, layer in chosen_layers)
         ):
             lora_selection = select_automatic_lora_stack(
                 session,
@@ -1889,28 +1929,7 @@ class ConversationOrchestrator:
             plan.standalone_prompt if accepted_offer else request.text,
             fields,
             effective_settings,
-            (
-                (EditSettingSource.PROFILE_LOAD, profile.load_settings_json if profile else {}),
-                (
-                    EditSettingSource.PROFILE_REQUEST,
-                    workflow_lora_layers.ordinary("profile_request"),
-                ),
-                (
-                    EditSettingSource.DEFAULT_PRESET,
-                    workflow_lora_layers.ordinary("default_preset"),
-                ),
-                (
-                    EditSettingSource.PROJECT_PRESET,
-                    workflow_lora_layers.ordinary("project_preset"),
-                ),
-                (EditSettingSource.PROJECT, workflow_lora_layers.ordinary("project")),
-                (
-                    EditSettingSource.CHAT_PRESET,
-                    workflow_lora_layers.ordinary("chat_preset"),
-                ),
-                (EditSettingSource.CHAT, workflow_lora_layers.ordinary("chat")),
-                (EditSettingSource.TURN, request_settings),
-            ),
+            chosen_layers,
             inherited_auto=inherited_image_edit_strength,
             workflow_schema=(workflow_revision.input_schema_json if workflow_revision else None),
             extension=request.source_fit is not None,
@@ -1979,33 +1998,27 @@ class ConversationOrchestrator:
                     "attached. Choose a workflow built for multiple references, or "
                     "attach fewer."
                 )
-        lora_resolution = None
+        lora_resolution: ResolvedLoraStack | None = None
         workflow_lora_outcome: _WorkflowLoraOutcome | None = None
         workflow_loras_relevant = plan.operation != Operation.TEXT and (
             workflow_lora_layers.relevant_to(workflow_revision)
         )
-        if workflow_loras_relevant and (
-            prompt_batch_selection is None or effective_settings.get("loras")
-        ):
-            workflow_lora_outcome = _admit_workflow_loras(
+        if plan.operation != Operation.TEXT:
+            workflow_lora_outcome, lora_resolution = _resolve_output_loras(
                 session,
                 workflow_revision,
                 workflow_activation,
                 workflow_lora_layers,
                 effective_settings.get("loras", []),
+                admit=workflow_loras_relevant
+                and (prompt_batch_selection is None or bool(effective_settings.get("loras"))),
             )
-            lora_resolution = workflow_lora_outcome.resolution
-            effective_settings["loras"] = lora_resolution.settings
-            effective_settings[WORKFLOW_LORA_OVERRIDES_SETTING_KEY] = workflow_lora_outcome.setting
-        elif plan.operation != Operation.TEXT and effective_settings.get("loras"):
-            if not workflow_revision:
-                raise ValueError("LoRA settings require a selected media workflow.")
-            lora_resolution = resolve_lora_stack(
-                session,
-                workflow_revision,
-                effective_settings["loras"],
-            )
-            effective_settings["loras"] = lora_resolution.settings
+            if lora_resolution is not None:
+                effective_settings["loras"] = lora_resolution.settings
+            if workflow_lora_outcome is not None:
+                effective_settings[WORKFLOW_LORA_OVERRIDES_SETTING_KEY] = (
+                    workflow_lora_outcome.setting
+                )
         prompt_batch_lora_selections: tuple[AutomaticLoraSelection | None, ...] = ()
         prompt_batch_lora_resolutions: tuple[ResolvedLoraStack | None, ...] = ()
         prompt_batch_workflow_lora_outcomes: tuple[_WorkflowLoraOutcome | None, ...] = ()
@@ -2019,7 +2032,7 @@ class ConversationOrchestrator:
             per_item_selections: list[AutomaticLoraSelection | None] = []
             per_item_resolutions: list[ResolvedLoraStack | None] = []
             per_item_outcomes: list[_WorkflowLoraOutcome | None] = []
-            lora_settings_in_layers = any("loras" in layer for layer in lora_setting_layers)
+            lora_settings_in_layers = any("loras" in layer for _source, layer in chosen_layers)
             for item, resources in zip(
                 prompt_batch_selection.items,
                 prompt_batch_resources,
@@ -2042,23 +2055,13 @@ class ConversationOrchestrator:
                     if item_selection is not None
                     else list(resources.lora_settings or ())
                 )
-                item_outcome = (
-                    _admit_workflow_loras(
-                        session,
-                        workflow_revision,
-                        workflow_activation,
-                        workflow_lora_layers,
-                        item_settings,
-                    )
-                    if workflow_loras_relevant
-                    else None
-                )
-                item_resolution = (
-                    item_outcome.resolution
-                    if item_outcome is not None
-                    else resolve_lora_stack(session, workflow_revision, item_settings)
-                    if item_settings
-                    else None
+                item_outcome, item_resolution = _resolve_output_loras(
+                    session,
+                    workflow_revision,
+                    workflow_activation,
+                    workflow_lora_layers,
+                    item_settings,
+                    admit=workflow_loras_relevant,
                 )
                 per_item_selections.append(item_selection)
                 per_item_resolutions.append(item_resolution)
@@ -3128,20 +3131,11 @@ class ConversationOrchestrator:
                 workflow_revision.input_schema_json if workflow_revision else None,
             )
             lora_selection = None
-            lora_setting_layers = (
-                profile.load_settings_json if profile else {},
-                workflow_lora_layers.ordinary("profile_request"),
-                workflow_lora_layers.ordinary("default_preset"),
-                workflow_lora_layers.ordinary("project_preset"),
-                workflow_lora_layers.ordinary("project"),
-                workflow_lora_layers.ordinary("chat_preset"),
-                workflow_lora_layers.ordinary("chat"),
-                step_overrides,
-            )
+            chosen_layers = _chosen_setting_layers(profile, workflow_lora_layers, step_overrides)
             if (
                 operation in {Operation.TEXT_TO_IMAGE, Operation.IMAGE_TO_IMAGE}
                 and workflow_revision
-                and not any("loras" in layer for layer in lora_setting_layers)
+                and not any("loras" in layer for _source, layer in chosen_layers)
             ):
                 lora_selection = select_automatic_lora_stack(
                     session,
@@ -3158,60 +3152,29 @@ class ConversationOrchestrator:
                 step_intent.prompt,
                 fields,
                 effective_settings,
-                (
-                    (
-                        EditSettingSource.PROFILE_LOAD,
-                        profile.load_settings_json if profile else {},
-                    ),
-                    (
-                        EditSettingSource.PROFILE_REQUEST,
-                        workflow_lora_layers.ordinary("profile_request"),
-                    ),
-                    (
-                        EditSettingSource.DEFAULT_PRESET,
-                        workflow_lora_layers.ordinary("default_preset"),
-                    ),
-                    (
-                        EditSettingSource.PROJECT_PRESET,
-                        workflow_lora_layers.ordinary("project_preset"),
-                    ),
-                    (EditSettingSource.PROJECT, workflow_lora_layers.ordinary("project")),
-                    (
-                        EditSettingSource.CHAT_PRESET,
-                        workflow_lora_layers.ordinary("chat_preset"),
-                    ),
-                    (EditSettingSource.CHAT, workflow_lora_layers.ordinary("chat")),
-                    (EditSettingSource.TURN, step_overrides),
-                ),
+                chosen_layers,
                 inherited_auto=inherited.image_edit_strength if inherited is not None else None,
                 workflow_schema=(
                     workflow_revision.input_schema_json if workflow_revision else None
                 ),
             )
-            lora_resolution = None
+            lora_resolution: ResolvedLoraStack | None = None
             workflow_lora_outcome: _WorkflowLoraOutcome | None = None
-            if operation != Operation.TEXT and workflow_lora_layers.relevant_to(workflow_revision):
-                workflow_lora_outcome = _admit_workflow_loras(
+            if operation != Operation.TEXT:
+                workflow_lora_outcome, lora_resolution = _resolve_output_loras(
                     session,
                     workflow_revision,
                     workflow_activation,
                     workflow_lora_layers,
                     effective_settings.get("loras", []),
+                    admit=workflow_lora_layers.relevant_to(workflow_revision),
                 )
-                lora_resolution = workflow_lora_outcome.resolution
-                effective_settings["loras"] = lora_resolution.settings
-                effective_settings[WORKFLOW_LORA_OVERRIDES_SETTING_KEY] = (
-                    workflow_lora_outcome.setting
-                )
-            elif operation != Operation.TEXT and effective_settings.get("loras"):
-                if not workflow_revision:
-                    raise ValueError("LoRA settings require a selected media workflow.")
-                lora_resolution = resolve_lora_stack(
-                    session,
-                    workflow_revision,
-                    effective_settings["loras"],
-                )
-                effective_settings["loras"] = lora_resolution.settings
+                if lora_resolution is not None:
+                    effective_settings["loras"] = lora_resolution.settings
+                if workflow_lora_outcome is not None:
+                    effective_settings[WORKFLOW_LORA_OVERRIDES_SETTING_KEY] = (
+                        workflow_lora_outcome.setting
+                    )
             if operation != Operation.TEXT and effective_settings.get("seed") == -1:
                 effective_settings["seed"] = _fresh_media_seed()
             estimate = (
@@ -10341,23 +10304,14 @@ class ConversationOrchestrator:
             effective_settings[OUTPAINT_SETTING_KEY] = normalize_margins(
                 effective_settings[OUTPAINT_SETTING_KEY]
             )
-        lora_layers = (
-            profile.load_settings_json if profile else {},
-            workflow_lora_layers.ordinary("profile_request"),
-            workflow_lora_layers.ordinary("default_preset"),
-            workflow_lora_layers.ordinary("project_preset"),
-            workflow_lora_layers.ordinary("project"),
-            workflow_lora_layers.ordinary("chat_preset"),
-            workflow_lora_layers.ordinary("chat"),
-            request_settings,
-        )
+        chosen_layers = _chosen_setting_layers(profile, workflow_lora_layers, request_settings)
         lora_selection = None
         if resources.lora_settings is not None:
             if resources.lora_settings:
                 effective_settings["loras"] = [dict(item) for item in resources.lora_settings]
             else:
                 effective_settings.pop("loras", None)
-        elif not any("loras" in layer for layer in lora_layers):
+        elif not any("loras" in layer for _source, layer in chosen_layers):
             lora_selection = select_automatic_lora_stack(
                 session,
                 revision,
@@ -10366,23 +10320,13 @@ class ConversationOrchestrator:
             )
             if lora_selection.settings:
                 effective_settings["loras"] = lora_selection.settings
-        workflow_lora_outcome = (
-            _admit_workflow_loras(
-                session,
-                revision,
-                activation,
-                workflow_lora_layers,
-                effective_settings.get("loras", []),
-            )
-            if workflow_lora_layers.relevant_to(revision)
-            else None
-        )
-        lora_resolution = (
-            workflow_lora_outcome.resolution
-            if workflow_lora_outcome is not None
-            else resolve_lora_stack(session, revision, effective_settings["loras"])
-            if effective_settings.get("loras")
-            else None
+        workflow_lora_outcome, lora_resolution = _resolve_output_loras(
+            session,
+            revision,
+            activation,
+            workflow_lora_layers,
+            effective_settings.get("loras", []),
+            admit=workflow_lora_layers.relevant_to(revision),
         )
         if lora_resolution is not None:
             effective_settings["loras"] = lora_resolution.settings
