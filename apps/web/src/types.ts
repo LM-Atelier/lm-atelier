@@ -1,3 +1,4 @@
+export type * from "./queueOrderTypes";
 import type { HardwareFitAdvice } from "./hardwareFitTypes";
 export type * from "./hardwareFitTypes";
 export type * from "./priorTurnEditTypes";

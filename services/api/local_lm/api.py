@@ -352,6 +352,8 @@ from .prompt_templates import (
 )
 from .queue_control import QueueControlConflict, QueueControlMissing, change_plan_control
 from .queue_lane_policy import QueueLaneConflict, change_lane_policy, read_lane_policy
+from .queue_order import QueueOrderConflict, change_queue_order, read_queue_order
+from .queue_order_v1 import QueueOrderCommand, QueueOrderPageOut, QueueOrderResultOut
 from .recipes import get_reference_recipe, list_reference_recipes
 from .reference_library import (
     DEFAULT_PAGE,
@@ -5008,6 +5010,38 @@ async def queue_activity(
             "queue-activity-cursor-invalid",
             "The accepted work page request is invalid. Refresh to start again.",
         ) from exc
+
+
+@router.get("/queue/lanes/{lane}/order", response_model=QueueOrderPageOut)
+def queue_order(
+    lane: Literal["generation", "transfer", "install"],
+    session: ConversationSessionDep,
+    limit: int = Query(default=50, ge=1, le=100),
+    cursor: str | None = Query(default=None, min_length=1, max_length=2_048),
+) -> QueueOrderPageOut:
+    try:
+        return read_queue_order(session, lane, limit=limit, cursor=cursor)
+    except QueueOrderConflict as exc:
+        raise api_error(
+            409, "queue-order-conflict", "The queue changed. Refresh before trying again."
+        ) from exc
+
+
+@router.post("/queue/lanes/{lane}/reorder", response_model=QueueOrderResultOut)
+async def reorder_queue(
+    lane: Literal["generation", "transfer", "install"],
+    request: Request,
+    payload: QueueOrderCommand,
+    session: ConversationSessionDep,
+) -> QueueOrderResultOut:
+    try:
+        result = await run_in_threadpool(change_queue_order, session, lane, payload)
+    except QueueOrderConflict as exc:
+        raise api_error(
+            409, "queue-order-conflict", "The queue changed. Refresh before trying again."
+        ) from exc
+    await _services(request).scheduler.queue_control_changed(lane)
+    return result
 
 
 async def _change_queue_control(

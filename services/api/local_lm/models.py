@@ -421,6 +421,34 @@ class GenerationQueueReceipt(Base):
     response_json: Mapped[dict[str, Any]] = mapped_column(JSON)
 
 
+class QueueOrderEntry(Base):
+    """Explicit ordering of visible owners, separate from acceptance audit facts."""
+
+    __tablename__ = "queue_order_entries"
+    __table_args__ = (CheckConstraint("position >= 0", name="ck_queue_order_position"),)
+
+    lane: Mapped[str] = mapped_column(String(16), primary_key=True)
+    owner_type: Mapped[str] = mapped_column(String(16), primary_key=True)
+    owner_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    queue_group: Mapped[str] = mapped_column(String(100))
+    queue_resource: Mapped[str] = mapped_column(String(100))
+    priority: Mapped[int] = mapped_column(Integer)
+    position: Mapped[int] = mapped_column(Integer)
+
+
+class QueueOrderReceipt(Base):
+    """A durable relative move and its exact successful response."""
+
+    __tablename__ = "queue_order_receipts"
+
+    lane: Mapped[str] = mapped_column(
+        ForeignKey("generation_queue_policies.lane", ondelete="CASCADE"), primary_key=True
+    )
+    command_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    command_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    response_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
 class WorkStep(TimestampMixin, Base):
     __tablename__ = "work_steps"
     __table_args__ = (

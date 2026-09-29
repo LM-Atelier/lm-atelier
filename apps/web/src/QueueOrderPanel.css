@@ -1,0 +1,10 @@
+.queue-order-panel { min-width: 0; }
+.queue-order-actions { display: flex; flex-wrap: wrap; gap: calc(8px * var(--spacing-scale, 1)); }
+.queue-order-items li { scroll-margin-block: 12px; }
+.queue-order-items button[draggable="true"] { cursor: grab; }
+.queue-order-panel .secondary.compact-button[aria-disabled="true"] {
+  background: transparent; color: var(--ink-secondary); cursor: default; opacity: 0.6;
+}
+
+.queue-order-items li[data-drop-placement="before"] { border-top: 3px solid var(--accent); }
+.queue-order-items li[data-drop-placement="after"] { border-bottom: 3px solid var(--accent); }

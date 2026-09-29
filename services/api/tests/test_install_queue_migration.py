@@ -56,7 +56,7 @@ def test_install_policy_upgrade_preserves_accepted_work_and_can_revert_before_us
     settings, database = prepare(tmp_path)
     before = snapshot(database)
     config = alembic_config(settings)
-    command.upgrade(config, "head")
+    command.upgrade(config, REVISION)
     assert snapshot(database) == before
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT version_num FROM alembic_version").fetchall() == [
@@ -72,7 +72,7 @@ def test_install_policy_downgrade_retains_policy_receipts_and_legacy_completion(
 ) -> None:
     settings, database = prepare(tmp_path)
     config = alembic_config(settings)
-    command.upgrade(config, "head")
+    command.upgrade(config, REVISION)
     with sqlite3.connect(database) as connection:
         if state == "legacy-job":
             connection.execute(
@@ -104,7 +104,7 @@ def test_install_policy_downgrade_retains_unfinished_or_claimed_installations(
 ) -> None:
     settings, database = prepare(tmp_path)
     config = alembic_config(settings)
-    command.upgrade(config, "head")
+    command.upgrade(config, REVISION)
     with sqlite3.connect(database) as connection:
         connection.execute(
             "UPDATE jobs SET kind = ?, status = ?, claim_owner = ? WHERE id = 'job_migration'",
@@ -121,7 +121,7 @@ def test_previous_migration_set_refuses_installation_state_without_changing_it(
 ) -> None:
     settings, database = prepare(tmp_path)
     config = alembic_config(settings)
-    command.upgrade(config, "head")
+    command.upgrade(config, REVISION)
     with sqlite3.connect(database) as connection:
         connection.execute("INSERT INTO generation_queue_policies VALUES ('install', 'paused', 1)")
     before = snapshot(database)
