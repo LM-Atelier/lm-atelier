@@ -35,7 +35,11 @@ STAMP = datetime(2026, 9, 1, tzinfo=UTC)
 
 
 @pytest.fixture
-def sessions(settings: Settings) -> Iterator[sessionmaker[Session]]:
+def sessions(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[sessionmaker[Session]]:
+    # Move between cohorts only when a test deliberately advances the clock.
+    monkeypatch.setattr("local_lm.queue_order.utcnow", lambda: STAMP)
     engine = create_database_engine(settings)
     Base.metadata.create_all(engine)
     try:
