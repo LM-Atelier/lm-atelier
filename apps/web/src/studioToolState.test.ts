@@ -6,6 +6,7 @@ import {
   studioToolReducer,
   snapshotBeforeGesture,
   toolFor,
+  toolMarksPicture,
   toolUsesMask,
   type StudioToolState,
 } from "./studioToolState";
@@ -32,6 +33,18 @@ describe("studio tool state", () => {
     expect(toolFor({ ...base, kind: "eraser" })).toBeInstanceOf(BrushTool);
     expect(toolFor({ ...base, kind: "rect" })).toBeInstanceOf(RectTool);
     expect(toolFor({ ...base, kind: "instruct" })).toBeNull();
+  });
+
+  it("offers the selection's controls only to the tools that work on a marked part", () => {
+    for (const kind of ["brush", "eraser", "rect", "lasso", "bucket", "wand", "text", "blur", "paint"] as const) {
+      expect(toolMarksPicture(kind)).toBe(true);
+    }
+    for (const kind of [
+      "instruct", "enhance", "extend", "perspective", "relight", "isolate", "background", "subject",
+      "transform", "crop", "resize", "canvas", "adjust", "caption",
+    ] as const) {
+      expect(toolMarksPicture(kind)).toBe(false);
+    }
   });
 
   it("gives the paint bucket its click, and the wand one only with the picture's pixels", () => {
