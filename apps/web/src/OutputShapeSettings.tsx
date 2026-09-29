@@ -2,7 +2,9 @@ import { ArrowDown, ArrowUp } from "lucide-react";
 import { RATIO_LABELS } from "./outputRatio";
 import {
   DEFAULT_OUTPUT_SHAPES,
+  defaultedShape,
   movedShape,
+  OUTPUT_SHAPES,
   setOutputShapeChoice,
   toggledShape,
   useOutputShapes,
@@ -14,7 +16,7 @@ const MODES: Array<{ mode: OutputShapeMode; label: string }> = [
   { mode: "video", label: "Videos" },
 ];
 
-/** Which output shapes the composer offers, and in what order, as a Models & generation setting. */
+/** Which output shapes the composer offers, in what order, and which new work takes, as a Models & generation setting. */
 export function OutputShapeSettings() {
   const choices = useOutputShapes();
   return (
@@ -23,8 +25,9 @@ export function OutputShapeSettings() {
         <div>
           <h2>Output shapes</h2>
           <p>
-            Which shapes the composer offers for pictures and videos, and in what order. A workflow still offers only
-            the shapes it can make. Saved in this browser.
+            Which shapes the composer offers for pictures and videos, in what order, and which shape new ones take
+            when no chat, preset or profile sets a size. A workflow still offers only the shapes it can make, and
+            keeps its own size when it cannot make the default exactly. Saved in this browser.
           </p>
         </div>
       </div>
@@ -41,6 +44,19 @@ export function OutputShapeSettings() {
                 }}>
                 Reset {label.toLowerCase()}
               </button>
+            </div>
+            <div className="setting-row">
+              <span>Default shape</span>
+              <select aria-label={`Default shape for ${label.toLowerCase()}`} value={choice.default ?? ""}
+                onChange={(event) => setOutputShapeChoice(
+                  mode,
+                  defaultedShape(choice, OUTPUT_SHAPES.find((shape) => shape === event.target.value) ?? null),
+                )}>
+                <option value="">The workflow decides</option>
+                {choice.order.filter((shape) => !choice.hidden.includes(shape)).map((shape) => (
+                  <option key={shape} value={shape}>{`${shape} ${RATIO_LABELS[shape]}`}</option>
+                ))}
+              </select>
             </div>
             {choice.order.map((shape, index) => {
               const name = `${shape} ${RATIO_LABELS[shape]}`;

@@ -43,6 +43,32 @@ describe("the output shapes setting", () => {
     expect(stored().video.order.at(-1)).toBe("16:9");
   });
 
+  it("chooses a default shape for one mode among the shapes the composer offers", () => {
+    render(<OutputShapeSettings />);
+    const pictures = screen.getByRole("group", { name: "Pictures shapes" });
+    const choose = within(pictures).getByRole("combobox", { name: "Default shape for pictures" });
+    expect(choose).toHaveValue("");
+
+    fireEvent.change(choose, { target: { value: "3:2" } });
+
+    expect(choose).toHaveValue("3:2");
+    expect(stored().image.default).toBe("3:2");
+    expect(within(screen.getByRole("group", { name: "Videos shapes" }))
+      .getByRole("combobox", { name: "Default shape for videos" })).toHaveValue("");
+
+    // Left out of the composer, a shape stops being the default and stops being offered as one.
+    fireEvent.click(within(pictures).getByRole("checkbox", { name: "3:2 Landscape wide" }));
+
+    expect(stored().image.default).toBeNull();
+    expect(choose).toHaveValue("");
+    expect(within(choose).queryByRole("option", { name: "3:2 Landscape wide" })).toBeNull();
+
+    fireEvent.change(choose, { target: { value: "1:1" } });
+    fireEvent.change(choose, { target: { value: "" } });
+
+    expect(stored().image.default).toBeNull();
+  });
+
   it("does not move the first shape earlier or the last one later", () => {
     render(<OutputShapeSettings />);
     const pictures = screen.getByRole("group", { name: "Pictures shapes" });

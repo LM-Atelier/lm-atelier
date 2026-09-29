@@ -1,7 +1,10 @@
 import type { ComposerPromptSource } from "./composerPromptSource";
 import type { TurnReference } from "./mentionDraft";
 import type { SourceFitIntent, SourceFitSelection } from "./sourceFit";
-import type { RoutingMode } from "./types";
+import type { OutputRatioPresetId, RoutingMode } from "./types";
+
+/** The shape new pictures and videos take when nothing else sets their size. */
+export type DefaultOutputShapes = { image: OutputRatioPresetId | null; video: OutputRatioPresetId | null };
 
 export interface TurnRequestInput {
   text: string;
@@ -15,6 +18,8 @@ export interface TurnRequestInput {
   promptSource?: ComposerPromptSource;
   /** An intent asks the server to resolve context; a selection pins a previewed choice. */
   sourceFit?: SourceFitIntent | SourceFitSelection;
+  /** Sent only when one is chosen, so a turn without any reads as it always did. */
+  defaultOutputShapes?: DefaultOutputShapes;
 }
 
 export interface TurnRequestPayload {
@@ -28,6 +33,7 @@ export interface TurnRequestPayload {
   output_count?: number;
   prompt_source?: ComposerPromptSource;
   source_fit?: SourceFitIntent;
+  default_output_shapes?: DefaultOutputShapes;
   confirm_media: boolean;
 }
 
@@ -35,7 +41,7 @@ export const SOURCE_FIT_BINDING_ERROR = "The source or workflow changed. Preview
 
 /** Snapshot the actual wire fields before any session initialization or confirmation awaits. */
 export function buildTurnRequest(input: TurnRequestInput): TurnRequestPayload {
-  const { sourceFit, mode } = input;
+  const { sourceFit, mode, defaultOutputShapes: shapes } = input;
   const selection = sourceFit && "request" in sourceFit ? sourceFit : undefined;
   if (sourceFit && (mode !== "image" && mode !== "auto")) throw new Error(SOURCE_FIT_BINDING_ERROR);
   if (selection && (
@@ -56,6 +62,7 @@ export function buildTurnRequest(input: TurnRequestInput): TurnRequestPayload {
     confirm_media: false,
     idempotency_key: input.idempotencyKey,
     prompt_source: input.promptSource,
+    default_output_shapes: shapes && (shapes.image || shapes.video) ? shapes : undefined,
   };
   return JSON.parse(JSON.stringify(payload)) as TurnRequestPayload;
 }
