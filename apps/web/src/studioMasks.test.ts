@@ -5,6 +5,7 @@ import {
   createMask,
   decodeMask,
   DEFAULT_MASK_HISTORY_BYTES,
+  dilate,
   encodeMask,
   feather,
   fillPolygon,
@@ -110,6 +111,42 @@ describe("mask rasters", () => {
     const before = [...untouched.data];
     feather(untouched, 0);
     expect([...untouched.data]).toEqual(before);
+  });
+
+  it("grows a selection to the strongest coverage within its reach", () => {
+    // Checked against the plain definition, on a sparse pattern of soft and
+    // hard pixels, with reaches that cross every edge.
+    const width = 23;
+    const height = 17;
+    const source = createMask(width, height);
+    for (let index = 0; index < source.data.length; index += 1) {
+      source.data[index] = (index * 37) % 11 === 0 ? (index * 53) % 256 : 0;
+    }
+    const wrong: string[] = [];
+    for (const reach of [1, 2, 5, 30]) {
+      const grown = cloneMask(source);
+      dilate(grown, reach);
+      for (let y = 0; y < height; y += 1) {
+        for (let x = 0; x < width; x += 1) {
+          let strongest = 0;
+          for (let dy = -reach; dy <= reach; dy += 1) {
+            for (let dx = -reach; dx <= reach; dx += 1) {
+              const sx = x + dx;
+              const sy = y + dy;
+              if (sx >= 0 && sx < width && sy >= 0 && sy < height) {
+                strongest = Math.max(strongest, source.data[sy * width + sx]);
+              }
+            }
+          }
+          if (grown.data[y * width + x] !== strongest) wrong.push(`${reach}:${x},${y}`);
+        }
+      }
+    }
+    expect(wrong).toEqual([]);
+    // Less than a pixel of reach changes nothing.
+    const untouched = cloneMask(source);
+    dilate(untouched, 0.5);
+    expect([...untouched.data]).toEqual([...source.data]);
   });
 
   it("exports RGBA with the mask as alpha", () => {

@@ -1,0 +1,205 @@
+/** Replacing a subject cuts it out, then redraws only its place from a second picture. */
+
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useEffect } from "react";
+import { afterEach, expect, it, vi } from "vitest";
+import { StudioView } from "./StudioView";
+import { api } from "./api";
+import { readCutoutMask } from "./studioBackground";
+import { createMask, encodeMaskPng } from "./studioMasks";
+import type { ChatDetail, Message, StudioToolCapability } from "./types";
+import { useStudioImage } from "./useStudioImage";
+import { useStudioSession } from "./useStudioSession";
+
+vi.mock("./api", () => ({
+  api: { favoriteArtifact: vi.fn(), artifact: vi.fn(), editTemplates: vi.fn(), studioCapabilities: vi.fn() },
+}));
+vi.mock("./useStudioSession", () => ({ useStudioSession: vi.fn() }));
+vi.mock("./useStudioImage", () => ({ useStudioImage: vi.fn() }));
+vi.mock("./studioBackground", async (original) => ({
+  ...(await original<typeof import("./studioBackground")>()),
+  readCutoutMask: vi.fn(),
+}));
+vi.mock("./studioMasks", async (original) => ({
+  ...(await original<typeof import("./studioMasks")>()),
+  encodeMaskPng: vi.fn(async () => new Blob(["subject"], { type: "image/png" })),
+}));
+vi.mock("./StudioWorkflowSelector", () => ({
+  StudioWorkflowSelector: ({ onAvailabilityChange }: { onAvailabilityChange: (reason: string | null) => void }) => {
+    useEffect(() => onAvailabilityChange(null), [onAvailabilityChange]);
+    return <div>Workflow chooser</div>;
+  },
+}));
+
+const BRUSH_REASON = "Install an inpainting workflow to edit part of a picture.";
+let apply: ReturnType<typeof vi.fn>;
+let session: ChatDetail;
+let view: ReturnType<typeof render>;
+
+function message(status: Message["status"], artifactId?: string): Message {
+  return {
+    id: "msg-cutout",
+    role: "assistant",
+    status,
+    parts: artifactId ? [{ type: "image", artifact_id: artifactId, metadata_json: {} }] : [],
+  } as unknown as Message;
+}
+
+function mockSession() {
+  vi.mocked(useStudioSession).mockReturnValue({
+    steps: [{ artifactId: "art-1", instruction: null, generationIdentity: null }],
+    previewArtifactId: null,
+    sessionId: "chat-studio",
+    session,
+    busy: false,
+    error: null,
+    apply,
+  } as unknown as ReturnType<typeof useStudioSession>);
+}
+
+function tree() {
+  return (
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      <StudioView sourceArtifactId="art-1" onOpenArtifact={vi.fn()} onOpenWorkflows={vi.fn()} onClose={vi.fn()} />
+    </QueryClientProvider>
+  );
+}
+
+function showSession(messages: Message[]) {
+  session = { id: "chat-studio", messages } as unknown as ChatDetail;
+  mockSession();
+  view.rerender(tree());
+}
+
+function tool(kind: StudioToolCapability["kind"], changes: Partial<StudioToolCapability> = {}) {
+  return {
+    kind,
+    workflow_class: "image_to_image",
+    available: true,
+    reason: null,
+    workflow_revision_id: null,
+    adapter_asset_id: null,
+    ...changes,
+  };
+}
+
+async function openWith(subject: Partial<StudioToolCapability>) {
+  vi.mocked(api.artifact).mockResolvedValue({ id: "art-1", favorite: false } as never);
+  vi.mocked(api.editTemplates).mockResolvedValue([]);
+  vi.mocked(api.studioCapabilities).mockResolvedValue({
+    tools: [
+      tool("isolate", { workflow_class: "matting", workflow_revision_id: "wfrev_cutout" }),
+      tool("subject", { workflow_class: "reference_edit", workflow_revision_id: "wfrev_two", ...subject }),
+      // Unavailable on purpose: its reason on the rail says the report has arrived.
+      tool("brush", { workflow_class: "inpaint", available: false, reason: BRUSH_REASON }),
+    ],
+  });
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+  vi.mocked(useStudioImage).mockReturnValue({
+    bitmap: { width: 400, height: 200, close: vi.fn() } as unknown as ImageBitmap,
+    error: null,
+    reload: vi.fn(),
+  } as ReturnType<typeof useStudioImage>);
+  const subjectAtCentre = createMask(400, 200);
+  subjectAtCentre.data[100 * 400 + 200] = 255;
+  vi.mocked(readCutoutMask).mockResolvedValue(subjectAtCentre);
+  apply = vi.fn();
+  session = { id: "chat-studio", messages: [] } as unknown as ChatDetail;
+  mockSession();
+  view = render(tree());
+  fireEvent.click(screen.getByRole("button", { name: /^Replace the subject/ }));
+  await screen.findByRole("button", { name: `Brush a selection - ${BRUSH_REASON}` });
+}
+
+function choosePicture() {
+  const picture = new File(["neutral"], "new-subject.png", { type: "image/png" });
+  fireEvent.change(screen.getByLabelText("Picture of the new subject"), {
+    target: { files: [picture] },
+  });
+  return picture;
+}
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
+
+it("cuts the subject out on Isolate's workflow, then redraws only its place from the picture", async () => {
+  await openWith({});
+  const replace = screen.getByRole("button", { name: "Replace subject" });
+  // The report is in and the words are optional: only the picture is missing.
+  expect(replace).toHaveAttribute("aria-disabled", "true");
+  const picture = choosePicture();
+  expect(screen.getByText("new-subject.png")).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText(/What to take from it/), { target: { value: "the dog" } });
+  await waitFor(() => expect(replace).toHaveAttribute("aria-disabled", "false"));
+  fireEvent.click(replace);
+  await waitFor(() => expect(apply).toHaveBeenCalledTimes(1));
+
+  const [cutWords, cutSource, cutMask, cutSettings, cutWorkflow, accepted] = apply.mock.calls[0];
+  expect(cutWords).toBe("Cut the subject out onto a transparent background.");
+  expect(cutSource).toBe("art-1");
+  expect(cutMask).toBeUndefined();
+  expect(cutSettings).toBeUndefined();
+  expect(cutWorkflow).toBe("wfrev_cutout");
+
+  accepted({ assistant_message: { id: "msg-cutout" } });
+  showSession([message("pending")]);
+  expect(apply).toHaveBeenCalledTimes(1);
+  showSession([message("complete", "art-cutout")]);
+  await waitFor(() => expect(apply).toHaveBeenCalledTimes(2));
+
+  expect(readCutoutMask).toHaveBeenCalledWith("art-cutout", 400, 200);
+  const [words, source, mask, settings, workflow, , second] = apply.mock.calls[1];
+  expect(words).toBe(
+    "Replace the subject with the dog from the second picture. Keep everything around it exactly as it is.",
+  );
+  // The picture being edited first, the new subject's picture after it, and
+  // the result placed back into the first alone.
+  expect(source).toBe("art-1");
+  expect(second).toBe(picture);
+  expect(mask).toMatchObject({ featherPx: 4, invert: false, apply: "blend", references: 1 });
+  expect(settings).toBeUndefined();
+  expect(workflow).toBe("wfrev_two");
+  // The subject's own coverage, grown by its reach on a 400 by 200 picture
+  // (8 pixels) so a new subject has room, and no further.
+  const grown = vi.mocked(encodeMaskPng).mock.calls[0][0];
+  expect(grown.data[100 * 400 + 208]).toBe(255);
+  expect(grown.data[100 * 400 + 209]).toBe(0);
+  expect(grown.data[92 * 400 + 200]).toBe(255);
+  expect(grown.data[91 * 400 + 200]).toBe(0);
+
+  // Another look at the same finished cutout never sends the redraw again.
+  showSession([message("complete", "art-cutout")]);
+  expect(apply).toHaveBeenCalledTimes(2);
+});
+
+it("words the redraw for the whole subject when nothing is named", async () => {
+  await openWith({});
+  choosePicture();
+  const replace = screen.getByRole("button", { name: "Replace subject" });
+  await waitFor(() => expect(replace).toHaveAttribute("aria-disabled", "false"));
+  fireEvent.click(replace);
+  await waitFor(() => expect(apply).toHaveBeenCalledTimes(1));
+  apply.mock.calls[0][5]({ assistant_message: { id: "msg-cutout" } });
+  showSession([message("complete", "art-cutout")]);
+  await waitFor(() => expect(apply).toHaveBeenCalledTimes(2));
+
+  expect(apply.mock.calls[1][0]).toBe(
+    "Replace the subject with the one in the second picture. Keep everything around it exactly as it is.",
+  );
+});
+
+it("says what to install when nothing here reads a second picture", async () => {
+  const reason =
+    "Install an image editing workflow that takes a second picture to replace a subject with one from another picture.";
+  await openWith({ available: false, reason, workflow_revision_id: null });
+
+  expect(await screen.findByRole("status")).toHaveTextContent("takes a second picture");
+  choosePicture();
+  const replace = screen.getByRole("button", { name: "Replace subject" });
+  expect(replace).toHaveAttribute("aria-disabled", "true");
+  fireEvent.click(replace);
+  expect(apply).not.toHaveBeenCalled();
+});

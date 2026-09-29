@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { StudioApplyPlan } from "./studioApplyPlan";
-import { cutoutOutcome, readCutoutMask } from "./studioBackground";
-import { encodeMaskPng } from "./studioMasks";
+import { cutoutOutcome, readCutoutMask, subjectReach } from "./studioBackground";
+import { dilate, encodeMaskPng, MAX_FEATHER_PX } from "./studioMasks";
 import type { ChatDetail, TurnAccepted } from "./types";
 import type { StudioMaskUpload } from "./useStudioSession";
 
@@ -28,15 +28,17 @@ type Replacement = {
   cutoutMessageId: string | null;
 };
 
-export const CUTOUT_FAILED = "The subject could not be cut out, so the background was left as it was.";
-export const CUTOUT_UNREADABLE = "The cutout could not be read, so the background was left as it was.";
+export const CUTOUT_FAILED = "The subject could not be cut out, so the picture was left as it was.";
+export const CUTOUT_UNREADABLE = "The cutout could not be read, so the picture was left as it was.";
 
-/** Replace a background in two applies: cut the subject out, then redraw around it.
+/** Replace a background or a subject in two applies: cut the subject out, then redraw.
  *
  * The cutout is an ordinary turn, so it lands in the filmstrip like any other
- * result. Its alpha becomes the selection for the second turn, which takes the
- * person's words and redraws only what the subject does not cover, placed back
- * through the selection so the subject keeps its own pixels.
+ * result. Its alpha becomes the selection for the second turn, which redraws
+ * the picture from the person's words and is placed back through that
+ * selection. Inverted, the selection is everything around the subject, which
+ * keeps its own pixels. As it is, grown a little, it is the subject, which is
+ * redrawn from a second picture while everything around it stays.
  */
 export function useStudioBackground(
   sessionId: string | null,
@@ -69,9 +71,16 @@ export function useStudioBackground(
       return;
     }
     const started = active;
+    const reference = started.plan.cutout?.reference;
+    const subject = started.plan.cutout?.redraw === "subject";
+    const reach = subjectReach(started.width, started.height);
     const settle = () => setReplacement((current) => (current === started ? null : current));
     void readCutoutMask(outcome.artifactId, started.width, started.height)
-      .then((mask) => (mask ? encodeMaskPng(mask) : null))
+      .then((mask) => {
+        if (!mask) return null;
+        if (subject) dilate(mask, reach);
+        return encodeMaskPng(mask);
+      })
       .then(
         (blob) => {
           if (!mounted.current) return;
@@ -83,16 +92,27 @@ export function useStudioBackground(
           apply(
             started.plan.words,
             started.sourceArtifactId,
-            // The subject's coverage, inverted: everything around it is redrawn.
-            // Its alpha is already soft, so no further feathering.
-            { blob, featherPx: 0, invert: true, apply: "blend" },
+            subject
+              ? // The subject, grown so a new one has room, and softened by half
+                // that reach so the redrawn part meets the rest gradually. The
+                // second picture is only read, never placed back into.
+                {
+                  blob,
+                  featherPx: Math.min(MAX_FEATHER_PX, Math.round(reach / 2)),
+                  invert: false,
+                  apply: "blend",
+                  references: reference ? 1 : 0,
+                }
+              : // The subject's coverage, inverted: everything around it is
+                // redrawn. Its alpha is already soft, so no further feathering.
+                { blob, featherPx: 0, invert: true, apply: "blend" },
             started.plan.settings,
             started.plan.workflowRevisionId,
             () => {
               settle();
               started.onAccepted();
             },
-            undefined,
+            reference,
             settle,
           );
         },
@@ -116,6 +136,8 @@ export function useStudioBackground(
     ) => {
       const cutout = plan.cutout;
       if (!cutout || !sessionId || busy) return;
+      // A subject with nothing to replace it from would redraw from the words alone.
+      if (cutout.redraw === "subject" && !cutout.reference) return;
       const started: Replacement = {
         sessionId,
         plan,

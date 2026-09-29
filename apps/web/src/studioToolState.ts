@@ -13,6 +13,7 @@ import {
   createMask,
   feather as featherMask,
   invert as invertMask,
+  MAX_FEATHER_PX,
   MaskHistory,
   type MaskRaster,
 } from "./studioMasks";
@@ -76,6 +77,8 @@ export type StudioToolState = {
   readonly lightIntensity: number;
   /** The light's colour temperature in kelvin, or null for no warmth grade. */
   readonly lightKelvin: number | null;
+  /** The picture a replaced subject is taken from. */
+  readonly subjectPicture: File | null;
   readonly mask: MaskRaster | null;
   /** Bumped whenever the raster changes so the canvas repaints its tint. */
   readonly maskVersion: number;
@@ -96,6 +99,7 @@ export type StudioToolAction =
   | { type: "set-light-direction"; direction: LightDirection }
   | { type: "set-light-intensity"; intensity: number }
   | { type: "set-light-kelvin"; kelvin: number | null }
+  | { type: "set-subject-picture"; picture: File | null }
   | { type: "image-changed"; width: number; height: number }
   | { type: "stroke-end" }
   | { type: "invert" }
@@ -118,6 +122,7 @@ export function initialToolState(): StudioToolState {
     lightDirection: "left",
     lightIntensity: 0.5,
     lightKelvin: null,
+    subjectPicture: null,
     mask: null,
     maskVersion: 0,
     history: new MaskHistory(),
@@ -134,7 +139,7 @@ export function studioToolReducer(
     case "set-brush-radius":
       return { ...state, brushRadius: clamp(action.radius, 1, 512) };
     case "set-feather":
-      return { ...state, featherPx: clamp(action.px, 0, 128) };
+      return { ...state, featherPx: clamp(action.px, 0, MAX_FEATHER_PX) };
     case "set-selection-mode":
       return { ...state, selectionMode: action.mode };
     case "set-color-tolerance":
@@ -163,6 +168,9 @@ export function studioToolReducer(
       };
     case "set-light-kelvin":
       return { ...state, lightKelvin: action.kelvin };
+    // Kept when the picture changes: the new subject can go into another one.
+    case "set-subject-picture":
+      return { ...state, subjectPicture: action.picture };
     case "image-changed": {
       // A new image invalidates the mask entirely; carrying it over would
       // silently apply a selection drawn on different pixels.
@@ -300,6 +308,10 @@ export function toolFor(
     // Nor does replacing a background: the cutout finds the subject, and the
     // words say what goes around it.
     case "background":
+      return null;
+    // Nor replacing a subject: the cutout finds it, and a second picture says
+    // what takes its place.
+    case "subject":
       return null;
   }
 }

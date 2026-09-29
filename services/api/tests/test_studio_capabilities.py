@@ -94,6 +94,34 @@ def test_replacing_a_background_needs_a_cutout_and_an_editor() -> None:
     assert ready.workflow_revision_id == "wfrev-matting"
 
 
+def test_replacing_a_subject_needs_a_cutout_and_an_editor_that_reads_a_second_picture() -> None:
+    """The cutout finds the subject; the redraw takes the new one from a second picture."""
+
+    matting: dict[str, Any] = {
+        "type": "object",
+        "properties": {"matte": {"type": "boolean", "x-lm-atelier-kind": "matting"}},
+    }
+
+    def subject(**kwargs: Any) -> Any:
+        return next(tool for tool in tool_capabilities(**kwargs) if tool.kind == "subject")
+
+    cutout_only = subject(edit_input_schemas=[matting, PLAIN_SCHEMA])
+    assert cutout_only.available is False
+    assert "takes a second picture" in (cutout_only.reason or "")
+    editor_only = subject(edit_input_schemas=[PLAIN_SCHEMA], reference_workflow_ids=["wfrev-two"])
+    assert editor_only.available is False
+    assert "background removal" in (editor_only.reason or "")
+    ready = subject(
+        edit_input_schemas=[matting, PLAIN_SCHEMA],
+        matting_workflow_ids=["wfrev-matting"],
+        reference_workflow_ids=["wfrev-two", "wfrev-three"],
+    )
+    assert ready.available is True and ready.reason is None
+    # Always the first that reads a second picture: the studio's own choice
+    # may read only one.
+    assert ready.workflow_revision_id == "wfrev-two"
+
+
 def test_a_plain_editor_runs_instruct_but_not_a_selection() -> None:
     """The live case: an edit workflow that declares no mask input.
 

@@ -110,6 +110,63 @@ def test_a_blend_selection_needs_exactly_one_picture_being_edited(
     assert raised.value.code == "mask-blend-needs-one-source"
 
 
+def test_a_blend_selection_may_name_the_pictures_after_its_source_as_references() -> None:
+    selection = parse_mask_setting(
+        {"mask": {"artifact_id": ARTIFACT, "apply": "blend", "references": 1}},
+        None,
+        operation="image_to_image",
+        source_count=2,
+    )
+
+    assert selection is not None
+    assert selection.references == 1
+    assert selection.as_dict()["references"] == 1
+    # Without a reference the record reads as it always has.
+    plain = parse_mask_setting(
+        {"mask": {"artifact_id": ARTIFACT, "apply": "blend"}},
+        None,
+        operation="image_to_image",
+        source_count=1,
+    )
+    assert plain is not None
+    assert "references" not in plain.as_dict()
+
+
+@pytest.mark.parametrize(
+    ("references", "source_count", "code"),
+    [
+        (1, 1, "mask-blend-needs-one-source"),
+        (1, 3, "mask-blend-needs-one-source"),
+        (-1, 0, "mask-references-invalid"),
+        (True, 2, "mask-references-invalid"),
+        (1.0, 2, "mask-references-invalid"),
+        ("1", 2, "mask-references-invalid"),
+    ],
+)
+def test_references_leave_exactly_one_picture_being_edited(
+    references: object, source_count: int, code: str
+) -> None:
+    with pytest.raises(MaskContractError) as raised:
+        parse_mask_setting(
+            {"mask": {"artifact_id": ARTIFACT, "apply": "blend", "references": references}},
+            None,
+            operation="image_to_image",
+            source_count=source_count,
+        )
+    assert raised.value.code == code
+
+
+def test_only_a_blend_selection_names_references() -> None:
+    with pytest.raises(MaskContractError) as raised:
+        parse_mask_setting(
+            {"mask": {"artifact_id": ARTIFACT, "references": 1}},
+            MASK_SCHEMA,
+            operation="image_to_image",
+            source_count=2,
+        )
+    assert raised.value.code == "mask-references-invalid"
+
+
 def test_an_unknown_apply_refuses() -> None:
     with pytest.raises(MaskContractError) as raised:
         parse_mask_setting(

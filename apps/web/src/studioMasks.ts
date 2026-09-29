@@ -238,6 +238,64 @@ export function invert(mask: MaskRaster): void {
   }
 }
 
+/** The most feathering a selection may ask the server for, in pixels. */
+export const MAX_FEATHER_PX = 128;
+
+/** Grow the selection outward by up to `radiusPx` in every direction.
+ *
+ * Each pixel takes the strongest coverage within the square around it, so a
+ * soft edge keeps its softness and moves out with the rest. One sliding
+ * maximum per row, then per column, keeps the cost to a few passes over the
+ * pixels whatever the radius.
+ */
+export function dilate(mask: MaskRaster, radiusPx: number): void {
+  const radius = Math.floor(radiusPx);
+  if (radius < 1) return;
+  const { width, height, data } = mask;
+  const row = new Uint8Array(width);
+  for (let y = 0; y < height; y += 1) {
+    slidingMax(data, y * width, 1, width, radius, row);
+    data.set(row, y * width);
+  }
+  const column = new Uint8Array(height);
+  for (let x = 0; x < width; x += 1) {
+    slidingMax(data, x, width, height, radius, column);
+    for (let y = 0; y < height; y += 1) data[y * width + x] = column[y];
+  }
+}
+
+/** The maximum of each window of `2 * radius + 1` values along one line.
+ *
+ * A queue of positions whose values only fall from front to back: a position
+ * is dropped once it leaves the window, or once a stronger one arrives after
+ * it, so each is added and removed at most once.
+ */
+function slidingMax(
+  data: Uint8Array,
+  start: number,
+  step: number,
+  length: number,
+  radius: number,
+  out: Uint8Array,
+): void {
+  const queue = new Int32Array(length);
+  let head = 0;
+  let tail = 0;
+  let next = 0;
+  for (let index = 0; index < length; index += 1) {
+    const reach = Math.min(length - 1, index + radius);
+    while (next <= reach) {
+      const value = data[start + next * step];
+      while (tail > head && data[start + queue[tail - 1] * step] <= value) tail -= 1;
+      queue[tail] = next;
+      tail += 1;
+      next += 1;
+    }
+    while (queue[head] < index - radius) head += 1;
+    out[index] = data[start + queue[head] * step];
+  }
+}
+
 /** Two box passes approximate a gaussian; enough for selection feathering. */
 export function feather(mask: MaskRaster, radiusPx: number): void {
   const radius = Math.floor(radiusPx);

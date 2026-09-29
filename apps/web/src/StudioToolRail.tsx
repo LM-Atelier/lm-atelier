@@ -6,6 +6,7 @@ import {
   Maximize2,
   Mountain,
   PaintBucket,
+  PersonStanding,
   Redo2,
   Scissors,
   Sparkles,
@@ -32,6 +33,7 @@ const TOOLS: Array<{ kind: StudioToolKind; label: string; icon: typeof Brush }> 
   { kind: "relight", label: "Relight from a direction", icon: SunMedium },
   { kind: "isolate", label: "Cut the subject out", icon: Scissors },
   { kind: "background", label: "Replace the background", icon: Mountain },
+  { kind: "subject", label: "Replace the subject", icon: PersonStanding },
 ];
 
 /** The studio's left rail: pick how you point at the image.

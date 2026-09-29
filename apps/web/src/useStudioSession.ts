@@ -21,6 +21,9 @@ export type StudioMaskUpload = {
   /** Placed back over the source after a whole-picture edit, rather than
    * handed to the workflow's own mask input. */
   apply?: "blend";
+  /** How many pictures after the source the workflow only reads, so the
+   * result is placed back into the source alone. */
+  references?: number;
 };
 
 type StudioApply = {
@@ -32,8 +35,8 @@ type StudioApply = {
   /** The workflow a recipe recorded, so applying one reproduces its run
    * rather than running its words against whatever is current. */
   workflowRevisionId?: string;
-  /** A picture the tool made for this edit, sent after the source: the
-   * relight tool's light map. */
+  /** A picture sent after the source: the light map the relight tool draws,
+   * or the picture a replaced subject is taken from. */
   secondPicture?: Blob;
 };
 
@@ -138,9 +141,14 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
         ...(mask ? { mask: await uploadMask(mask) } : {}),
       };
       // Unlike a selection, this is content the workflow reads as a picture, so
-      // it goes in the inputs, after the source it belongs to.
+      // it goes in the inputs, after the source it belongs to. A picture the
+      // person chose keeps its own name and type; a drawn one is a PNG.
       const second = secondPicture
-        ? await api.upload(new File([secondPicture], "studio-light-map.png", { type: "image/png" }))
+        ? await api.upload(
+            secondPicture instanceof File
+              ? secondPicture
+              : new File([secondPicture], "studio-light-map.png", { type: "image/png" }),
+          )
         : null;
       return api.sendTurn(
         sessionId,
@@ -197,6 +205,7 @@ async function uploadMask(mask: StudioMaskUpload) {
     feather_px: mask.featherPx,
     invert: mask.invert,
     ...(mask.apply ? { apply: mask.apply } : {}),
+    ...(mask.references ? { references: mask.references } : {}),
   };
 }
 

@@ -4,7 +4,8 @@ import type { StudioToolAction, StudioToolState } from "./studioToolState";
 /** The panel's tool-specific control: what this tool needs said before it runs.
  *
  * Extend and Enhance are a drag or a number, Text is the words before and
- * after, Isolate needs nothing, and every other tool is described in words.
+ * after, Isolate needs nothing, replacing a subject needs the picture it comes
+ * from, and every other tool is described in words.
  * Kept apart from the studio view so each tool's control reads in one place.
  */
 export function StudioToolOptions({
@@ -132,6 +133,42 @@ export function StudioToolOptions({
             rows={4}
             value={instruction}
             placeholder="e.g. a quiet beach at sunset"
+            onChange={(event) => onInstructionChange(event.target.value)}
+          />
+        </label>
+      </div>
+    );
+  }
+  if (tools.kind === "subject") {
+    return (
+      <div className="studio-tool-options">
+        <small>
+          Cuts the subject out first, then redraws it from a second picture. Everything
+          around it keeps its own pixels.
+        </small>
+        <label>
+          <span>
+            <strong>Picture of the new subject</strong>
+          </span>
+          <input
+            type="file"
+            accept="image/*"
+            onChange={(event) => {
+              // A dialog closed without a choice keeps the picture already chosen.
+              const picture = event.target.files?.[0];
+              if (picture) dispatch({ type: "set-subject-picture", picture });
+            }}
+          />
+        </label>
+        {tools.subjectPicture && <small>{tools.subjectPicture.name}</small>}
+        <label>
+          <span>
+            <strong>What to take from it</strong> (optional)
+          </span>
+          <input
+            type="text"
+            value={instruction}
+            placeholder="e.g. the dog"
             onChange={(event) => onInstructionChange(event.target.value)}
           />
         </label>

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cutoutOutcome, readCutoutMask, subjectMask } from "./studioBackground";
+import { cutoutOutcome, readCutoutMask, subjectMask, subjectReach } from "./studioBackground";
 import { readSourcePixels } from "./studioSourcePixels";
 import type { ChatDetail, Message } from "./types";
 
@@ -45,6 +45,14 @@ describe("subjectMask", () => {
     const mask = subjectMask(pixels, 3, 1);
     expect([mask.width, mask.height]).toEqual([3, 1]);
     expect(Array.from(mask.data)).toEqual([0, 128, 255]);
+  });
+});
+
+describe("subjectReach", () => {
+  it("gives a new subject room in proportion to the picture, and a little at least", () => {
+    expect(subjectReach(1000, 800)).toBe(32);
+    expect(subjectReach(800, 1000)).toBe(32);
+    expect(subjectReach(100, 100)).toBe(8);
   });
 });
 
