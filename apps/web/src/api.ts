@@ -76,6 +76,7 @@ import type {
   ModelStorageInfo,
   ModelUpdate,
   ModelProfile,
+  UseCaseSuggestionOut,
   ModelProfileModelUpdate,
   ModelProfileBundle,
   OutputRatioPresetId,
@@ -768,6 +769,8 @@ export const api = {
     values: {
       name?: string;
       use_case?: string;
+      use_case_derived?: boolean;
+      expected_use_case?: string;
       load_settings?: Record<string, unknown>;
       request_settings?: Record<string, unknown>;
       is_default?: boolean;
@@ -777,6 +780,14 @@ export const api = {
     request<ModelProfile>(`/api/profiles/${id}/clone`, {
       method: "POST",
       body: JSON.stringify({ name }),
+    }),
+  suggestProfileUseCase: (id: string, expectedUseCase: string, signal?: AbortSignal) =>
+    request<UseCaseSuggestionOut>(`/api/profiles/${encodeURIComponent(id)}/use-case-suggestion`, {
+      method: "POST", body: JSON.stringify({ expected_use_case: expectedUseCase }), signal,
+    }),
+  suggestLoraUseCase: (id: string, expectedUseCase: string, signal?: AbortSignal) =>
+    request<UseCaseSuggestionOut>(`/api/model-assets/${encodeURIComponent(id)}/use-case-suggestion`, {
+      method: "POST", body: JSON.stringify({ expected_use_case: expectedUseCase }), signal,
     }),
   resetProfile: (id: string) =>
     request<ModelProfile>(`/api/profiles/${id}/reset`, { method: "POST" }),
@@ -1141,10 +1152,11 @@ export const api = {
     values: Partial<Pick<
       ModelAssetInstall,
       "active" | "use_case" | "auto_apply" | "default_model_strength" | "default_clip_strength"
-      | "typed_trigger_words"
+      | "typed_trigger_words" | "use_case_derived"
     >> & {
       /** The base model the asset is for; an empty string clears it. */
       family?: string;
+      expected_use_case?: string;
     },
   ) =>
     request<ModelAssetInstall>(`/api/model-assets/${id}`, {

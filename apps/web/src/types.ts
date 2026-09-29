@@ -645,6 +645,10 @@ export interface ModelProfileModelUpdate {
   download_job_id: string;
 }
 
+export interface UseCaseSuggestionOut {
+  suggestion: string;
+}
+
 export interface ModelProfile {
   id: string;
   model_install_id: string | null;

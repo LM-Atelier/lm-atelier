@@ -523,6 +523,7 @@ async def test_unknown_gguf_plan_installs_and_activates_with_one_request(
                 "filename": "weights.bin.gguf",
                 "size": len(content),
                 "sha256": digest,
+                "metadata": {"description": "Accepted chat description"},
             }
         ],
         inspection=inspection,
@@ -617,6 +618,8 @@ async def test_unknown_gguf_plan_installs_and_activates_with_one_request(
         assert completed.status == JobStatus.COMPLETE.value, completed.error
         assert len(installs) == 1
         assert installs[0].active is True
+        assert installs[0].manifest_json["provider_description"] == "Accepted chat description"
+        assert installs[0].manifest_json.get("instruction_edit_capability") == "unknown"
         assert session.query(ModelProfile).count() == 1
         assert session.query(ModelComponentManifest).count() == 1
         assert session.query(ModelCapabilityEvidence).count() == 1
@@ -862,7 +865,10 @@ async def test_lora_plan_installs_as_a_verified_auxiliary_asset(
                 "filename": "adapter.safetensors",
                 "size": len(content),
                 "sha256": digest,
-                "metadata": {"trained_words": ["provider ink"]},
+                "metadata": {
+                    "trained_words": ["provider ink"],
+                    "description": "Accepted watercolor description",
+                },
             }
         ],
         inspection=inspection,
@@ -961,6 +967,7 @@ async def test_lora_plan_installs_as_a_verified_auxiliary_asset(
         assert asset.manifest_json["use_case_metadata"] == {"trained_words": ["provider ink"]}
         assert asset.manifest_json["sha256"] == digest
         assert asset.manifest_json["comfy_name"] == "adapter.safetensors"
+        assert asset.manifest_json["provider_description"] == "Accepted watercolor description"
         assert asset.manifest_json["metadata"]["trigger_words"] == [
             "atelier ink",
             "provider ink",
@@ -972,9 +979,11 @@ async def test_lora_plan_installs_as_a_verified_auxiliary_asset(
     assert processes.stopped == ["media"]
 
 
+@pytest.mark.parametrize("instruction_capability", ["declared", "unknown", None])
 async def test_workflow_checkpoint_installs_as_an_inert_verified_asset(
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
+    instruction_capability: str | None,
 ) -> None:
     settings.prepare()
     configure_database(settings)
@@ -1015,12 +1024,15 @@ async def test_workflow_checkpoint_installs_as_an_inert_verified_asset(
             runtime_contract_json={
                 "auxiliary_kind": None,
                 "workflow_asset_kind": "checkpoint",
+                "instruction_edit_capability": instruction_capability,
                 "comfy_paths": {"checkpoints": "."},
                 "workflow_component_folders": {filename: "checkpoints"},
             },
             activation_probe_json={"kind": "workflow_asset", "required": False},
             status="planned",
         )
+        if instruction_capability is None:
+            plan.runtime_contract_json.pop("instruction_edit_capability")
         session.add(plan)
         request = DownloadRequest(
             install_plan_id=plan.id,
@@ -1079,6 +1091,18 @@ async def test_workflow_checkpoint_installs_as_an_inert_verified_asset(
         target.write_bytes(content)
         return str(target)
 
+    original_sources = manager._download_sources
+
+    async def changed_provider_metadata(
+        request: DownloadRequest, saved_plan: InstallPlan | None
+    ) -> Any:
+        siblings, sources, revision, metadata = await original_sources(request, saved_plan)
+        metadata["instruction_edit_capability"] = (
+            "unknown" if instruction_capability == "declared" else "declared"
+        )
+        return siblings, sources, revision, metadata
+
+    monkeypatch.setattr(manager, "_download_sources", changed_provider_metadata)
     monkeypatch.setattr(manager, "_download_file", download_file)
     await manager._download("job_workflow_checkpoint")
 
@@ -1092,6 +1116,9 @@ async def test_workflow_checkpoint_installs_as_an_inert_verified_asset(
         assert asset.kind == "checkpoint"
         assert asset.manifest_json["comfy_name"] == filename
         assert asset.manifest_json["workflow_asset_kind"] == "checkpoint"
+        assert asset.manifest_json.get("instruction_edit_capability") == (
+            "declared" if instruction_capability == "declared" else "unknown"
+        )
         assert session.query(ModelInstall).count() == 0
         assert stored_plan and stored_plan.status == "activated"
     assert processes.started[0][0].name.endswith(f"-asset-{plan_hash[:12]}")
@@ -1306,6 +1333,7 @@ async def test_civitai_sources_come_only_from_the_immutable_plan(
     assert revision == "202"
     assert metadata == {
         "source_version_id": "202",
+        "instruction_edit_capability": "unknown",
         "tags": ["landscapes"],
         "base_model": ["Neutral base"],
     }

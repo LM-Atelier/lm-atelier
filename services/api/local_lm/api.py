@@ -673,6 +673,13 @@ from .studio_sessions import (
     studio_session_title,
 )
 from .turn_inheritance import TurnInheritance, TurnSourceResolver
+from .use_case_summary_api import (
+    check_use_case_update,
+    prepare_use_case_update,
+)
+from .use_case_summary_api import (
+    router as use_case_summary_router,
+)
 from .user_queue_activity import (
     QueueActivityCursorError,
     QueueStepStateError,
@@ -890,6 +897,7 @@ def _services(request: Request) -> Services:
 
 router = APIRouter(prefix="/api")
 router.include_router(workflow_use_case_preset_router)
+router.include_router(use_case_summary_router)
 logger = logging.getLogger(__name__)
 
 
@@ -8270,6 +8278,7 @@ async def update_model_asset(
     values = payload.model_dump(exclude_unset=True, exclude_none=True)
     if not values:
         return asset
+    expected_use_case = prepare_use_case_update(values)
     _refuse_lora_only_settings(asset.kind, set(values) & LORA_ONLY_ASSET_SETTINGS)
     if "typed_trigger_words" in values:
         # A trigger word is something a LoRA answers to; nothing else reads one.
@@ -8287,7 +8296,6 @@ async def update_model_asset(
             raise api_error(422, "trigger-words-invalid", str(exc)) from exc
     if "use_case" in values:
         values["use_case"] = values["use_case"].strip()
-        values["use_case_derived"] = False
     if "family" in values:
         # Any kind carries one: a LoRA is admitted by it, and a diffusion
         # model is where a workflow built around one reads its own. A value
@@ -8324,6 +8332,7 @@ async def update_model_asset(
     active_changed = "active" in values and values["active"] != asset.active
 
     def apply_values() -> None:
+        check_use_case_update(session, asset, expected_use_case)
         for field, value in values.items():
             setattr(asset, field, value)
         session.commit()
@@ -9061,8 +9070,8 @@ async def update_profile(
             )
         except ValueError as exc:
             raise api_error(422, "profile-request-settings-invalid", str(exc)) from exc
-    if "use_case" in values:
-        profile.use_case_derived = False
+    expected_use_case = prepare_use_case_update(values)
+    check_use_case_update(session, profile, expected_use_case)
     for key, value in values.items():
         setattr(profile, key, value)
     reconcile_legacy_workflow_compatibility(session)
