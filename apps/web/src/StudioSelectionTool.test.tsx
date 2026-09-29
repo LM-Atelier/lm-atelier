@@ -84,6 +84,7 @@ afterEach(() => {
 
 it("selects the area of similar color with the wand, and takes it away again", () => {
   renderStudio();
+  fireEvent.click(screen.getByRole("button", { name: "Select part of the picture" }));
   fireEvent.click(screen.getByRole("button", { name: "Select similar colors" }));
   expect(screen.queryByLabelText("Brush size")).toBeNull();
   expect(screen.getByLabelText("Color tolerance")).toHaveValue("32");
@@ -100,6 +101,7 @@ it("selects the area of similar color with the wand, and takes it away again", (
 
 it("fills an area with the paint bucket and undoes it as one step", () => {
   renderStudio();
+  fireEvent.click(screen.getByRole("button", { name: "Select part of the picture" }));
   fireEvent.click(screen.getByRole("button", { name: "Fill an area of the selection" }));
   expect(screen.getByRole("button", { name: "Add to selection" })).toHaveAttribute("aria-pressed", "true");
   expect(screen.queryByLabelText("Color tolerance")).toBeNull();
@@ -116,6 +118,7 @@ it("fills an area with the paint bucket and undoes it as one step", () => {
 it("says so when the picture's colors cannot be read, and gives the wand nothing to click with", () => {
   vi.mocked(readSourcePixels).mockReturnValue(null);
   renderStudio();
+  fireEvent.click(screen.getByRole("button", { name: "Select part of the picture" }));
   fireEvent.click(screen.getByRole("button", { name: "Select similar colors" }));
 
   expect(screen.getByRole("alert")).toHaveTextContent("This picture's colors cannot be read here");
@@ -129,6 +132,7 @@ it("uses the chosen tolerance for the next click", () => {
     new Uint8ClampedArray([0, 1, 2, 3, 0, 1, 2, 3].flatMap((column) => shades[column])),
   );
   renderStudio();
+  fireEvent.click(screen.getByRole("button", { name: "Select part of the picture" }));
   fireEvent.click(screen.getByRole("button", { name: "Select similar colors" }));
 
   click(0, 0);

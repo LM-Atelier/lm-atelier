@@ -114,6 +114,7 @@ it("replaces the boxed words through a softened copy of the box", async () => {
 });
 
 it("keeps other selection tools handing their selection to the workflow", async () => {
+  fireEvent.click(screen.getByRole("button", { name: "Select part of the picture" }));
   fireEvent.click(screen.getByRole("button", { name: "Select a rectangle" }));
   drawBox();
   fireEvent.change(screen.getByRole("textbox"), { target: { value: "make it blue" } });

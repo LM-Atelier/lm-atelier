@@ -44,6 +44,7 @@ function open(client: QueryClient, sessionId = "chat-studio", artifactId = "art-
 
 /** Brush a short stroke and write some words. */
 function work() {
+  fireEvent.click(screen.getByRole("button", { name: "Select part of the picture" }));
   fireEvent.click(screen.getByRole("button", { name: "Brush a selection" }));
   const canvas = screen.getByRole("application");
   fireEvent.keyDown(canvas, { key: "Enter" });

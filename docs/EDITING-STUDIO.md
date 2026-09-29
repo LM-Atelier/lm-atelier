@@ -60,6 +60,15 @@ pictures. **Stop the edit** ends it, and the picture stays as it was.
   forked from another carries results, not history, and the lineage view
   never pretends otherwise.
 
+## Choosing a tool
+
+Image Studio's tools sit in five runs down its left edge: exact edits made
+without a model; selecting part of the picture; edits said in words; the
+subject and the scene around it; and enlarging with detail restored. Select is
+one tool. Once it is chosen, the panel offers the ways of drawing the
+selection: the brush, the eraser, a rectangle, a lasso, a fill, or similar
+colors. Choosing Select again returns to the way last used.
+
 ## Exact edits in Image Studio
 
 Some changes need no model at all, and Image Studio makes them itself, from

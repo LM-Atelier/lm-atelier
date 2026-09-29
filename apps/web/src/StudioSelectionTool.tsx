@@ -1,5 +1,21 @@
 import type { Dispatch } from "react";
-import type { StudioToolAction, StudioToolState } from "./studioToolState";
+import { Brush, Eraser, Lasso, PaintBucket, Square, Wand2 } from "lucide-react";
+import {
+  isSelectionKind,
+  type SelectionKind,
+  type StudioToolAction,
+  type StudioToolState,
+} from "./studioToolState";
+
+/** The six ways of drawing the one selection, offered once Select is chosen. */
+const SELECTION_WAYS: Array<{ kind: SelectionKind; label: string; icon: typeof Brush }> = [
+  { kind: "brush", label: "Brush a selection", icon: Brush },
+  { kind: "eraser", label: "Erase from the selection", icon: Eraser },
+  { kind: "rect", label: "Select a rectangle", icon: Square },
+  { kind: "lasso", label: "Lasso a selection", icon: Lasso },
+  { kind: "bucket", label: "Fill an area of the selection", icon: PaintBucket },
+  { kind: "wand", label: "Select similar colors", icon: Wand2 },
+];
 
 /** The control that depends on how the selection is drawn.
  *
@@ -76,8 +92,9 @@ export function StudioSelectionTool({
   );
 }
 
-/** What the panel offers for a selection: how it is drawn, what to do with it
- * as a whole, and how much of the picture it covers. */
+/** What the panel offers for a selection: the way it is drawn while Select is
+ * in hand, how it is drawn, what to do with it as a whole, and how much of the
+ * picture it covers. */
 export function StudioSelectionControls({
   tools,
   dispatch,
@@ -92,6 +109,23 @@ export function StudioSelectionControls({
 }) {
   return (
     <div className="studio-selection-controls">
+      {isSelectionKind(tools.kind) && (
+        <div className="studio-selection-ways" role="group" aria-label="How to select">
+          {SELECTION_WAYS.map(({ kind, label, icon: Icon }) => (
+            <button
+              key={kind}
+              type="button"
+              className={`icon-button ${tools.kind === kind ? "selected" : ""}`}
+              aria-label={label}
+              aria-pressed={tools.kind === kind}
+              title={label}
+              onClick={() => dispatch({ type: "select-tool", kind })}
+            >
+              <Icon size={16} aria-hidden="true" />
+            </button>
+          ))}
+        </div>
+      )}
       <StudioSelectionTool tools={tools} dispatch={dispatch} colorsUnreadable={colorsUnreadable} />
       <div className="row-actions">
         <button

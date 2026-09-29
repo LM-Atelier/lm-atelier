@@ -58,7 +58,7 @@ afterEach(() => {
 });
 
 it("refuses and says why instead of editing the whole picture", async () => {
-  fireEvent.click(screen.getByRole("button", { name: "Brush a selection" }));
+  fireEvent.click(screen.getByRole("button", { name: "Select part of the picture" }));
   const canvas = screen.getByRole("application");
   fireEvent.keyDown(canvas, { key: "Enter" });
   fireEvent.keyDown(canvas, { key: "ArrowRight" });
@@ -74,7 +74,7 @@ it("refuses and says why instead of editing the whole picture", async () => {
 });
 
 it("refuses the same way when drawing the selection throws", async () => {
-  fireEvent.click(screen.getByRole("button", { name: "Brush a selection" }));
+  fireEvent.click(screen.getByRole("button", { name: "Select part of the picture" }));
   const canvas = screen.getByRole("application");
   fireEvent.keyDown(canvas, { key: "Enter" });
   fireEvent.keyDown(canvas, { key: "ArrowRight" });

@@ -40,9 +40,10 @@ test("keeps the selection and the words while the person visits the workflow lib
     mimeType: "image/png",
     buffer: await picture(page),
   });
-  const brush = page.getByRole("button", { name: /^Brush a selection/ });
-  await expect(brush).toBeEnabled();
-  await brush.click();
+  const select = page.getByRole("button", { name: /^Select part of the picture/ });
+  await expect(select).toBeEnabled();
+  await select.click();
+  await page.getByRole("button", { name: /^Brush a selection/ }).click();
 
   // A stroke across the middle of the picture.
   const layers = await page.locator(".studio-canvas-layers").boundingBox();

@@ -19,10 +19,45 @@ describe("StudioToolRail", () => {
     return props;
   }
 
-  it("names every tool and marks the active one", () => {
-    renderRail({ active: "brush" });
+  it("lays the tools out in five runs, then undo and redo", () => {
+    renderRail();
+    const rail = screen.getByRole("navigation", { name: "Editing tools" });
+    const runs: string[][] = [[]];
+    for (const child of Array.from(rail.children)) {
+      if (child.classList.contains("studio-rail-divider")) runs.push([]);
+      else runs[runs.length - 1].push(child.getAttribute("aria-label") ?? "");
+    }
 
-    expect(screen.getByRole("button", { name: "Brush a selection" })).toHaveAttribute(
+    expect(runs).toEqual([
+      [
+        "Crop the picture",
+        "Rotate, straighten or flip",
+        "Correct the perspective",
+        "Resize the picture",
+        "Change the canvas size",
+        "Adjust light and color",
+        "Blur or pixelate part of the picture",
+        "Paint over part of the picture",
+        "Add text to the picture",
+      ],
+      ["Select part of the picture"],
+      ["Instruct the whole image", "Replace words in the picture"],
+      [
+        "Cut the subject out",
+        "Replace the background",
+        "Replace the subject",
+        "Relight from a direction",
+        "Extend past the edge",
+      ],
+      ["Enlarge and restore detail"],
+      ["Undo the selection change", "Redo the selection change"],
+    ]);
+  });
+
+  it("offers the ways of selecting as one tool, marked while any of them is in hand", () => {
+    renderRail({ active: "lasso" });
+
+    expect(screen.getByRole("button", { name: "Select part of the picture" })).toHaveAttribute(
       "aria-pressed",
       "true",
     );
@@ -30,21 +65,25 @@ describe("StudioToolRail", () => {
       "aria-pressed",
       "false",
     );
+    // The panel offers them once Select is chosen; here they are no tools of their own.
     for (const name of [
+      "Brush a selection",
       "Erase from the selection",
       "Select a rectangle",
       "Lasso a selection",
       "Fill an area of the selection",
       "Select similar colors",
     ]) {
-      expect(screen.getByRole("button", { name })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name })).toBeNull();
     }
   });
 
-  it("reports the chosen tool", () => {
-    const props = renderRail();
-    fireEvent.click(screen.getByRole("button", { name: "Lasso a selection" }));
-    expect(props.onSelect).toHaveBeenCalledWith("lasso");
+  it("reports the chosen tool, and for Select the way of selecting last used", () => {
+    const props = renderRail({ selectionKind: "wand" });
+    fireEvent.click(screen.getByRole("button", { name: "Crop the picture" }));
+    expect(props.onSelect).toHaveBeenLastCalledWith("crop");
+    fireEvent.click(screen.getByRole("button", { name: "Select part of the picture" }));
+    expect(props.onSelect).toHaveBeenLastCalledWith("wand");
   });
 
   it("disables undo and redo until there is something to undo", () => {
@@ -69,7 +108,7 @@ describe("StudioToolRail", () => {
 
   it("disables everything while no image is loaded", () => {
     const props = renderRail({ disabled: true, canUndo: true, canRedo: true });
-    expect(screen.getByRole("button", { name: "Brush a selection" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Select part of the picture" })).toBeDisabled();
     const undo = screen.getByRole("button", { name: "Undo the selection change" });
     const redo = screen.getByRole("button", { name: "Redo the selection change" });
     expect(undo).toHaveAttribute("aria-disabled", "true");
@@ -105,11 +144,11 @@ describe("StudioToolRail", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: /Brush a selection - Install an inpainting/ })).
+    expect(screen.getByRole("button", { name: /Select part of the picture - Install an inpainting/ })).
       toBeInTheDocument();
     // Still clickable: the way out is an install, and a dead button says
     // nothing about that.
-    expect(screen.getByRole("button", { name: /Brush a selection -/ })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /Select part of the picture -/ })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Instruct the whole image" })).toBeInTheDocument();
   });
 

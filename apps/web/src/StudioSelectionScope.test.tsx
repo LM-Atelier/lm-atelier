@@ -1,7 +1,7 @@
 /** The selection's controls show beside the tools that work on a marked part of the picture, and only those. */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { StudioView } from "./StudioView";
 import { useStudioImage } from "./useStudioImage";
@@ -66,7 +66,7 @@ function stroke() {
 it.each(["Enlarge and restore detail", "Extend past the edge", "Correct the perspective"])(
   "offers no selection controls beside %s, and keeps the selection for later",
   (tool) => {
-    fireEvent.click(screen.getByRole("button", { name: "Brush a selection" }));
+    fireEvent.click(screen.getByRole("button", { name: "Select part of the picture" }));
     stroke();
     const painted = selection();
     expect(painted).not.toBe(NOTHING);
@@ -78,7 +78,8 @@ it.each(["Enlarge and restore detail", "Extend past the edge", "Correct the pers
     expect(screen.queryByRole("button", { name: "Soften edges" })).toBeNull();
     expect(selection()).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "Brush a selection" }));
+    // Select comes back to the brush, the way of selecting last used.
+    fireEvent.click(screen.getByRole("button", { name: "Select part of the picture" }));
     expect(selection()).toBe(painted);
   },
 );
@@ -93,3 +94,22 @@ it.each(["Blur or pixelate part of the picture", "Paint over part of the picture
     expect(selection()).toBe(NOTHING);
   },
 );
+
+it("offers the ways of drawing the selection in the panel while Select is in hand", () => {
+  const ways = () => screen.queryByRole("group", { name: "How to select" });
+  expect(ways()).toBeNull();
+
+  fireEvent.click(screen.getByRole("button", { name: "Select part of the picture" }));
+  expect(within(ways()!).getByRole("button", { name: "Brush a selection" })).toHaveAttribute("aria-pressed", "true");
+  fireEvent.click(within(ways()!).getByRole("button", { name: "Lasso a selection" }));
+  expect(within(ways()!).getByRole("button", { name: "Lasso a selection" })).toHaveAttribute("aria-pressed", "true");
+  expect(screen.getByRole("button", { name: "Select part of the picture" })).toHaveAttribute("aria-pressed", "true");
+
+  // A tool that works inside the marking keeps the selection's controls, not the ways of drawing it.
+  fireEvent.click(screen.getByRole("button", { name: "Blur or pixelate part of the picture" }));
+  expect(ways()).toBeNull();
+  expect(screen.getByRole("button", { name: "Invert" })).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Select part of the picture" }));
+  expect(within(ways()!).getByRole("button", { name: "Lasso a selection" })).toHaveAttribute("aria-pressed", "true");
+});
