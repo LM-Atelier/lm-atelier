@@ -55,6 +55,9 @@ export function InstallHardwareFit({ fit }: { fit: HardwareFitAdvice }) {
         <ul>{fit.alternatives.map((alternative) => <li key={alternative.code}>{alternative.message}</li>)}</ul>
       )}
       {fit.settings.length > 0 && (
+        <p>Suggested ranges do not change your settings. Model and runtime limits still apply.</p>
+      )}
+      {fit.settings.length > 0 && (
         <dl className="install-facts">
           {fit.settings.map((setting) => (
             <div key={setting.key}>

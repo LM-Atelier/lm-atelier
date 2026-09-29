@@ -2822,6 +2822,7 @@ class HardwareFitReasonOut(ApiModel):
         "architecture_unsupported",
         "cpu_capabilities_unknown",
         "cpu_capability_missing",
+        "chat_context_estimate",
         "evidence_stale",
         "platform_unsupported",
         "runtime_backend_missing",

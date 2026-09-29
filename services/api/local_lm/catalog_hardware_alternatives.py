@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import re
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
+from .chat_memory import (
+    CHAT_CONTEXT_BYTES_PER_TOKEN,
+    DEFAULT_CHAT_CONTEXT,
+    MINIMUM_CHAT_CONTEXT_MEMORY,
+    estimated_chat_memory,
+)
 from .gguf import automatic_mmproj_selection, complete_gguf_selections
 from .hardware_fit import (
+    BoundedSetting,
+    FitReason,
     FitRequirements,
     HardwareCandidate,
+    HardwareFit,
     capacity_from_system_info,
     rank_hardware_candidates,
 )
@@ -19,10 +28,68 @@ from .schemas import (
 )
 
 
-def estimated_catalog_ram(download_bytes: int, *, complete: bool) -> int | None:
+def estimated_catalog_ram(
+    download_bytes: int, *, complete: bool, chat_context: bool = False
+) -> int | None:
     """Estimate load memory only when every selected file has a known size."""
 
-    return int(download_bytes * 1.2) + 512 * 1024**2 if complete else None
+    if not complete:
+        return None
+    model_bytes = int(download_bytes * 1.2)
+    return (
+        estimated_chat_memory(model_bytes)
+        if chat_context
+        else model_bytes + MINIMUM_CHAT_CONTEXT_MEMORY
+    )
+
+
+def catalog_context_settings(
+    estimated_ram_bytes: int | None, capacity_bytes: int
+) -> tuple[BoundedSetting, ...]:
+    """Bound context by the default and a ninety-percent total-RAM budget."""
+
+    if estimated_ram_bytes is None or capacity_bytes <= 0:
+        return ()
+    model_bytes = estimated_ram_bytes - estimated_chat_memory(0)
+    if model_bytes <= 0:
+        return ()
+    context_budget = capacity_bytes * 9 // 10 - model_bytes
+    if context_budget < MINIMUM_CHAT_CONTEXT_MEMORY:
+        return ()
+    maximum = min(DEFAULT_CHAT_CONTEXT, context_budget // CHAT_CONTEXT_BYTES_PER_TOKEN)
+    maximum = maximum // 512 * 512
+    return (
+        BoundedSetting(
+            key="context_length",
+            label="Context length",
+            unit="tokens",
+            minimum=512,
+            maximum=DEFAULT_CHAT_CONTEXT,
+            preferred_minimum=min(2048, maximum),
+            preferred_maximum=maximum,
+            tight_minimum=512,
+            tight_maximum=maximum,
+        ),
+    )
+
+
+def with_catalog_context_estimate(fit: HardwareFit) -> HardwareFit:
+    """Explain the context assumption when a calculated memory resource exists."""
+
+    if not fit.resources:
+        return fit
+    return replace(
+        fit,
+        reasons=(
+            *fit.reasons,
+            FitReason(
+                "chat_context_estimate",
+                "info",
+                f"Memory estimates assume the default {DEFAULT_CHAT_CONTEXT}-token context. "
+                "Model limits and actual memory use may differ.",
+            ),
+        ),
+    )
 
 
 def catalog_hardware_alternatives(
@@ -64,11 +131,13 @@ def catalog_hardware_alternatives(
         total = sum(known)
         key = str(len(choices))
         choices[key] = selected, total, complete
+        estimated_ram = estimated_catalog_ram(total, complete=complete, chat_context=True)
         candidates.append(
             HardwareCandidate(
                 key,
                 FitRequirements(
-                    estimated_system_memory_bytes=estimated_catalog_ram(total, complete=complete),
+                    estimated_system_memory_bytes=estimated_ram,
+                    settings=catalog_context_settings(estimated_ram, system.memory_total_bytes),
                 ),
             )
         )
@@ -81,7 +150,9 @@ def catalog_hardware_alternatives(
             selected_files=choices[item.key][0],
             download_bytes=choices[item.key][1],
             download_size_complete=choices[item.key][2],
-            hardware_fit=HardwareFitAdviceOut.model_validate(asdict(item.fit)),
+            hardware_fit=HardwareFitAdviceOut.model_validate(
+                asdict(with_catalog_context_estimate(item.fit))
+            ),
         )
         for item in ranked[:5]
     ]

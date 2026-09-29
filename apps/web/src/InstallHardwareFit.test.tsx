@@ -65,6 +65,7 @@ describe("Install hardware advice", () => {
     expect(screen.getByText("Context")).toBeInTheDocument();
     expect(screen.getByText("Suggested range: 2048–4096 tokens")).toBeInTheDocument();
     expect(screen.getByText("Your chosen setting will be kept.")).toBeInTheDocument();
+    expect(screen.getByText("Suggested ranges do not change your settings. Model and runtime limits still apply.")).toBeInTheDocument();
     expect(screen.queryByRole("spinbutton")).not.toBeInTheDocument();
     expect(onConfirm).not.toHaveBeenCalled();
   });
