@@ -22,7 +22,9 @@ from .civitai_delivery import (
     permitted_delivery_url,
 )
 from .config import Settings
+from .model_edit_capability import instruction_edit_declaration
 from .network import shared_tls_context
+from .provider_descriptions import merge_provider_descriptions
 from .schemas import CatalogModel, CatalogPage, ContentRating
 
 _ITEM_ID = re.compile(r"^[1-9][0-9]{0,11}$")
@@ -54,7 +56,7 @@ _MAX_RETRY_AFTER_SECONDS = 30.0
 _BASE_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._+-]{0,63}$")
 _MAX_BASE_MODELS = 8
 _MAX_METADATA_VALUES = 128
-_NORMALIZATION_VERSION = 2
+_NORMALIZATION_VERSION = 4
 # A workflow graph is JSON describing nodes, not model weights, so it gets its
 # own far smaller ceiling than a catalog response. Exceeding it is REFUSED
 # rather than truncated: a truncated graph is invalid JSON, and failing at the
@@ -664,6 +666,9 @@ class CivitaiCatalog:
             str(item.get("description") or "")[:4096],
             str(version.get("description") or "")[:4096],
         ]
+        description = merge_provider_descriptions(
+            (item.get("description"), version.get("description"))
+        )
         metadata = {
             "provider": cls.source_id,
             "source_model_id": str(item.get("id") or ""),
@@ -675,6 +680,10 @@ class CivitaiCatalog:
             "base_models": base_models,
             "tags": tags,
             "trained_words": trained_words,
+            "description": description,
+            "instruction_edit_capability": instruction_edit_declaration(
+                [*tags, item.get("name"), version.get("name")]
+            ),
             "edit_tailored": (
                 "declared"
                 if any(_EDIT_DECLARATION.search(value) for value in declared_values)

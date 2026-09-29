@@ -15,9 +15,11 @@ from .auxiliary_assets import AUXILIARY_ASSET_KINDS
 from .comfy_templates import COMFY_TEMPLATE_COMPILER_VERSION
 from .domain import new_id
 from .install_plan_types import InstallPlanFailureCode
+from .model_edit_capability import combined_instruction_edit_capability
 from .model_manifests import InspectedComponent, ModelManifestInspection, comfy_folder_for_kind
 from .models import InstallPlan, ModelComponentManifest
 from .profile_use_cases import merge_provider_use_case_metadata
+from .provider_descriptions import merge_provider_descriptions
 
 INSTALL_RESOLVER_VERSION = "install-resolver-v9"
 ACTIVATION_PROBE_VERSION = "activation-probe-v2"
@@ -554,7 +556,10 @@ def resolve_install_plan(
             "can activate it yet."
         )
 
-    runtime_contract = {
+    runtime_contract: dict[str, Any] = {
+        "instruction_edit_capability": combined_instruction_edit_capability(
+            item.get("metadata") for item in selected_files
+        ),
         "trigger_words": _declared_trigger_words(selected_files),
         "engine": engine,
         "adapter_contract_version": ADAPTER_CONTRACT_VERSION,
@@ -576,6 +581,13 @@ def resolve_install_plan(
     )
     if use_case_metadata:
         runtime_contract["use_case_metadata"] = use_case_metadata
+    description = merge_provider_descriptions(
+        metadata.get("description")
+        for item in selected_files
+        if isinstance(metadata := item.get("metadata"), Mapping)
+    )
+    if description:
+        runtime_contract["provider_description"] = description
     if workflow_reference_kind:
         runtime_contract["workflow_reference_kind"] = workflow_reference_kind
         if len(artifacts) == 1:

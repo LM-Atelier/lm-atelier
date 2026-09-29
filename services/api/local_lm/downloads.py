@@ -76,6 +76,7 @@ from .matting_workflows import (
     declare_matting,
     runtime_lists_model_file,
 )
+from .model_edit_capability import instruction_edit_capability
 from .model_manifests import (
     COMFY_MODEL_ASSET_KINDS,
     COMFY_MODEL_FOLDERS,
@@ -117,6 +118,7 @@ from .profile_service import (
 )
 from .profile_use_cases import normalize_provider_use_case_metadata
 from .progress import completed_progress, update_job_progress
+from .provider_descriptions import installed_provider_description
 from .revision_dependency_contract import persist_dependency_contract
 from .scheduler import JobClaim, ResourceScheduler
 from .schemas import DownloadRequest
@@ -1480,6 +1482,9 @@ class DownloadManager:
                     revision,
                     source_metadata,
                 ) = await self._download_sources(request, plan)
+                provider_description = installed_provider_description(
+                    plan.runtime_contract_json if plan else None, source_metadata
+                )
                 filenames = self._select_files(request, siblings)
                 if not filenames:
                     raise ValueError("no files matched the requested model selection")
@@ -1755,6 +1760,9 @@ class DownloadManager:
                     self._template_defaults(compiled_template) if compiled_template else {}
                 )
                 default_settings = {**template_defaults, **request.default_settings}
+                edit_capability = instruction_edit_capability(
+                    plan.runtime_contract_json if plan is not None else source_metadata
+                )
 
                 asset_kind = request.workflow_asset_kind or request.auxiliary_kind
                 if asset_kind:
@@ -1801,6 +1809,7 @@ class DownloadManager:
                             use_case_derived=bool(use_case),
                             manifest_json={
                                 "remote_id": request.remote_id,
+                                "provider_description": provider_description,
                                 "revision": revision,
                                 "files": filenames,
                                 "expected_sha256": resolved_sha256,
@@ -1815,6 +1824,7 @@ class DownloadManager:
                                 },
                                 "comfy_paths": request.comfy_paths,
                                 "workflow_asset_kind": request.workflow_asset_kind,
+                                "instruction_edit_capability": edit_capability,
                                 "content_rating": request.content_rating,
                                 **(
                                     {"use_case_metadata": use_case_metadata}
@@ -1948,6 +1958,8 @@ class DownloadManager:
                             "use_case_metadata": normalize_provider_use_case_metadata(
                                 source_metadata
                             ),
+                            "provider_description": provider_description,
+                            "instruction_edit_capability": edit_capability,
                         },
                         active=compiled_template is None and not request.install_plan_id,
                     )
@@ -3635,6 +3647,9 @@ class DownloadManager:
                     plan.runtime_contract_json.get("use_case_metadata")
                 ),
                 "source_version_id": plan.revision,
+                "instruction_edit_capability": instruction_edit_capability(
+                    plan.runtime_contract_json
+                ),
             },
         )
 

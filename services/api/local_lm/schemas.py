@@ -1804,6 +1804,8 @@ class ModelProfileModelUpdate(ApiModel):
 class ModelProfileUpdate(ApiModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     use_case: str | None = Field(default=None, max_length=1_000)
+    use_case_derived: bool | None = None
+    expected_use_case: str | None = Field(default=None, max_length=1_000)
     load_settings: dict[str, Any] | None = None
     request_settings: dict[str, Any] | None = None
     is_default: bool | None = None
@@ -1811,6 +1813,14 @@ class ModelProfileUpdate(ApiModel):
 
 class ModelProfileClone(ApiModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class UseCaseSuggestionRequest(ApiModel):
+    expected_use_case: str = Field(max_length=1_000)
+
+
+class UseCaseSuggestionOut(ApiModel):
+    suggestion: str = Field(min_length=1, max_length=500)
 
 
 class ModelProfileBundle(ApiModel):
@@ -3109,6 +3119,8 @@ class ModelAssetUpdate(ApiModel):
     #: registered without declaring one otherwise never gets one.
     family: str | None = Field(default=None, max_length=100)
     use_case: str | None = Field(default=None, max_length=1_000)
+    use_case_derived: bool | None = None
+    expected_use_case: str | None = Field(default=None, max_length=1_000)
     auto_apply: bool | None = None
     default_model_strength: float | None = Field(default=None, ge=-4, le=4)
     default_clip_strength: float | None = Field(default=None, ge=-4, le=4)

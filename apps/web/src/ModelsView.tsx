@@ -9,6 +9,7 @@ import { AccessibleDialog } from "./AccessibleDialog";
 import { ErrorCallout } from "./ErrorCallout";
 import { FirstFailure } from "./FirstFailure";
 import { InstallConfirmDialog } from "./InstallConfirmDialog";
+import { InstructionEditCapability } from "./InstructionEditCapability";
 import { LoraTriggerWordsEditor } from "./LoraTriggerWordsEditor";
 import { measuredTriggerWords } from "./loraTriggerWords";
 import { useCatalogInstall } from "./useCatalogInstall";
@@ -18,6 +19,7 @@ import { ModelUpdateProfileOffers } from "./ModelUpdateProfileOffers";
 import { RecipeCard } from "./RecipeCard";
 import { VersionChooser } from "./VersionChooser";
 import { WorkflowConsumers } from "./WorkflowConsumers";
+import { UseCaseSuggestion } from "./UseCaseSuggestion";
 import { api } from "./api";
 import { catalogUnavailableMessage } from "./catalogSourceMessages";
 import { formatBytes } from "./format";
@@ -68,10 +70,11 @@ function InstalledModelRow({
       <span className="model-install-copy">
         <strong>{model.name}</strong>
         <small>{model.readiness === "ready" ? "Runtime verified" : model.readiness === "unsupported" ? "Unsupported" : "Not runtime verified"}</small>
+        {model.role === "image" && <InstructionEditCapability manifest={model.manifest_json} />}
         {model.role === "chat" && model.readiness === "ready" && profile?.input_modalities?.includes("text") && (
           <small>{profile.input_modalities.includes("image") ? "Vision capable" : "Text only"}</small>
         )}
-        {profile?.use_case && <small>{profile.use_case}</small>}
+        {profile?.use_case && <small>{profile.use_case_derived ? "Derived · " : ""}{profile.use_case}</small>}
       </span>
       <span className="model-install-size">{formatBytes(model.size_bytes)}</span>
       <span className="row-actions">
@@ -81,6 +84,9 @@ function InstalledModelRow({
         {profile
           ? <button className="secondary compact-button" aria-label={`Edit use case for ${model.name}`} onClick={startEditing} disabled={editing || saving}>Edit use case</button>
           : <button className="secondary compact-button" aria-label={`Add ${model.name} to model selectors`} disabled={creating} onClick={onCreate}>Add to selectors</button>}
+        {profile && <UseCaseSuggestion kind="profile" id={profile.id} name={model.name} savedText={profile.use_case}
+          available={typeof model.manifest_json.provider_description === "string" && !!model.manifest_json.provider_description.trim()}
+          busy={editing || saving || deleting} />}
         <button className="secondary compact-button danger" aria-label={`Delete ${model.name}`} disabled={deleting} onClick={onDelete}>Delete</button>
       </span>
       {editing && profile && (
@@ -195,6 +201,7 @@ function InstalledAssetRow({
       <span className="model-install-copy">
         <strong>{asset.name}</strong>
         <small>{asset.active ? "Ready" : "Disabled"}{asset.family ? ` · ${asset.family}` : ""}</small>
+        {["checkpoint", "diffusion_model", "gguf_model", "lora"].includes(asset.kind) && <InstructionEditCapability manifest={asset.manifest_json} />}
         {asset.kind === "lora" && (asset.auto_apply || asset.use_case_derived) && asset.use_case && (
           <small>{asset.auto_apply ? "Auto · " : ""}{asset.use_case_derived ? "Derived · " : ""}{asset.use_case}</small>
         )}
@@ -222,6 +229,9 @@ function InstalledAssetRow({
             Edit Auto rules
           </button>
         )}
+        {asset.kind === "lora" && <UseCaseSuggestion kind="lora" id={asset.id} name={asset.name} savedText={asset.use_case}
+          available={typeof asset.manifest_json.provider_description === "string" && !!asset.manifest_json.provider_description.trim()}
+          busy={editing || editingWords || saving || deleting} />}
         {asset.kind === "lora" && (
           <button ref={editWordsButton} className="secondary compact-button" aria-disabled={editingWords || saving} onClick={() => { if (!editingWords && !saving) setEditingWords(true); }}>
             Edit trigger words

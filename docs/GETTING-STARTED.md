@@ -130,6 +130,15 @@ description makes it your own and removes **Derived** after you save. Changing
 another setting preserves the description and its label. **Cancel** discards the
 unsaved changes.
 
+New CivitAI and Hugging Face model and LoRA installations can also retain a
+provider description. Hugging Face text comes from the inspected revision's model card.
+When one is available, **Suggest use case** asks your running local chat model for
+a short summary. Review the result, then choose **Save use case** to replace the
+current text. Generating a suggestion or choosing **Cancel** leaves the saved text
+alone. An unchanged suggestion keeps the **Derived** label; editing it makes the
+saved text manual. If the saved use case changes while you are reviewing a
+suggestion, refresh it before trying again.
+
 Automatic use starts off for new LoRAs. Enable **Use automatically** to let the
 app consider a LoRA whose description matches your request. It still needs to be
 enabled, verified and compatible with the selected workflow's base model.

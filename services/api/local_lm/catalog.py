@@ -16,6 +16,7 @@ from .config import Settings
 from .domain import CompatibilityLevel
 from .gguf import automatic_mmproj_selection, gguf_identity_tokens
 from .network import shared_tls_context
+from .provider_descriptions import MAX_PROVIDER_DESCRIPTION_CHARS, normalize_provider_description
 from .schemas import CatalogModel, CatalogPage
 
 SORTS = {
@@ -41,7 +42,7 @@ _FILENAME_QUANTIZATION = re.compile(
 )
 _PARAMETERS = re.compile(r"(?:^|[-_ ])(\d+(?:\.\d+)?)\s*([bmk])(?:$|[-_ ])", re.I)
 _REMOTE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
-_CACHE_VERSION = 5
+_CACHE_VERSION = 6
 
 
 class HuggingFaceCatalog:
@@ -263,10 +264,30 @@ class HuggingFaceCatalog:
                     or None,
                 }
             )
+        resolved_revision = str(payload.get("sha") or revision)
+        description = ""
+        if re.fullmatch(r"[0-9a-fA-F]{40}", resolved_revision) and any(
+            item["filename"] == "README.md" for item in siblings
+        ):
+            try:
+                async with asyncio.timeout(2):
+                    card = await self.inspect_file_prefix(
+                        remote_id,
+                        resolved_revision,
+                        "README.md",
+                        max_bytes=MAX_PROVIDER_DESCRIPTION_CHARS * 4,
+                    )
+                description = normalize_provider_description(card.decode("utf-8"))
+            except (httpx.HTTPError, ValueError, TimeoutError):
+                # Optional card text must not prevent inspecting installable files.
+                pass
+        if description:
+            for item in siblings:
+                item["metadata"] = {"description": description}
         model = self._normalize(payload, requested_role)
         result = {
             "model": model.model_dump(mode="json"),
-            "revision": str(payload.get("sha") or revision),
+            "revision": resolved_revision,
             "files": siblings,
         }
         self._write_cache(cache, json.dumps(result, default=str))
