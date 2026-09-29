@@ -198,7 +198,7 @@ export function studioToolReducer(
     case "set-margin":
       return {
         ...state,
-        margins: { ...state.margins, [action.side]: clamp(action.fraction, 0, 2) },
+        margins: { ...state.margins, [action.side]: bounded(action.fraction, 0, 2) },
       };
     case "clear-margins":
       return { ...state, margins: { top: 0, right: 0, bottom: 0, left: 0 } };
@@ -459,4 +459,13 @@ export function snapshotBeforeGesture(state: StudioToolState): void {
 
 function clamp(value: number, low: number, high: number): number {
   return Math.min(high, Math.max(low, Math.round(value)));
+}
+
+/** Hold a value within bounds without rounding it: a share of something, not a count.
+ *
+ * An edge's margin is a share of the picture. Rounded as a count is, every
+ * margin became none of the picture or all of it.
+ */
+function bounded(value: number, low: number, high: number): number {
+  return Number.isFinite(value) ? Math.min(high, Math.max(low, value)) : low;
 }

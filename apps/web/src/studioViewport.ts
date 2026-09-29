@@ -80,6 +80,24 @@ export function fitViewport(
   };
 }
 
+/** A rectangle on screen, in the canvas's own CSS pixels. */
+export type ScreenRect = {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+};
+
+/** Where the picture is shown under the viewport: its corner and its size at this zoom. */
+export function shownRect(viewport: Viewport, image: { width: number; height: number }): ScreenRect {
+  return {
+    x: viewport.tx,
+    y: viewport.ty,
+    width: image.width * viewport.scale,
+    height: image.height * viewport.scale,
+  };
+}
+
 function clampScale(scale: number): number {
   return Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale));
 }

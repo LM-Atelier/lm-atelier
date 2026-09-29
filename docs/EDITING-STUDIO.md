@@ -104,3 +104,12 @@ transparent parts come out white.
 reference. It goes to the chat the studio was opened from, or else the chat
 that was open, or else a new chat. Nothing is sent, and the chat's mode stays
 as it was.
+
+## Extending a picture
+
+**Extend past the edge** paints beyond the picture's edges with an installed
+outpainting workflow. Drag any edge of the frame outward, or pick an edge and
+use the arrow keys; each edge can reach up to twice the picture's width or
+height. The frame is drawn around the picture at whatever zoom you are
+viewing, with the added area tinted, and the panel names the size the extended
+picture will be.

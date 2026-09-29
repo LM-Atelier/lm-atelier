@@ -1387,15 +1387,15 @@ html[data-motion="reduced"] .progress-track > div.indeterminate { width: 100% !i
 /* A button that reads as part of the sentence it sits in, because the way out
    of a guidance line is the line itself. */
 .link-button { display: inline; padding: 0; border: 0; background: none; color: var(--accent); font: inherit; text-decoration: underline; cursor: pointer; }
-/* Extend's control is the frame itself: four edges of the picture, dragged
-   outward. They sit over the stage because that is where the frame is. */
+/* Extend's control is the frame itself: the new canvas drawn around the picture
+   at the canvas's zoom, the added area tinted, a grip on each edge. The grips
+   place themselves; only a press on one is the frame's, the rest still pans. */
 .studio-extend-handles { position: absolute; inset: 0; pointer-events: none; }
-.studio-extend-handle { position: absolute; pointer-events: auto; border: 1px dashed var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); border-radius: 6px; padding: 0; cursor: grab; }
-.studio-extend-handle.dragging { cursor: grabbing; background: color-mix(in srgb, var(--accent) 26%, transparent); }
-.studio-extend-handle.top { top: 0; left: 12%; right: 12%; }
-.studio-extend-handle.bottom { bottom: 0; left: 12%; right: 12%; }
-.studio-extend-handle.left { left: 0; top: 12%; bottom: 12%; }
-.studio-extend-handle.right { right: 0; top: 12%; bottom: 12%; }
+.studio-extend-frame { position: absolute; inset: 0; width: 100%; height: 100%; }
+.studio-extend-added { fill: color-mix(in srgb, var(--accent) 14%, transparent); }
+.studio-extend-edge { fill: none; stroke: var(--accent); stroke-width: 1; stroke-dasharray: 6 4; }
+.studio-extend-handle { position: absolute; pointer-events: auto; border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 45%, var(--panel)); border-radius: 6px; padding: 0; cursor: grab; }
+.studio-extend-handle.dragging { cursor: grabbing; background: var(--accent); }
 .studio-tool-options { display: flex; flex-direction: column; gap: calc(6px * var(--spacing-scale, 1)); }
 .studio-recipe-save { display: flex; flex-direction: column; gap: calc(6px * var(--spacing-scale, 1)); }
 /* Recipes offered where the edit is being made, rather than in a dialog that

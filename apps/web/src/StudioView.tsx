@@ -302,18 +302,14 @@ export function StudioView({
               before={compare.layer}
               onGestureStart={() => snapshotBeforeGesture(tools)}
               onStrokeEnd={() => dispatch({ type: "stroke-end" })}
+              // Over the picture and at its zoom: the frame is the control,
+              // so it has to be where the frame is.
+              overlay={tools.kind === "extend"
+                ? (shown) => <StudioExtendHandles tools={tools} dispatch={dispatch} picture={bitmap} shown={shown} />
+                : undefined}
             />
           ) : (
             <StudioStageLoading error={imageError} reload={reload} />
-          )}
-          {!previewArtifactId && bitmap && tools.kind === "extend" && (
-            // Over the picture rather than beside it: the frame is the
-            // control, so it has to be where the frame is.
-            <StudioExtendHandles
-              tools={tools}
-              dispatch={dispatch}
-              size={{ width: bitmap.width, height: bitmap.height }}
-            />
           )}
         </div>
         <aside className="studio-panel">

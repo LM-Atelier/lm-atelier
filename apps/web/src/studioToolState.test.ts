@@ -69,6 +69,18 @@ describe("studio tool state", () => {
     expect(state.colorTolerance).toBe(0);
   });
 
+  it("keeps an edge's margin as the share of the picture it was set to", () => {
+    let state = withImage();
+    state = studioToolReducer(state, { type: "set-margin", side: "right", fraction: 0.25 });
+    state = studioToolReducer(state, { type: "set-margin", side: "top", fraction: 0.05 });
+    expect(state.margins).toEqual({ top: 0.05, right: 0.25, bottom: 0, left: 0 });
+
+    // Up to twice the picture, and never less than none of it.
+    state = studioToolReducer(state, { type: "set-margin", side: "right", fraction: 2.5 });
+    state = studioToolReducer(state, { type: "set-margin", side: "top", fraction: -0.1 });
+    expect(state.margins).toEqual({ top: 0, right: 2, bottom: 0, left: 0 });
+  });
+
   it("undoes to the pre-gesture mask, not the painted one", () => {
     // The ordering that matters: snapshot as the gesture starts, mutate, then
     // stroke-end. Snapshotting at stroke end would store the painted raster

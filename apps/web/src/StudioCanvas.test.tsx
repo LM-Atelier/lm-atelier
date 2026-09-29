@@ -165,6 +165,32 @@ describe("StudioCanvas", () => {
     expect(layers.style.transform).toContain("scale(1.2");
   });
 
+  it("tells what it lays over the picture where the picture is shown, at the zoom", () => {
+    const overlay = vi.fn((shown: { x: number; y: number; width: number; height: number }) => (
+      <span data-testid="over" data-width={shown.width} />
+    ));
+    const { container } = render(
+      <StudioCanvas image={image} mask={null} tool={null} overlay={overlay} />,
+    );
+    expect(overlay).toHaveBeenLastCalledWith({ x: 0, y: 0, width: 400, height: 200 });
+
+    fireEvent.wheel(container.querySelector(".studio-canvas")!, {
+      deltaY: -120,
+      clientX: 200,
+      clientY: 100,
+    });
+
+    // Zoomed by 1.2 about (200, 100): that point stays put and the picture grows around it.
+    const shown = overlay.mock.calls.at(-1)![0];
+    expect(shown.x).toBeCloseTo(-40);
+    expect(shown.y).toBeCloseTo(-20);
+    expect(shown.width).toBeCloseTo(480);
+    expect(shown.height).toBeCloseTo(240);
+    // Laid over the canvas at screen scale, not inside the zoomed layers.
+    expect(container.querySelector(".studio-canvas > [data-testid='over']")).not.toBeNull();
+    expect(container.querySelector(".studio-canvas-layers [data-testid='over']")).toBeNull();
+  });
+
   it("passes the live viewport scale to drawing tools", () => {
     const tool = new SpyTool();
     const { container } = render(<StudioCanvas image={image} mask={null} tool={tool} />);
