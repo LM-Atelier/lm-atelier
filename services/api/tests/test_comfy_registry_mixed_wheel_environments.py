@@ -282,6 +282,9 @@ async def test_cancellation_waits_for_file_work_before_removing_staging(
     started = asyncio.Event()
     release = threading.Event()
     loop = asyncio.get_running_loop()
+    # Real wheel installation can precede the held step on a slow runner.
+    # This deadline detects deadlocks rather than measuring assembly speed.
+    watchdog_seconds = 60
     original = module._stage_wheels
     original_cleanup = module._remove_staged_wheels
     original_audit = module._audit_environment
@@ -290,7 +293,7 @@ async def test_cancellation_waits_for_file_work_before_removing_staging(
     def hold(directory: Path) -> None:
         directories.append(directory)
         loop.call_soon_threadsafe(started.set)
-        assert release.wait(5), "Staging test did not release the worker"
+        assert release.wait(watchdog_seconds), "Staging test did not release the worker"
 
     def held_stage(
         wheels: Sequence[tuple[module._EnvironmentWheel, Path]], directory: Path
@@ -322,7 +325,7 @@ async def test_cancellation_waits_for_file_work_before_removing_staging(
     destination = _destination(tmp_path, closure)
     task = asyncio.create_task(_assemble(closure, paths, destination, source_review_context))
     try:
-        await asyncio.wait_for(started.wait(), timeout=5)
+        await asyncio.wait_for(started.wait(), timeout=watchdog_seconds)
         task.cancel()
         await asyncio.sleep(0)
         task.cancel()
