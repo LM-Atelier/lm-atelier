@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "./api";
 import { OutputRatioControl } from "./OutputRatioControl";
 import { ratioOf } from "./outputRatio";
+import { OUTPUT_SHAPES_KEY } from "./outputShapePreferences";
 import type {
   OutputRatioPresetId,
   WorkflowOutputGeometryCapability,
@@ -425,5 +426,55 @@ describe("a workflow that decides its own size", () => {
 
     await waitFor(() => expect(screen.getByRole("button", { name: "16:9 Wide" })).toBeTruthy());
     expect(screen.queryByText("This workflow sets the picture size itself.")).toBeNull();
+  });
+});
+
+describe("the shapes chosen in Settings", () => {
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+    localStorage.clear();
+  });
+
+  function choose(mode: "image" | "video", order: OutputRatioPresetId[], hidden: OutputRatioPresetId[]) {
+    const all: OutputRatioPresetId[] = ["1:1", "3:4", "2:3", "9:16", "4:3", "3:2", "16:9"];
+    const rest = all.filter((shape) => !order.includes(shape));
+    const stored = JSON.parse(localStorage.getItem(OUTPUT_SHAPES_KEY) ?? "{}");
+    localStorage.setItem(OUTPUT_SHAPES_KEY, JSON.stringify({ ...stored, [mode]: { order: [...order, ...rest], hidden } }));
+  }
+
+  it("offers the workflow's shapes in the chosen order, leaving out the hidden ones", async () => {
+    choose("image", ["16:9", "4:3"], ["1:1"]);
+    vi.mocked(api.workflowRevisionOutputGeometry).mockResolvedValue(
+      capability({ preset_ids: ["1:1", "4:3", "16:9"] }),
+    );
+
+    renderControl();
+
+    await waitFor(() => expect(screen.getByRole("group", { name: "Output aspect ratio" })).toBeTruthy());
+    expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(["16:9 Wide", "4:3 Landscape"]);
+  });
+
+  it("reads a video revision's shapes from the video choice", async () => {
+    choose("image", [], ["16:9"]);
+    vi.mocked(api.workflowRevisionOutputGeometry).mockResolvedValue(
+      capability({ operation: "text_to_video", preset_ids: ["1:1", "16:9"] }),
+    );
+
+    renderControl();
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "16:9 Wide" })).toBeTruthy());
+  });
+
+  it("says so when every shape the workflow offers is left out", async () => {
+    choose("image", [], ["1:1", "4:3"]);
+    vi.mocked(api.workflowRevisionOutputGeometry).mockResolvedValue(
+      capability({ preset_ids: ["1:1", "4:3"] }),
+    );
+
+    renderControl();
+
+    expect(await screen.findByText("The shapes this workflow offers are all left out in Settings.")).toBeTruthy();
+    expect(screen.queryByRole("group", { name: "Output aspect ratio" })).toBeNull();
   });
 });

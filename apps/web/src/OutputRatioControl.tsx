@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "./api";
 import { RATIO_LABELS, ratioOf } from "./outputRatio";
+import { arrangedShapes, useOutputShapes } from "./outputShapePreferences";
 import type { OutputRatioPresetId } from "./types";
 
 /** Choosing the shape of what comes out, and seeing the pixels before Send.
@@ -15,7 +16,8 @@ import type { OutputRatioPresetId } from "./types";
  * own bounds and multiples can express exactly, and resolving one returns the
  * pair it means - so this asks rather than divides. A ratio the workflow cannot
  * hit exactly is not offered at all, because returning a picture of a shape
- * nobody asked for is worse than not offering the choice.
+ * nobody asked for is worse than not offering the choice. Of those, the ones
+ * shown and their order are the person's, from Settings.
  */
 
 export function OutputRatioControl({
@@ -40,6 +42,7 @@ export function OutputRatioControl({
   const [refused, setRefused] = useState<
     { revisionId: string; preset: OutputRatioPresetId } | null
   >(null);
+  const shapes = useOutputShapes();
   const geometry = useQuery({
     queryKey: ["workflow-revision", revisionId, "output-geometry"],
     queryFn: () => api.workflowRevisionOutputGeometry(revisionId),
@@ -70,7 +73,20 @@ export function OutputRatioControl({
     );
   }
 
-  const offered = capability.preset_ids;
+  // The mode is the revision's, not the panel's: a video revision proves
+  // video sizes, and asking it for a picture would be refused.
+  const mode = capability.operation === "text_to_image" ? "image" : "video";
+  const offered = arrangedShapes(capability.preset_ids, shapes[mode]);
+  if (offered.length === 0) {
+    return (
+      <div className="setting-row output-ratio-control">
+        <span>
+          <strong>Shape</strong>
+          <small>The shapes this workflow offers are all left out in Settings.</small>
+        </span>
+      </div>
+    );
+  }
   const selected = ratioOf(width, height, offered);
   const resolved = Number.isInteger(width) && Number.isInteger(height)
     ? `${width as number} × ${height as number}`
@@ -87,10 +103,8 @@ export function OutputRatioControl({
     setPending(preset);
     setRefused(null);
     try {
-      // The mode is the revision's, not the panel's: a video revision proves
-      // video sizes, and asking it for a picture would be refused.
       const answer = await api.resolveWorkflowRevisionOutputGeometry(revisionId, {
-        mode: capability.operation === "text_to_image" ? "image" : "video",
+        mode,
         size_mode: "preset",
         preset_id: preset,
       });
