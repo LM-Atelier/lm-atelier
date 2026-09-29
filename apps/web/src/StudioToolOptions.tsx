@@ -6,21 +6,21 @@ import { StudioCaptionTool } from "./StudioCaptionTool";
 import { StudioPaintTool } from "./StudioPaintTool";
 import { StudioPerspectiveTool } from "./StudioPerspectiveTool";
 import { StudioCropTool } from "./StudioCropTool";
+import { StudioExtendTool } from "./StudioExtendTool";
 import { StudioResizeTool } from "./StudioResizeTool";
 import { StudioTransformTool } from "./StudioTransformTool";
-import { extendedSize } from "./studioExtend";
 import { pictureCorners } from "./studioPerspective";
 import type { StudioToolAction, StudioToolState } from "./studioToolState";
 import type { StudioLocalEditDetails, StudioLocalEditOperation } from "./types";
 
 /** The panel's tool-specific control: what this tool needs said before it runs.
  *
- * Extend and Enhance are a drag or a number, Text is the words before and
- * after, Isolate needs nothing, replacing a subject needs the picture it comes
- * from, turning and flipping are a press each, a perspective correction is
- * four corners placed on the picture, a crop is a drawn box, a
+ * Extend is a drag, a shape or a size, Enhance is a number, Text is the words
+ * before and after, Isolate needs nothing, replacing a subject needs the
+ * picture it comes from, turning and flipping are a press each, a perspective
+ * correction is four corners placed on the picture, a crop is a drawn box, a
  * resize is a width and a height, a canvas change is those and a place, light
- * and color are four sliders, a blur is a marked area and a strength, a paint
+ * and color are sliders, a blur is a marked area and a strength, a paint
  * is a marked area and a color, added words are the words and their look, and
  * every other tool is described in words.
  * Kept apart from the studio view so each tool's control reads in one place.
@@ -117,32 +117,14 @@ export function StudioToolOptions({
     ) : null;
   }
   if (tools.kind === "extend") {
-    // The selection raster is made at the picture's own size, so it says what that is.
-    const size = tools.mask ? { width: tools.mask.width, height: tools.mask.height } : null;
-    const extended = size && Object.values(tools.margins).some(Boolean) ? extendedSize(tools.margins, size) : null;
     return (
-      <div className="studio-tool-options">
-        <span>
-          <strong>Extend by</strong>
-        </span>
-        <small>
-          {Object.values(tools.margins).some(Boolean)
-            ? (["top", "right", "bottom", "left"] as const)
-                .filter((side) => tools.margins[side] > 0)
-                .map((side) => `${side} ${Math.round(tools.margins[side] * 100)}%`)
-                .join(", ")
-            : "Drag an edge of the picture outward, or use the arrow keys on one."}
-        </small>
-        {size && extended && (
-          <small>{`The canvas goes from ${size.width} × ${size.height} to ${extended.width} × ${extended.height}.`}</small>
-        )}
-        <button
-          className="secondary compact-button"
-          onClick={() => dispatch({ type: "clear-margins" })}
-        >
-          Reset edges
-        </button>
-      </div>
+      <StudioExtendTool
+        margins={tools.margins}
+        // The selection raster is made at the picture's own size, so it says what that is.
+        size={tools.mask ? { width: tools.mask.width, height: tools.mask.height } : null}
+        onMargins={(margins) => dispatch({ type: "set-margins", margins })}
+        onReset={() => dispatch({ type: "clear-margins" })}
+      />
     );
   }
   if (tools.kind === "enhance") {
