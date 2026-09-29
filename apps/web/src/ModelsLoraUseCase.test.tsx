@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { api } from "./api";
 import { ModelsView } from "./ModelsView";
@@ -67,7 +67,7 @@ it("shows derived text without automatic use and keeps its provenance on strengt
   await screen.findByRole("button", { name: "Saving…" });
   expect(save).toHaveFocus();
   expect(save).toHaveAttribute("aria-disabled", "true");
-  fireEvent.click(save);
+  await act(async () => { fireEvent.click(save); });
   expect(api.updateModelAsset).toHaveBeenCalledTimes(1);
   finishSave(asset);
   await waitFor(() => expect(screen.getByRole("button", { name: "Edit Auto rules" })).toHaveFocus());
