@@ -98,6 +98,7 @@ from .image_edit_difference import (
     ChangedArea,
     ImageDifference,
     compare_edit,
+    compare_region,
     crop_changed_area,
 )
 from .image_edit_kind import image_edit_kind
@@ -110,12 +111,15 @@ from .image_edit_strength import (
 )
 from .image_edit_verification import (
     CORRESPONDENCE_MARGIN,
+    DRIFT_EXCLUSION_MARGIN,
     MAX_ASSESSMENT_CHARACTERS,
     MAX_CORRESPONDENCE_AREAS,
+    MAX_DRIFT_CHECKS,
     MAX_INVENTORY_CHARACTERS,
     VERIFICATION_VERSION,
     AreaContents,
     ChangeAttribution,
+    ContradictedReading,
     ImageEditRetryDecision,
     ImageEditVerificationJobPayload,
     InventoryChange,
@@ -125,6 +129,7 @@ from .image_edit_verification import (
     build_area_contents_prompt,
     build_change_attribution_prompt,
     build_image_inventory_prompt,
+    build_subject_location_prompt,
     compare_inventories,
     decide_image_edit_retry,
     image_edit_verification_eligibility,
@@ -132,6 +137,9 @@ from .image_edit_verification import (
     parse_area_contents,
     parse_change_attribution,
     parse_image_inventory,
+    parse_subject_location,
+    reading_contradicted,
+    without_contradicted,
 )
 from .matting_workflows import workflow_declares_matting
 from .media_references import exceeds_capacity
@@ -7345,6 +7353,7 @@ class ConversationOrchestrator:
         job_status: str = JobStatus.COMPLETE.value,
         claim: JobClaim | None = None,
         difference: ImageDifference | None = None,
+        contradicted: Sequence[ContradictedReading] = (),
     ) -> bool:
         """Skipped-verification terminal write, bound to the presented claim.
 
@@ -7366,6 +7375,8 @@ class ConversationOrchestrator:
         }
         if difference is not None:
             record["difference"] = difference.provenance()
+        if contradicted:
+            record["contradicted_readings"] = [item.provenance() for item in contradicted]
         return self._persist_image_edit_verification(
             session,
             job,
@@ -7797,6 +7808,8 @@ class ConversationOrchestrator:
         reason: VerificationReason,
         claim: JobClaim,
         difference: ImageDifference | None = None,
+        *,
+        contradicted: Sequence[ContradictedReading] = (),
     ) -> None:
         """Record why this verification could not reach a verdict, and leave it there."""
 
@@ -7805,11 +7818,110 @@ class ConversationOrchestrator:
             if not job:
                 return
             if self._finish_image_edit_verification(
-                session, job, reason, claim=claim, difference=difference
+                session,
+                job,
+                reason,
+                claim=claim,
+                difference=difference,
+                contradicted=contradicted,
             ):
                 session.commit()
             else:
                 session.rollback()
+
+    async def _contradicted_readings(
+        self,
+        job_id: str,
+        claim: JobClaim,
+        *,
+        changes: Sequence[InventoryChange],
+        attribution: ChangeAttribution,
+        difference: ImageDifference,
+        source: Artifact,
+        result: Artifact,
+        seen: tuple[PreparedVisualContext, PreparedVisualContext],
+        snapshot: AcceptedContext | None,
+    ) -> dict[int, ContradictedReading]:
+        """Find the listed differences that the pixels where their subject sits contradict.
+
+        Each reading of a picture is its own answer, so two of them can name an
+        unchanged thing in different words, and lists compared as text then
+        report a change nobody made. Every difference the request did not ask
+        for is found in its picture - the source, or the result for a thing that
+        was not there before - and measured there with the requested subjects
+        left out. Only a region whose every part stayed under the local change
+        threshold contradicts its difference. Anything that cannot be placed or
+        measured contradicts nothing, and every changed area still has to be
+        accounted for afterwards, so a box that misses a real change only leaves
+        that change to be found in its own area.
+        """
+
+        requested = set(attribution.requested)
+        unrequested = [index for index in range(len(changes)) if index not in requested]
+        if (
+            not difference.comparable
+            or attribution.operation == "other"
+            or not unrequested
+            or len(unrequested) > MAX_DRIFT_CHECKS
+            or any(index >= len(changes) for index in requested)
+        ):
+            return {}
+        try:
+            before = self.artifacts.verified_bytes(source, maximum_bytes=MAX_BLEND_READ_BYTES)
+            after = self.artifacts.verified_bytes(result, maximum_bytes=MAX_BLEND_READ_BYTES)
+        except (OSError, ValueError):
+            return {}
+
+        async def locate(change: InventoryChange) -> ChangedArea | None:
+            answer = await self._vision_answer(
+                job_id,
+                claim,
+                self.vision.attach_to_latest_user(
+                    [
+                        {
+                            "role": MessageRole.USER.value,
+                            "content": build_subject_location_prompt(change.subject),
+                        }
+                    ],
+                    seen[0] if change.before is not None else seen[1],
+                ),
+                snapshot=snapshot,
+                limit=MAX_ASSESSMENT_CHARACTERS,
+            )
+            try:
+                return parse_subject_location(answer).area()
+            except ValueError:
+                return None
+
+        placed: list[ChangedArea] = []
+        for index in sorted(requested):
+            area = await locate(changes[index])
+            if area is None:
+                # With a requested thing unplaced, nothing beside it can be
+                # measured apart from it.
+                return {}
+            placed.append(area.widened(DRIFT_EXCLUSION_MARGIN))
+        # The requested change's measured extent is left out too, since a box a
+        # reader draws can fall short of the pixels the change actually moved.
+        excluded = placed + [
+            area
+            for area in difference.changed_areas or ()
+            if any(area.overlaps(box) for box in placed)
+        ]
+        contradicted: dict[int, ContradictedReading] = {}
+        for index in unrequested:
+            area = await locate(changes[index])
+            if area is None:
+                continue
+            region, measured = await asyncio.to_thread(
+                compare_region, before, after, area, excluded
+            )
+            largest = region.largest_local_difference
+            if reading_contradicted(region, measured) and largest is not None:
+                contradicted[index] = ContradictedReading(
+                    subject=changes[index].subject, area=area, largest_local_difference=largest
+                )
+        return contradicted
 
     async def _areas_explain_the_edit(
         self,
@@ -8269,6 +8381,21 @@ class ConversationOrchestrator:
             difference = await asyncio.to_thread(
                 self._image_edit_difference, source, result, verification_mask
             )
+            # Readings that disagree about something whose pixels did not move
+            # come out of the lists before anything is decided from them.
+            contradicted = await self._contradicted_readings(
+                job_id,
+                claim,
+                changes=changes,
+                attribution=attribution,
+                difference=difference,
+                source=source,
+                result=result,
+                seen=(seen_source, seen_result),
+                snapshot=snapshot,
+            )
+            if contradicted:
+                changes, attribution = without_contradicted(changes, attribution, contradicted)
             areas = await self._areas_explain_the_edit(
                 job_id,
                 claim,
@@ -8285,7 +8412,11 @@ class ConversationOrchestrator:
                 # other, or they agree and still cannot show that nothing else
                 # moved, so the verdict cannot be told from what was seen.
                 self._abandon_image_edit_verification(
-                    job_id, VerificationReason.CHANGE_UNACCOUNTED, claim, difference
+                    job_id,
+                    VerificationReason.CHANGE_UNACCOUNTED,
+                    claim,
+                    difference,
+                    contradicted=tuple(contradicted.values()),
                 )
                 return
             decision = decide_image_edit_retry(
@@ -8306,6 +8437,10 @@ class ConversationOrchestrator:
                 "result_artifact_id": payload.result_artifact_id,
                 "automatic_retry_executed": False,
             }
+            if contradicted:
+                persisted["contradicted_readings"] = [
+                    item.provenance() for item in contradicted.values()
+                ]
             accepted_retry: TurnAccepted | None = None
             # Whether the retry's start was reached. Bound here rather than
             # in the recovery below, because the ordinary path never enters

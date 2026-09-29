@@ -29,7 +29,7 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from PIL import Image, ImageMath, UnidentifiedImageError
+from PIL import Image, ImageDraw, ImageMath, UnidentifiedImageError
 
 # Small enough that re-encoding noise and one-pixel resampling differences
 # average away, large enough that a genuine local edit (a recoloured object,
@@ -58,6 +58,10 @@ DISTINCT_AREA_THRESHOLD = 2 * UNCHANGED_THRESHOLD
 #: How finely a mask of another size is sampled per source pixel, so a
 #: selection that covers part of a pixel still counts that pixel.
 MASK_SAMPLES = 4
+#: The side of the mask a region comparison draws its boxes on. Eight times
+#: the comparison grid, so a box edge lands inside a part rather than
+#: rounding a whole part in or out.
+REGION_MASK_SIDE = 8 * LOCAL_GRID
 
 
 @dataclass(frozen=True)
@@ -82,6 +86,23 @@ class ChangedArea:
             "right": round(self.right, 4),
             "bottom": round(self.bottom, 4),
         }
+
+    def widened(self, margin: float) -> ChangedArea:
+        """Grow this area by ``margin`` on every side, keeping it inside the picture."""
+        return ChangedArea(
+            left=max(0.0, self.left - margin),
+            top=max(0.0, self.top - margin),
+            right=min(1.0, self.right + margin),
+            bottom=min(1.0, self.bottom + margin),
+        )
+
+    def overlaps(self, other: ChangedArea) -> bool:
+        return (
+            self.left < other.right
+            and other.left < self.right
+            and self.top < other.bottom
+            and other.top < self.bottom
+        )
 
 
 @dataclass(frozen=True)
@@ -211,6 +232,43 @@ def compare_edit(
         largest_local_difference=largest,
         changed_regions=len(areas),
         changed_areas=areas,
+    )
+
+
+def compare_region(
+    source: bytes, result: bytes, box: ChangedArea, excluded: Sequence[ChangedArea] = ()
+) -> tuple[ImageDifference, float]:
+    """Measure the edit inside one box with others left out, and report what that left.
+
+    The comparison is compare_edit's, through a mask of the box minus every
+    excluded box. The second value is the fraction of the picture the mask
+    still selects, so a caller can tell a region too small to say anything
+    from one that measured nothing. A mask that selects nothing is
+    incomparable, as compare_edit makes any empty selection.
+    """
+
+    mask = Image.new("L", (REGION_MASK_SIDE, REGION_MASK_SIDE), 0)
+    drawing = ImageDraw.Draw(mask)
+    drawing.rectangle(_mask_box(box), fill=255)
+    for area in excluded:
+        drawing.rectangle(_mask_box(area), fill=0)
+    selected = mask.histogram()[255] / (REGION_MASK_SIDE * REGION_MASK_SIDE)
+    if not selected:
+        return INCOMPARABLE, 0.0
+    buffer = io.BytesIO()
+    mask.save(buffer, format="PNG")
+    return compare_edit(source, result, mask=buffer.getvalue()), selected
+
+
+def _mask_box(area: ChangedArea) -> tuple[int, int, int, int]:
+    # Pillow's rectangle includes both of its corners, so the far edge is the
+    # last pixel the area reaches rather than the first one past it.
+    side = REGION_MASK_SIDE
+    return (
+        int(area.left * side),
+        int(area.top * side),
+        max(int(area.left * side), math.ceil(area.right * side) - 1),
+        max(int(area.top * side), math.ceil(area.bottom * side) - 1),
     )
 
 
