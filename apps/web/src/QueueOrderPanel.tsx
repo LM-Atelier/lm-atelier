@@ -9,11 +9,13 @@ import "./QueueActivityDialog.css";
 
 export function QueueOrderPanel({ initialLane, onBack }: { initialLane: QueueLane; onBack: () => void }) {
   const [lane, setLane] = useState(initialLane);
+  const category = useRef<HTMLSelectElement>(null);
+  useEffect(() => { category.current?.focus(); }, []);
   return (
     <section className="queue-order-panel" aria-label="Dispatch order">
       <div className="queue-activity-toolbar">
         <label>Order category
-          <select value={lane} onChange={(event) => setLane(event.target.value as QueueLane)}>
+          <select ref={category} value={lane} onChange={(event) => setLane(event.target.value as QueueLane)}>
             <option value="generation">Generation</option>
             <option value="transfer">Transfers</option>
             <option value="install">Installs</option>
