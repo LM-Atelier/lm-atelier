@@ -4,8 +4,9 @@ import { expect, test, type Page } from "@playwright/test";
  *
  * The history strip lists results in the order they were made. A change made
  * from an earlier picture is listed last, so it has to say where it came from
- * or it reads as the next change to the latest picture. Exact edits need no
- * model, so this branches with flips and a turn.
+ * or it reads as the next change to the latest picture, and the chosen result
+ * marks the ones it was made from. Exact edits need no model, so this
+ * branches with flips and a turn.
  */
 
 async function dismissSetup(page: Page) {
@@ -62,4 +63,16 @@ test("names the picture a change was made from when it was not the latest", asyn
   await strip.getByRole("button", { name: /^Result of step 1 / }).click();
   await page.getByRole("button", { name: "Rotate left" }).click();
   await expect(strip.getByRole("button", { name: /^Result of step 4 Rotate left From step 1$/ })).toBeVisible();
+
+  // With the newest chosen, the results it was made from are marked, and the other branch is not.
+  const note = "Part of how the chosen result was made";
+  await expect(strip.getByRole("button", { name: `Result of step 1 Flip horizontally ${note}` })).toHaveClass(/made-from/);
+  await expect(strip.getByRole("button", { name: `The original image Original ${note}` })).toHaveClass(/made-from/);
+  await expect(strip.getByRole("button", { name: /^Result of step 2 Flip vertically$/ })).not.toHaveClass(/made-from/);
+  await expect(strip.getByRole("button", { name: /^Result of step 3 Rotate right From the original$/ })).not.toHaveClass(/made-from/);
+
+  // Choosing the change made from the original moves the marks to its own way back.
+  await strip.getByRole("button", { name: /^Result of step 3 Rotate right From the original$/ }).click();
+  await expect(strip.getByRole("button", { name: `The original image Original ${note}` })).toHaveClass(/made-from/);
+  await expect(strip.getByRole("button", { name: /^Result of step 1 Flip horizontally$/ })).not.toHaveClass(/made-from/);
 });
