@@ -362,35 +362,54 @@ export function toAlphaImageData(
  * so a fixed depth of full clones is not a safe bound - bytes are. */
 export const DEFAULT_MASK_HISTORY_BYTES = 96 * 1024 * 1024;
 
-/** Run-length encoding of one mask; masks are mostly-uniform by nature, so
- * a stored snapshot is typically orders of magnitude smaller than the
- * raster. Pathological content still encodes correctly, just larger. */
-type MaskSnapshot = {
-  readonly width: number;
-  readonly height: number;
-  /** Alternating [value, runLength] pairs over the row-major raster. */
-  readonly runs: Uint32Array;
-};
+/** One stored mask: its runs when they are the smaller record, or its bytes as they are.
+ *
+ * Masks are mostly uniform by nature, so the runs are typically orders of
+ * magnitude smaller than the raster. A speckled one, such as a similar-colors
+ * selection on a noisy photograph, changes value at nearly every pixel, and at
+ * two four-byte numbers a run its runs came to eight times the raster: one
+ * snapshot of a 32 MP mask outgrew the whole undo budget. Keeping whichever is
+ * smaller holds every snapshot to the size of the mask itself.
+ */
+type MaskSnapshot =
+  | {
+      readonly width: number;
+      readonly height: number;
+      /** Alternating [value, runLength] pairs over the row-major raster. */
+      readonly runs: Uint32Array;
+    }
+  | { readonly width: number; readonly height: number; readonly bytes: Uint8Array };
 
 export function encodeMask(mask: MaskRaster): MaskSnapshot {
-  const runs: number[] = [];
-  let value = mask.data[0] ?? 0;
-  let length = 0;
-  for (const sample of mask.data) {
-    if (sample === value) {
-      length += 1;
-      continue;
-    }
-    runs.push(value, length);
-    value = sample;
-    length = 1;
+  const { data } = mask;
+  // Counted first, so the runs go straight into an array of their exact size
+  // rather than into a growing list of numbers several times larger again.
+  let count = data.length > 0 ? 1 : 0;
+  for (let index = 1; index < data.length; index += 1) {
+    if (data[index] !== data[index - 1]) count += 1;
   }
-  if (length > 0) runs.push(value, length);
-  return { width: mask.width, height: mask.height, runs: Uint32Array.from(runs) };
+  if (count * 2 * Uint32Array.BYTES_PER_ELEMENT >= data.byteLength) {
+    return { width: mask.width, height: mask.height, bytes: data.slice() };
+  }
+  const runs = new Uint32Array(count * 2);
+  let run = 0;
+  let start = 0;
+  for (let index = 1; index <= data.length; index += 1) {
+    if (index < data.length && data[index] === data[start]) continue;
+    runs[run] = data[start];
+    runs[run + 1] = index - start;
+    run += 2;
+    start = index;
+  }
+  return { width: mask.width, height: mask.height, runs };
 }
 
 export function decodeMask(snapshot: MaskSnapshot): MaskRaster {
   const mask = createMask(snapshot.width, snapshot.height);
+  if ("bytes" in snapshot) {
+    mask.data.set(snapshot.bytes);
+    return mask;
+  }
   let offset = 0;
   for (let index = 0; index + 1 < snapshot.runs.length; index += 2) {
     const value = snapshot.runs[index];
@@ -401,8 +420,9 @@ export function decodeMask(snapshot: MaskSnapshot): MaskRaster {
   return mask;
 }
 
+/** What one snapshot holds in memory: never more than the mask it was taken of. */
 function snapshotBytes(snapshot: MaskSnapshot): number {
-  return snapshot.runs.byteLength;
+  return "bytes" in snapshot ? snapshot.bytes.byteLength : snapshot.runs.byteLength;
 }
 
 /** A byte-budgeted undo ring. Callers snapshot BEFORE the first mutation of

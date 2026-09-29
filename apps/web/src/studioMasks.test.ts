@@ -175,6 +175,40 @@ describe("mask history", () => {
     expect(coverage(decodeMask(encodeMask(full)))).toBe(1);
   });
 
+  it("keeps a speckled selection's snapshot no larger than the selection itself", () => {
+    // Every pixel differs from the one before it, as a similar-colors pick on a
+    // noisy photograph can: as runs, two four-byte numbers for every pixel.
+    const speckled = createMask(64, 64);
+    for (let index = 0; index < speckled.data.length; index += 2) speckled.data[index] = 255;
+
+    const history = new MaskHistory(64, Number.MAX_SAFE_INTEGER);
+    history.push(speckled);
+
+    expect(history.usedBytes).toBeLessThanOrEqual(speckled.data.byteLength);
+    expect([...decodeMask(encodeMask(speckled)).data]).toEqual([...speckled.data]);
+  });
+
+  it("still keeps an ordinary selection as its runs, far smaller than the selection", () => {
+    const mask = createMask(64, 64);
+    fillRect(mask, 8, 8, 40, 30);
+    const history = new MaskHistory(64, Number.MAX_SAFE_INTEGER);
+    history.push(mask);
+
+    expect(history.usedBytes).toBeLessThan(mask.data.byteLength / 8);
+  });
+
+  it("holds speckled steps to the budget, or to one step when a single one is larger", () => {
+    const speckled = createMask(256, 256);
+    for (let index = 0; index < speckled.data.length; index += 2) speckled.data[index] = 255;
+    const budget = 100_000;
+    const history = new MaskHistory(64, budget);
+
+    for (let step = 0; step < 3; step += 1) history.push(speckled);
+
+    expect(history.usedBytes).toBeLessThanOrEqual(Math.max(budget, speckled.data.byteLength));
+    expect(history.canUndo).toBe(true);
+  });
+
   it("bounds memory by bytes and evicts the oldest steps first", () => {
     const mask = createMask(64, 64);
     const stripe = (step: number) =>
