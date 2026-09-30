@@ -178,6 +178,17 @@ Images and video appear in the conversation, with queue progress while generatio
 runs. Output count and seed controls let you vary a request. Generation speed and
 supported sizes depend on the selected model, workflow, and hardware.
 
+A workflow that takes a size offers its shapes in the turn's **Shape** row, from
+square and portrait to landscape and wide, and shows the exact pixels before
+Send. A shape the workflow cannot make exactly is not offered, and **Settings**
+chooses which shapes appear and in what order. When a video starts from a
+picture, **Match source** makes it in that picture's own shape, as the picture is
+shown. A picture edited into a canvas of another shape can be kept whole with
+**Extend / preserve all**, which paints new canvas around it, or trimmed with
+**Crop / fill**, which keeps the centred part that has the canvas's shape. Each
+shows a preview before Send, and each is offered only where the chosen workflow
+can do it.
+
 ### Read links and search the web
 
 Web access starts off. To make it available, set
