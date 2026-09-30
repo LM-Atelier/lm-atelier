@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { GenerationSettingsPanel } from "./GenerationSettingsPanel";
+import type { ShapeAlternatives } from "./shapeAlternatives";
 import type { EngineCapabilities, EngineRole, GenerationPreset, RoutingMode } from "./types";
 
 export interface EditedVersionSettings {
@@ -30,6 +31,7 @@ export function SettingsDrawer({
   imageEdit,
   imageEditPrompt,
   editSettings,
+  shapeAlternatives,
 }: {
   open: boolean;
   onClose: () => void;
@@ -53,6 +55,8 @@ export function SettingsDrawer({
   imageEdit: boolean;
   imageEditPrompt: string;
   editSettings?: EditedVersionSettings;
+  /** Other workflows for the chat, offered when the chosen one sets its own size. */
+  shapeAlternatives?: ShapeAlternatives;
 }) {
   if (!open) return null;
   return (
@@ -103,6 +107,7 @@ export function SettingsDrawer({
         editSettings={editSettings}
         resetLabel={editSettings ? "Restore original settings" : "Reset chat overrides"}
         onReset={editSettings?.onRestore ?? (() => onValues({}))}
+        shapeAlternatives={shapeAlternatives}
       />
     </AccessibleDialog>
   );

@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { OutputRatioControl } from "./OutputRatioControl";
+import type { ShapeAlternatives } from "./shapeAlternatives";
 import { SettingControl } from "./SettingControl";
 import { NativeWorkflowFixedSettings } from "./NativeWorkflowFixedSettings";
 import { nativeWorkflowSettingParameters } from "./nativeWorkflowSettings";
@@ -146,6 +147,7 @@ export function GenerationSettingsPanel({
   resetLabel,
   onReset,
   editSettings,
+  shapeAlternatives,
 }: {
   role: EngineRole;
   engines: EngineCapabilities[];
@@ -165,6 +167,8 @@ export function GenerationSettingsPanel({
   resetLabel: string;
   onReset: () => void;
   editSettings?: { presetControl: ReactNode };
+  /** Other workflows for this turn, offered when the chosen one sets its own size. */
+  shapeAlternatives?: ShapeAlternatives;
 }) {
   const [visibility, setVisibility] = useState<Visibility>(storedSettingDetail);
   const engine = engines.find((item) => item.roles.includes(role));
@@ -302,6 +306,7 @@ export function GenerationSettingsPanel({
           onDimensions={({ width, height }) => onValues(
             { ...values, width, height }, ["width", "height"],
           )}
+          alternatives={shapeAlternatives}
         />}
         <NativeWorkflowFixedSettings schema={workflowSchema} />
         {fields.map((field) => (
