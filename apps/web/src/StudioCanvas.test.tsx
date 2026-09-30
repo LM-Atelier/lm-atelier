@@ -254,6 +254,34 @@ describe("StudioCanvas", () => {
     expect(isEmpty(brushMask)).toBe(false);
   });
 
+  it("drops a gesture still being drawn when the window loses focus, and forgets the pointer held for it", () => {
+    const at = (target: Element, type: string, x: number, y: number) =>
+      fireEvent(target, new MouseEvent(type, { clientX: x, clientY: y, button: 0, bubbles: true }));
+    const mask = createMask(400, 200);
+    const onStrokeEnd = vi.fn();
+    const { container } = render(
+      <StudioCanvas image={image} mask={mask} tool={new RectTool(mask)} onStrokeEnd={onStrokeEnd} />,
+    );
+    const surface = container.querySelector(".studio-canvas")!;
+    at(surface, "pointerdown", 10, 10);
+    at(surface, "pointermove", 90, 60);
+
+    // The button came up in another window, so no release or cancel ever reaches the canvas.
+    fireEvent.blur(window);
+    expect(onStrokeEnd).toHaveBeenCalledTimes(1);
+
+    // Back over the canvas with no button down, a move must not carry the rectangle on, nor a release close it.
+    at(surface, "pointermove", 150, 120);
+    at(surface, "pointerup", 150, 120);
+    expect(isEmpty(mask)).toBe(true);
+
+    // And the next press draws, rather than being taken for a second finger and panning.
+    at(surface, "pointerdown", 20, 20);
+    at(surface, "pointermove", 60, 50);
+    at(surface, "pointerup", 60, 50);
+    expect(isEmpty(mask)).toBe(false);
+  });
+
   it("zooms the layer transform about the wheel cursor", () => {
     const { container } = render(<StudioCanvas image={image} mask={null} tool={null} />);
     const surface = container.querySelector(".studio-canvas")!;
