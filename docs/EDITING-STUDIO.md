@@ -162,3 +162,25 @@ the picture on an edge, cannot be chosen. **Extend to this size** takes an exact
 width and height, no smaller than the picture, and puts the new room away from
 where you place the picture. Either way the edges can still be dragged
 afterwards.
+
+## The subject and the scene around it
+
+These tools find the picture's subject themselves, so there is nothing to
+select first. Each cutout and each redraw arrives as the next step like any
+other result, and a tool that cannot run here says what it needs, with a way to
+browse for it.
+
+- **Cut the subject out** keeps the subject and makes everything behind it
+  transparent.
+- **Replace the background** cuts the subject out first, then redraws
+  everything around it from the words you give, such as "a quiet beach at
+  sunset". The subject keeps its own pixels; only its surroundings change.
+- **Replace the subject** cuts the subject out first, then redraws its place
+  from a second picture you choose, optionally naming what to take from it,
+  such as "the dog". The place is grown a little so the new subject has room,
+  and its edge is softened so it meets the rest gradually. Everything around it
+  keeps its own pixels. It needs an image editing workflow that reads a second
+  picture.
+- **Select the subject**, among the selection controls, finds the subject and
+  makes it the selection, which the selection tools can then adjust before an
+  edit uses it.
