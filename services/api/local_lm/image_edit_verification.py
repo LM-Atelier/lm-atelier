@@ -93,6 +93,9 @@ class VerificationReason(StrEnum):
     NO_MEASURABLE_CHANGE = "no_measurable_change"
     INVENTORY_UNAVAILABLE = "inventory_unavailable"
     CHANGE_UNACCOUNTED = "change_unaccounted"
+    #: The edit made new canvas around its source. The check compares a result
+    #: with its source at the source's size, so it cannot judge such an edit.
+    NEW_CANVAS = "new_canvas"
 
 
 class ImageEditVerificationJobPayload(BaseModel):

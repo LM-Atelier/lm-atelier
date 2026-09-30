@@ -113,7 +113,7 @@ describe("editReviewSummary", () => {
   });
 
   it("stays silent for the skips that describe an ordinary message", () => {
-    for (const reason of ["not_image_edit", "disabled", "eligible", "cancelled"]) {
+    for (const reason of ["not_image_edit", "disabled", "eligible", "cancelled", "new_canvas"]) {
       expect(editReviewSummary({
         image_edit_verification: { status: "skipped", reason, automatic_retry_executed: false },
       })).toBeNull();
