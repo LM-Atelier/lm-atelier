@@ -17,6 +17,10 @@ from local_lm.config import Settings
     [
         (b"Watercolor landscapes", 200, "Watercolor landscapes"),
         (b"x" * 32_000, 206, "x" * 8_000),
+        (b"x" * 31_999 + b"\xc3", 206, "x" * 8_000),
+        (b"x" * 31_998 + b"\xf0\x9f", 206, "x" * 8_000),
+        (b"x" * 100 + b"\xc3", 200, ""),
+        (b"x" * 31_998 + b"\xffx", 206, ""),
         (b"x" * 32_001, 200, ""),
         (b"\xff", 200, ""),
         (b" \n", 200, ""),
@@ -24,7 +28,20 @@ from local_lm.config import Settings
         (b"", 403, ""),
         (b"", 503, ""),
     ],
-    ids=["text", "bounded", "oversized", "invalid-utf8", "empty", "missing", "gated", "offline"],
+    ids=[
+        "text",
+        "bounded",
+        "split-two-byte-character",
+        "split-four-byte-character",
+        "incomplete-short-card",
+        "invalid-inside-prefix",
+        "oversized",
+        "invalid-utf8",
+        "empty",
+        "missing",
+        "gated",
+        "offline",
+    ],
 )
 async def test_model_card_is_bounded_optional_and_pinned(
     tmp_path: Path, card: bytes, status: int, expected: str
