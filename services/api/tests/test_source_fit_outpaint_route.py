@@ -18,6 +18,7 @@ from test_workflow_revision_review import reviewed_runtime as reviewed_runtime
 from local_lm.adapters.base import GeneratedAsset, MediaEvent, MediaRequest
 from local_lm.db import SessionLocal
 from local_lm.models import Job, Run, WorkflowRevision
+from local_lm.outpaint_workflows import OUTPAINT_SETTING_KEY
 from local_lm.output_origin import stated_origin
 from local_lm.scheduler import JobClaim
 
@@ -97,3 +98,21 @@ async def test_the_official_outpaint_shape_extends_and_keeps_every_source_pixel(
     assert output["source_restore"]["left"] == 1
     assert output["source_restore"]["top"] == 1
     assert output["source_fit_agreement"] == {"v": 1, "state": "preserved"}
+
+
+async def test_extend_fits_the_canvas_on_a_workflow_that_declares_margins(
+    app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The chat's Extend fits a new canvas instead of naming margins, so the
+    declared ones refused it before a preview could be drawn."""
+    chat_id, payload = await prepared_turn(
+        app, client, monkeypatch, conditioning=True, declared_margins=True
+    )
+    payload["source_fit"] = {"mode": "extend", "width": 5, "height": 6}
+    async with app.state.services.scheduler.lease("primary"):
+        preview = await client.post(f"/api/chats/{chat_id}/source-fit/preview", json=payload)
+        assert preview.status_code == 200, preview.text
+        assert preview.json()["canvas"] == {"width": 5, "height": 6}
+        accepted = await client.post(f"/api/chats/{chat_id}/turns", json=payload)
+    assert accepted.status_code == 202, accepted.text
+    assert OUTPAINT_SETTING_KEY not in accepted.json()["run"]["settings_json"]
