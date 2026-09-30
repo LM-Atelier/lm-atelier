@@ -175,6 +175,10 @@ async function shownPixels(page: Page): Promise<number[]> {
 }
 
 test("shows exactly the picture that applying the adjustment keeps", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  // The preview is worked out in a worker beside the page; its script has to load for that.
+  const workerScript = page.waitForResponse((response) => /studioAdjustWorker/.test(response.url()));
   await page.goto("/");
   await dismissSetup(page);
   const before = await openToAdjust(page, "neutral-shapes.png", await neutralPicture(page), 96 * 64);
@@ -192,6 +196,8 @@ test("shows exactly the picture that applying the adjustment keeps", async ({ pa
   expect(kept.length).toBe(preview.length);
   const differing = kept.filter((value, index) => value !== preview[index]).length;
   expect(differing).toBe(0);
+  expect((await workerScript).ok()).toBe(true);
+  expect(errors).toEqual([]);
 });
 
 test("lifts the shadows and holds back the highlights exactly as the preview shows", async ({ page }) => {
