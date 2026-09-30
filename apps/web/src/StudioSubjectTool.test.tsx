@@ -13,7 +13,7 @@ import { useStudioImage } from "./useStudioImage";
 import { useStudioSession } from "./useStudioSession";
 
 vi.mock("./api", () => ({
-  api: { favoriteArtifact: vi.fn(), artifact: vi.fn(), editTemplates: vi.fn(), studioCapabilities: vi.fn() },
+  api: { favoriteArtifact: vi.fn(), artifact: vi.fn(), editTemplates: vi.fn(), studioCapabilities: vi.fn(), artifacts: vi.fn() },
 }));
 vi.mock("./useStudioSession", () => ({ useStudioSession: vi.fn() }));
 vi.mock("./useStudioImage", () => ({ useStudioImage: vi.fn() }));
@@ -173,6 +173,33 @@ it("cuts the subject out on Isolate's workflow, then redraws only its place from
   // Another look at the same finished cutout never sends the redraw again.
   showSession([message("complete", "art-cutout")]);
   expect(apply).toHaveBeenCalledTimes(2);
+});
+
+it("takes the new subject from a picture the library holds, and sends that picture as it is", async () => {
+  await openWith({});
+  const item = (id: string, name: string) => ({
+    id, sha256: "a".repeat(64), kind: "image", media_type: "image/png", size_bytes: 1, original_name: name,
+    metadata_json: {}, created_at: "2026-01-01T00:00:00Z", reference_count: 0, chat_ids: [], project_ids: [],
+  });
+  vi.mocked(api.artifacts).mockResolvedValue([item("art-red", "red-cube.png"), item("art-blue", "blue-cube.png")]);
+
+  fireEvent.click(screen.getByRole("button", { name: "Choose from the library" }));
+  fireEvent.click(await screen.findByRole("button", { name: "red-cube.png" }));
+  fireEvent.click(screen.getByRole("button", { name: "blue-cube.png" }));
+  fireEvent.click(screen.getByRole("button", { name: "Use this picture" }));
+
+  expect(screen.getByText("blue-cube.png")).toBeInTheDocument();
+  const replace = screen.getByRole("button", { name: "Replace subject" });
+  await waitFor(() => expect(replace).toHaveAttribute("aria-disabled", "false"));
+  fireEvent.click(replace);
+  await waitFor(() => expect(apply).toHaveBeenCalledTimes(1));
+  apply.mock.calls[0][5]({ assistant_message: { id: "msg-cutout" } });
+  showSession([message("complete", "art-cutout")]);
+  await waitFor(() => expect(apply).toHaveBeenCalledTimes(2));
+
+  // The library's own picture follows the source, named rather than sent again.
+  expect(apply.mock.calls[1][6]).toBe("art-blue");
+  expect(apply.mock.calls[1][2]).toMatchObject({ apply: "blend", references: 1 });
 });
 
 it("words the redraw for the whole subject when nothing is named", async () => {

@@ -12,7 +12,8 @@ type Apply = (
   settings?: Record<string, unknown>,
   workflowRevisionId?: string,
   onAccepted?: (accepted: TurnAccepted) => void,
-  secondPicture?: Blob,
+  /** The new subject's picture: its bytes, or the artifact when the library holds it. */
+  secondPicture?: Blob | string,
   onRefused?: () => void,
 ) => void;
 

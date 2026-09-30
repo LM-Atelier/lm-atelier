@@ -8,6 +8,7 @@ import { StudioPerspectiveTool } from "./StudioPerspectiveTool";
 import { StudioCropTool } from "./StudioCropTool";
 import { StudioExtendTool } from "./StudioExtendTool";
 import { StudioResizeTool } from "./StudioResizeTool";
+import { StudioSubjectPanel } from "./StudioSubjectPanel";
 import { StudioTransformTool } from "./StudioTransformTool";
 import { autoAdjustments } from "./studioAutoAdjust";
 import { pictureCorners } from "./studioPerspective";
@@ -18,7 +19,8 @@ import type { StudioLocalEditDetails, StudioLocalEditOperation } from "./types";
  *
  * Extend is a drag, a shape or a size, Enhance is a number, Text is the words
  * before and after, Isolate needs nothing, replacing a subject needs the
- * picture it comes from, turning and flipping are a press each, a perspective
+ * picture it comes from, chosen from the computer or the library, turning
+ * and flipping are a press each, a perspective
  * correction is four corners placed on the picture, a crop is a drawn box, a
  * resize is a width and a height, a canvas change is those and a place, light
  * and color are sliders, a blur is a marked area and a strength, a paint
@@ -233,38 +235,9 @@ export function StudioToolOptions({
   }
   if (tools.kind === "subject") {
     return (
-      <div className="studio-tool-options">
-        <small>
-          Cuts the subject out first, then redraws it from a second picture. Everything
-          around it keeps its own pixels.
-        </small>
-        <label>
-          <span>
-            <strong>Picture of the new subject</strong>
-          </span>
-          <input
-            type="file"
-            accept="image/*"
-            onChange={(event) => {
-              // A dialog closed without a choice keeps the picture already chosen.
-              const picture = event.target.files?.[0];
-              if (picture) dispatch({ type: "set-subject-picture", picture });
-            }}
-          />
-        </label>
-        {tools.subjectPicture && <small>{tools.subjectPicture.name}</small>}
-        <label>
-          <span>
-            <strong>What to take from it</strong> (optional)
-          </span>
-          <input
-            type="text"
-            value={instruction}
-            placeholder="e.g. the dog"
-            onChange={(event) => onInstructionChange(event.target.value)}
-          />
-        </label>
-      </div>
+      <StudioSubjectPanel picture={tools.subjectPicture} instruction={instruction}
+        onPicture={(picture) => dispatch({ type: "set-subject-picture", picture })}
+        onInstructionChange={onInstructionChange} />
     );
   }
   if (tools.kind === "remove") {

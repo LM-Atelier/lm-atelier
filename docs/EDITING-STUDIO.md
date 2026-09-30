@@ -179,8 +179,9 @@ browse for it.
   everything around it from the words you give, such as "a quiet beach at
   sunset". The subject keeps its own pixels; only its surroundings change.
 - **Replace the subject** cuts the subject out first, then redraws its place
-  from a second picture you choose, optionally naming what to take from it,
-  such as "the dog". The place is grown a little so the new subject has room,
+  from a second picture you choose from your computer or from the library,
+  optionally naming what to take from it, such as "the dog". The place is
+  grown a little so the new subject has room,
   and its edge is softened so it meets the rest gradually. Everything around it
   keeps its own pixels. It needs an image editing workflow that reads a second
   picture.
