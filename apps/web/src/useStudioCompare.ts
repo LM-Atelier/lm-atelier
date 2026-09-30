@@ -8,6 +8,8 @@ import type { StudioStep } from "./useStudioSession";
 /** Another picture in the strip that a result can be compared with. */
 export type StudioCompareChoice = { artifactId: string; label: string };
 
+const NONE_HIDDEN: ReadonlySet<string> = new Set();
+
 /** Comparing the result on the canvas with the picture it was made from, or with another in the strip.
  *
  * The earlier picture is decoded before anyone asks, so holding shows it at
@@ -20,11 +22,18 @@ export function useStudioCompare(
   shown: ImageBitmap | null,
   previewing: boolean,
   steps: readonly StudioStep[] = [],
+  /** Results taken out of the strip, which are not offered either. */
+  hidden: ReadonlySet<string> = NONE_HIDDEN,
 ) {
   const currentId = current?.artifactId ?? null;
-  // Chosen for one result, so moving to another compares it with what it was made from again.
+  const choices = current && !current.isSource ? compareChoices(steps, current, hidden) : [];
+  // Chosen for one result, so moving to another compares it with what it was made from again,
+  // as does taking the chosen picture out of the strip.
   const [chosen, setChosen] = useState<{ result: string; against: string } | null>(null);
-  const against = chosen !== null && chosen.result === currentId ? chosen.against : null;
+  const against = chosen !== null && chosen.result === currentId
+    && choices.some((choice) => choice.artifactId === chosen.against)
+    ? chosen.against
+    : null;
   const beforeId = !previewing && current && !current.isSource ? against ?? current.beforeArtifactId : null;
   const earlier = useStudioImage(beforeId);
   const before = beforeId ? earlier.bitmap : null;
@@ -67,19 +76,26 @@ export function useStudioCompare(
       canDiffer,
       changed: overlay?.words ?? null,
       against,
-      choices: current && !current.isSource ? compareChoices(steps, current) : [],
+      choices,
       onAgainst: (artifactId: string | null) =>
         setChosen(artifactId && currentId ? { result: currentId, against: artifactId } : null),
     },
   };
 }
 
-/** The other pictures in the strip, each once: not the result itself, nor the one it was made from, which is already the default. */
-function compareChoices(steps: readonly StudioStep[], current: StudioStep): StudioCompareChoice[] {
+/** The other pictures in the strip, each once: not the result itself, nor the one it was made from, which is already the default.
+ *
+ * A hidden result is left out but still counted, so the others keep the numbers the strip shows them with.
+ */
+function compareChoices(
+  steps: readonly StudioStep[],
+  current: StudioStep,
+  hidden: ReadonlySet<string>,
+): StudioCompareChoice[] {
   const seen = new Set([current.artifactId, current.beforeArtifactId]);
   const choices: StudioCompareChoice[] = [];
   steps.forEach((step, index) => {
-    if (seen.has(step.artifactId)) return;
+    if (seen.has(step.artifactId) || (!step.isSource && hidden.has(step.artifactId))) return;
     seen.add(step.artifactId);
     const words = step.instruction ? ` · ${step.instruction}` : "";
     choices.push({ artifactId: step.artifactId, label: step.isSource ? "The original" : `Step ${index}${words}` });

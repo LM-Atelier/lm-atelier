@@ -176,6 +176,36 @@ describe("comparing with another picture from the strip", () => {
     expect(hook.current.layer?.image).toBe(pictures["art-1"]);
   });
 
+  it("leaves a hidden result out, counting it still, and goes back to what a result was made from once its choice is hidden", () => {
+    const pictures: Record<string, ImageBitmap> = { "art-1": bitmap(4, 1), "art-3": bitmap(4, 1) };
+    vi.mocked(useStudioImage).mockImplementation((artifactId: string | null) => ({
+      bitmap: artifactId ? pictures[artifactId] ?? null : null,
+      error: null,
+      reload: vi.fn(),
+    }));
+    const steps = [
+      original("art-1"),
+      { ...result("art-2", "art-1"), instruction: "warmer" },
+      { ...result("art-3", "art-1"), instruction: "cooler" },
+      { ...result("art-4", "art-1"), instruction: "brighter" },
+    ];
+    const { result: hook, rerender } = renderHook(
+      ({ hidden }) => useStudioCompare(steps[3], shown, false, steps, hidden),
+      { initialProps: { hidden: new Set(["art-2"]) as ReadonlySet<string> } },
+    );
+
+    // Step 2 keeps the number the strip shows it with, though step 1 is hidden.
+    expect(hook.current.controls.choices).toEqual([{ artifactId: "art-3", label: "Step 2 · cooler" }]);
+
+    act(() => hook.current.controls.onAgainst("art-3"));
+    expect(hook.current.layer?.image).toBe(pictures["art-3"]);
+
+    rerender({ hidden: new Set(["art-2", "art-3"]) });
+    expect(hook.current.controls.choices).toEqual([]);
+    expect(hook.current.controls.against).toBeNull();
+    expect(hook.current.layer?.image).toBe(pictures["art-1"]);
+  });
+
   it("offers nothing to compare the original with", () => {
     const steps = [original("art-1"), result("art-2", "art-1")];
     const { result: hook } = renderHook(() => useStudioCompare(original("art-1"), shown, false, steps));

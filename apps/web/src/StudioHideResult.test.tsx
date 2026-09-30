@@ -90,6 +90,21 @@ it("takes the result on the canvas out of the strip, shows the one before it, an
   expect(screen.queryByRole("button", { name: /hidden result/ })).toBeNull();
 });
 
+it("leaves a hidden result out of what the one on the canvas can be compared with", () => {
+  const third: StudioStep = { ...first, messageId: "answer-3", artifactId: "art-3", instruction: "warmer light" };
+  const strip = open([source, first, second, third]);
+  const offered = () =>
+    [...screen.getByRole("combobox", { name: "Compare with" }).querySelectorAll("option")].map((option) => option.textContent);
+  expect(offered()).toEqual(["What it was made from", "Step 1 · calmer water", "Step 2 · calmer water"]);
+
+  fireEvent.click(within(strip).getByRole("button", { name: /^Result of step 1/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Hide this result from the strip" }));
+
+  // Back on the newest result, which can no longer be set against the hidden one; step 2 keeps its number.
+  expect(within(strip).getByRole("button", { pressed: true })).toHaveAccessibleName(/^Result of step 3/);
+  expect(offered()).toEqual(["What it was made from", "Step 2 · calmer water"]);
+});
+
 it("offers no hiding for the original", () => {
   open([source]);
 
