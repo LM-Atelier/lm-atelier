@@ -96,6 +96,7 @@ from .chat_item_removal import (
     execute_chat_item_removal,
     preview_chat_item_removal,
 )
+from .chat_message_queries import message_ancestry
 from .chat_summary_reads import list_chat_summary_rows
 from .civitai_catalog import CivitaiCatalog
 from .comfy_editor_bridge import ComfyEditorBridgeError
@@ -2488,15 +2489,7 @@ async def get_chat(chat_id: str, session: ConversationSessionDep) -> ChatDetail:
     )
 
 
-#: What one message needs to render, and nothing that belongs to the chat as a
-#: whole: the window's cost has to stay proportional to the page, not the
-#: conversation.
-#: How far back a lineage walk will follow parent links. A transcript longer
-#: than this is not one a page can anchor in anyway, and an unbounded recursive
-#: walk is the kind of query that turns a long conversation into a stall.
-MAX_LINEAGE_WALK = 10_000
-
-
+# Load only the relationships needed to render the requested message page.
 _MESSAGE_WINDOW_LOADERS = (
     selectinload(Message.parts).selectinload(MessagePart.artifact),
     selectinload(Message.response_revisions)
@@ -2522,9 +2515,9 @@ async def get_chat_messages(
 
     The endpoint that returns a whole chat loads every message with its parts,
     artifacts, revisions, feedback and references, so its cost is the length of
-    the conversation. This one is bounded by the database rather than after it:
-    each mode orders in SQL and stops at the page, so a long transcript answers
-    in the time a short one does.
+    the conversation. This endpoint limits message hydration in SQL before
+    loading those relationships. Branch ancestry remains a walk over parent
+    identities in the database; it does not load the rest of the transcript.
 
     One anchor at most. Without one the newest page is returned, which is what
     opening a conversation asks for.
@@ -2551,50 +2544,45 @@ async def get_chat_messages(
     chat = session.scalar(select(Chat).where(Chat.id == chat_id, Chat.scope == STANDARD_CHAT_SCOPE))
     if not chat:
         raise api_error(404, "chat-not-found", "chat not found")
-    lineage: list[str] | None = None
+    lineage = None
     if head_id is not None:
         head = session.scalar(
             select(Message).where(Message.id == head_id, Message.chat_id == chat_id)
         )
         if not head:
             raise api_error(404, "message-not-found", "This message is not in this conversation")
-        # One query rather than a walk of round trips, and bounded by the
-        # conversation's own length because a parent link cannot revisit a
-        # message already on the path.
-        walk = text(
-            """
-            WITH RECURSIVE ancestry(id, parent_id, depth) AS (
-                SELECT id, parent_id, 0 FROM messages WHERE id = :head AND chat_id = :chat
-                UNION ALL
-                SELECT m.id, m.parent_id, ancestry.depth + 1
-                FROM messages AS m
-                JOIN ancestry ON m.id = ancestry.parent_id
-                WHERE m.chat_id = :chat AND ancestry.depth < :ceiling
-            )
-            SELECT id FROM ancestry ORDER BY depth DESC
-            """
-        )
-        lineage = [
-            str(row[0])
-            for row in session.execute(
-                walk, {"head": head_id, "chat": chat_id, "ceiling": MAX_LINEAGE_WALK}
-            ).all()
-        ]
+        lineage = message_ancestry(chat_id, head_id)
     anchor_at = None
+    older_than_anchor: ColumnElement[bool] | None = None
+    newer_than_anchor: ColumnElement[bool] | None = None
     if anchors:
         anchor_message = session.scalar(
             select(Message).where(Message.id == anchors[0], Message.chat_id == chat_id)
         )
         if not anchor_message:
             raise api_error(404, "message-not-found", "This message is not in this conversation")
+        if (
+            lineage is not None
+            and session.scalar(select(lineage.c.id).where(lineage.c.id == anchor_message.id))
+            is None
+        ):
+            raise api_error(400, "chat-window-invalid", "The anchor is not in the selected branch.")
         anchor_at = anchor_message.created_at
+        older_than_anchor = or_(
+            Message.created_at < anchor_at,
+            and_(Message.created_at == anchor_at, Message.id < anchor_message.id),
+        )
+        newer_than_anchor = or_(
+            Message.created_at > anchor_at,
+            and_(Message.created_at == anchor_at, Message.id > anchor_message.id),
+        )
 
     def page(
         newest_first: bool, *, strictly: ColumnElement[bool] | None, count: int
     ) -> list[Message]:
         query = select(Message).where(Message.chat_id == chat_id)
         if lineage is not None:
-            query = query.where(Message.id.in_(lineage))
+            query = query.where(Message.id.in_(select(lineage.c.id)))
         if strictly is not None:
             query = query.where(strictly)
         order = Message.created_at.desc() if newest_first else Message.created_at.asc()
@@ -2609,8 +2597,8 @@ async def get_chat_messages(
     if around is not None and anchor_at is not None:
         older_half = max(0, (limit - 1) // 2)
         newer_half = limit - 1 - older_half
-        older = page(True, strictly=Message.created_at < anchor_at, count=older_half + 1)
-        newer = page(False, strictly=Message.created_at > anchor_at, count=newer_half + 1)
+        older = page(True, strictly=older_than_anchor, count=older_half + 1)
+        newer = page(False, strictly=newer_than_anchor, count=newer_half + 1)
         has_older = len(older) > older_half
         has_newer = len(newer) > newer_half
         anchor_row = session.get(Message, anchors[0])
@@ -2620,12 +2608,12 @@ async def get_chat_messages(
             + newer[:newer_half]
         )
     elif after is not None and anchor_at is not None:
-        found = page(False, strictly=Message.created_at > anchor_at, count=limit + 1)
+        found = page(False, strictly=newer_than_anchor, count=limit + 1)
         has_newer = len(found) > limit
         messages = found[:limit]
         has_older = True
     elif before is not None and anchor_at is not None:
-        found = page(True, strictly=Message.created_at < anchor_at, count=limit + 1)
+        found = page(True, strictly=older_than_anchor, count=limit + 1)
         has_older = len(found) > limit
         messages = list(reversed(found[:limit]))
         has_newer = True
