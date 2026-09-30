@@ -1,7 +1,7 @@
 /** Where a studio session's running edit has got to, read from the session itself. */
 
 import { describe, expect, it } from "vitest";
-import { studioApplyProgress } from "./studioApplyProgress";
+import { studioApplyFailure, studioApplyProgress } from "./studioApplyProgress";
 import type { ChatDetail, Message, MessagePart } from "./types";
 
 function part(type: string, text: string | null, metadata: Record<string, unknown> = {}): MessagePart {
@@ -75,5 +75,62 @@ describe("the running edit's progress", () => {
 
   it("is nothing for a running answer that reports no progress", () => {
     expect(studioApplyProgress(session([message("assistant", "pending", [part("text", "")])]))).toBeNull();
+  });
+});
+
+describe("why the newest edit came back without a picture", () => {
+  it("gives the reason the server recorded on the failed answer", () => {
+    const request = message("user", "complete", [part("text", "Make it warmer")]);
+
+    const found = studioApplyFailure(session([
+      request,
+      message("assistant", "failed", [part("error", " The workflow stopped at its sampler. ")]),
+    ]));
+
+    expect(found).toEqual({ requestId: request.id, text: "The edit did not finish: The workflow stopped at its sampler." });
+  });
+
+  it("counts the results that did not finish among several, while the rest are still made", () => {
+    const found = studioApplyFailure(session([
+      message("user", "complete", [part("text", "Make it cooler")]),
+      message("assistant", "complete", [part("image", null)]),
+      message("assistant", "failed", [part("error", "Out of memory")]),
+      message("assistant", "pending", [part("progress", "Sampling")]),
+    ]));
+
+    expect(found?.text).toBe("1 of 3 results did not finish: Out of memory");
+  });
+
+  it("says only that it did not finish when no reason was recorded", () => {
+    const found = studioApplyFailure(session([
+      message("user", "complete", [part("text", "Make it cooler")]),
+      message("assistant", "failed", [part("error", "  ")]),
+    ]));
+
+    expect(found?.text).toBe("The edit did not finish.");
+  });
+
+  it("is nothing once a newer edit is asked for, for an edit that finished or was stopped, or before a session", () => {
+    const failedEarlier = [
+      message("user", "complete", [part("text", "Make it warmer")]),
+      message("assistant", "failed", [part("error", "Out of memory")]),
+    ];
+
+    expect(studioApplyFailure(session([...failedEarlier, message("user", "complete", [part("text", "Try again")])]))).toBeNull();
+    expect(studioApplyFailure(session([
+      ...failedEarlier,
+      message("user", "complete", [part("text", "Make it cooler")]),
+      message("assistant", "pending", [part("progress", "Queued")]),
+    ]))).toBeNull();
+    expect(studioApplyFailure(session([
+      message("user", "complete", [part("text", "Make it warmer")]),
+      message("assistant", "complete", [part("image", null)]),
+    ]))).toBeNull();
+    expect(studioApplyFailure(session([
+      message("user", "complete", [part("text", "Make it warmer")]),
+      message("assistant", "cancelled", []),
+    ]))).toBeNull();
+    expect(studioApplyFailure(undefined)).toBeNull();
+    expect(studioApplyFailure(session([]))).toBeNull();
   });
 });

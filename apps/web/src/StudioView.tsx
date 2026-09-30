@@ -16,6 +16,7 @@ import type { StudioPictureForChat } from "./useStudioPictureForChat";
 import { StudioExtendHandles } from "./StudioExtendHandles";
 import { StudioResultCount } from "./StudioResultCount";
 import { StudioRunningEdit } from "./StudioRunningEdit";
+import { StudioApplyFailure } from "./StudioApplyFailure";
 import { studioApplyProgress } from "./studioApplyProgress";
 import { StudioRecipes } from "./StudioRecipes";
 import { StudioSelectionControls } from "./StudioSelectionTool";
@@ -298,7 +299,8 @@ export function StudioView({
       {(error || keep.error) && (
         <ErrorCallout message={((error ?? keep.error) as Error).message} />
       )}
-      {selectionError && <ErrorCallout message={selectionError} />}
+      {/* One reason at a time: a cutout that failed says what it left as it was. */}
+      {selectionError ? <ErrorCallout message={selectionError} /> : <StudioApplyFailure session={session} />}
       <div className="studio-layout">
         <StudioToolRail
           active={tools.kind}
