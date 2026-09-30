@@ -101,6 +101,7 @@ import type {
   SystemInfo,
   ToolCapabilityProbe,
   TurnAccepted,
+  Run,
   PriorTurnEditRequest,
   PriorTurnEditAccepted,
   PriorTurnEditSource,
@@ -409,6 +410,8 @@ export const api = {
     }),
   studioSession: (sessionId: string) =>
     request<ChatDetail>(`/api/studio/sessions/${encodeURIComponent(sessionId)}`),
+  /** One run, with what it resolved and recorded: how a Studio result's edit is made again. */
+  run: (runId: string) => request<Run>(`/api/runs/${encodeURIComponent(runId)}`),
   studioLocalEdit: (sessionId: string, edit: StudioLocalEditRequest) =>
     request<ChatDetail>(`/api/studio/sessions/${encodeURIComponent(sessionId)}/local-edits`, {
       method: "POST",

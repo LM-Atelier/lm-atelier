@@ -8,6 +8,7 @@ import { ErrorCallout } from "./ErrorCallout";
 import { StudioCanvas } from "./StudioCanvas";
 import { StudioCompare } from "./StudioCompare";
 import { StudioExportLink } from "./StudioExportLink";
+import { StudioTryAnother } from "./StudioTryAnother";
 import { StudioUseInChat } from "./StudioUseInChat";
 import type { StudioPictureForChat } from "./useStudioPictureForChat";
 import { StudioExtendHandles } from "./StudioExtendHandles";
@@ -21,7 +22,7 @@ import { StudioToolRail } from "./StudioToolRail";
 import { StudioWorkflowSelector } from "./StudioWorkflowSelector";
 import { artifactSource } from "./messageMedia";
 import { cloneMask, coverage, encodeMaskPng, feather, isEmpty, type MaskRaster } from "./studioMasks";
-import { studioApplyPlan } from "./studioApplyPlan";
+import { studioApplyLabel, studioApplyPlan } from "./studioApplyPlan";
 import { studioStepAncestors, studioStepOrigin } from "./studioStepOrigin";
 import { renderLightMap } from "./studioLightMap";
 import { studioRecipeSource } from "./studioRecipeSource";
@@ -85,7 +86,7 @@ export function StudioView({
   useEffect(() => {
     heading.current?.focus();
   }, [sourceArtifactId]);
-  const { sessionId, session, steps, previewArtifactId, busy: sessionBusy, error, apply, localEdit, stop, stopping } = useStudioSession(
+  const { sessionId, session, steps, previewArtifactId, busy: sessionBusy, error, apply, again, localEdit, stop, stopping } = useStudioSession(
     sourceArtifactId,
     sourceChatId,
   );
@@ -246,6 +247,8 @@ export function StudioView({
                 <Star size={14} aria-hidden="true" fill={isFavorite ? "currentColor" : "none"} />
                 {isFavorite ? "Favorited" : "Favorite"}
               </button>
+              <StudioTryAnother key={current.artifactId} session={session} current={current} busy={busy}
+                onTry={(replay) => again(replay, () => setSelectedId(null))} />
               <StudioExportLink artifactId={current.artifactId} />
               {onUseInChat && <StudioUseInChat ready={Boolean(artifact.data)} onUse={() => onUseInChat({ artifactId: current.artifactId, artifact: artifact.data ?? null, origin: current.isSource ? (artifact.data?.original_name ? "uploaded" : "generated") : "edited" })} />}
             </>
@@ -429,25 +432,7 @@ export function StudioView({
                 } else send(null);
               }}
             >
-              {busy
-                ? "Applying…"
-                : tools.kind === "extend"
-                  ? "Extend"
-                  : tools.kind === "text"
-                    ? "Replace words"
-                  : tools.kind === "relight"
-                    ? "Relight"
-                  : tools.kind === "isolate"
-                    ? "Cut out"
-                  : tools.kind === "background"
-                    ? "Replace background"
-                  : tools.kind === "subject"
-                    ? "Replace subject"
-                  : tools.kind === "enhance"
-                    ? `Enlarge ${tools.upscaleFactor}x`
-                  : tools.kind !== "instruct" && selectionCoverage > 0
-                    ? "Apply to selection"
-                    : "Apply edit"}
+              {studioApplyLabel(tools, busy, selectionCoverage)}
             </button>
           )}
           {applyProgress && <StudioRunningEdit part={applyProgress} stopping={stopping} onStop={stop} />}
