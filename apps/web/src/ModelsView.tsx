@@ -57,12 +57,38 @@ function InstalledModelRow({
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(profile?.use_case ?? "");
+  const [submitting, setSubmitting] = useState(false);
+  const inFlight = useRef(false);
+  const editButton = useRef<HTMLButtonElement>(null);
+  const useCaseField = useRef<HTMLTextAreaElement>(null);
+  const editor = useRef<HTMLFormElement>(null);
+  const wasEditing = useRef(false);
+  const restoreFocus = useRef(false);
+  const busy = saving || submitting;
+  const unchanged = draft.trim() === (profile?.use_case ?? "").trim();
+  useEffect(() => {
+    if (editing) useCaseField.current?.focus();
+    else if (wasEditing.current && restoreFocus.current) editButton.current?.focus();
+    wasEditing.current = editing;
+  }, [editing]);
   const startEditing = () => {
+    if (editing || busy) return;
     setDraft(profile?.use_case ?? "");
     setEditing(true);
   };
   const save = async () => {
-    if (await onSaveUseCase(draft.trim())) setEditing(false);
+    if (busy || inFlight.current || unchanged || !profile) return;
+    inFlight.current = true;
+    setSubmitting(true);
+    try {
+      if (await onSaveUseCase(draft.trim())) {
+        restoreFocus.current = editor.current?.contains(document.activeElement) ?? false;
+        setEditing(false);
+      }
+    } finally {
+      inFlight.current = false;
+      setSubmitting(false);
+    }
   };
   return (
     <div className={editing ? "editing" : ""}>
@@ -82,18 +108,18 @@ function InstalledModelRow({
           ? <span className="badge tested">Default</span>
           : <button className="secondary compact-button" aria-label={`Set ${model.name} as default ${model.role} model`} disabled={creating || defaulting} onClick={onSetDefault}>{defaulting ? "Setting..." : "Set default"}</button>}
         {profile
-          ? <button className="secondary compact-button" aria-label={`Edit use case for ${model.name}`} onClick={startEditing} disabled={editing || saving}>Edit use case</button>
+          ? <button ref={editButton} className="secondary compact-button" aria-label={`Edit use case for ${model.name}`} onClick={startEditing} aria-disabled={editing || busy}>Edit use case</button>
           : <button className="secondary compact-button" aria-label={`Add ${model.name} to model selectors`} disabled={creating} onClick={onCreate}>Add to selectors</button>}
         {profile && <UseCaseSuggestion kind="profile" id={profile.id} name={model.name} savedText={profile.use_case}
           available={typeof model.manifest_json.provider_description === "string" && !!model.manifest_json.provider_description.trim()}
-          busy={editing || saving || deleting} />}
+            busy={editing || busy || deleting} />}
         <button className="secondary compact-button danger" aria-label={`Delete ${model.name}`} disabled={deleting} onClick={onDelete}>Delete</button>
       </span>
       {editing && profile && (
-        <form className="model-use-case-editor" onSubmit={(event) => { event.preventDefault(); void save(); }}>
-          <textarea aria-label={`Best uses for ${model.name}`} rows={2} value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Programming, illustration, cinematic video…" />
-          <button type="button" className="secondary compact-button" disabled={saving} onClick={() => setEditing(false)}>Cancel</button>
-          <button type="submit" className="primary compact-button" disabled={saving || draft.trim() === profile.use_case.trim()}>{saving ? "Saving…" : "Save"}</button>
+        <form ref={editor} className="model-use-case-editor" onSubmit={(event) => { event.preventDefault(); void save(); }}>
+          <textarea ref={useCaseField} aria-label={`Best uses for ${model.name}`} rows={2} value={draft} readOnly={busy} onChange={(event) => setDraft(event.target.value)} placeholder="Programming, illustration, cinematic video…" />
+          <button type="button" className="secondary compact-button" aria-disabled={busy} onClick={() => { if (!busy) { restoreFocus.current = true; setEditing(false); } }}>Cancel</button>
+          <button type="submit" className="primary compact-button" aria-disabled={busy || unchanged}>{busy ? "Saving…" : "Save"}</button>
         </form>
       )}
     </div>
