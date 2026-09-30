@@ -82,3 +82,40 @@ async def test_preflight_records_complete_selected_file_hashes(
     checksum = next(check for check in payload["checks"] if check["id"] == "checksum")
     assert checksum["status"] == "pass"
     assert detail.files[0]["sha256"] is None
+
+
+@pytest.mark.parametrize("revision,size", [("main", 128), ("a" * 40, 5 * 1024 * 1024)])
+async def test_preflight_explains_why_incomplete_evidence_cannot_be_installed(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch, revision: str, size: int
+) -> None:
+    content = _gguf({"general.architecture": "llama"})
+    detail = CatalogDetail(
+        model=CatalogModel(remote_id="example/model", name="Fixture", compatibility="likely"),
+        revision=revision,
+        files=[{"filename": "chosen.gguf", "size": size, "sha256": None}],
+    )
+    monkeypatch.setattr(
+        "local_lm.api.collect_system_info", lambda _settings: _system(None, device=False)
+    )
+    monkeypatch.setattr(HuggingFaceCatalog, "inspect", AsyncMock(return_value=detail.model_dump()))
+    monkeypatch.setattr(
+        HuggingFaceCatalog, "discover_vision_projector", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(HuggingFaceCatalog, "inspect_file_prefix", AsyncMock(return_value=content))
+    response = await client.post(
+        "/api/catalog/example/model/preflight",
+        json={
+            "revision": revision,
+            "role": "chat",
+            "engine": "llama.cpp",
+            "selected_files": ["chosen.gguf"],
+        },
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["can_install"] is False
+    assert payload["install_plan"]["compatibility"] == "unsupported"
+    assert payload["install_plan"]["failure_code"] == "preflight_blocked"
+    check = next(check for check in payload["checks"] if check["id"] == "install-evidence")
+    assert check["status"] == "block"
+    assert "immutable file evidence" in check["detail"]

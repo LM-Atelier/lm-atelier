@@ -7,6 +7,7 @@ import hashlib
 import importlib
 import importlib.util
 import threading
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -21,6 +22,7 @@ from test_workflow_activations import _asset
 from test_workflow_offer_download_acceptance import _created_offer
 from test_workflow_revision_review import reviewed_runtime as reviewed_runtime
 
+from local_lm import workflow_asset_downloads
 from local_lm.db import SessionLocal
 from local_lm.model_manifests import inspect_repository_metadata
 from local_lm.model_planner import persist_install_plan, resolve_install_plan
@@ -45,6 +47,8 @@ pytestmark = pytest.mark.asyncio
     [
         "none",
         "recover",
+        "contract-recover",
+        "contract-request",
         "replan",
         "revoke",
         "bytes",
@@ -73,6 +77,9 @@ pytestmark = pytest.mark.asyncio
 async def test_accepted_download_completes_offer_and_activates_exact_installed_dependency(
     app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch, change: str
 ) -> None:
+    legacy_contract = change.startswith("contract-")
+    if legacy_contract:
+        change = change.removeprefix("contract-")
     content = safetensors_bytes(["lora_unet_block.lora_down.weight"])
     digest = hashlib.sha256(content).hexdigest()
     filename = "detail.safetensors"
@@ -89,6 +96,11 @@ async def test_accepted_download_completes_offer_and_activates_exact_installed_d
         comfy_paths={"loras": "."},
         auxiliary_kind="lora",
     )
+    if legacy_contract:
+        planned = replace(planned, resolver_version="install-resolver-v9")
+        monkeypatch.setattr(
+            workflow_asset_downloads, "INSTALL_RESOLVER_VERSION", "install-resolver-v9"
+        )
     with SessionLocal() as session:
         plan = persist_install_plan(session, planned)
         session.commit()
@@ -261,27 +273,32 @@ async def test_accepted_download_completes_offer_and_activates_exact_installed_d
                 QueueControlCommand(expected_revision=0, idempotency_key="pause-install"),
             )
             assert policy.dispatch_state == "paused"
-    queued = await client.post(f"/api/workflow-install-offers/{offer_id}/install")
-    assert queued.status_code == 202, queued.text
-    job_id = queued.json()[0]["id"]
-    with SessionLocal() as session:
-        stored_offer = session.get(WorkflowInstallOffer, offer_id)
-        assert stored_offer is not None and stored_offer.completion_job_id is not None
-        completion_job_id = stored_offer.completion_job_id
-        completion_job = session.get(Job, completion_job_id)
-        assert completion_job is not None and completion_job.status == "queued"
-        assert completion_job.kind == "workflow_install" and completion_job.claim_owner is None
-    with SessionLocal() as session:
-        assert session.scalar(select(WorkflowActivation)) is None
-    if change == "legacy-recover":
+    async with services.scheduler.lease("primary"):
+        queued = await client.post(f"/api/workflow-install-offers/{offer_id}/install")
+        assert queued.status_code == 202, queued.text
+        if legacy_contract:
+            monkeypatch.setattr(
+                workflow_asset_downloads, "INSTALL_RESOLVER_VERSION", "install-resolver-v10"
+            )
+        job_id = queued.json()[0]["id"]
         with SessionLocal() as session:
             stored_offer = session.get(WorkflowInstallOffer, offer_id)
-            assert stored_offer is not None
-            stored_offer.completion_job_id = None
+            assert stored_offer is not None and stored_offer.completion_job_id is not None
+            completion_job_id = stored_offer.completion_job_id
             completion_job = session.get(Job, completion_job_id)
-            assert completion_job is not None
-            session.delete(completion_job)
-            session.commit()
+            assert completion_job is not None and completion_job.status == "queued"
+            assert completion_job.kind == "workflow_install" and completion_job.claim_owner is None
+        with SessionLocal() as session:
+            assert session.scalar(select(WorkflowActivation)) is None
+        if change == "legacy-recover":
+            with SessionLocal() as session:
+                stored_offer = session.get(WorkflowInstallOffer, offer_id)
+                assert stored_offer is not None
+                stored_offer.completion_job_id = None
+                completion_job = session.get(Job, completion_job_id)
+                assert completion_job is not None
+                session.delete(completion_job)
+                session.commit()
     profile = await client.post(
         "/api/profiles",
         json={

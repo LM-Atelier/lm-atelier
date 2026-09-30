@@ -6,7 +6,11 @@ from pathlib import PurePosixPath
 from typing import Any, Final, Literal
 
 from .comfy_templates import COMFY_TEMPLATE_COMPILER_VERSION
-from .model_planner import INSTALL_RESOLVER_VERSION
+from .install_plan_contract_v1 import (
+    INSTALL_RESOLVER_VERSION,
+    LEGACY_INSTALL_RESOLVER_VERSION,
+    stored_install_plan_identity_matches,
+)
 from .models import InstallPlan
 from .schemas import CatalogFileSource, DownloadRequest
 from .workflow_asset_bindings import (
@@ -77,11 +81,20 @@ def compose_workflow_asset_download_requests(
 
 
 def install_plan_download_request(
-    plan: InstallPlan, *, allow_activated: bool = False, allow_downloading: bool = False
+    plan: InstallPlan,
+    *,
+    allow_activated: bool = False,
+    allow_downloading: bool = False,
+    allow_legacy_contract: bool = False,
 ) -> DownloadRequest:
     """Derive the only download request authorized by an immutable plan."""
 
-    _validate_plan_state(plan, allow_activated=allow_activated, allow_downloading=allow_downloading)
+    _validate_plan_state(
+        plan,
+        allow_activated=allow_activated,
+        allow_downloading=allow_downloading,
+        allow_legacy_contract=allow_legacy_contract,
+    )
     artifacts = _required_artifacts(plan)
     allow_patterns: list[str] = []
     expected_sha256: dict[str, str] = {}
@@ -175,7 +188,11 @@ def install_plan_download_request(
 
 
 def _validate_plan_state(
-    plan: InstallPlan, *, allow_activated: bool = False, allow_downloading: bool = False
+    plan: InstallPlan,
+    *,
+    allow_activated: bool = False,
+    allow_downloading: bool = False,
+    allow_legacy_contract: bool = False,
 ) -> None:
     if plan.provider not in _PROVIDERS:
         raise WorkflowAssetDownloadError(
@@ -206,9 +223,15 @@ def _validate_plan_state(
         raise WorkflowAssetDownloadError(
             "install_plan_not_supported", "install plan is not supported"
         )
-    if plan.resolver_version != INSTALL_RESOLVER_VERSION:
+    if plan.resolver_version != INSTALL_RESOLVER_VERSION and not (
+        allow_legacy_contract and plan.resolver_version == LEGACY_INSTALL_RESOLVER_VERSION
+    ):
         raise WorkflowAssetDownloadError(
             "install_contract_changed", "install contract changed; review the assets again"
+        )
+    if not stored_install_plan_identity_matches(plan):
+        raise WorkflowAssetDownloadError(
+            "install_plan_changed", "install plan evidence changed; run the install check again"
         )
     runtime = plan.runtime_contract_json
     if not isinstance(runtime, dict):

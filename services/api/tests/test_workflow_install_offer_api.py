@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import hashlib
 from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from install_plan_fixture import bind_install_plan_identity
 from sqlalchemy.orm import Session
 
 from local_lm.db import SessionLocal
@@ -84,7 +84,6 @@ def _seed() -> tuple[str, str, str]:
             revision="202",
             role="image",
             engine="comfyui",
-            plan_hash=hashlib.sha256(b"plan_offer_api").hexdigest(),
             resolver_version=INSTALL_RESOLVER_VERSION,
             compatibility="supported",
             artifacts_json=[
@@ -107,7 +106,7 @@ def _seed() -> tuple[str, str, str]:
             activation_probe_json={},
             status="planned",
         )
-        session.add_all([revision, plan])
+        session.add_all([revision, bind_install_plan_identity(plan)])
         session.flush()
         definition.current_revision_id = revision.id
         session.commit()

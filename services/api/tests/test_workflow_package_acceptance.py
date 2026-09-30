@@ -214,7 +214,9 @@ async def test_changed_preflight_refuses_without_creating_installation_work(
         session.commit()
     response = await client.post(_url(plan["id"]))
     assert response.status_code == 409, response.text
-    assert response.json()["code"] == "workflow-package-install-plan-changed"
+    assert response.json()["code"] == (
+        "workflow-package-install-plan-changed" if change == "source" else "install_plan_changed"
+    )
     assert _identities() == before and started == []
 
 

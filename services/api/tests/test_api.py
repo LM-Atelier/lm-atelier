@@ -6978,7 +6978,7 @@ async def test_catalog_preflight_autoselects_smallest_gguf(
                 "compatibility": "likely",
                 "compatibility_reasons": ["GGUF artifact detected"],
             },
-            "revision": revision,
+            "revision": "a" * 40,
             "files": [
                 {"filename": "large.gguf", "size": 2048, "sha256": "b" * 64},
                 {"filename": "small.gguf", "size": 1024, "sha256": "a" * 64},
@@ -6996,6 +6996,7 @@ async def test_catalog_preflight_autoselects_smallest_gguf(
         },
     )
     assert response.status_code == 200
+    assert response.json()["revision"] == "a" * 40
     assert response.json()["can_install"] is True
     assert response.json()["selected_files"] == ["small.gguf"]
     assert response.json()["expected_sha256"] == {"small.gguf": "a" * 64}
@@ -7006,7 +7007,7 @@ async def test_catalog_preflight_autoselects_smallest_gguf(
         json={
             "install_plan_id": plan["id"],
             "remote_id": "owner/model",
-            "revision": "abc123",
+            "revision": response.json()["revision"],
             "role": "chat",
             "engine": "llama.cpp",
             "allow_patterns": ["large.gguf"],
@@ -7075,7 +7076,7 @@ async def test_catalog_preflight_selects_a_complete_split_gguf_set(
                 "compatibility": "likely",
                 "compatibility_reasons": ["GGUF artifact detected"],
             },
-            "revision": revision,
+            "revision": "a" * 40,
             "files": [
                 {
                     "filename": "model-Q4_K_M-00002-of-00002.gguf",
@@ -7102,6 +7103,7 @@ async def test_catalog_preflight_selects_a_complete_split_gguf_set(
     )
 
     assert response.status_code == 200
+    assert response.json()["revision"] == "a" * 40
     payload = response.json()
     assert payload["can_install"] is True
     assert payload["selected_files"] == [
@@ -7230,8 +7232,31 @@ async def test_catalog_preflight_explains_an_incomplete_split_gguf_set(
 
 
 async def test_catalog_preflight_autoselects_safe_media_checkpoint(
-    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    client: AsyncClient,
+    settings: Settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from test_downloads import safetensors_bytes
+
+    settings.media_engine = "comfyui"
+    external_runtime = tmp_path / "external-comfy"
+    external_runtime.mkdir()
+    settings.comfy_executable = external_runtime / "python.exe"
+    settings.comfy_executable.write_bytes(b"external runtime")
+    settings.comfy_directory = external_runtime / "ComfyUI"
+    settings.comfy_directory.mkdir()
+    (settings.comfy_directory / "main.py").write_text("", encoding="utf-8")
+
+    header = safetensors_bytes(
+        [
+            "model.diffusion_model.input_blocks.0.weight",
+            "cond_stage_model.transformer.text_model.embeddings.token_embedding.weight",
+            "first_stage_model.decoder.conv.weight",
+        ]
+    )
+    monkeypatch.setattr(HuggingFaceCatalog, "inspect_file_prefix", AsyncMock(return_value=header))
+
     async def inspect(
         _catalog: HuggingFaceCatalog,
         remote_id: str,
@@ -7246,7 +7271,7 @@ async def test_catalog_preflight_autoselects_safe_media_checkpoint(
                 "compatibility": "likely",
                 "compatibility_reasons": ["safetensors artifact detected"],
             },
-            "revision": revision,
+            "revision": "a" * 40,
             "files": [
                 {"filename": "model.safetensors", "size": 2048, "sha256": "a" * 64},
                 {"filename": "vae.safetensors", "size": 1024, "sha256": "b" * 64},
@@ -7264,7 +7289,8 @@ async def test_catalog_preflight_autoselects_safe_media_checkpoint(
         },
     )
     assert response.status_code == 200
-    assert response.json()["can_install"] is True
+    assert response.json()["revision"] == "a" * 40
+    assert response.json()["can_install"] is True, response.json()["install_plan"]["failure_reason"]
     assert response.json()["selected_files"] == ["model.safetensors"]
 
 
@@ -7736,7 +7762,7 @@ async def test_comfy_catalog_preflight_pins_a_multirepository_official_bundle(
     assert [item["path"] for item in named["install_plan"]["artifacts_json"]] == [
         "model.safetensors"
     ]
-    assert named["install_plan"]["resolver_version"] == "install-resolver-v9"
+    assert named["install_plan"]["resolver_version"] == "install-resolver-v10"
     runtime_contract = named["install_plan"]["runtime_contract_json"]
     assert runtime_contract["workflow_reference_kind"] == "checkpoint"
     assert runtime_contract["workflow_asset_kind"] == "checkpoint"

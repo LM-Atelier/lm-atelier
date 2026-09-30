@@ -4,6 +4,7 @@ from copy import deepcopy
 from typing import Any
 
 import pytest
+from install_plan_fixture import bind_install_plan_identity
 
 from local_lm.comfy_templates import COMFY_TEMPLATE_COMPILER_VERSION
 from local_lm.comfy_workflow_packages import WorkflowAssetReference
@@ -73,7 +74,10 @@ def _plan(
         "status": "planned",
     }
     values.update(overrides)
-    return InstallPlan(**values)
+    plan = bind_install_plan_identity(InstallPlan(**values))
+    if "plan_hash" in overrides:
+        plan.plan_hash = overrides["plan_hash"]
+    return plan
 
 
 def _reference(path: str, *, kind: str = "lora") -> WorkflowAssetReference:

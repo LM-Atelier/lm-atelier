@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Generator
 
 import pytest
+from install_plan_fixture import bind_install_plan_identity
 from sqlalchemy import create_engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -106,7 +106,6 @@ def _plan(
         revision="202",
         role="image",
         engine="comfyui",
-        plan_hash=hashlib.sha256(plan_id.encode()).hexdigest(),
         resolver_version=INSTALL_RESOLVER_VERSION,
         compatibility="supported",
         artifacts_json=[
@@ -129,7 +128,7 @@ def _plan(
         activation_probe_json={},
         status="planned",
     )
-    session.add(plan)
+    session.add(bind_install_plan_identity(plan))
     session.flush()
     return plan
 
