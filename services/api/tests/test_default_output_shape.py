@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
@@ -29,6 +30,10 @@ async def _picture_workflow(
 ) -> tuple[str, str]:
     """A trusted picture workflow whose size the geometry proof covers, and a profile for it."""
     monkeypatch.setattr(app.state.services.engines.settings, "media_engine", "comfyui")
+    # A turn's work starts as soon as the lease is let go. With the engine set to
+    # ComfyUI, starting or restarting that worker would first set up its runtime by
+    # downloading it; the mock engine that runs the work here needs no worker.
+    monkeypatch.setattr(app.state.services.processes, "start_media", AsyncMock())
     created = await client.post(
         "/api/workflows",
         json={
