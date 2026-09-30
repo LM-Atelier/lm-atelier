@@ -1,9 +1,12 @@
 import { SlidersHorizontal } from "lucide-react";
-import { ADJUSTMENT_LIMIT, isNeutral } from "./studioAdjustments";
+import { useMemo } from "react";
+import { ADJUSTMENT_LIMIT, isNeutral, type StudioSliderKey } from "./studioAdjustments";
+import { pictureHistogram } from "./studioAutoAdjust";
 import { currentLook, lookAdjustments, LOOKS } from "./studioLooks";
-import type { StudioColorAdjustments } from "./types";
+import { StudioToneCurve } from "./StudioToneCurve";
+import type { StudioColorAdjustments, StudioCurvePoint } from "./types";
 
-const SLIDERS: Array<{ key: keyof StudioColorAdjustments; label: string; minimum?: number }> = [
+const SLIDERS: Array<{ key: StudioSliderKey; label: string; minimum?: number }> = [
   { key: "brightness", label: "Brightness" },
   { key: "contrast", label: "Contrast" },
   { key: "highlights", label: "Highlights" },
@@ -24,7 +27,7 @@ function signed(value: number): string {
   return value > 0 ? `+${value}` : String(value);
 }
 
-/** Light and color: thirteen sliders shown on the picture as they move.
+/** Light and color: thirteen sliders and a tone curve, shown on the picture as they move.
  *
  * The canvas draws the adjusted picture itself, by the same arithmetic the
  * server uses, so what is on screen is what Apply makes. Nothing is saved
@@ -42,17 +45,24 @@ export function StudioAdjustTool({
   onApply,
   onAuto,
   onLook,
+  onCurve,
+  pixels = null,
 }: {
   adjustments: StudioColorAdjustments;
   busy: boolean;
-  onChange: (key: keyof StudioColorAdjustments, value: number) => void;
+  onChange: (key: StudioSliderKey, value: number) => void;
   onReset: () => void;
   onApply: () => void;
   /** Sets the sliders from the picture; absent where its colors cannot be read. */
   onAuto?: () => void;
   /** Sets every slider to a look. */
   onLook?: (adjustments: StudioColorAdjustments) => void;
+  /** Sets the tone curve's points. */
+  onCurve?: (points: StudioCurvePoint[]) => void;
+  /** The picture's own pixels, which the tone curve shows the brightness of; absent where they cannot be read. */
+  pixels?: Uint8ClampedArray | null;
 }) {
+  const histogram = useMemo(() => (pixels ? pictureHistogram(pixels) : null), [pixels]);
   const unchanged = isNeutral(adjustments);
   const ready = !unchanged && !busy;
   const chosen = currentLook(adjustments);
@@ -87,6 +97,7 @@ export function StudioAdjustTool({
           />
         </label>
       ))}
+      {onCurve && <StudioToneCurve points={adjustments.curve} busy={busy} onChange={onCurve} histogram={histogram} />}
       <small>
         {busy
           ? "Applying…"

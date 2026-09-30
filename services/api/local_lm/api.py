@@ -2919,7 +2919,7 @@ async def apply_studio_local_edit(
         )
         size = PictureSize(**payload.size.model_dump()) if payload.size is not None else None
         adjustments = (
-            ColorAdjustments(**payload.adjustments.model_dump())
+            ColorAdjustments.from_request(payload.adjustments.model_dump())
             if payload.adjustments is not None
             else None
         )

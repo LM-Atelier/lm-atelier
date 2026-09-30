@@ -2,7 +2,8 @@
 
 import { describe, expect, it } from "vitest";
 import {
-  adjustPixels, channelTables, grainLevel, grainOffsets, isNeutral, levelEnds, NEUTRAL_ADJUSTMENTS,
+  adjustPixels, channelTables, curveLevel, grainLevel, grainOffsets, isNeutral, levelEnds, NEUTRAL_ADJUSTMENTS,
+  toneCurve,
 } from "./studioAdjustments";
 import type { StudioColorAdjustments } from "./types";
 
@@ -81,6 +82,20 @@ const CASES: Array<[string, Partial<StudioColorAdjustments>, number[][]]> = [
   ["brighter with white held down", { brightness: 40, whites: -80 }, [
     [204, 106, 53], [11, 204, 135], [135, 135, 135], [204, 0, 204], [0, 0, 0],
     [204, 204, 204], [39, 96, 204], [0, 179, 0], [204, 204, 133], [178, 48, 165]]],
+  ["an s-curve", { curve: [{ x: 64, y: 48 }, { x: 192, y: 208 }] }, [
+    [216, 90, 35], [7, 244, 128], [128, 128, 128], [255, 0, 255], [0, 0, 0],
+    [255, 255, 255], [25, 79, 218], [0, 184, 0], [224, 254, 125], [182, 31, 166]]],
+  ["a lifted middle", { curve: [{ x: 128, y: 160 }] }, [
+    [217, 129, 65], [13, 244, 160], [160, 160, 160], [255, 0, 255], [0, 0, 0],
+    [255, 255, 255], [48, 118, 219], [0, 196, 0], [224, 254, 158], [195, 59, 185]]],
+  ["a steep turn, where the slopes are scaled down", { curve: [{ x: 40, y: 120 }, { x: 60, y: 130 }, { x: 200, y: 140 }] }, [
+    [140, 131, 129], [33, 218, 132], [132, 132, 132], [255, 0, 255], [0, 0, 0],
+    [255, 255, 255], [115, 131, 141], [0, 135, 0], [148, 251, 132], [135, 126, 134]]],
+  ["a curve under faded ends", {
+    curve: [{ x: 64, y: 48 }, { x: 192, y: 208 }], blacks: 40, whites: -20, contrast: 15,
+  }, [
+    [214, 99, 50], [26, 241, 134], [134, 134, 134], [242, 26, 242], [26, 26, 26],
+    [242, 242, 242], [41, 88, 217], [26, 186, 26], [221, 242, 132], [185, 47, 170]]],
 ];
 
 // A picture with edges in it, for sharpness, which reads each pixel's
@@ -266,6 +281,33 @@ describe("whites and blacks", () => {
   it("each count as a change on their own", () => {
     expect(isNeutral({ ...NEUTRAL_ADJUSTMENTS, whites: -1 })).toBe(false);
     expect(isNeutral({ ...NEUTRAL_ADJUSTMENTS, blacks: 1 })).toBe(false);
+  });
+});
+
+describe("the tone curve", () => {
+  it("passes through its points and keeps black and white, as the server's does", () => {
+    const points = [{ x: 40, y: 120 }, { x: 60, y: 130 }, { x: 200, y: 140 }];
+    const curve = toneCurve(points);
+    if (!curve) throw new Error("a curve with points is a curve");
+
+    expect(points.map((point) => curveLevel(curve, point.x))).toEqual([120, 130, 140]);
+    expect([curveLevel(curve, 0), curveLevel(curve, 255)]).toEqual([0, 255]);
+    for (const table of channelTables({ ...NEUTRAL_ADJUSTMENTS, curve: points })) {
+      expect(points.map((point) => table[point.x])).toEqual([120, 130, 140]);
+      expect([table[0], table[255]]).toEqual([0, 255]);
+    }
+    expect(toneCurve([])).toBeNull();
+  });
+
+  it("finds the slopes the server finds", () => {
+    // The same numbers test_studio_adjustments.py's curve reads.
+    expect(toneCurve([{ x: 64, y: 48 }, { x: 192, y: 208 }])?.slopes)
+      .toEqual([0.75, 1.0, 0.998015873015873, 0.746031746031746]);
+  });
+
+  it("counts as a change only where it leaves the straight line", () => {
+    expect(isNeutral({ ...NEUTRAL_ADJUSTMENTS, curve: [{ x: 100, y: 101 }] })).toBe(false);
+    expect(isNeutral({ ...NEUTRAL_ADJUSTMENTS, curve: [{ x: 64, y: 64 }, { x: 200, y: 200 }] })).toBe(true);
   });
 });
 

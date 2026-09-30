@@ -12,10 +12,12 @@ from local_lm.schemas import StudioColorAdjustments
 from local_lm.studio_adjustments import (
     GRAIN_TILE,
     ColorAdjustments,
+    CurvePoint,
     adjust_colors,
     channel_tables,
     grain_level,
     level_ends,
+    tone_curve,
     vignette_mask,
 )
 
@@ -173,6 +175,35 @@ CASES: list[tuple[str, dict[str, int], str]] = [
         {"brightness": 40, "whites": -80},
         "204,106,53 11,204,135 135,135,135 204,0,204 0,0,0 "
         "204,204,204 39,96,204 0,179,0 204,204,133 178,48,165",
+    ),
+    (
+        "an s-curve",
+        {"curve": [{"x": 64, "y": 48}, {"x": 192, "y": 208}]},
+        "216,90,35 7,244,128 128,128,128 255,0,255 0,0,0 "
+        "255,255,255 25,79,218 0,184,0 224,254,125 182,31,166",
+    ),
+    (
+        "a lifted middle",
+        {"curve": [{"x": 128, "y": 160}]},
+        "217,129,65 13,244,160 160,160,160 255,0,255 0,0,0 "
+        "255,255,255 48,118,219 0,196,0 224,254,158 195,59,185",
+    ),
+    (
+        "a steep turn, where the slopes are scaled down",
+        {"curve": [{"x": 40, "y": 120}, {"x": 60, "y": 130}, {"x": 200, "y": 140}]},
+        "140,131,129 33,218,132 132,132,132 255,0,255 0,0,0 "
+        "255,255,255 115,131,141 0,135,0 148,251,132 135,126,134",
+    ),
+    (
+        "a curve under faded ends",
+        {
+            "curve": [{"x": 64, "y": 48}, {"x": 192, "y": 208}],
+            "blacks": 40,
+            "whites": -20,
+            "contrast": 15,
+        },
+        "214,99,50 26,241,134 134,134,134 242,26,242 26,26,26 "
+        "242,242,242 41,88,217 26,186,26 221,242,132 185,47,170",
     ),
 ]
 
@@ -362,7 +393,7 @@ def _reds(picture: Image.Image) -> list[list[int]]:
 
 @pytest.mark.parametrize(("name", "sliders", "expected"), CASES, ids=[case[0] for case in CASES])
 def test_the_pixels_the_preview_promises(name: str, sliders: dict[str, Any], expected: str) -> None:
-    result = adjust_colors(_row(PIXELS), ColorAdjustments(**sliders))
+    result = adjust_colors(_row(PIXELS), ColorAdjustments.from_request(sliders))
 
     assert [result.getpixel((x, 0)) for x in range(len(PIXELS))] == _pixels(expected)
 
@@ -376,6 +407,9 @@ def test_every_slider_at_zero_changes_nothing() -> None:
     assert not ColorAdjustments(vignette=1).is_neutral()
     assert not ColorAdjustments(whites=-1).is_neutral()
     assert not ColorAdjustments(blacks=1).is_neutral()
+    assert not ColorAdjustments(curve=(CurvePoint(100, 101),)).is_neutral()
+    # Points on the straight line from black to white change no level.
+    assert ColorAdjustments(curve=(CurvePoint(64, 64), CurvePoint(200, 200))).is_neutral()
     for table in channel_tables(ColorAdjustments()):
         assert table == list(range(256))
 
@@ -445,6 +479,52 @@ def test_whites_and_blacks_run_from_minus_100_to_100() -> None:
             StudioColorAdjustments(**{name: -101})
         with pytest.raises(ValueError):
             StudioColorAdjustments(**{name: 101})
+
+
+def test_the_tone_curve_passes_through_its_points_and_keeps_black_and_white() -> None:
+    points = (CurvePoint(40, 120), CurvePoint(60, 130), CurvePoint(200, 140))
+    curve = tone_curve(points)
+    assert curve is not None
+
+    assert [curve.level(point.x) for point in points] == [120.0, 130.0, 140.0]
+    assert (curve.level(0), curve.level(255)) == (0.0, 255.0)
+    for table in channel_tables(ColorAdjustments(curve=points)):
+        assert [table[point.x] for point in points] == [120, 130, 140]
+        assert (table[0], table[255]) == (0, 255)
+    assert tone_curve(()) is None
+
+
+@pytest.mark.parametrize(
+    "points",
+    [
+        [(64, 48), (192, 208)],
+        [(40, 120), (60, 130), (200, 140)],
+        [(10, 90), (20, 95), (30, 200), (240, 201), (250, 254), (254, 255)],
+    ],
+)
+def test_a_rising_curve_never_swaps_two_levels_or_overshoots_its_points(
+    points: list[tuple[int, int]],
+) -> None:
+    table = channel_tables(ColorAdjustments(curve=tuple(CurvePoint(x, y) for x, y in points)))[0]
+
+    assert all(low <= high for low, high in pairwise(table))
+    ends = [(0, 0), *points, (255, 255)]
+    for (left, low), (right, high) in pairwise(ends):
+        assert all(low <= table[level] <= high for level in range(left, right + 1))
+
+
+def test_a_curve_runs_left_to_right_with_at_most_six_points_inside_the_range() -> None:
+    assert StudioColorAdjustments(curve=[{"x": 1, "y": 0}, {"x": 254, "y": 255}]).curve
+    for curve in (
+        [{"x": 80, "y": 10}, {"x": 80, "y": 90}],
+        [{"x": 90, "y": 10}, {"x": 80, "y": 90}],
+        [{"x": 0, "y": 10}],
+        [{"x": 255, "y": 10}],
+        [{"x": 10, "y": 256}],
+        [{"x": 10 * index + 10, "y": 50} for index in range(7)],
+    ):
+        with pytest.raises(ValueError):
+            StudioColorAdjustments(curve=curve)
 
 
 def test_transparency_is_kept_as_it_was() -> None:
