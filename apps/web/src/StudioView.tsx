@@ -196,7 +196,8 @@ export function StudioView({
   useEffect(() => draft.track({ artifactId: currentArtifactId, tools, instruction, selectedId }));
   // Enhance asks for no words: the whole picture is the subject and
   // the size is the whole instruction. Text takes its words from its
-  // own fields, and without a box it would change the whole picture.
+  // own fields, and without a box it would change the whole picture;
+  // Remove, too, needs a marked part as well as its words.
   // Isolate asks for nothing and runs only the workflow the report names.
   // Replacing a subject needs the picture it comes from, and runs only the
   // workflows the report names, so the studio's own choice never matters.
@@ -204,6 +205,7 @@ export function StudioView({
     unchecked !== null ||
     (tools.kind === "extend" && !Object.values(tools.margins).some(Boolean)) ||
     (tools.kind === "text" && (!tools.newWords.trim() || selectionCoverage === 0)) ||
+    (tools.kind === "remove" && selectionCoverage === 0) ||
     (tools.kind === "isolate" && !activeTool?.workflow_revision_id) ||
     (tools.kind === "background" && !activeTool?.workflow_revision_id) ||
     (tools.kind === "subject" &&

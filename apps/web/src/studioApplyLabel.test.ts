@@ -12,6 +12,7 @@ describe("the apply button's words", () => {
   it.each([
     ["extend", "Extend"],
     ["text", "Replace words"],
+    ["remove", "Remove"],
     ["relight", "Relight"],
     ["isolate", "Cut out"],
     ["background", "Replace background"],

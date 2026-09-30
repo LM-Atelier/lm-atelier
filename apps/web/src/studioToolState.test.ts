@@ -36,7 +36,7 @@ describe("studio tool state", () => {
   });
 
   it("offers the selection's controls only to the tools that work on a marked part", () => {
-    for (const kind of ["brush", "eraser", "rect", "lasso", "bucket", "wand", "text", "blur", "paint"] as const) {
+    for (const kind of ["brush", "eraser", "rect", "lasso", "bucket", "wand", "text", "remove", "blur", "paint"] as const) {
       expect(toolMarksPicture(kind)).toBe(true);
     }
     for (const kind of [

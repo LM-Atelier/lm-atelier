@@ -260,6 +260,27 @@ export function StudioToolOptions({
       </div>
     );
   }
+  if (tools.kind === "remove") {
+    return (
+      <div className="studio-tool-options">
+        <small>
+          Brush over what should go, and say what it is. Only the marked part changes;
+          the rest of the picture keeps its own pixels.
+        </small>
+        <label>
+          <span>
+            <strong>What to remove</strong>
+          </span>
+          <input
+            type="text"
+            value={instruction}
+            placeholder="e.g. the lamp post"
+            onChange={(event) => onInstructionChange(event.target.value)}
+          />
+        </label>
+      </div>
+    );
+  }
   if (tools.kind === "text") {
     return (
       <div className="studio-tool-options">

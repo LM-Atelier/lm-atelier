@@ -1,4 +1,5 @@
 import {
+  Bandage,
   Brush,
   Captions,
   Crop,
@@ -52,6 +53,7 @@ const TOOL_GROUPS: RailTool[][] = [
   [
     { kind: "instruct", label: "Instruct the whole image", icon: Type },
     { kind: "text", label: "Replace words in the picture", icon: LetterText },
+    { kind: "remove", label: "Remove something from the picture", icon: Bandage },
   ],
   [
     { kind: "isolate", label: "Cut the subject out", icon: Scissors },

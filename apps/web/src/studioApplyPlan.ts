@@ -106,6 +106,18 @@ export function studioApplyPlan(
       },
     };
   }
+  if (tools.kind === "remove") {
+    const target = instruction.trim();
+    return {
+      // The model redraws the whole picture without it and only the marked part
+      // is kept, so it is told what goes and to leave the rest as it was.
+      words: target
+        ? `Remove ${target}. Fill the space it leaves to match what surrounds it, and leave everything else unchanged.`
+        : "",
+      blendSelection: true,
+      sendsLightMap: false,
+    };
+  }
   // Text takes its words from its own fields. Enhance and Extend ask for no
   // words, and the turn requires some: both were reaching the server and being
   // refused before anything ran. Otherwise the user's words win.
@@ -149,6 +161,8 @@ export function studioApplyLabel(tools: StudioToolState, busy: boolean, selectio
       return "Extend";
     case "text":
       return "Replace words";
+    case "remove":
+      return "Remove";
     case "relight":
       return "Relight";
     case "isolate":

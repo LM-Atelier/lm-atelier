@@ -45,7 +45,7 @@ export type { StudioToolKind } from "./types";
  * instruct tool" instead meant a selection drawn with the brush, left on the
  * canvas, travelled with an Enhance or an Extend that never asked for one -
  * a mask the reader had stopped thinking about, silently narrowing the work.
- * Text is among them: the box around the words is what keeps the rest of the
+ * Text and Remove are among them: the marked part is what keeps the rest of the
  * picture as it was.
  */
 const MASK_TOOLS: ReadonlySet<StudioToolKind> = new Set<StudioToolKind>([
@@ -56,6 +56,7 @@ const MASK_TOOLS: ReadonlySet<StudioToolKind> = new Set<StudioToolKind>([
   "bucket",
   "wand",
   "text",
+  "remove",
 ]);
 
 export function toolUsesMask(kind: StudioToolKind): boolean {
@@ -417,11 +418,12 @@ export function toolFor(
   if (!state.mask) return null;
   const selected = state.selectionMode === "add" ? 255 : 0;
   switch (state.kind) {
-    // A blur or a paint is marked with the brush, into the same selection the
-    // other tools draw.
+    // A blur, a paint or a removal is marked with the brush, into the same
+    // selection the other tools draw.
     case "brush":
     case "blur":
     case "paint":
+    case "remove":
       return new BrushTool(state.mask, state.brushRadius);
     case "eraser":
       return new BrushTool(state.mask, state.brushRadius, 0);

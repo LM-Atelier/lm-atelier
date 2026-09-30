@@ -206,6 +206,7 @@ describe("what travels with a turn", () => {
     expect(toolUsesMask("instruct")).toBe(false);
     // The box around the words is what keeps the rest of the picture as it was.
     expect(toolUsesMask("text")).toBe(true);
+    expect(toolUsesMask("remove")).toBe(true);
   });
 
   it("says which words to replace, and with what, once there are new words", () => {
