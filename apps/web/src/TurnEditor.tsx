@@ -336,6 +336,8 @@ export function TurnEditor({
     // Only the chat's own choice can be changed from here, not one a caller fixed.
     enabled: !onAccept && workflowControl === undefined && workflowSelection === undefined && workflowSchemaOverride === undefined,
   });
+  // A video made from a picture can take that picture's shape.
+  const shapeSource = drawerMode === "video" && attachments[0]?.kind === "image" ? attachments[0].id : null;
   const clearAcceptedDraft = () => {
     setText("");
     clearAcceptedState();
@@ -540,6 +542,7 @@ export function TurnEditor({
         imageEdit={drawerImageEdit}
         imageEditPrompt={text}
         shapeAlternatives={shapeAlternatives}
+        shapeSource={shapeSource}
       />
     </fieldset>
   );

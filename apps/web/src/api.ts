@@ -1235,6 +1235,13 @@ export const api = {
       `/api/workflow-revisions/${encodeURIComponent(revisionId)}/output-geometry/resolve`,
       { method: "POST", body: JSON.stringify(geometry) },
     ),
+  // Read-only as well: the size the revision makes in the exact shape of one
+  // picture, as the picture is shown. A shape it cannot make exactly is refused.
+  matchWorkflowRevisionOutputGeometryToSource: (revisionId: string, sourceArtifactId: string) =>
+    request<WorkflowOutputGeometryResolution>(
+      `/api/workflow-revisions/${encodeURIComponent(revisionId)}/output-geometry/match-source`,
+      { method: "POST", body: JSON.stringify({ source_artifact_id: sourceArtifactId }) },
+    ),
   workflowSummaries: () => request<WorkflowSummary[]>("/api/workflow-summaries"),
   workflow: (id: string, signal?: AbortSignal) =>
     request<Workflow>("/api/workflows/" + encodeURIComponent(id), { signal }).then((value) => {

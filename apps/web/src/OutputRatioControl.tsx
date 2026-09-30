@@ -20,6 +20,11 @@ import type { OutputRatioPresetId } from "./types";
  * hit exactly is not offered at all, because returning a picture of a shape
  * nobody asked for is worse than not offering the choice. Of those, the ones
  * shown and their order are the person's, from Settings.
+ *
+ * Where the turn has a picture its output can take the shape of, such as a
+ * video's start frame, Match source asks the workflow for its own size in
+ * exactly that shape. That is asked before the answer is known, so a picture
+ * of a shape the workflow cannot make exactly is refused, and says so.
  */
 
 export function OutputRatioControl({
@@ -29,6 +34,7 @@ export function OutputRatioControl({
   sizeIsTheWorkflowsOwn,
   onDimensions,
   alternatives,
+  source,
 }: {
   revisionId: string;
   width: unknown;
@@ -38,8 +44,17 @@ export function OutputRatioControl({
   onDimensions: (dimensions: { width: number; height: number }) => void;
   /** Other workflows for this turn, offered when this one sets its own size. */
   alternatives?: ShapeAlternatives;
+  /** A picture the output can take the shape of, such as a video's start frame. */
+  source?: string | null;
 }) {
-  const [pending, setPending] = useState<OutputRatioPresetId | null>(null);
+  const [pending, setPending] = useState<OutputRatioPresetId | "source" | null>(null);
+  // What Match source answered, and a refusal, are each kept with the revision
+  // and picture they were about, like a preset's refusal. The choice shows as
+  // made only while the size is still the pair it answered.
+  const [matched, setMatched] = useState<
+    { revisionId: string; source: string; width: number; height: number } | null
+  >(null);
+  const [unmatched, setUnmatched] = useState<{ revisionId: string; source: string } | null>(null);
   // A refusal is a fact about one revision, so it is remembered with the
   // revision it came from. The panel's role tabs swap which revision this row
   // describes without remounting it, and a message carried across that swap
@@ -99,6 +114,9 @@ export function OutputRatioControl({
     ? `${width as number} × ${height as number}`
     : null;
   const refusal = refused?.revisionId === revisionId ? refused.preset : null;
+  const matching = Boolean(source) && matched?.revisionId === revisionId && matched.source === source
+    && matched.width === width && matched.height === height;
+  const cannotMatch = Boolean(source) && unmatched?.revisionId === revisionId && unmatched.source === source;
 
   const choose = async (preset: OutputRatioPresetId) => {
     // The guard lives here rather than on a disabled attribute. Disabling a
@@ -109,6 +127,7 @@ export function OutputRatioControl({
     if (pending !== null) return;
     setPending(preset);
     setRefused(null);
+    setUnmatched(null);
     try {
       const answer = await api.resolveWorkflowRevisionOutputGeometry(revisionId, {
         mode,
@@ -126,6 +145,22 @@ export function OutputRatioControl({
     }
   };
 
+  const matchSource = async (picture: string) => {
+    if (pending !== null) return;
+    setPending("source");
+    setRefused(null);
+    setUnmatched(null);
+    try {
+      const answer = await api.matchWorkflowRevisionOutputGeometryToSource(revisionId, picture);
+      setMatched({ revisionId, source: picture, width: answer.width, height: answer.height });
+      onDimensions({ width: answer.width, height: answer.height });
+    } catch {
+      setUnmatched({ revisionId, source: picture });
+    } finally {
+      setPending(null);
+    }
+  };
+
   return (
     <div className="setting-row output-ratio-control">
       <span>
@@ -133,6 +168,9 @@ export function OutputRatioControl({
         {resolved && <small>{`Output: ${resolved}`}</small>}
         {refusal && (
           <small role="alert">{`This workflow no longer offers ${refusal}.`}</small>
+        )}
+        {cannotMatch && (
+          <small role="alert">This workflow cannot make the source picture&apos;s exact shape.</small>
         )}
       </span>
       <div className="segmented compact" role="group" aria-label="Output aspect ratio">
@@ -148,6 +186,17 @@ export function OutputRatioControl({
             {`${preset} ${RATIO_LABELS[preset]}`}
           </button>
         ))}
+        {source && (
+          <button
+            type="button"
+            aria-pressed={matching}
+            className={matching ? "active" : ""}
+            aria-disabled={pending !== null}
+            onClick={() => void matchSource(source)}
+          >
+            Match source
+          </button>
+        )}
       </div>
     </div>
   );

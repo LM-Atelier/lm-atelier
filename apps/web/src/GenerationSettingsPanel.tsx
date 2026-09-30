@@ -148,6 +148,7 @@ export function GenerationSettingsPanel({
   onReset,
   editSettings,
   shapeAlternatives,
+  shapeSource,
 }: {
   role: EngineRole;
   engines: EngineCapabilities[];
@@ -169,6 +170,8 @@ export function GenerationSettingsPanel({
   editSettings?: { presetControl: ReactNode };
   /** Other workflows for this turn, offered when the chosen one sets its own size. */
   shapeAlternatives?: ShapeAlternatives;
+  /** A picture the output can take the shape of, such as a video's start frame. */
+  shapeSource?: string | null;
 }) {
   const [visibility, setVisibility] = useState<Visibility>(storedSettingDetail);
   const engine = engines.find((item) => item.roles.includes(role));
@@ -307,6 +310,7 @@ export function GenerationSettingsPanel({
             { ...values, width, height }, ["width", "height"],
           )}
           alternatives={shapeAlternatives}
+          source={shapeSource}
         />}
         <NativeWorkflowFixedSettings schema={workflowSchema} />
         {fields.map((field) => (
