@@ -10,12 +10,18 @@ import pytest
 from local_lm import catalog_file_identity as module
 
 
-async def _hash(
+async def _verify(
     files: list[dict[str, Any]], read: AsyncMock, *, provider: str = "huggingface"
-) -> list[dict[str, Any]]:
+) -> module.CatalogFileVerification:
     return await module.hash_selected_catalog_files(
         files, provider=provider, remote_id="example/model", revision="a" * 40, read=read
     )
+
+
+async def _hash(
+    files: list[dict[str, Any]], read: AsyncMock, *, provider: str = "huggingface"
+) -> list[dict[str, Any]]:
+    return (await _verify(files, read, provider=provider)).files
 
 
 async def test_hashes_complete_config_without_mutating_catalog_metadata() -> None:
@@ -47,7 +53,10 @@ async def test_hashes_companion_bytes_at_their_own_source_identity() -> None:
 @pytest.mark.parametrize("content", [b"ab", b"abcd", b"abcde"])
 async def test_incomplete_or_longer_files_do_not_supply_a_hash(content: bytes) -> None:
     original = {"filename": "config.json", "size": 3}
-    assert await _hash([original], AsyncMock(return_value=content)) == [original]
+    result = await _verify([original], AsyncMock(return_value=content))
+    assert result.files == [original]
+    assert result.issues == {"size-changed"}
+    assert result.detail is not None and "reported size" in result.detail
 
 
 @pytest.mark.parametrize("digest", ["a" * 64, "A" * 64, "invalid", ""])
@@ -58,11 +67,14 @@ async def test_explicit_hash_metadata_is_never_replaced(digest: str) -> None:
     reader.assert_not_awaited()
 
 
-@pytest.mark.parametrize("size", [None, True, False, 0, -1, "3", 3.5, 4 * 1024 * 1024 + 1])
+@pytest.mark.parametrize("size", [None, True, False, 0, -1, "3", 3.5, 10 * 1024 * 1024 + 1])
 async def test_unknown_or_unbounded_sizes_are_not_read(size: object) -> None:
     original = {"filename": "config.json", "size": size}
     reader = AsyncMock()
-    assert await _hash([original], reader) == [original]
+    result = await _verify([original], reader)
+    assert result.files == [original]
+    issue = "verification-limit" if size == 10 * 1024 * 1024 + 1 else "size-unavailable"
+    assert result.issues == {issue}
     reader.assert_not_awaited()
 
 
@@ -77,7 +89,8 @@ async def test_mutable_or_invalid_revisions_are_not_read(revision: str) -> None:
         revision=revision,
         read=reader,
     )
-    assert result == [original]
+    assert result.files == [original]
+    assert result.issues == {"source-unavailable"}
     reader.assert_not_awaited()
 
 
@@ -117,16 +130,20 @@ async def test_other_providers_keep_their_own_hash_authority(provider: str) -> N
 async def test_read_count_is_bounded_even_when_every_read_fails() -> None:
     originals = [{"filename": f"{index}.json", "size": 3} for index in range(20)]
     reader = AsyncMock(side_effect=OSError("Unavailable"))
-    assert await _hash(originals, reader) == originals
+    result = await _verify(originals, reader)
+    assert result.files == originals
+    assert result.issues == {"read-failed", "verification-limit"}
     assert reader.await_count == 16
 
 
 async def test_total_read_bytes_are_reserved_before_each_attempt() -> None:
-    originals = [{"filename": f"{index}.json", "size": 4 * 1024 * 1024} for index in range(8)]
+    originals = [{"filename": f"{index}.json", "size": 10 * 1024 * 1024} for index in range(8)]
     reader = AsyncMock(side_effect=OSError("Unavailable"))
-    assert await _hash(originals, reader) == originals
+    result = await _verify(originals, reader)
+    assert result.files == originals
+    assert result.issues == {"read-failed", "verification-limit"}
     assert reader.await_count == 3
-    assert sum(call.kwargs["max_bytes"] for call in reader.await_args_list) <= 16 * 1024 * 1024
+    assert sum(call.kwargs["max_bytes"] for call in reader.await_args_list) <= 40 * 1024 * 1024
 
 
 async def test_read_deadline_preserves_completed_hashes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -141,8 +158,9 @@ async def test_read_deadline_preserves_completed_hashes(monkeypatch: pytest.Monk
             await asyncio.Event().wait()
         return b"abc"
 
-    result = await _hash(originals, AsyncMock(side_effect=read))
-    assert result == [
+    result = await _verify(originals, AsyncMock(side_effect=read))
+    assert result.issues == {"timed-out"}
+    assert result.files == [
         {**originals[0], "sha256": hashlib.sha256(b"abc").hexdigest()},
         originals[1],
     ]
@@ -154,3 +172,14 @@ async def test_caller_cancellation_is_not_treated_as_missing_metadata() -> None:
             [{"filename": "config.json", "size": 3}],
             AsyncMock(side_effect=asyncio.CancelledError),
         )
+
+
+@pytest.mark.parametrize("size", [4 * 1024 * 1024 + 1, 5 * 1024 * 1024, 10 * 1024 * 1024])
+async def test_complete_files_through_ten_mebibytes_supply_hashes(size: int) -> None:
+    content = b"x" * size
+    original = {"filename": "tokenizer.json", "size": size, "sha256": None}
+    reader = AsyncMock(return_value=content)
+    result = await _hash([original], reader)
+    assert result[0]["sha256"] == hashlib.sha256(content).hexdigest()
+    reader.assert_awaited_once_with("example/model", "a" * 40, "tokenizer.json", max_bytes=size + 1)
+    assert original["sha256"] is None

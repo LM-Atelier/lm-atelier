@@ -7044,14 +7044,17 @@ async def resolve_catalog_preflight(
             )
         except ExactCivitaiFileSelectionError as exc:
             raise api_error(422, "catalog-file-variant-invalid", str(exc)) from exc
+        file_verification_detail: str | None = None
         if result.can_install and callable(inspect_prefix):
-            selected_metadata = await hash_selected_catalog_files(
+            file_verification = await hash_selected_catalog_files(
                 selected_metadata,
                 provider=source,
                 remote_id=resolved_detail.model.remote_id,
                 revision=resolved_detail.revision,
                 read=inspect_prefix,
             )
+            selected_metadata = file_verification.files
+            file_verification_detail = file_verification.detail
             result = with_catalog_file_hashes(result, selected_metadata)
         workflow_component_folders: dict[str, str] = {}
         workflow_contract_error: str | None = None
@@ -7123,7 +7126,13 @@ async def resolve_catalog_preflight(
                     id="install-evidence",
                     label="File verification",
                     status="block",
-                    detail=resolved.failure_reason or "The install plan could not be verified.",
+                    detail=(
+                        file_verification_detail
+                        if resolved.failure_code == "preflight_blocked"
+                        else None
+                    )
+                    or resolved.failure_reason
+                    or "The install plan could not be verified.",
                 ),
             ]
         return result.model_copy(

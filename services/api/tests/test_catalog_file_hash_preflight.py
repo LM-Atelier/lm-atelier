@@ -118,4 +118,66 @@ async def test_preflight_explains_why_incomplete_evidence_cannot_be_installed(
     assert payload["install_plan"]["failure_code"] == "preflight_blocked"
     check = next(check for check in payload["checks"] if check["id"] == "install-evidence")
     assert check["status"] == "block"
-    assert "immutable file evidence" in check["detail"]
+    assert "fully verified" in check["detail"]
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "/api/catalog/example/model/preflight",
+        "/api/catalog/preflight?source=huggingface&id=example/model",
+    ],
+)
+async def test_failed_file_verification_can_be_retried(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch, endpoint: str
+) -> None:
+    header = _gguf({"general.architecture": "llama"})
+    size = 5 * 1024 * 1024
+    content = header + b"\0" * (size - len(header))
+    detail = CatalogDetail(
+        model=CatalogModel(remote_id="example/model", name="Fixture", compatibility="likely"),
+        revision="a" * 40,
+        files=[{"filename": "chosen.gguf", "size": size, "sha256": None}],
+    )
+    monkeypatch.setattr(
+        "local_lm.api.collect_system_info", lambda _settings: _system(None, device=False)
+    )
+    monkeypatch.setattr(HuggingFaceCatalog, "inspect", AsyncMock(return_value=detail.model_dump()))
+    monkeypatch.setattr(
+        HuggingFaceCatalog, "discover_vision_projector", AsyncMock(return_value=None)
+    )
+    complete_reads = 0
+
+    async def read(_remote: str, _revision: str, _filename: str, *, max_bytes: int) -> bytes:
+        nonlocal complete_reads
+        if max_bytes == size + 1:
+            complete_reads += 1
+            if complete_reads == 1:
+                raise OSError("Temporary constructed read failure")
+        return content[:max_bytes]
+
+    monkeypatch.setattr(HuggingFaceCatalog, "inspect_file_prefix", AsyncMock(side_effect=read))
+    request = {
+        "revision": "a" * 40,
+        "role": "chat",
+        "engine": "llama.cpp",
+        "selected_files": ["chosen.gguf"],
+    }
+    first = await client.post(endpoint, json=request)
+    assert first.status_code == 200, first.text
+    blocked = first.json()
+    assert blocked["can_install"] is False
+    assert blocked["install_plan"]["failure_code"] == "preflight_blocked"
+    check = next(item for item in blocked["checks"] if item["id"] == "install-evidence")
+    assert check["status"] == "block"
+    assert "could not be read" in check["detail"]
+    assert "Run the install check again" in check["detail"]
+    assert "provider did not supply" not in blocked["install_plan"]["failure_reason"]
+    second = await client.post(endpoint, json=request)
+    assert second.status_code == 200, second.text
+    accepted = second.json()
+    assert accepted["can_install"] is True
+    assert accepted["install_plan"]["compatibility"] == "supported"
+    assert accepted["expected_sha256"] == {"chosen.gguf": hashlib.sha256(content).hexdigest()}
+    assert complete_reads == 2
+    assert detail.files[0]["sha256"] is None

@@ -258,7 +258,7 @@ async def test_http_preflight_keeps_advice_and_explicit_model_choice(
         assert payload["install_plan"]["failure_code"] == "preflight_blocked"
         evidence = next(check for check in payload["checks"] if check["id"] == "install-evidence")
         assert evidence["status"] == "block"
-        assert "immutable file evidence" in evidence["detail"]
+        assert "fully verified" in evidence["detail"]
     else:
         assert len(advice["resources"]) == 1
         assert advice["resources"][0]["capacity_bytes"] == 32 * _GIB
@@ -286,6 +286,4 @@ async def test_http_preflight_keeps_advice_and_explicit_model_choice(
     )
     assert changed.status_code == 422
     assert changed.json()["code"] == "download-request-invalid"
-    assert ("immutable plan" if size is not None else "immutable file evidence") in changed.json()[
-        "detail"
-    ]
+    assert ("immutable plan" if size is not None else "fully verified") in changed.json()["detail"]
