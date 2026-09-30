@@ -2,22 +2,28 @@
 
 from __future__ import annotations
 
+import io
 import json
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from PIL import Image
 from test_image_edit_verification_orchestration import _TEST_CLAIM, _picture, _verification_world
 
 from local_lm.image_edit_difference import ChangedArea, compare_region
 from local_lm.image_edit_verification import (
+    DRIFT_MEASURE_MARGIN,
     LOCAL_CHANGE_THRESHOLD,
     MIN_DRIFT_REGION,
     ChangeAttribution,
     InventoryChange,
+    drift_region,
     parse_subject_location,
     reading_contradicted,
+    reading_contradicted_around,
     without_contradicted,
 )
 
@@ -113,6 +119,19 @@ def test_widening_stays_inside_the_picture_and_overlap_needs_shared_area() -> No
     assert not ChangedArea(0.0, 0.0, 0.25, 0.25).overlaps(SQUARE)
 
 
+def test_only_a_small_box_clear_of_the_request_is_measured_around() -> None:
+    excluded = [SQUARE.widened(1 / 32)]
+    bead = ChangedArea(0.8, 0.8, 0.85, 0.85)
+    assert drift_region(bead, excluded) == bead.widened(DRIFT_MEASURE_MARGIN)
+    # Widened, even a point away from the edges covers the least region that can speak.
+    point = drift_region(ChangedArea(0.5, 0.5, 0.5, 0.5), [])
+    assert (point.right - point.left) * (point.bottom - point.top) == MIN_DRIFT_REGION
+    # A box big enough to measure, one of exactly the least size, and a small
+    # one touching the requested thing are measured where they were located.
+    for located in (WHOLE, CORNER, ChangedArea(0.74, 0.74, 0.8, 0.8)):
+        assert drift_region(located, excluded) == located
+
+
 FLOOR_DRIFT = (
     '[{"subject": "mug", "appearance": "blue"}, '
     '{"subject": "floor", "appearance": "dark grey, flat"}]',
@@ -123,9 +142,25 @@ FLOOR_DRIFT = (
 )
 
 
-async def verify(answers: tuple[str, ...], *patches: tuple[int, int, int, int]) -> Any:
+def _large_picture(*recolour: tuple[int, int, int, int] | None) -> bytes:
+    """The fixture's picture at 512 pixels a side, where one part of the grid is 16 pixels."""
+
+    image = Image.new("RGB", (512, 512), (40, 90, 180))
+    for patch in recolour:
+        if patch is not None:
+            image.paste((200, 40, 60), patch)
+    buffer = io.BytesIO()
+    image.save(buffer, "PNG")
+    return buffer.getvalue()
+
+
+async def verify(
+    answers: tuple[str, ...],
+    *patches: tuple[int, int, int, int],
+    painter: Callable[..., bytes] = _picture,
+) -> Any:
     job, orchestrator, world = _verification_world(lose_at="never", answers=answers)
-    pictures = {"artifact-source": _picture(None), "artifact-result": _picture(*patches)}
+    pictures = {"artifact-source": painter(None), "artifact-result": painter(*patches)}
     orchestrator.artifacts.verified_bytes = Mock(
         side_effect=lambda artifact, *, maximum_bytes: pictures[artifact.id]
     )
@@ -154,6 +189,76 @@ async def test_a_reading_slip_about_an_unmoved_floor_no_longer_refuses_a_precise
     assert reading["largest_local_difference"] < LOCAL_CHANGE_THRESHOLD
     assert "Find this thing in the attached picture" in world["questions"][3]
     assert len(world["questions"]) == 6
+
+
+BEAD_DRIFT = (
+    '[{"subject": "mug", "appearance": "blue"}, {"subject": "bead", "appearance": "glossy"}]',
+    '[{"subject": "mug", "appearance": "green"}, {"subject": "bead", "appearance": "shiny"}]',
+    # Sorted, the differences are the bead (0) and the mug (1).
+    '{"subject_present": true, "operation": "change", "requested": [1], "as_asked": true}',
+)
+#: A small thing read with a box tighter than the least region that can speak for it.
+BEAD = ChangedArea(left=0.8, top=0.8, right=0.85, bottom=0.85)
+
+
+async def test_a_small_unmoved_thing_read_with_a_tight_box_no_longer_refuses_a_precise_edit() -> (
+    None
+):
+    record, world = await verify(
+        BEAD_DRIFT + (box(SQUARE), box(BEAD), '{"subjects": [0]}'),
+        (16, 16, 48, 48),
+    )
+    assert record["reason"] == "accepted"
+    assert record["assessment"]["unrelated_content_preserved"] is True
+    [reading] = record["contradicted_readings"]
+    assert reading["subject"] == "bead"
+    assert reading["area"] == BEAD.widened(DRIFT_MEASURE_MARGIN).provenance()
+    assert len(world["questions"]) == 6
+
+
+async def test_a_small_thing_that_moved_still_counts_when_measured_around() -> None:
+    record, _world = await verify(
+        BEAD_DRIFT + (box(SQUARE), box(BEAD), '{"subjects": [0]}'),
+        (16, 16, 48, 48),
+        (52, 52, 55, 55),
+    )
+    assert "contradicted_readings" not in record
+    assert record["assessment"]["unrelated_content_preserved"] is False
+    assert record["reason"] != "accepted"
+
+
+async def test_a_small_change_in_a_tight_box_is_not_averaged_away_by_widening_it() -> None:
+    # Two pixels changed on a large picture: inside their own tight box they are
+    # a large local change, while the whole grid part a widened box covers
+    # averages them to almost nothing.
+    patch = (416, 416, 418, 418)
+    located = ChangedArea(416 / 512, 416 / 512, 418 / 512, 418 / 512)
+    record, _world = await verify(
+        BEAD_DRIFT + (box(SQUARE), box(located), '{"subjects": [0]}'),
+        (128, 128, 384, 384),
+        patch,
+        painter=_large_picture,
+    )
+    assert "contradicted_readings" not in record
+    assert record["assessment"]["unrelated_content_preserved"] is False
+    assert record["reason"] != "accepted"
+
+
+def test_a_widened_box_speaks_only_where_the_located_one_agrees() -> None:
+    patch = (416, 416, 418, 418)
+    located = ChangedArea(416 / 512, 416 / 512, 418 / 512, 418 / 512)
+    source, result = _large_picture(None), _large_picture(patch)
+    own, _ = compare_region(source, result, located)
+    widened, measured = compare_region(source, result, drift_region(located, []))
+    # The widening alone would call the thing unchanged; its own pixels say otherwise.
+    assert reading_contradicted(widened, measured)
+    assert own.largest_local_difference is not None
+    assert own.largest_local_difference >= LOCAL_CHANGE_THRESHOLD
+    assert not reading_contradicted_around(own, widened, measured)
+    # Where nothing moved, the two agree.
+    still, _ = compare_region(source, source, located)
+    unchanged, around = compare_region(source, source, drift_region(located, []))
+    assert reading_contradicted_around(still, unchanged, around)
 
 
 async def test_a_real_replacement_still_refuses_the_edit_beside_a_reading_slip() -> None:
