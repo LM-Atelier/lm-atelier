@@ -41,7 +41,7 @@ describe("StudioToolRail", () => {
         "Add text to the picture",
       ],
       ["Select part of the picture"],
-      ["Instruct the whole image", "Replace words in the picture"],
+      ["Instruct the whole image", "Replace words in the picture", "Remove something from the picture"],
       [
         "Cut the subject out",
         "Replace the background",

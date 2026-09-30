@@ -33,6 +33,7 @@ StudioToolKind = Literal[
     "enhance",
     "extend",
     "text",
+    "remove",
     "relight",
     "isolate",
     "background",
@@ -51,8 +52,8 @@ StudioToolKind = Literal[
 
 #: The tool kinds the surface offers, paired with what each needs installed.
 #: Selection tools share one class: they are six ways to draw one mask. Text
-#: draws a selection too, but the selection is placed back after a whole-picture
-#: edit rather than given to the workflow, so any edit workflow can run it.
+#: and Remove mark a selection too, but it is placed back after a whole-picture
+#: edit rather than given to the workflow, so any edit workflow can run them.
 TOOL_WORKFLOW_CLASSES: dict[StudioToolKind, str] = {
     "instruct": "image_to_image",
     "brush": "inpaint",
@@ -64,6 +65,7 @@ TOOL_WORKFLOW_CLASSES: dict[StudioToolKind, str] = {
     "enhance": "upscale",
     "extend": "outpaint",
     "text": "image_to_image",
+    "remove": "image_to_image",
     "relight": "relight",
     "isolate": "matting",
     # Replacing a background cuts the subject out first, so it runs the matting

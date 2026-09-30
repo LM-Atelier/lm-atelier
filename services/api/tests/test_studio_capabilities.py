@@ -167,6 +167,14 @@ def test_replacing_words_needs_an_edit_workflow_but_no_mask_input() -> None:
     assert "image editing workflow" in (_by_kind([])["text"].reason or "")
 
 
+def test_removing_something_needs_an_edit_workflow_but_no_mask_input() -> None:
+    """Like replacing words: the marked part is kept from a whole-picture edit."""
+    assert _by_kind([PLAIN_SCHEMA])["remove"].available is True
+    assert _by_kind([PLAIN_SCHEMA])["remove"].workflow_class == "image_to_image"
+    assert _by_kind([])["remove"].available is False
+    assert "image editing workflow" in (_by_kind([])["remove"].reason or "")
+
+
 def test_one_mask_capable_workflow_enables_every_selection_tool() -> None:
     # Four ways to draw one mask: they stand or fall together.
     tools = _by_kind([PLAIN_SCHEMA, MASK_SCHEMA])
