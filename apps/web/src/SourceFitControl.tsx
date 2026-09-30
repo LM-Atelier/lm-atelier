@@ -1,6 +1,9 @@
 import { useState } from "react";
+import type { SourceFitMode } from "./sourceFit";
 import { SourceFitPreview } from "./SourceFitPreview";
 import { sourceCanvasDimension, type useSourceFitCanvas } from "./useSourceFitCanvas";
+
+const MODE_LABELS: Record<SourceFitMode, string> = { extend: "Extend / preserve all", crop: "Crop / fill" };
 
 function CanvasDimension({ label, value, onChange, onEdit }: {
   label: string;
@@ -34,21 +37,28 @@ export function SourceFitControl({
   initialHeight: unknown;
 }) {
   const intent = canvas.value?.request;
+  // Switching between the two keeps the canvas size the person already chose.
+  const start = (mode: SourceFitMode) => canvas.choose(intent ? { ...intent, mode } : {
+    mode,
+    width: sourceCanvasDimension(initialWidth) ? initialWidth : 1024,
+    height: sourceCanvasDimension(initialHeight) ? initialHeight : 1024,
+  });
   return (
     <fieldset style={{ minWidth: 0, margin: 0, padding: 12, border: "1px solid var(--border)", borderRadius: 8 }}>
       <legend>Source canvas · this turn</legend>
       <div className="segmented compact" role="group" aria-label="Source canvas mode" style={{ flexWrap: "wrap" }}>
         <button type="button" aria-pressed={!intent} className={!intent ? "active" : ""} onClick={() => canvas.choose(null)}>Workflow size</button>
-        {canvas.available && <button type="button" aria-pressed={Boolean(intent)} className={intent ? "active" : ""} onClick={() => canvas.choose(
-          intent ?? { mode: "extend", width: sourceCanvasDimension(initialWidth) ? initialWidth : 1024, height: sourceCanvasDimension(initialHeight) ? initialHeight : 1024 },
-        )}>Extend / preserve all</button>}
+        {canvas.modes.map((mode) => (
+          <button key={mode} type="button" aria-pressed={intent?.mode === mode} className={intent?.mode === mode ? "active" : ""}
+            onClick={() => start(mode)}>{MODE_LABELS[mode]}</button>
+        ))}
       </div>
       {!canvas.available && <p className="muted">
-        {canvas.missingSource ? "Attach the image you want to extend."
+        {canvas.missingSource ? "Attach the image you want to fit to a canvas."
           : canvas.missingRevision ? "Choose an image workflow to preview a source canvas."
           : canvas.checking ? "Checking source canvas options…"
           : canvas.capabilityError ? "Cannot check this workflow right now."
-          : "This workflow does not offer source-preserving extension."}
+          : "This workflow does not offer a source canvas."}
       </p>}
       {intent && <>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 10rem), 1fr))", gap: 8 }}>

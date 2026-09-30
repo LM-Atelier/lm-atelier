@@ -379,6 +379,16 @@ it("restores the accepted source canvas with its source and exact workflow", () 
   expect(request.references).toBeUndefined();
 });
 
+it("restores an accepted crop as a crop, through storage", () => {
+  const original = { ...source(), source_fit: { mode: "crop" as const, width: 900, height: 1200 } };
+  const storage = memoryStorage();
+  const first = preparePriorTurnEditSubmission(initializePriorTurnEditDraft(original), undefined, storage);
+  const restored = readPriorTurnEditDraft("chat-one", "source-user", storage)!;
+
+  expect(restored.editor.sourceFit?.request).toEqual({ mode: "crop", width: 900, height: 1200 });
+  expect(first.request.source_fit).toEqual({ mode: "crop", width: 900, height: 1200 });
+});
+
 it.each([true, false])("records deliberate source-canvas removal with configurations=%s", (configurations) => {
   const draft = initializePriorTurnEditDraft(source());
   if (!configurations) delete draft.configurations;

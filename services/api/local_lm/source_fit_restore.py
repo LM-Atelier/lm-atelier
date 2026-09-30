@@ -1,5 +1,8 @@
 """Put the accepted source back into an extended picture, pixel for pixel.
 
+A cropped picture needs nothing put back: its whole canvas is the edit. It is
+only brought back to its canvas when the VAE rounded the canvas down.
+
 An outpainting workflow repaints a feathered band inside the source edge and
 sends the rest of the source through its VAE, so the picture it saves is close
 to the source but is not the source. The accepted margins say exactly where the
@@ -21,6 +24,7 @@ from typing import Any, Final
 from PIL import Image
 
 from .output_measurement import Budget, measure_output
+from .source_crop_recipe import SourceCropRecipe
 from .source_fit_image import PreparedSourceImage
 from .source_fit_recipe import SourceExtensionRecipe
 from .studio_region_edit import RESULT_RESAMPLER, RegionEditError, decode_picture, encode_png
@@ -109,6 +113,62 @@ def restore_source(restore: SourceRestore, result: bytes) -> RestoredPicture | N
             "result_resampler": RESULT_RESAMPLER if resized else None,
             "left": margins["left"],
             "top": margins["top"],
+            "width": canvas[0],
+            "height": canvas[1],
+        },
+    )
+
+
+def fits(recipe: SourceCropRecipe, origin: object) -> bool:
+    """Whether this output is the picture the crop recipe's own save node wrote."""
+    return (
+        isinstance(origin, Mapping)
+        and origin.get("state") == "attributed"
+        and origin.get("node_id") == recipe.save_node_id
+        and origin.get("output_type") == "output"
+        and origin.get("collection") == "images"
+    )
+
+
+def fit_to_canvas(recipe: SourceCropRecipe, result: bytes) -> RestoredPicture | None:
+    """A cropped edit brought back to its canvas when the VAE rounded the canvas down.
+
+    The crop is uploaded at the canvas size, so a workflow that keeps its
+    source's size saves the canvas as it is, and there is nothing to do. A VAE
+    that works in blocks trims a canvas that is not a whole number of them, by
+    less than one block on each side; that picture is resized back to the
+    canvas, so what is kept is the size that was asked for. Anything else is
+    left as the workflow saved it, and the size check says so.
+    """
+    canvas = (recipe.canvas_width, recipe.canvas_height)
+    measured = measure_output(result, Budget())
+    if measured.get("state") != "measured" or measured.get("animated") is not False:
+        return None
+    try:
+        picture = decode_picture(result, "edited picture")
+    except RegionEditError:
+        return None
+    trim = (canvas[0] - picture.width, canvas[1] - picture.height)
+    if (
+        picture.format != "PNG"
+        or picture.mode not in {"RGB", "RGBA", "L", "LA"}
+        or getattr(picture, "n_frames", 1) != 1
+        or any(key in picture.info for key in _UNSUPPORTED_INFO)
+        or not all(0 <= side < MAX_VAE_CROP for side in trim)
+        or trim == (0, 0)
+    ):
+        return None
+    mode = "RGBA" if picture.mode in {"RGBA", "LA"} else "RGB"
+    resized = picture.convert(mode).resize(canvas, Image.Resampling.LANCZOS)
+    return RestoredPicture(
+        content=encode_png(resized, None),
+        record={
+            "source_artifact_id": recipe.image.source_artifact_id,
+            "cropped_artifact_id": recipe.cropped_artifact_id,
+            "result_sha256": hashlib.sha256(result).hexdigest(),
+            "result_width": picture.width,
+            "result_height": picture.height,
+            "result_resampler": RESULT_RESAMPLER,
             "width": canvas[0],
             "height": canvas[1],
         },

@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "./api";
 import { workflowRevisionForTurn } from "./turnEditorContext";
 import type { PriorTurnEditRequest, RoutingMode, WorkflowFamily, WorkflowSelection } from "./types";
-import type { SourceFitIntent, SourceFitSelection } from "./sourceFit";
+import type { SourceFitIntent, SourceFitMode, SourceFitSelection } from "./sourceFit";
 import type { TurnRequestPayload } from "./turnRequest";
 
 export type SourceFitPreviewContext =
@@ -40,10 +40,14 @@ export function useSourceFitCanvas({
     retry: false,
   });
   const intent = value?.request;
-  const available = previewContext ? (mode === "image" || mode === "auto")
-    : Boolean(revisionId && sourceId && capability.data?.available
-      && capability.data.modes.includes("extend") && !capability.isError);
-  const valid = Boolean(intent && intent.mode === "extend" && sourceCanvasDimension(intent.width) && sourceCanvasDimension(intent.height));
+  // A preview within a submission asks the server about that submission, so
+  // both ways are offered and the server answers for the one chosen.
+  const modes: SourceFitMode[] = previewContext
+    ? mode === "image" || mode === "auto" ? ["extend", "crop"] : []
+    : revisionId && sourceId && capability.data?.available && !capability.isError
+      ? capability.data.modes.filter((one) => one === "extend" || one === "crop") : [];
+  const available = modes.length > 0;
+  const valid = Boolean(intent && modes.includes(intent.mode) && sourceCanvasDimension(intent.width) && sourceCanvasDimension(intent.height));
   const context: SourceFitPreviewContext | undefined = previewContext
     ? JSON.parse(JSON.stringify({ ...previewContext, request: { ...previewContext.request, source_fit: intent } }))
     : undefined;
@@ -66,7 +70,7 @@ export function useSourceFitCanvas({
   const expectedRevision = context ? context.request.workflow_revision_id : revisionId;
   const matches = requestedKey === key && available && valid && !previewQuery.isFetching && !previewQuery.isError
     && (context || (value?.sourceArtifactId === sourceId && value?.workflowRevisionId === revisionId))
-    && answer?.version === 1 && answer.mode === "extend"
+    && answer?.version === 1 && answer.mode === intent?.mode
     && Boolean(answer.workflow_revision_id && answer.source_artifact_id)
     && (!expectedRevision || answer.workflow_revision_id === expectedRevision)
     && (!expectedSource || answer.source_artifact_id === expectedSource)
@@ -87,7 +91,7 @@ export function useSourceFitCanvas({
     else setRequestedKey(key);
   };
   return {
-    value, available, preview, selection, choose, requestPreview, pending,
+    value, modes, available, preview, selection, choose, requestPreview, pending,
     invalidatePreview: () => setRequestedKey(null),
     canPreview: available && valid && !pending,
     checking: Boolean(!context && revisionId && sourceId && capability.isFetching),

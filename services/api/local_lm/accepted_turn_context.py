@@ -27,7 +27,7 @@ from .models import (
     WorkStep,
     WorkStepDependency,
 )
-from .source_fit_recipe import SourceExtensionRecipe
+from .source_fit_recipes import RecordedSourceFitRecipe, SourceFitRecipe
 from .vision import VisionSamplingPolicy
 from .workflow_revision_reviews import revision_is_trusted
 from .workflow_use_case_preset_provenance import (
@@ -298,7 +298,7 @@ class AcceptedContext(BaseModel):
     vision_profile: AcceptedProfile | None
     verification_profile: AcceptedProfile | None = None
 
-    source_fit: SourceExtensionRecipe | None = None
+    source_fit: RecordedSourceFitRecipe | None = None
 
     @model_validator(mode="after")
     def bind_workflow_use_case_preset(self) -> Self:
@@ -321,11 +321,7 @@ class AcceptedContext(BaseModel):
             or self.workflow.id != self.workflow_revision_id
             or not self.input_artifact_ids
             or self.input_artifact_ids[0] != recipe.image.source_artifact_id
-            or not {
-                recipe.image.source_artifact_id,
-                recipe.image.prepared_artifact_id,
-            }
-            <= set(self.artifact_ids)
+            or not recipe.retained_artifact_ids <= set(self.artifact_ids)
         ):
             raise ValueError("source_fit_context_binding")
         recipe.route(self.workflow.api_graph_json)
@@ -356,7 +352,7 @@ def save_accepted_context(
     media_prompt: str,
     context_artifact_ids: set[str],
     verification_profile_id: str | None = None,
-    source_fit: SourceExtensionRecipe | None = None,
+    source_fit: SourceFitRecipe | None = None,
     inherited_context: AcceptedContext | None = None,
     inherited_configuration: AcceptedContext | None = None,
     inherit_profile_configuration: bool = False,
@@ -510,10 +506,7 @@ def save_accepted_context(
         # These are ordinary snapshot retention edges. The caller must supply
         # the recipe validated from the requested transform and verified bytes.
         # Capturing an image alone does not authorize it as the primary source.
-        retained_source_ids = {
-            source_fit.image.source_artifact_id,
-            source_fit.image.prepared_artifact_id,
-        }
+        retained_source_ids = set(source_fit.retained_artifact_ids)
         if any(session.get(Artifact, artifact_id) is None for artifact_id in retained_source_ids):
             raise ValueError("source_fit_image_unavailable")
         artifact_ids = artifact_ids | retained_source_ids

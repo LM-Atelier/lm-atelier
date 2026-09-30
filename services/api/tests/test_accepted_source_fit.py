@@ -31,6 +31,7 @@ from local_lm.models import (
 )
 from local_lm.source_fit_image import capture_source_fit_image, replay_source_fit_image
 from local_lm.source_fit_recipe import SourceExtensionRecipe, plan_source_extension
+from local_lm.source_fit_recipes import SourceFitRecipe
 from local_lm.vision import VisionSamplingPolicy
 
 
@@ -76,9 +77,7 @@ def make_run(pair: tuple[ArtifactStore, Session]) -> tuple[Run, SourceExtensionR
     return run, recipe
 
 
-def save(
-    session: Session, run: Run, recipe: SourceExtensionRecipe | None, **overrides: Any
-) -> None:
+def save(session: Session, run: Run, recipe: SourceFitRecipe | None, **overrides: Any) -> None:
     options: dict[str, Any] = {
         "messages": [{"role": "user", "content": "Extend the neutral color grid"}],
         "sources": [run.user_message_id],

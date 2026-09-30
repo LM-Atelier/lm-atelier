@@ -213,3 +213,68 @@ class SourceFitPixels:
     def margins(self) -> dict[str, int]:
         """The four sides, named as the source padding step names them."""
         return {"top": self.top, "right": self.right, "bottom": self.bottom, "left": self.left}
+
+
+@dataclass(frozen=True, slots=True)
+class SourceCropRoute:
+    """An ordinary picture-to-picture path, whose output takes its source's size."""
+
+    source_node_id: str
+    source_parameter: Literal["input_image"]
+    encode_node_id: str
+    sampler_node_id: str
+    decode_node_id: str
+    save_node_id: str
+    vae_node_id: str
+    vae_output_index: int
+
+
+def trace_source_crop_route(api_graph: object, save_node_id: object) -> SourceCropRoute | None:
+    """Trace one selected SaveImage back to its source through a plain encode, sample and decode.
+
+    A cropped source is uploaded already at the canvas size, so the canvas is
+    kept only where nothing between the source and the save changes the size:
+    the source is encoded, sampled in place and decoded by the same VAE. Any
+    other structure answers no route rather than a guess.
+    """
+    try:
+        return _trace_crop(api_graph, save_node_id)
+    except _UnboundRoute:
+        return None
+
+
+def _trace_crop(api_graph: object, save_node_id: object) -> SourceCropRoute:
+    if type(api_graph) is not dict or not 1 <= len(api_graph) <= 512:
+        _refuse()
+    graph = cast(dict[str, object], api_graph)
+    for key in graph:
+        _identifier(key)
+    save_id = _identifier(save_node_id)
+    save = _inputs(graph, save_id, "SaveImage")
+    decode_id = _image_edge(save, "images")
+    decode = _inputs(graph, decode_id, "VAEDecode")
+    sampler_id = _image_edge(decode, "samples")
+    sampler = _inputs(graph, sampler_id, "KSampler")
+    encode_id = _image_edge(sampler, "latent_image")
+    encode = _inputs(graph, encode_id, "VAEEncode")
+    vae_id, vae_port = _edge(encode, "vae")
+    if _edge(decode, "vae") != (vae_id, vae_port):
+        _refuse()
+    vae_kind = _node(graph, vae_id).get("class_type")
+    if not isinstance(vae_kind, str) or _VAE_OUTPUTS.get(vae_kind) != vae_port:
+        _refuse()
+    _inputs(graph, vae_id, vae_kind)
+    source_id = _image_edge(encode, "pixels")
+    source = _inputs(graph, source_id, "LoadImage")
+    if source.get("image") != "$" + "{input_image}":
+        _refuse()
+    return SourceCropRoute(
+        source_node_id=source_id,
+        source_parameter="input_image",
+        encode_node_id=encode_id,
+        sampler_node_id=sampler_id,
+        decode_node_id=decode_id,
+        save_node_id=save_id,
+        vae_node_id=vae_id,
+        vae_output_index=vae_port,
+    )

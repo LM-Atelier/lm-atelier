@@ -13,7 +13,7 @@ from .accepted_turn_context import AcceptedProfile, AcceptedWorkflow, resolve_ac
 from .domain import Operation
 from .models import ModelProfile
 from .schemas import TurnRequest
-from .source_fit_recipe import SourceExtensionRecipe
+from .source_fit_recipes import SourceFitRecipe
 from .workflow_use_case_execution import InheritedWorkflowUseCasePreset
 
 
@@ -22,7 +22,7 @@ class TurnInheritance:
     profile: AcceptedProfile | None = None
     vision_profile: AcceptedProfile | None = None
     workflow: AcceptedWorkflow | None = None
-    source_fit: SourceExtensionRecipe | None = None
+    source_fit: SourceFitRecipe | None = None
     image_edit_strength: dict[str, Any] | None = None
     use_case_preset: InheritedWorkflowUseCasePreset | None = None
 

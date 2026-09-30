@@ -314,7 +314,7 @@ function sourceShape(value: Record<string, unknown>, chatId: string, messageId: 
 
 function sourceFitShape(value: unknown): value is import("./sourceFit").SourceFitSelection {
   return record(value) && nonempty(value.sourceArtifactId) && nonempty(value.workflowRevisionId)
-    && record(value.request) && value.request.mode === "extend"
+    && record(value.request) && (value.request.mode === "extend" || value.request.mode === "crop")
     && count(value.request.width) && (value.request.width as number) <= 1_000_000
     && count(value.request.height) && (value.request.height as number) <= 1_000_000;
 }
