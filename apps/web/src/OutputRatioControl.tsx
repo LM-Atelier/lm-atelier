@@ -3,6 +3,8 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "./api";
 import { RATIO_LABELS, ratioOf } from "./outputRatio";
 import { arrangedShapes, useOutputShapes } from "./outputShapePreferences";
+import { ShapeAlternativeList } from "./ShapeAlternativeList";
+import type { ShapeAlternatives } from "./shapeAlternatives";
 import type { OutputRatioPresetId } from "./types";
 
 /** Choosing the shape of what comes out, and seeing the pixels before Send.
@@ -26,6 +28,7 @@ export function OutputRatioControl({
   height,
   sizeIsTheWorkflowsOwn,
   onDimensions,
+  alternatives,
 }: {
   revisionId: string;
   width: unknown;
@@ -33,6 +36,8 @@ export function OutputRatioControl({
   /** The panel is offering no width and no height, so nothing here can be set. */
   sizeIsTheWorkflowsOwn: boolean;
   onDimensions: (dimensions: { width: number; height: number }) => void;
+  /** Other workflows for this turn, offered when this one sets its own size. */
+  alternatives?: ShapeAlternatives;
 }) {
   const [pending, setPending] = useState<OutputRatioPresetId | null>(null);
   // A refusal is a fact about one revision, so it is remembered with the
@@ -60,7 +65,8 @@ export function OutputRatioControl({
   // is a statement about what this panel is showing, which is the only thing
   // that can be known here - the server answers "unsupported" without saying
   // why, on purpose, so that a caller cannot learn the shape of a graph it
-  // cannot see.
+  // cannot see. What can be said is which other workflows do take a shape,
+  // since each of those answers the same question about its own revision.
   if (!capability?.available || capability.preset_ids.length === 0) {
     if (!sizeIsTheWorkflowsOwn) return null;
     return (
@@ -68,6 +74,7 @@ export function OutputRatioControl({
         <span>
           <strong>Shape</strong>
           <small>This workflow sets the picture size itself.</small>
+          {alternatives && <ShapeAlternativeList alternatives={alternatives} />}
         </span>
       </div>
     );

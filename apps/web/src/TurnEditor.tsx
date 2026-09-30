@@ -28,6 +28,7 @@ import { drawerRoleView, roleForMode } from "./viewHelpers";
 import { useWorkflowRevisionSchema } from "./useWorkflowRevisionSchema";
 import { useComposerLoraControls } from "./useComposerLoraControls";
 import { operationForTurn } from "./turnWorkflow";
+import { useShapeAlternatives } from "./shapeAlternatives";
 import { initialTurnEditorState, useTurnEditorState, type TurnEditorState } from "./useTurnEditorState";
 export type { TurnEditorState } from "./useTurnEditorState";
 import type { Artifact, ChatDetail, EngineCapabilities, EngineRole, Message, PriorTurnEditBinding, RoutingMode, WorkflowSelection } from "./types";
@@ -328,6 +329,12 @@ export function TurnEditor({
   });
   const drawerWorkflowSchema = workflowSchemaOverride !== undefined
     ? workflowSchemaOverride ?? undefined : drawerWorkflowRead.schema;
+  const shapeAlternatives = useShapeAlternatives({
+    chatId: chat.id, capability: drawerMode === "image" || drawerMode === "video" ? drawerMode : null,
+    hasAttachments: hasWorkflowAttachments, families: families.data ?? [], currentRevisionId: drawerWorkflowRevisionId,
+    // Only the chat's own choice can be changed from here, not one a caller fixed.
+    enabled: !onAccept && workflowControl === undefined && workflowSelection === undefined && workflowSchemaOverride === undefined,
+  });
   const clearAcceptedDraft = () => {
     setText("");
     clearAcceptedState();
@@ -531,6 +538,7 @@ export function TurnEditor({
         profileValues={profileValues}
         imageEdit={drawerImageEdit}
         imageEditPrompt={text}
+        shapeAlternatives={shapeAlternatives}
       />
     </fieldset>
   );
