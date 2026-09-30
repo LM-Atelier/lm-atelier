@@ -1,4 +1,4 @@
-import { Columns2, Diff, Eye } from "lucide-react";
+import { Columns2, Diff, Eye, PanelsLeftRight } from "lucide-react";
 import type { KeyboardEvent, PointerEvent } from "react";
 import type { StudioCompareChoice } from "./useStudioCompare";
 
@@ -10,9 +10,10 @@ import type { StudioCompareChoice } from "./useStudioCompare";
  * change worth studying rather than spotting. What changed tints every pixel
  * the edit changed, and says how much of the picture that is, for an edit
  * meant to leave most of it alone. All keep the canvas's zoom, so a detail is
- * compared at the size it was edited at. Another picture from the strip can
- * stand in for the earlier one, so two results of one edit can be set against
- * each other the same ways.
+ * compared at the size it was edited at. Side by side puts the two next to each
+ * other instead, zoomed and moved as one, and takes two pictures of any shapes.
+ * Another picture from the strip can stand in for the earlier one, so two
+ * results of one edit can be set against each other the same ways.
  */
 export function StudioCompare({
   holding,
@@ -24,6 +25,9 @@ export function StudioCompare({
   onDifference,
   canDiffer = false,
   changed = null,
+  sideBySide = false,
+  onSideBySide,
+  canSideBySide = false,
   against = null,
   choices = [],
   onAgainst,
@@ -42,6 +46,11 @@ export function StudioCompare({
   canDiffer?: boolean;
   /** How much of the picture changed, once that is known. */
   changed?: string | null;
+  /** Whether the two are shown next to each other in place of the canvas. */
+  sideBySide?: boolean;
+  onSideBySide?: (on: boolean) => void;
+  /** Any two pictures sit side by side, whatever their shapes, when nothing is being marked on the canvas. */
+  canSideBySide?: boolean;
   /** The picture chosen to compare with, when it is not the one this was made from. */
   against?: string | null;
   choices?: StudioCompareChoice[];
@@ -59,35 +68,38 @@ export function StudioCompare({
           ))}
         </select>
       )}
-      <button
-        type="button"
-        className="secondary compact-button"
-        aria-pressed={holding}
-        title={against ? "Shows the chosen picture while held" : "Shows the picture this was made from while held"}
-        onPointerDown={(event: PointerEvent<HTMLButtonElement>) => {
-          if (event.button !== 0) return;
-          // Captured, so the release is heard even off the button.
-          event.currentTarget.setPointerCapture?.(event.pointerId);
-          onHold(true);
-        }}
-        onPointerUp={release}
-        onPointerCancel={release}
-        onLostPointerCapture={release}
-        onKeyDown={(event: KeyboardEvent<HTMLButtonElement>) => {
-          if (!holds(event.key)) return;
-          event.preventDefault();
-          // A held key repeats, and the picture is already showing.
-          if (!event.repeat) onHold(true);
-        }}
-        onKeyUp={(event: KeyboardEvent<HTMLButtonElement>) => {
-          if (!holds(event.key)) return;
-          event.preventDefault();
-          release();
-        }}
-        onBlur={release}
-      >
-        <Eye size={14} aria-hidden="true" /> Hold to compare
-      </button>
+      {/* Holding lays one picture over the other, which side by side does not show. */}
+      {!sideBySide && (
+        <button
+          type="button"
+          className="secondary compact-button"
+          aria-pressed={holding}
+          title={against ? "Shows the chosen picture while held" : "Shows the picture this was made from while held"}
+          onPointerDown={(event: PointerEvent<HTMLButtonElement>) => {
+            if (event.button !== 0) return;
+            // Captured, so the release is heard even off the button.
+            event.currentTarget.setPointerCapture?.(event.pointerId);
+            onHold(true);
+          }}
+          onPointerUp={release}
+          onPointerCancel={release}
+          onLostPointerCapture={release}
+          onKeyDown={(event: KeyboardEvent<HTMLButtonElement>) => {
+            if (!holds(event.key)) return;
+            event.preventDefault();
+            // A held key repeats, and the picture is already showing.
+            if (!event.repeat) onHold(true);
+          }}
+          onKeyUp={(event: KeyboardEvent<HTMLButtonElement>) => {
+            if (!holds(event.key)) return;
+            event.preventDefault();
+            release();
+          }}
+          onBlur={release}
+        >
+          <Eye size={14} aria-hidden="true" /> Hold to compare
+        </button>
+      )}
       {canSplit && (
         <button
           type="button"
@@ -120,6 +132,17 @@ export function StudioCompare({
         </button>
       )}
       {canDiffer && difference && <small aria-live="polite">{changed ?? "Comparing…"}</small>}
+      {canSideBySide && onSideBySide && (
+        <button
+          type="button"
+          className="secondary compact-button"
+          aria-pressed={sideBySide}
+          title={against ? "Shows the chosen picture beside this one" : "Shows the picture this was made from beside this one"}
+          onClick={() => onSideBySide(!sideBySide)}
+        >
+          <PanelsLeftRight size={14} aria-hidden="true" /> Side by side
+        </button>
+      )}
     </div>
   );
 }

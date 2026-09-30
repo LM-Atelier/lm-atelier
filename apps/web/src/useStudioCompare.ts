@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { sameShape } from "./studioComparison";
 import { changedWords, differenceOverlay } from "./studioDifference";
 import { readSourcePixels } from "./studioSourcePixels";
+import type { StudioSide } from "./StudioSideBySide";
 import { useStudioImage } from "./useStudioImage";
 import type { StudioStep } from "./useStudioSession";
 
@@ -42,6 +43,8 @@ export function useStudioCompare(
   const [split, setSplit] = useState<number | null>(null);
   // Asked for one result too, so another result never shows this one's changes.
   const [differenceFor, setDifferenceFor] = useState<string | null>(null);
+  // Side by side too: any two pictures sit beside each other, whatever their shapes.
+  const [besideFor, setBesideFor] = useState<string | null>(null);
   const holding = heldFor !== null && heldFor === currentId;
   const canSplit = Boolean(shown && before && sameShape(before, shown));
   // Pixel for pixel only at exactly one size; see studioDifference.
@@ -49,7 +52,17 @@ export function useStudioCompare(
   const differing = canDiffer && differenceFor !== null && differenceFor === currentId;
   const overlay = useDifferenceOverlay(differing ? before : null, differing ? shown : null);
   const reveal = holding ? 1 : canSplit && split !== null ? split : 0;
+  const canSideBySide = Boolean(shown && before);
+  const sideBySide = canSideBySide && besideFor !== null && besideFor === currentId;
+  const againstLabel = choices.find((choice) => choice.artifactId === against)?.label;
   return {
+    /** The two pictures to show side by side, while that is asked for. */
+    pair: sideBySide && before && shown
+      ? {
+          before: { image: before, label: againstLabel ?? "What it was made from" } satisfies StudioSide,
+          after: { image: shown, label: "This result" } satisfies StudioSide,
+        }
+      : null,
     /** Null until both pictures are ready, so nothing offers a comparison it
      * cannot show: a result that did not decode has no canvas to lay it over. */
     layer:
@@ -65,15 +78,30 @@ export function useStudioCompare(
       onSplit: (next: number | null) => {
         setSplit(next);
         // One comparison across the canvas at a time.
-        if (next !== null) setDifferenceFor(null);
+        if (next !== null) {
+          setDifferenceFor(null);
+          setBesideFor(null);
+        }
       },
       canSplit,
       difference: differing,
       onDifference: (on: boolean) => {
         setDifferenceFor(on ? currentId : null);
-        if (on) setSplit(null);
+        if (on) {
+          setSplit(null);
+          setBesideFor(null);
+        }
       },
       canDiffer,
+      sideBySide,
+      onSideBySide: (on: boolean) => {
+        setBesideFor(on ? currentId : null);
+        if (on) {
+          setSplit(null);
+          setDifferenceFor(null);
+        }
+      },
+      canSideBySide,
       changed: overlay?.words ?? null,
       against,
       choices,

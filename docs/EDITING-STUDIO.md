@@ -60,6 +60,10 @@ pictures. **Stop the edit** ends it, and the picture stays as it was.
   to red for a large one, and says how much of the picture that is. What
   changed is offered when the result and the picture it was made from are
   exactly the same size, since only then do their pixels line up one to one.
+  **Side by side** puts the two next to each other instead, whatever their
+  shapes, so an extended or cropped result can be set beside what it was made
+  from. Zooming or dragging either half moves both, and the same part of the
+  scene stays in view in each.
 - **Lineage** appears once a result is at least two edits deep and walks the
   whole chain, oldest first: the image that entered each step and the exact
   instruction that transformed it, ending at the current result. A chat
