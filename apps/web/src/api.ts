@@ -1,6 +1,7 @@
 import type { QueueLane, QueueOrderCommand, QueueOrderPage, QueueOrderResult } from "./queueOrderTypes";
 import type { WorkflowRecipeTarget, WorkflowUseCase, WorkflowUseCaseChoice, WorkflowUseCaseDefault, WorkflowUseCasePreset, WorkflowUseCasePresetCreate } from "./workflowUseCaseTypes";
 import { buildTurnRequest, SOURCE_FIT_BINDING_ERROR, type TurnRequestPayload } from "./turnRequest";
+import { defaultOutputShapes } from "./outputShapePreferences";
 export { buildTurnRequest } from "./turnRequest";
 import type { SourceFitCapability, SourceFitIntent, SourceFitPreviewResult, SourceFitSelection } from "./sourceFit";
 import type { TurnReference } from "./mentionDraft";
@@ -528,6 +529,7 @@ export const api = {
     const payload = buildTurnRequest({
       text, mode, inputArtifactIds, settings, idempotencyKey, workflowRevisionId,
       references, outputCount, promptSource, sourceFit,
+      defaultOutputShapes: defaultOutputShapes(),
     });
     const submit = (selectedMode: RoutingMode, confirmed = false) => {
       if (payload.source_fit && selectedMode !== "image" && selectedMode !== "auto") throw new Error(SOURCE_FIT_BINDING_ERROR);

@@ -301,3 +301,48 @@ test("the shapes stay reachable in a narrow window", async ({ browser, request }
     await narrow.close();
   }
 });
+
+test("a new picture takes the default shape chosen in Settings", async ({ page, request }) => {
+  requiresTheManagedMediaRunner();
+  const { familyId, csrfToken } = await installShapeCapableWorkflow(request);
+  const title = await chatReadyForShapes(request, csrfToken, familyId, "Default shape");
+
+  await page.goto("/?view=settings&settings=models-and-generation");
+  await dismissSetup(page);
+  await page.getByRole("combobox", { name: "Default shape for pictures" }).selectOption("3:2");
+
+  // To the chat and its composer, so the choice travels with a turn the person sends.
+  await page.getByRole("button", { name: title, exact: true }).click();
+  const composer = page.getByRole("textbox", { name: "Message" });
+  await composer.fill("A plain gray square on a white table");
+  const accepted = page.waitForResponse(
+    (response) => response.request().method() === "POST" && /\/api\/chats\/[^/]+\/turns$/.test(response.url()),
+    { timeout: 30_000 },
+  );
+  // The composer holds a send until the chat's workflow settings have loaded, which a
+  // loaded machine can take a moment to do. A send it takes clears the box, and a press
+  // with the box empty sends nothing, so pressing until the box clears sends exactly once.
+  await expect(async () => {
+    await composer.press("Enter");
+    await expect(composer).toHaveValue("", { timeout: 1_000 });
+  }).toPass({ timeout: 20_000 });
+  const turn = await accepted;
+  expect(turn.status(), await turn.text()).toBe(202);
+  expect(turn.request().postDataJSON()).toMatchObject({ default_output_shapes: { image: "3:2" } });
+  const runId = (await turn.json() as { run: { id: string } }).run.id;
+
+  const run = await (await request.get(`/api/runs/${runId}`)).json() as {
+    workflow_revision_id: string;
+    settings_json: { width: number; height: number };
+    provenance_json: { output_shape?: { preset_id: string; width: number; height: number } };
+  };
+  // The size the composer's own 3:2 button would choose on this workflow, made without anyone pressing it.
+  const resolved = await request.post(`/api/workflow-revisions/${run.workflow_revision_id}/output-geometry/resolve`, {
+    headers: { "x-local-lm-csrf": csrfToken },
+    data: { mode: "image", size_mode: "preset", preset_id: "3:2" },
+  });
+  expect(resolved.status(), await resolved.text()).toBe(200);
+  const shape = await resolved.json() as { width: number; height: number };
+  expect([run.settings_json.width, run.settings_json.height]).toEqual([shape.width, shape.height]);
+  expect(run.provenance_json.output_shape).toEqual({ source: "default", preset_id: "3:2", width: shape.width, height: shape.height });
+});

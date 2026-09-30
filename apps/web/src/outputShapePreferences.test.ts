@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   arrangedShapes,
   DEFAULT_OUTPUT_SHAPES,
+  defaultedShape,
+  defaultOutputShapes,
   movedShape,
   OUTPUT_SHAPES_KEY,
   setOutputShapeChoice,
@@ -47,6 +49,41 @@ describe("the chosen output shapes", () => {
     expect(result.current.video.hidden).toEqual(["1:1"]);
     expect(result.current.image).toEqual(DEFAULT_OUTPUT_SHAPES.image);
     expect(JSON.parse(localStorage.getItem(OUTPUT_SHAPES_KEY) ?? "{}").video.hidden).toEqual(["1:1"]);
+  });
+});
+
+describe("the default shape", () => {
+  it("starts as none, and a stored default is kept only while it is a shape still offered", () => {
+    expect(DEFAULT_OUTPUT_SHAPES.image.default).toBeNull();
+    const order = [...DEFAULT_OUTPUT_SHAPES.image.order];
+    for (const [stored, expected] of [
+      [{ order, hidden: [], default: "3:2" }, "3:2"],
+      [{ order, hidden: ["3:2"], default: "3:2" }, null],
+      [{ order, hidden: [], default: "5:4" }, null],
+      [{ order, hidden: [] }, null],
+    ] as const) {
+      localStorage.setItem(OUTPUT_SHAPES_KEY, JSON.stringify({ image: stored }));
+      const { result, unmount } = renderHook(() => useOutputShapes());
+      expect(result.current.image.default).toBe(expected);
+      unmount();
+    }
+  });
+
+  it("goes when its shape is left out, and cannot be a shape that is left out", () => {
+    const chosen = defaultedShape(DEFAULT_OUTPUT_SHAPES.image, "3:2");
+    expect(chosen.default).toBe("3:2");
+    expect(toggledShape(chosen, "1:1", false).default).toBe("3:2");
+    expect(toggledShape(chosen, "3:2", false).default).toBeNull();
+    expect(defaultedShape(toggledShape(DEFAULT_OUTPUT_SHAPES.image, "16:9", false), "16:9").default).toBeNull();
+    expect(defaultedShape(chosen, null).default).toBeNull();
+  });
+
+  it("is read per mode as a turn is sent", () => {
+    expect(defaultOutputShapes()).toEqual({ image: null, video: null });
+
+    setOutputShapeChoice("video", defaultedShape(DEFAULT_OUTPUT_SHAPES.video, "16:9"));
+
+    expect(defaultOutputShapes()).toEqual({ image: null, video: "16:9" });
   });
 });
 

@@ -16,6 +16,8 @@ export interface OutputShapeChoice {
   order: OutputRatioPresetId[];
   /** Shapes the composer leaves out. */
   hidden: OutputRatioPresetId[];
+  /** The shape new work takes when nothing else sets its size; null leaves it to the workflow. */
+  default: OutputRatioPresetId | null;
 }
 
 export type OutputShapeChoices = Record<OutputShapeMode, OutputShapeChoice>;
@@ -25,7 +27,7 @@ export const OUTPUT_SHAPES: readonly OutputRatioPresetId[] = ["1:1", "3:4", "2:3
 
 export const OUTPUT_SHAPES_KEY = "local-lm-output-shapes";
 
-const DEFAULT_CHOICE: OutputShapeChoice = { order: [...OUTPUT_SHAPES], hidden: [] };
+const DEFAULT_CHOICE: OutputShapeChoice = { order: [...OUTPUT_SHAPES], hidden: [], default: null };
 export const DEFAULT_OUTPUT_SHAPES: OutputShapeChoices = { image: DEFAULT_CHOICE, video: DEFAULT_CHOICE };
 
 function isShape(value: unknown): value is OutputRatioPresetId {
@@ -39,11 +41,14 @@ function isShape(value: unknown): value is OutputRatioPresetId {
  */
 function parsedChoice(value: unknown): OutputShapeChoice {
   if (typeof value !== "object" || value === null) return DEFAULT_CHOICE;
-  const { order, hidden } = value as { order?: unknown; hidden?: unknown };
+  const { order, hidden, default: chosen } = value as { order?: unknown; hidden?: unknown; default?: unknown };
   if (!Array.isArray(order) || !Array.isArray(hidden)) return DEFAULT_CHOICE;
   if (!order.every(isShape) || !hidden.every(isShape)) return DEFAULT_CHOICE;
   if (order.length !== OUTPUT_SHAPES.length || new Set(order).size !== OUTPUT_SHAPES.length) return DEFAULT_CHOICE;
-  return { order, hidden: [...new Set(hidden)] };
+  const leftOut = [...new Set(hidden)];
+  // A choice saved before there was a default has none, and a default since
+  // left out is no default: the composer would never offer that shape.
+  return { order, hidden: leftOut, default: isShape(chosen) && !leftOut.includes(chosen) ? chosen : null };
 }
 
 let cached: { raw: string | null; choices: OutputShapeChoices } = { raw: null, choices: DEFAULT_OUTPUT_SHAPES };
@@ -119,8 +124,21 @@ export function movedShape(choice: OutputShapeChoice, shape: OutputRatioPresetId
   return { ...choice, order };
 }
 
-/** The choice with one shape shown or left out. */
+/** The choice with one shape shown or left out; leaving out the default leaves no default. */
 export function toggledShape(choice: OutputShapeChoice, shape: OutputRatioPresetId, shown: boolean): OutputShapeChoice {
   const hidden = choice.hidden.filter((other) => other !== shape);
-  return { ...choice, hidden: shown ? hidden : [...hidden, shape] };
+  if (shown) return { ...choice, hidden };
+  return { ...choice, hidden: [...hidden, shape], default: choice.default === shape ? null : choice.default };
+}
+
+/** The choice with this default shape, or none; a shape left out cannot be the default. */
+export function defaultedShape(choice: OutputShapeChoice, shape: OutputRatioPresetId | null): OutputShapeChoice {
+  if (shape !== null && choice.hidden.includes(shape)) return choice;
+  return { ...choice, default: shape };
+}
+
+/** The default shapes a turn asks for, read as it is sent. */
+export function defaultOutputShapes(): Record<OutputShapeMode, OutputRatioPresetId | null> {
+  const choices = storedChoices();
+  return { image: choices.image.default, video: choices.video.default };
 }
