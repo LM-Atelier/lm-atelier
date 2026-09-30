@@ -134,6 +134,8 @@ it("cuts the subject out first, then redraws everything around it from the words
   showSession([message("pending")]);
   expect(readCutoutMask).not.toHaveBeenCalled();
   expect(apply).toHaveBeenCalledTimes(1);
+  // The redraw is sent from here once the cutout is done, so closing waits for it.
+  expect(screen.getByRole("button", { name: "Close" })).toHaveAttribute("aria-disabled", "true");
 
   showSession([message("complete", "art-cutout")]);
   await waitFor(() => expect(apply).toHaveBeenCalledTimes(2));
