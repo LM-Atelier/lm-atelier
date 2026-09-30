@@ -32,6 +32,7 @@ export function SettingsDrawer({
   imageEditPrompt,
   editSettings,
   shapeAlternatives,
+  shapeSource,
 }: {
   open: boolean;
   onClose: () => void;
@@ -57,6 +58,8 @@ export function SettingsDrawer({
   editSettings?: EditedVersionSettings;
   /** Other workflows for the chat, offered when the chosen one sets its own size. */
   shapeAlternatives?: ShapeAlternatives;
+  /** A picture the output can take the shape of, such as a video's start frame. */
+  shapeSource?: string | null;
 }) {
   if (!open) return null;
   return (
@@ -108,6 +111,7 @@ export function SettingsDrawer({
         resetLabel={editSettings ? "Restore original settings" : "Reset chat overrides"}
         onReset={editSettings?.onRestore ?? (() => onValues({}))}
         shapeAlternatives={shapeAlternatives}
+        shapeSource={shapeSource}
       />
     </AccessibleDialog>
   );
