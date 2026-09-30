@@ -1,3 +1,4 @@
+import { installChatReadFixtures } from "./chatReadFixtures";
 import { createHash } from "node:crypto";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -39,6 +40,7 @@ vi.mock("./api", () => ({
 }));
 
 beforeEach(() => {
+  installChatReadFixtures();
   localStorage.clear();
   sessionStorage.clear();
   vi.mocked(api.setupReadiness).mockResolvedValue({ version: 2, state: "ready", roles: [] });

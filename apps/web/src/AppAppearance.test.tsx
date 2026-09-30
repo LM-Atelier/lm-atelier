@@ -1,3 +1,4 @@
+import { installChatReadFixtures } from "./chatReadFixtures";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -33,6 +34,7 @@ vi.mock("./api", () => ({
 }));
 
 beforeEach(() => {
+  installChatReadFixtures();
   localStorage.clear();
   sessionStorage.clear();
   window.history.replaceState(null, "", "/");

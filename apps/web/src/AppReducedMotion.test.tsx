@@ -1,3 +1,4 @@
+import { installChatReadFixtures } from "./chatReadFixtures";
 /** Following a conversation to its newest message without animating it for somebody who asked not to. */
 
 import { cleanup, render, waitFor } from "@testing-library/react";
@@ -73,6 +74,7 @@ function computerReducesMotion(reduced: boolean) {
 }
 
 beforeEach(() => {
+  installChatReadFixtures();
   localStorage.clear();
   localStorage.setItem("local-lm-chat", chat.id);
   Element.prototype.scrollIntoView = scrollIntoView;

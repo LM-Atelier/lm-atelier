@@ -457,6 +457,12 @@ class WebSearchOut(ApiModel):
     ) = None
 
 
+class ChatSearchPage(ApiModel):
+    chat_id: str
+    searches: list[WebSearchOut]
+    next_before: str | None
+
+
 class WebSearchDecisionRequest(ApiModel):
     revision: int = Field(strict=True, ge=1, le=2**63 - 1)
     action: Literal["approve", "decline", "cancel"]
@@ -497,6 +503,27 @@ class ChatMessageWindow(ApiModel):
     messages: list[MessageOut]
     has_older: bool
     has_newer: bool
+
+
+class ChatEditLineageStep(ApiModel):
+    message_id: str
+    artifact_id: str
+    instruction: str
+
+
+class ChatEditLineagePage(ApiModel):
+    chat_id: str
+    result_message_id: str
+    steps: list[ChatEditLineageStep]
+    next_before: str | None
+
+
+class ChatTranscriptContext(ApiModel):
+    chat_id: str
+    head_id: str | None
+    has_prior_visual: bool
+    has_prior_image: bool
+    has_pending_response: bool
 
 
 class ExchangeDeletionOut(ApiModel):

@@ -1,6 +1,7 @@
 import { ChatSidebar } from "./ChatSidebar";
 import { ChatView } from "./ChatView";
 import { useChatPages } from "./useChatPages";
+import { useChatTranscript } from "./useChatTranscript";
 import { useChatDeletion } from "./useChatDeletion";
 import { useStudioPictureForChat } from "./useStudioPictureForChat";
 import { CURRENT_CHAT_KEY, rememberCurrentChat } from "./currentChat";
@@ -79,7 +80,7 @@ export default function App() {
   const chats = useChatPages();
   const firstActiveChatId = chats.data?.find((candidate) => !candidate.archived)?.id ?? null;
   const activeChatId = currentChatId ?? firstActiveChatId;
-  const chat = useQuery({ queryKey: ["chat", activeChatId], queryFn: () => api.chat(activeChatId!), enabled: Boolean(activeChatId) });
+  const chat = useChatTranscript(activeChatId);
   const workPlans = useQuery({
     queryKey: ["work-plans", activeChatId],
     queryFn: () => api.workPlans(activeChatId!),
@@ -131,7 +132,7 @@ export default function App() {
     mutationFn: ({ chatId, messageId, settings }: { chatId: string; messageId: string; settings: Record<string, unknown> }) =>
       regenerateWithRetry(chatId, messageId, settings),
     onSuccess: (_accepted, { chatId }) => {
-      void client.invalidateQueries({ queryKey: ["chat", chatId], exact: true });
+      void client.invalidateQueries({ queryKey: ["chat", chatId] });
       void client.invalidateQueries({ queryKey: ["jobs"] });
     },
   });
@@ -139,7 +140,7 @@ export default function App() {
     mutationFn: ({ messageId, revisionId }: { chatId: string; messageId: string; revisionId: string }) =>
       api.selectResponseRevision(messageId, revisionId),
     onSuccess: (_message, { chatId }) => {
-      void client.invalidateQueries({ queryKey: ["chat", chatId], exact: true });
+      void client.invalidateQueries({ queryKey: ["chat", chatId] });
     },
   });
   const stop = useMutation({
@@ -218,7 +219,7 @@ export default function App() {
       ));
       updateChat.mutate({ id: displayedChat.id, values });
     };
-    return <ChatView key={displayedChat?.id ?? "empty-chat"} libraryEdit={studioHandOver} onLibraryEditTaken={studioPictureTaken} onOpenStudio={(artifactId) => { setStudioSource({ artifactId, chatId: displayedChat?.id ?? null }); setView("studio"); focusMainContent(); }} chat={displayedChat} engines={engines.data ?? []} profiles={profiles.data ?? []} presets={presets.data ?? []} project={allProjects.find((item) => item.id === displayedChat?.project_id)} liveText={liveText} pendingTurns={displayedChat ? pendingTurns[displayedChat.id] ?? [] : []} workPlans={workPlans.data ?? []} settings={scopedSettings} settingsRole={selectedRole} onSettingsRole={(role) => { if (displayedChat) rememberSettingsRole(displayedChat.id, role); }} presetId={presetId} maxMediaOutputsPerPlan={applicationInfo.data?.max_media_outputs_per_plan ?? 1} composerDraft={displayedChat ? composerDrafts[displayedChat.id] ?? EMPTY_COMPOSER_DRAFT : EMPTY_COMPOSER_DRAFT} onComposerDraft={(update) => {
+    return <ChatView transcript={chat.reads} key={displayedChat?.id ?? "empty-chat"} libraryEdit={studioHandOver} onLibraryEditTaken={studioPictureTaken} onOpenStudio={(artifactId) => { setStudioSource({ artifactId, chatId: displayedChat?.id ?? null }); setView("studio"); focusMainContent(); }} chat={displayedChat} engines={engines.data ?? []} profiles={profiles.data ?? []} presets={presets.data ?? []} project={allProjects.find((item) => item.id === displayedChat?.project_id)} liveText={liveText} pendingTurns={displayedChat ? pendingTurns[displayedChat.id] ?? [] : []} workPlans={workPlans.data ?? []} settings={scopedSettings} settingsRole={selectedRole} onSettingsRole={(role) => { if (displayedChat) rememberSettingsRole(displayedChat.id, role); }} presetId={presetId} maxMediaOutputsPerPlan={applicationInfo.data?.max_media_outputs_per_plan ?? 1} composerDraft={displayedChat ? composerDrafts[displayedChat.id] ?? EMPTY_COMPOSER_DRAFT : EMPTY_COMPOSER_DRAFT} onComposerDraft={(update) => {
       if (!displayedChat) return;
       setComposerDrafts((current) => updatedComposerDrafts(current, displayedChat.id, update));
     }} onSettings={(settings) => {
@@ -268,7 +269,7 @@ export default function App() {
         send.mutate({ chatId: displayedChat.id, id: crypto.randomUUID(), text, mode, artifacts, settings, references, outputCount, promptSource, sourceFit });
       }
     }} />;
-  }, [openWorkflows, studioSource, studioHandOver, sendStudioPicture, studioPictureTaken, activeChatId, view, setView, appearance, settingsDestination, setSettingsDestination, settingsFocusRequest, modelLibraryRole, engines.data, profiles.data, presets.data, applicationInfo.data, allProjects, chat.data, chatDrafts, autoSettingsRoles, rememberSettingsRole, composerDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, removeItem, forkThread, client, openLibraryImage, applyAcceptedTurn]);
+  }, [openWorkflows, studioSource, studioHandOver, sendStudioPicture, studioPictureTaken, activeChatId, view, setView, appearance, settingsDestination, setSettingsDestination, settingsFocusRequest, modelLibraryRole, engines.data, profiles.data, presets.data, applicationInfo.data, allProjects, chat.data, chat.reads, chatDrafts, autoSettingsRoles, rememberSettingsRole, composerDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, removeItem, forkThread, client, openLibraryImage, applyAcceptedTurn]);
 
   if (firstRunSetup && setupReadiness.data) {
     return <FirstRunSetup report={setupReadiness.data} onExit={exitFirstRunSetup} onOpenModels={(role) => { exitFirstRunSetup(); setModelLibraryRole(role); setView("models"); }} onOpenWorkflows={() => { exitFirstRunSetup(); setView("workflows"); }} />;

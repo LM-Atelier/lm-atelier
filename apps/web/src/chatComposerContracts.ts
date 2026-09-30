@@ -1,4 +1,5 @@
 import type { SourceFitSelection } from "./sourceFit";
+import type { TranscriptReads } from "./useChatTranscript";
 import type { VisualTarget } from "./libraryEditTargets";
 import type { TurnReference } from "./mentionDraft";
 import type {
@@ -8,6 +9,7 @@ import type {
 } from "./composerPromptSource";
 import type {
   ChatDetail,
+  ChatTranscriptContext,
   EngineCapabilities,
   EngineRole,
   GenerationPreset,
@@ -33,6 +35,7 @@ export type PendingTurn = { id: string; text: string; mode: RoutingMode };
 
 export interface ComposerProps {
   chat: ChatDetail;
+  transcriptContext?: ChatTranscriptContext;
   engines: EngineCapabilities[];
   profiles: ModelProfile[];
   stoppable: boolean;
@@ -56,6 +59,7 @@ export interface ComposerProps {
 }
 
 export interface ChatViewProps {
+  transcript?: TranscriptReads;
   onOpenStudio: (artifactId: string) => void;
   chat?: ChatDetail;
   engines: EngineCapabilities[];

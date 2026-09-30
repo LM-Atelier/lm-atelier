@@ -68,3 +68,34 @@ async def test_a_cyclic_branch_returns_each_message_once(client: AsyncClient, co
     assert sorted(message["id"] for message in window["messages"]) == ids
     assert window["has_older"] is False
     assert window["has_newer"] is False
+
+
+async def test_a_page_keeps_ancestors_across_an_unloaded_parent(client: AsyncClient) -> None:
+    ids = [f"m-{index:02d}" for index in range(39)] + ["a-gap", "z-head"]
+    stamp = utcnow()
+    with SessionLocal() as session:
+        session.add(Chat(id="chat_gap", active_head_message_id=ids[-1]))
+        session.flush()
+        session.execute(
+            insert(Message),
+            [
+                {
+                    "id": identity,
+                    "chat_id": "chat_gap",
+                    "parent_id": ids[index - 1] if index else None,
+                    "created_at": stamp,
+                }
+                for index, identity in enumerate(ids)
+            ],
+        )
+        session.commit()
+
+    path = "/api/chats/chat_gap/messages"
+    latest = await client.get(path, params={"head_id": ids[-1], "limit": 40})
+    assert latest.status_code == 200
+    assert [message["id"] for message in latest.json()["messages"]] == ids[:39] + [ids[-1]]
+    assert latest.json()["has_older"] is True
+    oldest = await client.get(path, params={"head_id": ids[-1], "limit": 40, "before": ids[0]})
+    assert oldest.status_code == 200
+    assert [message["id"] for message in oldest.json()["messages"]] == ["a-gap"]
+    assert oldest.json()["has_older"] is False

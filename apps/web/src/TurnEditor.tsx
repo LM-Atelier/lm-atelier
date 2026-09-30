@@ -154,6 +154,7 @@ function TurnEditorAttachments({ attachments, changeMode, onFocus, onAnimate, on
 
 export function TurnEditor({
   chat,
+  transcriptContext,
   engines,
   profiles,
   stoppable,
@@ -255,20 +256,20 @@ export function TurnEditor({
     textInput.current?.focus();
   }, [quoteTarget, setText]);
   const branchMessages = contextMessages ?? activeBranchMessages(chat);
-  const priorVisual = Boolean(contextVisualArtifacts?.length) || branchMessages.some((message) =>
+  const priorVisual = transcriptContext?.has_prior_visual ?? (Boolean(contextVisualArtifacts?.length) || branchMessages.some((message) =>
     message.parts.some((part) =>
       Boolean(part.artifact_id)
       && (part.type === "image" || part.type === "video")
       && part.metadata_json.preview !== true
     )
-  );
-  const priorImage = Boolean(contextVisualArtifacts?.some((item) => item.media_type.startsWith("image/"))) || branchMessages.some((message) =>
+  ));
+  const priorImage = transcriptContext?.has_prior_image ?? (Boolean(contextVisualArtifacts?.some((item) => item.media_type.startsWith("image/"))) || branchMessages.some((message) =>
     message.parts.some((part) =>
       Boolean(part.artifact_id)
       && part.type === "image"
       && part.metadata_json.preview !== true
     )
-  );
+  ));
   const usePriorVisual = useDraftClassification(chat.id, text, mode, priorVisual, classificationSource);
   const editableImageAttached =
     attachments.some((attachment) => attachment.kind === "image")

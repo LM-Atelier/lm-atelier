@@ -85,6 +85,7 @@ from .chat_deletion import (
     ExchangeNotFound,
     delete_exchange,
 )
+from .chat_edit_lineage import read_edit_lineage
 from .chat_forking import ForkSourceNotFound, fork_chat_from_message
 from .chat_item_removal import (
     ChatItemRemovalActiveWork,
@@ -97,7 +98,9 @@ from .chat_item_removal import (
     preview_chat_item_removal,
 )
 from .chat_message_queries import message_ancestry
+from .chat_search_pages import read_search_page
 from .chat_summary_reads import list_chat_summary_rows
+from .chat_transcript_context import read_transcript_context
 from .civitai_catalog import CivitaiCatalog
 from .comfy_editor_bridge import ComfyEditorBridgeError
 from .comfy_registry import ComfyNodeResolution, ComfyRegistryClient
@@ -427,12 +430,15 @@ from .schemas import (
     ChatComposerDraftWrite,
     ChatCreate,
     ChatDetail,
+    ChatEditLineagePage,
     ChatItemRemovalExecute,
     ChatItemRemovalExecutionOut,
     ChatItemRemovalImpactOut,
     ChatMessageWindow,
     ChatOut,
+    ChatSearchPage,
     ChatSummaryOut,
+    ChatTranscriptContext,
     ChatUpdate,
     ChatWorkflowSelectionIn,
     CredentialSet,
@@ -2487,6 +2493,69 @@ async def get_chat(chat_id: str, session: ConversationSessionDep) -> ChatDetail:
     return ChatDetail.model_validate(chat).model_copy(
         update={"web_searches": chat_searches(session, chat_id)}
     )
+
+
+@router.get("/chats/{chat_id}/metadata", response_model=ChatOut)
+async def get_chat_metadata(chat_id: str, session: ConversationSessionDep) -> ChatOut:
+    """Read conversation settings without loading messages or search history."""
+    chat = session.scalar(select(Chat).where(Chat.id == chat_id, Chat.scope == STANDARD_CHAT_SCOPE))
+    if not chat:
+        raise api_error(404, "chat-not-found", "chat not found")
+    return ChatOut.model_validate(chat)
+
+
+@router.get("/chats/{chat_id}/context", response_model=ChatTranscriptContext)
+async def get_chat_transcript_context(
+    chat_id: str, session: ConversationSessionDep, head_id: str | None = None
+) -> ChatTranscriptContext:
+    if (
+        session.scalar(select(Chat.id).where(Chat.id == chat_id, Chat.scope == STANDARD_CHAT_SCOPE))
+        is None
+    ):
+        raise api_error(404, "chat-not-found", "chat not found")
+    if (
+        head_id is not None
+        and session.scalar(
+            select(Message.id).where(Message.id == head_id, Message.chat_id == chat_id)
+        )
+        is None
+    ):
+        raise api_error(404, "message-not-found", "This message is not in this conversation")
+    return read_transcript_context(session, chat_id, head_id)
+
+
+@router.get("/chats/{chat_id}/searches", response_model=ChatSearchPage)
+async def get_chat_search_page(
+    chat_id: str,
+    session: ConversationSessionDep,
+    head_id: str | None = None,
+    oldest_message_id: str | None = None,
+    before: str | None = None,
+    pending_only: bool = False,
+    limit: int = 40,
+) -> ChatSearchPage:
+    return read_search_page(
+        session,
+        chat_id,
+        head_id=head_id,
+        oldest_message_id=oldest_message_id,
+        before=before,
+        pending_only=pending_only,
+        limit=limit,
+    )
+
+
+@router.get(
+    "/chats/{chat_id}/messages/{result_message_id}/lineage", response_model=ChatEditLineagePage
+)
+async def get_chat_edit_lineage(
+    chat_id: str,
+    result_message_id: str,
+    session: ConversationSessionDep,
+    before: str | None = None,
+    limit: int = 40,
+) -> ChatEditLineagePage:
+    return read_edit_lineage(session, chat_id, result_message_id, before=before, limit=limit)
 
 
 # Load only the relationships needed to render the requested message page.
