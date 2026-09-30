@@ -324,6 +324,46 @@ def resolve_workflow_output_geometry(
     return resolution
 
 
+def match_source_output_geometry(
+    result: WorkflowOutputGeometryResult, source_width: object, source_height: object
+) -> WorkflowOutputGeometryResolution | None:
+    """This revision's own size in the exact shape of a source picture, or None.
+
+    The picture's reduced ratio names the shape, and the pair is chosen the way a
+    preset's is: the legal one whose area sits closest to the size the workflow
+    already defaults to. A shape the workflow's bounds and multiples cannot make
+    exactly is refused rather than snapped to a near one, for the reason a preset
+    it cannot make is never offered. The pair is then resolved as an exact size,
+    so the capability that will check the turn checks the answer first.
+    """
+
+    if type(result) is not WorkflowOutputGeometryResult:
+        _refuse()
+    proof = result.proof
+    if not result.available or type(proof) is not WorkflowOutputGeometryProof:
+        return None
+    if not all(
+        type(value) is int and 1 <= value <= MAX_DIMENSION
+        for value in (source_width, source_height)
+    ):
+        return None
+    across, down = cast(int, source_width), cast(int, source_height)
+    exact = next(
+        (item for item in proof.capability.combinations if item.size_mode == "exact"), None
+    )
+    if exact is None:
+        return None
+    divisor = math.gcd(across, down)
+    pair = _ratio_dimensions(
+        proof.width, proof.height, exact.max_pixels, across // divisor, down // divisor
+    )
+    if pair is None:
+        return None
+    return resolve_workflow_output_geometry(
+        result, {"mode": exact.mode, "size_mode": "exact", "width": pair[0], "height": pair[1]}
+    )
+
+
 def workflow_output_geometry_resolution_payload(
     resolution: WorkflowOutputGeometryResolution,
 ) -> dict[str, object]:
@@ -612,42 +652,56 @@ def _preset_dimensions(
     hand back an image of a ratio nobody asked for.
     """
 
-    default_area = width.default * height.default
     resolved: dict[str, tuple[int, int]] = {}
     for preset_id, (across, down) in PRESET_RATIOS.items():
-        # A reduced ratio across:down admits exactly the pairs across*count by
-        # down*count, and the counts that land both sides on their own multiple
-        # grids are exactly the multiples of step.
-        step = math.lcm(
-            width.multiple_of // math.gcd(across, width.multiple_of),
-            height.multiple_of // math.gcd(down, height.multiple_of),
-        )
-        lowest = max(
-            -(-width.minimum // (across * step)),
-            -(-height.minimum // (down * step)),
-            1,
-        )
-        area_step = across * down * step * step
-        highest = min(
-            width.maximum // (across * step),
-            height.maximum // (down * step),
-            math.isqrt(max_pixels // area_step),
-        )
-        if lowest > highest:
-            continue
-        # Area grows with the count, so the closest legal area to the default is
-        # at one of the two counts around the ideal, clamped into range.
-        ideal = math.isqrt(default_area // area_step)
-        count = min(
-            {min(max(value, lowest), highest) for value in (ideal, ideal + 1)},
-            key=lambda value: (
-                abs(area_step * value * value - default_area),
-                0 if area_step * value * value >= default_area else 1,
-                value,
-            ),
-        )
-        resolved[preset_id] = (across * step * count, down * step * count)
+        pair = _ratio_dimensions(width, height, max_pixels, across, down)
+        if pair is not None:
+            resolved[preset_id] = pair
     return resolved
+
+
+def _ratio_dimensions(
+    width: WorkflowGeometryInputBinding,
+    height: WorkflowGeometryInputBinding,
+    max_pixels: int,
+    across: int,
+    down: int,
+) -> tuple[int, int] | None:
+    """The legal pair of the reduced ratio across:down nearest the default area, if any."""
+
+    default_area = width.default * height.default
+    # A reduced ratio across:down admits exactly the pairs across*count by
+    # down*count, and the counts that land both sides on their own multiple
+    # grids are exactly the multiples of step.
+    step = math.lcm(
+        width.multiple_of // math.gcd(across, width.multiple_of),
+        height.multiple_of // math.gcd(down, height.multiple_of),
+    )
+    lowest = max(
+        -(-width.minimum // (across * step)),
+        -(-height.minimum // (down * step)),
+        1,
+    )
+    area_step = across * down * step * step
+    highest = min(
+        width.maximum // (across * step),
+        height.maximum // (down * step),
+        math.isqrt(max_pixels // area_step),
+    )
+    if lowest > highest:
+        return None
+    # Area grows with the count, so the closest legal area to the default is
+    # at one of the two counts around the ideal, clamped into range.
+    ideal = math.isqrt(default_area // area_step)
+    count = min(
+        {min(max(value, lowest), highest) for value in (ideal, ideal + 1)},
+        key=lambda value: (
+            abs(area_step * value * value - default_area),
+            0 if area_step * value * value >= default_area else 1,
+            value,
+        ),
+    )
+    return (across * step * count, down * step * count)
 
 
 def _field_binding(key: Literal["width", "height"], value: object) -> WorkflowGeometryInputBinding:

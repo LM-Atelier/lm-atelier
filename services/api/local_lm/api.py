@@ -284,6 +284,7 @@ from .picture_export import (
     export_file_name,
     export_stored_picture,
 )
+from .picture_shape import MatchSourceRequest, shown_size
 from .platforms import list_platform_matrix
 from .preflight import (
     ExactCivitaiFileSelectionError,
@@ -795,6 +796,7 @@ from .workflow_loras import WorkflowLoraProjectionError, workflow_lora_controls
 from .workflow_node_dependencies import node_dependency_errors
 from .workflow_output_geometry import (
     WorkflowOutputGeometryResult,
+    match_source_output_geometry,
     prove_workflow_output_geometry,
     resolve_workflow_output_geometry,
     workflow_output_geometry_payload,
@@ -13985,6 +13987,44 @@ async def resolve_workflow_revision_output_geometry(
             422,
             "workflow-geometry-request-invalid",
             "Output geometry request is invalid or unsupported for this workflow revision",
+        )
+    return workflow_output_geometry_resolution_payload(resolution)
+
+
+@router.post(
+    "/workflow-revisions/{revision_id}/output-geometry/match-source",
+    response_model=WorkflowOutputGeometryResolutionOut,
+)
+async def match_workflow_revision_output_geometry_to_source(
+    revision_id: str,
+    payload: MatchSourceRequest,
+    request: Request,
+    session: SessionDep,
+) -> dict[str, object]:
+    """The size a stored revision makes in the exact shape of one source picture.
+
+    Read-only like resolving a preset, and bound to the revision as it is now.
+    The shape is the one the picture is shown in, read from its verified bytes.
+    A shape the revision cannot make exactly is refused rather than snapped to a
+    near one, and nothing here admits, queues or generates anything.
+    """
+
+    result = _prove_stored_revision_geometry(revision_id, session)
+    source = session.get(Artifact, payload.source_artifact_id)
+    if source is None:
+        raise api_error(404, "artifact-not-found", "source image not found")
+    try:
+        width, height = await run_in_threadpool(shown_size, _services(request).artifacts, source)
+    except ValueError:
+        raise api_error(
+            422, "source-shape-unavailable", "The source picture's shape cannot be read."
+        ) from None
+    resolution = match_source_output_geometry(result, width, height)
+    if resolution is None:
+        raise api_error(
+            422,
+            "workflow-geometry-request-invalid",
+            "This workflow cannot make a picture in this source's exact shape.",
         )
     return workflow_output_geometry_resolution_payload(resolution)
 
