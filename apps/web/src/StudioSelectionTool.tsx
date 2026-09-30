@@ -1,5 +1,5 @@
 import type { Dispatch } from "react";
-import { Brush, Eraser, Lasso, PaintBucket, Square, Wand2 } from "lucide-react";
+import { Brush, Eraser, Lasso, PaintBucket, ScanSearch, Square, Wand2 } from "lucide-react";
 import {
   isSelectionKind,
   type SelectionKind,
@@ -93,19 +93,27 @@ export function StudioSelectionTool({
 }
 
 /** What the panel offers for a selection: the way it is drawn while Select is
- * in hand, how it is drawn, what to do with it as a whole, and how much of the
- * picture it covers. */
+ * in hand, how it is drawn, finding the subject to select, what to do with it
+ * as a whole, and how much of the picture it covers. */
 export function StudioSelectionControls({
   tools,
   dispatch,
   colorsUnreadable,
   coverage,
+  onSelectSubject,
+  selectSubjectWaits = false,
+  findingSubject = false,
 }: {
   tools: StudioToolState;
   dispatch: Dispatch<StudioToolAction>;
   colorsUnreadable: boolean;
   /** The selected fraction of the picture; 0 when nothing is selected. */
   coverage: number;
+  /** Finds the picture's subject and selects it; absent where no workflow can cut a subject out. */
+  onSelectSubject?: () => void;
+  /** An edit is under way, so another cannot start yet. */
+  selectSubjectWaits?: boolean;
+  findingSubject?: boolean;
 }) {
   return (
     <div className="studio-selection-controls">
@@ -127,6 +135,19 @@ export function StudioSelectionControls({
         </div>
       )}
       <StudioSelectionTool tools={tools} dispatch={dispatch} colorsUnreadable={colorsUnreadable} />
+      {onSelectSubject && (
+        <button
+          type="button"
+          className="secondary compact-button"
+          // Not disabled: a focused button that becomes disabled drops focus to the page.
+          aria-disabled={selectSubjectWaits}
+          title="Finds the subject and selects it, in place of what is selected now"
+          onClick={() => !selectSubjectWaits && onSelectSubject()}
+        >
+          <ScanSearch size={14} aria-hidden="true" /> Select the subject
+        </button>
+      )}
+      {findingSubject && <small role="status">Finding the subject…</small>}
       <div className="row-actions">
         <button
           className="secondary compact-button"
