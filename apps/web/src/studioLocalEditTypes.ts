@@ -90,6 +90,8 @@ export interface StudioColorAdjustments {
   contrast: number;
   highlights: number;
   shadows: number;
+  whites: number;
+  blacks: number;
   saturation: number;
   warmth: number;
   tint: number;

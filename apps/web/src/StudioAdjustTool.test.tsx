@@ -209,6 +209,8 @@ describe("adjusting in the studio", () => {
     act(() => {
       fireEvent.change(screen.getByRole("slider", { name: "Brightness" }), { target: { value: "25" } });
       fireEvent.change(screen.getByRole("slider", { name: "Shadows" }), { target: { value: "40" } });
+      fireEvent.change(screen.getByRole("slider", { name: "Whites" }), { target: { value: "-25" } });
+      fireEvent.change(screen.getByRole("slider", { name: "Blacks" }), { target: { value: "30" } });
       fireEvent.change(screen.getByRole("slider", { name: "Sharpness" }), { target: { value: "-30" } });
       fireEvent.change(screen.getByRole("slider", { name: "Vibrance" }), { target: { value: "15" } });
       fireEvent.change(screen.getByRole("slider", { name: "Vignette" }), { target: { value: "20" } });
@@ -224,8 +226,8 @@ describe("adjusting in the studio", () => {
       source_artifact_id: "art-1",
       operation: "adjust",
       adjustments: {
-        brightness: 25, contrast: 0, highlights: 0, shadows: 40, saturation: 0, warmth: 0, tint: 0, sharpness: -30,
-        vibrance: 15, vignette: 20, grain: 12,
+        brightness: 25, contrast: 0, highlights: 0, shadows: 40, whites: -25, blacks: 30, saturation: 0, warmth: 0,
+        tint: 0, sharpness: -30, vibrance: 15, vignette: 20, grain: 12,
       },
     });
   });

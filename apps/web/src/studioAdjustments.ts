@@ -5,13 +5,14 @@ import type { StudioColorAdjustments } from "./types";
  * The canvas shows an adjustment while its sliders move, and an apply asks the
  * server to make the same picture. So this is the server's arithmetic step for
  * step (studio_adjustments.py): one lookup table per channel for shadows,
- * highlights, warmth, tint, brightness and contrast, then saturation as a mix
- * toward each pixel's grey, then vibrance as the same mix kept in proportion to
- * how muted each pixel is, then sharpness as a mix away from a softened copy of
- * the picture, then the vignette, a mix toward black or white that grows toward
- * the corners, and last grain, the same small step up or down on all three
- * channels of each pixel, taken from a fixed tile of noise, with the same
- * roundings. Both copies are checked against the same pixels.
+ * highlights, warmth, tint, brightness, contrast, whites and blacks, then
+ * saturation as a mix toward each pixel's grey, then vibrance as the same mix
+ * kept in proportion to how muted each pixel is, then sharpness as a mix away
+ * from a softened copy of the picture, then the vignette, a mix toward black or
+ * white that grows toward the corners, and last grain, the same small step up
+ * or down on all three channels of each pixel, taken from a fixed tile of
+ * noise, with the same roundings. Both copies are checked against the same
+ * pixels.
  */
 
 export const NEUTRAL_ADJUSTMENTS: StudioColorAdjustments = {
@@ -19,6 +20,8 @@ export const NEUTRAL_ADJUSTMENTS: StudioColorAdjustments = {
   contrast: 0,
   highlights: 0,
   shadows: 0,
+  whites: 0,
+  blacks: 0,
   saturation: 0,
   warmth: 0,
   tint: 0,
@@ -33,6 +36,8 @@ export const ADJUSTMENT_LIMIT = 100;
 const NEUTRAL_KELVIN = 6500;
 const KELVIN_PER_WARMTH_STEP = 25;
 const TINT_REACH = 0.15;
+/** How far the whites and blacks sliders at either end move white or black, as a share of the range. */
+const LEVELS_REACH = 0.25;
 /** How far toward black, or toward white, the vignette takes the corners at either end. */
 const VIGNETTE_REACH = 0.8;
 /** Where the vignette begins and where it is whole, as the squared distance
@@ -49,8 +54,9 @@ const GRAIN_TILE = 256;
 export function isNeutral(adjustments: StudioColorAdjustments): boolean {
   return !(
     adjustments.brightness || adjustments.contrast || adjustments.highlights || adjustments.shadows
-    || adjustments.saturation || adjustments.warmth || adjustments.tint || adjustments.sharpness
-    || adjustments.vibrance || adjustments.vignette || adjustments.grain
+    || adjustments.whites || adjustments.blacks || adjustments.saturation || adjustments.warmth
+    || adjustments.tint || adjustments.sharpness || adjustments.vibrance || adjustments.vignette
+    || adjustments.grain
   );
 }
 
@@ -111,18 +117,42 @@ export function colorGains(warmth: number, tint: number): [number, number, numbe
   return [warm[0] * tinted[0], warm[1] * tinted[1], warm[2] * tinted[2]];
 }
 
-/** The red, green and blue lookup tables for tone, color, brightness and contrast. */
+/** The levels the blacks and whites sliders make black and white, and what they make them.
+ *
+ * In order: the level that becomes black and the level black becomes, then the
+ * level that becomes white and the level white becomes. Above zero, blacks
+ * lifts black to a grey, and below, it deepens the darkest levels into black;
+ * whites does the same at the other end. Worked as the server works it.
+ */
+export function levelEnds(blacks: number, whites: number): [number, number, number, number] {
+  const black = 255 * LEVELS_REACH * Math.abs(blacks) / ADJUSTMENT_LIMIT;
+  const white = 255 * LEVELS_REACH * Math.abs(whites) / ADJUSTMENT_LIMIT;
+  const [blackFrom, blackTo] = blacks > 0 ? [0, black] : [black, 0];
+  const [whiteFrom, whiteTo] = whites > 0 ? [255 - white, 255] : [255, 255 - white];
+  return [blackFrom, blackTo, whiteFrom, whiteTo];
+}
+
+/** The three channels' lookup tables for tone, color, brightness, contrast, whites and blacks.
+ *
+ * Last, the level as it then stands, held within the range, is moved so that
+ * the levels the whites and blacks take as white and black land where they put
+ * them. Holding it first makes the white and black they set the picture's
+ * lightest and darkest, however far the other sliders took it.
+ */
 export function channelTables(adjustments: StudioColorAdjustments): [Uint8Array, Uint8Array, Uint8Array] {
   const gains = colorGains(adjustments.warmth, adjustments.tint);
   const brightness = Math.pow(2, adjustments.brightness / ADJUSTMENT_LIMIT);
   const contrast = Math.pow(2, adjustments.contrast / ADJUSTMENT_LIMIT);
   const shadows = adjustments.shadows / ADJUSTMENT_LIMIT;
   const highlights = adjustments.highlights / ADJUSTMENT_LIMIT;
+  const [blackFrom, blackTo, whiteFrom, whiteTo] = levelEnds(adjustments.blacks, adjustments.whites);
+  const spread = (whiteTo - blackTo) / (whiteFrom - blackFrom);
   const tables = gains.map((gain) => {
     const table = new Uint8Array(256);
     for (let value = 0; value < 256; value += 1) {
       const lit = toned(value, shadows, highlights) * gain * brightness;
-      table[value] = rounded((lit - 127.5) * contrast + 127.5);
+      const level = Math.min(255, Math.max(0, (lit - 127.5) * contrast + 127.5));
+      table[value] = rounded(blackTo + (level - blackFrom) * spread);
     }
     return table;
   });
