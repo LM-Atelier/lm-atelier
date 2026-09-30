@@ -133,6 +133,7 @@ from .image_edit_verification import (
     build_subject_location_prompt,
     compare_inventories,
     decide_image_edit_retry,
+    drift_region,
     image_edit_verification_eligibility,
     image_edit_verification_job_id,
     parse_area_contents,
@@ -140,6 +141,7 @@ from .image_edit_verification import (
     parse_image_inventory,
     parse_subject_location,
     reading_contradicted,
+    reading_contradicted_around,
     without_contradicted,
 )
 from .matting_workflows import workflow_declares_matting
@@ -8206,11 +8208,12 @@ class ConversationOrchestrator:
         report a change nobody made. Every difference the request did not ask
         for is found in its picture - the source, or the result for a thing that
         was not there before - and measured there with the requested subjects
-        left out. Only a region whose every part stayed under the local change
-        threshold contradicts its difference. Anything that cannot be placed or
-        measured contradicts nothing, and every changed area still has to be
-        accounted for afterwards, so a box that misses a real change only leaves
-        that change to be found in its own area.
+        left out, around its box when that box is too small to measure (see
+        drift_region). Only a region whose every part stayed under the local
+        change threshold contradicts its difference. Anything that cannot be
+        placed or measured contradicts nothing, and every changed area still has
+        to be accounted for afterwards, so a box that misses a real change only
+        leaves that change to be found in its own area.
         """
 
         requested = set(attribution.requested)
@@ -8267,14 +8270,20 @@ class ConversationOrchestrator:
         ]
         contradicted: dict[int, ContradictedReading] = {}
         for index in unrequested:
-            area = await locate(changes[index])
-            if area is None:
+            located = await locate(changes[index])
+            if located is None:
                 continue
+            area = drift_region(located, excluded)
             region, measured = await asyncio.to_thread(
                 compare_region, before, after, area, excluded
             )
+            if area == located:
+                contradicts = reading_contradicted(region, measured)
+            else:
+                own, _ = await asyncio.to_thread(compare_region, before, after, located, excluded)
+                contradicts = reading_contradicted_around(own, region, measured)
             largest = region.largest_local_difference
-            if reading_contradicted(region, measured) and largest is not None:
+            if contradicts and largest is not None:
                 contradicted[index] = ContradictedReading(
                     subject=changes[index].subject, area=area, largest_local_difference=largest
                 )

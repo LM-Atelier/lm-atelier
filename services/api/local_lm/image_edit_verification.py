@@ -52,6 +52,11 @@ MIN_DRIFT_REGION = 1.0 / 64
 #: How far around a requested subject's box is left out of the measurement,
 #: so the edge of the requested change is not measured against a neighbour.
 DRIFT_EXCLUSION_MARGIN = 1.0 / 32
+#: How far a located box too small to measure is widened on every side. A
+#: reader's box for a small thing is often tighter than the thing and a little
+#: off it; widened by this much, any box away from the picture's edges covers
+#: at least MIN_DRIFT_REGION.
+DRIFT_MEASURE_MARGIN = 1.0 / 16
 DEFAULT_STRENGTH_ADJUSTMENT = 0.12
 #: The largest strength step a short schedule may widen a retry to. On a
 #: four-step schedule a quarter of the strength is one effective step; on a
@@ -600,6 +605,42 @@ def reading_contradicted(difference: ImageDifference, measured: float) -> bool:
         and measured >= MIN_DRIFT_REGION
         and difference.largest_local_difference is not None
         and difference.largest_local_difference < LOCAL_CHANGE_THRESHOLD
+    )
+
+
+def drift_region(area: ChangedArea, excluded: Sequence[ChangedArea]) -> ChangedArea:
+    """The box a listed subject's pixels are measured in.
+
+    Its located box, unless that is too small to say anything and clear of
+    every excluded box, when it is widened by DRIFT_MEASURE_MARGIN. A widened
+    box is judged together with the located one (reading_contradicted_around).
+    A small box that touches a requested thing is left as it is: the parts
+    around it belong to the requested change as much as to the thing.
+    """
+
+    small = (area.right - area.left) * (area.bottom - area.top) < MIN_DRIFT_REGION
+    if small and not any(area.overlaps(box) for box in excluded):
+        return area.widened(DRIFT_MEASURE_MARGIN)
+    return area
+
+
+def reading_contradicted_around(
+    located: ImageDifference, widened: ImageDifference, measured: float
+) -> bool:
+    """Whether a small box's reading is contradicted once it is measured widened.
+
+    Each part of the comparison is averaged over what the mask covers of it,
+    so a widened mask can spread a small change inside the located box across
+    a whole part and bring it under the threshold. The widened box speaks for
+    the thing only where the located box agrees: its own pixels, however few,
+    must show nothing at or above LOCAL_CHANGE_THRESHOLD either.
+    """
+
+    return (
+        located.comparable
+        and located.largest_local_difference is not None
+        and located.largest_local_difference < LOCAL_CHANGE_THRESHOLD
+        and reading_contradicted(widened, measured)
     )
 
 
