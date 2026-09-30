@@ -163,6 +163,7 @@ export type StudioToolAction =
   | { type: "set-paint-opacity"; opacity: number }
   | { type: "set-caption"; patch: Partial<StudioCaption> }
   | { type: "set-subject-picture"; picture: File | null }
+  | { type: "select-subject"; mask: MaskRaster }
   | { type: "image-changed"; width: number; height: number }
   /** Everything as it stood when the Studio was left, for the same picture. */
   | { type: "restore"; state: StudioToolState }
@@ -327,6 +328,15 @@ export function studioToolReducer(
     }
     case "stroke-end":
       return { ...state, maskVersion: state.maskVersion + 1 };
+    case "select-subject": {
+      // Found in the picture on the canvas, so it has the selection's size; one
+      // of any other size was found in another picture and would not line up.
+      if (!state.mask || action.mask.width !== state.mask.width || action.mask.height !== state.mask.height) {
+        return state;
+      }
+      state.history.push(state.mask);
+      return { ...state, mask: action.mask, maskVersion: state.maskVersion + 1 };
+    }
     case "invert": {
       if (!state.mask) return state;
       state.history.push(state.mask);
@@ -363,6 +373,9 @@ export function studioToolReducer(
   }
 }
 
+/** What a cutout turn says it did; the workflow reads no words. */
+export const CUTOUT_INSTRUCTION = "Cut the subject out onto a transparent background.";
+
 /** What to call a turn the reader gave no words for.
  *
  * The turn contract requires text, and these two tools deliberately ask for
@@ -374,7 +387,7 @@ export function defaultInstruction(state: StudioToolState): string {
   if (state.kind === "enhance") return `Enhance to ${state.upscaleFactor}x`;
   if (state.kind === "text") return replaceWordsInstruction(state);
   // The workflow reads no words; these are what the history shows it did.
-  if (state.kind === "isolate") return "Cut the subject out onto a transparent background.";
+  if (state.kind === "isolate") return CUTOUT_INSTRUCTION;
   // The lighting adapter reads its two pictures as figures, and the direction
   // in words must agree with the map or it follows the words.
   if (state.kind === "relight") {

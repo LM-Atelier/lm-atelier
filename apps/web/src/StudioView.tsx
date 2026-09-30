@@ -45,6 +45,7 @@ import {
   type StudioToolKind,
 } from "./studioToolState";
 import { useStudioCompare } from "./useStudioCompare";
+import { SUBJECT_ELSEWHERE, useStudioSubjectSelection } from "./useStudioSubjectSelection";
 import { useStudioImage } from "./useStudioImage";
 import { useStudioSession, type StudioStep } from "./useStudioSession";
 import { useStudioDraft } from "./useStudioDraft";
@@ -108,7 +109,6 @@ export function StudioView({
   const [results, setResults] = useState(1);
   // Replacing a background or a subject is two applies; the studio stays busy in between.
   const cutoutEdit = useStudioBackground(sessionId, session, apply, setSelectionError);
-  const busy = sessionBusy || cutoutEdit.busy;
   const applyProgress = studioApplyProgress(session);
   // The recipe an apply should run under. Cleared whenever the instruction is
   // edited by hand: at that point the words are no longer the recipe's, and
@@ -157,6 +157,12 @@ export function StudioView({
   const current = shown.find((step) => step.artifactId === selectedId) ?? shown.at(-1) ?? null;
 
   const currentArtifactId = current?.artifactId ?? null;
+  // Finding the subject is a cutout too, whose alpha becomes the selection of the picture it was found in.
+  const subjectSearch = useStudioSubjectSelection(sessionId, session, apply, setSelectionError, (artifactId, mask) =>
+    artifactId === currentArtifactId ? dispatch({ type: "select-subject", mask }) : setSelectionError(SUBJECT_ELSEWHERE));
+  const busy = sessionBusy || cutoutEdit.busy || subjectSearch.busy;
+  // Offered where a workflow can cut a subject out, which the report names under Isolate.
+  const subjectWorkflow = isolateTool?.available ? isolateTool.workflow_revision_id : null;
   const artifact = useQuery({
     queryKey: ["artifact", currentArtifactId],
     queryFn: () => api.artifact(currentArtifactId!),
@@ -321,7 +327,14 @@ export function StudioView({
           )}
           {toolMarksPicture(tools.kind) && (
             <StudioSelectionControls tools={tools} dispatch={dispatch} coverage={selectionCoverage}
-              colorsUnreadable={readsColors && Boolean(bitmap) && !sourcePixels} />
+              colorsUnreadable={readsColors && Boolean(bitmap) && !sourcePixels}
+              selectSubjectWaits={busy} findingSubject={subjectSearch.busy}
+              onSelectSubject={subjectWorkflow && current && bitmap ? () => {
+                setSelectionError(null);
+                // Kept on the canvas while the cutout joins the strip, so the subject is selected where it was asked for.
+                setSelectedId(current.artifactId);
+                subjectSearch.start(current.artifactId, { width: bitmap.width, height: bitmap.height }, subjectWorkflow);
+              } : undefined} />
           )}
           <StudioToolOptions
             tools={tools}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { coverage, isEmpty, fillRect } from "./studioMasks";
+import { coverage, createMask, isEmpty, fillRect } from "./studioMasks";
 import { BrushTool, ClickSelectTool, RectTool } from "./studioTools";
 import {
   initialToolState,
@@ -153,6 +153,28 @@ describe("studio tool state", () => {
     expect(isEmpty(state.mask!)).toBe(true);
     state = studioToolReducer(state, { type: "undo" });
     expect(coverage(state.mask!)).toBeCloseTo(half);
+  });
+
+  it("makes a subject found in the picture the selection, undoably, and leaves one found elsewhere", () => {
+    let state = withImage(32, 32);
+    fillRect(state.mask!, 0, 0, 8, 32);
+    const brushed = coverage(state.mask!);
+    const subject = createMask(32, 32);
+    fillRect(subject, 16, 0, 32, 32);
+
+    state = studioToolReducer(state, { type: "select-subject", mask: subject });
+    // In place of what was selected, not added to it.
+    expect(state.mask).toBe(subject);
+    expect(coverage(state.mask!)).toBeCloseTo(0.5);
+    state = studioToolReducer(state, { type: "undo" });
+    expect(coverage(state.mask!)).toBeCloseTo(brushed);
+
+    // Another picture's size means another picture: its subject would not line up.
+    const elsewhere = createMask(40, 20);
+    fillRect(elsewhere, 0, 0, 40, 20);
+    expect(studioToolReducer(state, { type: "select-subject", mask: elsewhere })).toBe(state);
+    const unloaded = initialToolState();
+    expect(studioToolReducer(unloaded, { type: "select-subject", mask: subject })).toBe(unloaded);
   });
 
   it("drops the mask when the image changes", () => {
