@@ -931,6 +931,8 @@ async def test_an_adjustment_is_recorded_with_where_each_slider_stood(
         "contrast": -20,
         "highlights": -15,
         "shadows": 45,
+        "whites": 20,
+        "blacks": -15,
         "saturation": 30,
         "warmth": -40,
         "tint": 25,

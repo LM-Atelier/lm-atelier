@@ -15,6 +15,7 @@ from local_lm.studio_adjustments import (
     adjust_colors,
     channel_tables,
     grain_level,
+    level_ends,
     vignette_mask,
 )
 
@@ -154,6 +155,24 @@ CASES: list[tuple[str, dict[str, int], str]] = [
         {"shadows": 50, "highlights": -40, "contrast": 20, "saturation": -30, "warmth": 25},
         "184,112,74 48,222,136 135,131,127 210,31,210 0,0,0 "
         "255,255,255 54,95,164 29,148,29 223,247,156 151,62,134",
+    ),
+    (
+        "faded",
+        {"blacks": 60, "whites": -30},
+        "193,116,77 46,224,137 137,137,137 236,38,236 38,38,38 "
+        "236,236,236 67,109,196 38,170,38 201,234,136 169,73,159",
+    ),
+    (
+        "deeper blacks and brighter whites",
+        {"blacks": -50, "whites": 70},
+        "240,97,26 0,255,137 137,137,137 255,0,255 0,0,0 "
+        "255,255,255 7,84,244 0,197,0 254,255,134 196,19,177",
+    ),
+    (
+        "brighter with white held down",
+        {"brightness": 40, "whites": -80},
+        "204,106,53 11,204,135 135,135,135 204,0,204 0,0,0 "
+        "204,204,204 39,96,204 0,179,0 204,204,133 178,48,165",
     ),
 ]
 
@@ -355,6 +374,8 @@ def test_every_slider_at_zero_changes_nothing() -> None:
     assert not ColorAdjustments(shadows=1).is_neutral()
     assert not ColorAdjustments(vibrance=-1).is_neutral()
     assert not ColorAdjustments(vignette=1).is_neutral()
+    assert not ColorAdjustments(whites=-1).is_neutral()
+    assert not ColorAdjustments(blacks=1).is_neutral()
     for table in channel_tables(ColorAdjustments()):
         assert table == list(range(256))
 
@@ -378,6 +399,52 @@ def test_no_two_levels_swap_places_however_the_tone_sliders_are_set(
     for table in channel_tables(ColorAdjustments(shadows=shadows, highlights=highlights)):
         assert table[0] == 0 and table[255] == 255
         assert all(low <= high for low, high in pairwise(table))
+
+
+def test_whites_and_blacks_move_white_and_black_a_quarter_of_the_range_at_most() -> None:
+    lifted = channel_tables(ColorAdjustments(blacks=100))[1]
+    deepened = channel_tables(ColorAdjustments(blacks=-100))[1]
+    brightened = channel_tables(ColorAdjustments(whites=100))[1]
+    dimmed = channel_tables(ColorAdjustments(whites=-100))[1]
+
+    # Black lifts to 63.75 and white keeps its place; the rest spread evenly.
+    assert [lifted[level] for level in (0, 128, 255)] == [64, 160, 255]
+    # Every level up to the lowest quarter's top becomes black.
+    assert set(deepened[:65]) == {0} and deepened[255] == 255
+    # Every level from the highest quarter's foot becomes white.
+    assert brightened[0] == 0 and set(brightened[192:]) == {255}
+    assert [dimmed[level] for level in (0, 128, 255)] == [0, 96, 191]
+
+
+def test_white_and_black_hold_however_far_the_other_sliders_take_the_picture() -> None:
+    glaring = ColorAdjustments(brightness=100, contrast=100, whites=-100)
+    murky = ColorAdjustments(brightness=-100, contrast=100, blacks=100)
+
+    assert {max(table) for table in channel_tables(glaring)} == {191}
+    assert {min(table) for table in channel_tables(murky)} == {64}
+
+
+@pytest.mark.parametrize("blacks", [-100, -33, 0, 41, 100])
+@pytest.mark.parametrize("whites", [-100, -67, 0, 12, 100])
+def test_no_two_levels_swap_places_however_whites_and_blacks_are_set(
+    blacks: int, whites: int
+) -> None:
+    _, black, _, white = level_ends(blacks, whites)
+    alone = channel_tables(ColorAdjustments(blacks=blacks, whites=whites))
+    toned = channel_tables(ColorAdjustments(blacks=blacks, whites=whites, contrast=-45, shadows=30))
+
+    assert all(table[0] == int(black + 0.5) and table[255] == int(white + 0.5) for table in alone)
+    for table in (*alone, *toned):
+        assert all(low <= high for low, high in pairwise(table))
+
+
+def test_whites_and_blacks_run_from_minus_100_to_100() -> None:
+    for name in ("whites", "blacks"):
+        assert getattr(StudioColorAdjustments(**{name: -100}), name) == -100
+        with pytest.raises(ValueError):
+            StudioColorAdjustments(**{name: -101})
+        with pytest.raises(ValueError):
+            StudioColorAdjustments(**{name: 101})
 
 
 def test_transparency_is_kept_as_it_was() -> None:

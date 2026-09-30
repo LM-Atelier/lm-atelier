@@ -1,7 +1,9 @@
 /** The preview's arithmetic, checked against the pixels the server makes. */
 
 import { describe, expect, it } from "vitest";
-import { adjustPixels, channelTables, grainLevel, grainOffsets, isNeutral, NEUTRAL_ADJUSTMENTS } from "./studioAdjustments";
+import {
+  adjustPixels, channelTables, grainLevel, grainOffsets, isNeutral, levelEnds, NEUTRAL_ADJUSTMENTS,
+} from "./studioAdjustments";
 import type { StudioColorAdjustments } from "./types";
 
 // The same pixels and results test_studio_adjustments.py checks the server
@@ -70,6 +72,15 @@ const CASES: Array<[string, Partial<StudioColorAdjustments>, number[][]]> = [
   ["toned and graded", { shadows: 50, highlights: -40, contrast: 20, saturation: -30, warmth: 25 }, [
     [184, 112, 74], [48, 222, 136], [135, 131, 127], [210, 31, 210], [0, 0, 0],
     [255, 255, 255], [54, 95, 164], [29, 148, 29], [223, 247, 156], [151, 62, 134]]],
+  ["faded", { blacks: 60, whites: -30 }, [
+    [193, 116, 77], [46, 224, 137], [137, 137, 137], [236, 38, 236], [38, 38, 38],
+    [236, 236, 236], [67, 109, 196], [38, 170, 38], [201, 234, 136], [169, 73, 159]]],
+  ["deeper blacks and brighter whites", { blacks: -50, whites: 70 }, [
+    [240, 97, 26], [0, 255, 137], [137, 137, 137], [255, 0, 255], [0, 0, 0],
+    [255, 255, 255], [7, 84, 244], [0, 197, 0], [254, 255, 134], [196, 19, 177]]],
+  ["brighter with white held down", { brightness: 40, whites: -80 }, [
+    [204, 106, 53], [11, 204, 135], [135, 135, 135], [204, 0, 204], [0, 0, 0],
+    [204, 204, 204], [39, 96, 204], [0, 179, 0], [204, 204, 133], [178, 48, 165]]],
 ];
 
 // A picture with edges in it, for sharpness, which reads each pixel's
@@ -229,6 +240,32 @@ describe("shadows and highlights", () => {
   it("each count as a change on their own", () => {
     expect(isNeutral({ ...NEUTRAL_ADJUSTMENTS, highlights: -1 })).toBe(false);
     expect(isNeutral({ ...NEUTRAL_ADJUSTMENTS, shadows: 1 })).toBe(false);
+  });
+});
+
+describe("whites and blacks", () => {
+  it("move white and black a quarter of the range at most, as the server's tables do", () => {
+    // The same levels are pinned in test_studio_adjustments.py.
+    const at = (sliders: Partial<StudioColorAdjustments>, levels: number[]) =>
+      levels.map((level) => channelTables({ ...NEUTRAL_ADJUSTMENTS, ...sliders })[1][level]);
+    expect(at({ blacks: 100 }, [0, 128, 255])).toEqual([64, 160, 255]);
+    expect(at({ blacks: -100 }, [64, 65, 255])).toEqual([0, 2, 255]);
+    expect(at({ whites: 100 }, [0, 190, 192])).toEqual([0, 253, 255]);
+    expect(at({ whites: -100 }, [0, 128, 255])).toEqual([0, 96, 191]);
+    expect(levelEnds(-100, 100)).toEqual([63.75, 0, 191.25, 255]);
+  });
+
+  it("hold white and black however far the other sliders take the picture", () => {
+    const glaring = channelTables({ ...NEUTRAL_ADJUSTMENTS, brightness: 100, contrast: 100, whites: -100 });
+    const murky = channelTables({ ...NEUTRAL_ADJUSTMENTS, brightness: -100, contrast: 100, blacks: 100 });
+
+    expect(glaring.map((table) => Math.max(...table))).toEqual([191, 191, 191]);
+    expect(murky.map((table) => Math.min(...table))).toEqual([64, 64, 64]);
+  });
+
+  it("each count as a change on their own", () => {
+    expect(isNeutral({ ...NEUTRAL_ADJUSTMENTS, whites: -1 })).toBe(false);
+    expect(isNeutral({ ...NEUTRAL_ADJUSTMENTS, blacks: 1 })).toBe(false);
   });
 });
 

@@ -2,13 +2,13 @@
 
 The studio shows an adjustment on the picture while its sliders move, so the
 arithmetic here is the arithmetic the browser runs, in the same order: one
-lookup table per channel for shadows, highlights, warmth, tint, brightness and
-contrast, then saturation as a mix toward each pixel's grey, then vibrance as
-the same mix kept in proportion to how muted each pixel is, then sharpness as
-a mix away from a softened copy of the picture, then the vignette, a mix
-toward black or white that grows toward the corners, and last grain, the same
-small step up or down on all three channels of each pixel, taken from a fixed
-tile of noise. Every step is integer
+lookup table per channel for shadows, highlights, warmth, tint, brightness,
+contrast, whites and blacks, then saturation as a mix toward each pixel's grey,
+then vibrance as the same mix kept in proportion to how muted each pixel is,
+then sharpness as a mix away from a softened copy of the picture, then the
+vignette, a mix toward black or white that grows toward the corners, and last
+grain, the same small step up or down on all three channels of each pixel,
+taken from a fixed tile of noise. Every step is integer
 arithmetic or floating-point arithmetic with a stated rounding, which the
 browser repeats exactly, so the preview is the picture an apply makes. The
 browser's copy lives in studioAdjustments.ts, and the two are checked against
@@ -35,6 +35,10 @@ KELVIN_PER_WARMTH_STEP = 25
 #: How far the tint slider at either end moves green against red and blue,
 #: before the gains are evened out to keep the brightness.
 TINT_REACH = 0.15
+#: How far the whites and blacks sliders at either end move white or black, as
+#: a share of the range: at 100 blacks lifts black a quarter of the way up, and
+#: at -100 every level in the lowest quarter becomes black.
+LEVELS_REACH = 0.25
 #: The softened copy sharpness mixes against: each pixel's neighborhood of
 #: nine, weighted 1-2-1 each way. The weights sum to 16, so every sum the
 #: kernel makes in single precision is exact and the browser's integers match.
@@ -65,6 +69,10 @@ class ColorAdjustments:
     contrast: int = 0
     highlights: int = 0
     shadows: int = 0
+    #: Above zero the lightest levels brighten into white; below, white dims to a grey.
+    whites: int = 0
+    #: Above zero black lifts to a grey; below, the darkest levels deepen into black.
+    blacks: int = 0
     saturation: int = 0
     warmth: int = 0
     tint: int = 0
@@ -80,6 +88,8 @@ class ColorAdjustments:
             or self.contrast
             or self.highlights
             or self.shadows
+            or self.whites
+            or self.blacks
             or self.saturation
             or self.warmth
             or self.tint
@@ -129,15 +139,37 @@ def toned(value: int, shadows: float, highlights: float) -> float:
     return value + 255 * (shadows * share * left * left + highlights * share * share * left)
 
 
+def level_ends(blacks: int, whites: int) -> tuple[float, float, float, float]:
+    """The levels the blacks and whites sliders make black and white, and what they make them.
+
+    In order: the level that becomes black and the level black becomes, then
+    the level that becomes white and the level white becomes. Above zero,
+    blacks lifts black to a grey, and below, it deepens the darkest levels into
+    black. Whites does the same at the other end: above zero the lightest
+    levels brighten into white, and below, white dims to a grey. Either moves
+    its end by at most LEVELS_REACH of the range.
+    """
+
+    black = 255 * LEVELS_REACH * abs(blacks) / ADJUSTMENT_LIMIT
+    white = 255 * LEVELS_REACH * abs(whites) / ADJUSTMENT_LIMIT
+    black_from, black_to = (0.0, black) if blacks > 0 else (black, 0.0)
+    white_from, white_to = (255 - white, 255.0) if whites > 0 else (255.0, 255 - white)
+    return (black_from, black_to, white_from, white_to)
+
+
 def channel_tables(adjustments: ColorAdjustments) -> tuple[list[int], list[int], list[int]]:
-    """The red, green and blue lookup tables for tone, color, brightness and contrast.
+    """The three channels' lookup tables for tone, color, brightness, contrast, whites and blacks.
 
     Each level is first moved by the shadows and highlights, so they act on the
     picture's own tones, then by the warmth and tint gains. Brightness scales
     every channel by two to the power of its slider over 100, so 100 doubles
     the light and -100 halves it. Contrast does the same to the distance from
-    middle grey. Nothing is clamped until the one rounding at the end, so the
-    steps do not lose detail to each other.
+    middle grey. Last, the level as it then stands, held within the range, is
+    moved so that the levels the whites and blacks take as white and black
+    land where they put them, with the levels between spread evenly. Holding
+    it first makes the white and black they set the picture's lightest and
+    darkest, however far the other sliders took it. Nothing is rounded until
+    the end, so the steps do not lose detail to each other.
     """
 
     warmth = warmth_gains(NEUTRAL_KELVIN - KELVIN_PER_WARMTH_STEP * adjustments.warmth)
@@ -147,12 +179,15 @@ def channel_tables(adjustments: ColorAdjustments) -> tuple[list[int], list[int],
     contrast = 2 ** (adjustments.contrast / ADJUSTMENT_LIMIT)
     shadows = adjustments.shadows / ADJUSTMENT_LIMIT
     highlights = adjustments.highlights / ADJUSTMENT_LIMIT
+    black_from, black_to, white_from, white_to = level_ends(adjustments.blacks, adjustments.whites)
+    spread = (white_to - black_to) / (white_from - black_from)
     tables: list[list[int]] = []
     for gain in gains:
         table = []
         for value in range(256):
             lit = toned(value, shadows, highlights) * gain * brightness
-            table.append(_rounded((lit - 127.5) * contrast + 127.5))
+            level = min(255.0, max(0.0, (lit - 127.5) * contrast + 127.5))
+            table.append(_rounded(black_to + (level - black_from) * spread))
         tables.append(table)
     return (tables[0], tables[1], tables[2])
 

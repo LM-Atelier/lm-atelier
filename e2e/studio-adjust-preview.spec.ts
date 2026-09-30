@@ -66,6 +66,31 @@ async function tonesPicture(page: Page): Promise<Buffer> {
   return Buffer.from(dataUrl.split(",")[1], "base64");
 }
 
+/** Every level from black to white across the top, and colors across the bottom.
+ *
+ * Written pixel by pixel, so black and white are both there exactly. A picture
+ * of its own again.
+ */
+async function levelsPicture(page: Page): Promise<Buffer> {
+  const dataUrl = await page.evaluate(() => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 96;
+    canvas.height = 64;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("no canvas");
+    const image = context.createImageData(96, 64);
+    for (let y = 0; y < 64; y += 1) {
+      for (let x = 0; x < 96; x += 1) {
+        const level = Math.round((x * 255) / 95);
+        image.data.set(y < 32 ? [level, level, level, 255] : [level, 255 - level, 96, 255], (y * 96 + x) * 4);
+      }
+    }
+    context.putImageData(image, 0, 0);
+    return canvas.toDataURL("image/png");
+  });
+  return Buffer.from(dataUrl.split(",")[1], "base64");
+}
+
 /** A cutout: two shapes on a transparent background.
  *
  * Whole-pixel rectangles only, so every pixel is wholly opaque or wholly
@@ -208,6 +233,26 @@ test("lifts the shadows and holds back the highlights exactly as the preview sho
   expect(kept.length).toBe(preview.length);
   const differing = kept.filter((value, index) => value !== preview[index]).length;
   expect(differing).toBe(0);
+});
+
+test("lifts black and dims white exactly as the preview shows", async ({ page }) => {
+  await page.goto("/");
+  await dismissSetup(page);
+  const before = await openToAdjust(page, "neutral-levels.png", await levelsPicture(page), 96 * 64);
+  await page.getByRole("slider", { name: "Blacks" }).fill("35");
+  await page.getByRole("slider", { name: "Whites" }).fill("-40");
+  await expect.poll(async () => (await shownPixels(page)).join() !== before.join()).toBe(true);
+  const preview = await shownPixels(page);
+
+  const kept = await applyAndReadKept(page);
+
+  expect(kept.length).toBe(preview.length);
+  expect(kept.filter((value, index) => value !== preview[index]).length).toBe(0);
+  // The picture had black and white exactly; now black sits at a dark grey
+  // and white at a light one, and no color is darker or lighter than those.
+  const colors = (pixels: number[]) => pixels.filter((_, index) => index % 4 !== 3);
+  expect([Math.min(...colors(before)), Math.max(...colors(before))]).toEqual([0, 255]);
+  expect([Math.min(...colors(kept)), Math.max(...colors(kept))]).toEqual([22, 230]);
 });
 
 test("sharpens a cutout exactly as the preview shows, keeping it cut out", async ({ page }) => {
