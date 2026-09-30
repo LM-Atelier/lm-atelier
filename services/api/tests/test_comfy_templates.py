@@ -1991,6 +1991,145 @@ def test_an_image_template_edits_when_a_running_picture_loader_feeds_a_picture_o
     assert _operation_for_template(template, "image", graph(("SaveImage", 0))) == "text_to_image"
 
 
+def test_a_video_template_animates_a_picture_it_loads_and_needs_no_audio_or_video() -> None:
+    """First-frame, first-and-last-frame and camera workflows are named for
+    what they do, so a picture they load kept its authored sample and the
+    install refused after the download; templates that read an audio or video
+    file need an input no turn supplies, and are not offered."""
+    from local_lm.comfy_templates import _operation_for_template
+
+    def graph(*nodes: tuple[str, int]) -> dict[str, Any]:
+        return {
+            "nodes": [
+                {"id": index, "type": kind, "mode": mode}
+                for index, (kind, mode) in enumerate(nodes)
+            ]
+        }
+
+    template = "video_first_frame_example"
+    animated = graph(("LoadImage", 0), ("CreateVideo", 0), ("SaveVideo", 0))
+    assert _operation_for_template(template, "video", animated) == "image_to_video"
+    assert (
+        _operation_for_template(template, "video", graph(("LoadImage", 0), ("SaveWEBM", 0)))
+        == "image_to_video"
+    )
+    # A loader that does not run reads nothing; a picture answer is not a video.
+    assert (
+        _operation_for_template(template, "video", graph(("LoadImage", 4), ("SaveVideo", 0)))
+        == "text_to_video"
+    )
+    assert (
+        _operation_for_template(template, "video", graph(("LoadImage", 0), ("SaveImage", 0)))
+        == "text_to_video"
+    )
+    for loader in ("LoadAudio", "LoadVideo"):
+        needs = graph(("LoadImage", 0), (loader, 0), ("SaveVideo", 0))
+        assert _operation_for_template(template, "video", needs) is None, loader
+        assert (
+            _operation_for_template(
+                "image_i2i_example", "image", graph((loader, 0), ("SaveImage", 0))
+            )
+            is None
+        )
+        muted = graph(("LoadImage", 0), (loader, 2), ("SaveVideo", 0))
+        assert _operation_for_template(template, "video", muted) == "image_to_video", loader
+    # Without a graph, the id alone still decides.
+    assert _operation_for_template("video_wan2_2_14B_i2v", "video") == "image_to_video"
+    assert _operation_for_template("video_wan2_2_14B_t2v", "video") == "text_to_video"
+
+
+def test_a_video_template_that_loads_a_picture_installs_as_image_to_video(tmp_path: Path) -> None:
+    registry = _registry(tmp_path)
+    revision = "c" * 40
+    model = {
+        "directory": "checkpoints",
+        "name": "motion.safetensors",
+        "url": f"https://huggingface.co/owner/motion/resolve/{revision}/motion.safetensors",
+    }
+
+    def template(*extra: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "LoadImage",
+                    "inputs": [],
+                    "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": []}],
+                    "properties": {"cnr_id": "comfy-core"},
+                    "widgets_values": ["authored-first-frame.png", "image"],
+                },
+                {
+                    "id": 2,
+                    "type": "CheckpointLoaderSimple",
+                    "inputs": [],
+                    "outputs": [],
+                    "properties": {"cnr_id": "comfy-core", "models": [model]},
+                    "widgets_values": ["motion.safetensors"],
+                },
+                {
+                    "id": 3,
+                    "type": "SaveVideo",
+                    "inputs": [],
+                    "outputs": [],
+                    "properties": {"cnr_id": "comfy-core"},
+                    "widgets_values": ["h264"],
+                },
+                *extra,
+            ],
+            "links": [],
+        }
+
+    templates = _installed_templates(registry)
+    (templates / "video_first_frame_example.json").write_text(
+        json.dumps(template()), encoding="utf-8"
+    )
+    (templates / "video_sound_driven_example.json").write_text(
+        json.dumps(
+            template(
+                {
+                    "id": 4,
+                    "type": "LoadAudio",
+                    "inputs": [],
+                    "outputs": [],
+                    "properties": {"cnr_id": "comfy-core"},
+                    "widgets_values": ["authored-sound.wav"],
+                }
+            )
+        ),
+        encoding="utf-8",
+    )
+    object_info = {
+        "LoadImage": {
+            "input": {"required": {"image": [["available.png"], {"image_upload": True}]}},
+            "input_order": {"required": ["image"]},
+        },
+        "CheckpointLoaderSimple": {
+            "input": {"required": {"ckpt_name": [["motion.safetensors"]]}},
+            "input_order": {"required": ["ckpt_name"]},
+        },
+        "SaveVideo": {
+            "input": {"required": {"codec": ["COMBO", {"options": ["h264", "vp9"]}]}},
+            "input_order": {"required": ["codec"]},
+            "output_node": True,
+        },
+    }
+
+    offered = {item.id: item.operation for item in registry.available("video")}
+    compiled = registry.compile(
+        "video_first_frame_example",
+        "video",
+        object_info,
+        remote_id="owner/motion",
+        revision=revision,
+        selected_files=["motion.safetensors"],
+        comfy_paths={"checkpoints": "."},
+    )
+
+    assert offered == {"video_first_frame_example": "image_to_video"}
+    assert compiled.template.operation == "image_to_video"
+    assert compiled.api_graph["1"]["inputs"]["image"] == "${input_image}"
+
+
 def test_declared_acceleration_ignores_non_media_operations() -> None:
     subgraph = _four_step_edit_graph()
     ui_graph = {"nodes": [], "definitions": {"subgraphs": [subgraph]}}
