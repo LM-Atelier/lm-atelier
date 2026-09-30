@@ -8,7 +8,7 @@ from urllib.parse import unquote
 
 import pytest
 from httpx2 import AsyncClient
-from PIL import Image, ImageCms
+from PIL import Image, ImageCms, PngImagePlugin
 
 from local_lm.picture_export import (
     ExportFormat,
@@ -58,6 +58,28 @@ def test_a_picture_comes_out_upright_without_its_orientation_tag() -> None:
     assert exported.format == "PNG"
     assert exported.size == (2, 4)
     assert exported.getexif().get(0x0112) in (None, 1)
+
+
+@pytest.mark.parametrize("file_format", ["png", "jpeg", "webp"])
+def test_an_export_leaves_behind_the_text_and_camera_details_the_file_carried(
+    file_format: ExportFormat,
+) -> None:
+    # A generated picture can carry the words and settings it was made with in
+    # its text chunks; a file from a camera, who and what took it.
+    words = PngImagePlugin.PngInfo()
+    words.add_text("parameters", "neutral words kept with the file")
+    details = Image.Exif()
+    details[0x010F] = "Neutral Camera"  # the maker
+    details[0x0131] = "Neutral Editor"  # the software
+    stored = _encoded(_wide(), pnginfo=words, exif=details.tobytes())
+    assert _open(stored).text == {"parameters": "neutral words kept with the file"}
+
+    exported = _open(export_picture(stored, file_format))
+
+    assert "parameters" not in exported.info
+    assert getattr(exported, "text", {}) == {}
+    assert exported.getexif().get(0x010F) is None
+    assert exported.getexif().get(0x0131) is None
 
 
 def test_jpeg_lays_transparency_on_white() -> None:
