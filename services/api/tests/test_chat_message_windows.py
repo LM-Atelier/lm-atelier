@@ -275,3 +275,64 @@ async def test_a_head_from_another_conversation_is_not_found(client: AsyncClient
 
     assert missing.status_code == 404
     assert missing.json()["code"] == "message-not-found"
+
+
+@pytest.mark.parametrize("mode", ["before", "after", "around", "latest"])
+@pytest.mark.parametrize("branch", [False, True])
+async def test_window_anchors_keep_messages_with_matching_timestamps(
+    client: AsyncClient, mode: str, branch: bool
+) -> None:
+    ids = _conversation(9)
+    with SessionLocal() as session:
+        middle = session.get(Message, ids[4])
+        assert middle is not None
+        stamp = middle.created_at
+        for index, identity in enumerate(ids):
+            message = session.get(Message, identity)
+            assert message is not None
+            if 2 <= index <= 6:
+                message.created_at = stamp
+            if branch:
+                message.parent_id = ids[index - 1] if index else None
+        if branch:
+            session.add(
+                Message(
+                    id="msg_chat_window_00045",
+                    chat_id="chat_window",
+                    parent_id=ids[1],
+                    role=MessageRole.ASSISTANT.value,
+                    created_at=stamp,
+                )
+            )
+        session.commit()
+    parameters = {"limit": "5" if mode == "around" else "3"}
+    if mode != "latest":
+        parameters[mode] = ids[4]
+    if branch:
+        parameters["head_id"] = ids[-1]
+    response = await client.get("/api/chats/chat_window/messages", params=parameters)
+    assert response.status_code == 200, response.text
+    window = response.json()
+    expected = {
+        "before": ids[1:4],
+        "after": ids[5:8],
+        "around": ids[2:7],
+        "latest": ids[6:9],
+    }[mode]
+    assert [message["id"] for message in window["messages"]] == expected
+    assert window["has_older"] is True
+    assert window["has_newer"] is (mode != "latest")
+
+
+@pytest.mark.parametrize("mode", ["before", "after", "around"])
+@pytest.mark.parametrize("anchor", ["abandoned", "abandoned_early"])
+async def test_an_anchor_from_another_branch_is_refused(
+    client: AsyncClient, mode: str, anchor: str
+) -> None:
+    ids = _branched(early_sibling=True)
+    response = await client.get(
+        "/api/chats/chat_branch/messages",
+        params={"head_id": ids["kept_two"], mode: ids[anchor], "limit": "3"},
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "chat-window-invalid"
