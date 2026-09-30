@@ -650,8 +650,8 @@ def resolve_install_plan(
         except WorkflowAssetDownloadError:
             return resolved.blocked(
                 "preflight_blocked",
-                "The provider did not supply complete immutable file evidence. "
-                "Exact revisions, file sizes and SHA-256 hashes are required.",
+                "The selected files could not be fully verified. "
+                "Run the install check again or choose another version.",
             )
     return resolved
 
