@@ -91,6 +91,7 @@ def test_successful_edit_queues_one_detached_low_priority_verifier(
         operation=Operation.IMAGE_TO_IMAGE.value,
         work_plan_id=plan.id,
         work_step_id="step-source",
+        settings_json={},
         provenance_json={
             "image_edit": {
                 "strength": {

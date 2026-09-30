@@ -35,9 +35,10 @@ function strengthChange(before: unknown, after: unknown): string {
 /**
  * Skips that are not worth a line. `not_image_edit` and `disabled` are the
  * ordinary state of almost every message, and `eligible` means the check was
- * about to run rather than that it stopped.
+ * about to run rather than that it stopped. `new_canvas` is an extension, which
+ * is not an edit of its source's pixels for the review to judge.
  */
-const SILENT_SKIPS = new Set(["not_image_edit", "disabled", "eligible", "cancelled"]);
+const SILENT_SKIPS = new Set(["not_image_edit", "disabled", "eligible", "cancelled", "new_canvas"]);
 
 /**
  * Skips where the review ran and reached no verdict, which is a different thing

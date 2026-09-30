@@ -7427,6 +7427,21 @@ class ConversationOrchestrator:
         )
         return verification_job_id
 
+    @staticmethod
+    def _makes_new_canvas(run: Run) -> bool:
+        """Whether this edit extends its source onto new canvas, as Extend does.
+
+        The edit check brings a result to its source's size and compares them,
+        so a larger canvas would read as a change over the whole picture, the
+        source it kept included. The new canvas is the change that was asked
+        for, and a chat extension's own pixel check already measures that its
+        source was kept exactly.
+        """
+        fit = run.provenance_json.get("source_fit_request")
+        return (
+            isinstance(fit, dict) and fit.get("mode") == "extend"
+        ) or OUTPAINT_SETTING_KEY in run.settings_json
+
     def _queue_image_edit_verification(
         self,
         session: Session,
@@ -7448,6 +7463,17 @@ class ConversationOrchestrator:
                     "version": VERIFICATION_VERSION,
                     "status": "skipped",
                     "reason": VerificationReason.RETRY_LIMIT_REACHED.value,
+                    "automatic_retry_executed": False,
+                },
+            }
+            return None
+        if self._makes_new_canvas(run):
+            run.provenance_json = {
+                **run.provenance_json,
+                "image_edit_verification": {
+                    "version": VERIFICATION_VERSION,
+                    "status": "skipped",
+                    "reason": VerificationReason.NEW_CANVAS.value,
                     "automatic_retry_executed": False,
                 },
             }
