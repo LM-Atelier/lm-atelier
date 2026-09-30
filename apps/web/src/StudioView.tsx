@@ -8,6 +8,8 @@ import { ErrorCallout } from "./ErrorCallout";
 import { StudioCanvas } from "./StudioCanvas";
 import { StudioCompare } from "./StudioCompare";
 import { StudioExportLink } from "./StudioExportLink";
+import { StudioHideResult } from "./StudioHideResult";
+import { hideStudioStep, showStudioSteps, useStudioHiddenSteps } from "./studioHiddenSteps";
 import { StudioTryAnother } from "./StudioTryAnother";
 import { StudioUseInChat } from "./StudioUseInChat";
 import type { StudioPictureForChat } from "./useStudioPictureForChat";
@@ -90,6 +92,7 @@ export function StudioView({
     sourceArtifactId,
     sourceChatId,
   );
+  const hidden = useStudioHiddenSteps(sessionId);
   const [confirmDialog, confirm] = useConfirm();
   // Every result is already an artifact in the library - the studio's turns
   // are ordinary turns. What was missing is a way to say "keep this one",
@@ -150,8 +153,9 @@ export function StudioView({
   // looking ready: the gap would otherwise be found only when the edit failed.
   const unchecked = capabilities.data ? null : capabilities.isError ? "failed" : "checking";
   // Derived, never synced: with nothing chosen the studio shows the newest
-  // result, so a finished apply lands on the canvas without an effect.
-  const current = steps.find((step) => step.artifactId === selectedId) ?? steps.at(-1) ?? null;
+  // result not hidden, so a finished apply lands on the canvas without an effect.
+  const shown = steps.filter((step) => step.isSource || !hidden.has(step.artifactId));
+  const current = shown.find((step) => step.artifactId === selectedId) ?? shown.at(-1) ?? null;
 
   const currentArtifactId = current?.artifactId ?? null;
   const artifact = useQuery({
@@ -250,6 +254,7 @@ export function StudioView({
               <StudioTryAnother key={current.artifactId} session={session} current={current} busy={busy}
                 onTry={(replay) => again(replay, () => setSelectedId(null))} />
               <StudioExportLink artifactId={current.artifactId} />
+              {sessionId && !current.isSource && <StudioHideResult onHide={() => { hideStudioStep(sessionId, current.artifactId); setSelectedId(null); }} />}
               {onUseInChat && <StudioUseInChat ready={Boolean(artifact.data)} onUse={() => onUseInChat({ artifactId: current.artifactId, artifact: artifact.data ?? null, origin: current.isSource ? (artifact.data?.original_name ? "uploaded" : "generated") : "edited" })} />}
             </>
           )}
@@ -442,6 +447,7 @@ export function StudioView({
         steps={steps} generationIdentity={previewArtifactId ? null : current?.generationIdentity ?? artifact.data?.generation_identity}
         selectedId={previewArtifactId ? null : current?.artifactId ?? null}
         onSelect={setSelectedId}
+        hidden={hidden} onShowHidden={() => sessionId && showStudioSteps(sessionId)}
       />
     </div>
   );
@@ -526,13 +532,19 @@ function StudioFilmstrip({
   selectedId,
   generationIdentity,
   onSelect,
+  hidden,
+  onShowHidden,
 }: {
   steps: StudioStep[];
   selectedId: string | null;
   generationIdentity?: GenerationIdentity | null;
   onSelect: (artifactId: string) => void;
+  /** Results taken out of the strip. They keep their numbers, so a branch still names the step it came from. */
+  hidden: ReadonlySet<string>;
+  onShowHidden: () => void;
 }) {
   if (steps.length === 0) return null;
+  const hiddenCount = steps.filter((step) => !step.isSource && hidden.has(step.artifactId)).length;
   // The results the chosen one was made from, so its path back is visible among the branches.
   const madeFrom = studioStepAncestors(steps, steps.findIndex((step) => step.artifactId === selectedId));
   // A group of buttons, not a listbox: a real listbox owns focus with a
@@ -542,6 +554,7 @@ function StudioFilmstrip({
     <>
       <div className="studio-filmstrip" role="group" aria-label="Edit history">
       {steps.map((step, index) => {
+        if (!step.isSource && hidden.has(step.artifactId)) return null;
         const origin = studioStepOrigin(steps, index);
         return (
           <button
@@ -563,6 +576,11 @@ function StudioFilmstrip({
         );
       })}
       </div>
+      {hiddenCount > 0 && (
+        <button type="button" className="secondary compact-button" onClick={onShowHidden}>
+          Show {hiddenCount} hidden {hiddenCount === 1 ? "result" : "results"}
+        </button>
+      )}
       <GenerationIdentitySummary identity={generationIdentity} />
     </>
   );
