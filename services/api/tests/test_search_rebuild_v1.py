@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 import local_lm.search_rebuild_v1 as rebuild_mod
@@ -116,7 +118,7 @@ def test_public_constructor_cannot_mint_swap_authority() -> None:
     with pytest.raises(SearchRebuildError, match=INVALID_REBUILD):
         SearchRebuildV1()
     with pytest.raises(TypeError):
-        SearchRebuildV1(
+        cast(Any, SearchRebuildV1)(
             schema="lm-atelier-search-rebuild-v1",
             schema_version=1,
             phase="swap",

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import inspect
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -139,7 +139,7 @@ def test_invalid_and_hostile() -> None:
         )
 
     class HostileStr(str):
-        def strip(self, *args, **kwargs):
+        def strip(self, *args: Any, **kwargs: Any) -> str:
             raise RuntimeError("private attacker detail")
 
     with pytest.raises(SearchDocumentError, match=INVALID_DOCUMENT) as caught:
@@ -229,7 +229,7 @@ def test_public_constructor_cannot_mint_eligible_document() -> None:
     with pytest.raises(SearchDocumentError, match=INVALID_DOCUMENT):
         SearchDocumentV1()
     with pytest.raises(TypeError):
-        SearchDocumentV1(
+        cast(Any, SearchDocumentV1)(
             schema="wrong-schema",
             schema_version=1,
             projection_schema="conversation-fts-v1",

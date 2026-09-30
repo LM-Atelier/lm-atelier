@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from local_lm.search_cursor_v1 import (
@@ -263,14 +265,14 @@ def test_decode_refuses_wrong_prefix_and_wrong_part_count() -> None:
             query_digest=DIGEST,
         )
     with pytest.raises(SearchCursorError, match=INVALID_CURSOR):
-        encode_search_cursor(object())
+        encode_search_cursor(cast(Any, object()))
 
 
 def test_public_constructor_cannot_mint_query_text() -> None:
     with pytest.raises(SearchCursorError, match=INVALID_CURSOR):
         SearchCursorV1()
     with pytest.raises(TypeError):
-        SearchCursorV1(
+        cast(Any, SearchCursorV1)(
             schema="lm-atelier-search-cursor-v1",
             schema_version=1,
             index_generation=1,

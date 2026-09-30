@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from typing import Any, NoReturn, cast
+
 import pytest
 
 from local_lm.conversation_search_compose_v1 import (
@@ -21,8 +24,8 @@ from local_lm.conversation_search_query_v1 import MAX_ID_CHARS
 from local_lm.search_privacy_v1 import MAX_PRIVACY_QUERY_CHARS
 
 
-def _row(mid: str, body: str, chat_id: str = "chat-1", **over):
-    base = {
+def _row(mid: str, body: str, chat_id: str = "chat-1", **over: object) -> dict[str, object]:
+    base: dict[str, object] = {
         "message_id": mid,
         "chat_id": chat_id,
         "body": body,
@@ -36,7 +39,7 @@ def _row(mid: str, body: str, chat_id: str = "chat-1", **over):
     return base
 
 
-def _refuse(rows, query="hello", **kwargs) -> None:
+def _refuse(rows: object, query: object = "hello", **kwargs: object) -> None:
     with pytest.raises(SearchComposeError, match=INVALID_COMPOSE) as caught:
         compose_conversation_search(rows, query, **kwargs)
     assert str(caught.value) == INVALID_COMPOSE
@@ -167,7 +170,7 @@ def test_compose_wraps_invalid_query_and_visibility() -> None:
     _refuse([_row("m1", "hello")], limit=0)
     _refuse([_row("m1", "hello")], limit=True)
     _refuse([_row("m1", "hello")], limit=99)
-    _refuse("not-a-sequence")  # type: ignore[arg-type]
+    _refuse("not-a-sequence")
     _refuse([_row("m1", "hello", chat_id="x" * (MAX_ID_CHARS + 1))])
     _refuse([{"not": "a complete row"}])
 
@@ -210,10 +213,10 @@ def test_compose_pages_after_bounded_rank() -> None:
 
 def test_compose_refuses_hostile_str_keys_without_equality() -> None:
     class HostileKey(str):
-        def __eq__(self, other):
+        def __eq__(self, other: object) -> bool:
             raise RuntimeError("private attacker detail")
 
-        def __hash__(self):
+        def __hash__(self) -> int:
             return str.__hash__(self)
 
     row = {HostileKey(key): value for key, value in _row("m1", "hello").items()}
@@ -225,8 +228,8 @@ def test_compose_refuses_hostile_str_keys_without_equality() -> None:
 
 
 def test_compose_refuses_hostile_mapping_subclass() -> None:
-    class HostileDict(dict):
-        def get(self, key, default=None):
+    class HostileDict(dict[str, object]):
+        def get(self, key: object, default: object = None) -> NoReturn:
             raise RuntimeError("private attacker detail")
 
     with pytest.raises(SearchComposeError, match=INVALID_COMPOSE) as caught:
@@ -237,12 +240,12 @@ def test_compose_refuses_hostile_mapping_subclass() -> None:
 
 
 def test_compose_refuses_hostile_sequence_and_string_subclasses() -> None:
-    class HostileList(list):
-        def __iter__(self):
+    class HostileList(list[object]):
+        def __iter__(self) -> Iterator[object]:
             raise RuntimeError("private attacker detail")
 
     class HostileStr(str):
-        def split(self, *args, **kwargs):
+        def split(self, *args: Any, **kwargs: Any) -> list[str]:
             raise RuntimeError("private attacker detail")
 
     _refuse(HostileList([_row("m1", "hello")]))
@@ -255,7 +258,7 @@ def test_compose_refuses_oversized_whitespace_query() -> None:
 
 def test_compose_authority_flags_are_not_constructor_settable() -> None:
     with pytest.raises(TypeError):
-        SearchComposeResultV1(
+        cast(Any, SearchComposeResultV1)(
             schema="lm-atelier-search-compose-v1",
             schema_version=1,
             page=compose_conversation_search([_row("m1", "hello")], "hello").page,

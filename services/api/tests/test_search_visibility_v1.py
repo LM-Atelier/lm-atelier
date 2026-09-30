@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from local_lm.search_visibility_v1 import (
@@ -11,8 +13,8 @@ from local_lm.search_visibility_v1 import (
 )
 
 
-def _eval(**over):
-    facts = {
+def _eval(**over: object) -> SearchVisibilityV1:
+    facts: dict[str, object] = {
         "message_id": "m1",
         "transcript_visible": True,
         "content_removed": False,
@@ -26,7 +28,7 @@ def _eval(**over):
 
 def test_visibility_public_constructor_cannot_mint_eligible() -> None:
     with pytest.raises(TypeError):
-        SearchVisibilityV1(
+        cast(Any, SearchVisibilityV1)(
             schema="lm-atelier-search-visibility-v1",
             schema_version=1,
             message_id_bound=False,
@@ -54,7 +56,7 @@ def test_visibility_positive_facts_are_witness_owned() -> None:
     assert eligible.may_emit_snippet is True
     assert eligible.may_rank is True
     with pytest.raises(TypeError):
-        SearchVisibilityV1(
+        cast(Any, SearchVisibilityV1)(
             schema="lm-atelier-search-visibility-v1",
             schema_version=1,
             message_id_bound=True,
@@ -65,7 +67,7 @@ def test_visibility_positive_facts_are_witness_owned() -> None:
             may_rank=True,
         )
     with pytest.raises(TypeError):
-        SearchVisibilityV1(
+        cast(Any, SearchVisibilityV1)(
             schema="lm-atelier-search-visibility-v1",
             schema_version=1,
             message_id_bound=True,
@@ -123,10 +125,10 @@ def test_visibility_refuses_hostile_facts() -> None:
 
 def test_filter_refuses_hostile_str_keys() -> None:
     class HostileKey(str):
-        def __eq__(self, other):
+        def __eq__(self, other: object) -> bool:
             raise RuntimeError("private attacker detail")
 
-        def __hash__(self):
+        def __hash__(self) -> int:
             return str.__hash__(self)
 
     row = {

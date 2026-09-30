@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from local_lm.conversation_search_http_snippet_policy_v1 import (
@@ -49,7 +51,7 @@ def test_public_constructor_cannot_emit_html() -> None:
     with pytest.raises(SearchHttpSnippetPolicyError, match=INVALID_HTTP_SNIPPET_POLICY):
         ConversationSearchHttpSnippetPolicyV1()
     with pytest.raises(TypeError):
-        ConversationSearchHttpSnippetPolicyV1(
+        cast(Any, ConversationSearchHttpSnippetPolicyV1)(
             schema="lm-atelier-conversation-search-http-snippet-policy-v1",
             schema_version=1,
             html_authorized=True,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from local_lm.search_snippet_v1 import (
@@ -45,14 +47,14 @@ def test_refuses_hostile_and_unbounded_inputs() -> None:
         build_search_snippet("hello", " ".join(["term"] * (MAX_TERMS + 1)))
 
     class HostileStr(str):
-        def casefold(self):
+        def casefold(self) -> str:
             raise RuntimeError("private attacker detail")
 
     with pytest.raises(SearchSnippetError, match=INVALID_SNIPPET) as caught:
         build_search_snippet(HostileStr("hello world"), "hello")
     assert "private attacker detail" not in str(caught.value)
     with pytest.raises(TypeError):
-        SearchSnippetV1(
+        cast(Any, SearchSnippetV1)(
             schema="lm-atelier-search-snippet-v1",
             schema_version=1,
             segments=(),
