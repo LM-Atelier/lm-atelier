@@ -49,6 +49,10 @@ type StudioApply = {
   /** Pictures already in the library sent after the source, as an edit made
    * again sends the ones it was given the first time. */
   alsoGiven?: string[];
+  /** How many results to ask for. Each comes back as its own answer, the
+   * server counting the seed on from one to the next, so they sit beside one
+   * another as alternatives. */
+  results?: number;
 };
 
 export type StudioStep = {
@@ -151,6 +155,7 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
       workflowRevisionId,
       secondPicture,
       alsoGiven,
+      results,
     }: StudioApply) => {
       // Refused rather than raced. Between switching pictures and the new
       // session opening there is no session for what is on screen, and the
@@ -175,16 +180,11 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
               : new File([secondPicture], "studio-light-map.png", { type: "image/png" }),
           )
         : null;
-      return api.sendTurn(
-        sessionId,
-        instruction,
-        "image",
-        second ? [artifactId, second.id] : [artifactId, ...(alsoGiven ?? [])],
-        turnSettings,
-        undefined,
-        undefined,
-        workflowRevisionId,
-      );
+      const inputs = second ? [artifactId, second.id] : [artifactId, ...(alsoGiven ?? [])];
+      // One result is the request as it always was, with no count in it.
+      return results && results > 1
+        ? api.sendTurn(sessionId, instruction, "image", inputs, turnSettings, undefined, undefined, workflowRevisionId, [], results)
+        : api.sendTurn(sessionId, instruction, "image", inputs, turnSettings, undefined, undefined, workflowRevisionId);
     },
     onSuccess: () => void client.invalidateQueries({ queryKey: ["studio-session", sessionId] }),
   });
@@ -260,9 +260,10 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
       secondPicture?: Blob,
       /** Runs when the turn is refused, so a caller waiting on it can stop. */
       onRefused?: () => void,
+      results?: number,
     ) =>
       apply.mutate(
-        { instruction, artifactId, mask, settings, workflowRevisionId, secondPicture },
+        { instruction, artifactId, mask, settings, workflowRevisionId, secondPicture, results },
         { onSuccess: onAccepted, onError: onRefused },
       ),
     /** The same edit again on the same pictures, as Try another sends it. */

@@ -28,6 +28,12 @@ describe("a running edit in the studio", () => {
     expect(onStop).toHaveBeenCalledTimes(1);
   });
 
+  it("says which of several results it is making, in the same announcement", () => {
+    render(<StudioRunningEdit part={SAMPLING} place={{ index: 2, count: 4 }} stopping={false} onStop={vi.fn()} />);
+
+    expect(screen.getByRole("status")).toHaveTextContent("Result 2 of 4 · Sampling");
+  });
+
   it("does not ask again while a stop is on its way", () => {
     const onStop = vi.fn();
     render(<StudioRunningEdit part={SAMPLING} stopping onStop={onStop} />);

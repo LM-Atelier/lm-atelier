@@ -12,6 +12,7 @@ import { StudioTryAnother } from "./StudioTryAnother";
 import { StudioUseInChat } from "./StudioUseInChat";
 import type { StudioPictureForChat } from "./useStudioPictureForChat";
 import { StudioExtendHandles } from "./StudioExtendHandles";
+import { StudioResultCount } from "./StudioResultCount";
 import { StudioRunningEdit } from "./StudioRunningEdit";
 import { studioApplyProgress } from "./studioApplyProgress";
 import { StudioRecipes } from "./StudioRecipes";
@@ -22,7 +23,7 @@ import { StudioToolRail } from "./StudioToolRail";
 import { StudioWorkflowSelector } from "./StudioWorkflowSelector";
 import { artifactSource } from "./messageMedia";
 import { cloneMask, coverage, encodeMaskPng, feather, isEmpty, type MaskRaster } from "./studioMasks";
-import { studioApplyLabel, studioApplyPlan } from "./studioApplyPlan";
+import { studioApplyLabel, studioApplyPlan, studioOffersResults } from "./studioApplyPlan";
 import { studioStepAncestors, studioStepOrigin } from "./studioStepOrigin";
 import { renderLightMap } from "./studioLightMap";
 import { studioRecipeSource } from "./studioRecipeSource";
@@ -104,6 +105,7 @@ export function StudioView({
   const [selectedId, setSelectedId] = useState<string | null>(draft.selectedId);
   const [instruction, setInstruction] = useState(draft.instruction);
   const [selectionError, setSelectionError] = useState<string | null>(null);
+  const [results, setResults] = useState(1);
   // Replacing a background or a subject is two applies; the studio stays busy in between.
   const cutoutEdit = useStudioBackground(sessionId, session, apply, setSelectionError);
   const busy = sessionBusy || cutoutEdit.busy;
@@ -371,6 +373,7 @@ export function StudioView({
           {unchecked && !EXACT_EDITS.includes(tools.kind) && (
             <StudioCapabilityCheck failed={unchecked === "failed"} onRetry={() => void capabilities.refetch()} />
           )}
+          {!EXACT_EDITS.includes(tools.kind) && <StudioResultCount kind={tools.kind} value={results} onChange={setResults} />}
           {!EXACT_EDITS.includes(tools.kind) && (
             <button
               className="primary"
@@ -411,6 +414,8 @@ export function StudioView({
                       setSelectedId(null);
                     },
                     secondPicture,
+                    undefined,
+                    studioOffersResults(tools.kind) ? results : 1,
                   );
                 };
                 setSelectionError(null);
@@ -435,7 +440,7 @@ export function StudioView({
               {studioApplyLabel(tools, busy, selectionCoverage)}
             </button>
           )}
-          {applyProgress && <StudioRunningEdit part={applyProgress} stopping={stopping} onStop={stop} />}
+          {applyProgress && <StudioRunningEdit part={applyProgress.part} place={applyProgress.place} stopping={stopping} onStop={stop} />}
         </aside>
       </div>
       <StudioFilmstrip

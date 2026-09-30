@@ -8,8 +8,10 @@ function part(type: string, text: string | null, metadata: Record<string, unknow
   return { id: `${type}-${text}`, type, text, artifact_id: null, metadata_json: metadata } as unknown as MessagePart;
 }
 
+let made = 0;
 function message(role: "user" | "assistant", status: string, parts: MessagePart[]): Message {
-  return { id: `${role}-${status}-${parts.length}`, role, status, parts } as unknown as Message;
+  made += 1;
+  return { id: `${role}-${status}-${made}`, role, status, parts } as unknown as Message;
 }
 
 function session(messages: Message[]): ChatDetail {
@@ -28,7 +30,37 @@ describe("the running edit's progress", () => {
       message("assistant", "pending", [newest, part("image", null, { preview: true })]),
     ]));
 
-    expect(found).toBe(newest);
+    expect(found?.part).toBe(newest);
+    expect(found?.place).toBeNull();
+  });
+
+  it("is the first result of several still to come, and says which one it is", () => {
+    const running = part("progress", "Sampling", { progress: 0.4, phase: "sampling" });
+    const waiting = part("progress", "Queued", { progress: 0, phase: "queued", indeterminate: true });
+
+    const found = studioApplyProgress(session([
+      message("user", "complete", [part("text", "Make it warmer")]),
+      message("assistant", "complete", [part("image", null)]),
+      message("user", "complete", [part("text", "Make it cooler")]),
+      message("assistant", "complete", [part("image", null)]),
+      message("assistant", "pending", [running]),
+      message("assistant", "pending", [waiting]),
+    ]));
+
+    // The earlier request's answer is not one of this edit's results.
+    expect(found).toEqual({ part: running, place: { index: 2, count: 3 } });
+  });
+
+  it("counts a result that was stopped or failed among the several", () => {
+    const running = part("progress", "Sampling", { progress: 0.1, phase: "sampling" });
+
+    const found = studioApplyProgress(session([
+      message("user", "complete", [part("text", "Make it cooler")]),
+      message("assistant", "failed", [part("text", "")]),
+      message("assistant", "pending", [running]),
+    ]));
+
+    expect(found?.place).toEqual({ index: 2, count: 2 });
   });
 
   it("is nothing once every answer has finished, or before there is a session", () => {
