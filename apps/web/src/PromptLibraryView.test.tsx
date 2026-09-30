@@ -424,6 +424,34 @@ describe("Prompt Library", { timeout: CASE_TIMEOUT_MS }, () => {
     })));
   });
 
+  it("keeps a LoRA's last strength when its box is emptied, so the template is never saved without one", async () => {
+    renderLibrary();
+    await screen.findByRole("heading", { name: "Portrait variants" });
+    beginNewTemplate();
+    fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "fixed" } });
+    await screen.findByRole("option", { name: "Portrait - Base - revision 1" });
+    fireEvent.change(screen.getByLabelText("Workflow"), { target: { value: "workflow-revision-1" } });
+    fireEvent.change(screen.getByLabelText("LoRA policy"), { target: { value: "fixed" } });
+    await screen.findByRole("option", { name: "Portrait LoRA 3 - Portrait styles" });
+    fireEvent.change(screen.getByLabelText("LoRA 1"), { target: { value: "c".repeat(64) } });
+    fireEvent.change(screen.getByLabelText("LoRA 1 model strength"), { target: { value: "0.8" } });
+    fireEvent.change(screen.getByLabelText("LoRA 1 CLIP strength"), { target: { value: "0.7" } });
+
+    fireEvent.change(screen.getByLabelText("LoRA 1 model strength"), { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText("LoRA 1 CLIP strength"), { target: { value: "" } });
+    expect(screen.getByLabelText("LoRA 1 model strength")).toHaveValue(0.8);
+    expect(screen.getByLabelText("LoRA 1 CLIP strength")).toHaveValue(0.7);
+    fireEvent.click(screen.getByRole("button", { name: "Save revision" }));
+
+    await waitFor(() => expect(api.createPromptTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      contract: expect.objectContaining({
+        resource_policy: expect.objectContaining({
+          lora_policy: { mode: "fixed", stack: [{ sha256: "c".repeat(64), model_strength: 0.8, clip_strength: 0.7 }] },
+        }),
+      }),
+    })));
+  });
+
   it("authors an exact workflow bundle pool with per-option LoRA policies", async () => {
     renderLibrary();
     await screen.findByRole("heading", { name: "Portrait variants" });
