@@ -60,6 +60,16 @@ class SourceExtensionRecipe(BaseModel):
             raise ValueError("source_fit_dimensions")
         return SourceFitPixels(left, top, right, bottom, self.canvas_width, self.canvas_height)
 
+    @property
+    def upload_image(self) -> SourceFitImageRecord:
+        """The picture the workflow is given: the source as prepared, which its graph pads."""
+        return self.image
+
+    @property
+    def retained_artifact_ids(self) -> frozenset[str]:
+        """Every picture this recipe needs kept for as long as its run can be replayed."""
+        return frozenset({self.image.source_artifact_id, self.image.prepared_artifact_id})
+
     def route(self, api_graph: object) -> SourceFitRoute:
         """Recheck that this graph still pads, samples and saves the source this way."""
         route = trace_source_fit_route(api_graph, self.save_node_id)

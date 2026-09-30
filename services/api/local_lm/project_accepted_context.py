@@ -275,6 +275,10 @@ def import_accepted_contexts(
             image["prepared_artifact_id"] = artifacts[
                 snapshot.source_fit.image.prepared_artifact_id
             ]
+            if snapshot.source_fit.mode == "crop":
+                payload["source_fit"]["cropped_artifact_id"] = artifacts[
+                    snapshot.source_fit.cropped_artifact_id
+                ]
         payload["visual_posters"] = {
             artifacts[video_id]: artifacts[poster_id]
             for video_id, poster_id in snapshot.visual_posters.items()

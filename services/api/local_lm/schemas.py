@@ -1089,9 +1089,14 @@ class DefaultOutputShapesIn(ApiModel):
 
 
 class SourceFitRequest(ApiModel):
-    """An explicit canvas choice; source and workflow identity are resolved by the server."""
+    """An explicit canvas choice; source and workflow identity are resolved by the server.
 
-    mode: Literal["extend"]
+    Extend keeps the whole source and makes the rest of the canvas; crop keeps
+    the middle of the source that has the canvas's shape and fills the canvas
+    with it at one scale.
+    """
+
+    mode: Literal["extend", "crop"]
     width: StrictInt = Field(ge=1, le=MAX_DIMENSION)
     height: StrictInt = Field(ge=1, le=MAX_DIMENSION)
 

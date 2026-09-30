@@ -240,6 +240,7 @@ from .setup_verification import (
     recover_terminal_setup_verifications,
     setup_verification_for_chat,
 )
+from .source_crop_recipe import SourceCropRecipe, capture_source_crop, plan_source_crop_recipe
 from .source_fit_image import (
     MAX_SOURCE_BYTES,
     PreparedSourceImage,
@@ -252,10 +253,12 @@ from .source_fit_output import SourceFitPixelVerifier
 from .source_fit_preview import (
     SourceFitPreviewOut,
     preview_source_fit,
+    source_crop_preview_for_image,
     source_fit_preview_for_recipe,
 )
 from .source_fit_recipe import SourceExtensionRecipe, plan_source_extension
-from .source_fit_restore import SourceRestore, restore_source, restores
+from .source_fit_recipes import SourceFitRecipe
+from .source_fit_restore import SourceRestore, fit_to_canvas, fits, restore_source, restores
 from .studio_masks import (
     MASK_SETTING_KEY,
     MaskContractError,
@@ -1263,7 +1266,7 @@ class ConversationOrchestrator:
         inherited_image_edit_strength: dict[str, Any] | None = None,
         inherited_prompt_source: object | None = None,
         inherited_workflow: AcceptedWorkflow | None = None,
-        inherited_source_fit: SourceExtensionRecipe | None = None,
+        inherited_source_fit: SourceFitRecipe | None = None,
         reference_source_message_id: str | None = None,
         freeze_context: bool = False,
         activate_branch: bool = True,
@@ -1489,7 +1492,7 @@ class ConversationOrchestrator:
         inherited_image_edit_strength: dict[str, Any] | None = None,
         inherited_prompt_source: object | None = None,
         inherited_workflow: AcceptedWorkflow | None = None,
-        inherited_source_fit: SourceExtensionRecipe | None = None,
+        inherited_source_fit: SourceFitRecipe | None = None,
         reference_source_message_id: str | None = None,
         prompt_batch_selection: PromptBatchQueueSelection | None = None,
         freeze_context: bool = False,
@@ -1532,7 +1535,7 @@ class ConversationOrchestrator:
         inherited_image_edit_strength: dict[str, Any] | None = None,
         inherited_prompt_source: object | None = None,
         inherited_workflow: AcceptedWorkflow | None = None,
-        inherited_source_fit: SourceExtensionRecipe | None = None,
+        inherited_source_fit: SourceFitRecipe | None = None,
         reference_source_message_id: str | None = None,
         inherited_use_case_preset: InheritedWorkflowUseCasePreset | None = None,
         resolve_source: TurnSourceResolver | None = None,
@@ -1573,7 +1576,7 @@ class ConversationOrchestrator:
         inherited_image_edit_strength: dict[str, Any] | None = None,
         inherited_prompt_source: object | None = None,
         inherited_workflow: AcceptedWorkflow | None = None,
-        inherited_source_fit: SourceExtensionRecipe | None = None,
+        inherited_source_fit: SourceFitRecipe | None = None,
         reference_source_message_id: str | None = None,
         prompt_batch_selection: PromptBatchQueueSelection | None = None,
         freeze_context: bool = False,
@@ -2049,7 +2052,9 @@ class ConversationOrchestrator:
             chosen_layers,
             inherited_auto=inherited_image_edit_strength,
             workflow_schema=(workflow_revision.input_schema_json if workflow_revision else None),
-            extension=request.source_fit is not None,
+            # A crop is an ordinary edit of the picture it uploads; only an
+            # extension paints new canvas at full strength.
+            extension=request.source_fit is not None and request.source_fit.mode == "extend",
         )
         # A selection is validated where the workflow is known, so a mask
         # aimed at a workflow that cannot apply one refuses before the turn
@@ -2254,14 +2259,25 @@ class ConversationOrchestrator:
                     inherited_source_fit.image,
                     selected_source_id=resolved_input_ids[0],
                 )
-                preview_recipe = plan_source_extension(
-                    inherited_source_fit.image,
-                    canvas_width=request.source_fit.width,
-                    canvas_height=request.source_fit.height,
-                    api_graph=workflow_revision.api_graph_json,
-                    save_node_id=inherited_source_fit.save_node_id,
-                )
-                source_preview = source_fit_preview_for_recipe(workflow_revision, preview_recipe)
+                if request.source_fit.mode == "crop":
+                    source_preview = source_crop_preview_for_image(
+                        workflow_revision,
+                        inherited_source_fit.image,
+                        request.source_fit.width,
+                        request.source_fit.height,
+                        inherited_source_fit.save_node_id,
+                    )
+                else:
+                    preview_recipe = plan_source_extension(
+                        inherited_source_fit.image,
+                        canvas_width=request.source_fit.width,
+                        canvas_height=request.source_fit.height,
+                        api_graph=workflow_revision.api_graph_json,
+                        save_node_id=inherited_source_fit.save_node_id,
+                    )
+                    source_preview = source_fit_preview_for_recipe(
+                        workflow_revision, preview_recipe
+                    )
             else:
                 fit_definition = session.get(WorkflowDefinition, workflow_revision.workflow_id)
                 fit_source = session.get(Artifact, resolved_input_ids[0])
@@ -6359,13 +6375,15 @@ class ConversationOrchestrator:
         relight: RelightFinish | None,
         region_edit: RegionEdit | None,
         media_engine: str,
-        source_fit: SourceExtensionRecipe | None = None,
+        source_fit: SourceFitRecipe | None = None,
         prepared_source: PreparedSourceImage | None = None,
     ) -> list[GeneratedAsset]:
         """Each kept picture finished against its source, in one fixed order.
 
         An extension's source is put back first, on the picture its own save
-        node wrote, so every later step starts from the accepted source.
+        node wrote, so every later step starts from the accepted source. A
+        crop has nothing to put back, and is only brought back to its canvas
+        when the VAE rounded the canvas down.
         Relight next, because its mix and grade are about the whole picture
         and its source. The selection blend last, so a selection keeps
         everything outside it as the source, including from the relight. Each
@@ -6377,9 +6395,10 @@ class ConversationOrchestrator:
 
         restore = (
             SourceRestore(source_fit, prepared_source)
-            if source_fit is not None and prepared_source is not None
+            if isinstance(source_fit, SourceExtensionRecipe) and prepared_source is not None
             else None
         )
+        crop = source_fit if isinstance(source_fit, SourceCropRecipe) else None
         finished: list[GeneratedAsset] = []
         for generated in completed_assets:
             origin = record_for(generated.origin, media_engine)
@@ -6393,6 +6412,10 @@ class ConversationOrchestrator:
                     restored = await asyncio.to_thread(restore_source, restore, content)
                     if restored is not None:
                         content, records["source_restore"] = restored.content, restored.record
+                elif crop is not None and fits(crop, origin):
+                    fitted = await asyncio.to_thread(fit_to_canvas, crop, content)
+                    if fitted is not None:
+                        content, records["source_crop"] = fitted.content, fitted.record
                 if relight is not None:
                     relit = await asyncio.to_thread(finish_relight, relight, content)
                     content, records["relight"] = relit.content, relit.record
@@ -6552,11 +6575,12 @@ class ConversationOrchestrator:
         session: Session,
         accepted_inputs: AcceptedContext | None,
         input_ids: Sequence[str],
-    ) -> tuple[SourceExtensionRecipe | None, PreparedSourceImage | None]:
-        """The source fit the turn accepted, and the picture it prepared, read back exactly.
+    ) -> tuple[SourceFitRecipe | None, PreparedSourceImage | None]:
+        """The source fit the turn accepted, and the picture it uploads, read back exactly.
 
-        The prepared picture belongs to the first input, so a fit with no input
-        to bind it to is refused rather than run against nothing.
+        That picture is the prepared source an extension pads, or the crop cut
+        from it. It belongs to the first input, so a fit with no input to bind
+        it to is refused rather than run against nothing.
         """
 
         source_fit = accepted_inputs.source_fit if accepted_inputs is not None else None
@@ -6567,7 +6591,7 @@ class ConversationOrchestrator:
         prepared = replay_source_fit_image(
             session,
             self.artifacts,
-            source_fit.image,
+            source_fit.upload_image,
             selected_source_id=input_ids[0],
         )
         return source_fit, prepared
@@ -6577,7 +6601,7 @@ class ConversationOrchestrator:
         session: Session,
         input_ids: Sequence[str],
         accepted_inputs: AcceptedContext | None,
-        source_fit: SourceExtensionRecipe | None,
+        source_fit: SourceFitRecipe | None,
         prepared_source: PreparedSourceImage | None,
     ) -> tuple[list[Path], list[bytes] | None]:
         """Each input picture's file, and its checked bytes when a source fit needs them.
@@ -6615,28 +6639,32 @@ class ConversationOrchestrator:
     def _prepared_source_input(
         self,
         session: Session,
-        source_fit: SourceExtensionRecipe,
+        source_fit: SourceFitRecipe,
         prepared_source: PreparedSourceImage,
     ) -> tuple[Path, bytes]:
-        """The prepared picture that stands in for the first input, and its bytes."""
+        """The picture that stands in for the first input, and its bytes."""
 
-        prepared_artifact = session.get(Artifact, source_fit.image.prepared_artifact_id)
+        prepared_artifact = session.get(Artifact, source_fit.upload_image.prepared_artifact_id)
         if prepared_artifact is None:
             raise ValueError("source_fit_image_unavailable")
         return self.artifacts.resolve(prepared_artifact), prepared_source.content
 
     async def _source_fit_agreements(
         self,
-        source_fit: SourceExtensionRecipe | None,
+        source_fit: SourceFitRecipe | None,
         prepared_source: PreparedSourceImage | None,
         workflow: dict[str, Any],
         media_engine: str,
         completed_assets: Sequence[GeneratedAsset],
         measurements: Sequence[dict[str, Any]],
     ) -> list[dict[str, Any] | None]:
-        """How each output agrees with the accepted source fit; None where none applies."""
+        """How each output agrees with the accepted source fit; None where none applies.
 
-        if source_fit is None:
+        A crop keeps no part of its source as it was, so there is nothing to
+        compare pixel for pixel; the size check still holds it to its canvas.
+        """
+
+        if not isinstance(source_fit, SourceExtensionRecipe):
             return [None] * len(completed_assets)
         verifier = SourceFitPixelVerifier(source_fit, prepared_source, workflow, media_engine)
         return [
@@ -7497,6 +7525,15 @@ class ConversationOrchestrator:
             None,
         )
         snapshot = accepted_context(session, run)
+        # A crop's workflow edited the crop, not the whole source, so the edit is
+        # judged against the picture it was given: measured against the source,
+        # everything the crop left out would read as a change nobody asked for.
+        if (
+            snapshot is not None
+            and isinstance(snapshot.source_fit, SourceCropRecipe)
+            and source_artifact_id == snapshot.source_fit.image.source_artifact_id
+        ):
+            source_artifact_id = snapshot.source_fit.cropped_artifact_id
         vision_profile = (
             session.get(ModelProfile, snapshot.verification_profile.id)
             if snapshot is not None and snapshot.verification_profile is not None
@@ -7965,6 +8002,7 @@ class ConversationOrchestrator:
             ), TurnInheritance(
                 profile=snapshot.profile,
                 workflow=snapshot.workflow,
+                source_fit=snapshot.source_fit,
                 image_edit_strength=inherited_strength,
                 use_case_preset=InheritedWorkflowUseCasePreset(snapshot.workflow_use_case_preset),
             )
@@ -8033,6 +8071,10 @@ class ConversationOrchestrator:
                     },
                 }
 
+        # A crop keeps automatic strength, so it can be retried; the retry edits
+        # the same crop again, read back from the one the source kept, and not
+        # the whole source. An extension pins its strength and is never retried.
+        source_fit = snapshot.source_fit if snapshot is not None else None
         accepted = await self.create_turn(
             session,
             source_chat_id,
@@ -8042,6 +8084,15 @@ class ConversationOrchestrator:
                 parent_message_id=parent_message_id,
                 input_artifact_ids=input_artifact_ids,
                 settings=settings,
+                source_fit=(
+                    SourceFitRequest(
+                        mode=source_fit.mode,
+                        width=source_fit.canvas_width,
+                        height=source_fit.canvas_height,
+                    )
+                    if source_fit is not None
+                    else None
+                ),
             ),
             use_explicit_parent=True,
             replacement_message_id=source_assistant_id,
@@ -12066,7 +12117,7 @@ class ConversationOrchestrator:
         ]
         chat = session.get(Chat, run.chat_id)
         profile = session.get(ModelProfile, run.profile_id) if run.profile_id else None
-        source_fit: SourceExtensionRecipe | None = None
+        source_fit: SourceFitRecipe | None = None
         fit_value = run.provenance_json.get("source_fit_request")
         if fit_value is not None:
             intent = SourceFitRequest.model_validate(fit_value)
@@ -12089,16 +12140,46 @@ class ConversationOrchestrator:
                 and recipe is not None
                 and recipe.image.source_artifact_id == input_ids[0]
             ):
-                replay_source_fit_image(
+                replayed = replay_source_fit_image(
                     session, self.artifacts, recipe.image, selected_source_id=input_ids[0]
                 )
-                source_fit = plan_source_extension(
-                    recipe.image,
-                    canvas_width=intent.width,
-                    canvas_height=intent.height,
-                    api_graph=revision.api_graph_json,
-                    save_node_id=recipe.save_node_id,
-                )
+                if intent.mode == "extend":
+                    source_fit = plan_source_extension(
+                        recipe.image,
+                        canvas_width=intent.width,
+                        canvas_height=intent.height,
+                        api_graph=revision.api_graph_json,
+                        save_node_id=recipe.save_node_id,
+                    )
+                elif isinstance(recipe, SourceCropRecipe) and (
+                    recipe.canvas_width,
+                    recipe.canvas_height,
+                ) == (intent.width, intent.height):
+                    # The same crop again: its kept picture is read back, not cut anew.
+                    replay_source_fit_image(
+                        session,
+                        self.artifacts,
+                        recipe.upload_image,
+                        selected_source_id=input_ids[0],
+                    )
+                    source_fit = plan_source_crop_recipe(
+                        recipe.image,
+                        cropped_artifact_id=recipe.cropped_artifact_id,
+                        canvas_width=intent.width,
+                        canvas_height=intent.height,
+                        api_graph=revision.api_graph_json,
+                        save_node_id=recipe.save_node_id,
+                    )
+                else:
+                    source_fit = capture_source_crop(
+                        session,
+                        self.artifacts,
+                        replayed,
+                        canvas_width=intent.width,
+                        canvas_height=intent.height,
+                        api_graph=revision.api_graph_json,
+                        save_node_id=recipe.save_node_id,
+                    )
             else:
                 graph = revision.api_graph_json
                 saves = [
@@ -12112,20 +12193,31 @@ class ConversationOrchestrator:
                 if source is None:
                     raise ValueError("Source image is unavailable.")
                 prepared = prepare_source_fit_image(self.artifacts, source)
-                image = SourceFitImageRecord(
-                    source_artifact_id=prepared.source_artifact_id,
-                    prepared_artifact_id=f"sha256:{prepared.sha256}",
-                    width=prepared.width,
-                    height=prepared.height,
-                )
-                source_fit = plan_source_extension(
-                    image,
-                    canvas_width=intent.width,
-                    canvas_height=intent.height,
-                    api_graph=graph,
-                    save_node_id=saves[0],
-                )
-                retain_prepared_source_fit_image(session, self.artifacts, prepared)
+                if intent.mode == "crop":
+                    source_fit = capture_source_crop(
+                        session,
+                        self.artifacts,
+                        prepared,
+                        canvas_width=intent.width,
+                        canvas_height=intent.height,
+                        api_graph=graph,
+                        save_node_id=saves[0],
+                    )
+                else:
+                    image = SourceFitImageRecord(
+                        source_artifact_id=prepared.source_artifact_id,
+                        prepared_artifact_id=f"sha256:{prepared.sha256}",
+                        width=prepared.width,
+                        height=prepared.height,
+                    )
+                    source_fit = plan_source_extension(
+                        image,
+                        canvas_width=intent.width,
+                        canvas_height=intent.height,
+                        api_graph=graph,
+                        save_node_id=saves[0],
+                    )
+                    retain_prepared_source_fit_image(session, self.artifacts, prepared)
             # The accepted settings record the strength the sampler actually runs at.
             run.settings_json = {
                 **run.settings_json,
