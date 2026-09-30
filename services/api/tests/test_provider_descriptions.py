@@ -94,3 +94,67 @@ def test_civitai_model_and_version_descriptions_are_preserved_once_per_file() ->
     descriptions = [item["metadata"]["description"] for item in files]
     assert descriptions == ["Watercolor landscapes\n\nAdds pastel tones"] * 2
     assert merge_provider_descriptions(descriptions) == descriptions[0]
+
+
+@pytest.mark.parametrize(
+    "description,expected",
+    [
+        (
+            "<p>Watercolor <strong>landscapes</strong>.</p><p>Soft &amp; warm tones.</p>",
+            "Watercolor landscapes. Soft & warm tones.",
+        ),
+        ("<style>color: blue</style><script>neutral()</script><p>Pastel skies</p>", "Pastel skies"),
+        ('<p><a href="https://example.test">Ink</a><br>and pencil</p>', "Ink and pencil"),
+        ("<p>Watercolor <strong>landscapes", "Watercolor landscapes"),
+        ("Paint 2 < 3 panels", "Paint 2 < 3 panels"),
+        ('<p title="' + "x" * 9_000 + '">Watercolor</p>', "Watercolor"),
+        ("<p>" + "x" * 10_000 + "</p>", "x" * 8_000),
+        ('<p title="' + "x" * 32_000 + '">Beyond the input bound</p>', ""),
+        ("<![unknown]>", ""),
+    ],
+    ids=[
+        "markup",
+        "non-prose",
+        "links-and-breaks",
+        "unclosed-tags",
+        "literal-less-than",
+        "long-markup",
+        "text-bound",
+        "input-bound",
+        "malformed-declaration",
+    ],
+)
+def test_civitai_descriptions_keep_bounded_readable_text(description: str, expected: str) -> None:
+    files = CivitaiCatalog._normalize_files(
+        {"id": 1, "type": "LORA", "description": description},
+        {"id": 2, "files": [{"id": 3, "name": "a.safetensors"}]},
+    )
+    assert files[0]["metadata"]["description"] == expected
+
+
+def test_accepted_provider_prose_is_not_reinterpreted_after_installation() -> None:
+    assert (
+        installed_provider_description(
+            {"provider_description": "<p>Accepted text</p>"},
+            {"description": "New provider prose"},
+        )
+        == "<p>Accepted text</p>"
+    )
+
+
+@pytest.mark.parametrize("error", [AssertionError, ValueError])
+def test_description_parser_failures_discard_partial_text(
+    monkeypatch: pytest.MonkeyPatch, error: type[Exception]
+) -> None:
+    from local_lm.provider_descriptions import _DescriptionText
+
+    def fail_after_text(parser: _DescriptionText, data: str) -> None:
+        parser.handle_data(data)
+        raise error("Invalid markup")
+
+    monkeypatch.setattr(_DescriptionText, "feed", fail_after_text)
+    files = CivitaiCatalog._normalize_files(
+        {"id": 1, "type": "LORA", "description": "Watercolor"},
+        {"id": 2, "files": [{"id": 3, "name": "a.safetensors"}]},
+    )
+    assert files[0]["metadata"]["description"] == ""

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import hashlib
 import json
 import re
@@ -42,7 +43,7 @@ _FILENAME_QUANTIZATION = re.compile(
 )
 _PARAMETERS = re.compile(r"(?:^|[-_ ])(\d+(?:\.\d+)?)\s*([bmk])(?:$|[-_ ])", re.I)
 _REMOTE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
-_CACHE_VERSION = 6
+_CACHE_VERSION = 7
 
 
 class HuggingFaceCatalog:
@@ -277,7 +278,10 @@ class HuggingFaceCatalog:
                         "README.md",
                         max_bytes=MAX_PROVIDER_DESCRIPTION_CHARS * 4,
                     )
-                description = normalize_provider_description(card.decode("utf-8"))
+                text = codecs.getincrementaldecoder("utf-8")().decode(
+                    card, final=len(card) < MAX_PROVIDER_DESCRIPTION_CHARS * 4
+                )
+                description = normalize_provider_description(text)
             except (httpx.HTTPError, ValueError, TimeoutError):
                 # Optional card text must not prevent inspecting installable files.
                 pass
