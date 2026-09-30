@@ -97,7 +97,7 @@ from .chat_item_removal import (
     execute_chat_item_removal,
     preview_chat_item_removal,
 )
-from .chat_message_queries import message_ancestry
+from .chat_message_queries import message_ancestry_positions
 from .chat_search_pages import read_search_page
 from .chat_summary_reads import list_chat_summary_rows
 from .chat_transcript_context import read_transcript_context
@@ -2598,7 +2598,7 @@ async def get_chat_messages(
     chat that has been edited or forked holds messages from branches nobody is
     looking at, and a page taken by time alone can hold those and can omit a
     parent the lineage needs. With a head, the page walks that head's ancestry
-    through parent links and returns only messages on it. Without one, the whole
+    through parent links and returns them in parent order. Without one, the whole
     conversation is paged by time, which is what a caller wanting everything
     means.
     """
@@ -2622,7 +2622,7 @@ async def get_chat_messages(
         )
         if not head:
             raise api_error(404, "message-not-found", "This message is not in this conversation")
-        lineage = message_ancestry(chat_id, head_id)
+        lineage = message_ancestry_positions(chat_id, head_id)
     anchor_at = None
     older_than_anchor: ColumnElement[bool] | None = None
     newer_than_anchor: ColumnElement[bool] | None = None
@@ -2632,38 +2632,43 @@ async def get_chat_messages(
         )
         if not anchor_message:
             raise api_error(404, "message-not-found", "This message is not in this conversation")
-        if (
-            lineage is not None
-            and session.scalar(select(lineage.c.id).where(lineage.c.id == anchor_message.id))
-            is None
-        ):
-            raise api_error(400, "chat-window-invalid", "The anchor is not in the selected branch.")
         anchor_at = anchor_message.created_at
-        older_than_anchor = or_(
-            Message.created_at < anchor_at,
-            and_(Message.created_at == anchor_at, Message.id < anchor_message.id),
-        )
-        newer_than_anchor = or_(
-            Message.created_at > anchor_at,
-            and_(Message.created_at == anchor_at, Message.id > anchor_message.id),
-        )
+        if lineage is not None:
+            anchor_depth = session.scalar(
+                select(lineage.c.depth).where(lineage.c.id == anchor_message.id)
+            )
+            if anchor_depth is None:
+                raise api_error(
+                    400, "chat-window-invalid", "The anchor is not in the selected branch."
+                )
+            older_than_anchor = lineage.c.depth > anchor_depth
+            newer_than_anchor = lineage.c.depth < anchor_depth
+        else:
+            older_than_anchor = or_(
+                Message.created_at < anchor_at,
+                and_(Message.created_at == anchor_at, Message.id < anchor_message.id),
+            )
+            newer_than_anchor = or_(
+                Message.created_at > anchor_at,
+                and_(Message.created_at == anchor_at, Message.id > anchor_message.id),
+            )
 
     def page(
         newest_first: bool, *, strictly: ColumnElement[bool] | None, count: int
     ) -> list[Message]:
         query = select(Message).where(Message.chat_id == chat_id)
         if lineage is not None:
-            query = query.where(Message.id.in_(select(lineage.c.id)))
+            query = query.join(lineage, Message.id == lineage.c.id).order_by(
+                lineage.c.depth.asc() if newest_first else lineage.c.depth.desc()
+            )
+        else:
+            query = query.order_by(
+                Message.created_at.desc() if newest_first else Message.created_at.asc(),
+                Message.id.desc() if newest_first else Message.id.asc(),
+            )
         if strictly is not None:
             query = query.where(strictly)
-        order = Message.created_at.desc() if newest_first else Message.created_at.asc()
-        return list(
-            session.scalars(
-                query.order_by(order, Message.id.desc() if newest_first else Message.id.asc())
-                .limit(count)
-                .options(*_MESSAGE_WINDOW_LOADERS)
-            ).all()
-        )
+        return list(session.scalars(query.limit(count).options(*_MESSAGE_WINDOW_LOADERS)).all())
 
     if around is not None and anchor_at is not None:
         older_half = max(0, (limit - 1) // 2)
