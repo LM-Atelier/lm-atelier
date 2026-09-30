@@ -19,6 +19,7 @@ from test_workflow_source_geometry import (
 from local_lm.accepted_turn_context import accepted_context
 from local_lm.db import SessionLocal
 from local_lm.models import ModelProfile, Run, RunContextSnapshot
+from local_lm.outpaint_workflows import OUTPAINT_SCHEMA_KIND, OUTPAINT_SETTING_KEY
 
 
 async def prepared_turn(
@@ -29,6 +30,7 @@ async def prepared_turn(
     broken_graph: bool = False,
     runtime_sampler: bool = False,
     conditioning: bool = False,
+    declared_margins: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     # The conditioning shape is the one the official outpaint template uses.
     graph = inpaint_conditioning_graph() if conditioning else composited_graph()
@@ -68,6 +70,13 @@ async def prepared_turn(
         "checkpoint": {"type": "string", "default": "fixture.safetensors"},
         "steps": {"type": "integer", "minimum": 1, "maximum": 100, "default": 2},
     }
+    if declared_margins:
+        # What installing an outpainting template from the catalog declares.
+        properties[OUTPAINT_SETTING_KEY] = {
+            "type": "object",
+            "x-lm-atelier-kind": OUTPAINT_SCHEMA_KIND,
+            "default": {"top": 0, "right": 0, "bottom": 0, "left": 0},
+        }
     created = await client.post(
         "/api/workflows",
         json={

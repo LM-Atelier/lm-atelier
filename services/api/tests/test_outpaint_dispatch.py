@@ -11,17 +11,25 @@ from fastapi import FastAPI
 from httpx2 import AsyncClient
 from PIL import Image
 from sqlalchemy import select
+from test_turn_workflow_choices import _image_workflow, _resource_batch
 
 from local_lm.adapters.base import MediaEvent, MediaRequest
 from local_lm.db import SessionLocal
 from local_lm.models import Job, Run, WorkflowDefinition, WorkflowRevision
 from local_lm.outpaint_workflows import OUTPAINT_SCHEMA_KIND, OUTPAINT_SETTING_KEY
+from local_lm.prompt_expansion_use import read_prompt_batch_queue_selection
 from local_lm.scheduler import JobClaim
 from local_lm.schemas import TurnRequest
 
 #: EXIF orientation 6 stores a picture rotated; every viewer and ComfyUI's
 #: LoadImage show it turned a quarter, with width and height swapped.
 ROTATED = 6
+#: The margins an outpainting workflow installed from the catalog declares.
+DECLARED_MARGINS = {
+    "type": "object",
+    "x-lm-atelier-kind": OUTPAINT_SCHEMA_KIND,
+    "default": {"top": 0, "right": 0, "bottom": 0, "left": 0},
+}
 
 
 def _png(width: int, height: int, *, orientation: int | None = None) -> bytes:
@@ -100,13 +108,7 @@ async def _outpainter(
             api_graph_json=graph,
             input_schema_json={
                 "type": "object",
-                "properties": {
-                    OUTPAINT_SETTING_KEY: {
-                        "type": "object",
-                        "x-lm-atelier-kind": OUTPAINT_SCHEMA_KIND,
-                        "default": {"top": 0, "right": 0, "bottom": 0, "left": 0},
-                    }
-                },
+                "properties": {OUTPAINT_SETTING_KEY: DECLARED_MARGINS},
             },
             dependencies_json={},
         )
@@ -212,3 +214,88 @@ async def test_a_workflow_with_no_single_source_pad_refuses_the_margins(
     )
     assert response.status_code == 422, response.text
     assert "cannot extend a picture past its edge" in response.text
+
+
+async def test_a_turn_that_names_no_margins_runs_an_outpainter_as_an_ordinary_edit(
+    app: FastAPI, client: AsyncClient
+) -> None:
+    """The declared margins extend by nothing and reach every turn on the
+    workflow; taken as a request to extend, they refused every one of them."""
+    revision_id, source_id, chat_id = await _outpainter(client, _outpaint_graph(), _png(400, 300))
+    async with app.state.services.scheduler.lease("primary"):
+        response = await client.post(
+            f"/api/chats/{chat_id}/turns",
+            json={
+                "text": "Warm the light.",
+                "mode": "image",
+                "input_artifact_ids": [source_id],
+                "workflow_revision_id": revision_id,
+            },
+        )
+    assert response.status_code == 202, response.text
+    assert OUTPAINT_SETTING_KEY not in response.json()["run"]["settings_json"]
+
+
+async def test_margins_a_turn_names_that_extend_by_nothing_are_still_refused(
+    client: AsyncClient,
+) -> None:
+    revision_id, source_id, chat_id = await _outpainter(client, _outpaint_graph(), _png(400, 300))
+    response = await client.post(
+        f"/api/chats/{chat_id}/turns",
+        json={
+            "text": "Extend the scene.",
+            "mode": "image",
+            "input_artifact_ids": [source_id],
+            "workflow_revision_id": revision_id,
+            "settings": {OUTPAINT_SETTING_KEY: {"top": 0, "right": 0, "bottom": 0, "left": 0}},
+        },
+    )
+    assert response.status_code == 422, response.text
+    assert "Extending by nothing on every side" in response.text
+
+
+async def test_a_prompt_batch_on_workflows_that_declare_margins_is_admitted(
+    app: FastAPI, client: AsyncClient
+) -> None:
+    chat = (await client.post("/api/chats", json={"title": "Batch margins"})).json()
+    with SessionLocal() as session:
+        revision_ids = [
+            _image_workflow(session, f"Declared margins {index}")[1] for index in range(2)
+        ]
+        for revision_id in revision_ids:
+            revision = session.get(WorkflowRevision, revision_id)
+            assert revision is not None
+            revision.input_schema_json = {
+                "type": "object",
+                "properties": {OUTPAINT_SETTING_KEY: DECLARED_MARGINS},
+            }
+        session.commit()
+    batch = await _resource_batch(client, chat["id"], revision_ids)
+    orchestrator = app.state.services.orchestrator
+    async with app.state.services.scheduler.lease("primary"), orchestrator.chat_guard(chat["id"]):
+        with SessionLocal() as session:
+            selection = read_prompt_batch_queue_selection(
+                session,
+                chat["id"],
+                batch["id"],
+                batch["plan_version"],
+                batch["plan_sha256"],
+                expected_engine="mock",
+            )
+            accepted = await orchestrator._create_new_turn(
+                session,
+                chat["id"],
+                TurnRequest(
+                    text=batch["items"][0]["reviewed_prompt"],
+                    mode="image",
+                    output_count=2,
+                    idempotency_key="declared-margins-batch",
+                ),
+                source_action="prompt_library",
+                prompt_batch_selection=selection,
+            )
+            runs = list(
+                session.scalars(select(Run).where(Run.work_plan_id == accepted.run.work_plan_id))
+            )
+    assert {run.workflow_revision_id for run in runs} == set(revision_ids)
+    assert all(OUTPAINT_SETTING_KEY not in run.settings_json for run in runs)

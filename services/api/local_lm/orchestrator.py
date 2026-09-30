@@ -181,6 +181,7 @@ from .models import (
 from .ordered_planning import OrderedPlanCompiler, OrderedPlanConfirmationRequired
 from .outpaint_workflows import (
     OUTPAINT_SETTING_KEY,
+    extends_by_nothing,
     margin_pixels,
     normalize_margins,
     oriented_size,
@@ -2094,7 +2095,13 @@ class ConversationOrchestrator:
         # a margin of nine hundred, and a margin of "lots" were all accepted
         # and handed to a workflow that would do something arbitrary with
         # each. The contract that refuses them existed already and nothing
-        # called it.
+        # called it. Margins of nothing that the turn did not name are the
+        # workflow's declared default rather than a request, and would refuse
+        # every ordinary edit and every Extend that fits its canvas instead.
+        if OUTPAINT_SETTING_KEY not in request.settings and extends_by_nothing(
+            effective_settings.get(OUTPAINT_SETTING_KEY)
+        ):
+            del effective_settings[OUTPAINT_SETTING_KEY]
         if plan.operation != Operation.TEXT and OUTPAINT_SETTING_KEY in effective_settings:
             if (
                 not workflow_revision
@@ -10539,6 +10546,12 @@ class ConversationOrchestrator:
                 **request_settings,
             },
         )
+        # As for a turn: margins of nothing the request did not name are only
+        # the workflow's declared default.
+        if OUTPAINT_SETTING_KEY not in request.settings and extends_by_nothing(
+            effective_settings.get(OUTPAINT_SETTING_KEY)
+        ):
+            del effective_settings[OUTPAINT_SETTING_KEY]
         if OUTPAINT_SETTING_KEY in effective_settings:
             if (
                 not workflow_declares_outpaint(revision.input_schema_json)

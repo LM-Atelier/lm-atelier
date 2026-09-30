@@ -79,6 +79,22 @@ def normalize_margins(value: object) -> dict[str, float]:
     return margins
 
 
+def extends_by_nothing(value: object) -> bool:
+    """Whether these margins, read as `normalize_margins` reads them, add no canvas at all.
+
+    That is the default an outpainting workflow declares, so it rides along
+    with every turn on one. A turn asks to extend only when it names margins
+    itself or some layer adds canvas on a side; anything malformed is left for
+    `normalize_margins` to refuse.
+    """
+    if not isinstance(value, dict):
+        return False
+    sides = [value.get(side, 0) for side in _SIDES]
+    return all(
+        not isinstance(side, bool) and isinstance(side, int | float) and side == 0 for side in sides
+    )
+
+
 def source_pad_node(graph: object) -> str | None:
     """The one padding node that receives the source picture, or nothing.
 
