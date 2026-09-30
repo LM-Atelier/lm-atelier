@@ -52,7 +52,9 @@ it.each(["profile", "lora"] as const)("keeps a %s suggestion unsaved until expli
     use_case: "Watercolor scenes.", use_case_derived: true, expected_use_case: "My existing text",
   });
   expect(client.getQueryData([kind === "profile" ? "profiles" : "model-assets"])).toEqual([updated]);
-  expect(opener).toHaveFocus();
+  // The save closes the dialog once its request settles, and the dialog hands
+  // focus back as it is taken down, a moment after it has left the page.
+  await waitFor(() => expect(opener).toHaveFocus());
 });
 
 it("labels an edited suggestion as manual when saving", async () => {
