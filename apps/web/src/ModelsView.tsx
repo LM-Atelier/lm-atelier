@@ -161,6 +161,32 @@ function InstalledAssetRow({
 }) {
   const [editing, setEditing] = useState(false);
   const [editingWords, setEditingWords] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const inFlight = useRef(false);
+  const busy = saving || submitting;
+  const rulesEditor = useRef<HTMLFormElement>(null);
+  const wordsEditor = useRef<HTMLFormElement>(null);
+  const restoreRulesFocus = useRef(false);
+  const restoreWordsFocus = useRef(false);
+  const closeRules = () => {
+    restoreRulesFocus.current = rulesEditor.current?.contains(document.activeElement) ?? false;
+    setEditing(false);
+  };
+  const closeWords = () => {
+    restoreWordsFocus.current = wordsEditor.current?.contains(document.activeElement) ?? false;
+    setEditingWords(false);
+  };
+  const update = async (values: ModelAssetUpdateValues) => {
+    if (busy || inFlight.current) return false;
+    inFlight.current = true;
+    setSubmitting(true);
+    try {
+      return await onUpdate(values);
+    } finally {
+      inFlight.current = false;
+      setSubmitting(false);
+    }
+  };
   const editRulesButton = useRef<HTMLButtonElement>(null);
   const editWordsButton = useRef<HTMLButtonElement>(null);
   const useCaseField = useRef<HTMLTextAreaElement>(null);
@@ -168,11 +194,11 @@ function InstalledAssetRow({
   const wasEditingWords = useRef(false);
   useEffect(() => {
     if (editing) useCaseField.current?.focus();
-    else if (wasEditing.current) editRulesButton.current?.focus();
+    else if (wasEditing.current && restoreRulesFocus.current) editRulesButton.current?.focus();
     wasEditing.current = editing;
   }, [editing]);
   useEffect(() => {
-    if (!editingWords && wasEditingWords.current) editWordsButton.current?.focus();
+    if (!editingWords && wasEditingWords.current && restoreWordsFocus.current) editWordsButton.current?.focus();
     wasEditingWords.current = editingWords;
   }, [editingWords]);
   const measuredWords = measuredTriggerWords(asset);
@@ -184,7 +210,7 @@ function InstalledAssetRow({
   const [modelStrength, setModelStrength] = useState(String(asset.default_model_strength));
   const [clipStrength, setClipStrength] = useState(String(asset.default_clip_strength));
   const beginEditing = () => {
-    if (editing || saving) return;
+    if (editing || busy || inFlight.current) return;
     setUseCase(asset.use_case);
     setUseCaseEdited(false);
     setBaseModel(asset.family ?? "");
@@ -210,8 +236,8 @@ function InstalledAssetRow({
     && parsedModelStrength === asset.default_model_strength
     && parsedClipStrength === asset.default_clip_strength;
   const save = async () => {
-    if (saving || unchanged || !strengthsValid || !baseModelValid || (autoApply && !useCase.trim())) return;
-    const saved = await onUpdate({
+    if (busy || unchanged || !strengthsValid || !baseModelValid || (autoApply && !useCase.trim())) return;
+    const saved = await update({
       ...(useCaseEdited ? { use_case: useCase.trim() } : {}),
       // Sent only when edited, so the spelling a file declared stays until someone changes it.
       ...(baseModelChanged ? { family: typedBaseModel } : {}),
@@ -219,7 +245,7 @@ function InstalledAssetRow({
       default_model_strength: parsedModelStrength,
       default_clip_strength: parsedClipStrength,
     });
-    if (saved) setEditing(false);
+    if (saved) closeRules();
   };
   return (
     <div className={editing ? "editing" : ""}>
@@ -245,55 +271,55 @@ function InstalledAssetRow({
       <span className="row-actions">
         <button
           className="secondary compact-button"
-          disabled={!asset.verified_at || saving}
-          onClick={() => void onUpdate({ active: !asset.active })}
+          disabled={!asset.verified_at || busy}
+          onClick={() => void update({ active: !asset.active })}
         >
           {asset.active ? "Disable" : "Enable"}
         </button>
         {asset.kind === "lora" && (
-          <button ref={editRulesButton} className="secondary compact-button" aria-disabled={editing || saving} onClick={beginEditing}>
+          <button ref={editRulesButton} className="secondary compact-button" aria-disabled={editing || busy} onClick={beginEditing}>
             Edit Auto rules
           </button>
         )}
         {asset.kind === "lora" && <UseCaseSuggestion kind="lora" id={asset.id} name={asset.name} savedText={asset.use_case}
           available={typeof asset.manifest_json.provider_description === "string" && !!asset.manifest_json.provider_description.trim()}
-          busy={editing || editingWords || saving || deleting} />}
+          busy={editing || editingWords || busy || deleting} />}
         {asset.kind === "lora" && (
-          <button ref={editWordsButton} className="secondary compact-button" aria-disabled={editingWords || saving} onClick={() => { if (!editingWords && !saving) setEditingWords(true); }}>
+          <button ref={editWordsButton} className="secondary compact-button" aria-disabled={editingWords || busy} onClick={() => { if (!editingWords && !busy) setEditingWords(true); }}>
             Edit trigger words
           </button>
         )}
         <button className="secondary compact-button danger" disabled={deleting} onClick={onDelete}>Delete</button>
       </span>
       {editing && asset.kind === "lora" && (
-        <form className="model-use-case-editor lora-auto-editor" onSubmit={(event) => { event.preventDefault(); void save(); }}>
+        <form ref={rulesEditor} className="model-use-case-editor lora-auto-editor" onSubmit={(event) => { event.preventDefault(); void save(); }}>
           <label>
             Use case
-            <textarea ref={useCaseField} aria-label={`Auto use case for ${asset.name}`} rows={2} value={useCase} onChange={(event) => { setUseCase(event.target.value); setUseCaseEdited(true); }} placeholder="Watercolor landscapes, product photography…" />
+            <textarea ref={useCaseField} aria-label={`Auto use case for ${asset.name}`} rows={2} readOnly={busy} value={useCase} onChange={(event) => { setUseCase(event.target.value); setUseCaseEdited(true); }} placeholder="Watercolor landscapes, product photography…" />
             {asset.use_case_derived && !useCaseEdited && <small>Derived from provider metadata. You can edit it.</small>}
           </label>
           <label className="lora-base-model">
             Base model
-            <input aria-label={`Base model for ${asset.name}`} type="text" list={baseModelList} maxLength={100} value={baseModel} onChange={(event) => setBaseModel(event.target.value)} placeholder="The model it was made for" />
+            <input aria-label={`Base model for ${asset.name}`} type="text" list={baseModelList} maxLength={100} readOnly={busy} value={baseModel} onChange={(event) => setBaseModel(event.target.value)} placeholder="The model it was made for" />
             <datalist id={baseModelList}>
               {baseModels.map((name) => <option key={name} value={name} />)}
             </datalist>
           </label>
           <label>
             Model strength
-            <input aria-label={`Default model strength for ${asset.name}`} type="number" min="-4" max="4" step="0.05" value={modelStrength} onChange={(event) => setModelStrength(event.target.value)} />
+            <input aria-label={`Default model strength for ${asset.name}`} type="number" min="-4" max="4" step="0.05" readOnly={busy} value={modelStrength} onChange={(event) => setModelStrength(event.target.value)} />
           </label>
           <label>
             CLIP strength
-            <input aria-label={`Default CLIP strength for ${asset.name}`} type="number" min="-4" max="4" step="0.05" value={clipStrength} onChange={(event) => setClipStrength(event.target.value)} />
+            <input aria-label={`Default CLIP strength for ${asset.name}`} type="number" min="-4" max="4" step="0.05" readOnly={busy} value={clipStrength} onChange={(event) => setClipStrength(event.target.value)} />
           </label>
           <label className="lora-auto-toggle">
-            <input aria-label={`Use ${asset.name} automatically`} type="checkbox" checked={autoApply} onChange={(event) => setAutoApply(event.target.checked)} />
+            <input aria-label={`Use ${asset.name} automatically`} type="checkbox" aria-disabled={busy} checked={autoApply} onChange={(event) => { if (!busy) setAutoApply(event.target.checked); }} />
             Use automatically
           </label>
           <span className="row-actions">
-            <button type="button" className="secondary compact-button" aria-disabled={saving} onClick={() => { if (!saving) setEditing(false); }}>Cancel</button>
-            <button type="submit" className="primary compact-button" aria-disabled={saving || unchanged || !strengthsValid || !baseModelValid || (autoApply && !useCase.trim())}>{saving ? "Saving…" : "Save"}</button>
+            <button type="button" className="secondary compact-button" aria-disabled={busy} onClick={() => { if (!busy) closeRules(); }}>Cancel</button>
+            <button type="submit" className="primary compact-button" aria-disabled={busy || unchanged || !strengthsValid || !baseModelValid || (autoApply && !useCase.trim())}>{busy ? "Saving…" : "Save"}</button>
           </span>
           {!baseModelValid
             ? <small>A base model needs at least one letter or digit.</small>
@@ -303,11 +329,12 @@ function InstalledAssetRow({
       {editingWords && asset.kind === "lora" && (
         <LoraTriggerWordsEditor
           asset={asset}
-          saving={saving}
-          onCancel={() => setEditingWords(false)}
+          formRef={wordsEditor}
+          saving={busy}
+          onCancel={closeWords}
           onSave={(typedTriggerWords) => {
-            void onUpdate({ typed_trigger_words: typedTriggerWords }).then((saved) => {
-              if (saved) setEditingWords(false);
+            void update({ typed_trigger_words: typedTriggerWords }).then((saved) => {
+              if (saved) closeWords();
             });
           }}
         />

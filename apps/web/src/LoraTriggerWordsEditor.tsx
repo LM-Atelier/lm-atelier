@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { measuredTriggerWords, parseTypedTriggerWords } from "./loraTriggerWords";
 import type { ModelAssetInstall } from "./types";
 
@@ -10,11 +10,13 @@ import type { ModelAssetInstall } from "./types";
  */
 export function LoraTriggerWordsEditor({
   asset,
+  formRef,
   saving,
   onSave,
   onCancel,
 }: {
   asset: Pick<ModelAssetInstall, "name" | "manifest_json" | "typed_trigger_words">;
+  formRef?: RefObject<HTMLFormElement | null>;
   saving: boolean;
   onSave: (typedTriggerWords: string[]) => void;
   onCancel: () => void;
@@ -27,6 +29,7 @@ export function LoraTriggerWordsEditor({
   const unchanged = typed.join("\n") === asset.typed_trigger_words.join("\n");
   return (
     <form
+      ref={formRef}
       className="model-use-case-editor lora-trigger-editor"
       onSubmit={(event) => {
         event.preventDefault();
@@ -43,6 +46,7 @@ export function LoraTriggerWordsEditor({
         <input
           ref={field}
           aria-label={`Trigger words for ${asset.name}`}
+          readOnly={saving}
           value={text}
           onChange={(event) => setText(event.target.value)}
           placeholder="Separate words with commas"
