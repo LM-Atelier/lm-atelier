@@ -63,6 +63,9 @@ def normalize_html_provider_description(value: object) -> str:
     parser = _DescriptionText()
     try:
         parser.feed(value[:_MAX_DESCRIPTION_MARKUP_CHARS])
+        # Closing flushes trailing text but would expose an unfinished tag and its attributes.
+        if len(value) <= _MAX_DESCRIPTION_MARKUP_CHARS and not parser.rawdata.startswith("<"):
+            parser.close()
     except (AssertionError, ValueError):
         return ""
     # An unfinished tag at the input bound remains buffered, not exposed as prose.
