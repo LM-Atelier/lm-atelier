@@ -8,6 +8,8 @@ import { StudioAdjustTool } from "./StudioAdjustTool";
 import { StudioView } from "./StudioView";
 import { api } from "./api";
 import { adjustPixels, NEUTRAL_ADJUSTMENTS } from "./studioAdjustments";
+import { autoAdjustments } from "./studioAutoAdjust";
+import { readSourcePixels } from "./studioSourcePixels";
 import { initialToolState, studioToolReducer } from "./studioToolState";
 import { useAdjustedPreview } from "./useAdjustedPreview";
 import { useStudioImage } from "./useStudioImage";
@@ -26,6 +28,7 @@ vi.mock("./api", () => ({
   },
 }));
 vi.mock("./useStudioImage", () => ({ useStudioImage: vi.fn() }));
+vi.mock("./studioSourcePixels", () => ({ readSourcePixels: vi.fn() }));
 vi.mock("./StudioWorkflowSelector", () => ({
   StudioWorkflowSelector: ({ onAvailabilityChange }: { onAvailabilityChange: (reason: string | null) => void }) => {
     useEffect(() => onAvailabilityChange(null), [onAvailabilityChange]);
@@ -88,6 +91,23 @@ describe("the light and color panel", () => {
     expect(screen.getByText("Applying…")).toBeInTheDocument();
     expect(onApply).not.toHaveBeenCalled();
   });
+
+  it("offers Auto only where the picture's colors can be read, and not while an edit arrives", () => {
+    const onAuto = vi.fn();
+    const panel = (busy: boolean, auto?: () => void) => (
+      <StudioAdjustTool adjustments={NEUTRAL_ADJUSTMENTS} busy={busy} onChange={vi.fn()} onReset={vi.fn()}
+        onApply={vi.fn()} onAuto={auto} />
+    );
+    const { rerender } = render(panel(false));
+    expect(screen.queryByRole("button", { name: "Auto" })).toBeNull();
+
+    rerender(panel(false, onAuto));
+    fireEvent.click(screen.getByRole("button", { name: "Auto" }));
+    rerender(panel(true, onAuto));
+    fireEvent.click(screen.getByRole("button", { name: "Auto" }));
+
+    expect(onAuto).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("where the sliders stand", () => {
@@ -101,6 +121,15 @@ describe("where the sliders stand", () => {
     // sliders would show it twice.
     state = studioToolReducer(state, { type: "image-changed", width: 4, height: 4 });
     expect(state.adjustments).toEqual(NEUTRAL_ADJUSTMENTS);
+  });
+
+  it("takes every slider at once, as Auto sets them, only when each is a whole step in range", () => {
+    const auto = { ...NEUTRAL_ADJUSTMENTS, brightness: 31, contrast: 12, warmth: -8 };
+    const state = studioToolReducer(initialToolState(), { type: "set-adjustments", adjustments: auto });
+
+    expect(state.adjustments).toEqual(auto);
+    expect(studioToolReducer(state, { type: "set-adjustments", adjustments: { ...auto, tint: 101 } })).toBe(state);
+    expect(studioToolReducer(state, { type: "set-adjustments", adjustments: { ...auto, tint: 1.5 } })).toBe(state);
   });
 });
 
@@ -194,6 +223,43 @@ describe("adjusting in the studio", () => {
         brightness: 25, contrast: 0, highlights: 0, shadows: 40, saturation: 0, warmth: 0, tint: 0, sharpness: -30,
         vibrance: 15, vignette: 20,
       },
+    });
+  });
+
+  it("sets the sliders from the picture on screen with Auto, and sends where they then stand", async () => {
+    const session = { id: "chat-studio", messages: [] } as never;
+    vi.mocked(api.openStudioSession).mockResolvedValue(session);
+    vi.mocked(api.studioSession).mockResolvedValue(session);
+    vi.mocked(api.studioLocalEdit).mockResolvedValue(session);
+    vi.mocked(api.artifact).mockResolvedValue({ id: "art-1", favorite: false } as never);
+    vi.mocked(api.editTemplates).mockResolvedValue([]);
+    vi.mocked(api.studioCapabilities).mockResolvedValue({ tools: [] });
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+    const bitmap = { width: 400, height: 200, close: vi.fn() } as unknown as ImageBitmap;
+    vi.mocked(useStudioImage).mockReturnValue({ bitmap, error: null, reload: vi.fn() });
+    // A dim grey picture, darker to the left.
+    const pixels = new Uint8ClampedArray(400 * 200 * 4);
+    for (let at = 0; at < pixels.length; at += 4) {
+      const level = 10 + Math.round((160 * ((at / 4) % 400)) / 399);
+      pixels.set([level, level, level, 255], at);
+    }
+    vi.mocked(readSourcePixels).mockReturnValue(pixels);
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <StudioView sourceArtifactId="art-1" onOpenArtifact={vi.fn()} onOpenWorkflows={vi.fn()} onClose={vi.fn()} />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: /^Adjust light and color/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Auto" }));
+    const expected = autoAdjustments(pixels, NEUTRAL_ADJUSTMENTS);
+
+    expect(expected.brightness).toBeGreaterThan(0);
+    expect(screen.getByRole("slider", { name: "Brightness" })).toHaveValue(String(expected.brightness));
+    fireEvent.click(screen.getByRole("button", { name: "Apply adjustments" }));
+    await waitFor(() => expect(api.studioLocalEdit).toHaveBeenCalledTimes(1));
+    expect(api.studioLocalEdit).toHaveBeenCalledWith("chat-studio", {
+      source_artifact_id: "art-1", operation: "adjust", adjustments: expected,
     });
   });
 });

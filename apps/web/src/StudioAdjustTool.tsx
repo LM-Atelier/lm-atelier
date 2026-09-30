@@ -23,7 +23,9 @@ function signed(value: number): string {
  *
  * The canvas draws the adjusted picture itself, by the same arithmetic the
  * server uses, so what is on screen is what Apply makes. Nothing is saved
- * until then, and Reset puts every slider back without leaving a step.
+ * until then, and Reset puts every slider back without leaving a step. Auto
+ * sets warmth, tint, brightness and contrast from the picture itself, where
+ * its colors can be read, and leaves them to be changed like any others.
  */
 export function StudioAdjustTool({
   adjustments,
@@ -31,12 +33,15 @@ export function StudioAdjustTool({
   onChange,
   onReset,
   onApply,
+  onAuto,
 }: {
   adjustments: StudioColorAdjustments;
   busy: boolean;
   onChange: (key: keyof StudioColorAdjustments, value: number) => void;
   onReset: () => void;
   onApply: () => void;
+  /** Sets the sliders from the picture; absent where its colors cannot be read. */
+  onAuto?: () => void;
 }) {
   const unchanged = isNeutral(adjustments);
   const ready = !unchanged && !busy;
@@ -66,6 +71,14 @@ export function StudioAdjustTool({
             : "The picture shows the change. Nothing is kept until you apply it."}
       </small>
       <div className="studio-transform-actions">
+        {onAuto && (
+          <button type="button" className="secondary compact-button" aria-disabled={busy}
+            onClick={() => {
+              if (!busy) onAuto();
+            }}>
+            Auto
+          </button>
+        )}
         <button type="button" className="secondary compact-button" aria-disabled={unchanged}
           onClick={() => {
             if (!unchanged) onReset();

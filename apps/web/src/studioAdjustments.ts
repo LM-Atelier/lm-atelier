@@ -98,11 +98,16 @@ export function toned(value: number, shadows: number, highlights: number): numbe
   return value + 255 * (shadows * share * left * left + highlights * share * share * left);
 }
 
+/** The red, green and blue gains the warmth and tint sliders make together. */
+export function colorGains(warmth: number, tint: number): [number, number, number] {
+  const warm = warmthGains(NEUTRAL_KELVIN - KELVIN_PER_WARMTH_STEP * warmth);
+  const tinted = tintGains(tint);
+  return [warm[0] * tinted[0], warm[1] * tinted[1], warm[2] * tinted[2]];
+}
+
 /** The red, green and blue lookup tables for tone, color, brightness and contrast. */
 export function channelTables(adjustments: StudioColorAdjustments): [Uint8Array, Uint8Array, Uint8Array] {
-  const warmth = warmthGains(NEUTRAL_KELVIN - KELVIN_PER_WARMTH_STEP * adjustments.warmth);
-  const tint = tintGains(adjustments.tint);
-  const gains = [0, 1, 2].map((index) => warmth[index] * tint[index]);
+  const gains = colorGains(adjustments.warmth, adjustments.tint);
   const brightness = Math.pow(2, adjustments.brightness / ADJUSTMENT_LIMIT);
   const contrast = Math.pow(2, adjustments.contrast / ADJUSTMENT_LIMIT);
   const shadows = adjustments.shadows / ADJUSTMENT_LIMIT;

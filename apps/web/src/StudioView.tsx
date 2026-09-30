@@ -324,6 +324,7 @@ export function StudioView({
             }}
             busy={busy}
             onLocalEdit={(operation, details) => current && localEdit(operation, current.artifactId, () => setSelectedId(null), details)}
+            pixels={sourcePixels}
           />
           <StudioRecipes
             disabled={busy || !current}
