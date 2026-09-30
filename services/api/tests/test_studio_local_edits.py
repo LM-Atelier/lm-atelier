@@ -935,6 +935,8 @@ async def test_an_adjustment_is_recorded_with_where_each_slider_stood(
         "warmth": -40,
         "tint": 25,
         "sharpness": 35,
+        "vibrance": 20,
+        "vignette": -10,
     }
 
     response = await client.post(

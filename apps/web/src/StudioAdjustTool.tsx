@@ -8,16 +8,18 @@ const SLIDERS: Array<{ key: keyof StudioColorAdjustments; label: string }> = [
   { key: "highlights", label: "Highlights" },
   { key: "shadows", label: "Shadows" },
   { key: "saturation", label: "Saturation" },
+  { key: "vibrance", label: "Vibrance" },
   { key: "warmth", label: "Warmth" },
   { key: "tint", label: "Tint" },
   { key: "sharpness", label: "Sharpness" },
+  { key: "vignette", label: "Vignette" },
 ];
 
 function signed(value: number): string {
   return value > 0 ? `+${value}` : String(value);
 }
 
-/** Light and color: eight sliders shown on the picture as they move.
+/** Light and color: ten sliders shown on the picture as they move.
  *
  * The canvas draws the adjusted picture itself, by the same arithmetic the
  * server uses, so what is on screen is what Apply makes. Nothing is saved

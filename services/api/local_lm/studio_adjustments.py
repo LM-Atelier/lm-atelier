@@ -3,8 +3,10 @@
 The studio shows an adjustment on the picture while its sliders move, so the
 arithmetic here is the arithmetic the browser runs, in the same order: one
 lookup table per channel for shadows, highlights, warmth, tint, brightness and
-contrast, then saturation as a mix toward each pixel's grey, then sharpness as
-a mix away from a softened copy of the picture. Every step is integer
+contrast, then saturation as a mix toward each pixel's grey, then vibrance as
+the same mix kept in proportion to how muted each pixel is, then sharpness as
+a mix away from a softened copy of the picture, and last the vignette, a mix
+toward black or white that grows toward the corners. Every step is integer
 arithmetic or floating-point arithmetic with a stated rounding, which the
 browser repeats exactly, so the preview is the picture an apply makes. The
 browser's copy lives in studioAdjustments.ts, and the two are checked against
@@ -15,9 +17,10 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass
+from operator import itemgetter
 from typing import Any
 
-from PIL import Image, ImageFilter
+from PIL import Image, ImageChops, ImageFilter
 
 from .studio_relight import NEUTRAL_KELVIN, warmth_gains
 
@@ -33,6 +36,17 @@ TINT_REACH = 0.15
 #: nine, weighted 1-2-1 each way. The weights sum to 16, so every sum the
 #: kernel makes in single precision is exact and the browser's integers match.
 _SOFTENED = ImageFilter.Kernel((3, 3), (1, 2, 1, 2, 4, 2, 1, 2, 1), 16)
+#: How far toward black, or toward white, the vignette takes the corners at
+#: either end of its slider.
+VIGNETTE_REACH = 0.8
+#: Where the vignette begins and where it is whole, as the squared distance from
+#: the middle of the picture, on which the middle of each edge is 1 and each
+#: corner 2. Nothing changes inside the first, so the middle keeps its light.
+VIGNETTE_START = 0.25
+VIGNETTE_FULL = 1.75
+#: How finely that squared distance is counted: this many steps to the middle
+#: of an edge, in whole numbers the browser counts the same way.
+VIGNETTE_STEPS = 4096
 
 
 @dataclass(frozen=True)
@@ -47,6 +61,8 @@ class ColorAdjustments:
     warmth: int = 0
     tint: int = 0
     sharpness: int = 0
+    vibrance: int = 0
+    vignette: int = 0
 
     def is_neutral(self) -> bool:
         return not (
@@ -58,6 +74,8 @@ class ColorAdjustments:
             or self.warmth
             or self.tint
             or self.sharpness
+            or self.vibrance
+            or self.vignette
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -142,6 +160,26 @@ def saturated(color: Image.Image, saturation: int) -> Image.Image:
     return Image.blend(grey, color, 1 + saturation / ADJUSTMENT_LIMIT)
 
 
+def vibrant(color: Image.Image, vibrance: int) -> Image.Image:
+    """Saturation that moves muted colors most and leaves vivid ones nearly alone.
+
+    Each pixel is mixed toward or away from its grey as the saturation slider
+    would mix it, and the mix is kept in proportion to how muted the pixel is:
+    its spread, the brightest channel less the dimmest, taken from white. A
+    pixel with no spread takes the whole mix and one at full spread keeps its
+    color, so muted colors richen before vivid ones clip. The proportion is
+    Pillow's composite, which rounds in whole numbers the browser repeats.
+    """
+
+    if vibrance == 0:
+        return color
+    red, green, blue = color.split()
+    brightest = ImageChops.lighter(ImageChops.lighter(red, green), blue)
+    dimmest = ImageChops.darker(ImageChops.darker(red, green), blue)
+    muted = ImageChops.invert(ImageChops.subtract(brightest, dimmest))
+    return Image.composite(saturated(color, vibrance), color, muted)
+
+
 def sharpened(color: Image.Image, alpha: Image.Image | None, sharpness: int) -> Image.Image:
     """Each channel moved toward or away from a softened copy of the picture.
 
@@ -163,6 +201,71 @@ def sharpened(color: Image.Image, alpha: Image.Image | None, sharpness: int) -> 
     return Image.blend(soft, color, 1 + sharpness / ADJUSTMENT_LIMIT)
 
 
+def _distance_steps(size: int) -> list[int]:
+    """Each column's or row's squared distance from the middle, in whole steps.
+
+    Measured from the centre of each pixel as a share of half the picture's
+    width or height, squared and floored, so the middle of an edge is
+    VIGNETTE_STEPS away and the middle of the picture none. Exact at any size;
+    the browser works it in exact integers too.
+    """
+
+    area = size * size
+    return [(VIGNETTE_STEPS * (2 * index + 1 - size) ** 2) // area for index in range(size)]
+
+
+def _vignette_weights() -> list[int]:
+    """How much of the vignette each squared distance takes, from 0 to 255.
+
+    None up to VIGNETTE_START, all of it from VIGNETTE_FULL, and a smooth step
+    between, so no ring shows where it begins. Only sums, products and
+    divisions, each rounded as the browser rounds it.
+    """
+
+    weights = []
+    for step in range(2 * VIGNETTE_STEPS):
+        share = (step / VIGNETTE_STEPS - VIGNETTE_START) / (VIGNETTE_FULL - VIGNETTE_START)
+        share = min(1.0, max(0.0, share))
+        weights.append(math.floor(255 * share * share * (3 - 2 * share) + 0.5))
+    return weights
+
+
+_VIGNETTE_WEIGHTS = _vignette_weights()
+
+
+def vignette_mask(width: int, height: int) -> Image.Image:
+    """How much of the vignette each pixel takes, as a greyscale picture.
+
+    A row depends only on its distance from the middle, so each distinct row
+    is worked out once and repeated.
+    """
+
+    across = _distance_steps(width)
+    pick = itemgetter(*across)
+    lines: dict[int, bytes] = {}
+    data = bytearray()
+    for down in _distance_steps(height):
+        line = lines.get(down)
+        if line is None:
+            picked = pick(_VIGNETTE_WEIGHTS[down : down + VIGNETTE_STEPS])
+            line = lines[down] = bytes(picked if width > 1 else (picked,))
+        data += line
+    return Image.frombytes("L", (width, height), bytes(data))
+
+
+def vignetted(color: Image.Image, vignette: int) -> Image.Image:
+    """The edges darkened above zero, or lightened below, most at the corners."""
+
+    if vignette == 0:
+        return color
+    reach = abs(vignette) / ADJUSTMENT_LIMIT * VIGNETTE_REACH
+    if vignette > 0:
+        table = [_rounded(value * (1 - reach)) for value in range(256)]
+    else:
+        table = [_rounded(value + (255 - value) * reach) for value in range(256)]
+    return Image.composite(color.point(table * 3), color, vignette_mask(*color.size))
+
+
 def adjust_colors(picture: Image.Image, adjustments: ColorAdjustments) -> Image.Image:
     """The picture with the adjustments applied; transparency is kept as it was."""
 
@@ -174,7 +277,9 @@ def adjust_colors(picture: Image.Image, adjustments: ColorAdjustments) -> Image.
         "RGB", (red.point(tables[0]), green.point(tables[1]), blue.point(tables[2]))
     )
     adjusted = saturated(adjusted, adjustments.saturation)
+    adjusted = vibrant(adjusted, adjustments.vibrance)
     adjusted = sharpened(adjusted, alpha, adjustments.sharpness)
+    adjusted = vignetted(adjusted, adjustments.vignette)
     if alpha is None:
         return adjusted
     adjusted.putalpha(alpha)

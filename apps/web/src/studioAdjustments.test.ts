@@ -58,6 +58,15 @@ const CASES: Array<[string, Partial<StudioColorAdjustments>, number[][]]> = [
   ["brighter highlights", { highlights: 45 }, [
     [215, 111, 54], [10, 246, 142], [142, 142, 142], [255, 0, 255], [0, 0, 0],
     [255, 255, 255], [39, 100, 218], [0, 187, 0], [224, 254, 140], [186, 48, 173]]],
+  ["vivid", { vibrance: 60 }, [
+    [219, 94, 31], [9, 241, 126], [128, 128, 128], [255, 0, 255], [0, 0, 0],
+    [255, 255, 255], [26, 91, 221], [0, 184, 0], [205, 254, 96], [192, 30, 174]]],
+  ["muted", { vibrance: -60 }, [
+    [181, 106, 68], [19, 235, 130], [128, 128, 128], [255, 0, 255], [0, 0, 0],
+    [255, 255, 255], [47, 90, 179], [20, 156, 20], [215, 244, 156], [146, 60, 137]]],
+  ["vivid and paler", { vibrance: 80, saturation: -30 }, [
+    [202, 99, 47], [34, 230, 131], [128, 128, 128], [223, 22, 223], [0, 0, 0],
+    [255, 255, 255], [36, 91, 203], [14, 170, 14], [208, 251, 119], [173, 41, 160]]],
   ["toned and graded", { shadows: 50, highlights: -40, contrast: 20, saturation: -30, warmth: 25 }, [
     [184, 112, 74], [48, 222, 136], [135, 131, 127], [210, 31, 210], [0, 0, 0],
     [255, 255, 255], [54, 95, 164], [29, 148, 29], [223, 247, 156], [151, 62, 134]]],
@@ -113,6 +122,35 @@ const SHARP_CASES: Array<[string, Partial<StudioColorAdjustments>, boolean, numb
     [0, 0, 0, 0], [84, 65, 56, 255], [108, 78, 88, 200], [126, 107, 111, 255], [132, 95, 130, 17], [128, 0, 255, 255],
     [45, 45, 200, 255], [68, 74, 83, 255], [92, 56, 75, 255], [134, 67, 90, 255], [136, 107, 114, 128], [0, 0, 0, 0],
     [77, 22, 11, 255], [0, 128, 255, 255], [0, 0, 0, 0], [60, 30, 90, 255], [210, 210, 40, 255], [18, 180, 180, 255]]],
+];
+
+// The same picture again, for the vignette, which reads where each pixel is:
+// the pixels test_studio_adjustments.py checks the server against.
+const VIGNETTE_CASES: Array<[string, Partial<StudioColorAdjustments>, boolean, number[][]]> = [
+  ["darker edges", { vignette: 60 }, false, [
+    [7, 25, 122, 255], [49, 49, 49, 255], [182, 27, 27, 255], [227, 227, 227, 255], [0, 0, 0, 255], [55, 110, 25, 255],
+    [25, 25, 25, 255], [217, 197, 10, 255], [128, 128, 128, 255], [15, 90, 210, 255], [236, 118, 59, 255], [27, 55, 82, 255],
+    [229, 229, 229, 255], [10, 10, 10, 255], [180, 40, 160, 255], [70, 200, 120, 255], [0, 255, 0, 255], [115, 0, 229, 255],
+    [37, 37, 166, 255], [148, 148, 20, 255], [5, 5, 5, 255], [250, 10, 120, 255], [98, 98, 98, 255], [166, 166, 166, 255],
+    [47, 13, 7, 255], [0, 104, 207, 255], [232, 117, 0, 255], [55, 27, 82, 255], [170, 170, 33, 255], [11, 110, 110, 255]]],
+  ["lighter edges", { vignette: -45 }, false, [
+    [83, 103, 216, 255], [87, 87, 87, 255], [204, 45, 45, 255], [250, 250, 250, 255], [36, 36, 36, 255], [138, 202, 103, 255],
+    [59, 59, 59, 255], [220, 201, 13, 255], [128, 128, 128, 255], [15, 90, 210, 255], [240, 122, 62, 255], [62, 90, 119, 255],
+    [255, 255, 255, 255], [10, 10, 10, 255], [180, 40, 160, 255], [70, 200, 120, 255], [0, 255, 0, 255], [138, 19, 255, 255],
+    [72, 72, 207, 255], [151, 151, 23, 255], [5, 5, 5, 255], [250, 10, 120, 255], [102, 102, 102, 255], [207, 207, 207, 255],
+    [129, 90, 82, 255], [36, 146, 255, 255], [255, 137, 17, 255], [73, 45, 101, 255], [216, 216, 70, 255], [87, 202, 202, 255]]],
+  ["a cutout with darker edges", { vignette: 100 }, true, [
+    [4, 14, 70, 255], [41, 41, 41, 255], [170, 25, 25, 255], [212, 212, 212, 255], [0, 0, 0, 0], [32, 63, 14, 255],
+    [21, 21, 21, 255], [214, 195, 10, 128], [128, 128, 128, 255], [15, 90, 210, 64], [234, 117, 58, 255], [24, 47, 71, 255],
+    [212, 212, 212, 0], [10, 10, 10, 255], [180, 40, 160, 200], [70, 200, 120, 255], [0, 255, 0, 17], [106, 0, 212, 255],
+    [32, 32, 143, 255], [146, 146, 19, 255], [5, 5, 5, 255], [250, 10, 120, 255], [97, 97, 97, 128], [143, 143, 143, 0],
+    [27, 7, 4, 255], [0, 88, 175, 255], [217, 109, 0, 0], [51, 25, 76, 255], [144, 144, 27, 255], [7, 63, 63, 255]]],
+  ["crisper, livelier and darker at the edges", { sharpness: 40, vibrance: 50, vignette: 30 }, false, [
+    [7, 32, 173, 255], [55, 55, 55, 255], [208, 20, 20, 255], [239, 239, 239, 255], [0, 0, 0, 255], [64, 152, 18, 255],
+    [28, 28, 28, 255], [253, 239, 0, 255], [124, 136, 134, 255], [0, 75, 255, 255], [253, 113, 28, 255], [21, 62, 103, 255],
+    [242, 242, 242, 255], [0, 0, 0, 255], [233, 5, 204, 255], [30, 247, 112, 255], [0, 255, 0, 255], [121, 0, 242, 255],
+    [37, 37, 203, 255], [175, 178, 0, 255], [0, 0, 0, 255], [255, 0, 136, 255], [89, 84, 95, 255], [183, 183, 183, 255],
+    [74, 13, 2, 255], [0, 116, 231, 255], [244, 122, 0, 255], [62, 23, 102, 255], [193, 193, 25, 255], [9, 152, 152, 255]]],
 ];
 
 function rgba(pixels: number[][], alpha = 255): Uint8ClampedArray {
@@ -184,5 +222,51 @@ describe("sharpness", () => {
 
   it("counts as a change on its own", () => {
     expect(isNeutral({ ...NEUTRAL_ADJUSTMENTS, sharpness: -1 })).toBe(false);
+  });
+});
+
+describe("vibrance and the vignette", () => {
+  it.each(VIGNETTE_CASES)("make the server's pixels for %s", (_name, sliders, cutout, expected) => {
+    const pixels = new Uint8ClampedArray(
+      SHARP_COLORS.flatMap(([r, g, b], index) => [r, g, b, cutout ? SHARP_ALPHAS[index] : 255]),
+    );
+
+    const adjusted = adjustPixels(pixels, SHARP_WIDTH, { ...NEUTRAL_ADJUSTMENTS, ...sliders });
+
+    expect(Array.from(adjusted)).toEqual(expected.flat());
+  });
+
+  it("each count as a change on their own", () => {
+    expect(isNeutral({ ...NEUTRAL_ADJUSTMENTS, vibrance: -1 })).toBe(false);
+    expect(isNeutral({ ...NEUTRAL_ADJUSTMENTS, vignette: 1 })).toBe(false);
+  });
+
+  it("leave the middle of the picture and gather evenly toward the corners", () => {
+    const width = 64;
+    const height = 48;
+    const grey = new Uint8ClampedArray(width * height * 4).fill(160);
+
+    const adjusted = adjustPixels(grey, width, { ...NEUTRAL_ADJUSTMENTS, vignette: 100 });
+    const red = (x: number, y: number) => adjusted[(y * width + x) * 4];
+
+    expect([red(31, 23), red(32, 24)]).toEqual([160, 160]);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        // Mirrored left to right and top to bottom, as a centred vignette is.
+        expect([red(width - 1 - x, y), red(x, height - 1 - y)]).toEqual([red(x, y), red(x, y)]);
+      }
+    }
+    expect(red(0, 0)).toBeLessThan(red(0, 24));
+    expect(red(0, 24)).toBeLessThan(160);
+  });
+
+  it("take the vignette on a picture one pixel wide or tall", () => {
+    const strip = new Uint8ClampedArray(3 * 4).fill(160);
+
+    const tall = adjustPixels(strip, 1, { ...NEUTRAL_ADJUSTMENTS, vignette: 100 });
+    const wide = adjustPixels(strip, 3, { ...NEUTRAL_ADJUSTMENTS, vignette: 100 });
+
+    expect([tall[0], tall[4], tall[8]]).toEqual([154, 160, 154]);
+    expect(Array.from(wide)).toEqual(Array.from(tall));
   });
 });

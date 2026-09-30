@@ -181,6 +181,8 @@ describe("adjusting in the studio", () => {
       fireEvent.change(screen.getByRole("slider", { name: "Brightness" }), { target: { value: "25" } });
       fireEvent.change(screen.getByRole("slider", { name: "Shadows" }), { target: { value: "40" } });
       fireEvent.change(screen.getByRole("slider", { name: "Sharpness" }), { target: { value: "-30" } });
+      fireEvent.change(screen.getByRole("slider", { name: "Vibrance" }), { target: { value: "15" } });
+      fireEvent.change(screen.getByRole("slider", { name: "Vignette" }), { target: { value: "20" } });
     });
     fireEvent.click(screen.getByRole("button", { name: "Apply adjustments" }));
 
@@ -190,6 +192,7 @@ describe("adjusting in the studio", () => {
       operation: "adjust",
       adjustments: {
         brightness: 25, contrast: 0, highlights: 0, shadows: 40, saturation: 0, warmth: 0, tint: 0, sharpness: -30,
+        vibrance: 15, vignette: 20,
       },
     });
   });

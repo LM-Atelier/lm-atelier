@@ -6,9 +6,11 @@ import type { StudioColorAdjustments } from "./types";
  * server to make the same picture. So this is the server's arithmetic step for
  * step (studio_adjustments.py): one lookup table per channel for shadows,
  * highlights, warmth, tint, brightness and contrast, then saturation as a mix
- * toward each pixel's grey, then sharpness as a mix away from a softened copy
- * of the picture, with the same roundings. Both copies are checked against the
- * same pixels.
+ * toward each pixel's grey, then vibrance as the same mix kept in proportion to
+ * how muted each pixel is, then sharpness as a mix away from a softened copy of
+ * the picture, and last the vignette, a mix toward black or white that grows
+ * toward the corners, with the same roundings. Both copies are checked against
+ * the same pixels.
  */
 
 export const NEUTRAL_ADJUSTMENTS: StudioColorAdjustments = {
@@ -20,6 +22,8 @@ export const NEUTRAL_ADJUSTMENTS: StudioColorAdjustments = {
   warmth: 0,
   tint: 0,
   sharpness: 0,
+  vibrance: 0,
+  vignette: 0,
 };
 
 /** Each slider runs from -100 to 100, with 0 changing nothing. */
@@ -27,11 +31,20 @@ export const ADJUSTMENT_LIMIT = 100;
 const NEUTRAL_KELVIN = 6500;
 const KELVIN_PER_WARMTH_STEP = 25;
 const TINT_REACH = 0.15;
+/** How far toward black, or toward white, the vignette takes the corners at either end. */
+const VIGNETTE_REACH = 0.8;
+/** Where the vignette begins and where it is whole, as the squared distance
+ * from the middle, on which the middle of each edge is 1 and each corner 2. */
+const VIGNETTE_START = 0.25;
+const VIGNETTE_FULL = 1.75;
+/** How finely that squared distance is counted: this many steps to the middle of an edge. */
+const VIGNETTE_STEPS = 4096;
 
 export function isNeutral(adjustments: StudioColorAdjustments): boolean {
   return !(
     adjustments.brightness || adjustments.contrast || adjustments.highlights || adjustments.shadows
     || adjustments.saturation || adjustments.warmth || adjustments.tint || adjustments.sharpness
+    || adjustments.vibrance || adjustments.vignette
   );
 }
 
@@ -120,6 +133,71 @@ function mixed(base: number, value: number, keep: number): number {
   return moved <= 0 ? 0 : moved >= 255 ? 255 : Math.trunc(moved);
 }
 
+/** `toward` laid over `value` by `weight` out of 255, rounded as the server's composite rounds it. */
+function composited(value: number, toward: number, weight: number): number {
+  const sum = value * (255 - weight) + toward * weight + 128;
+  return ((sum >> 8) + sum) >> 8;
+}
+
+/** The server's grey: integer luma with weights summing to 65536. */
+function greyOf(r: number, g: number, b: number): number {
+  return (r * 19595 + g * 38470 + b * 7471 + 0x8000) >> 16;
+}
+
+/** Each column's or row's squared distance from the middle, in whole steps.
+ *
+ * Measured from the centre of each pixel as a share of half the width or
+ * height, squared and floored, as the server counts it. Worked in exact
+ * integers, since a long enough side would take the product past what a
+ * float holds exactly.
+ */
+function distanceSteps(size: number): number[] {
+  const area = BigInt(size) * BigInt(size);
+  return Array.from({ length: size }, (_, index) => {
+    const offset = BigInt(2 * index + 1 - size);
+    return Number((BigInt(VIGNETTE_STEPS) * offset * offset) / area);
+  });
+}
+
+/** How much of the vignette each squared distance takes, from 0 to 255.
+ *
+ * None up to the start, all of it from the full distance, and a smooth step
+ * between; the same sums, products and divisions as the server, in the same
+ * order, so every weight comes out the same.
+ */
+const VIGNETTE_WEIGHTS: Uint8Array = (() => {
+  const weights = new Uint8Array(2 * VIGNETTE_STEPS);
+  for (let step = 0; step < weights.length; step += 1) {
+    let share = (step / VIGNETTE_STEPS - VIGNETTE_START) / (VIGNETTE_FULL - VIGNETTE_START);
+    share = Math.min(1, Math.max(0, share));
+    weights[step] = Math.floor(255 * share * share * (3 - 2 * share) + 0.5);
+  }
+  return weights;
+})();
+
+/** The edges darkened above zero, or lightened below, most at the corners. */
+function vignetted(pixels: Uint8ClampedArray, width: number, vignette: number): Uint8ClampedArray {
+  const reach = Math.abs(vignette) / ADJUSTMENT_LIMIT * VIGNETTE_REACH;
+  const toward = new Uint8Array(256);
+  for (let value = 0; value < 256; value += 1) {
+    toward[value] = vignette > 0 ? rounded(value * (1 - reach)) : rounded(value + (255 - value) * reach);
+  }
+  const height = pixels.length / 4 / width;
+  const across = distanceSteps(width);
+  const down = distanceSteps(height);
+  const out = new Uint8ClampedArray(pixels);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const weight = VIGNETTE_WEIGHTS[down[y] + across[x]];
+      const at = (y * width + x) * 4;
+      for (let channel = at; channel < at + 3; channel += 1) {
+        out[channel] = composited(pixels[channel], toward[pixels[channel]], weight);
+      }
+    }
+  }
+  return out;
+}
+
 /** A color scaled by its opacity, rounded as the server's conversion rounds it. */
 function weighted(value: number, alpha: number): number {
   const product = value * alpha + 128;
@@ -193,23 +271,32 @@ export function adjustPixels(
 ): Uint8ClampedArray {
   const [red, green, blue] = channelTables(adjustments);
   const keep = 1 + adjustments.saturation / ADJUSTMENT_LIMIT;
+  const vivid = 1 + adjustments.vibrance / ADJUSTMENT_LIMIT;
   const out = new Uint8ClampedArray(pixels.length);
   for (let index = 0; index < pixels.length; index += 4) {
-    const r = red[pixels[index]];
-    const g = green[pixels[index + 1]];
-    const b = blue[pixels[index + 2]];
-    if (adjustments.saturation === 0) {
-      out[index] = r;
-      out[index + 1] = g;
-      out[index + 2] = b;
-    } else {
-      // The server's grey: integer luma with weights summing to 65536.
-      const grey = (r * 19595 + g * 38470 + b * 7471 + 0x8000) >> 16;
-      out[index] = mixed(grey, r, keep);
-      out[index + 1] = mixed(grey, g, keep);
-      out[index + 2] = mixed(grey, b, keep);
+    let r = red[pixels[index]];
+    let g = green[pixels[index + 1]];
+    let b = blue[pixels[index + 2]];
+    if (adjustments.saturation !== 0) {
+      const grey = greyOf(r, g, b);
+      r = mixed(grey, r, keep);
+      g = mixed(grey, g, keep);
+      b = mixed(grey, b, keep);
     }
+    if (adjustments.vibrance !== 0) {
+      // The saturation mix again, from this pixel's own grey, kept in
+      // proportion to how muted the pixel is: its spread taken from white.
+      const grey = greyOf(r, g, b);
+      const muted = 255 - (Math.max(r, g, b) - Math.min(r, g, b));
+      r = composited(r, mixed(grey, r, vivid), muted);
+      g = composited(g, mixed(grey, g, vivid), muted);
+      b = composited(b, mixed(grey, b, vivid), muted);
+    }
+    out[index] = r;
+    out[index + 1] = g;
+    out[index + 2] = b;
     out[index + 3] = pixels[index + 3];
   }
-  return adjustments.sharpness === 0 ? out : sharpened(out, width, adjustments.sharpness);
+  const sharp = adjustments.sharpness === 0 ? out : sharpened(out, width, adjustments.sharpness);
+  return adjustments.vignette === 0 ? sharp : vignetted(sharp, width, adjustments.vignette);
 }
