@@ -119,9 +119,11 @@ names what was done rather than a model:
   and place you choose, with an optional outline or shadow so they read over a
   busy picture. What the canvas shows is what is added.
 
-**Export** saves the picture as stored, or as PNG, JPEG or WebP. Exports come
-out upright and keep the picture's color profile; JPEG has no transparency, so
-transparent parts come out white.
+**Export** saves the picture as stored, or as PNG, JPEG or WebP. JPEG and WebP
+come at a quality you choose, from best quality down to smallest file, trading
+detail for size; PNG keeps every pixel. Exports come out upright and keep the
+picture's color profile; JPEG has no transparency, so transparent parts come out
+white.
 
 **Use in chat** attaches the picture on screen to a chat's next message, as a
 reference. It goes to the chat the studio was opened from, or else the chat
