@@ -8,6 +8,7 @@ import { ErrorCallout } from "./ErrorCallout";
 import { StudioCanvas } from "./StudioCanvas";
 import { StudioCloseButton } from "./StudioCloseButton";
 import { StudioCompare } from "./StudioCompare";
+import { StudioSideBySide } from "./StudioSideBySide";
 import { StudioExportLink } from "./StudioExportLink";
 import { StudioHideResult } from "./StudioHideResult";
 import { hideStudioStep, showStudioSteps, useStudioHiddenSteps } from "./studioHiddenSteps";
@@ -224,7 +225,9 @@ export function StudioView({
         <div className="studio-header-actions">
           {current && !previewArtifactId && (
             <>
-              {compare.layer && <StudioCompare {...compare.controls} />}
+              {compare.layer && (
+                <StudioCompare {...compare.controls} canSideBySide={compare.controls.canSideBySide && !pointerTool} />
+              )}
               {/* Every result is already in the library - the close dialog
                   beside this says so. What this does is mark one, which is
                   what makes it findable among hundreds, and it is named for
@@ -271,6 +274,9 @@ export function StudioView({
         <div className="studio-stage">
           {previewArtifactId ? (
             <StudioGenerationPreview artifactId={previewArtifactId} />
+          ) : bitmap && compare.pair && !pointerTool ? (
+            <StudioSideBySide key={`${currentArtifactId}:${compare.controls.against ?? ""}`}
+              before={compare.pair.before} after={compare.pair.after} />
           ) : bitmap ? (
             <StudioCanvas
               image={bitmap}
