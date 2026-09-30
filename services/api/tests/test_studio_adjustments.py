@@ -8,10 +8,13 @@ from typing import Any
 import pytest
 from PIL import Image, ImageStat
 
+from local_lm.schemas import StudioColorAdjustments
 from local_lm.studio_adjustments import (
+    GRAIN_TILE,
     ColorAdjustments,
     adjust_colors,
     channel_tables,
+    grain_level,
     vignette_mask,
 )
 
@@ -271,6 +274,40 @@ VIGNETTE_CASES: list[tuple[str, dict[str, int], bool, str]] = [
     ),
 ]
 
+# The same picture again, for grain, which reads where each pixel is too.
+GRAIN_CASES: list[tuple[str, dict[str, int], bool, str]] = [
+    (
+        "grain",
+        {"grain": 60},
+        False,
+        "2,30,190,255 61,61,61,255 203,33,33,255 255,255,255,255 16,16,16,255 91,181,41,255 "
+        "40,40,40,255 218,198,8,255 123,123,123,255 3,78,198,255 238,118,58,255 42,75,108,255 "
+        "255,255,255,255 21,21,21,255 176,36,156,255 72,202,122,255 11,255,11,255 120,0,247,255 "
+        "53,53,208,255 152,152,22,255 7,7,7,255 255,24,134,255 88,88,88,255 199,199,199,255 "
+        "69,14,3,255 12,140,255,255 255,136,8,255 57,27,87,255 211,211,41,255 23,185,185,255",
+    ),
+    (
+        "a cutout with the most grain",
+        {"grain": 100},
+        True,
+        "0,23,183,255 61,61,61,255 206,36,36,255 255,255,255,255 26,26,26,0 91,181,41,255 "
+        "47,47,47,255 216,196,6,128 120,120,120,255 0,70,190,64 236,116,56,255 48,81,114,255 "
+        "255,255,255,0 29,29,29,255 173,33,153,200 73,203,123,255 19,255,19,17 114,0,241,255 "
+        "59,59,214,255 154,154,24,255 9,9,9,255 255,33,143,255 81,81,81,128 198,198,198,0 "
+        "63,8,0,255 21,149,255,255 255,142,14,0 55,25,85,255 212,212,42,255 27,189,189,255",
+    ),
+    (
+        "a film look",
+        {"contrast": 10, "saturation": -15, "warmth": 10, "grain": 35},
+        False,
+        "4,29,172,255 55,55,54,255 190,33,33,255 255,255,255,255 9,9,9,255 96,176,48,255 "
+        "29,29,29,255 222,201,28,255 126,125,123,255 10,78,185,255 235,122,67,255 36,65,94,255 "
+        "255,255,255,255 9,9,8,255 170,41,148,255 81,198,124,255 29,246,29,255 115,5,221,255 "
+        "47,46,185,255 152,149,31,255 1,1,1,255 238,23,121,255 91,91,90,255 206,204,201,255 "
+        "62,11,1,255 22,131,239,255 244,136,27,255 51,23,77,255 216,213,58,255 31,178,176,255",
+    ),
+]
+
 
 def _row(pixels: list[tuple[int, int, int]], mode: str = "RGB") -> Image.Image:
     image = Image.new("RGB", (len(pixels), 1))
@@ -500,3 +537,50 @@ def test_a_picture_one_pixel_wide_or_tall_takes_the_vignette_too() -> None:
     assert list(vignette_mask(1, 3).tobytes()) == list(vignette_mask(3, 1).tobytes())
     assert list(vignette_mask(3, 1).tobytes()) == [12, 0, 12]
     assert list(vignette_mask(1, 1).tobytes()) == [0]
+
+
+@pytest.mark.parametrize(
+    ("name", "sliders", "cutout", "expected"),
+    GRAIN_CASES,
+    ids=[case[0] for case in GRAIN_CASES],
+)
+def test_the_grained_pixels_the_preview_promises(
+    name: str, sliders: dict[str, int], cutout: bool, expected: str
+) -> None:
+    result = adjust_colors(_sharpness_picture(cutout), ColorAdjustments(**sliders))
+
+    assert result.mode == ("RGBA" if cutout else "RGB")
+    assert _grid(result) == [
+        tuple(int(part) for part in pixel.split(",")) for pixel in expected.split()
+    ]
+
+
+def test_the_grain_levels_are_the_ones_the_browser_works_out() -> None:
+    # The same numbers are pinned in studioAdjustments.test.ts.
+    assert [grain_level(x, 0) for x in range(8)] == [59, 133, 151, 193, 232, 132, 185, 110]
+    assert (grain_level(255, 255), grain_level(3, 7)) == (126, 172)
+
+
+def test_grain_repeats_every_tile_and_keeps_the_picture_s_light() -> None:
+    grey = Image.new("RGB", (GRAIN_TILE * 2, 40), (128, 128, 128))
+
+    grained = adjust_colors(grey, ColorAdjustments(grain=100))
+    reds = _reds(grained)
+
+    # The same step on all three channels, so grey stays grey.
+    assert all(len(set(_pixel(grained, (x, y)))) == 1 for y in range(40) for x in range(0, 512, 37))
+    assert all(row[:GRAIN_TILE] == row[GRAIN_TILE:] for row in reds)
+    assert len({value for row in reds for value in row}) > 40
+    # Up as often as down: the picture's light is kept.
+    assert abs(ImageStat.Stat(grained).mean[0] - 128) < 1
+    assert max(value for row in reds for value in row) <= 128 + 32
+
+
+def test_grain_is_added_or_not_and_counts_as_a_change() -> None:
+    assert not ColorAdjustments(grain=1).is_neutral()
+    picture = _sharpness_picture(False)
+    assert _grid(adjust_colors(picture, ColorAdjustments(grain=0))) == _grid(picture)
+    with pytest.raises(ValueError):
+        StudioColorAdjustments(grain=-1)
+    with pytest.raises(ValueError):
+        StudioColorAdjustments(grain=101)

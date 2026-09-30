@@ -644,6 +644,8 @@ class StudioColorAdjustments(ApiModel):
     sharpness: StrictInt = Field(default=0, ge=-100, le=100)
     vibrance: StrictInt = Field(default=0, ge=-100, le=100)
     vignette: StrictInt = Field(default=0, ge=-100, le=100)
+    #: Grain is added or not, so it runs from 0 only.
+    grain: StrictInt = Field(default=0, ge=0, le=100)
 
 
 class StudioSelectionBlur(ApiModel):

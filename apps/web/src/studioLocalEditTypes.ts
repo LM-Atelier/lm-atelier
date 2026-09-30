@@ -84,7 +84,7 @@ export type StudioLocalEditDetails = Pick<
   caption?: { words: Blob };
 };
 
-/** Where each light and color slider stands, from -100 to 100, with 0 unchanged. */
+/** Where each light and color slider stands, from -100 to 100 (grain from 0), with 0 unchanged. */
 export interface StudioColorAdjustments {
   brightness: number;
   contrast: number;
@@ -96,6 +96,7 @@ export interface StudioColorAdjustments {
   sharpness: number;
   vibrance: number;
   vignette: number;
+  grain: number;
 }
 
 /** A point on a picture, in its own pixels as it is seen upright. */

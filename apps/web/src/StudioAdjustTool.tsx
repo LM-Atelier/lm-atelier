@@ -1,8 +1,9 @@
 import { SlidersHorizontal } from "lucide-react";
 import { ADJUSTMENT_LIMIT, isNeutral } from "./studioAdjustments";
+import { currentLook, lookAdjustments, LOOKS } from "./studioLooks";
 import type { StudioColorAdjustments } from "./types";
 
-const SLIDERS: Array<{ key: keyof StudioColorAdjustments; label: string }> = [
+const SLIDERS: Array<{ key: keyof StudioColorAdjustments; label: string; minimum?: number }> = [
   { key: "brightness", label: "Brightness" },
   { key: "contrast", label: "Contrast" },
   { key: "highlights", label: "Highlights" },
@@ -13,19 +14,23 @@ const SLIDERS: Array<{ key: keyof StudioColorAdjustments; label: string }> = [
   { key: "tint", label: "Tint" },
   { key: "sharpness", label: "Sharpness" },
   { key: "vignette", label: "Vignette" },
+  // Grain is added or not; there is no taking it away.
+  { key: "grain", label: "Grain", minimum: 0 },
 ];
 
 function signed(value: number): string {
   return value > 0 ? `+${value}` : String(value);
 }
 
-/** Light and color: ten sliders shown on the picture as they move.
+/** Light and color: eleven sliders shown on the picture as they move.
  *
  * The canvas draws the adjusted picture itself, by the same arithmetic the
  * server uses, so what is on screen is what Apply makes. Nothing is saved
  * until then, and Reset puts every slider back without leaving a step. Auto
  * sets warmth, tint, brightness and contrast from the picture itself, where
- * its colors can be read, and leaves them to be changed like any others.
+ * its colors can be read, and leaves them to be changed like any others. A
+ * look sets every slider to a named starting point, and shows as chosen while
+ * the sliders still stand exactly there.
  */
 export function StudioAdjustTool({
   adjustments,
@@ -34,6 +39,7 @@ export function StudioAdjustTool({
   onReset,
   onApply,
   onAuto,
+  onLook,
 }: {
   adjustments: StudioColorAdjustments;
   busy: boolean;
@@ -42,19 +48,35 @@ export function StudioAdjustTool({
   onApply: () => void;
   /** Sets the sliders from the picture; absent where its colors cannot be read. */
   onAuto?: () => void;
+  /** Sets every slider to a look. */
+  onLook?: (adjustments: StudioColorAdjustments) => void;
 }) {
   const unchanged = isNeutral(adjustments);
   const ready = !unchanged && !busy;
+  const chosen = currentLook(adjustments);
   return (
     <div className="studio-tool-options">
-      {SLIDERS.map(({ key, label }) => (
+      {onLook && (
+        <div className="segmented compact" role="group" aria-label="Looks" style={{ flexWrap: "wrap" }}>
+          {LOOKS.map((look) => (
+            <button key={look.name} type="button" aria-pressed={chosen === look.name}
+              className={chosen === look.name ? "active" : ""} aria-disabled={busy}
+              onClick={() => {
+                if (!busy) onLook(lookAdjustments(look));
+              }}>
+              {look.name}
+            </button>
+          ))}
+        </div>
+      )}
+      {SLIDERS.map(({ key, label, minimum = -ADJUSTMENT_LIMIT }) => (
         <label key={key} className="studio-adjust-slider">
           <span>
             <strong>{label}</strong> {signed(adjustments[key])}
           </span>
           <input
             type="range"
-            min={-ADJUSTMENT_LIMIT}
+            min={minimum}
             max={ADJUSTMENT_LIMIT}
             step={1}
             value={adjustments[key]}

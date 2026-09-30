@@ -5,8 +5,10 @@ arithmetic here is the arithmetic the browser runs, in the same order: one
 lookup table per channel for shadows, highlights, warmth, tint, brightness and
 contrast, then saturation as a mix toward each pixel's grey, then vibrance as
 the same mix kept in proportion to how muted each pixel is, then sharpness as
-a mix away from a softened copy of the picture, and last the vignette, a mix
-toward black or white that grows toward the corners. Every step is integer
+a mix away from a softened copy of the picture, then the vignette, a mix
+toward black or white that grows toward the corners, and last grain, the same
+small step up or down on all three channels of each pixel, taken from a fixed
+tile of noise. Every step is integer
 arithmetic or floating-point arithmetic with a stated rounding, which the
 browser repeats exactly, so the preview is the picture an apply makes. The
 browser's copy lives in studioAdjustments.ts, and the two are checked against
@@ -17,6 +19,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass
+from functools import cache
 from operator import itemgetter
 from typing import Any
 
@@ -47,6 +50,11 @@ VIGNETTE_FULL = 1.75
 #: How finely that squared distance is counted: this many steps to the middle
 #: of an edge, in whole numbers the browser counts the same way.
 VIGNETTE_STEPS = 4096
+#: How far the grain slider at its top moves a pixel up or down, as a share of
+#: the grain's own spread of 256 levels.
+GRAIN_REACH = 0.25
+#: The grain repeats every this many pixels across and down.
+GRAIN_TILE = 256
 
 
 @dataclass(frozen=True)
@@ -63,6 +71,8 @@ class ColorAdjustments:
     sharpness: int = 0
     vibrance: int = 0
     vignette: int = 0
+    #: From 0 to 100 only: grain is added or not; there is no taking it away.
+    grain: int = 0
 
     def is_neutral(self) -> bool:
         return not (
@@ -76,6 +86,7 @@ class ColorAdjustments:
             or self.sharpness
             or self.vibrance
             or self.vignette
+            or self.grain
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -266,6 +277,55 @@ def vignetted(color: Image.Image, vignette: int) -> Image.Image:
     return Image.composite(color.point(table * 3), color, vignette_mask(*color.size))
 
 
+def grain_level(x: int, y: int) -> int:
+    """The grain at one place of its tile, from 0 to 255.
+
+    A whole-number hash of the place, worked in 32 bits the browser repeats
+    with the same multiplications and shifts, and the mean of two of its bytes,
+    so middling levels are commoner than extremes, as they are in film grain.
+    The added constant keeps the first place of every tile from hashing to
+    nothing, which would put the darkest level on a regular grid.
+    """
+
+    mixed = (x * 374761393 + y * 668265263 + 0x9E3779B9) & 0xFFFFFFFF
+    mixed = ((mixed ^ (mixed >> 13)) * 1274126177) & 0xFFFFFFFF
+    mixed ^= mixed >> 16
+    return ((mixed & 255) + ((mixed >> 8) & 255)) >> 1
+
+
+@cache
+def grain_tile() -> Image.Image:
+    """The tile of grain levels, made once and laid across a picture of any size."""
+
+    tile = Image.new("L", (GRAIN_TILE, GRAIN_TILE))
+    tile.putdata([grain_level(x, y) for y in range(GRAIN_TILE) for x in range(GRAIN_TILE)])
+    return tile
+
+
+def grain_offsets(grain: int) -> list[int]:
+    """How far each grain level moves a pixel at this slider value, plus 128."""
+
+    reach = grain / ADJUSTMENT_LIMIT * GRAIN_REACH
+    return [_rounded(128 + (level - 128) * reach) for level in range(256)]
+
+
+def grained(color: Image.Image, grain: int) -> Image.Image:
+    """Grain laid over the picture: each pixel moved the same way on all three channels."""
+
+    if grain <= 0:
+        return color
+    offsets = grain_tile().point(grain_offsets(grain))
+    width, height = color.size
+    field = Image.new("L", (width, height))
+    for top in range(0, height, GRAIN_TILE):
+        for left in range(0, width, GRAIN_TILE):
+            field.paste(offsets, (left, top))
+    # A clipped whole-number add: each channel plus the offset, less the 128 it carries.
+    return Image.merge(
+        "RGB", [ImageChops.add(band, field, scale=1.0, offset=-128) for band in color.split()]
+    )
+
+
 def adjust_colors(picture: Image.Image, adjustments: ColorAdjustments) -> Image.Image:
     """The picture with the adjustments applied; transparency is kept as it was."""
 
@@ -280,6 +340,7 @@ def adjust_colors(picture: Image.Image, adjustments: ColorAdjustments) -> Image.
     adjusted = vibrant(adjusted, adjustments.vibrance)
     adjusted = sharpened(adjusted, alpha, adjustments.sharpness)
     adjusted = vignetted(adjusted, adjustments.vignette)
+    adjusted = grained(adjusted, adjustments.grain)
     if alpha is None:
         return adjusted
     adjusted.putalpha(alpha)

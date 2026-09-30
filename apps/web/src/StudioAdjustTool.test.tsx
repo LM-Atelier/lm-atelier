@@ -212,7 +212,11 @@ describe("adjusting in the studio", () => {
       fireEvent.change(screen.getByRole("slider", { name: "Sharpness" }), { target: { value: "-30" } });
       fireEvent.change(screen.getByRole("slider", { name: "Vibrance" }), { target: { value: "15" } });
       fireEvent.change(screen.getByRole("slider", { name: "Vignette" }), { target: { value: "20" } });
+      fireEvent.change(screen.getByRole("slider", { name: "Grain" }), { target: { value: "12" } });
     });
+    // Grain is added or not: its slider starts at zero.
+    expect(screen.getByRole("slider", { name: "Grain" })).toHaveAttribute("min", "0");
+    expect(screen.getByRole("slider", { name: "Vignette" })).toHaveAttribute("min", "-100");
     fireEvent.click(screen.getByRole("button", { name: "Apply adjustments" }));
 
     await waitFor(() => expect(api.studioLocalEdit).toHaveBeenCalledTimes(1));
@@ -221,7 +225,7 @@ describe("adjusting in the studio", () => {
       operation: "adjust",
       adjustments: {
         brightness: 25, contrast: 0, highlights: 0, shadows: 40, saturation: 0, warmth: 0, tint: 0, sharpness: -30,
-        vibrance: 15, vignette: 20,
+        vibrance: 15, vignette: 20, grain: 12,
       },
     });
   });
