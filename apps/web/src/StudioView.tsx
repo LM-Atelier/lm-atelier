@@ -1,4 +1,4 @@
-import { Star, X } from "lucide-react";
+import { Star } from "lucide-react";
 import { useCallback, useEffect, useId, useMemo, useReducer, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
@@ -6,6 +6,7 @@ import { GenerationIdentitySummary } from "./GenerationIdentitySummary";
 import { StudioOpenImage } from "./StudioOpenImage";
 import { ErrorCallout } from "./ErrorCallout";
 import { StudioCanvas } from "./StudioCanvas";
+import { StudioCloseButton } from "./StudioCloseButton";
 import { StudioCompare } from "./StudioCompare";
 import { StudioExportLink } from "./StudioExportLink";
 import { StudioHideResult } from "./StudioHideResult";
@@ -49,7 +50,6 @@ import { useStudioImage } from "./useStudioImage";
 import { useStudioSession, type StudioStep } from "./useStudioSession";
 import { useStudioDraft } from "./useStudioDraft";
 import { useStudioBackground } from "./useStudioBackground";
-import { useConfirm } from "./useConfirm";
 import type { EditTemplate, GenerationIdentity } from "./types";
 
 /** Tools that make their edit without a model, each from its own panel, so they have no Apply of the model's. */
@@ -91,7 +91,6 @@ export function StudioView({
     sourceChatId,
   );
   const hidden = useStudioHiddenSteps(sessionId);
-  const [confirmDialog, confirm] = useConfirm();
   // Every result is already an artifact in the library - the studio's turns
   // are ordinary turns. What was missing is a way to say "keep this one",
   // because a picture among hundreds is findable only in principle.
@@ -234,36 +233,9 @@ export function StudioView({
               {onUseInChat && <StudioUseInChat ready={Boolean(artifact.data)} onUse={() => onUseInChat({ artifactId: current.artifactId, artifact: artifact.data ?? null, origin: current.isSource ? (artifact.data?.original_name ? "uploaded" : "generated") : "edited" })} />}
             </>
           )}
-          <button
-            className="secondary compact-button"
-            disabled={busy}
-            onClick={() => {
-              // Only the edits are at stake. The source picture is in the
-              // library either way, and every result is a durable artifact -
-              // what closing loses is the chain that got here, which is the
-              // part worth asking about.
-              const edited = steps.length > 1;
-              if (!edited) {
-                onClose();
-                return;
-              }
-              void confirm({
-                title: "Close this image?",
-                question: `This session has ${steps.length - 1} edit${
-                  steps.length === 2 ? "" : "s"
-                }. Closing puts the picture down and leaves the chain behind.`,
-                detail:
-                  "Every result is already in the media library; closing only "
-                  + "leaves this chain of edits behind.",
-                confirmLabel: "Close it",
-              }).then((ok) => ok && onClose());
-            }}
-          >
-            <X size={14} aria-hidden="true" /> Close
-          </button>
+          <StudioCloseButton halfway={cutoutEdit.busy} onClose={onClose} />
         </div>
       </header>
-      {confirmDialog}
       {/* A save that fails must not look like a save that worked. The button
           only changes on success, so without this the picture silently stays
           unmarked while the label still invites the same press. */}
