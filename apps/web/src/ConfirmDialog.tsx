@@ -46,8 +46,11 @@ export function ConfirmDialog({
         </button>
         <button
           className={tone === "trust" || tone === "action" ? "primary" : "secondary danger"}
-          disabled={confirmDisabled}
-          onClick={onConfirm}
+          aria-disabled={confirmDisabled}
+          onClick={() => {
+            if (confirmDisabled) return;
+            onConfirm();
+          }}
         >
           {confirmLabel}
         </button>

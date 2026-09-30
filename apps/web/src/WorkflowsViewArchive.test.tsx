@@ -79,7 +79,10 @@ describe("archiving workflow families from the page", () => {
     vi.mocked(api.workflowFamilyRemovalImpact).mockReturnValue(new Promise((done) => { resolve = done; }));
     const close = vi.fn();
     wrap(<WorkflowFamilyArchive family={family("b")} onClose={close} />);
-    expect(screen.getByRole("button", { name: "Archive" })).toBeDisabled();
+    const confirm = screen.getByRole("button", { name: "Archive" });
+    expect(confirm).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(confirm);
+    expect(api.updateWorkflowFamily).not.toHaveBeenCalled();
     expect(close).not.toHaveBeenCalled();
     await act(async () => resolve(impact()));
     fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
