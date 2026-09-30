@@ -274,7 +274,7 @@ class ComfyTemplateRegistry:
             template_role = _role_for_template(path.stem, raw)
             if template_role != role:
                 continue
-            operation = _operation_for_template(path.stem, role)
+            operation = _operation_for_template(path.stem, role, raw)
             if operation is None:
                 continue
             dependencies = tuple(_model_dependencies(raw))
@@ -403,7 +403,7 @@ class ComfyTemplateRegistry:
                 continue
             raw = _read_json(path)
             dependencies = tuple(_model_dependencies(raw))
-            operation = _operation_for_template(path.stem, role)
+            operation = _operation_for_template(path.stem, role, raw)
             if (
                 _role_for_template(path.stem, raw) != role
                 or operation is None
@@ -700,6 +700,10 @@ def _supports_dependency_bundle(
     return all(len(revisions) == 1 for revisions in repository_revisions.values())
 
 
+#: The node types, casefolded, through which a graph answers with a picture.
+_PICTURE_OUTPUTS = frozenset({"previewimage", "saveimage"})
+
+
 def _role_for_template(template_id: str, value: dict[str, Any] | None = None) -> str | None:
     if template_id.startswith("image_"):
         return "image"
@@ -712,7 +716,7 @@ def _role_for_template(template_id: str, value: dict[str, Any] | None = None) ->
             for node_type in node_types
         ):
             return "video"
-        if node_types & {"previewimage", "saveimage"}:
+        if node_types & _PICTURE_OUTPUTS:
             return "image"
     return None
 
@@ -724,12 +728,36 @@ def _operation_markers(template_id: str) -> set[str]:
     return set(re.findall(r"[a-z0-9]+", template_id.lower()))
 
 
-def _operation_for_template(template_id: str, role: str) -> str | None:
-    """Map a template id to a supported operation, or None for none.
+def _loads_a_picture(value: dict[str, Any]) -> bool:
+    """Whether the graph reads a picture through a LoadImage that runs and answers with one.
+
+    Such a graph edits the picture it is given, whatever its id says: fill and
+    outpaint workflows are named for what they do. Its LoadImage names the
+    sample picture the template was authored with, which a runtime does not
+    hold, so only as an edit, with the turn's picture in that sample's place,
+    can the workflow compile at all.
+    """
+
+    nodes = _all_nodes(value)
+    answers_with_a_picture = any(
+        str(node.get("type") or "").casefold() in _PICTURE_OUTPUTS for node in nodes
+    )
+    return answers_with_a_picture and any(
+        str(node.get("type") or "") == "LoadImage" and int(node.get("mode") or 0) not in {2, 4}
+        for node in nodes
+    )
+
+
+def _operation_for_template(
+    template_id: str, role: str, value: dict[str, Any] | None = None
+) -> str | None:
+    """Map a template to a supported operation, or None for none.
 
     None means the workflow needs an input LM Atelier cannot provide - an
     audio- or speech-driven video template offered for a text prompt would
-    install a workflow whose required input never arrives.
+    install a workflow whose required input never arrives. For the same
+    reason an image template whose graph loads a picture is an edit even when
+    its id does not say so.
     """
 
     markers = _operation_markers(template_id)
@@ -739,9 +767,9 @@ def _operation_for_template(template_id: str, role: str) -> str | None:
         if {"s2v", "a2v", "speech2video", "audio2video"} & markers:
             return None
         return "text_to_video"
-    return (
-        "image_to_image" if {"img2img", "image2image", "i2i", "edit"} & markers else "text_to_image"
-    )
+    if {"img2img", "image2image", "i2i", "edit"} & markers or (value and _loads_a_picture(value)):
+        return "image_to_image"
+    return "text_to_image"
 
 
 def _read_json(path: Path) -> dict[str, Any]:

@@ -747,6 +747,96 @@ def test_native_edit_loaders_bind_ordered_runtime_images(
     assert compiled.input_schema["properties"]["input_image_1"] == {"type": "string"}
 
 
+def test_a_template_that_loads_a_picture_installs_as_an_edit(tmp_path: Path) -> None:
+    """An outpainting template is named for what it does, not "edit". Offered
+    as text-to-image, its LoadImage kept the sample picture it was authored
+    with, which no runtime holds, so the install refused after every model
+    file had been downloaded."""
+    registry = _registry(tmp_path)
+    revision = "b" * 40
+    template = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "LoadImage",
+                "inputs": [],
+                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [1]}],
+                "properties": {"cnr_id": "comfy-core"},
+                "widgets_values": ["authored-sample.png", "image"],
+            },
+            {
+                "id": 2,
+                "type": "CheckpointLoaderSimple",
+                "inputs": [],
+                "outputs": [],
+                "properties": {
+                    "cnr_id": "comfy-core",
+                    "models": [
+                        {
+                            "directory": "checkpoints",
+                            "name": "fill.safetensors",
+                            "url": (
+                                "https://huggingface.co/owner/fill/resolve/"
+                                f"{revision}/fill.safetensors"
+                            ),
+                        }
+                    ],
+                },
+                "widgets_values": ["fill.safetensors"],
+            },
+            {
+                "id": 3,
+                "type": "SaveImage",
+                "inputs": [{"name": "images", "type": "IMAGE", "link": 1}],
+                "outputs": [],
+                "properties": {"cnr_id": "comfy-core"},
+                "widgets_values": ["outpainted"],
+            },
+        ],
+        "links": [[1, 1, 0, 3, 0, "IMAGE"]],
+    }
+    (_installed_templates(registry) / "image_fill_outpaint_example.json").write_text(
+        json.dumps(template),
+        encoding="utf-8",
+    )
+    object_info = {
+        "LoadImage": {
+            "input": {"required": {"image": [["available.png"], {"image_upload": True}]}},
+            "input_order": {"required": ["image"]},
+        },
+        "CheckpointLoaderSimple": {
+            "input": {"required": {"ckpt_name": [["fill.safetensors"]]}},
+            "input_order": {"required": ["ckpt_name"]},
+        },
+        "SaveImage": {
+            "input": {
+                "required": {
+                    "images": ["IMAGE"],
+                    "filename_prefix": ["STRING", {"default": "ComfyUI"}],
+                }
+            },
+            "input_order": {"required": ["images", "filename_prefix"]},
+            "output_node": True,
+        },
+    }
+
+    offered = {item.id: item.operation for item in registry.available("image")}
+    compiled = registry.compile(
+        "image_fill_outpaint_example",
+        "image",
+        object_info,
+        remote_id="owner/fill",
+        revision=revision,
+        selected_files=["fill.safetensors"],
+        comfy_paths={"checkpoints": "."},
+    )
+
+    assert offered["image_fill_outpaint_example"] == "image_to_image"
+    assert compiled.template.operation == "image_to_image"
+    assert compiled.api_graph["1"]["inputs"]["image"] == "${input_image}"
+    assert compiled.input_schema["properties"]["input_image"] == {"type": "string"}
+
+
 def test_native_image_conditioning_keeps_authored_denoise_constant() -> None:
     ui_graph = {
         "nodes": [
@@ -1857,6 +1947,48 @@ def test_operation_classification_reads_compact_variant_markers() -> None:
     assert _operation_for_template("image_qwen_image_edit", "image") == "image_to_image"
     assert _operation_for_template("image_sdxl_img2img", "image") == "image_to_image"
     assert _operation_for_template("image_sdxl_base", "image") == "text_to_image"
+
+
+def test_an_image_template_edits_when_a_running_picture_loader_feeds_a_picture_output() -> None:
+    from local_lm.comfy_templates import _operation_for_template
+
+    def graph(*nodes: tuple[str, int]) -> dict[str, Any]:
+        return {
+            "nodes": [
+                {"id": index, "type": kind, "mode": mode}
+                for index, (kind, mode) in enumerate(nodes)
+            ]
+        }
+
+    template = "image_fill_outpaint_example"
+    assert (
+        _operation_for_template(template, "image", graph(("LoadImage", 0), ("SaveImage", 0)))
+        == "image_to_image"
+    )
+    assert (
+        _operation_for_template(template, "image", graph(("LoadImage", 0), ("PreviewImage", 0)))
+        == "image_to_image"
+    )
+    nested = {
+        "nodes": [{"id": 1, "type": "SaveImage"}],
+        "definitions": {"subgraphs": [graph(("LoadImage", 0))]},
+    }
+    assert _operation_for_template(template, "image", nested) == "image_to_image"
+    # A loader that is muted or bypassed never reads a picture.
+    assert (
+        _operation_for_template(template, "image", graph(("LoadImage", 2), ("SaveImage", 0)))
+        == "text_to_image"
+    )
+    assert (
+        _operation_for_template(template, "image", graph(("LoadImage", 4), ("SaveImage", 0)))
+        == "text_to_image"
+    )
+    # A graph that answers with a video is not an image edit, whatever its id's prefix.
+    assert (
+        _operation_for_template(template, "image", graph(("LoadImage", 0), ("SaveVideo", 0)))
+        == "text_to_image"
+    )
+    assert _operation_for_template(template, "image", graph(("SaveImage", 0))) == "text_to_image"
 
 
 def test_declared_acceleration_ignores_non_media_operations() -> None:
