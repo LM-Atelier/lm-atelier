@@ -1,3 +1,4 @@
+import { installChatReadFixtures } from "./chatReadFixtures";
 /** A chat's unsent draft comes back whole when you return to it, and never appears in another chat. */
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -91,6 +92,7 @@ const sketch: Artifact = {
 } as Artifact;
 
 beforeEach(() => {
+  installChatReadFixtures();
   localStorage.clear();
   sessionStorage.clear();
   localStorage.setItem("local-lm-chat", first.id);

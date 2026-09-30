@@ -21,6 +21,11 @@ for (const width of [1280, 375]) {
       results: [], result_count: 0, truncated: false, error_code: null,
     };
     let activeHead = "answer-search";
+    let olderPending = true;
+    const olderSearch: WebSearch = { ...search, run_id: "run-search-older", job_id: "job-search-older",
+      assistant_message_id: "other-answer", query: "Compare brick and stone" };
+    const olderDecisions: unknown[] = [];
+    const reads: URL[] = [];
     let webSettings = chat.web_settings_json;
     const permissionWrites: unknown[] = [];
     let finishPermissionSave: (() => void) | undefined;
@@ -41,6 +46,8 @@ for (const width of [1280, 375]) {
     page.on("pageerror", (error) => errors.push(error.message));
     page.on("request", (outgoing) => {
       if (outgoing.method() === "POST" && outgoing.url().endsWith("/turns")) sends.push(outgoing.url());
+      const url = new URL(outgoing.url());
+      if (outgoing.method() === "GET" && url.pathname.startsWith(`/api/chats/${chat.id}`)) reads.push(url);
     });
     await page.addInitScript((id) => localStorage.setItem("local-lm-chat", id), chat.id);
     await page.route("**/api/web-search/configuration", (route) => route.fulfill({ json: {
@@ -55,6 +62,33 @@ for (const width of [1280, 375]) {
         webSettings = body.web_settings_json;
       }
       await route.fulfill({ json: detail() });
+    });
+    await page.route(`**/api/chats/${chat.id}/metadata`, (route) => route.fulfill({ json: {
+      ...chat, web_settings_json: webSettings, active_head_message_id: activeHead,
+    } }));
+    await page.route(`**/api/chats/${chat.id}/messages?**`, (route) => route.fulfill({ json: {
+      chat_id: chat.id, messages: detail().messages.slice(0, activeHead === "answer-search" ? 2 : 1),
+      has_older: false, has_newer: false,
+    } }));
+    await page.route(`**/api/chats/${chat.id}/context?**`, (route) => route.fulfill({ json: {
+      chat_id: chat.id, head_id: activeHead, has_prior_image: false, has_prior_visual: false,
+      has_pending_response: activeHead === "answer-search" && search.state === "awaiting_approval",
+    } }));
+    await page.route(`**/api/chats/${chat.id}/searches?**`, (route) => {
+      const params = new URL(route.request().url()).searchParams;
+      const pending = params.has("pending_only");
+      const older = params.has("before");
+      return route.fulfill({ json: { chat_id: chat.id,
+        searches: pending ? older ? olderPending ? [olderSearch] : []
+          : search.state === "awaiting_approval" ? [search] : []
+          : activeHead === "answer-search" ? [search] : [],
+        next_before: pending && !older && olderPending ? search.run_id : null,
+      } });
+    });
+    await page.route("**/api/jobs/job-search-older/search/decision", async (route) => {
+      olderDecisions.push(route.request().postDataJSON());
+      olderPending = false;
+      await route.fulfill({ json: { ...olderSearch, state: "declined", job_id: null, revision: null } });
     });
     await page.route("**/api/jobs/job-search/search", async (route) => {
       const body = route.request().postDataJSON() as { revision: number; query: string };
@@ -110,6 +144,19 @@ for (const width of [1280, 375]) {
     await page.reload();
     const otherBranch = page.getByRole("region", { name: "Pending searches in other branches" });
     await expect(otherBranch).toBeVisible();
+    await expect(otherBranch.getByLabel("Exact query")).toHaveValue(search.query);
+    expect(reads.some((url) => url.searchParams.has("before"))).toBe(false);
+    const pendingPager = page.getByRole("button", { name: "Load more pending searches" });
+    await pendingPager.focus();
+    const pendingControl = await pendingPager.elementHandle();
+    await pendingPager.press("Enter");
+    await expect(otherBranch.getByRole("region", { name: "Web search", exact: true })).toHaveCount(2);
+    await expect.poll(() => pendingControl!.evaluate((element) => document.activeElement === element)).toBe(true);
+    const olderCard = otherBranch.getByRole("region", { name: "Web search", exact: true }).nth(1);
+    await expect(olderCard.getByLabel("Exact query")).toHaveValue("Compare brick and stone");
+    await olderCard.getByRole("button", { name: "Continue without search" }).click();
+    await expect.poll(() => olderDecisions).toEqual([{ revision: 1, action: "decline" }]);
+    await expect(otherBranch.getByRole("region", { name: "Web search", exact: true })).toHaveCount(1);
     await expect(otherBranch.getByLabel("Exact query")).toHaveValue(search.query);
     if (process.env.LM_ATELIER_E2E_SCREENSHOT_DIR) {
       await page.screenshot({ path: path.join(process.env.LM_ATELIER_E2E_SCREENSHOT_DIR, "search-other-branch-" + width + ".png"), fullPage: true });
@@ -181,6 +228,11 @@ for (const width of [1280, 375]) {
     await page.getByRole("button", { name: "Add source to message" }).click();
     await expect(message).toHaveValue("Explain the comparison.\n\nhttps://materials.example.test/reference");
     expect(sends).toEqual([]);
+    expect(reads.some((url) => url.pathname === `/api/chats/${chat.id}`)).toBe(false);
+    expect(reads.filter((url) => /\/(messages|searches)$/.test(url.pathname)).every((url) =>
+      Number(url.searchParams.get("limit")) > 0 && Number(url.searchParams.get("limit")) <= 40)).toBe(true);
+    expect(reads.some((url) => url.searchParams.get("before") === "run-search"
+      && url.searchParams.get("pending_only") === "true")).toBe(true);
     expect(errors).toEqual([]);
   });
 }

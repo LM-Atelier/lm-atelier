@@ -1,3 +1,4 @@
+import { installChatReadFixtures } from "./chatReadFixtures";
 /** A picture in Image Studio goes to a chat's composer as a reference, and only once. */
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -98,6 +99,7 @@ const firstDetail: ChatDetail = {
 } as ChatDetail;
 
 beforeEach(() => {
+  installChatReadFixtures();
   localStorage.clear();
   sessionStorage.clear();
   localStorage.setItem("local-lm-chat", first.id);

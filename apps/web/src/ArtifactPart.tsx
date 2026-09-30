@@ -11,6 +11,7 @@ import {
 import { CompareButton } from "./CompareButton";
 import { ImageStudioIcon } from "./ImageStudioIcon";
 import { LineageButton } from "./LineageButton";
+import { PagedImageHistory, type ImageHistoryTarget } from "./PagedImageHistory";
 import {
   artifactSource,
   mediaOriginLabel,
@@ -31,6 +32,7 @@ export function ArtifactPart({
   onToggleFavorite,
   compareSourceUrl,
   lineage,
+  editHistory,
 }: {
   part: MessagePart;
   origin: MediaOrigin | null;
@@ -41,6 +43,7 @@ export function ArtifactPart({
   onToggleFavorite?: (part: MessagePart) => void;
   compareSourceUrl?: string | null;
   lineage?: EditLineageStep[];
+  editHistory?: ImageHistoryTarget;
 }) {
   const proxyId = typeof part.metadata_json.browser_proxy_artifact_id === "string" ? part.metadata_json.browser_proxy_artifact_id : null;
   const posterId = typeof part.metadata_json.poster_artifact_id === "string"
@@ -131,8 +134,9 @@ export function ArtifactPart({
               <Quote size={14} aria-hidden="true" />
             </button>
           )}
-          {!preview && compareSourceUrl && source && <CompareButton before={compareSourceUrl} after={source} />}
-          {!preview && lineage && source && <LineageButton steps={lineage} resultUrl={source} />}
+          {!preview && editHistory && <PagedImageHistory key={`${editHistory.chatId}:${editHistory.resultId}`} target={editHistory} resultUrl={source} />}
+          {!preview && !editHistory && compareSourceUrl && source && <CompareButton before={compareSourceUrl} after={source} />}
+          {!preview && !editHistory && lineage && source && <LineageButton steps={lineage} resultUrl={source} />}
           {!preview && onToggleFavorite && (
             <button
               type="button"

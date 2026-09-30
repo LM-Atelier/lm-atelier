@@ -1,3 +1,4 @@
+import { installChatReadFixtures } from "./chatReadFixtures";
 /** The send key, chosen in Settings and honoured by the prompt workshop as well as the composer. */
 
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -57,6 +58,7 @@ const chat: Chat = {
 const helper = { ...chat, id: "send-key-helper", title: "Prompt workshop", archived: true, draft_prompt: "A blue cup", messages: [] };
 
 beforeEach(() => {
+  installChatReadFixtures();
   localStorage.clear();
   localStorage.setItem("local-lm-chat", chat.id);
   Element.prototype.scrollIntoView = vi.fn();

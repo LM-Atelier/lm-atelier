@@ -1,3 +1,4 @@
+import { installChatReadFixtures } from "./chatReadFixtures";
 import { exerciseWorkspaceHistory } from "./workspaceHistoryAppCase.test-support";
 import { mockWorkflowReadsFromFixture, mockWorkflowConsumerReadsFromFixture } from "./workflowReadFixtures";
 import { exerciseEditedBranchNavigation } from "./editedBranchAppCase.test-support";
@@ -5,11 +6,11 @@ import { exerciseQueuedOutputActions } from "./queuedOutputActions.test-support"
 import { exercisePriorTurnEditor } from "./priorTurnEditAppCase.test-support";
 import { exercisePriorImageWorkflowControls } from "./priorImageWorkflowControlsAppCase.test-support";
 import { act, cleanup, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, type InfiniteData } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { api, connectEvents } from "./api";
-import type { BackupInfo, Chat, ChatDetail, EngineCapabilities, EngineRole, Job, ModelAssetInstall, SettingField, SetupReadinessReport, SetupRoleReadiness, TurnAccepted, WorkPlan, Workflow } from "./types";
+import type { BackupInfo, Chat, ChatDetail, ChatMessageWindow, EngineCapabilities, EngineRole, Job, ModelAssetInstall, SettingField, SetupReadinessReport, SetupRoleReadiness, TurnAccepted, WorkPlan, Workflow } from "./types";
 import { DEFAULT_CHAT_WORKFLOW_SELECTIONS, DEFAULT_PROJECT_WORKFLOW_SELECTIONS, familiesForWorkflows } from "./workflowSelectionFixtures";
 import { asChatSummary } from "./chatSummaryFixtures";
 const clipboardWrite = vi.fn();
@@ -22,14 +23,12 @@ function setWorkflowFixtures(values: Workflow[]) { workflowFixtures = values; }
 // for that and still fail a render that never arrives.
 configure({ asyncUtilTimeout: 5_000 });
 const CASE_TIMEOUT_MS = 20_000;
-
 function renderApp() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}><App /></QueryClientProvider>,
   );
 }
-
 const imageSetting: SettingField = {
   key: "negative_prompt",
   label: "Negative prompt",
@@ -122,7 +121,7 @@ vi.mock("./api", async (importOriginal) => ({
     verifySetupRole: vi.fn(),
     projects: vi.fn().mockResolvedValue([]),
     chats: vi.fn().mockResolvedValue([]), chatSummaries: vi.fn((...args: Parameters<typeof api.chats>) => api.chats(...args).then((rows) => rows.map(asChatSummary))),
-    chat: vi.fn(),
+    chat: vi.fn(), chatMetadata: vi.fn((id: string) => api.chat(id)),
     classifyDraft: vi.fn(),
     createProject: vi.fn(),
     updateProject: vi.fn(),
@@ -353,6 +352,7 @@ async function openSettings(destination: string) {
 describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
   it("restores workspace destinations and focus with browser history", async () => { await exerciseWorkspaceHistory(renderApp); });
   beforeEach(() => {
+  installChatReadFixtures();
     window.history.replaceState(null, "", "/");
     vi.clearAllMocks();
     clipboardWrite.mockResolvedValue(undefined);
@@ -3104,8 +3104,8 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
       </QueryClientProvider>,
     );
 
-    const status = await screen.findByRole("status");
-    expect(status).toHaveTextContent(/Preparing chat model/);
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(/Preparing chat model/));
+    const status = screen.getByRole("status");
     expect(status).toHaveTextContent(/· 0s/);
   });
 
@@ -5624,13 +5624,13 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
       finishTurn?.(accepted);
     });
     await waitFor(() => {
-      const origin = client.getQueryData<ChatDetail>(["chat", first.id]);
-      expect(origin?.messages.map((message) => message.id)).toEqual([
+      const origin = client.getQueryData<InfiniteData<ChatMessageWindow>>(["chat", first.id, "messages", "assistant-origin"]);
+      expect(origin?.pages.flatMap((page) => page.messages.map((message) => message.id))).toEqual([
         "user-origin",
         "assistant-origin",
       ]);
     });
-    expect(client.getQueryData<ChatDetail>(["chat", second.id])?.messages).toEqual([]);
+    expect(client.getQueryData<InfiniteData<ChatMessageWindow>>(["chat", second.id, "messages", null])?.pages.flatMap((page) => page.messages)).toEqual([]);
     expect(screen.getByRole("heading", { name: second.title })).toBeInTheDocument();
   });
 
@@ -5800,7 +5800,7 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
     expect(messageMeta.compareDocumentPosition(uploadedImage) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     // The result of an edit can be held against its source directly.
-    fireEvent.click(screen.getByRole("button", { name: "Compare with the source" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Compare with the source" }));
     expect(await screen.findByRole("dialog", { name: "Compare with the source" })).toBeVisible();
     expect(screen.getByRole("img", { name: "The source before the edit" })).toBeVisible();
     expect(screen.getByRole("img", { name: "The edited result" })).toBeVisible();

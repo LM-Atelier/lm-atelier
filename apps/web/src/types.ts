@@ -1,4 +1,5 @@
 export type * from "./queueOrderTypes";
+export type * from "./chatEditLineageTypes";
 import type { HardwareFitAdvice } from "./hardwareFitTypes";
 export type * from "./hardwareFitTypes";
 export type * from "./priorTurnEditTypes";
@@ -278,6 +279,24 @@ export interface ChatComposerDraft extends ChatComposerDraftInput {
 export interface ChatDetail extends Chat {
   messages: Message[];
   web_searches?: WebSearch[];
+}
+export interface ChatMessageWindow {
+  chat_id: string;
+  messages: Message[];
+  has_older: boolean;
+  has_newer: boolean;
+}
+export interface ChatTranscriptContext {
+  chat_id: string;
+  head_id: string | null;
+  has_prior_visual: boolean;
+  has_prior_image: boolean;
+  has_pending_response: boolean;
+}
+export interface ChatSearchPage {
+  chat_id: string;
+  searches: WebSearch[];
+  next_before: string | null;
 }
 export interface PromptHelperDetail extends ChatDetail {
   draft_prompt: string;

@@ -2,7 +2,9 @@ import { ChatWebAccess } from "./ChatWebAccess";
 import { ChatSearchConsent } from "./ChatSearchConsent";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Bot, LoaderCircle, MessageSquare, Sparkles } from "lucide-react";
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { TranscriptReadControls, TranscriptReadFailure } from "./TranscriptReadControls";
+import { useChatMessagePages } from "./useChatMessagePages";
 import { EditedBranchCards } from "./EditedBranchCards";
 import { EmptyState } from "./EmptyState";
 import { FirstFailure } from "./FirstFailure";
@@ -27,6 +29,7 @@ import { MessageBubble } from "./MessageBubble";
 import { useVisibleChatActivity } from "./useVisibleChatActivity";
 
 export function ChatView({
+  transcript,
   onOpenStudio,
   chat,
   engines,
@@ -64,10 +67,26 @@ export function ChatView({
 }: ChatViewProps) {
   const [editMessageId, setEditMessageId] = useState<string | null>(null);
   const edited = useEditedBranches(chat);
+  const previewPages = useChatMessagePages(edited.preview ? chat?.id : undefined,
+    edited.preview?.branch_head_message_id ?? null);
   const endRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   useVisibleChatActivity(messagesRef, chat?.id);
   const followMessages = useRef(true);
+  const olderScroll = useRef<{ height: number; top: number } | null>(null);
+  useLayoutEffect(() => {
+    if (!olderScroll.current || transcript?.loadingOlder) return;
+    const viewport = messagesRef.current;
+    if (viewport) viewport.scrollTop = olderScroll.current.top + viewport.scrollHeight - olderScroll.current.height;
+    olderScroll.current = null;
+  }, [chat?.messages, transcript?.loadingOlder]);
+  const loadOlder = () => {
+    const viewport = messagesRef.current;
+    if (!viewport || !transcript) return;
+    followMessages.current = false;
+    olderScroll.current = { height: viewport.scrollHeight, top: viewport.scrollTop };
+    void transcript.loadOlder();
+  };
   const previousChatId = useRef<string | undefined>(undefined);
   const [visualTarget, setVisualTarget] = useState<VisualTarget | null>(null);
   const favoriteClient = useQueryClient();
@@ -111,8 +130,11 @@ export function ChatView({
       viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
     ) <= 96;
   };
+  if (!chat && (transcript?.loading || transcript?.error)) return <TranscriptReadFailure reads={transcript} />;
   if (!chat) return <EmptyState icon={<MessageSquare />} title="Start a local conversation" body="Create a chat and choose a model. Conversations stay on this machine." />;
-  const messages = activeBranchMessages(chat);
+  // Paged reads already select the branch; a parent may lie outside this window.
+  const messages = transcript ? chat.messages.filter((message) => message.transcript_visible !== false)
+    : activeBranchMessages(chat);
   const searchCard = (search: WebSearch) => (
     <ChatSearchConsent key={search.run_id} search={search}
       onChanged={() => {
@@ -128,9 +150,8 @@ export function ChatView({
   const hiddenSearches = (chat.web_searches ?? []).filter((search) =>
     search.job_id !== null && ["awaiting_approval", "approved", "scheduled"].includes(search.state)
     && !messages.some((message) => message.id === search.assistant_message_id));
-  const previewMessages = edited.preview && chat.messages.some(
-    (message) => message.id === edited.preview?.branch_head_message_id,
-  ) ? activeBranchMessages({ ...chat, active_head_message_id: edited.preview.branch_head_message_id }) : [];
+  const previewMessages = edited.preview
+    ? (previewPages.data ?? []).filter((message) => message.transcript_visible !== false) : [];
   const branchCards = (sourceId?: string) => <EditedBranchCards
     branches={edited.branches.filter((branch) => sourceId
       ? branch.source_message_id === sourceId
@@ -140,7 +161,7 @@ export function ChatView({
     onCancelPlan={onCancelPlan} onRetryPlan={onRetryPlan}
     onCancelStep={onCancelStep} onRetryStep={onRetryStep} />;
   const priorVisibleMedia = priorVisibleMediaByMessage(messages);
-  const stoppable = messages.some(
+  const stoppable = transcript?.context?.has_pending_response || messages.some(
     (message) => message.status === "pending"
       || (message.response_revisions ?? []).some(
         (revision) => revision.status === "pending",
@@ -174,7 +195,9 @@ export function ChatView({
       {/* Reported here because the global list belongs to a component the
           transcript cannot reach. */}
       <FirstFailure of={[feedback, toggleFavorite]} />
+      <TranscriptReadFailure reads={transcript?.error ? transcript : undefined} />
       <div className="messages" ref={messagesRef} onScroll={trackMessageScroll}>
+        {transcript && <TranscriptReadControls reads={transcript} onOlder={loadOlder} />}
         {hiddenSearches.length > 0 && (
           <section aria-label="Pending searches in other branches">
             <p>Another branch is waiting for your search decision.</p>
@@ -217,6 +240,7 @@ export function ChatView({
                 liveText={liveText[message.id]}
                 compareSourceUrl={compareSourceUrl}
                 lineage={lineage}
+                readImageHistory={Boolean(transcript)}
                 onFeedback={(messageId, revisionId, rating) =>
                   feedback.mutate({ messageId, revisionId, rating })}
                 onToggleFavorite={(part) => part.artifact_id && toggleFavorite.mutate({
@@ -305,16 +329,23 @@ export function ChatView({
         <button className="secondary" onClick={edited.close}>Close preview</button>
         <button className="secondary" disabled={!edited.preview.can_continue || edited.activating}
           onClick={() => edited.preview && edited.continueBranch(edited.preview)}>Continue from this version</button>
-        {previewMessages.length === 0 && <p>This edited version is being loaded.</p>}
+        {previewPages.error && <div role="alert"><p>{previewPages.error.message}</p>
+          <button onClick={() => { void previewPages.refetch(); }}>Retry edited version</button></div>}
+        {previewPages.isPending && <p>This edited version is being loaded.</p>}
+        {previewPages.data && <button aria-disabled={!previewPages.hasNextPage || previewPages.isFetchingNextPage}
+          onClick={() => { if (previewPages.hasNextPage && !previewPages.isFetchingNextPage) void previewPages.loadOlder(); }}>
+          {previewPages.isFetchingNextPage ? "Loading older preview messages…"
+            : previewPages.hasNextPage ? "Load older preview messages" : "All preview messages loaded"}
+        </button>}
         {previewMessages.map((message) => <MessageBubble key={message.id} message={message}
-          liveText={liveText[message.id]} onOpenEdit={setEditMessageId} />)}
+          liveText={liveText[message.id]} onOpenEdit={setEditMessageId} readImageHistory={Boolean(transcript)} />)}
       </section>}
       {editMessageId && <PriorTurnEditor key={editMessageId} messageId={editMessageId} chat={chat}
         engines={engines} profiles={profiles} presets={presets}
         maxMediaOutputsPerPlan={maxMediaOutputsPerPlan} PromptHelper={PromptHelperDialog}
         onAccepted={onEditAccepted} onClose={() => setEditMessageId(null)} />}
       <WorkspaceComposerDraft chatId={chat.id} draft={composerDraft} onDraft={onComposerDraft} />
-      <TurnEditor PromptHelper={PromptHelperDialog} chat={chat} engines={engines} profiles={profiles} stoppable={stoppable} settings={settings} onSettings={onSettings} settingsRole={settingsRole} onSettingsRole={onSettingsRole} presets={presets} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} onStopAndSend={onStopAndSend} maxMediaOutputsPerPlan={maxMediaOutputsPerPlan} project={project} visualTarget={visualTarget} quoteTarget={quoteTarget} draft={composerDraft} onDraftChange={onComposerDraft} />
+      <TurnEditor transcriptContext={transcript?.context} PromptHelper={PromptHelperDialog} chat={chat} engines={engines} profiles={profiles} stoppable={stoppable} settings={settings} onSettings={onSettings} settingsRole={settingsRole} onSettingsRole={onSettingsRole} presets={presets} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} onStopAndSend={onStopAndSend} maxMediaOutputsPerPlan={maxMediaOutputsPerPlan} project={project} visualTarget={visualTarget} quoteTarget={quoteTarget} draft={composerDraft} onDraftChange={onComposerDraft} />
     </div>
   );
 }

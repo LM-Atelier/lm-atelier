@@ -1,12 +1,13 @@
 import { useMutation, type QueryClient } from "@tanstack/react-query";
 import { useCallback, type Dispatch, type SetStateAction } from "react";
 import { api } from "./api";
+import { applyAcceptedChatPages } from "./acceptedChatPages";
 import type { PendingTurn } from "./chatComposerContracts";
 import type { ComposerDraft, ComposerPromptSource } from "./composerPromptSource";
 import type { TurnReference } from "./mentionDraft";
 import { recoverPromptSourceSend } from "./promptSourceSendRecovery";
 import type { SourceFitSelection } from "./sourceFit";
-import type { ChatDetail, TurnAccepted } from "./types";
+import type { TurnAccepted } from "./types";
 
 export type SendTurnVariables = PendingTurn & {
   chatId: string;
@@ -42,18 +43,8 @@ export function useTurnSending({
   setComposerDrafts: Dispatch<SetStateAction<Record<string, ComposerDraft>>>;
 }) {
     const applyAcceptedTurn = useCallback((chatId: string, accepted: TurnAccepted, activate = true) => {
-      client.setQueryData<ChatDetail>(["chat", chatId], (current) => {
-        if (!current) return current;
-        const messageIds = new Set(current.messages.map((message) => message.id));
-        const acceptedMessages = [accepted.user_message, accepted.assistant_message]
-          .filter((message) => !messageIds.has(message.id));
-        return {
-          ...current,
-          active_head_message_id: activate ? accepted.assistant_message.id : current.active_head_message_id,
-          messages: [...current.messages, ...acceptedMessages],
-        };
-      });
-      void client.invalidateQueries({ queryKey: ["chat", chatId], exact: true });
+      applyAcceptedChatPages(client, chatId, accepted, activate);
+      void client.invalidateQueries({ queryKey: ["chat", chatId] });
       void client.invalidateQueries({ queryKey: ["chats"] });
       void client.invalidateQueries({ queryKey: ["jobs"] });
       void client.invalidateQueries({ queryKey: ["work-plans", chatId] });

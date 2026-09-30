@@ -44,6 +44,9 @@ import type {
   CatalogPreflight,
   CatalogVersions,
   Chat,
+  ChatSearchPage,
+  ChatTranscriptContext,
+  ChatEditLineagePage,
   ChatSummary,
   ChatComposerDraft,
   ChatComposerDraftInput,
@@ -52,6 +55,7 @@ import type {
   ContentRating,
   ExchangeDeletion,
   ChatDetail,
+  ChatMessageWindow,
   DraftClassification,
   PriorTurnEditBinding,
   CustomNodeInstall,
@@ -375,6 +379,46 @@ export const api = {
     return request<ChatSummary[]>(`/api/chats/summaries?${parameters}`, options.signal ? { signal: options.signal } : undefined);
   },
   chat: (id: string) => request<ChatDetail>(`/api/chats/${id}`),
+  chatMetadata: (id: string, signal?: AbortSignal) =>
+    request<Chat>(`/api/chats/${encodeURIComponent(id)}/metadata`, signal ? { signal } : undefined),
+  chatEditLineage: (id: string, resultId: string, options: {
+    before?: string; limit?: number; signal?: AbortSignal;
+  } = {}) => {
+    const parameters = new URLSearchParams({ limit: String(options.limit ?? 40) });
+    if (options.before) parameters.set("before", options.before);
+    return request<ChatEditLineagePage>(`/api/chats/${encodeURIComponent(id)}/messages/${encodeURIComponent(resultId)}/lineage?${parameters}`,
+      options.signal ? { signal: options.signal } : undefined);
+  },
+  chatContext: (id: string, headId: string | null, signal?: AbortSignal) => {
+    const parameters = new URLSearchParams();
+    if (headId !== null) parameters.set("head_id", headId);
+    return request<ChatTranscriptContext>(`/api/chats/${encodeURIComponent(id)}/context?${parameters}`,
+      signal ? { signal } : undefined);
+  },
+  chatSearches: (id: string, options: {
+    headId?: string | null; oldestMessageId?: string; before?: string;
+    pendingOnly?: boolean; limit?: number; signal?: AbortSignal;
+  } = {}) => {
+    const parameters = new URLSearchParams({ limit: String(options.limit ?? 40) });
+    if (options.headId) parameters.set("head_id", options.headId);
+    if (options.oldestMessageId !== undefined) parameters.set("oldest_message_id", options.oldestMessageId);
+    if (options.before !== undefined) parameters.set("before", options.before);
+    if (options.pendingOnly) parameters.set("pending_only", "true");
+    return request<ChatSearchPage>(`/api/chats/${encodeURIComponent(id)}/searches?${parameters}`,
+      options.signal ? { signal: options.signal } : undefined);
+  },
+  chatMessages: (id: string, options: {
+    headId?: string | null; before?: string; after?: string; around?: string;
+    limit?: number; signal?: AbortSignal;
+  } = {}) => {
+    const parameters = new URLSearchParams({ limit: String(options.limit ?? 40) });
+    if (options.headId) parameters.set("head_id", options.headId);
+    for (const anchor of ["before", "after", "around"] as const) {
+      if (options[anchor] !== undefined) parameters.set(anchor, options[anchor]);
+    }
+    return request<ChatMessageWindow>(`/api/chats/${encodeURIComponent(id)}/messages?${parameters}`,
+      options.signal ? { signal: options.signal } : undefined);
+  },
   classifyDraft: (chatId: string, text: string, mode: RoutingMode, editSource?: PriorTurnEditBinding) =>
     request<DraftClassification>(`/api/chats/${chatId}/classify-draft`, {
       method: "POST",

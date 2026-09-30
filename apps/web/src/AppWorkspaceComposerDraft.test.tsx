@@ -1,3 +1,4 @@
+import { installChatReadFixtures } from "./chatReadFixtures";
 /** A chat's unsent draft outlasts the page: stored in the workspace, and back after a restart. */
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -93,6 +94,7 @@ const sketch: Artifact = {
 } as Artifact;
 
 beforeEach(() => {
+  installChatReadFixtures();
   localStorage.clear();
   sessionStorage.clear();
   localStorage.setItem("local-lm-chat", first.id);

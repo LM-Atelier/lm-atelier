@@ -8,7 +8,7 @@ import { asChatSummary } from "./chatSummaryFixtures";
 import { changeChatPages, useChatPages } from "./useChatPages";
 import type { ChatDetail } from "./types";
 
-vi.mock("./api", () => ({ api: { chatSummaries: vi.fn(), chat: vi.fn() } }));
+vi.mock("./api", () => ({ api: { chatSummaries: vi.fn(), chatMetadata: vi.fn() } }));
 const stamp = "2026-09-20T00:00:00Z";
 const detail: ChatDetail = {
   id: "chat", title: "Color study", project_id: null, archived: false, pinned: false,
@@ -31,12 +31,12 @@ function sidebar(onUpdateChat = vi.fn()) {
     onUpdateProject={vi.fn()} onDeleteProject={vi.fn()}
     sidebar={{ width: 272, collapsed: false, setWidth: vi.fn(), toggle: vi.fn() }} />;
 }
-beforeEach(() => { vi.mocked(api.chatSummaries).mockResolvedValue([summary]); vi.mocked(api.chat).mockResolvedValue(detail); });
+beforeEach(() => { vi.mocked(api.chatSummaries).mockResolvedValue([summary]); vi.mocked(api.chatMetadata).mockResolvedValue(detail); });
 afterEach(cleanup);
 
 it("loads exact chat settings before showing management controls", async () => {
   let resolve!: (chat: ChatDetail) => void;
-  vi.mocked(api.chat).mockImplementation(() => new Promise((done) => { resolve = done; }));
+  vi.mocked(api.chatMetadata).mockImplementation(() => new Promise((done) => { resolve = done; }));
   const onUpdate = vi.fn();
   render(sidebar(onUpdate), { wrapper: setup().wrapper });
   const manage = await screen.findByRole("button", { name: "Manage Color study" });
@@ -44,7 +44,7 @@ it("loads exact chat settings before showing management controls", async () => {
   fireEvent.click(manage);
   expect(await screen.findByRole("status")).toHaveTextContent("Loading chat settings");
   expect(screen.queryByLabelText(/Confirm uncertain media/)).not.toBeInTheDocument();
-  expect(api.chat).toHaveBeenCalledWith("chat");
+  expect(api.chatMetadata).toHaveBeenCalledWith("chat", expect.any(AbortSignal));
   await act(async () => resolve(detail));
   expect(await screen.findByLabelText(/Confirm uncertain media/)).toBeChecked();
   expect(screen.getByLabelText(/Review image edits/)).toBeChecked();
@@ -59,7 +59,7 @@ it("loads exact chat settings before showing management controls", async () => {
 });
 
 it("offers retry after management detail fails without invented settings", async () => {
-  vi.mocked(api.chat).mockRejectedValueOnce(new Error("Offline"));
+  vi.mocked(api.chatMetadata).mockRejectedValueOnce(new Error("Offline"));
   render(sidebar(), { wrapper: setup().wrapper });
   fireEvent.click(await screen.findByRole("button", { name: "Manage Color study" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("Chat settings could not be loaded");
