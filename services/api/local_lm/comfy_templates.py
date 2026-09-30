@@ -702,6 +702,8 @@ def _supports_dependency_bundle(
 
 #: The node types, casefolded, through which a graph answers with a picture.
 _PICTURE_OUTPUTS = frozenset({"previewimage", "saveimage"})
+#: The node types, casefolded, through which a graph answers with a video.
+_VIDEO_OUTPUTS = frozenset({"saveanimatedpng", "saveanimatedwebp", "savevideo", "savewebm"})
 
 
 def _role_for_template(template_id: str, value: dict[str, Any] | None = None) -> str | None:
@@ -728,24 +730,35 @@ def _operation_markers(template_id: str) -> set[str]:
     return set(re.findall(r"[a-z0-9]+", template_id.lower()))
 
 
-def _loads_a_picture(value: dict[str, Any]) -> bool:
-    """Whether the graph reads a picture through a LoadImage that runs and answers with one.
+def _runs(node: dict[str, Any]) -> bool:
+    return int(node.get("mode") or 0) not in {2, 4}
 
-    Such a graph edits the picture it is given, whatever its id says: fill and
-    outpaint workflows are named for what they do. Its LoadImage names the
-    sample picture the template was authored with, which a runtime does not
-    hold, so only as an edit, with the turn's picture in that sample's place,
-    can the workflow compile at all.
+
+def _loads_a_picture(value: dict[str, Any], answers: frozenset[str] = _PICTURE_OUTPUTS) -> bool:
+    """Whether a LoadImage that runs reads a picture and the graph answers through `answers`.
+
+    Such a graph edits or animates the picture it is given, whatever its id
+    says: fill, outpaint and first-frame workflows are named for what they do.
+    Its LoadImage names the sample picture the template was authored with,
+    which a runtime does not hold, so only with the turn's picture in that
+    sample's place can the workflow compile at all.
     """
 
     nodes = _all_nodes(value)
-    answers_with_a_picture = any(
-        str(node.get("type") or "").casefold() in _PICTURE_OUTPUTS for node in nodes
+    answers_through = any(str(node.get("type") or "").casefold() in answers for node in nodes)
+    return answers_through and any(
+        str(node.get("type") or "") == "LoadImage" and _runs(node) for node in nodes
     )
-    return answers_with_a_picture and any(
-        str(node.get("type") or "") == "LoadImage" and int(node.get("mode") or 0) not in {2, 4}
-        for node in nodes
-    )
+
+
+def _loads_audio_or_video(value: dict[str, Any]) -> bool:
+    """Whether a loader that runs reads an audio or video file, which no turn supplies."""
+
+    for node in _all_nodes(value):
+        kind = str(node.get("type") or "").casefold()
+        if _runs(node) and kind.startswith("load") and ("audio" in kind or "video" in kind):
+            return True
+    return False
 
 
 def _operation_for_template(
@@ -754,15 +767,19 @@ def _operation_for_template(
     """Map a template to a supported operation, or None for none.
 
     None means the workflow needs an input LM Atelier cannot provide - an
-    audio- or speech-driven video template offered for a text prompt would
-    install a workflow whose required input never arrives. For the same
-    reason an image template whose graph loads a picture is an edit even when
-    its id does not say so.
+    audio- or speech-driven video template, or any graph that loads an audio
+    or video file, would install a workflow whose required input never
+    arrives. For the same reason a template whose graph loads a picture edits
+    it, or animates it into a video, even when its id does not say so.
     """
 
     markers = _operation_markers(template_id)
+    if value and _loads_audio_or_video(value):
+        return None
     if role == "video":
-        if {"i2v", "image2video", "img2video"} & markers:
+        if {"i2v", "image2video", "img2video"} & markers or (
+            value and _loads_a_picture(value, _VIDEO_OUTPUTS)
+        ):
             return "image_to_video"
         if {"s2v", "a2v", "speech2video", "audio2video"} & markers:
             return None
