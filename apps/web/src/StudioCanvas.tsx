@@ -10,6 +10,7 @@ import {
   type WheelEvent as ReactWheelEvent,
 } from "react";
 import { compareFit } from "./studioComparison";
+import { useSpaceToPan } from "./useSpaceToPan";
 import { toAlphaImageData, type MaskRaster, type MaskRegion } from "./studioMasks";
 import { CORNERS } from "./studioPerspective";
 import type { ImagePoint, PointerTool, ToolPreview } from "./studioTools";
@@ -78,7 +79,6 @@ export function StudioCanvas({
   const keyboardStroke = useRef(false);
   const [viewport, setViewport] = useState<Viewport>(identityViewport);
   const [panning, setPanning] = useState(false);
-  const spaceHeld = useRef(false);
   const activePointers = useRef<Map<number, { x: number; y: number }>>(new Map());
   const drawingPointer = useRef<number | null>(null);
 
@@ -150,24 +150,21 @@ export function StudioCanvas({
     drawPreview();
   }, [drawPreview]);
 
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.code === "Space") spaceHeld.current = event.type === "keydown";
-    };
-    // A Space release outside the window would otherwise strand pan mode.
-    const onBlur = () => {
-      spaceHeld.current = false;
-      setPanning(false);
-    };
-    window.addEventListener("keydown", onKey);
-    window.addEventListener("keyup", onKey);
-    window.addEventListener("blur", onBlur);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("keyup", onKey);
-      window.removeEventListener("blur", onBlur);
-    };
-  }, []);
+  /** Drop the gesture being drawn: a rectangle or a lasso is abandoned, and what a brush painted stays. */
+  const cancelDrawing = () => {
+    drawingPointer.current = null;
+    tool?.cancel();
+    drawPreview();
+    onStrokeEnd?.();
+  };
+  // With focus gone, a released button is never heard: pan mode ends, a gesture
+  // still being drawn is dropped rather than carried on by the next move, and
+  // the pointers remembered as down are forgotten, or the next press would pan.
+  const spaceHeld = useSpaceToPan(() => {
+    setPanning(false);
+    activePointers.current.clear();
+    if (drawingPointer.current !== null) cancelDrawing();
+  });
 
   /** Where the caret sits, put at the middle of the picture on first use. */
   const caretPoint = (): ImagePoint => {
@@ -347,12 +344,7 @@ export function StudioCanvas({
    */
   const onPointerCancel = (event: ReactPointerEvent) => {
     activePointers.current.delete(event.pointerId);
-    if (drawingPointer.current === event.pointerId) {
-      drawingPointer.current = null;
-      tool?.cancel();
-      drawPreview();
-      onStrokeEnd?.();
-    }
+    if (drawingPointer.current === event.pointerId) cancelDrawing();
     if (activePointers.current.size === 0) setPanning(false);
   };
 
