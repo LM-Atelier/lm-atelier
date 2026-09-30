@@ -102,8 +102,12 @@ export function StudioView({
   // only ever mark, never take it back.
   const client = useQueryClient();
   const draft = useStudioDraft(sessionId);
-  const [selectedId, setSelectedId] = useState<string | null>(draft.selectedId);
-  const [instruction, setInstruction] = useState(draft.instruction);
+  // What this visit chose and typed, and until then what the session's draft had, which is known
+  // only once the session is: after a reload the Studio is open before a picture is chosen.
+  const [chosen, setSelectedId] = useState<string | null>();
+  const selectedId = chosen === undefined ? draft.selectedId : chosen;
+  const [typed, setInstruction] = useState<string>();
+  const instruction = typed ?? draft.instruction;
   const [selectionError, setSelectionError] = useState<string | null>(null);
   const [results, setResults] = useState(1);
   // Replacing a background or a subject is two applies; the studio stays busy in between.
@@ -190,7 +194,7 @@ export function StudioView({
   useEffect(() => {
     if (!bitmap) return;
     // Back on the picture the Studio was left on: what was drawn there still fits it.
-    const kept = draft.take(currentArtifactId);
+    const kept = draft.take(currentArtifactId, bitmap);
     dispatch(kept ? { type: "restore", state: kept.tools } : { type: "image-changed", width: bitmap.width, height: bitmap.height });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bitmap]);

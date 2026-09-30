@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { StudioView } from "./StudioView";
+import { savedStudioDraftWords } from "./studioSavedDraft";
 import { useStudioImage } from "./useStudioImage";
 import { useStudioSession } from "./useStudioSession";
 
@@ -143,4 +144,66 @@ it("keeps a waiting draft through a visit that ends before its picture loads", (
   open(client);
 
   expect(selection()).toBe(drawn);
+});
+
+it("gives back the tool, its selection and the words after a reload, from what this browser wrote down", () => {
+  const visit = open(new QueryClient({ defaultOptions: { queries: { retry: false } } }));
+  work();
+  const drawn = selection();
+  visit.unmount();
+
+  // A reload keeps nothing in memory: only what was written down as the Studio was left.
+  open(new QueryClient({ defaultOptions: { queries: { retry: false } } }));
+
+  expect(screen.getByRole("button", { name: "Brush a selection" })).toHaveAttribute("aria-pressed", "true");
+  expect(selection()).toBe(drawn);
+  expect(screen.getByRole("textbox")).toHaveValue("make the sky warmer");
+});
+
+it("gives the words back after a reload even though the picture is chosen after the Studio opens", () => {
+  const visit = open(new QueryClient({ defaultOptions: { queries: { retry: false } } }));
+  work();
+  const drawn = selection();
+  visit.unmount();
+
+  // After a reload the Studio opens with no picture, and the session is known only once one is chosen.
+  // With no picture there is nothing decoded; the chosen one arrives as a picture of its own.
+  const picture = { width: 400, height: 200, close: vi.fn() } as unknown as ImageBitmap;
+  vi.mocked(useStudioImage).mockImplementation((artifactId: string | null) => (
+    { bitmap: artifactId ? picture : null, error: null, reload: vi.fn() } as ReturnType<typeof useStudioImage>
+  ));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  vi.mocked(useStudioSession).mockReturnValue({
+    steps: [], previewArtifactId: null, sessionId: null, busy: false, error: null, apply: vi.fn(),
+  } as unknown as ReturnType<typeof useStudioSession>);
+  const studio = (source: string | null) => (
+    <QueryClientProvider client={client}>
+      <StudioView sourceArtifactId={source} onOpenArtifact={vi.fn()} onOpenWorkflows={vi.fn()} onClose={vi.fn()} />
+    </QueryClientProvider>
+  );
+  const view = render(studio(null));
+  vi.mocked(useStudioSession).mockReturnValue({
+    steps: [{ artifactId: "art-1", instruction: null, generationIdentity: null }],
+    previewArtifactId: null, sessionId: "chat-studio", busy: false, error: null, apply: vi.fn(),
+  } as unknown as ReturnType<typeof useStudioSession>);
+  view.rerender(studio("art-1"));
+
+  expect(screen.getByRole("button", { name: "Brush a selection" })).toHaveAttribute("aria-pressed", "true");
+  expect(selection()).toBe(drawn);
+  expect(screen.getByRole("textbox")).toHaveValue("make the sky warmer");
+});
+
+it("writes the draft down when the page is hidden, before anything unmounts", () => {
+  open(new QueryClient({ defaultOptions: { queries: { retry: false } } }));
+  work();
+  expect(savedStudioDraftWords("chat-studio")).toBeNull();
+
+  Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true });
+  try {
+    document.dispatchEvent(new Event("visibilitychange"));
+  } finally {
+    delete (document as { visibilityState?: unknown }).visibilityState;
+  }
+
+  expect(savedStudioDraftWords("chat-studio")).toEqual({ instruction: "make the sky warmer", selectedId: null });
 });
