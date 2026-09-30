@@ -136,3 +136,51 @@ describe("what changed", () => {
     expect(hook.current.layer).toEqual({ image: before, reveal: 0 });
   });
 });
+
+describe("comparing with another picture from the strip", () => {
+  function original(artifactId: string): StudioStep {
+    return { messageId: "source", artifactId, instruction: "", beforeArtifactId: null, isSource: true, generationIdentity: null };
+  }
+
+  it("offers the strip's other pictures once each and compares with the one chosen, for that result only", () => {
+    const pictures: Record<string, ImageBitmap> = { "art-1": bitmap(4, 1), "art-2": bitmap(4, 1), "art-3": bitmap(4, 1) };
+    vi.mocked(useStudioImage).mockImplementation((artifactId: string | null) => ({
+      bitmap: artifactId ? pictures[artifactId] ?? null : null,
+      error: null,
+      reload: vi.fn(),
+    }));
+    const first = { ...result("art-2", "art-1"), instruction: "calmer water" };
+    const second = { ...result("art-3", "art-1"), instruction: "calmer water" };
+    // An edit can give back exactly the picture it was given, so art-2 is in the strip twice.
+    const steps = [original("art-1"), first, second, { ...result("art-2", "art-3"), messageId: "again" }];
+    const { result: hook, rerender } = renderHook(
+      ({ step }) => useStudioCompare(step, shown, false, steps),
+      { initialProps: { step: second } },
+    );
+
+    // Neither the result itself nor what it was made from, which is already the default.
+    expect(hook.current.controls.choices).toEqual([{ artifactId: "art-2", label: "Step 1 · calmer water" }]);
+    expect(hook.current.layer?.image).toBe(pictures["art-1"]);
+
+    act(() => hook.current.controls.onAgainst("art-2"));
+    expect(hook.current.controls.against).toBe("art-2");
+    expect(hook.current.layer?.image).toBe(pictures["art-2"]);
+
+    rerender({ step: first });
+    expect(hook.current.controls.against).toBeNull();
+    expect(hook.current.layer?.image).toBe(pictures["art-1"]);
+
+    rerender({ step: second });
+    act(() => hook.current.controls.onAgainst(null));
+    expect(hook.current.controls.against).toBeNull();
+    expect(hook.current.layer?.image).toBe(pictures["art-1"]);
+  });
+
+  it("offers nothing to compare the original with", () => {
+    const steps = [original("art-1"), result("art-2", "art-1")];
+    const { result: hook } = renderHook(() => useStudioCompare(original("art-1"), shown, false, steps));
+
+    expect(hook.current.controls.choices).toEqual([]);
+    expect(hook.current.layer).toBeNull();
+  });
+});
