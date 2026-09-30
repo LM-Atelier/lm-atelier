@@ -16,7 +16,7 @@ import type { StudioPictureForChat } from "./useStudioPictureForChat";
 import { StudioExtendHandles } from "./StudioExtendHandles";
 import { StudioResultCount } from "./StudioResultCount";
 import { StudioRunningEdit } from "./StudioRunningEdit";
-import { StudioApplyFailure } from "./StudioApplyFailure";
+import { StudioApplyFailure, type StudioSentWords } from "./StudioApplyFailure";
 import { studioApplyProgress } from "./studioApplyProgress";
 import { StudioRecipes } from "./StudioRecipes";
 import { StudioSelectionControls } from "./StudioSelectionTool";
@@ -105,6 +105,8 @@ export function StudioView({
   const [selectedId, setSelectedId] = useState<string | null>(draft.selectedId);
   const [instruction, setInstruction] = useState(draft.instruction);
   const [selectionError, setSelectionError] = useState<string | null>(null);
+  // Cleared from the box once an edit is taken, and offered back if it fails.
+  const [sentWords, setSentWords] = useState<StudioSentWords | null>(null);
   const [results, setResults] = useState(1);
   // Replacing a background or a subject is two applies; the studio stays busy in between.
   const cutoutEdit = useStudioBackground(sessionId, session, apply, setSelectionError);
@@ -271,7 +273,7 @@ export function StudioView({
         <ErrorCallout message={((error ?? keep.error) as Error).message} />
       )}
       {/* One reason at a time: a cutout that failed says what it left as it was. */}
-      {selectionError ? <ErrorCallout message={selectionError} /> : <StudioApplyFailure session={session} />}
+      {selectionError ? <ErrorCallout message={selectionError} /> : <StudioApplyFailure session={session} sent={sentWords} onWordsBack={setInstruction} />}
       <div className="studio-layout">
         <StudioToolRail
           active={tools.kind}
@@ -364,7 +366,10 @@ export function StudioView({
                   tools, instruction, recipe, activeTool, isolateTool, current, bitmap, results, apply,
                   cutout: cutoutEdit,
                   setError: setSelectionError,
-                  onAccepted: () => {
+                  onAccepted: (accepted) => {
+                    // Read with care: an answer without its request cannot be offered back, and must not stop the rest.
+                    const requestId = accepted?.user_message?.id;
+                    if (requestId) setSentWords({ requestId, words: instruction });
                     setInstruction("");
                     setSelectedId(null);
                   },

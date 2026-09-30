@@ -8,7 +8,7 @@ import { studioApplyPlan, studioOffersResults } from "./studioApplyPlan";
 import { renderLightMap } from "./studioLightMap";
 import { cloneMask, encodeMaskPng, feather, isEmpty, type MaskRaster } from "./studioMasks";
 import { toolUsesMask, type StudioToolState } from "./studioToolState";
-import type { EditTemplate, StudioToolCapability } from "./types";
+import type { EditTemplate, StudioToolCapability, TurnAccepted } from "./types";
 import type { useStudioBackground } from "./useStudioBackground";
 import type { StudioStep, useStudioSession } from "./useStudioSession";
 
@@ -33,8 +33,9 @@ export type StudioApplyEdit = {
   cutout: Pick<ReturnType<typeof useStudioBackground>, "start">;
   /** Says why nothing was sent, or with null that nothing is wrong any longer. */
   setError: (message: string | null) => void;
-  /** Runs once the edit's turn is taken. */
-  onAccepted: () => void;
+  /** Runs once the edit is taken, with its turn when it was sent as one: a replaced
+   * background or subject is two turns, and says only that both were taken. */
+  onAccepted: (accepted?: TurnAccepted) => void;
 };
 
 export function applyStudioEdit(edit: StudioApplyEdit): void {
