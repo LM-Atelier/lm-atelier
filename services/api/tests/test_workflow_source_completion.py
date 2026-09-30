@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -18,7 +19,7 @@ from test_workflow_package_import_endpoint import _object_info, _ui_graph
 from test_workflow_package_install_plans import configure_runtime
 from test_workflow_revision_review import reviewed_runtime as reviewed_runtime
 
-from local_lm import models
+from local_lm import models, workflow_asset_downloads
 from local_lm.db import SessionLocal
 from local_lm.processes import ProcessSupervisor
 from local_lm.scheduler import JobClaim
@@ -428,7 +429,9 @@ async def test_repeated_cancellation_retains_the_primary_lease_until_compilation
         await asyncio.gather(completion, waiting, return_exceptions=True)
 
 
-@pytest.mark.parametrize("change", ["none", "bytes", "request", "undeclared"])
+@pytest.mark.parametrize(
+    "change", ["none", "bytes", "request", "undeclared", "legacy-none", "legacy-request"]
+)
 async def test_source_completion_requires_its_exact_downloaded_declared_resource(
     client: AsyncClient,
     app: FastAPI,
@@ -439,6 +442,9 @@ async def test_source_completion_requires_its_exact_downloaded_declared_resource
     from local_lm.model_manifests import inspect_repository_metadata
     from local_lm.model_planner import persist_install_plan, resolve_install_plan
 
+    legacy_contract = change.startswith("legacy-")
+    if legacy_contract:
+        change = change.removeprefix("legacy-")
     content = safetensors_bytes(["lora_unet_block.lora_down.weight"])
     digest = hashlib.sha256(content).hexdigest()
     filename = "detail.safetensors"
@@ -453,6 +459,11 @@ async def test_source_completion_requires_its_exact_downloaded_declared_resource
         comfy_paths={"loras": "."},
         auxiliary_kind="lora",
     )
+    if legacy_contract:
+        planned = replace(planned, resolver_version="install-resolver-v9")
+        monkeypatch.setattr(
+            workflow_asset_downloads, "INSTALL_RESOLVER_VERSION", "install-resolver-v9"
+        )
     with SessionLocal() as session:
         plan = persist_install_plan(session, planned)
         session.commit()
@@ -539,6 +550,10 @@ async def test_source_completion_requires_its_exact_downloaded_declared_resource
     monkeypatch.setattr(manager, "_download_file", download_file)
     accepted = await client.post(f"/api/workflow-install-offers/{source.json()['id']}/install")
     assert accepted.status_code == 202, accepted.text
+    if legacy_contract:
+        monkeypatch.setattr(
+            workflow_asset_downloads, "INSTALL_RESOLVER_VERSION", "install-resolver-v10"
+        )
     job_id = accepted.json()[0]["id"]
     await asyncio.gather(*list(manager._offer_tasks.values()))
     original_publish = services.events.publish

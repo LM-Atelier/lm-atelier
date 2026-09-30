@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from install_plan_fixture import bind_install_plan_identity
 from sqlalchemy import MetaData, Table, func, select
 from test_workflow_install_offer_api import DIGEST, REFERENCE, _graph, _offer_payload
 from test_workflow_revision_review import reviewed_runtime as reviewed_runtime
@@ -75,35 +76,37 @@ async def _created_offer(app: FastAPI, client: AsyncClient, monkeypatch: pytest.
     compiled = compile_comfyui_ui_graph(graph, await object_info())
     with SessionLocal() as session:
         session.add(
-            InstallPlan(
-                id="accepted-plan",
-                provider="civitai",
-                remote_id="101",
-                revision="202",
-                role="image",
-                engine="comfyui",
-                plan_hash=hashlib.sha256(b"accepted-plan").hexdigest(),
-                resolver_version=INSTALL_RESOLVER_VERSION,
-                compatibility="supported",
-                artifacts_json=[
-                    {
-                        "path": REFERENCE,
-                        "kind": "lora",
-                        "target_folder": "loras",
-                        "size_bytes": 17,
-                        "sha256": DIGEST,
-                        "required": True,
-                        "reuse": "download",
-                        "source_version_id": "202",
-                        "source_file_id": "301",
-                    }
-                ],
-                runtime_contract_json={
-                    "auxiliary_kind": "lora",
-                    "comfy_paths": {"loras": "styles"},
-                },
-                activation_probe_json={},
-                status="planned",
+            bind_install_plan_identity(
+                InstallPlan(
+                    id="accepted-plan",
+                    provider="civitai",
+                    remote_id="101",
+                    revision="202",
+                    role="image",
+                    engine="comfyui",
+                    plan_hash=hashlib.sha256(b"accepted-plan").hexdigest(),
+                    resolver_version=INSTALL_RESOLVER_VERSION,
+                    compatibility="supported",
+                    artifacts_json=[
+                        {
+                            "path": REFERENCE,
+                            "kind": "lora",
+                            "target_folder": "loras",
+                            "size_bytes": 17,
+                            "sha256": DIGEST,
+                            "required": True,
+                            "reuse": "download",
+                            "source_version_id": "202",
+                            "source_file_id": "301",
+                        }
+                    ],
+                    runtime_contract_json={
+                        "auxiliary_kind": "lora",
+                        "comfy_paths": {"loras": "styles"},
+                    },
+                    activation_probe_json={},
+                    status="planned",
+                )
             )
         )
         session.commit()

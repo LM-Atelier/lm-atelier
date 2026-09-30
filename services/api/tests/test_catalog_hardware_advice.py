@@ -243,9 +243,11 @@ async def test_http_preflight_keeps_advice_and_explicit_model_choice(
     assert payload["selected_files"] == ["chosen.gguf"]
     assert payload["expected_sha256"] == {"chosen.gguf": "b" * 64}
     assert payload["revision"] == "a" * 40
-    assert payload["can_install"]
+    assert payload["can_install"] is (size is not None)
     assert payload["install_plan"]["id"]
-    assert payload["install_plan"]["compatibility"] == "supported"
+    assert payload["install_plan"]["compatibility"] == (
+        "supported" if size is not None else "unsupported"
+    )
     advice = payload["hardware_fit"]
     assert advice["status"] == status
     assert advice["basis"] == ("calculated" if size is not None else "unknown")
@@ -253,6 +255,10 @@ async def test_http_preflight_keeps_advice_and_explicit_model_choice(
     if size is None:
         assert advice["resources"] == []
         assert advice["settings"] == []
+        assert payload["install_plan"]["failure_code"] == "preflight_blocked"
+        evidence = next(check for check in payload["checks"] if check["id"] == "install-evidence")
+        assert evidence["status"] == "block"
+        assert "immutable file evidence" in evidence["detail"]
     else:
         assert len(advice["resources"]) == 1
         assert advice["resources"][0]["capacity_bytes"] == 32 * _GIB
@@ -279,4 +285,7 @@ async def test_http_preflight_keeps_advice_and_explicit_model_choice(
         },
     )
     assert changed.status_code == 422
-    assert "immutable plan" in changed.json()["detail"]
+    assert changed.json()["code"] == "download-request-invalid"
+    assert ("immutable plan" if size is not None else "immutable file evidence") in changed.json()[
+        "detail"
+    ]

@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from install_plan_fixture import bind_install_plan_identity
 from sqlalchemy import func, select
 from test_workflow_asset_install_api import _seed_plan, _ui_graph
 
@@ -174,6 +175,7 @@ async def test_preflight_counts_every_required_artifact_once(client: AsyncClient
                 "size_bytes": 23,
             },
         ]
+        bind_install_plan_identity(remote)
         session.commit()
     plan = await _created(client, payload)
     assert plan["total_download_bytes"] == 40
@@ -299,6 +301,7 @@ async def test_preflight_refuses_unrepresentable_generated_asset_identity(
         remote = session.get(models.InstallPlan, "plan_lora")
         assert remote is not None
         remote.artifacts_json = [{**remote.artifacts_json[0], "path": filename}]
+        bind_install_plan_identity(remote)
         session.commit()
     payload["ui_graph"] = _ui_graph(filename)
     payload["selections"][0].update(reference_filename=filename, artifact_path=filename)

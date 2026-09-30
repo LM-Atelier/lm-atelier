@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 from httpx2 import AsyncClient
+from install_plan_fixture import bind_install_plan_identity
 from sqlalchemy import func, select
 from test_workflow_revision_review import _GRAPH
 from test_workflow_revision_review import reviewed_runtime as reviewed_runtime
@@ -281,8 +282,6 @@ _LORA_API_GRAPH = {"1": {"class_type": "LoraLoader", "inputs": {"lora_name": _RE
 def _seed_model_plan() -> str:
     """The model download the offer selects - a resource plan, not trust or a digest."""
 
-    import hashlib
-
     from local_lm.model_planner import INSTALL_RESOLVER_VERSION
     from local_lm.models import InstallPlan
 
@@ -294,7 +293,6 @@ def _seed_model_plan() -> str:
             revision="202",
             role="image",
             engine="comfyui",
-            plan_hash=hashlib.sha256(b"plan_contract_acceptance").hexdigest(),
             resolver_version=INSTALL_RESOLVER_VERSION,
             compatibility="supported",
             artifacts_json=[
@@ -314,7 +312,7 @@ def _seed_model_plan() -> str:
             activation_probe_json={},
             status="planned",
         )
-        session.add(plan)
+        session.add(bind_install_plan_identity(plan))
         session.commit()
         return plan.id
 

@@ -133,6 +133,7 @@ def accepted_workflow_offer_downloads(
             or install_plan_download_request(
                 plan,
                 allow_activated=True,
+                allow_legacy_contract=True,
                 allow_downloading=job.status in {"queued", "running", "paused"},
             ).model_dump(mode="json")
             != request_json

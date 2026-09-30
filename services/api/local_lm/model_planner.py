@@ -14,6 +14,12 @@ from .adapters.contracts import ADAPTER_CONTRACT_VERSION
 from .auxiliary_assets import AUXILIARY_ASSET_KINDS
 from .comfy_templates import COMFY_TEMPLATE_COMPILER_VERSION
 from .domain import new_id
+from .install_plan_contract_v1 import (
+    INSTALL_RESOLVER_VERSION as INSTALL_RESOLVER_VERSION,
+)
+from .install_plan_contract_v1 import (
+    install_plan_contract_hash,
+)
 from .install_plan_types import InstallPlanFailureCode
 from .model_edit_capability import combined_instruction_edit_capability
 from .model_manifests import InspectedComponent, ModelManifestInspection, comfy_folder_for_kind
@@ -21,7 +27,6 @@ from .models import InstallPlan, ModelComponentManifest
 from .profile_use_cases import merge_provider_use_case_metadata
 from .provider_descriptions import merge_provider_descriptions
 
-INSTALL_RESOLVER_VERSION = "install-resolver-v9"
 ACTIVATION_PROBE_VERSION = "activation-probe-v2"
 LAUNCH_CONTRACT_VERSION = "worker-launch-v1"
 
@@ -309,6 +314,7 @@ class ResolvedInstallPlan:
     activation_probe: dict[str, Any]
     failure_code: InstallPlanFailureCode | None = None
     failure_reason: str | None = None
+    resolver_version: str = INSTALL_RESOLVER_VERSION
 
     def blocked(self, code: InstallPlanFailureCode, reason: str) -> ResolvedInstallPlan:
         """Return the same immutable artifact plan with activation disabled."""
@@ -327,6 +333,7 @@ class ResolvedInstallPlan:
             activation_probe={**self.activation_probe, "required": False},
             failure_code=code,
             failure_reason=reason,
+            resolver_version=self.resolver_version,
         )
 
     @property
@@ -343,10 +350,9 @@ class ResolvedInstallPlan:
             "artifacts": [artifact.as_dict() for artifact in self.artifacts],
             "runtime_contract": self.runtime_contract,
             "activation_probe": self.activation_probe,
-            "resolver_version": INSTALL_RESOLVER_VERSION,
+            "resolver_version": self.resolver_version,
         }
-        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
-        return hashlib.sha256(encoded.encode()).hexdigest()
+        return install_plan_contract_hash(payload)
 
 
 def _declared_trigger_words(selected_files: list[dict[str, Any]]) -> list[str]:
@@ -617,7 +623,7 @@ def resolve_install_plan(
     if workflow_reference_kind:
         activation_probe.update({"kind": "workflow_asset", "required": False})
 
-    return ResolvedInstallPlan(
+    resolved = ResolvedInstallPlan(
         provider=provider,
         remote_id=remote_id,
         revision=revision,
@@ -632,6 +638,22 @@ def resolve_install_plan(
         failure_code=failure_code,
         failure_reason=failure_reason,
     )
+
+    if resolved.compatibility == "supported":
+        from .workflow_asset_downloads import (
+            WorkflowAssetDownloadError,
+            install_plan_download_request,
+        )
+
+        try:
+            install_plan_download_request(_install_plan_record(resolved, "preflight"))
+        except WorkflowAssetDownloadError:
+            return resolved.blocked(
+                "preflight_blocked",
+                "The provider did not supply complete immutable file evidence. "
+                "Exact revisions, file sizes and SHA-256 hashes are required.",
+            )
+    return resolved
 
 
 def _workflow_asset_failure(
@@ -757,8 +779,15 @@ def persist_install_plan(session: Session, resolved: ResolvedInstallPlan) -> Ins
         existing.failure_code = resolved.failure_code
         existing.failure_reason = resolved.failure_reason
         return existing
-    plan = InstallPlan(
-        id=new_id("plan"),
+    plan = _install_plan_record(resolved, new_id("plan"))
+    session.add(plan)
+    session.flush()
+    return plan
+
+
+def _install_plan_record(resolved: ResolvedInstallPlan, identifier: str) -> InstallPlan:
+    return InstallPlan(
+        id=identifier,
         provider=resolved.provider,
         remote_id=resolved.remote_id,
         revision=resolved.revision,
@@ -767,7 +796,7 @@ def persist_install_plan(session: Session, resolved: ResolvedInstallPlan) -> Ins
         architecture=resolved.architecture,
         family=resolved.family,
         plan_hash=resolved.plan_hash,
-        resolver_version=INSTALL_RESOLVER_VERSION,
+        resolver_version=resolved.resolver_version,
         compatibility=resolved.compatibility,
         artifacts_json=[artifact.as_dict() for artifact in resolved.artifacts],
         runtime_contract_json=resolved.runtime_contract,
@@ -776,6 +805,3 @@ def persist_install_plan(session: Session, resolved: ResolvedInstallPlan) -> Ins
         failure_code=resolved.failure_code,
         failure_reason=resolved.failure_reason,
     )
-    session.add(plan)
-    session.flush()
-    return plan

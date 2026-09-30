@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from install_plan_fixture import bind_install_plan_identity
 
 from local_lm.comfy_workflow_packages import WorkflowAssetReference
 from local_lm.model_planner import INSTALL_RESOLVER_VERSION
@@ -21,32 +22,33 @@ _PATH = "detail.safetensors"
 
 
 def _plan(provider: str, revision: str) -> InstallPlan:
-    return InstallPlan(
-        id="plan_detail",
-        provider=provider,
-        remote_id="101" if provider == "civitai" else "example/detail",
-        revision=revision,
-        role="image",
-        engine="comfyui",
-        plan_hash="b" * 64,
-        resolver_version=INSTALL_RESOLVER_VERSION,
-        compatibility="supported",
-        artifacts_json=[
-            {
-                "path": _PATH,
-                "kind": "lora",
-                "target_folder": "loras",
-                "size_bytes": 17,
-                "sha256": "a" * 64,
-                "required": True,
-                "reuse": "download",
-                "source_version_id": revision if provider == "civitai" else None,
-                "source_file_id": "301" if provider == "civitai" else None,
-            }
-        ],
-        runtime_contract_json={"auxiliary_kind": "lora", "comfy_paths": {"loras": "."}},
-        activation_probe_json={},
-        status="planned",
+    return bind_install_plan_identity(
+        InstallPlan(
+            id="plan_detail",
+            provider=provider,
+            remote_id="101" if provider == "civitai" else "example/detail",
+            revision=revision,
+            role="image",
+            engine="comfyui",
+            resolver_version=INSTALL_RESOLVER_VERSION,
+            compatibility="supported",
+            artifacts_json=[
+                {
+                    "path": _PATH,
+                    "kind": "lora",
+                    "target_folder": "loras",
+                    "size_bytes": 17,
+                    "sha256": "a" * 64,
+                    "required": True,
+                    "reuse": "download",
+                    "source_version_id": revision if provider == "civitai" else None,
+                    "source_file_id": "301" if provider == "civitai" else None,
+                }
+            ],
+            runtime_contract_json={"auxiliary_kind": "lora", "comfy_paths": {"loras": "."}},
+            activation_probe_json={},
+            status="planned",
+        )
     )
 
 
@@ -102,6 +104,7 @@ def test_workflow_companion_requires_a_hugging_face_commit(revision: str) -> Non
         source_revision=revision,
         source_path="weights/detail.safetensors",
     )
+    bind_install_plan_identity(plan)
     with pytest.raises(WorkflowAssetDownloadError) as caught:
         install_plan_download_request(plan)
     assert caught.value.code == "incomplete_artifact_source"

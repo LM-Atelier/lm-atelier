@@ -192,6 +192,10 @@ from .gguf import (
 )
 from .hardware import collect_system_info
 from .image_edit_strength import STRENGTH_MODE_PARAMETER
+from .install_plan_contract_v1 import (
+    LEGACY_INSTALL_RESOLVER_VERSION,
+    stored_install_plan_identity_matches,
+)
 from .lora_suggestions import lora_suggestion_scope, suggested_loras
 from .message_window_v1 import DEFAULT_WINDOW, MAX_WINDOW
 from .model_manifests import (
@@ -717,6 +721,7 @@ from .workflow_asset_bindings import (
 from .workflow_asset_downloads import (
     WorkflowAssetDownloadError,
     compose_workflow_asset_download_requests,
+    install_plan_download_request,
 )
 from .workflow_compatibility import (
     WorkflowSelectionInvalid,
@@ -7110,7 +7115,25 @@ async def resolve_catalog_preflight(
             validate_resolved(resolved)
         plan = persist_install_plan(session, resolved)
         session.commit()
-        return result.model_copy(update={"install_plan": plan, "file_variants": variants})
+        checks = result.checks
+        if result.can_install and resolved.compatibility != "supported":
+            checks = [
+                *checks,
+                CatalogPreflightCheck(
+                    id="install-evidence",
+                    label="File verification",
+                    status="block",
+                    detail=resolved.failure_reason or "The install plan could not be verified.",
+                ),
+            ]
+        return result.model_copy(
+            update={
+                "install_plan": plan,
+                "file_variants": variants,
+                "checks": checks,
+                "can_install": result.can_install and resolved.compatibility == "supported",
+            }
+        )
 
     if payload.auxiliary_kind:
         auxiliary_folder = comfy_folder_for_kind(payload.auxiliary_kind)
@@ -7455,8 +7478,30 @@ def _planned_download_fields(plan: InstallPlan | None) -> dict[str, Any]:
         raise ValueError("install plan is no longer active; run the install check again")
     if plan.compatibility != "supported":
         raise ValueError(plan.failure_reason or "this model layout is unsupported")
-    if plan.resolver_version != INSTALL_RESOLVER_VERSION:
+    if plan.resolver_version == INSTALL_RESOLVER_VERSION:
+        request = install_plan_download_request(plan).model_dump(mode="json")
+        return {
+            key: request[key]
+            for key in (
+                "remote_id",
+                "revision",
+                "role",
+                "engine",
+                "allow_patterns",
+                "expected_sha256",
+                "file_sources",
+                "source_remote_id",
+                "comfy_paths",
+                "workflow_template_id",
+                "workflow_template_sha256",
+                "auxiliary_kind",
+                "workflow_asset_kind",
+            )
+        }
+    if plan.resolver_version != LEGACY_INSTALL_RESOLVER_VERSION:
         raise ValueError("install contract changed; run the install check again")
+    if not stored_install_plan_identity_matches(plan):
+        raise ValueError("install plan evidence changed; run the install check again")
     runtime = plan.runtime_contract_json
     if (
         runtime.get("workflow_template_id")
