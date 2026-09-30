@@ -438,6 +438,15 @@ class _TurnSettingLayers:
 
 
 @dataclass(frozen=True, slots=True)
+class _TurnWorkflow:
+    activation: dict[str, str] | None
+    role: str
+    use_case_admission: AdmittedWorkflowUseCasePreset | None
+    use_case_receipt: dict[str, Any] | None
+    fields: list[SettingField]
+
+
+@dataclass(frozen=True, slots=True)
 class _PromptBatchExecutionContext:
     profile: ModelProfile | None
     model_selection: dict[str, Any]
@@ -1912,33 +1921,13 @@ class ConversationOrchestrator:
             )
         ):
             raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
-        workflow_activation = _queued_workflow_activation(session, workflow_revision)
-        role = self._role_for_operation(plan.operation)
-        engine = (
-            profile.engine if profile else workflow_revision.engine if workflow_revision else None
+        turn_workflow = await self._turn_workflow(
+            session, plan.operation, profile, workflow_revision, use_case_execution
         )
-        engine_fields = await self.engines.settings_for_role(role, engine=engine)
-        use_case_admission = (
-            use_case_execution.admit(session, workflow_revision, fields=engine_fields)
-            if use_case_execution
-            else None
-        )
-        use_case_receipt = (
-            capture_workflow_use_case_preset(use_case_admission).model_dump(mode="json")
-            if use_case_admission
-            else None
-        )
-        fields = workflow_settings(
-            engine_fields,
-            workflow_revision.input_schema_json if workflow_revision else None,
-            # A workflow can carry the insertion point the run reads and
-            # declare no setting for it. Without this the validator below has
-            # no field for a stack the panel does offer, and a turn that chose
-            # one is refused as unsupported.
-            accepts_added_loras=(
-                workflow_revision is not None and revision_accepts_added_loras(workflow_revision)
-            ),
-        )
+        workflow_activation = turn_workflow.activation
+        use_case_admission = turn_workflow.use_case_admission
+        use_case_receipt = turn_workflow.use_case_receipt
+        fields = turn_workflow.fields
         # A selection is not a tunable, so it is not in the workflow's setting
         # schema and the generic validator would refuse it as unknown - which
         # is what made every masked edit fail with "unsupported settings: mask".
@@ -2505,33 +2494,7 @@ class ConversationOrchestrator:
             chat.active_head_message_id = assistant_messages[-1].id
         assistant_message = assistant_messages[0]
 
-        model_provenance: dict[str, Any] | None = None
-        if profile and profile.model_install_id:
-            install = session.get(ModelInstall, profile.model_install_id)
-            source = (
-                session.get(ModelSource, install.source_id)
-                if install and install.source_id
-                else None
-            )
-            if install:
-                model_provenance = {
-                    "profile_id": profile.id,
-                    "profile_name": profile.name,
-                    "profile_use_case": profile.use_case,
-                    "install_id": install.id,
-                    "engine": install.engine,
-                    "local_path": install.local_path,
-                    "size_bytes": install.size_bytes,
-                    "manifest": install.manifest_json,
-                    "source": {
-                        "provider": source.provider,
-                        "remote_id": source.remote_id,
-                        "revision": source.revision,
-                        "metadata": source.metadata_json,
-                    }
-                    if source
-                    else None,
-                }
+        model_provenance = self._model_provenance(session, profile)
         workflow_provenance = _workflow_execution_witness(
             session,
             workflow_revision,
@@ -2539,15 +2502,7 @@ class ConversationOrchestrator:
             model_selection,
         )
 
-        transcript_sequence = (
-            session.scalar(
-                select(WorkPlan.transcript_sequence)
-                .where(WorkPlan.chat_id == chat.id)
-                .order_by(WorkPlan.transcript_sequence.desc())
-                .limit(1)
-            )
-            or 0
-        ) + 1
+        transcript_sequence = self._next_transcript_sequence(session, chat)
         queue_class = "interactive_compute" if plan.operation == Operation.TEXT else "media_compute"
         work_plan = WorkPlan(
             chat_id=chat.id,
@@ -3220,34 +3175,14 @@ class ConversationOrchestrator:
                     raise ValueError(
                         f"Ordered step {index + 1} is not ready: " + "; ".join(dependency_errors)
                     )
-            workflow_activation = _queued_workflow_activation(session, workflow_revision)
-            role = self._role_for_operation(operation)
-            engine = (
-                profile.engine
-                if profile
-                else workflow_revision.engine
-                if workflow_revision
-                else None
+            turn_workflow = await self._turn_workflow(
+                session, operation, profile, workflow_revision, use_case_execution
             )
-            engine_fields = await self.engines.settings_for_role(role, engine=engine)
-            use_case_admission = (
-                use_case_execution.admit(session, workflow_revision, fields=engine_fields)
-                if use_case_execution
-                else None
-            )
-            use_case_receipt = (
-                capture_workflow_use_case_preset(use_case_admission).model_dump(mode="json")
-                if use_case_admission
-                else None
-            )
-            fields = workflow_settings(
-                engine_fields,
-                workflow_revision.input_schema_json if workflow_revision else None,
-                accepts_added_loras=(
-                    workflow_revision is not None
-                    and revision_accepts_added_loras(workflow_revision)
-                ),
-            )
+            workflow_activation = turn_workflow.activation
+            role = turn_workflow.role
+            use_case_admission = turn_workflow.use_case_admission
+            use_case_receipt = turn_workflow.use_case_receipt
+            fields = turn_workflow.fields
             setting_layers = self.resolve_turn_setting_layers(
                 session,
                 chat,
@@ -3431,15 +3366,7 @@ class ConversationOrchestrator:
         if activate_branch:
             chat.active_head_message_id = assistant_messages[-1].id
 
-        transcript_sequence = (
-            session.scalar(
-                select(WorkPlan.transcript_sequence)
-                .where(WorkPlan.chat_id == chat.id)
-                .order_by(WorkPlan.transcript_sequence.desc())
-                .limit(1)
-            )
-            or 0
-        ) + 1
+        transcript_sequence = self._next_transcript_sequence(session, chat)
         work_plan = WorkPlan(
             chat_id=chat.id,
             idempotency_key=request.idempotency_key,
@@ -10385,25 +10312,14 @@ class ConversationOrchestrator:
         if revision is None or revision.id != revision_id:
             raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
         model_selection = {**model_selection, "compatibility_only": True}
-        activation = _queued_workflow_activation(session, revision)
-        role = self._role_for_operation(Operation.TEXT_TO_IMAGE)
-        engine = profile.engine if profile else revision.engine
-        engine_fields = await self.engines.settings_for_role(role, engine=engine)
-        use_case_admission = (
-            use_case_execution.admit(session, revision, fields=engine_fields)
-            if use_case_execution
-            else None
+        turn_workflow = await self._turn_workflow(
+            session, Operation.TEXT_TO_IMAGE, profile, revision, use_case_execution
         )
-        use_case_receipt = (
-            capture_workflow_use_case_preset(use_case_admission).model_dump(mode="json")
-            if use_case_admission
-            else None
-        )
-        fields = workflow_settings(
-            engine_fields,
-            revision.input_schema_json,
-            accepts_added_loras=revision_accepts_added_loras(revision),
-        )
+        activation = turn_workflow.activation
+        role = turn_workflow.role
+        use_case_admission = turn_workflow.use_case_admission
+        use_case_receipt = turn_workflow.use_case_receipt
+        fields = turn_workflow.fields
         request_fields = [field for field in fields if field.scope != "load"]
         project = session.get(Project, chat.project_id) if chat.project_id else None
         default_preset, project_preset, chat_preset, turn_preset = self._presets_for_turn(
@@ -10989,6 +10905,50 @@ class ConversationOrchestrator:
             turn=turn_settings,
         )
 
+    async def _turn_workflow(
+        self,
+        session: Session,
+        operation: Operation,
+        profile: ModelProfile | None,
+        workflow_revision: WorkflowRevision | None,
+        use_case_execution: WorkflowUseCaseExecution | None,
+    ) -> _TurnWorkflow:
+        """Fix what a chosen workflow revision brings to a turn, the same way for every builder.
+
+        The activation is frozen first, so a revision whose dependencies are not
+        ready is refused before its engine's fields are asked for. The recipe is
+        admitted against the role's own fields, before the workflow's controls
+        are laid over them.
+        """
+        activation = _queued_workflow_activation(session, workflow_revision)
+        role = self._role_for_operation(operation)
+        engine = (
+            profile.engine if profile else workflow_revision.engine if workflow_revision else None
+        )
+        engine_fields = await self.engines.settings_for_role(role, engine=engine)
+        use_case_admission = (
+            use_case_execution.admit(session, workflow_revision, fields=engine_fields)
+            if use_case_execution
+            else None
+        )
+        use_case_receipt = (
+            capture_workflow_use_case_preset(use_case_admission).model_dump(mode="json")
+            if use_case_admission
+            else None
+        )
+        fields = workflow_settings(
+            engine_fields,
+            workflow_revision.input_schema_json if workflow_revision else None,
+            # A workflow can carry the insertion point the run reads and
+            # declare no setting for it. Without this the settings validator
+            # has no field for a stack the panel does offer, and a turn that
+            # chose one is refused as unsupported.
+            accepts_added_loras=(
+                workflow_revision is not None and revision_accepts_added_loras(workflow_revision)
+            ),
+        )
+        return _TurnWorkflow(activation, role, use_case_admission, use_case_receipt, fields)
+
     def resolve_turn_setting_layers(
         self,
         session: Session,
@@ -11230,6 +11190,19 @@ class ConversationOrchestrator:
                 metadata_json=progress_metadata,
             )
         ]
+
+    @staticmethod
+    def _next_transcript_sequence(session: Session, chat: Chat) -> int:
+        """The place in the chat's transcript a new plan takes: after every earlier plan."""
+        return (
+            session.scalar(
+                select(WorkPlan.transcript_sequence)
+                .where(WorkPlan.chat_id == chat.id)
+                .order_by(WorkPlan.transcript_sequence.desc())
+                .limit(1)
+            )
+            or 0
+        ) + 1
 
     @staticmethod
     def _model_provenance(
