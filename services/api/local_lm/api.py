@@ -2747,6 +2747,7 @@ async def studio_capabilities(
         lighting_adapter_ids=orchestrator.installed_lighting_adapter_ids(session),
         matting_workflow_ids=orchestrator.installed_matting_workflow_ids(session),
         reference_workflow_ids=orchestrator.installed_reference_edit_workflow_ids(session),
+        waiting_input_schemas=orchestrator.waiting_edit_input_schemas(session),
     )
     return StudioCapabilityReport(
         tools=[
