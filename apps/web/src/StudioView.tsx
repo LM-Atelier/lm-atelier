@@ -191,13 +191,20 @@ export function StudioView({
   const adjustedPreview = useAdjustedPreview(bitmap, sourcePixels, tools.kind === "adjust" ? tools.adjustments : null);
   const captionPreview = useCaptionPreview(bitmap, tools.kind === "caption" ? tools.caption : null);
   const straightenPreview = useStraightenPreview(bitmap, tools.kind === "transform" ? tools.straightenDegrees : null);
+  const wordsWritten = tools.caption.text.trim() !== "";
   // The pointer tool is rebuilt whenever the mode or brush changes; each one
-  // is a cheap wrapper over the shared raster, never a copy of it.
+  // is a cheap wrapper over the shared raster, never a copy of it. A drag of
+  // the words is kept in the state, so moving them never rebuilds it.
   const pointerTool = useMemo(
-    () => toolFor(tools, sourcePixels, (corners) => dispatch({ type: "set-perspective", corners })),
+    () => toolFor(tools, sourcePixels, (corners) => dispatch({ type: "set-perspective", corners }), {
+      hold: () => dispatch({ type: "hold-caption" }),
+      drag: (by) => dispatch({ type: "drag-caption", by }),
+      letGo: () => dispatch({ type: "let-go-caption" }),
+      cancel: () => dispatch({ type: "cancel-caption" }),
+    }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [tools.kind, tools.brushRadius, tools.cropShape, tools.perspective, tools.mask, tools.selectionMode,
-      tools.colorTolerance, sourcePixels],
+      tools.colorTolerance, sourcePixels, wordsWritten],
   );
   useEffect(() => {
     if (!bitmap) return;

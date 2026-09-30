@@ -28,12 +28,22 @@ import {
   magicWandTool,
   paintBucketTool,
   RectTool,
+  type ImagePoint,
   type PointerTool,
 } from "./studioTools";
 
 import type { LightDirection } from "./studioLightMap";
 import { NEUTRAL_ADJUSTMENTS } from "./studioAdjustments";
-import { DEFAULT_CAPTION, type StudioCaption } from "./studioCaption";
+import {
+  boundedShift,
+  CAPTION_TURN_LIMIT,
+  CaptionMoveTool,
+  DEFAULT_CAPTION,
+  draggedShift,
+  type CaptionDrag,
+  type CaptionShift,
+  type StudioCaption,
+} from "./studioCaption";
 import type { StudioColorAdjustments, StudioPerspective, StudioToolKind } from "./types";
 
 export type { StudioToolKind } from "./types";
@@ -128,6 +138,8 @@ export type StudioToolState = {
   readonly paintOpacity: number;
   /** Words being written to add; shown on the canvas until they are added. */
   readonly caption: StudioCaption;
+  /** Where the words were when the drag moving them took hold; null while none is under way. */
+  readonly captionHold: CaptionShift | null;
   /** The picture a replaced subject is taken from. */
   readonly subjectPicture: File | null;
   readonly mask: MaskRaster | null;
@@ -163,6 +175,11 @@ export type StudioToolAction =
   | { type: "set-paint-color"; color: string }
   | { type: "set-paint-opacity"; opacity: number }
   | { type: "set-caption"; patch: Partial<StudioCaption> }
+  /** A drag of the words: taking hold, how far it has come in the picture's pixels, and its end. */
+  | { type: "hold-caption" }
+  | { type: "drag-caption"; by: ImagePoint }
+  | { type: "let-go-caption" }
+  | { type: "cancel-caption" }
   | { type: "set-subject-picture"; picture: File | null }
   | { type: "select-subject"; mask: MaskRaster }
   | { type: "image-changed"; width: number; height: number }
@@ -200,6 +217,7 @@ export function initialToolState(): StudioToolState {
     paintColor: "#000000",
     paintOpacity: 100,
     caption: DEFAULT_CAPTION,
+    captionHold: null,
     subjectPicture: null,
     mask: null,
     maskVersion: 0,
@@ -308,8 +326,28 @@ export function studioToolReducer(
     case "set-caption": {
       const caption = { ...state.caption, ...action.patch };
       caption.sizePercent = clamp(caption.sizePercent, 2, 30);
+      // Choosing a place puts the words there afresh, so choosing the one they
+      // were dragged from puts them back.
+      caption.shift = "anchor" in action.patch ? { x: 0, y: 0 } : boundedShift(caption.shift);
+      caption.turn = Number.isFinite(caption.turn)
+        ? clamp(caption.turn, -CAPTION_TURN_LIMIT, CAPTION_TURN_LIMIT)
+        : state.caption.turn;
       return /^#[0-9a-f]{6}$/.test(caption.color) ? { ...state, caption } : state;
     }
+    case "hold-caption":
+      return { ...state, captionHold: state.caption.shift };
+    case "drag-caption":
+      // Always from where the drag took hold, so the words go exactly as far as
+      // the pointer has, however many steps it was reported in.
+      return state.captionHold && state.mask
+        ? { ...state, caption: { ...state.caption, shift: draggedShift(state.captionHold, action.by, state.mask) } }
+        : state;
+    case "let-go-caption":
+      return { ...state, captionHold: null };
+    case "cancel-caption":
+      return state.captionHold
+        ? { ...state, caption: { ...state.caption, shift: state.captionHold }, captionHold: null }
+        : state;
     // Kept when the picture changes: the new subject can go into another one.
     case "set-subject-picture":
       return { ...state, subjectPicture: action.picture };
@@ -327,6 +365,7 @@ export function studioToolReducer(
         perspective: null,
         // Added words are in the new picture; keeping them would draw them twice.
         caption: { ...state.caption, text: "" },
+        captionHold: null,
         mask: createMask(action.width, action.height),
         maskVersion: state.maskVersion + 1,
         history: new MaskHistory(),
@@ -427,12 +466,14 @@ function replaceWordsInstruction(state: StudioToolState): string {
  * `pixels` is the picture as RGBA bytes, needed only by the magic wand. Without
  * them the wand has nothing to compare, so it gives no tool rather than one
  * that selects by guesswork. `onCorners` hears where a perspective
- * correction's corners are dragged to.
+ * correction's corners are dragged to, and `words` hears a drag of the words
+ * being written; without it they are not dragged.
  */
 export function toolFor(
   state: StudioToolState,
   pixels: Uint8ClampedArray | null = null,
   onCorners: (corners: StudioPerspective) => void = () => {},
+  words: CaptionDrag | null = null,
 ): PointerTool | null {
   if (!state.mask) return null;
   const selected = state.selectionMode === "add" ? 255 : 0;
@@ -494,12 +535,15 @@ export function toolFor(
     // A crop is one box: drawing another replaces it rather than adding to it.
     case "crop":
       return new RectTool(state.mask, true, cropRatio(state.cropShape, state.mask));
+    // Words being written are dragged where they should sit; none of the
+    // picture is selected. Before there are any, a drag moves the view.
+    case "caption":
+      return words && state.caption.text.trim() ? new CaptionMoveTool(words) : null;
     // A resize is two numbers for the whole picture, a canvas change two and
     // a place, and an adjustment four.
     case "resize":
     case "canvas":
     case "adjust":
-    case "caption":
       return null;
   }
 }
@@ -513,9 +557,9 @@ export function toolFor(
  * and Undo left the start of every brush stroke behind.
  */
 export function snapshotBeforeGesture(state: StudioToolState): void {
-  // Moving a perspective correction's corner leaves the selection alone,
-  // so it keeps no step for Undo to return to.
-  if (state.mask && state.kind !== "perspective") state.history.push(state.mask);
+  // Moving a perspective correction's corner or the words being written
+  // leaves the selection alone, so it keeps no step for Undo to return to.
+  if (state.mask && state.kind !== "perspective" && state.kind !== "caption") state.history.push(state.mask);
 }
 
 function clamp(value: number, low: number, high: number): number {

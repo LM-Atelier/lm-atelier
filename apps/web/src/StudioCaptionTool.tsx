@@ -1,7 +1,7 @@
 import { Captions } from "lucide-react";
 import { useState } from "react";
 import { StudioAnchorPicker } from "./StudioAnchorPicker";
-import { drawCaption, type CaptionFont, type StudioCaption } from "./studioCaption";
+import { CAPTION_TURN_LIMIT, drawCaption, type CaptionFont, type StudioCaption } from "./studioCaption";
 import { PAINT_SWATCHES } from "./studioPaint";
 
 const FONTS: Array<{ font: CaptionFont; label: string }> = [
@@ -14,9 +14,10 @@ const FONTS: Array<{ font: CaptionFont; label: string }> = [
  *
  * The words are drawn at the picture's own size in a typeface the app ships,
  * shown on the canvas as they are written, and that same drawing is what is
- * added, so the preview is the result. They sit at one of nine places with a
- * margin from the edges, and an outline in the opposite shade or a soft
- * shadow keeps them readable over a busy picture.
+ * added, so the preview is the result. They start at one of nine places with
+ * a margin from the edges, can be dragged anywhere on the picture from there
+ * and turned about their middle, and an outline in the opposite shade or a
+ * soft shadow keeps them readable over a busy picture.
  */
 export function StudioCaptionTool({
   caption,
@@ -131,12 +132,26 @@ export function StudioCaptionTool({
         <span>Shadow</span>
       </label>
       <StudioAnchorPicker value={caption.anchor} label="Where the words sit" onChange={(anchor) => onChange({ anchor })} />
+      <label className="studio-adjust-slider">
+        <span>
+          <strong>Turn</strong> {caption.turn}°
+        </span>
+        <input
+          type="range"
+          min={-CAPTION_TURN_LIMIT}
+          max={CAPTION_TURN_LIMIT}
+          step={1}
+          value={caption.turn}
+          aria-label="Turn"
+          onChange={(event) => onChange({ turn: Number(event.target.value) })}
+        />
+      </label>
       <small role={refusal ? "alert" : undefined}>
         {refusal ??
           (busy || preparing
             ? "Applying…"
             : written
-              ? "The picture shows the words as they will be added."
+              ? "The picture shows the words as they will be added. Drag them on the picture to move them."
               : "Write the words to add, then choose where they sit.")}
       </small>
       <button
