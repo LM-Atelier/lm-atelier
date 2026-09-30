@@ -79,7 +79,9 @@ describe("workflow family usage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Archive family" }));
     await waitFor(() => expect(api.workflowFamilyRemovalImpact).toHaveBeenCalledTimes(2));
     const dialog = screen.getByRole("dialog", { name: "Archive Family a?" });
-    expect(within(dialog).getByRole("button", { name: /^Archive(?: it)?$/ })).toBeDisabled();
+    const confirm = within(dialog).getByRole("button", { name: /^Archive(?: it)?$/ });
+    expect(confirm).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(confirm);
     expect(api.updateWorkflowFamily).not.toHaveBeenCalled();
   });
 
