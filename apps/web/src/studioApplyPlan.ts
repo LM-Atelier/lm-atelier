@@ -148,6 +148,44 @@ export function studioOffersResults(kind: string): boolean {
   return !ONE_RESULT_TOOLS.includes(kind);
 }
 
+/** Tools that ask for no words of their own. */
+const WORDLESS_TOOLS: readonly string[] = ["enhance", "extend", "text", "relight", "isolate", "subject"];
+/** Tools that run on the workflow the report names for them, whatever the chat has chosen. */
+const OWN_WORKFLOW_TOOLS: readonly string[] = ["relight", "isolate", "subject"];
+
+/** Whether the tool in hand has everything its edit needs.
+ *
+ * Enhance asks for no words: the whole picture is the subject and the size is
+ * the whole instruction. Text takes its words from its own fields, and without
+ * a box it would change the whole picture; Remove, too, needs a marked part as
+ * well as its words. Isolate asks for nothing and runs only the workflow the
+ * report names. Replacing a subject needs the picture it comes from, and runs
+ * only the workflows the report names, so the studio's own choice never matters.
+ */
+export function studioToolReady(
+  tools: StudioToolState,
+  instruction: string,
+  recipe: EditTemplate | null,
+  selectionCoverage: number,
+  activeTool: StudioToolCapability | undefined,
+  isolateTool: StudioToolCapability | undefined,
+  /** Why the chat's own workflow choice cannot run, if it cannot. */
+  workflowUnavailable: string | null,
+): boolean {
+  const ownWorkflow = Boolean(activeTool?.workflow_revision_id);
+  if (tools.kind === "extend" && !Object.values(tools.margins).some(Boolean)) return false;
+  if (tools.kind === "text" && (!tools.newWords.trim() || selectionCoverage === 0)) return false;
+  if (tools.kind === "remove" && selectionCoverage === 0) return false;
+  if ((tools.kind === "isolate" || tools.kind === "background") && !ownWorkflow) return false;
+  if (tools.kind === "subject" && (!ownWorkflow || !isolateTool?.workflow_revision_id || !tools.subjectPicture)) {
+    return false;
+  }
+  if (!WORDLESS_TOOLS.includes(tools.kind) && !instruction.trim()) return false;
+  if (recipe !== null && recipe.mask_mode !== "none" && selectionCoverage === 0) return false;
+  return !workflowUnavailable || Boolean(recipe?.workflow_revision_id)
+    || (OWN_WORKFLOW_TOOLS.includes(tools.kind) && ownWorkflow);
+}
+
 /** What the apply button says for the tool in hand.
  *
  * The tool's own verb where it has one, "Apply to selection" once a selecting

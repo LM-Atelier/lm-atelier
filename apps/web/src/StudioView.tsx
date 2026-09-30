@@ -24,10 +24,10 @@ import { StudioToolOptions } from "./StudioToolOptions";
 import { StudioToolRail } from "./StudioToolRail";
 import { StudioWorkflowSelector } from "./StudioWorkflowSelector";
 import { artifactSource } from "./messageMedia";
-import { cloneMask, coverage, encodeMaskPng, feather, isEmpty, type MaskRaster } from "./studioMasks";
-import { studioApplyLabel, studioApplyPlan, studioOffersResults } from "./studioApplyPlan";
+import { coverage } from "./studioMasks";
+import { studioApplyLabel, studioToolReady } from "./studioApplyPlan";
+import { applyStudioEdit } from "./studioApplyEdit";
 import { studioStepAncestors, studioStepOrigin } from "./studioStepOrigin";
-import { renderLightMap } from "./studioLightMap";
 import { studioRecipeSource } from "./studioRecipeSource";
 import { readSourcePixels } from "./studioSourcePixels";
 import { useAdjustedPreview } from "./useAdjustedPreview";
@@ -55,10 +55,6 @@ import type { EditTemplate, GenerationIdentity } from "./types";
 const EXACT_EDITS: readonly string[] = [
   "transform", "perspective", "crop", "resize", "canvas", "adjust", "blur", "paint", "caption",
 ];
-const SELECTION_NOT_PREPARED =
-  "The selection could not be prepared, so nothing was sent. Try again, or clear the selection to edit the whole picture.";
-const LIGHT_MAP_NOT_PREPARED =
-  "The light map could not be drawn in this browser, so nothing was sent.";
 
 /** The Image Studio: a canvas-first editing surface, not a conversation.
  *
@@ -198,33 +194,8 @@ export function StudioView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bitmap]);
   useEffect(() => draft.track({ artifactId: currentArtifactId, tools, instruction, selectedId }));
-  // Enhance asks for no words: the whole picture is the subject and
-  // the size is the whole instruction. Text takes its words from its
-  // own fields, and without a box it would change the whole picture;
-  // Remove, too, needs a marked part as well as its words.
-  // Isolate asks for nothing and runs only the workflow the report names.
-  // Replacing a subject needs the picture it comes from, and runs only the
-  // workflows the report names, so the studio's own choice never matters.
-  const applyDisabled =
-    unchecked !== null ||
-    (tools.kind === "extend" && !Object.values(tools.margins).some(Boolean)) ||
-    (tools.kind === "text" && (!tools.newWords.trim() || selectionCoverage === 0)) ||
-    (tools.kind === "remove" && selectionCoverage === 0) ||
-    (tools.kind === "isolate" && !activeTool?.workflow_revision_id) ||
-    (tools.kind === "background" && !activeTool?.workflow_revision_id) ||
-    (tools.kind === "subject" &&
-      (!activeTool?.workflow_revision_id || !isolateTool?.workflow_revision_id || !tools.subjectPicture)) ||
-    (!["enhance", "extend", "text", "relight", "isolate", "subject"].includes(tools.kind) &&
-      !instruction.trim()) ||
-    busy ||
-    !current ||
-    (recipe !== null && recipe.mask_mode !== "none" && selectionCoverage === 0) ||
-    Boolean(unavailable) ||
-    Boolean(
-      workflowUnavailable &&
-        !recipe?.workflow_revision_id &&
-        !(["relight", "isolate", "subject"].includes(tools.kind) && activeTool?.workflow_revision_id),
-    );
+  const applyDisabled = unchecked !== null || busy || !current || Boolean(unavailable)
+    || !studioToolReady(tools, instruction, recipe, selectionCoverage, activeTool, isolateTool, workflowUnavailable);
   if (!sourceArtifactId) {
     return (
       <div className="page-view studio-view">
@@ -387,61 +358,15 @@ export function StudioView({
               aria-disabled={applyDisabled}
               onClick={() => {
                 if (applyDisabled || !current) return;
-                const selection = toolUsesMask(tools.kind) && tools.mask && !isEmpty(tools.mask)
-                  ? tools.mask
-                  : null;
-                const plan = studioApplyPlan(tools, instruction, recipe, activeTool, isolateTool);
-                if (plan.cutout) {
-                  // Drawn at the picture's own size, so the subject lines up with it.
-                  if (!bitmap) return;
-                  setSelectionError(null);
-                  cutoutEdit.start(plan, current.artifactId, { width: bitmap.width, height: bitmap.height }, () => {
+                applyStudioEdit({
+                  tools, instruction, recipe, activeTool, isolateTool, current, bitmap, results, apply,
+                  cutout: cutoutEdit,
+                  setError: setSelectionError,
+                  onAccepted: () => {
                     setInstruction("");
                     setSelectedId(null);
-                  });
-                  return;
-                }
-                const send = (mask: Blob | null, secondPicture?: Blob) => {
-                  apply(
-                    plan.words,
-                    current.artifactId,
-                    mask
-                      ? {
-                          blob: mask,
-                          featherPx: tools.featherPx,
-                          // A recipe made on everything outside a selection changes that again.
-                          invert: recipe?.mask_mode === "inverse",
-                          ...(plan.blendSelection ? { apply: "blend" as const } : {}),
-                        }
-                      : undefined,
-                    plan.settings,
-                    plan.workflowRevisionId,
-                    () => {
-                      setInstruction("");
-                      setSelectedId(null);
-                    },
-                    secondPicture,
-                    undefined,
-                    studioOffersResults(tools.kind) ? results : 1,
-                  );
-                };
-                setSelectionError(null);
-                if (plan.sendsLightMap) {
-                  // Drawn at the picture's own size, so the map and the picture line up.
-                  if (!bitmap) return;
-                  // Drawing can throw as well as come back empty; both refuse the same way.
-                  void renderLightMap(bitmap.width, bitmap.height, tools.lightDirection).then(
-                    (map) => (map ? send(null, map) : setSelectionError(LIGHT_MAP_NOT_PREPARED)),
-                    () => setSelectionError(LIGHT_MAP_NOT_PREPARED),
-                  );
-                } else if (selection) {
-                  // A selection that cannot be encoded is refused, never sent as an
-                  // edit of the whole picture it was drawn to protect.
-                  void encodeMaskPng(plan.blendSelection ? softened(selection, tools.featherPx) : selection).then(
-                    (mask) => (mask ? send(mask) : setSelectionError(SELECTION_NOT_PREPARED)),
-                    () => setSelectionError(SELECTION_NOT_PREPARED),
-                  );
-                } else send(null);
+                  },
+                });
               }}
             >
               {studioApplyLabel(tools, busy, selectionCoverage)}
@@ -458,17 +383,6 @@ export function StudioView({
       />
     </div>
   );
-}
-
-/** A copy of the selection with softened edges, leaving the one on the canvas as drawn.
- *
- * Text is placed back through its box, and a hard edge would show wherever the
- * edited picture differs slightly from the source just outside the words.
- */
-function softened(mask: MaskRaster, featherPx: number): MaskRaster {
-  const copy = cloneMask(mask);
-  if (featherPx > 0) feather(copy, featherPx);
-  return copy;
 }
 
 function StudioGenerationPreview({ artifactId }: { artifactId: string }) {
