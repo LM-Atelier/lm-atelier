@@ -127,6 +127,15 @@ export function studioApplyPlan(
   };
 }
 
+/** Tools a count does not suit: finding a subject gives the same answer every
+ * time, and replacing a background or a subject is two edits, one after the other. */
+const ONE_RESULT_TOOLS: readonly string[] = ["isolate", "background", "subject"];
+
+/** Whether an Apply of this model tool can ask for several results. */
+export function studioOffersResults(kind: string): boolean {
+  return !ONE_RESULT_TOOLS.includes(kind);
+}
+
 /** What the apply button says for the tool in hand.
  *
  * The tool's own verb where it has one, "Apply to selection" once a selecting
