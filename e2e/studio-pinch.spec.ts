@@ -56,9 +56,13 @@ async function openPicture(page: Page, name: string, left: string, right: string
     mimeType: "image/png",
     buffer: await widePicture(page, left, right),
   });
-  const stage = await box(page.locator(".studio-canvas"));
-  const fit = Math.min(stage.width / 200, stage.height / 100);
-  await expect.poll(async () => Math.round((await box(picture(page))).width)).toBe(Math.round(200 * fit));
+  // The stage is measured again on every look: it settles as the panel beside
+  // it fills in, and a size read before then is one the picture never reaches.
+  await expect.poll(async () => {
+    const stage = await box(page.locator(".studio-canvas"));
+    const fit = Math.min(stage.width / 200, stage.height / 100);
+    return Math.round((await box(picture(page))).width) === Math.round(200 * fit);
+  }).toBe(true);
   return box(picture(page));
 }
 
@@ -77,6 +81,8 @@ test("carries the picture with a drag the whole way", async ({ page }) => {
   await page.mouse.move(x + 60, y + 40, { steps: 6 });
   await page.mouse.up();
 
+  // The last move is drawn on a later frame, which a loaded machine can take a moment to reach.
+  await expect.poll(async () => (await box(picture(page))).x - start.x).toBeCloseTo(60, 0);
   const moved = await box(picture(page));
   expect(moved.x - start.x).toBeCloseTo(60, 0);
   expect(moved.y - start.y).toBeCloseTo(40, 0);
@@ -107,6 +113,7 @@ test.describe("on a touch screen", () => {
     for (let step = 1; step <= 8; step += 1) await fingers("touchMove", apart(40 + 5 * step));
     await fingers("touchEnd", []);
 
+    await expect.poll(async () => (await box(picture(page))).width / start.width).toBeCloseTo(2, 1);
     const zoomed = await box(picture(page));
     expect(zoomed.width / start.width).toBeCloseTo(2, 1);
     apart(80).forEach((finger, index) => {
