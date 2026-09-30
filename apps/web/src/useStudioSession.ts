@@ -44,8 +44,9 @@ type StudioApply = {
    * rather than running its words against whatever is current. */
   workflowRevisionId?: string;
   /** A picture sent after the source: the light map the relight tool draws,
-   * or the picture a replaced subject is taken from. */
-  secondPicture?: Blob;
+   * or the picture a replaced subject is taken from, as bytes or as the
+   * artifact of one the library already holds. */
+  secondPicture?: Blob | string;
   /** Pictures already in the library sent after the source, as an edit made
    * again sends the ones it was given the first time. */
   alsoGiven?: string[];
@@ -172,14 +173,17 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
       };
       // Unlike a selection, this is content the workflow reads as a picture, so
       // it goes in the inputs, after the source it belongs to. A picture the
-      // person chose keeps its own name and type; a drawn one is a PNG.
-      const second = secondPicture
-        ? await api.upload(
-            secondPicture instanceof File
-              ? secondPicture
-              : new File([secondPicture], "studio-light-map.png", { type: "image/png" }),
-          )
-        : null;
+      // person chose keeps its own name and type; a drawn one is a PNG; one
+      // the library already holds is named, not uploaded again.
+      const second = typeof secondPicture === "string"
+        ? { id: secondPicture }
+        : secondPicture
+          ? await api.upload(
+              secondPicture instanceof File
+                ? secondPicture
+                : new File([secondPicture], "studio-light-map.png", { type: "image/png" }),
+            )
+          : null;
       const inputs = second ? [artifactId, second.id] : [artifactId, ...(alsoGiven ?? [])];
       // One result is the request as it always was, with no count in it.
       return results && results > 1
@@ -257,7 +261,7 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
       settings?: Record<string, unknown>,
       workflowRevisionId?: string,
       onAccepted?: (accepted: TurnAccepted) => void,
-      secondPicture?: Blob,
+      secondPicture?: Blob | string,
       /** Runs when the turn is refused, so a caller waiting on it can stop. */
       onRefused?: () => void,
       results?: number,

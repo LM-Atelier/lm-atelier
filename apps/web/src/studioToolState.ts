@@ -48,6 +48,10 @@ import type { StudioColorAdjustments, StudioCurvePoint, StudioPerspective, Studi
 
 export type { StudioToolKind } from "./types";
 
+/** The picture a replaced subject is taken from: one chosen from the computer,
+ * or one the library already holds, named by its artifact. */
+export type StudioSubjectPicture = File | { artifactId: string; name: string };
+
 /** The tools whose drawing is part of the request.
  *
  * Enhance and Extend are not among them: the whole picture is their subject,
@@ -141,7 +145,7 @@ export type StudioToolState = {
   /** Where the words were when the drag moving them took hold; null while none is under way. */
   readonly captionHold: CaptionShift | null;
   /** The picture a replaced subject is taken from. */
-  readonly subjectPicture: File | null;
+  readonly subjectPicture: StudioSubjectPicture | null;
   readonly mask: MaskRaster | null;
   /** Bumped whenever the raster changes so the canvas repaints its tint. */
   readonly maskVersion: number;
@@ -181,7 +185,7 @@ export type StudioToolAction =
   | { type: "drag-caption"; by: ImagePoint }
   | { type: "let-go-caption" }
   | { type: "cancel-caption" }
-  | { type: "set-subject-picture"; picture: File | null }
+  | { type: "set-subject-picture"; picture: StudioSubjectPicture | null }
   | { type: "select-subject"; mask: MaskRaster }
   | { type: "image-changed"; width: number; height: number }
   /** Everything as it stood when the Studio was left, for the same picture. */

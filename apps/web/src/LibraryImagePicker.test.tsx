@@ -80,3 +80,21 @@ it("cancels the in-flight page when the picker closes", async () => {
   view.unmount();
   expect(signal?.aborted).toBe(true);
 });
+
+it("takes one picture when asked for one: choosing another replaces it", async () => {
+  vi.mocked(api.artifacts).mockResolvedValueOnce(firstPage);
+  const confirm = vi.fn();
+  render(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      <LibraryImagePicker title="Choose one" confirmLabel="Use this picture" single onConfirm={confirm} onClose={vi.fn()} />
+    </QueryClientProvider>,
+  );
+
+  fireEvent.click(await screen.findByRole("button", { name: "Image 4" }));
+  fireEvent.click(screen.getByRole("button", { name: "Image 7" }));
+
+  expect(screen.getByRole("button", { name: "Image 4" })).toHaveAttribute("aria-pressed", "false");
+  expect(screen.getByRole("button", { name: "Image 7" })).toHaveAttribute("aria-pressed", "true");
+  fireEvent.click(screen.getByRole("button", { name: "Use this picture" }));
+  expect(confirm).toHaveBeenCalledWith([firstPage[7]]);
+});

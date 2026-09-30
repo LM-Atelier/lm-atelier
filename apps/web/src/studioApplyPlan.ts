@@ -4,7 +4,7 @@
  * it can be checked without drawing anything.
  */
 
-import { defaultInstruction, type StudioToolState } from "./studioToolState";
+import { defaultInstruction, type StudioSubjectPicture, type StudioToolState } from "./studioToolState";
 import type { EditTemplate, StudioToolCapability } from "./types";
 
 export type StudioApplyPlan = {
@@ -22,10 +22,18 @@ export type StudioApplyPlan = {
     workflowRevisionId?: string;
     /** Everything around the subject, or the subject itself. */
     redraw: "surroundings" | "subject";
-    /** The picture a new subject is taken from, sent after the source. */
-    reference?: Blob;
+    /** The picture a new subject is taken from, sent after the source: its
+     * bytes, or the artifact when the library already holds it. */
+    reference?: Blob | string;
   };
 };
+
+/** What goes with the edit for a new subject's picture: a chosen file's bytes,
+ * or the artifact of one the library already holds, which is not sent again. */
+function subjectReference(picture: StudioSubjectPicture | null): Blob | string | undefined {
+  if (!picture) return undefined;
+  return picture instanceof File ? picture : picture.artifactId;
+}
 
 export function studioApplyPlan(
   tools: StudioToolState,
@@ -102,7 +110,7 @@ export function studioApplyPlan(
         words: defaultInstruction({ ...tools, kind: "isolate" }),
         workflowRevisionId: isolateTool?.workflow_revision_id ?? undefined,
         redraw: "subject",
-        reference: tools.subjectPicture ?? undefined,
+        reference: subjectReference(tools.subjectPicture),
       },
     };
   }
