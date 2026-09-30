@@ -63,6 +63,17 @@ export function PromptTemplateImageSetupPicker({
     if (value.mode !== "fixed") return;
     onChange({ ...value, lora_policy: { mode: "fixed", stack } });
   };
+  /** One strength of one LoRA, as its box reads. An emptied box, or one holding
+   * something that is not a number, is not a strength: the stack keeps the last
+   * one, as the workflow LoRA rows do, rather than carrying no strength into a
+   * template the server would refuse. */
+  const setStrength = (index: number, field: "model_strength" | "clip_strength", entered: number) => {
+    if (!Number.isFinite(entered)) return;
+    updateStack(value.mode === "fixed" && value.lora_policy.mode === "fixed"
+      ? value.lora_policy.stack.map((item, itemIndex) => itemIndex !== index ? item
+        : field === "model_strength" ? { ...item, model_strength: entered } : { ...item, clip_strength: entered })
+      : []);
+  };
 
   return (
     <section className="prompt-template-image-setup" aria-labelledby="quick-image-setup-heading">
@@ -139,8 +150,8 @@ export function PromptTemplateImageSetupPicker({
                   </label>
                   <details>
                     <summary>Adjust strength</summary>
-                    <label>Model strength<input aria-label={`Template LoRA ${index + 1} model strength`} type="number" min={-4} max={4} step="0.05" value={lora.model_strength} onChange={(event) => updateStack(value.lora_policy.mode === "fixed" ? value.lora_policy.stack.map((item, itemIndex) => itemIndex === index ? { ...item, model_strength: event.target.valueAsNumber } : item) : [])} /></label>
-                    <label>CLIP strength<input aria-label={`Template LoRA ${index + 1} CLIP strength`} type="number" min={-4} max={4} step="0.05" value={lora.clip_strength} onChange={(event) => updateStack(value.lora_policy.mode === "fixed" ? value.lora_policy.stack.map((item, itemIndex) => itemIndex === index ? { ...item, clip_strength: event.target.valueAsNumber } : item) : [])} /></label>
+                    <label>Model strength<input aria-label={`Template LoRA ${index + 1} model strength`} type="number" min={-4} max={4} step="0.05" value={lora.model_strength} onChange={(event) => setStrength(index, "model_strength", event.target.valueAsNumber)} /></label>
+                    <label>CLIP strength<input aria-label={`Template LoRA ${index + 1} CLIP strength`} type="number" min={-4} max={4} step="0.05" value={lora.clip_strength} onChange={(event) => setStrength(index, "clip_strength", event.target.valueAsNumber)} /></label>
                   </details>
                   <button type="button" className="secondary compact-button" onClick={() => updateStack(value.lora_policy.mode === "fixed" ? value.lora_policy.stack.filter((_, itemIndex) => itemIndex !== index) : [])}>Remove LoRA</button>
                 </fieldset>
