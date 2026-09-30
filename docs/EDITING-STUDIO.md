@@ -133,7 +133,9 @@ names what was done rather than a model:
 come at a quality you choose, from best quality down to smallest file, trading
 detail for size; PNG keeps every pixel. Exports come out upright and keep the
 picture's color profile; JPEG has no transparency, so transparent parts come out
-white.
+white. An export in another format holds the picture and its color profile and
+nothing else: text the stored file carried, such as the words a picture was made
+with, and camera details are left out. As stored is the file exactly as kept.
 
 **Use in chat** attaches the picture on screen to a chat's next message, as a
 reference. It goes to the chat the studio was opened from, or else the chat
