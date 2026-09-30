@@ -1,5 +1,5 @@
 import { Library } from "lucide-react";
-import { useState } from "react";
+import { useId, useState } from "react";
 import { LibraryImagePicker } from "./LibraryImagePicker";
 import type { StudioSubjectPicture } from "./studioToolState";
 
@@ -8,7 +8,9 @@ import type { StudioSubjectPicture } from "./studioToolState";
  * The new subject's picture is either chosen from the computer or taken from
  * the library, such as an earlier result; one from the library is sent as the
  * picture it already is, not uploaded again. Choosing either replaces the
- * other.
+ * other. The subject's name is asked for as well, and Replace subject waits
+ * for it: the redraw draws what it is told to take, and unnamed it takes the
+ * second picture's backdrop too.
  */
 export function StudioSubjectPanel({
   picture,
@@ -22,6 +24,7 @@ export function StudioSubjectPanel({
   onInstructionChange: (instruction: string) => void;
 }) {
   const [browsing, setBrowsing] = useState(false);
+  const nameHint = useId();
   return (
     <div className="studio-tool-options">
       <small>
@@ -48,15 +51,20 @@ export function StudioSubjectPanel({
       {picture && <small>{picture.name}</small>}
       <label>
         <span>
-          <strong>What to take from it</strong> (optional)
+          <strong>Name of the new subject</strong>
         </span>
         <input
           type="text"
           value={instruction}
           placeholder="e.g. the dog"
+          aria-required="true"
+          aria-describedby={nameHint}
           onChange={(event) => onInstructionChange(event.target.value)}
         />
       </label>
+      <small id={nameHint}>
+        A few words for what to take from the picture. Replace subject waits for them.
+      </small>
       {browsing && (
         <LibraryImagePicker
           title="Picture of the new subject"

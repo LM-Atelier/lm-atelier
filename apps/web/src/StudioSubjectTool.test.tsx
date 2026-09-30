@@ -112,6 +112,10 @@ async function openWith(subject: Partial<StudioToolCapability>) {
   await screen.findByRole("button", { name: `Select part of the picture - ${BRUSH_REASON}` });
 }
 
+function nameTheSubject(name: string) {
+  fireEvent.change(screen.getByLabelText("Name of the new subject"), { target: { value: name } });
+}
+
 function choosePicture() {
   const picture = new File(["neutral"], "new-subject.png", { type: "image/png" });
   fireEvent.change(screen.getByLabelText("Picture of the new subject"), {
@@ -128,11 +132,12 @@ afterEach(() => {
 it("cuts the subject out on Isolate's workflow, then redraws only its place from the picture", async () => {
   await openWith({});
   const replace = screen.getByRole("button", { name: "Replace subject" });
-  // The report is in and the words are optional: only the picture is missing.
+  // The report is in: only the picture and the new subject's name are missing.
   expect(replace).toHaveAttribute("aria-disabled", "true");
   const picture = choosePicture();
   expect(screen.getByText("new-subject.png")).toBeInTheDocument();
-  fireEvent.change(screen.getByLabelText(/What to take from it/), { target: { value: "the dog" } });
+  expect(replace).toHaveAttribute("aria-disabled", "true");
+  nameTheSubject("the dog");
   await waitFor(() => expect(replace).toHaveAttribute("aria-disabled", "false"));
   fireEvent.click(replace);
   await waitFor(() => expect(apply).toHaveBeenCalledTimes(1));
@@ -189,6 +194,7 @@ it("takes the new subject from a picture the library holds, and sends that pictu
   fireEvent.click(screen.getByRole("button", { name: "Use this picture" }));
 
   expect(screen.getByText("blue-cube.png")).toBeInTheDocument();
+  nameTheSubject("the blue cube");
   const replace = screen.getByRole("button", { name: "Replace subject" });
   await waitFor(() => expect(replace).toHaveAttribute("aria-disabled", "false"));
   fireEvent.click(replace);
@@ -202,10 +208,22 @@ it("takes the new subject from a picture the library holds, and sends that pictu
   expect(apply.mock.calls[1][2]).toMatchObject({ apply: "blend", references: 1 });
 });
 
-it("words the redraw for the whole subject when nothing is named", async () => {
+it("waits for the new subject's name before it replaces anything, and redraws what is named", async () => {
   await openWith({});
   choosePicture();
   const replace = screen.getByRole("button", { name: "Replace subject" });
+  const name = screen.getByLabelText("Name of the new subject");
+  expect(name).toHaveAttribute("aria-required", "true");
+  expect(name).toHaveAccessibleDescription(/Replace subject waits for them/);
+  // A picture alone, or a name of spaces, is not enough to run on.
+  expect(replace).toHaveAttribute("aria-disabled", "true");
+  fireEvent.click(replace);
+  nameTheSubject("   ");
+  expect(replace).toHaveAttribute("aria-disabled", "true");
+  fireEvent.click(replace);
+  expect(apply).not.toHaveBeenCalled();
+
+  nameTheSubject("the blue cube");
   await waitFor(() => expect(replace).toHaveAttribute("aria-disabled", "false"));
   fireEvent.click(replace);
   await waitFor(() => expect(apply).toHaveBeenCalledTimes(1));
@@ -214,7 +232,7 @@ it("words the redraw for the whole subject when nothing is named", async () => {
   await waitFor(() => expect(apply).toHaveBeenCalledTimes(2));
 
   expect(apply.mock.calls[1][0]).toBe(
-    "Replace the subject with the one in the second picture. Keep everything around it exactly as it is.",
+    "Replace the subject with the blue cube from the second picture. Keep everything around it exactly as it is.",
   );
 });
 
