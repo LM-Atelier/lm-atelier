@@ -102,27 +102,31 @@ names what was done rather than a model:
   filled with transparency, white or black.
 - **Adjust light and color** has brightness, contrast, highlights, shadows,
   whites, blacks, saturation, vibrance, warmth, tint, sharpness, vignette and
-  grain sliders, shown on the picture as they move. **Auto** sets warmth, tint,
-  brightness and contrast from the picture itself. It takes a color cast out of
-  the near-grey middle tones, brings the middle of the picture's brightness
-  toward a middle grey, and widens a picture that uses only part of the range,
-  each within a moderate reach, and leaves the other sliders as they were. A
-  **look** (Vivid, Soft, Warm, Cool, Mono, Faded, Dramatic or Film) sets every
-  slider to a named starting point. Either way the sliders show what was set,
-  and any of them can still be moved before applying. Vibrance richens muted
-  colors more than vivid ones, so a picture livens without its brightest colors
-  clipping. Whites and blacks set the picture's white and black: above zero,
-  whites brightens the lightest tones into white and blacks lifts black to a
-  dark grey, for a faded finish; below zero, whites dims white to a light grey
-  and blacks deepens the darkest tones into black. Warmth balances blue against
-  amber, and tint green against magenta. Sharpness crisps edges above zero and
-  softens them below; where a picture is transparent, colors hidden there play
-  no part. The vignette darkens the edges above zero and lightens them below,
-  most at the corners, and leaves the middle as it was. Grain, from zero up,
-  adds film-like grain: each pixel moves a little up or down, the same on all
-  three colors, so the picture keeps its light and a grey stays grey. The
-  preview is the result: the browser and the app work the adjustment out the
-  same way.
+  grain sliders and a tone curve, shown on the picture as they move. **Auto**
+  sets warmth, tint, brightness and contrast from the picture itself. It takes a
+  color cast out of the near-grey middle tones, brings the middle of the
+  picture's brightness toward a middle grey, and widens a picture that uses only
+  part of the range, each within a moderate reach, and leaves the other sliders
+  as they were. A **look** (Vivid, Soft, Warm, Cool, Mono, Faded, Dramatic or
+  Film) sets every slider to a named starting point. Either way the sliders show
+  what was set, and any of them can still be moved before applying. Vibrance
+  richens muted colors more than vivid ones, so a picture livens without its
+  brightest colors clipping. Whites and blacks set the picture's white and
+  black: above zero, whites brightens the lightest tones into white and blacks
+  lifts black to a dark grey, for a faded finish; below zero, whites dims white
+  to a light grey and blacks deepens the darkest tones into black. The **tone
+  curve** below the sliders, drawn over the picture's own spread of brightness,
+  bends its tones: press on the graph to add a point there and drag it, or move
+  a focused point with the arrow keys, and Delete or a double-click takes it
+  away. Black and white stay at the ends, and **Straighten the curve** puts it
+  back. Warmth balances blue against amber, and tint green against magenta.
+  Sharpness crisps edges above zero and softens them below; where a picture is
+  transparent, colors hidden there play no part. The vignette darkens the edges
+  above zero and lightens them below, most at the corners, and leaves the middle
+  as it was. Grain, from zero up, adds film-like grain: each pixel moves a
+  little up or down, the same on all three colors, so the picture keeps its
+  light and a grey stays grey. The preview is the result: the browser and the
+  app work the adjustment out the same way.
 - **Blur**, **Pixelate** and **Paint** act on a marked area, brushed with the
   tool itself or selected first with any selection tool. Everything outside the
   marking is left exactly as it was. Pixelate breaks the area into square

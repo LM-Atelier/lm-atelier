@@ -62,6 +62,21 @@ function sampled(pixels: Uint8ClampedArray): Samples {
   return { red: Uint8Array.from(red), green: Uint8Array.from(green), blue: Uint8Array.from(blue) };
 }
 
+/** How the picture's visible pixels spread over the 256 levels of brightness.
+ *
+ * Sampled as Auto samples the picture, so a large one costs no more than a
+ * middling one. Each sample counts at its luma, rounded to a whole level.
+ */
+export function pictureHistogram(pixels: Uint8ClampedArray): Uint32Array {
+  const { red, green, blue } = sampled(pixels);
+  const histogram = new Uint32Array(256);
+  for (let index = 0; index < red.length; index += 1) {
+    const level = 0.2126 * red[index] + 0.7152 * green[index] + 0.0722 * blue[index];
+    histogram[Math.min(255, Math.round(level))] += 1;
+  }
+  return histogram;
+}
+
 /** The warmth and tint that bring the near-grey middle tones back to grey, within reach.
  *
  * Grey things show a cast plainly and colored things hide it, so only pixels

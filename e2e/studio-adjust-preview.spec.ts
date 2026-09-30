@@ -91,6 +91,24 @@ async function levelsPicture(page: Page): Promise<Buffer> {
   return Buffer.from(dataUrl.split(",")[1], "base64");
 }
 
+/** A diagonal sweep from deep blue to pale orange, on which a tone curve shows plainly. A picture of its own again. */
+async function sweepPicture(page: Page): Promise<Buffer> {
+  const dataUrl = await page.evaluate(() => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 96;
+    canvas.height = 64;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("no canvas");
+    const sweep = context.createLinearGradient(0, 0, 96, 64);
+    sweep.addColorStop(0, "#14285a");
+    sweep.addColorStop(1, "#f5d2a0");
+    context.fillStyle = sweep;
+    context.fillRect(0, 0, 96, 64);
+    return canvas.toDataURL("image/png");
+  });
+  return Buffer.from(dataUrl.split(",")[1], "base64");
+}
+
 /** A cutout: two shapes on a transparent background.
  *
  * Whole-pixel rectangles only, so every pixel is wholly opaque or wholly
@@ -259,6 +277,29 @@ test("lifts black and dims white exactly as the preview shows", async ({ page })
   const colors = (pixels: number[]) => pixels.filter((_, index) => index % 4 !== 3);
   expect([Math.min(...colors(before)), Math.max(...colors(before))]).toEqual([0, 255]);
   expect([Math.min(...colors(kept)), Math.max(...colors(kept))]).toEqual([22, 230]);
+});
+
+test("bends the tone curve exactly as the preview shows", async ({ page }) => {
+  await page.goto("/");
+  await dismissSetup(page);
+  const before = await openToAdjust(page, "neutral-sweep.png", await sweepPicture(page), 96 * 64);
+  const graph = page.locator(".studio-tone-curve svg");
+  // Below the sliders, the graph can start out of view; a press only lands on what is on screen.
+  await graph.scrollIntoViewIfNeeded();
+  const box = await graph.boundingBox();
+  if (!box) throw new Error("no tone curve");
+  // A press a quarter of the way along and well above the line lifts the darker tones.
+  await page.mouse.move(box.x + box.width * 0.25, box.y + box.height * 0.45);
+  await page.mouse.down();
+  await page.mouse.up();
+  await expect(page.getByRole("slider", { name: "Curve point 1" })).toBeVisible();
+  await expect.poll(async () => (await shownPixels(page)).join() !== before.join()).toBe(true);
+  const preview = await shownPixels(page);
+
+  const kept = await applyAndReadKept(page);
+
+  expect(kept.length).toBe(preview.length);
+  expect(kept.filter((value, index) => value !== preview[index]).length).toBe(0);
 });
 
 test("sharpens a cutout exactly as the preview shows, keeping it cut out", async ({ page }) => {

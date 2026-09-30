@@ -1,12 +1,13 @@
-import type { StudioColorAdjustments } from "./types";
+import type { StudioColorAdjustments, StudioCurvePoint } from "./types";
 
 /** Light and color adjustments, computed exactly as the server applies them.
  *
  * The canvas shows an adjustment while its sliders move, and an apply asks the
  * server to make the same picture. So this is the server's arithmetic step for
  * step (studio_adjustments.py): one lookup table per channel for shadows,
- * highlights, warmth, tint, brightness, contrast, whites and blacks, then
- * saturation as a mix toward each pixel's grey, then vibrance as the same mix
+ * highlights, warmth, tint, brightness, contrast, the tone curve, whites and
+ * blacks, then saturation as a mix toward each pixel's grey, then vibrance as
+ * the same mix
  * kept in proportion to how muted each pixel is, then sharpness as a mix away
  * from a softened copy of the picture, then the vignette, a mix toward black or
  * white that grows toward the corners, and last grain, the same small step up
@@ -29,7 +30,11 @@ export const NEUTRAL_ADJUSTMENTS: StudioColorAdjustments = {
   vibrance: 0,
   vignette: 0,
   grain: 0,
+  curve: [],
 };
+
+/** The sliders, which is every adjustment but the tone curve. */
+export type StudioSliderKey = Exclude<keyof StudioColorAdjustments, "curve">;
 
 /** Each slider runs from -100 to 100, with 0 changing nothing. */
 export const ADJUSTMENT_LIMIT = 100;
@@ -50,13 +55,15 @@ const VIGNETTE_STEPS = 4096;
 const GRAIN_REACH = 0.25;
 /** The grain repeats every this many pixels across and down. */
 const GRAIN_TILE = 256;
+/** The most points a tone curve passes through between its fixed ends. */
+export const CURVE_POINTS = 6;
 
 export function isNeutral(adjustments: StudioColorAdjustments): boolean {
   return !(
     adjustments.brightness || adjustments.contrast || adjustments.highlights || adjustments.shadows
     || adjustments.whites || adjustments.blacks || adjustments.saturation || adjustments.warmth
     || adjustments.tint || adjustments.sharpness || adjustments.vibrance || adjustments.vignette
-    || adjustments.grain
+    || adjustments.grain || adjustments.curve.some((point) => point.x !== point.y)
   );
 }
 
@@ -132,12 +139,68 @@ export function levelEnds(blacks: number, whites: number): [number, number, numb
   return [blackFrom, blackTo, whiteFrom, whiteTo];
 }
 
+/** A tone curve ready to read: its points, black and white included, and its slope at each. */
+export type ToneCurve = { xs: number[]; ys: number[]; slopes: number[] };
+
+/** The curve through black, the points and white, or none when there are no points.
+ *
+ * Each point's slope is found as Fritsch and Carlson find it for a curve that
+ * never overshoots its points, in the server's order and with the same
+ * roundings, so both read the same curve.
+ */
+export function toneCurve(points: StudioCurvePoint[]): ToneCurve | null {
+  if (points.length === 0) return null;
+  const xs = [0, ...points.map((point) => point.x), 255];
+  const ys = [0, ...points.map((point) => point.y), 255];
+  const secants = xs.slice(0, -1).map((x, k) => (ys[k + 1] - ys[k]) / (xs[k + 1] - x));
+  const slopes = [secants[0]];
+  for (let k = 1; k < secants.length; k += 1) {
+    const before = secants[k - 1];
+    const after = secants[k];
+    slopes.push(before * after > 0 ? (before + after) / 2 : 0);
+  }
+  slopes.push(secants[secants.length - 1]);
+  secants.forEach((secant, k) => {
+    if (secant === 0) {
+      slopes[k] = 0;
+      slopes[k + 1] = 0;
+      return;
+    }
+    const into = slopes[k] / secant;
+    const out = slopes[k + 1] / secant;
+    const reach = into * into + out * out;
+    if (reach > 9) {
+      const scale = 3 / Math.sqrt(reach);
+      slopes[k] = scale * into * secant;
+      slopes[k + 1] = scale * out * secant;
+    }
+  });
+  return { xs, ys, slopes };
+}
+
+/** The curve's height at `value`, from 0 to 255: between two points, the cubic that meets both. */
+export function curveLevel(curve: ToneCurve, value: number): number {
+  const { xs, ys, slopes } = curve;
+  let segment = 0;
+  while (value > xs[segment + 1]) segment += 1;
+  const left = xs[segment];
+  const width = xs[segment + 1] - left;
+  const t = (value - left) / width;
+  const t2 = t * t;
+  const t3 = t2 * t;
+  return (2 * t3 - 3 * t2 + 1) * ys[segment]
+    + (t3 - 2 * t2 + t) * width * slopes[segment]
+    + (-2 * t3 + 3 * t2) * ys[segment + 1]
+    + (t3 - t2) * width * slopes[segment + 1];
+}
+
 /** The three channels' lookup tables for tone, color, brightness, contrast, whites and blacks.
  *
- * Last, the level as it then stands, held within the range, is moved so that
- * the levels the whites and blacks take as white and black land where they put
- * them. Holding it first makes the white and black they set the picture's
- * lightest and darkest, however far the other sliders took it.
+ * The level as it then stands, held within the range, passes through the tone
+ * curve. Last it is moved so that the levels the whites and blacks take as
+ * white and black land where they put them. Holding it first makes the white
+ * and black they set the picture's lightest and darkest, however far the other
+ * sliders took it.
  */
 export function channelTables(adjustments: StudioColorAdjustments): [Uint8Array, Uint8Array, Uint8Array] {
   const gains = colorGains(adjustments.warmth, adjustments.tint);
@@ -145,13 +208,15 @@ export function channelTables(adjustments: StudioColorAdjustments): [Uint8Array,
   const contrast = Math.pow(2, adjustments.contrast / ADJUSTMENT_LIMIT);
   const shadows = adjustments.shadows / ADJUSTMENT_LIMIT;
   const highlights = adjustments.highlights / ADJUSTMENT_LIMIT;
+  const curve = toneCurve(adjustments.curve);
   const [blackFrom, blackTo, whiteFrom, whiteTo] = levelEnds(adjustments.blacks, adjustments.whites);
   const spread = (whiteTo - blackTo) / (whiteFrom - blackFrom);
   const tables = gains.map((gain) => {
     const table = new Uint8Array(256);
     for (let value = 0; value < 256; value += 1) {
       const lit = toned(value, shadows, highlights) * gain * brightness;
-      const level = Math.min(255, Math.max(0, (lit - 127.5) * contrast + 127.5));
+      const held = Math.min(255, Math.max(0, (lit - 127.5) * contrast + 127.5));
+      const level = curve ? curveLevel(curve, held) : held;
       table[value] = rounded(blackTo + (level - blackFrom) * spread);
     }
     return table;

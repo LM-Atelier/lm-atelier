@@ -84,7 +84,14 @@ export type StudioLocalEditDetails = Pick<
   caption?: { words: Blob };
 };
 
-/** Where each light and color slider stands, from -100 to 100 (grain from 0), with 0 unchanged. */
+/** A point a tone curve passes through: a level, and the level it becomes. */
+export interface StudioCurvePoint {
+  x: number;
+  y: number;
+}
+
+/** Where each light and color slider stands, from -100 to 100 (grain from 0), with 0 unchanged,
+ * and the tone curve's points. */
 export interface StudioColorAdjustments {
   brightness: number;
   contrast: number;
@@ -99,6 +106,8 @@ export interface StudioColorAdjustments {
   vibrance: number;
   vignette: number;
   grain: number;
+  /** The tone curve's points between black and white, left to right; none leaves every level. */
+  curve: StudioCurvePoint[];
 }
 
 /** A point on a picture, in its own pixels as it is seen upright. */

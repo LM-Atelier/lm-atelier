@@ -44,12 +44,15 @@ describe("the looks", () => {
     for (const look of LOOKS) {
       const set = lookAdjustments(look);
       expect(Object.keys(set).sort()).toEqual(Object.keys(NEUTRAL_ADJUSTMENTS).sort());
-      for (const value of Object.values(set)) {
+      // A look is a setting of the sliders: it leaves the tone curve straight.
+      const { curve, ...sliders } = set;
+      expect(curve).toEqual([]);
+      for (const value of Object.values(sliders)) {
         expect(Number.isInteger(value) && Math.abs(value) <= ADJUSTMENT_LIMIT).toBe(true);
       }
       // A look changes something, and every slider it does not name stays at zero.
       expect(set).not.toEqual(NEUTRAL_ADJUSTMENTS);
-      for (const [key, value] of Object.entries(set)) {
+      for (const [key, value] of Object.entries(sliders)) {
         if (!(key in look.adjustments)) expect(value).toBe(0);
       }
     }

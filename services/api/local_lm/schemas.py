@@ -658,6 +658,13 @@ class StudioPictureSize(ApiModel):
     height: StrictInt = Field(ge=1, le=MAX_DIMENSION)
 
 
+class StudioCurvePoint(ApiModel):
+    """A point a tone curve passes through: a level, and the level it becomes."""
+
+    x: StrictInt = Field(ge=1, le=254)
+    y: StrictInt = Field(ge=0, le=255)
+
+
 class StudioColorAdjustments(ApiModel):
     """Where each light and color slider stands, from -100 to 100, with 0 unchanged."""
 
@@ -675,6 +682,15 @@ class StudioColorAdjustments(ApiModel):
     vignette: StrictInt = Field(default=0, ge=-100, le=100)
     #: Grain is added or not, so it runs from 0 only.
     grain: StrictInt = Field(default=0, ge=0, le=100)
+    #: The tone curve's points between black and white, left to right.
+    curve: list[StudioCurvePoint] = Field(default_factory=list, max_length=6)
+
+    @field_validator("curve")
+    @classmethod
+    def validate_curve(cls, value: list[StudioCurvePoint]) -> list[StudioCurvePoint]:
+        if any(left.x >= right.x for left, right in zip(value, value[1:], strict=False)):
+            raise ValueError("A tone curve's points must run left to right, one to a level.")
+        return value
 
 
 class StudioSelectionBlur(ApiModel):

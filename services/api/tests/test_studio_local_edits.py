@@ -940,6 +940,7 @@ async def test_an_adjustment_is_recorded_with_where_each_slider_stood(
         "vibrance": 20,
         "vignette": -10,
         "grain": 15,
+        "curve": [{"x": 64, "y": 48}, {"x": 192, "y": 208}],
     }
 
     response = await client.post(

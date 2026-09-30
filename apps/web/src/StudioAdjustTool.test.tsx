@@ -123,6 +123,29 @@ describe("where the sliders stand", () => {
     expect(state.adjustments).toEqual(NEUTRAL_ADJUSTMENTS);
   });
 
+  it("keeps a tone curve only as the server would take it", () => {
+    const points = [{ x: 64, y: 48 }, { x: 192, y: 208 }];
+    const state = studioToolReducer(initialToolState(), { type: "set-curve", points });
+    expect(state.adjustments.curve).toEqual(points);
+
+    for (const refused of [
+      [{ x: 80, y: 10 }, { x: 80, y: 90 }],
+      [{ x: 90, y: 10 }, { x: 80, y: 90 }],
+      [{ x: 0, y: 10 }],
+      [{ x: 255, y: 10 }],
+      [{ x: 10, y: 256 }],
+      [{ x: 10.5, y: 20 }],
+      Array.from({ length: 7 }, (_, index) => ({ x: 10 * index + 10, y: 50 })),
+    ]) {
+      expect(studioToolReducer(state, { type: "set-curve", points: refused })).toBe(state);
+      expect(studioToolReducer(state, {
+        type: "set-adjustments", adjustments: { ...NEUTRAL_ADJUSTMENTS, curve: refused },
+      })).toBe(state);
+    }
+    // Reset straightens it with the sliders.
+    expect(studioToolReducer(state, { type: "reset-adjustments" }).adjustments.curve).toEqual([]);
+  });
+
   it("takes every slider at once, as Auto sets them, only when each is a whole step in range", () => {
     const auto = { ...NEUTRAL_ADJUSTMENTS, brightness: 31, contrast: 12, warmth: -8 };
     const state = studioToolReducer(initialToolState(), { type: "set-adjustments", adjustments: auto });
@@ -227,8 +250,46 @@ describe("adjusting in the studio", () => {
       operation: "adjust",
       adjustments: {
         brightness: 25, contrast: 0, highlights: 0, shadows: 40, whites: -25, blacks: 30, saturation: 0, warmth: 0,
-        tint: 0, sharpness: -30, vibrance: 15, vignette: 20, grain: 12,
+        tint: 0, sharpness: -30, vibrance: 15, vignette: 20, grain: 12, curve: [],
       },
+    });
+  });
+
+  it("sends the tone curve drawn on the graph with the sliders", async () => {
+    const session = { id: "chat-studio", messages: [] } as never;
+    vi.mocked(api.openStudioSession).mockResolvedValue(session);
+    vi.mocked(api.studioSession).mockResolvedValue(session);
+    vi.mocked(api.studioLocalEdit).mockResolvedValue(session);
+    vi.mocked(api.artifact).mockResolvedValue({ id: "art-1", favorite: false } as never);
+    vi.mocked(api.editTemplates).mockResolvedValue([]);
+    vi.mocked(api.studioCapabilities).mockResolvedValue({ tools: [] });
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+    const bitmap = { width: 400, height: 200, close: vi.fn() } as unknown as ImageBitmap;
+    vi.mocked(useStudioImage).mockReturnValue({ bitmap, error: null, reload: vi.fn() });
+    const { container } = render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <StudioView sourceArtifactId="art-1" onOpenArtifact={vi.fn()} onOpenWorkflows={vi.fn()} onClose={vi.fn()} />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: /^Adjust light and color/ }));
+    const graph = container.querySelector<SVGSVGElement>(".studio-tone-curve svg");
+    if (!graph) throw new Error("no tone curve");
+    // Laid out one pixel to a level, so the press lands on level 128 and makes it 160.
+    graph.getBoundingClientRect = () => ({
+      left: 0, top: 0, right: 255, bottom: 255, width: 255, height: 255, x: 0, y: 0, toJSON: () => ({}),
+    }) as DOMRect;
+    act(() => {
+      graph.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 128, clientY: 95 }));
+      graph.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 128, clientY: 95 }));
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Apply adjustments" }));
+
+    await waitFor(() => expect(api.studioLocalEdit).toHaveBeenCalledTimes(1));
+    expect(api.studioLocalEdit).toHaveBeenCalledWith("chat-studio", {
+      source_artifact_id: "art-1",
+      operation: "adjust",
+      adjustments: { ...NEUTRAL_ADJUSTMENTS, curve: [{ x: 128, y: 160 }] },
     });
   });
 

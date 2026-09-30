@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 import { channelTables, NEUTRAL_ADJUSTMENTS } from "./studioAdjustments";
-import { autoAdjustments } from "./studioAutoAdjust";
+import { autoAdjustments, pictureHistogram } from "./studioAutoAdjust";
 import type { StudioColorAdjustments } from "./types";
 
 /** Every level from `low` to `high`, as grey pixels with each channel scaled by `cast`. */
@@ -108,5 +108,24 @@ describe("Auto", () => {
     expect(set).toEqual({ ...autoAdjustments(seen, current) });
     expect([set.vignette, set.sharpness, set.saturation]).toEqual([30, 20, -10]);
     expect(autoAdjustments(new Uint8ClampedArray(0), current)).toBe(current);
+  });
+});
+
+describe("the picture's brightness", () => {
+  it("counts each visible pixel at its level of brightness, and nothing mostly transparent", () => {
+    const pixels = new Uint8ClampedArray([
+      0, 0, 0, 255,
+      255, 255, 255, 255,
+      255, 255, 255, 255,
+      200, 100, 50, 255,
+      255, 0, 0, 40,
+    ]);
+
+    const histogram = pictureHistogram(pixels);
+
+    expect([histogram[0], histogram[255]]).toEqual([1, 2]);
+    // 0.2126 * 200 + 0.7152 * 100 + 0.0722 * 50 is 117.66.
+    expect(histogram[118]).toBe(1);
+    expect(histogram.reduce((sum, count) => sum + count, 0)).toBe(4);
   });
 });

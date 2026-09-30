@@ -1268,6 +1268,14 @@ html[data-motion="reduced"] .progress-track > div.indeterminate { width: 100% !i
 .studio-paint-swatch { display: inline-block; width: 16px; height: 16px; border-radius: 999px; border: 1px solid var(--border); vertical-align: middle; }
 .studio-adjust-slider { display: flex; flex-direction: column; gap: calc(4px * var(--spacing-scale, 1)); }
 .studio-adjust-slider input { width: 100%; }
+/* The tone curve: a square graph of levels, black at the bottom left and white at the top right. */
+.studio-tone-curve { display: flex; flex-direction: column; gap: calc(4px * var(--spacing-scale, 1)); }
+.studio-tone-curve svg { width: 100%; max-width: 230px; aspect-ratio: 1; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); cursor: crosshair; touch-action: none; }
+.studio-tone-curve-histogram { fill: var(--line); stroke: none; }
+.studio-tone-curve-diagonal { fill: none; stroke: var(--line); stroke-width: 1; stroke-dasharray: 6 4; }
+.studio-tone-curve-line { fill: none; stroke: var(--ink); stroke-width: 2; }
+.studio-tone-curve-point { fill: var(--accent); stroke: var(--panel); stroke-width: 2; cursor: grab; }
+.studio-tone-curve-point:focus-visible { outline: none; stroke: var(--ink); stroke-width: 3; }
 .studio-selection-controls label { display: grid; gap: calc(4px * var(--spacing-scale, 1)); color: var(--muted); font-size: calc(11px * var(--text-scale, 1)); }
 .studio-selection-controls input[type="range"] { accent-color: var(--atelier); width: 100%; }
 .studio-view > .generation-identity { align-self: center; max-width: min(100%, 720px); }

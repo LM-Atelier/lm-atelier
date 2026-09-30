@@ -25,12 +25,13 @@ export function lookAdjustments(look: (typeof LOOKS)[number]): StudioColorAdjust
   return { ...NEUTRAL_ADJUSTMENTS, ...look.adjustments };
 }
 
-/** The look the sliders stand at exactly, if any. */
+/** The look the sliders stand at exactly, with the tone curve as the look left it, if any. */
 export function currentLook(adjustments: StudioColorAdjustments): string | null {
   const keys = Object.keys(NEUTRAL_ADJUSTMENTS) as Array<keyof StudioColorAdjustments>;
   const look = LOOKS.find((candidate) => {
     const set = lookAdjustments(candidate);
-    return keys.every((key) => set[key] === adjustments[key]);
+    // Compared by value: a curve is a list of points, and two lists alike are two lists.
+    return keys.every((key) => JSON.stringify(set[key]) === JSON.stringify(adjustments[key]));
   });
   return look ? look.name : null;
 }

@@ -3,7 +3,8 @@
 The studio shows an adjustment on the picture while its sliders move, so the
 arithmetic here is the arithmetic the browser runs, in the same order: one
 lookup table per channel for shadows, highlights, warmth, tint, brightness,
-contrast, whites and blacks, then saturation as a mix toward each pixel's grey,
+contrast, the tone curve, whites and blacks, then saturation as a mix toward
+each pixel's grey,
 then vibrance as the same mix kept in proportion to how muted each pixel is,
 then sharpness as a mix away from a softened copy of the picture, then the
 vignette, a mix toward black or white that grows toward the corners, and last
@@ -18,6 +19,7 @@ the same pixels.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from functools import cache
 from operator import itemgetter
@@ -59,6 +61,16 @@ VIGNETTE_STEPS = 4096
 GRAIN_REACH = 0.25
 #: The grain repeats every this many pixels across and down.
 GRAIN_TILE = 256
+#: The most points a tone curve passes through between its fixed ends.
+CURVE_POINTS = 6
+
+
+@dataclass(frozen=True)
+class CurvePoint:
+    """A point the tone curve passes through: a level, and the level it becomes."""
+
+    x: int
+    y: int
 
 
 @dataclass(frozen=True)
@@ -81,6 +93,16 @@ class ColorAdjustments:
     vignette: int = 0
     #: From 0 to 100 only: grain is added or not; there is no taking it away.
     grain: int = 0
+    #: The tone curve's points between black and white, left to right; black
+    #: and white themselves stay where they are.
+    curve: tuple[CurvePoint, ...] = ()
+
+    @classmethod
+    def from_request(cls, values: Mapping[str, Any]) -> ColorAdjustments:
+        """The adjustments a request names, with its curve's points as points."""
+
+        points = tuple(CurvePoint(**point) for point in values.get("curve", ()))
+        return cls(**{**values, "curve": points})
 
     def is_neutral(self) -> bool:
         return not (
@@ -97,6 +119,7 @@ class ColorAdjustments:
             or self.vibrance
             or self.vignette
             or self.grain
+            or any(point.x != point.y for point in self.curve)
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -157,6 +180,73 @@ def level_ends(blacks: int, whites: int) -> tuple[float, float, float, float]:
     return (black_from, black_to, white_from, white_to)
 
 
+@dataclass(frozen=True)
+class ToneCurve:
+    """A tone curve ready to read: its points, black and white included, and its slope at each."""
+
+    xs: tuple[float, ...]
+    ys: tuple[float, ...]
+    slopes: tuple[float, ...]
+
+    def level(self, value: float) -> float:
+        """The curve's height at `value`, from 0 to 255.
+
+        Between two points it is the cubic that meets both with the slopes
+        found for them. The powers are written out as products, since a power
+        function may round differently from the browser's.
+        """
+
+        segment = 0
+        while value > self.xs[segment + 1]:
+            segment += 1
+        left, right = self.xs[segment], self.xs[segment + 1]
+        width = right - left
+        t = (value - left) / width
+        t2 = t * t
+        t3 = t2 * t
+        return (
+            (2 * t3 - 3 * t2 + 1) * self.ys[segment]
+            + (t3 - 2 * t2 + t) * width * self.slopes[segment]
+            + (-2 * t3 + 3 * t2) * self.ys[segment + 1]
+            + (t3 - t2) * width * self.slopes[segment + 1]
+        )
+
+
+def tone_curve(points: tuple[CurvePoint, ...]) -> ToneCurve | None:
+    """The curve through black, the points and white, or none when there are no points.
+
+    Each point's slope is found as Fritsch and Carlson find it for a curve
+    that never overshoots its points: the mean of the two straight lines to
+    its neighbours, zero where the curve turns back, and scaled down where it
+    would carry the curve past the next point. Only sums, products, quotients
+    and one square root, in an order the browser repeats.
+    """
+
+    if not points:
+        return None
+    xs = (0.0, *(float(point.x) for point in points), 255.0)
+    ys = (0.0, *(float(point.y) for point in points), 255.0)
+    secants = [(ys[k + 1] - ys[k]) / (xs[k + 1] - xs[k]) for k in range(len(xs) - 1)]
+    slopes = [secants[0]]
+    for k in range(1, len(secants)):
+        before, after = secants[k - 1], secants[k]
+        slopes.append((before + after) / 2 if before * after > 0 else 0.0)
+    slopes.append(secants[-1])
+    for k, secant in enumerate(secants):
+        if secant == 0:
+            slopes[k] = 0.0
+            slopes[k + 1] = 0.0
+            continue
+        into = slopes[k] / secant
+        out = slopes[k + 1] / secant
+        reach = into * into + out * out
+        if reach > 9:
+            scale = 3 / math.sqrt(reach)
+            slopes[k] = scale * into * secant
+            slopes[k + 1] = scale * out * secant
+    return ToneCurve(xs, ys, tuple(slopes))
+
+
 def channel_tables(adjustments: ColorAdjustments) -> tuple[list[int], list[int], list[int]]:
     """The three channels' lookup tables for tone, color, brightness, contrast, whites and blacks.
 
@@ -164,12 +254,13 @@ def channel_tables(adjustments: ColorAdjustments) -> tuple[list[int], list[int],
     picture's own tones, then by the warmth and tint gains. Brightness scales
     every channel by two to the power of its slider over 100, so 100 doubles
     the light and -100 halves it. Contrast does the same to the distance from
-    middle grey. Last, the level as it then stands, held within the range, is
-    moved so that the levels the whites and blacks take as white and black
-    land where they put them, with the levels between spread evenly. Holding
-    it first makes the white and black they set the picture's lightest and
-    darkest, however far the other sliders took it. Nothing is rounded until
-    the end, so the steps do not lose detail to each other.
+    middle grey. The level as it then stands, held within the range, passes
+    through the tone curve, which keeps black and white where they are. Last
+    it is moved so that the levels the whites and blacks take as white and
+    black land where they put them, with the levels between spread evenly.
+    Holding it first makes the white and black they set the picture's
+    lightest and darkest, however far the other sliders took it. Nothing is
+    rounded until the end, so the steps do not lose detail to each other.
     """
 
     warmth = warmth_gains(NEUTRAL_KELVIN - KELVIN_PER_WARMTH_STEP * adjustments.warmth)
@@ -179,6 +270,7 @@ def channel_tables(adjustments: ColorAdjustments) -> tuple[list[int], list[int],
     contrast = 2 ** (adjustments.contrast / ADJUSTMENT_LIMIT)
     shadows = adjustments.shadows / ADJUSTMENT_LIMIT
     highlights = adjustments.highlights / ADJUSTMENT_LIMIT
+    curve = tone_curve(adjustments.curve)
     black_from, black_to, white_from, white_to = level_ends(adjustments.blacks, adjustments.whites)
     spread = (white_to - black_to) / (white_from - black_from)
     tables: list[list[int]] = []
@@ -187,6 +279,8 @@ def channel_tables(adjustments: ColorAdjustments) -> tuple[list[int], list[int],
         for value in range(256):
             lit = toned(value, shadows, highlights) * gain * brightness
             level = min(255.0, max(0.0, (lit - 127.5) * contrast + 127.5))
+            if curve is not None:
+                level = curve.level(level)
             table.append(_rounded(black_to + (level - black_from) * spread))
         tables.append(table)
     return (tables[0], tables[1], tables[2])

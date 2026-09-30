@@ -33,7 +33,7 @@ import {
 } from "./studioTools";
 
 import type { LightDirection } from "./studioLightMap";
-import { NEUTRAL_ADJUSTMENTS } from "./studioAdjustments";
+import { CURVE_POINTS, NEUTRAL_ADJUSTMENTS, type StudioSliderKey } from "./studioAdjustments";
 import {
   boundedShift,
   CAPTION_TURN_LIMIT,
@@ -44,7 +44,7 @@ import {
   type CaptionShift,
   type StudioCaption,
 } from "./studioCaption";
-import type { StudioColorAdjustments, StudioPerspective, StudioToolKind } from "./types";
+import type { StudioColorAdjustments, StudioCurvePoint, StudioPerspective, StudioToolKind } from "./types";
 
 export type { StudioToolKind } from "./types";
 
@@ -163,8 +163,9 @@ export type StudioToolAction =
   | { type: "set-light-direction"; direction: LightDirection }
   | { type: "set-light-intensity"; intensity: number }
   | { type: "set-light-kelvin"; kelvin: number | null }
-  | { type: "set-adjustment"; key: keyof StudioColorAdjustments; value: number }
+  | { type: "set-adjustment"; key: StudioSliderKey; value: number }
   | { type: "set-adjustments"; adjustments: StudioColorAdjustments }
+  | { type: "set-curve"; points: StudioCurvePoint[] }
   | { type: "reset-adjustments" }
   | { type: "set-blur-radius"; radius: number }
   | { type: "set-blur-style"; style: "blur" | "pixelate" }
@@ -282,10 +283,17 @@ export function studioToolReducer(
       return Number.isInteger(action.value) && Math.abs(action.value) <= 100
         ? { ...state, adjustments: { ...state.adjustments, [action.key]: action.value } }
         : state;
-    case "set-adjustments":
+    case "set-adjustments": {
       // Every slider at once, as Auto sets them, and only if each is a whole step in range.
-      return Object.values(action.adjustments).every((value) => Number.isInteger(value) && Math.abs(value) <= 100)
+      const { curve, ...sliders } = action.adjustments;
+      return Object.values(sliders).every((value) => Number.isInteger(value) && Math.abs(value) <= 100)
+        && validCurve(curve)
         ? { ...state, adjustments: { ...action.adjustments } }
+        : state;
+    }
+    case "set-curve":
+      return validCurve(action.points)
+        ? { ...state, adjustments: { ...state.adjustments, curve: action.points } }
         : state;
     case "reset-adjustments":
       return { ...state, adjustments: NEUTRAL_ADJUSTMENTS };
@@ -560,6 +568,14 @@ export function snapshotBeforeGesture(state: StudioToolState): void {
   // Moving a perspective correction's corner or the words being written
   // leaves the selection alone, so it keeps no step for Undo to return to.
   if (state.mask && state.kind !== "perspective" && state.kind !== "caption") state.history.push(state.mask);
+}
+
+/** Whether `points` make a tone curve the server takes: at most CURVE_POINTS whole-level
+ * points inside the range, running left to right, one to a level. */
+function validCurve(points: StudioCurvePoint[]): boolean {
+  return points.length <= CURVE_POINTS && points.every((point, index) =>
+    Number.isInteger(point.x) && Number.isInteger(point.y) && point.x >= 1 && point.x <= 254
+    && point.y >= 0 && point.y <= 255 && (index === 0 || points[index - 1].x < point.x));
 }
 
 function clamp(value: number, low: number, high: number): number {
