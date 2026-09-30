@@ -1,5 +1,6 @@
 import { Columns2, Diff, Eye } from "lucide-react";
 import type { KeyboardEvent, PointerEvent } from "react";
+import type { StudioCompareChoice } from "./useStudioCompare";
 
 /** Comparing a result with the picture it was made from, on the canvas itself.
  *
@@ -9,7 +10,9 @@ import type { KeyboardEvent, PointerEvent } from "react";
  * change worth studying rather than spotting. What changed tints every pixel
  * the edit changed, and says how much of the picture that is, for an edit
  * meant to leave most of it alone. All keep the canvas's zoom, so a detail is
- * compared at the size it was edited at.
+ * compared at the size it was edited at. Another picture from the strip can
+ * stand in for the earlier one, so two results of one edit can be set against
+ * each other the same ways.
  */
 export function StudioCompare({
   holding,
@@ -21,6 +24,9 @@ export function StudioCompare({
   onDifference,
   canDiffer = false,
   changed = null,
+  against = null,
+  choices = [],
+  onAgainst,
 }: {
   holding: boolean;
   onHold: (held: boolean) => void;
@@ -36,16 +42,28 @@ export function StudioCompare({
   canDiffer?: boolean;
   /** How much of the picture changed, once that is known. */
   changed?: string | null;
+  /** The picture chosen to compare with, when it is not the one this was made from. */
+  against?: string | null;
+  choices?: StudioCompareChoice[];
+  onAgainst?: (artifactId: string | null) => void;
 }) {
   const release = () => onHold(false);
   const holds = (key: string) => key === " " || key === "Enter";
   return (
-    <div className="studio-compare" role="group" aria-label="Compare with the earlier picture">
+    <div className="studio-compare" role="group" aria-label="Compare">
+      {choices.length > 0 && onAgainst && (
+        <select aria-label="Compare with" value={against ?? ""} onChange={(event) => onAgainst(event.target.value || null)}>
+          <option value="">What it was made from</option>
+          {choices.map((choice) => (
+            <option key={choice.artifactId} value={choice.artifactId}>{choice.label}</option>
+          ))}
+        </select>
+      )}
       <button
         type="button"
         className="secondary compact-button"
         aria-pressed={holding}
-        title="Shows the picture this was made from while held"
+        title={against ? "Shows the chosen picture while held" : "Shows the picture this was made from while held"}
         onPointerDown={(event: PointerEvent<HTMLButtonElement>) => {
           if (event.button !== 0) return;
           // Captured, so the release is heard even off the button.
@@ -95,7 +113,7 @@ export function StudioCompare({
           type="button"
           className="secondary compact-button"
           aria-pressed={difference}
-          title="Tints every pixel the edit changed"
+          title={against ? "Tints every pixel that differs from the chosen picture" : "Tints every pixel the edit changed"}
           onClick={() => onDifference(!difference)}
         >
           <Diff size={14} aria-hidden="true" /> What changed

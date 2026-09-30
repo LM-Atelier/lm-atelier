@@ -5,18 +5,27 @@ import { readSourcePixels } from "./studioSourcePixels";
 import { useStudioImage } from "./useStudioImage";
 import type { StudioStep } from "./useStudioSession";
 
-/** Comparing the result on the canvas with the picture it was made from.
+/** Another picture in the strip that a result can be compared with. */
+export type StudioCompareChoice = { artifactId: string; label: string };
+
+/** Comparing the result on the canvas with the picture it was made from, or with another in the strip.
  *
  * The earlier picture is decoded before anyone asks, so holding shows it at
- * once, and only one is ever kept: moving to another result releases it.
+ * once, and only one is ever kept: moving to another result releases it. A
+ * picture chosen from the strip takes the earlier picture's place for that
+ * result only, so results made from one picture can be set against each other.
  */
 export function useStudioCompare(
   current: StudioStep | null,
   shown: ImageBitmap | null,
   previewing: boolean,
+  steps: readonly StudioStep[] = [],
 ) {
   const currentId = current?.artifactId ?? null;
-  const beforeId = !previewing && current && !current.isSource ? current.beforeArtifactId : null;
+  // Chosen for one result, so moving to another compares it with what it was made from again.
+  const [chosen, setChosen] = useState<{ result: string; against: string } | null>(null);
+  const against = chosen !== null && chosen.result === currentId ? chosen.against : null;
+  const beforeId = !previewing && current && !current.isSource ? against ?? current.beforeArtifactId : null;
   const earlier = useStudioImage(beforeId);
   const before = beforeId ? earlier.bitmap : null;
   // Held for one result, so moving to another never arrives mid-comparison.
@@ -57,8 +66,25 @@ export function useStudioCompare(
       },
       canDiffer,
       changed: overlay?.words ?? null,
+      against,
+      choices: current && !current.isSource ? compareChoices(steps, current) : [],
+      onAgainst: (artifactId: string | null) =>
+        setChosen(artifactId && currentId ? { result: currentId, against: artifactId } : null),
     },
   };
+}
+
+/** The other pictures in the strip, each once: not the result itself, nor the one it was made from, which is already the default. */
+function compareChoices(steps: readonly StudioStep[], current: StudioStep): StudioCompareChoice[] {
+  const seen = new Set([current.artifactId, current.beforeArtifactId]);
+  const choices: StudioCompareChoice[] = [];
+  steps.forEach((step, index) => {
+    if (seen.has(step.artifactId)) return;
+    seen.add(step.artifactId);
+    const words = step.instruction ? ` · ${step.instruction}` : "";
+    choices.push({ artifactId: step.artifactId, label: step.isSource ? "The original" : `Step ${index}${words}` });
+  });
+  return choices;
 }
 
 /** The overlay of what changed between two pictures, made once and released when it goes.

@@ -120,6 +120,33 @@ describe("the compare controls", () => {
     expect(screen.queryByRole("button", { name: "What changed" })).toBeNull();
     expect(screen.queryByText("Comparing…")).toBeNull();
   });
+
+  it("offers the strip's other pictures to compare with, and reports each choice", () => {
+    const onAgainst = vi.fn();
+    const choices = [
+      { artifactId: "art-2", label: "Step 1 · calmer water" },
+      { artifactId: "art-1", label: "The original" },
+    ];
+    const { hold } = controls({ choices, onAgainst });
+    const compareWith = screen.getByRole("combobox", { name: "Compare with" });
+    expect(compareWith).toHaveValue("");
+    expect(hold).toHaveAttribute("title", "Shows the picture this was made from while held");
+    fireEvent.change(compareWith, { target: { value: "art-2" } });
+    expect(onAgainst).toHaveBeenLastCalledWith("art-2");
+    cleanup();
+
+    controls({ choices, onAgainst, against: "art-2", canDiffer: true, onDifference: vi.fn() });
+    expect(screen.getByRole("combobox", { name: "Compare with" })).toHaveValue("art-2");
+    expect(screen.getByRole("button", { name: "Hold to compare" })).toHaveAttribute("title", "Shows the chosen picture while held");
+    expect(screen.getByRole("button", { name: "What changed" })).toHaveAttribute("title", "Tints every pixel that differs from the chosen picture");
+    fireEvent.change(screen.getByRole("combobox", { name: "Compare with" }), { target: { value: "" } });
+    expect(onAgainst).toHaveBeenLastCalledWith(null);
+  });
+
+  it("offers no choice when the strip holds nothing else to compare with", () => {
+    controls({ choices: [], onAgainst: vi.fn() });
+    expect(screen.queryByRole("combobox", { name: "Compare with" })).toBeNull();
+  });
 });
 
 describe("comparing in the studio", () => {
@@ -222,6 +249,27 @@ describe("comparing in the studio", () => {
     expect(earlierLayer()!.style.clipPath).toBe("inset(0 0% 0 0)");
     pointer(hold, "pointerup");
     expect(earlierLayer()!.style.clipPath).toBe("inset(0 80% 0 0)");
+  });
+
+  it("compares the result with another from the strip once it is chosen", () => {
+    open([source, first, second], { "art-source": [400, 200], "art-1": [400, 200], "art-2": [400, 200] });
+    // Two results of the same picture: the other one is offered, and nothing loads it until it is chosen.
+    const compareWith = screen.getByRole("combobox", { name: "Compare with" });
+    expect([...compareWith.querySelectorAll("option")].map((option) => option.textContent)).toEqual([
+      "What it was made from",
+      "Step 1 · brighter sky",
+    ]);
+    expect(useStudioImage).not.toHaveBeenCalledWith("art-1");
+
+    fireEvent.change(compareWith, { target: { value: "art-1" } });
+
+    expect(useStudioImage).toHaveBeenCalledWith("art-1");
+    const hold = screen.getByRole("button", { name: "Hold to compare" });
+    expect(hold).toHaveAttribute("title", "Shows the chosen picture while held");
+    pointer(hold, "pointerdown");
+    expect(earlierLayer()!.style.clipPath).toBe("inset(0 0% 0 0)");
+    pointer(hold, "pointerup");
+    expect(earlierLayer()!.style.clipPath).toBe("inset(0 100% 0 0)");
   });
 
   it("keeps a hold with the result it began on when a newer one arrives", () => {

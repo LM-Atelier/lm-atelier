@@ -171,7 +171,7 @@ export function StudioView({
     },
   });
   const { bitmap, error: imageError, reload } = useStudioImage(currentArtifactId);
-  const compare = useStudioCompare(current, bitmap, Boolean(previewArtifactId));
+  const compare = useStudioCompare(current, bitmap, Boolean(previewArtifactId), steps);
   // Read for the wand and the light and color preview, from the picture on the canvas, and again for each new one.
   const readsColors = tools.kind === "wand" || tools.kind === "adjust";
   const sourcePixels = useMemo(() => (readsColors && bitmap ? readSourcePixels(bitmap) : null), [readsColors, bitmap]);
