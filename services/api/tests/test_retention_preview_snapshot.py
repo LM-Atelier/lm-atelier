@@ -10,13 +10,20 @@ from httpx2 import AsyncClient
 from sqlalchemy.orm import Session
 from test_retention_policy import _kept, _unused_for
 
+from local_lm import api as api_module
 from local_lm.artifacts import ArtifactStore
 from local_lm.config import Settings
 
 
 async def test_clearing_old_eligible_files_does_not_mean_shortening_has_no_new_effect(
-    client: AsyncClient, settings: Settings
+    client: AsyncClient, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # A manual cleanup stops half a second after its first deletion and leaves
+    # the rest for the next pass. On a loaded machine the first of these
+    # deletions can take that long, which would split the clearing in two. This
+    # test is about which files are eligible before and after, and that clock
+    # has its own tests, so here it is put out of reach.
+    monkeypatch.setattr(api_module, "RETENTION_BATCH_SECONDS", 3600.0)
     old = [_unused_for(settings, 40, f"Neutral old file {index}") for index in range(2)]
     newly_eligible = _unused_for(settings, 10, "Neutral retained file")
     displayed = (await client.get("/api/artifacts/storage")).json()
