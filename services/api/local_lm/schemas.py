@@ -33,7 +33,7 @@ from .domain import (
 from .install_plan_types import InstallPlanFailureCode
 from .model_asset_types import BoundWorkflowAssetKind, InstalledAssetKind
 from .model_asset_types import WorkflowAssetKind as WorkflowAssetKind
-from .output_geometry import MAX_DIMENSION
+from .output_geometry import MAX_DIMENSION, PresetId
 from .references import (
     MAX_REFERENCES_PER_TURN,
     MAX_ROLE,
@@ -1050,6 +1050,13 @@ TurnWorkflowSelectionIn = Annotated[
 ]
 
 
+class DefaultOutputShapesIn(ApiModel):
+    """The shape to make new pictures and videos in when nothing else sets their size."""
+
+    image: PresetId | None = None
+    video: PresetId | None = None
+
+
 class SourceFitRequest(ApiModel):
     """An explicit canvas choice; source and workflow identity are resolved by the server."""
 
@@ -1071,6 +1078,7 @@ class TurnRoleOverrides(ApiModel):
 
 class TurnRequest(ApiModel):
     source_fit: SourceFitRequest | None = None
+    default_output_shapes: DefaultOutputShapesIn | None = None
     text: str = Field(min_length=1, max_length=200_000)
     preset_id: str | None = Field(default=None, min_length=1, max_length=40)
     profile_id: str | None = Field(default=None, min_length=1, max_length=40)

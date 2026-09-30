@@ -67,6 +67,7 @@ from .context_compaction import (
     compact_context_messages,
 )
 from .db import SessionLocal
+from .default_output_shape import DefaultOutputSize, default_output_size, size_is_chosen
 from .domain import (
     ArtifactKind,
     JobKind,
@@ -435,6 +436,7 @@ class _TurnSettingLayers:
     effective_settings: dict[str, Any]
     workflow_lora_layers: WorkflowLoraAdmissionLayers
     use_case_settings: dict[str, Any]
+    default_size: DefaultOutputSize | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -461,6 +463,44 @@ class _PromptBatchExecutionContext:
     model_provenance: dict[str, Any] | None
     workflow_provenance: dict[str, Any]
     use_case_receipt: dict[str, Any] | None
+
+
+# The layers a person or a recipe saves below the turn itself, each of which
+# can name a size that outranks a default shape.
+_SIZE_LAYER_ORIGINS = (
+    "profile_request",
+    "default_preset",
+    "project_preset",
+    "project",
+    "chat_preset",
+    "chat",
+)
+
+
+def _default_size_for_turn(
+    session: Session,
+    operation: Operation,
+    revision: WorkflowRevision | None,
+    request: TurnRequest,
+    profile: ModelProfile | None,
+    layers: WorkflowLoraAdmissionLayers,
+    chosen: tuple[dict[str, Any], ...],
+) -> DefaultOutputSize | None:
+    """The turn's default shape as its revision makes it, unless a layer already names a size.
+
+    `chosen` is what the turn and its recipe set; they outrank every saved
+    layer, so a size they name decides it as well.
+    """
+    shapes = request.default_output_shapes
+    if shapes is None or size_is_chosen(
+        (
+            profile.load_settings_json if profile else None,
+            *(layers.ordinary(origin) for origin in _SIZE_LAYER_ORIGINS),
+            *chosen,
+        )
+    ):
+        return None
+    return default_output_size(session, operation, revision, shapes.image, shapes.video)
 
 
 def _fresh_media_seed(excluding: object = None) -> int:
@@ -1942,8 +1982,10 @@ class ConversationOrchestrator:
             request,
             fields,
             use_case_preset=use_case_admission,
+            workflow_revision=workflow_revision,
         )
         mask = setting_layers.mask
+        default_size = setting_layers.default_size
         default_preset, project_preset, chat_preset, turn_preset = setting_layers.presets
         request_settings = setting_layers.request_settings
         preset_layers = setting_layers.preset_layers
@@ -2615,6 +2657,8 @@ class ConversationOrchestrator:
             output_use_case_receipt = (
                 output_context.use_case_receipt if output_context is not None else use_case_receipt
             )
+            # A prompt batch is queued from its own endpoint and carries no default shape.
+            output_shape = default_size if output_context is None else None
             output_preset_layers = (
                 output_context.preset_layers if output_context is not None else tuple(preset_layers)
             )
@@ -2751,6 +2795,7 @@ class ConversationOrchestrator:
                     if output_use_case_receipt is not None
                     else {}
                 ),
+                **({"output_shape": output_shape.provenance()} if output_shape is not None else {}),
                 **(
                     {"workflow_lora": copy.deepcopy(output_workflow_lora_outcome.receipt)}
                     if output_workflow_lora_outcome is not None
@@ -3192,6 +3237,7 @@ class ConversationOrchestrator:
                 fields,
                 ordered=True,
                 use_case_preset=use_case_admission,
+                workflow_revision=workflow_revision,
             )
             default_preset, project_preset, chat_preset, turn_preset = setting_layers.presets
             step_overrides = setting_layers.request_settings
@@ -3277,6 +3323,7 @@ class ConversationOrchestrator:
                     "workflow": workflow_revision,
                     "workflow_activation": workflow_activation,
                     "use_case_receipt": use_case_receipt,
+                    "default_size": setting_layers.default_size,
                     "role": role,
                     "settings": effective_settings,
                     "model_selection": model_selection,
@@ -3534,6 +3581,11 @@ class ConversationOrchestrator:
                     **(
                         {"workflow_use_case_preset": copy.deepcopy(resolved["use_case_receipt"])}
                         if resolved["use_case_receipt"] is not None
+                        else {}
+                    ),
+                    **(
+                        {"output_shape": resolved["default_size"].provenance()}
+                        if resolved["default_size"] is not None
                         else {}
                     ),
                     **(
@@ -10960,6 +11012,7 @@ class ConversationOrchestrator:
         *,
         ordered: bool = False,
         use_case_preset: AdmittedWorkflowUseCasePreset | None = None,
+        workflow_revision: WorkflowRevision | None = None,
     ) -> _TurnSettingLayers:
         """Resolve common layers after the caller selects workflow and source.
 
@@ -10969,6 +11022,8 @@ class ConversationOrchestrator:
         This method does not select a workflow, read prompts or admit work.
         An admitted recipe overrides saved defaults and yields to turn choices;
         its values stay separate so their source remains available to consumers.
+        A default shape the turn asks for sits under every saved layer, just
+        above the workflow's own size, and only when none of them names a size.
         """
         role = self._role_for_operation(operation)
         request_fields = [field for field in fields if field.scope != "load"]
@@ -11023,10 +11078,20 @@ class ConversationOrchestrator:
                 raise WorkflowUseCasePresetSettingsError(
                     "workflow-use-case-preset-settings-invalid"
                 ) from None
+        default_size = _default_size_for_turn(
+            session,
+            operation,
+            workflow_revision,
+            request,
+            profile,
+            workflow_lora_layers,
+            (use_case_settings, request_settings),
+        )
         effective_settings = resolve_generation_settings(
             fields,
             request_fields=request_fields,
             profile_defaults=(
+                default_size.settings() if default_size else {},
                 profile.load_settings_json if profile else {},
                 workflow_lora_layers.ordinary("profile_request"),
                 workflow_lora_layers.ordinary("default_preset"),
@@ -11051,6 +11116,7 @@ class ConversationOrchestrator:
             effective_settings=effective_settings,
             workflow_lora_layers=workflow_lora_layers,
             use_case_settings=use_case_settings,
+            default_size=default_size,
         )
 
     @staticmethod
