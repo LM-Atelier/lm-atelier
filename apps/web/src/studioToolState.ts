@@ -152,6 +152,7 @@ export type StudioToolAction =
   | { type: "set-light-intensity"; intensity: number }
   | { type: "set-light-kelvin"; kelvin: number | null }
   | { type: "set-adjustment"; key: keyof StudioColorAdjustments; value: number }
+  | { type: "set-adjustments"; adjustments: StudioColorAdjustments }
   | { type: "reset-adjustments" }
   | { type: "set-blur-radius"; radius: number }
   | { type: "set-blur-style"; style: "blur" | "pixelate" }
@@ -262,6 +263,11 @@ export function studioToolReducer(
     case "set-adjustment":
       return Number.isInteger(action.value) && Math.abs(action.value) <= 100
         ? { ...state, adjustments: { ...state.adjustments, [action.key]: action.value } }
+        : state;
+    case "set-adjustments":
+      // Every slider at once, as Auto sets them, and only if each is a whole step in range.
+      return Object.values(action.adjustments).every((value) => Number.isInteger(value) && Math.abs(value) <= 100)
+        ? { ...state, adjustments: { ...action.adjustments } }
         : state;
     case "reset-adjustments":
       return { ...state, adjustments: NEUTRAL_ADJUSTMENTS };

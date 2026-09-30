@@ -9,6 +9,7 @@ import { StudioCropTool } from "./StudioCropTool";
 import { StudioExtendTool } from "./StudioExtendTool";
 import { StudioResizeTool } from "./StudioResizeTool";
 import { StudioTransformTool } from "./StudioTransformTool";
+import { autoAdjustments } from "./studioAutoAdjust";
 import { pictureCorners } from "./studioPerspective";
 import type { StudioToolAction, StudioToolState } from "./studioToolState";
 import type { StudioLocalEditDetails, StudioLocalEditOperation } from "./types";
@@ -32,6 +33,7 @@ export function StudioToolOptions({
   onInstructionChange,
   onLocalEdit,
   busy = false,
+  pixels = null,
 }: {
   tools: StudioToolState;
   dispatch: Dispatch<StudioToolAction>;
@@ -40,6 +42,8 @@ export function StudioToolOptions({
   /** Makes an edit that needs no model, such as a turn or a flip. */
   onLocalEdit?: (operation: StudioLocalEditOperation, details?: StudioLocalEditDetails) => void;
   busy?: boolean;
+  /** The picture's own colors, where they can be read, for tools that start from them. */
+  pixels?: Uint8ClampedArray | null;
 }) {
   if (tools.kind === "transform") {
     return onLocalEdit ? (
@@ -98,7 +102,9 @@ export function StudioToolOptions({
       <StudioAdjustTool adjustments={tools.adjustments} busy={busy}
         onChange={(key, value) => dispatch({ type: "set-adjustment", key, value })}
         onReset={() => dispatch({ type: "reset-adjustments" })}
-        onApply={() => onLocalEdit("adjust", { adjustments: tools.adjustments })} />
+        onApply={() => onLocalEdit("adjust", { adjustments: tools.adjustments })}
+        onAuto={pixels ? () => dispatch({ type: "set-adjustments", adjustments: autoAdjustments(pixels, tools.adjustments) })
+          : undefined} />
     ) : null;
   }
   if (tools.kind === "canvas") {
