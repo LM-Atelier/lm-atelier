@@ -358,7 +358,7 @@ export function StudioCanvas({
     /* eslint-disable-next-line jsx-a11y-x/no-noninteractive-element-interactions */
     <div
       ref={containerRef}
-      className="studio-canvas"
+      className={tool?.cursor === "move" ? "studio-canvas moving" : "studio-canvas"}
       /* The rules below read the implicit role of the tag, not the explicit
          one: a focusable canvas application is exactly what they exist to
          prevent being written by accident, and exactly what this is. */
@@ -371,9 +371,11 @@ export function StudioCanvas({
       role="application"
       aria-roledescription="Image canvas"
       aria-label={
-        tool
-          ? "Image editing canvas. Arrow keys move the selection point, Enter starts and finishes a selection, Escape cancels it, Alt with arrows pans, plus and minus zoom, zero fits the image."
-          : "Image editing canvas. Arrow keys pan, plus and minus zoom, zero fits the image."
+        tool?.cursor === "move"
+          ? "Image editing canvas. Arrow keys move the point, Enter takes hold and lets go, Escape puts back what was moved, Alt with arrows pans, plus and minus zoom, zero fits the image."
+          : tool
+            ? "Image editing canvas. Arrow keys move the selection point, Enter starts and finishes a selection, Escape cancels it, Alt with arrows pans, plus and minus zoom, zero fits the image."
+            : "Image editing canvas. Arrow keys pan, plus and minus zoom, zero fits the image."
       }
       onKeyDown={onKeyDown}
       onPointerDown={onPointerDown}

@@ -127,7 +127,10 @@ names what was done rather than a model:
   Paint shows its color and opacity on the marking while you choose them.
 - **Add text** draws your words in one of the app's typefaces, at a size, color
   and place you choose, with an optional outline or shadow so they read over a
-  busy picture. What the canvas shows is what is added.
+  busy picture. Once written, drag them anywhere on the picture, or move them
+  with the arrow keys after Enter takes hold, and turn them about their middle
+  with the Turn slider. Choosing a place again puts them back there. What the
+  canvas shows is what is added.
 
 **Export** saves the picture as stored, or as PNG, JPEG or WebP. JPEG and WebP
 come at a quality you choose, from best quality down to smallest file, trading

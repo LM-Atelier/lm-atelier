@@ -38,6 +38,8 @@ export interface PointerTool {
    * nothing until it closes, so repainting mid-gesture would only redraw what
    * is already on screen. */
   readonly appliesWhileMoving: boolean;
+  /** "move" for a tool that drags something about rather than marking a place. */
+  readonly cursor?: "move";
   down(point: ImagePoint, viewportScale?: number): void;
   move(point: ImagePoint, viewportScale?: number): void;
   /** Returns true when the gesture changed the mask (history push point). */
