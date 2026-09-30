@@ -104,7 +104,8 @@ export function StudioToolOptions({
         onReset={() => dispatch({ type: "reset-adjustments" })}
         onApply={() => onLocalEdit("adjust", { adjustments: tools.adjustments })}
         onAuto={pixels ? () => dispatch({ type: "set-adjustments", adjustments: autoAdjustments(pixels, tools.adjustments) })
-          : undefined} />
+          : undefined}
+        onLook={(adjustments) => dispatch({ type: "set-adjustments", adjustments })} />
     ) : null;
   }
   if (tools.kind === "canvas") {

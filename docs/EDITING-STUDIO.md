@@ -101,15 +101,25 @@ names what was done rather than a model:
   size** adds room around the picture or trims it, from one of nine places,
   filled with transparency, white or black.
 - **Adjust light and color** has brightness, contrast, highlights, shadows,
-  saturation, vibrance, warmth, tint, sharpness and vignette sliders, shown on
-  the picture as they move. Vibrance richens muted colors more than vivid ones,
-  so a picture livens without its brightest colors clipping. Warmth balances
+  saturation, vibrance, warmth, tint, sharpness, vignette and grain sliders,
+  shown on the picture as they move. **Auto** sets warmth, tint, brightness and
+  contrast from the picture itself. It takes a color cast out of the
+  near-grey middle tones, brings the middle of the picture's brightness toward
+  a middle grey, and widens a picture that uses only part of the range, each
+  within a moderate reach, and leaves the other sliders as they were. A
+  **look** (Vivid, Soft, Warm, Cool, Mono, Faded, Dramatic or Film) sets every slider
+  to a named starting point. Either way the sliders show what was set, and
+  any of them can still be moved before applying. Vibrance richens muted
+  colors more than vivid ones, so a picture livens without its brightest
+  colors clipping. Warmth balances
   blue against amber, and tint green against magenta. Sharpness crisps edges
   above zero and softens them below; where a picture is transparent, colors
   hidden there play no part. The vignette darkens the edges above zero and
   lightens them below, most at the corners, and leaves the middle as it was.
-  The preview is the result: the browser and the app work the adjustment out
-  the same way.
+  Grain, from zero up, adds film-like grain: each pixel moves a little up or
+  down, the same on all three colors, so the picture keeps its light and a grey
+  stays grey. The preview is the result: the browser and the app work the
+  adjustment out the same way.
 - **Blur**, **Pixelate** and **Paint** act on a marked area, brushed with the
   tool itself or selected first with any selection tool. Everything outside the
   marking is left exactly as it was. Pixelate breaks the area into square

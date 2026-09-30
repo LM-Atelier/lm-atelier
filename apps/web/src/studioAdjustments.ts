@@ -8,9 +8,10 @@ import type { StudioColorAdjustments } from "./types";
  * highlights, warmth, tint, brightness and contrast, then saturation as a mix
  * toward each pixel's grey, then vibrance as the same mix kept in proportion to
  * how muted each pixel is, then sharpness as a mix away from a softened copy of
- * the picture, and last the vignette, a mix toward black or white that grows
- * toward the corners, with the same roundings. Both copies are checked against
- * the same pixels.
+ * the picture, then the vignette, a mix toward black or white that grows toward
+ * the corners, and last grain, the same small step up or down on all three
+ * channels of each pixel, taken from a fixed tile of noise, with the same
+ * roundings. Both copies are checked against the same pixels.
  */
 
 export const NEUTRAL_ADJUSTMENTS: StudioColorAdjustments = {
@@ -24,6 +25,7 @@ export const NEUTRAL_ADJUSTMENTS: StudioColorAdjustments = {
   sharpness: 0,
   vibrance: 0,
   vignette: 0,
+  grain: 0,
 };
 
 /** Each slider runs from -100 to 100, with 0 changing nothing. */
@@ -39,12 +41,16 @@ const VIGNETTE_START = 0.25;
 const VIGNETTE_FULL = 1.75;
 /** How finely that squared distance is counted: this many steps to the middle of an edge. */
 const VIGNETTE_STEPS = 4096;
+/** How far the grain slider at its top moves a pixel up or down, as a share of the grain's own spread. */
+const GRAIN_REACH = 0.25;
+/** The grain repeats every this many pixels across and down. */
+const GRAIN_TILE = 256;
 
 export function isNeutral(adjustments: StudioColorAdjustments): boolean {
   return !(
     adjustments.brightness || adjustments.contrast || adjustments.highlights || adjustments.shadows
     || adjustments.saturation || adjustments.warmth || adjustments.tint || adjustments.sharpness
-    || adjustments.vibrance || adjustments.vignette
+    || adjustments.vibrance || adjustments.vignette || adjustments.grain
   );
 }
 
@@ -268,6 +274,57 @@ function sharpened(pixels: Uint8ClampedArray, width: number, sharpness: number):
   return out;
 }
 
+/** The grain at one place of its tile, from 0 to 255, as the server works it out.
+ *
+ * The same whole-number hash in 32 bits: Math.imul and unsigned shifts give
+ * exactly the products and shifts the server takes modulo 2 to the 32. The
+ * mean of two of its bytes makes middling levels commoner than extremes.
+ */
+export function grainLevel(x: number, y: number): number {
+  let mixed = (Math.imul(x, 374761393) + Math.imul(y, 668265263) + 0x9e3779b9) >>> 0;
+  mixed = Math.imul(mixed ^ (mixed >>> 13), 1274126177) >>> 0;
+  mixed = (mixed ^ (mixed >>> 16)) >>> 0;
+  return ((mixed & 255) + ((mixed >>> 8) & 255)) >> 1;
+}
+
+let grainTileLevels: Uint8Array | null = null;
+
+/** The tile of grain levels, made once, row by row. */
+function grainTile(): Uint8Array {
+  if (!grainTileLevels) {
+    const levels = new Uint8Array(GRAIN_TILE * GRAIN_TILE);
+    for (let y = 0; y < GRAIN_TILE; y += 1) {
+      for (let x = 0; x < GRAIN_TILE; x += 1) levels[y * GRAIN_TILE + x] = grainLevel(x, y);
+    }
+    grainTileLevels = levels;
+  }
+  return grainTileLevels;
+}
+
+/** How far each grain level moves a pixel at this slider value, plus 128. */
+export function grainOffsets(grain: number): Uint8Array {
+  const reach = grain / ADJUSTMENT_LIMIT * GRAIN_REACH;
+  return Uint8Array.from({ length: 256 }, (_, level) => rounded(128 + (level - 128) * reach));
+}
+
+/** Grain laid over the picture: each pixel moved the same way on all three channels. */
+function grained(pixels: Uint8ClampedArray, width: number, grain: number): Uint8ClampedArray {
+  const tile = grainTile();
+  const offsets = grainOffsets(grain);
+  const out = new Uint8ClampedArray(pixels);
+  for (let index = 0; index < pixels.length; index += 4) {
+    const pixel = index / 4;
+    const x = (pixel % width) % GRAIN_TILE;
+    const y = Math.floor(pixel / width) % GRAIN_TILE;
+    // A clipped whole-number add, as the server's is: the offset carries 128.
+    const step = offsets[tile[y * GRAIN_TILE + x]] - 128;
+    for (let channel = index; channel < index + 3; channel += 1) {
+      out[channel] = Math.min(255, Math.max(0, pixels[channel] + step));
+    }
+  }
+  return out;
+}
+
 /** The adjusted copy of RGBA pixels, `width` to a row; transparency is kept as it was. */
 export function adjustPixels(
   pixels: Uint8ClampedArray,
@@ -303,5 +360,6 @@ export function adjustPixels(
     out[index + 3] = pixels[index + 3];
   }
   const sharp = adjustments.sharpness === 0 ? out : sharpened(out, width, adjustments.sharpness);
-  return adjustments.vignette === 0 ? sharp : vignetted(sharp, width, adjustments.vignette);
+  const edged = adjustments.vignette === 0 ? sharp : vignetted(sharp, width, adjustments.vignette);
+  return adjustments.grain <= 0 ? edged : grained(edged, width, adjustments.grain);
 }

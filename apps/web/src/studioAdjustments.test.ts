@@ -1,7 +1,7 @@
 /** The preview's arithmetic, checked against the pixels the server makes. */
 
 import { describe, expect, it } from "vitest";
-import { adjustPixels, channelTables, isNeutral, NEUTRAL_ADJUSTMENTS } from "./studioAdjustments";
+import { adjustPixels, channelTables, grainLevel, grainOffsets, isNeutral, NEUTRAL_ADJUSTMENTS } from "./studioAdjustments";
 import type { StudioColorAdjustments } from "./types";
 
 // The same pixels and results test_studio_adjustments.py checks the server
@@ -153,6 +153,29 @@ const VIGNETTE_CASES: Array<[string, Partial<StudioColorAdjustments>, boolean, n
     [74, 13, 2, 255], [0, 116, 231, 255], [244, 122, 0, 255], [62, 23, 102, 255], [193, 193, 25, 255], [9, 152, 152, 255]]],
 ];
 
+// The same picture again, for grain, which reads where each pixel is too:
+// the pixels test_studio_adjustments.py checks the server against.
+const GRAIN_CASES: Array<[string, Partial<StudioColorAdjustments>, boolean, number[][]]> = [
+  ["grain", { grain: 60 }, false, [
+    [2, 30, 190, 255], [61, 61, 61, 255], [203, 33, 33, 255], [255, 255, 255, 255], [16, 16, 16, 255], [91, 181, 41, 255],
+    [40, 40, 40, 255], [218, 198, 8, 255], [123, 123, 123, 255], [3, 78, 198, 255], [238, 118, 58, 255], [42, 75, 108, 255],
+    [255, 255, 255, 255], [21, 21, 21, 255], [176, 36, 156, 255], [72, 202, 122, 255], [11, 255, 11, 255], [120, 0, 247, 255],
+    [53, 53, 208, 255], [152, 152, 22, 255], [7, 7, 7, 255], [255, 24, 134, 255], [88, 88, 88, 255], [199, 199, 199, 255],
+    [69, 14, 3, 255], [12, 140, 255, 255], [255, 136, 8, 255], [57, 27, 87, 255], [211, 211, 41, 255], [23, 185, 185, 255]]],
+  ["a cutout with the most grain", { grain: 100 }, true, [
+    [0, 23, 183, 255], [61, 61, 61, 255], [206, 36, 36, 255], [255, 255, 255, 255], [26, 26, 26, 0], [91, 181, 41, 255],
+    [47, 47, 47, 255], [216, 196, 6, 128], [120, 120, 120, 255], [0, 70, 190, 64], [236, 116, 56, 255], [48, 81, 114, 255],
+    [255, 255, 255, 0], [29, 29, 29, 255], [173, 33, 153, 200], [73, 203, 123, 255], [19, 255, 19, 17], [114, 0, 241, 255],
+    [59, 59, 214, 255], [154, 154, 24, 255], [9, 9, 9, 255], [255, 33, 143, 255], [81, 81, 81, 128], [198, 198, 198, 0],
+    [63, 8, 0, 255], [21, 149, 255, 255], [255, 142, 14, 0], [55, 25, 85, 255], [212, 212, 42, 255], [27, 189, 189, 255]]],
+  ["a film look", { contrast: 10, saturation: -15, warmth: 10, grain: 35 }, false, [
+    [4, 29, 172, 255], [55, 55, 54, 255], [190, 33, 33, 255], [255, 255, 255, 255], [9, 9, 9, 255], [96, 176, 48, 255],
+    [29, 29, 29, 255], [222, 201, 28, 255], [126, 125, 123, 255], [10, 78, 185, 255], [235, 122, 67, 255], [36, 65, 94, 255],
+    [255, 255, 255, 255], [9, 9, 8, 255], [170, 41, 148, 255], [81, 198, 124, 255], [29, 246, 29, 255], [115, 5, 221, 255],
+    [47, 46, 185, 255], [152, 149, 31, 255], [1, 1, 1, 255], [238, 23, 121, 255], [91, 91, 90, 255], [206, 204, 201, 255],
+    [62, 11, 1, 255], [22, 131, 239, 255], [244, 136, 27, 255], [51, 23, 77, 255], [216, 213, 58, 255], [31, 178, 176, 255]]],
+];
+
 function rgba(pixels: number[][], alpha = 255): Uint8ClampedArray {
   return new Uint8ClampedArray(pixels.flatMap(([r, g, b]) => [r, g, b, alpha]));
 }
@@ -268,5 +291,44 @@ describe("vibrance and the vignette", () => {
 
     expect([tall[0], tall[4], tall[8]]).toEqual([154, 160, 154]);
     expect(Array.from(wide)).toEqual(Array.from(tall));
+  });
+});
+
+describe("grain", () => {
+  it.each(GRAIN_CASES)("makes the server's pixels for %s", (_name, sliders, cutout, expected) => {
+    const pixels = new Uint8ClampedArray(
+      SHARP_COLORS.flatMap(([r, g, b], index) => [r, g, b, cutout ? SHARP_ALPHAS[index] : 255]),
+    );
+
+    const adjusted = adjustPixels(pixels, SHARP_WIDTH, { ...NEUTRAL_ADJUSTMENTS, ...sliders });
+
+    expect(Array.from(adjusted)).toEqual(expected.flat());
+  });
+
+  it("takes the server's levels from the same whole-number hash", () => {
+    // The same numbers are pinned in test_studio_adjustments.py.
+    expect(Array.from({ length: 8 }, (_, x) => grainLevel(x, 0))).toEqual([59, 133, 151, 193, 232, 132, 185, 110]);
+    expect([grainLevel(255, 255), grainLevel(3, 7)]).toEqual([126, 172]);
+  });
+
+  it("moves all three channels alike, repeats every tile, and keeps the picture's light", () => {
+    const width = 512;
+    const height = 8;
+    const grey = new Uint8ClampedArray(width * height * 4).fill(128);
+
+    const grained = adjustPixels(grey, width, { ...NEUTRAL_ADJUSTMENTS, grain: 100 });
+    let sum = 0;
+    for (let pixel = 0; pixel < width * height; pixel += 1) {
+      const at = pixel * 4;
+      expect([grained[at + 1], grained[at + 2]]).toEqual([grained[at], grained[at]]);
+      expect(grained[at]).toBe(grained[(pixel % width < 256 ? pixel + 256 : pixel - 256) * 4]);
+      sum += grained[at];
+    }
+    expect(Math.abs(sum / (width * height) - 128)).toBeLessThan(1);
+    expect(grainOffsets(100)[255] - 128).toBeLessThanOrEqual(32);
+  });
+
+  it("counts as a change on its own", () => {
+    expect(isNeutral({ ...NEUTRAL_ADJUSTMENTS, grain: 1 })).toBe(false);
   });
 });

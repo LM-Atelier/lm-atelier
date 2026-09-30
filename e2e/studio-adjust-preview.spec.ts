@@ -108,6 +108,24 @@ async function mutedPicture(page: Page): Promise<Buffer> {
   return Buffer.from(dataUrl.split(",")[1], "base64");
 }
 
+/** A smooth grey ramp, on which grain shows plainly. A picture of its own again. */
+async function smoothPicture(page: Page): Promise<Buffer> {
+  const dataUrl = await page.evaluate(() => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 96;
+    canvas.height = 64;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("no canvas");
+    const ramp = context.createLinearGradient(0, 0, 0, 64);
+    ramp.addColorStop(0, "#5a5a5a");
+    ramp.addColorStop(1, "#b4b4b4");
+    context.fillStyle = ramp;
+    context.fillRect(0, 0, 96, 64);
+    return canvas.toDataURL("image/png");
+  });
+  return Buffer.from(dataUrl.split(",")[1], "base64");
+}
+
 /** Open `picture` in the studio with the light and color tool, once it shows. */
 async function openToAdjust(page: Page, name: string, picture: Buffer, size: number): Promise<number[]> {
   await page.locator(".primary-nav").getByRole("button", { name: "Image Studio" }).click();
@@ -232,4 +250,23 @@ test("richens muted colors and darkens the edges exactly as the preview shows", 
   expect(light(kept, 0, 0)).toBeLessThan(light(before, 0, 0));
   expect(light(kept, 95, 63)).toBeLessThan(light(before, 95, 63));
   expect(light(kept, 20, 32)).toBeGreaterThan(light(kept, 0, 32));
+});
+
+test("adds grain exactly as the preview shows, keeping grey grey", async ({ page }) => {
+  await page.goto("/");
+  await dismissSetup(page);
+  const before = await openToAdjust(page, "neutral-smooth.png", await smoothPicture(page), 96 * 64);
+  await page.getByRole("slider", { name: "Grain" }).fill("80");
+  await expect.poll(async () => (await shownPixels(page)).join() !== before.join()).toBe(true);
+  const preview = await shownPixels(page);
+
+  const kept = await applyAndReadKept(page);
+
+  expect(kept.length).toBe(preview.length);
+  expect(kept.filter((value, index) => value !== preview[index]).length).toBe(0);
+  // Every pixel moved alike on its three channels, so the grey ramp is grey still.
+  for (let at = 0; at < kept.length; at += 4) {
+    expect([kept[at + 1], kept[at + 2]]).toEqual([kept[at], kept[at]]);
+  }
+  expect(kept.filter((value, index) => value !== before[index]).length).toBeGreaterThan(96 * 64);
 });
