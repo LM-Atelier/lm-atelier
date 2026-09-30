@@ -88,6 +88,26 @@ async function cutoutPicture(page: Page): Promise<Buffer> {
   return Buffer.from(dataUrl.split(",")[1], "base64");
 }
 
+/** Muted colors across the whole picture, with one vivid square in it. */
+async function mutedPicture(page: Page): Promise<Buffer> {
+  const dataUrl = await page.evaluate(() => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 96;
+    canvas.height = 64;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("no canvas");
+    const muted = context.createLinearGradient(0, 0, 96, 64);
+    muted.addColorStop(0, "#8a7f74");
+    muted.addColorStop(1, "#6f8a9c");
+    context.fillStyle = muted;
+    context.fillRect(0, 0, 96, 64);
+    context.fillStyle = "#d8342a";
+    context.fillRect(36, 20, 24, 24);
+    return canvas.toDataURL("image/png");
+  });
+  return Buffer.from(dataUrl.split(",")[1], "base64");
+}
+
 /** Open `picture` in the studio with the light and color tool, once it shows. */
 async function openToAdjust(page: Page, name: string, picture: Buffer, size: number): Promise<number[]> {
   await page.locator(".primary-nav").getByRole("button", { name: "Image Studio" }).click();
@@ -188,4 +208,28 @@ test("sharpens a cutout exactly as the preview shows, keeping it cut out", async
   const clear = (pixels: number[]) => pixels.filter((value, index) => index % 4 === 3 && value === 0).length;
   expect(clear(kept)).toBe(clear(before));
   expect(clear(before)).toBeGreaterThan(0);
+});
+
+test("richens muted colors and darkens the edges exactly as the preview shows", async ({ page }) => {
+  await page.goto("/");
+  await dismissSetup(page);
+  const before = await openToAdjust(page, "neutral-muted.png", await mutedPicture(page), 96 * 64);
+  await page.getByRole("slider", { name: "Vibrance" }).fill("60");
+  await page.getByRole("slider", { name: "Vignette" }).fill("70");
+  await expect.poll(async () => (await shownPixels(page)).join() !== before.join()).toBe(true);
+  const preview = await shownPixels(page);
+
+  const kept = await applyAndReadKept(page);
+
+  expect(kept.length).toBe(preview.length);
+  const differing = kept.filter((value, index) => value !== preview[index]).length;
+  expect(differing).toBe(0);
+  // The corners went darker and the middle of the picture kept its light.
+  const light = (pixels: number[], x: number, y: number) => {
+    const at = (y * 96 + x) * 4;
+    return pixels[at] + pixels[at + 1] + pixels[at + 2];
+  };
+  expect(light(kept, 0, 0)).toBeLessThan(light(before, 0, 0));
+  expect(light(kept, 95, 63)).toBeLessThan(light(before, 95, 63));
+  expect(light(kept, 20, 32)).toBeGreaterThan(light(kept, 0, 32));
 });

@@ -94,6 +94,8 @@ export interface StudioColorAdjustments {
   warmth: number;
   tint: number;
   sharpness: number;
+  vibrance: number;
+  vignette: number;
 }
 
 /** A point on a picture, in its own pixels as it is seen upright. */

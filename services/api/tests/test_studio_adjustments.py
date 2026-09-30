@@ -8,7 +8,12 @@ from typing import Any
 import pytest
 from PIL import Image, ImageStat
 
-from local_lm.studio_adjustments import ColorAdjustments, adjust_colors, channel_tables
+from local_lm.studio_adjustments import (
+    ColorAdjustments,
+    adjust_colors,
+    channel_tables,
+    vignette_mask,
+)
 
 
 def _pixel(picture: Image.Image, xy: tuple[int, int]) -> tuple[int, ...]:
@@ -124,6 +129,24 @@ CASES: list[tuple[str, dict[str, int], str]] = [
         "255,255,255 39,100,218 0,187,0 224,254,140 186,48,173",
     ),
     (
+        "vivid",
+        {"vibrance": 60},
+        "219,94,31 9,241,126 128,128,128 255,0,255 0,0,0 "
+        "255,255,255 26,91,221 0,184,0 205,254,96 192,30,174",
+    ),
+    (
+        "muted",
+        {"vibrance": -60},
+        "181,106,68 19,235,130 128,128,128 255,0,255 0,0,0 "
+        "255,255,255 47,90,179 20,156,20 215,244,156 146,60,137",
+    ),
+    (
+        "vivid and paler",
+        {"vibrance": 80, "saturation": -30},
+        "202,99,47 34,230,131 128,128,128 223,22,223 0,0,0 "
+        "255,255,255 36,91,203 14,170,14 208,251,119 173,41,160",
+    ),
+    (
         "toned and graded",
         {"shadows": 50, "highlights": -40, "contrast": 20, "saturation": -30, "warmth": 25},
         "184,112,74 48,222,136 135,131,127 210,31,210 0,0,0 "
@@ -204,6 +227,50 @@ SHARP_CASES: list[tuple[str, dict[str, int], bool, str]] = [
     ),
 ]
 
+# The same picture again, for the vignette, which reads where each pixel is.
+VIGNETTE_CASES: list[tuple[str, dict[str, int], bool, str]] = [
+    (
+        "darker edges",
+        {"vignette": 60},
+        False,
+        "7,25,122,255 49,49,49,255 182,27,27,255 227,227,227,255 0,0,0,255 55,110,25,255 "
+        "25,25,25,255 217,197,10,255 128,128,128,255 15,90,210,255 236,118,59,255 27,55,82,255 "
+        "229,229,229,255 10,10,10,255 180,40,160,255 70,200,120,255 0,255,0,255 115,0,229,255 "
+        "37,37,166,255 148,148,20,255 5,5,5,255 250,10,120,255 98,98,98,255 166,166,166,255 "
+        "47,13,7,255 0,104,207,255 232,117,0,255 55,27,82,255 170,170,33,255 11,110,110,255",
+    ),
+    (
+        "lighter edges",
+        {"vignette": -45},
+        False,
+        "83,103,216,255 87,87,87,255 204,45,45,255 250,250,250,255 36,36,36,255 138,202,103,255 "
+        "59,59,59,255 220,201,13,255 128,128,128,255 15,90,210,255 240,122,62,255 62,90,119,255 "
+        "255,255,255,255 10,10,10,255 180,40,160,255 70,200,120,255 0,255,0,255 138,19,255,255 "
+        "72,72,207,255 151,151,23,255 5,5,5,255 250,10,120,255 102,102,102,255 207,207,207,255 "
+        "129,90,82,255 36,146,255,255 255,137,17,255 73,45,101,255 216,216,70,255 87,202,202,255",
+    ),
+    (
+        "a cutout with darker edges",
+        {"vignette": 100},
+        True,
+        "4,14,70,255 41,41,41,255 170,25,25,255 212,212,212,255 0,0,0,0 32,63,14,255 "
+        "21,21,21,255 214,195,10,128 128,128,128,255 15,90,210,64 234,117,58,255 24,47,71,255 "
+        "212,212,212,0 10,10,10,255 180,40,160,200 70,200,120,255 0,255,0,17 106,0,212,255 "
+        "32,32,143,255 146,146,19,255 5,5,5,255 250,10,120,255 97,97,97,128 143,143,143,0 "
+        "27,7,4,255 0,88,175,255 217,109,0,0 51,25,76,255 144,144,27,255 7,63,63,255",
+    ),
+    (
+        "crisper, livelier and darker at the edges",
+        {"sharpness": 40, "vibrance": 50, "vignette": 30},
+        False,
+        "7,32,173,255 55,55,55,255 208,20,20,255 239,239,239,255 0,0,0,255 64,152,18,255 "
+        "28,28,28,255 253,239,0,255 124,136,134,255 0,75,255,255 253,113,28,255 21,62,103,255 "
+        "242,242,242,255 0,0,0,255 233,5,204,255 30,247,112,255 0,255,0,255 121,0,242,255 "
+        "37,37,203,255 175,178,0,255 0,0,0,255 255,0,136,255 89,84,95,255 183,183,183,255 "
+        "74,13,2,255 0,116,231,255 244,122,0,255 62,23,102,255 193,193,25,255 9,152,152,255",
+    ),
+]
+
 
 def _row(pixels: list[tuple[int, int, int]], mode: str = "RGB") -> Image.Image:
     image = Image.new("RGB", (len(pixels), 1))
@@ -249,6 +316,8 @@ def test_every_slider_at_zero_changes_nothing() -> None:
     assert not ColorAdjustments(sharpness=1).is_neutral()
     assert not ColorAdjustments(highlights=-1).is_neutral()
     assert not ColorAdjustments(shadows=1).is_neutral()
+    assert not ColorAdjustments(vibrance=-1).is_neutral()
+    assert not ColorAdjustments(vignette=1).is_neutral()
     for table in channel_tables(ColorAdjustments()):
         assert table == list(range(256))
 
@@ -368,3 +437,66 @@ def test_a_color_hidden_under_transparency_does_not_bleed_into_a_cutout() -> Non
     middle_row = _grid(result)[10:15]
     assert middle_row[:3] == [(128, 128, 128, 255)] * 3
     assert [pixel[3] for pixel in middle_row[3:]] == [0, 0]
+
+
+def test_vibrance_moves_a_muted_color_about_as_far_as_saturation_and_a_vivid_one_less() -> None:
+    muted, vivid = (150, 130, 120), (230, 40, 30)
+    picture = _row([muted, vivid])
+
+    livelier = adjust_colors(picture, ColorAdjustments(vibrance=100))
+    richer = adjust_colors(picture, ColorAdjustments(saturation=100))
+
+    def moved(result: Image.Image, x: int, before: tuple[int, int, int]) -> int:
+        return sum(abs(a - b) for a, b in zip(_pixel(result, (x, 0)), before, strict=True))
+
+    # The muted color has a spread of 30, so it keeps 225/255 of the mix; the
+    # vivid one has 200 and keeps 55/255 of it.
+    assert moved(livelier, 0, muted) >= moved(richer, 0, muted) * 0.8
+    assert moved(livelier, 1, vivid) <= moved(richer, 1, vivid) * 0.3
+
+
+@pytest.mark.parametrize(
+    ("name", "sliders", "cutout", "expected"),
+    VIGNETTE_CASES,
+    ids=[case[0] for case in VIGNETTE_CASES],
+)
+def test_the_vignetted_pixels_the_preview_promises(
+    name: str, sliders: dict[str, int], cutout: bool, expected: str
+) -> None:
+    result = adjust_colors(_sharpness_picture(cutout), ColorAdjustments(**sliders))
+
+    assert result.mode == ("RGBA" if cutout else "RGB")
+    assert _grid(result) == [
+        tuple(int(part) for part in pixel.split(",")) for pixel in expected.split()
+    ]
+
+
+def test_the_vignette_leaves_the_middle_and_gathers_evenly_toward_the_corners() -> None:
+    grey = Image.new("RGB", (64, 48), (160, 160, 160))
+
+    reds = _reds(adjust_colors(grey, ColorAdjustments(vignette=100)))
+
+    assert reds[23][31] == reds[24][32] == 160
+    # Mirrored left to right and top to bottom, as a centred vignette is.
+    assert all(row == row[::-1] for row in reds)
+    assert reds == reds[::-1]
+    # Darker at every step out along the diagonal, and darkest in the corner.
+    diagonal = [reds[24 + step * 3 // 4][32 + step] for step in range(32)]
+    assert all(outer <= inner for inner, outer in pairwise(diagonal))
+    assert reds[0][0] == min(min(row) for row in reds) < reds[24][0] < 160
+
+
+def test_a_vignette_below_zero_lightens_the_edges_instead() -> None:
+    grey = Image.new("RGB", (64, 48), (100, 100, 100))
+
+    reds = _reds(adjust_colors(grey, ColorAdjustments(vignette=-100)))
+
+    assert reds[24][32] == 100
+    assert reds[0][0] > reds[24][0] > 100
+
+
+def test_a_picture_one_pixel_wide_or_tall_takes_the_vignette_too() -> None:
+    # Only the middle of a strip is inside the start of the vignette.
+    assert list(vignette_mask(1, 3).tobytes()) == list(vignette_mask(3, 1).tobytes())
+    assert list(vignette_mask(3, 1).tobytes()) == [12, 0, 12]
+    assert list(vignette_mask(1, 1).tobytes()) == [0]

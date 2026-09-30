@@ -642,6 +642,8 @@ class StudioColorAdjustments(ApiModel):
     warmth: StrictInt = Field(default=0, ge=-100, le=100)
     tint: StrictInt = Field(default=0, ge=-100, le=100)
     sharpness: StrictInt = Field(default=0, ge=-100, le=100)
+    vibrance: StrictInt = Field(default=0, ge=-100, le=100)
+    vignette: StrictInt = Field(default=0, ge=-100, le=100)
 
 
 class StudioSelectionBlur(ApiModel):
