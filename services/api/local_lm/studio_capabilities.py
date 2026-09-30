@@ -105,6 +105,12 @@ _CLASS_GUIDANCE = {
     ),
 }
 _NO_LIGHTING_ADAPTER = "Install the Qwen Multi-Angle Lighting LoRA to relight a picture."
+#: For a tool whose workflow is installed but refused by the run: installing
+#: another would not be the next step, finishing this one's setup would.
+_WAITING_GUIDANCE = (
+    "An installed workflow can do this once it has been reviewed and has the node packages "
+    "it needs."
+)
 
 
 @dataclass(frozen=True)
@@ -128,6 +134,7 @@ def tool_capabilities(
     lighting_adapter_ids: Sequence[str] = (),
     matting_workflow_ids: Sequence[str] = (),
     reference_workflow_ids: Sequence[str] = (),
+    waiting_input_schemas: Sequence[dict[str, Any] | None] = (),
 ) -> list[ToolCapability]:
     """Judge every tool from the schemas of the installed edit workflows.
 
@@ -135,6 +142,11 @@ def tool_capabilities(
     declared input, not a name: a workflow called "inpaint" that declares no
     mask cannot honor a selection, and one called anything at all that does
     can. The declaration is the only thing that decides.
+
+    `waiting_input_schemas` are the edit workflows installed here that the run
+    would refuse until they are reviewed or given their node packages. They make
+    no tool ready, but a tool one of them would serve says so, rather than
+    asking for an install that has already happened.
     """
     # A workflow that only cuts a subject out cannot carry out an instruction,
     # so on its own it does not make the instructed tools usable.
@@ -156,16 +168,29 @@ def tool_capabilities(
         # Nothing to install: the edit is made here, without a model.
         "local": True,
     }
+    waiting = {
+        "image_to_image": any(
+            not workflow_declares_matting(schema) for schema in waiting_input_schemas
+        ),
+        "inpaint": any(workflow_accepts_mask(schema) for schema in waiting_input_schemas),
+        "upscale": any(workflow_declares_upscale(schema) for schema in waiting_input_schemas),
+        "outpaint": any(workflow_declares_outpaint(schema) for schema in waiting_input_schemas),
+        "matting": any(workflow_declares_matting(schema) for schema in waiting_input_schemas),
+    }
+
+    def guidance(workflow_class: str) -> str:
+        return _WAITING_GUIDANCE if waiting.get(workflow_class) else _CLASS_GUIDANCE[workflow_class]
+
     capabilities = []
     for kind, workflow_class in TOOL_WORKFLOW_CLASSES.items():
         ready = available[workflow_class]
-        reason = None if ready else _CLASS_GUIDANCE[workflow_class]
+        reason = None if ready else guidance(workflow_class)
         if kind == "background" and ready and not can_edit:
             # The cutout alone replaces nothing: an edit redraws around it.
-            ready, reason = False, _CLASS_GUIDANCE["image_to_image"]
+            ready, reason = False, guidance("image_to_image")
         if kind == "subject" and ready and not can_matte:
             # The cutout is what says where the subject is.
-            ready, reason = False, _CLASS_GUIDANCE["matting"]
+            ready, reason = False, guidance("matting")
         if workflow_class == "relight" and relight_workflow_ids and not lighting_adapter_ids:
             reason = _NO_LIGHTING_ADAPTER
         capabilities.append(

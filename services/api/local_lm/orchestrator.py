@@ -11505,6 +11505,21 @@ class ConversationOrchestrator:
                 matched.append(asset.id)
         return matched
 
+    def _studio_revision_runs(self, session: Session, revision: WorkflowRevision) -> bool:
+        """Whether a media run on this revision gets past the checks it meets first.
+
+        The studio's report used to count every current revision for this
+        engine, so a workflow still waiting for review, or one whose node
+        packages are not installed, made its tools look ready, and the run then
+        refused it after the selection had been drawn and the edit accepted.
+        These are the run's own two refusals, made before the tool is offered.
+        """
+        if not self._workflow_matches_engine(revision):
+            return False
+        if revision.engine == "comfyui" and not revision_is_trusted(session, revision):
+            return False
+        return not node_dependency_errors(session, revision.dependencies_json)
+
     def installed_relight_workflow_ids(self, session: Session) -> list[str]:
         """Edit workflows that take a second picture and let a LoRA be added."""
 
@@ -11520,7 +11535,7 @@ class ConversationOrchestrator:
             revision = session.get(WorkflowRevision, definition.current_revision_id)
             if (
                 revision is not None
-                and self._workflow_matches_engine(revision)
+                and self._studio_revision_runs(session, revision)
                 and workflow_lora_extension(revision) is not None
                 and exceeds_capacity(revision.api_graph_json, 2) is None
             ):
@@ -11547,7 +11562,7 @@ class ConversationOrchestrator:
             revision = session.get(WorkflowRevision, definition.current_revision_id)
             if (
                 revision is not None
-                and self._workflow_matches_engine(revision)
+                and self._studio_revision_runs(session, revision)
                 and not workflow_declares_matting(revision.input_schema_json)
                 and exceeds_capacity(revision.api_graph_json, 2) is None
             ):
@@ -11573,7 +11588,7 @@ class ConversationOrchestrator:
             revision = session.get(WorkflowRevision, definition.current_revision_id)
             if (
                 revision is not None
-                and self._workflow_matches_engine(revision)
+                and self._studio_revision_runs(session, revision)
                 and workflow_declares_matting(revision.input_schema_json)
             ):
                 revision_ids.append(revision.id)
@@ -11597,7 +11612,32 @@ class ConversationOrchestrator:
             if not definition.current_revision_id:
                 continue
             revision = session.get(WorkflowRevision, definition.current_revision_id)
-            if revision and self._workflow_matches_engine(revision):
+            if revision and self._studio_revision_runs(session, revision):
+                schemas.append(revision.input_schema_json)
+        return schemas
+
+    def waiting_edit_input_schemas(self, session: Session) -> list[dict[str, Any] | None]:
+        """Input schemas of edit workflows installed for this engine that a run would refuse.
+
+        The studio tells these apart from workflows nobody has installed: the
+        next step for them is finishing their setup, not finding another.
+        """
+
+        definitions = session.scalars(
+            select(WorkflowDefinition).where(
+                WorkflowDefinition.operation == Operation.IMAGE_TO_IMAGE.value
+            )
+        ).all()
+        schemas: list[dict[str, Any] | None] = []
+        for definition in definitions:
+            if not definition.current_revision_id:
+                continue
+            revision = session.get(WorkflowRevision, definition.current_revision_id)
+            if (
+                revision
+                and self._workflow_matches_engine(revision)
+                and not self._studio_revision_runs(session, revision)
+            ):
                 schemas.append(revision.input_schema_json)
         return schemas
 
