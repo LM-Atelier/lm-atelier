@@ -127,10 +127,17 @@ def workflow_use_case_error(exc: ValueError) -> tuple[str, str] | None:
             if len(reasons) == 1:
                 code = reasons.pop()
             elif reasons:
-                return (
-                    "workflow-use-case-no-compatible-workflow",
-                    "No ready workflow supports the recipe's inputs and settings. " + _CHOOSE,
-                )
+                if "workflow-instruction-edit-required" in reasons:
+                    aggregate_message = (
+                        "No ready instruction-edit workflow supports the recipe's inputs and "
+                        "settings. Enable one in Workflows, or adjust the recipe under "
+                        "Recipes for this chat."
+                    )
+                else:
+                    aggregate_message = (
+                        "No ready workflow supports the recipe's inputs and settings. " + _CHOOSE
+                    )
+                return ("workflow-use-case-no-compatible-workflow", aggregate_message)
     elif isinstance(
         exc,
         (
