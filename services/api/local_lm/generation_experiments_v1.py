@@ -26,6 +26,8 @@ from pydantic import (
 from .output_geometry import MAX_DIMENSION, PresetId
 
 CONTRACT_VERSION: Literal[1] = 1
+# The scope of the one hidden chat a started comparison runs in.
+EXPERIMENT_CHAT_SCOPE = "experiment"
 # The largest seed every image workflow accepts; -1 means "choose one" to them,
 # and a comparison never leaves that choice to the run.
 MAX_SEED = 2_147_483_647
@@ -67,6 +69,7 @@ class GenerationExperimentRefusalCode(StrEnum):
     SEED_FAMILY_UNPROVEN = "seed-family-unproven"
     ARMS_IDENTICAL = "arms-identical"
     EXPERIMENT_TOO_LARGE = "experiment-too-large"
+    ARM_CHANGED = "arm-changed"
 
 
 # One fixed sentence per refusal. A refusal never repeats what was asked for,
@@ -126,6 +129,10 @@ REFUSAL_MESSAGES: dict[GenerationExperimentRefusalCode, str] = {
     ),
     GenerationExperimentRefusalCode.EXPERIMENT_TOO_LARGE: (
         "These two pictures together are larger than one request may be."
+    ),
+    GenerationExperimentRefusalCode.ARM_CHANGED: (
+        "This choice would now run differently from when the comparison was accepted. "
+        "Check it again."
     ),
 }
 
@@ -262,10 +269,27 @@ def canonical_sha256(value: Any) -> str:
 
 class GenerationExperimentState(StrEnum):
     READY = "ready"
+    STARTED = "started"
 
 
 class GenerationExperimentTrialState(StrEnum):
     PLANNED = "planned"
+    STARTED = "started"
+
+
+# Where a started picture's work stands, read from its step when the comparison
+# is read; "removed" when its work was deleted after it started.
+TrialWorkStatus = Literal[
+    "queued",
+    "running",
+    "paused",
+    "complete",
+    "failed",
+    "cancelled",
+    "interrupted",
+    "blocked",
+    "removed",
+]
 
 
 Digest = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
@@ -282,11 +306,27 @@ class GenerationExperimentCreate(GenerationExperimentRequest):
     preflight_sha256: Digest
 
 
+class GenerationExperimentStart(_Contract):
+    """Start an accepted comparison: queue one picture per choice, exactly as accepted.
+
+    The digest is the comparison's own, so a start aimed at a record that has
+    changed since it was read starts nothing.
+    """
+
+    idempotency_key: str = Field(min_length=1, max_length=200)
+    snapshot_sha256: Digest
+    confirm_expensive: bool = False
+
+
 class ExperimentTrialOut(BaseModel):
     id: str
     ordinal: int
     seed: int
     state: GenerationExperimentTrialState
+    work_step_id: str | None = None
+    run_id: str | None = None
+    job_id: str | None = None
+    status: TrialWorkStatus | None = None
 
 
 class ExperimentArmOut(BaseModel):
@@ -321,11 +361,15 @@ class GenerationExperimentOut(BaseModel):
     snapshot_sha256: str
     estimate: list[ResourceEvidenceOut]
     created_at: datetime
+    work_plan_id: str | None = None
+    started_at: datetime | None = None
     arms: list[ExperimentArmOut]
 
-    @field_serializer("created_at", when_used="json")
-    def serialize_created_at_as_utc(self, value: datetime) -> str:
-        """The database keeps it without a zone and it is UTC; say so in every answer."""
+    @field_serializer("created_at", "started_at", when_used="json")
+    def serialize_times_as_utc(self, value: datetime | None) -> str | None:
+        """The database keeps them without a zone and they are UTC; say so in every answer."""
 
+        if value is None:
+            return None
         normalized = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
         return normalized.isoformat().replace("+00:00", "Z")

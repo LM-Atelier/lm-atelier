@@ -1,4 +1,4 @@
-"""Check two generation choices against one frozen request, accept it, and read it back."""
+"""Check two generation choices against one frozen request, accept it, start it, read it."""
 
 from __future__ import annotations
 
@@ -11,11 +11,13 @@ from . import generation_experiment_store as store
 from .api_errors import api_error
 from .db import get_session
 from .generation_experiment_preflight import resolve_generation_experiment
+from .generation_experiment_start import StartRefused, start_generation_experiment
 from .generation_experiments_v1 import (
     GenerationExperimentCreate,
     GenerationExperimentOut,
     GenerationExperimentPreflightOut,
     GenerationExperimentRequest,
+    GenerationExperimentStart,
 )
 from .models import GenerationExperiment
 
@@ -43,6 +45,23 @@ REFUSALS: dict[str, tuple[int, str]] = {
         409,
         "This comparison's stored record no longer matches what was accepted.",
     ),
+    "generation-experiment-already-started": (409, "This comparison has already been started."),
+    "generation-experiment-snapshot-changed": (
+        409,
+        "This comparison changed since it was read. Read it again before starting it.",
+    ),
+    "generation-experiment-confirmation-required": (
+        409,
+        "These pictures are large. Confirm that they should be made.",
+    ),
+    "generation-experiment-storage-insufficient": (
+        409,
+        "There is not enough free storage to make these pictures.",
+    ),
+    "generation-experiment-unavailable": (
+        503,
+        "New work is not being accepted right now. Try again in a moment.",
+    ),
 }
 
 
@@ -51,9 +70,9 @@ def _refuse(code: str, **extra: object) -> Exception:
     return api_error(status, code, message, **extra)
 
 
-def _out(experiment: GenerationExperiment) -> GenerationExperimentOut:
+def _out(session: Session, experiment: GenerationExperiment) -> GenerationExperimentOut:
     try:
-        return store.out(experiment)
+        return store.out(experiment, store.read_trial_progress(session, experiment))
     except store.GenerationExperimentRecordError:
         raise _refuse("generation-experiment-record-invalid") from None
 
@@ -94,7 +113,7 @@ async def create_generation_experiment(
         if existing.request_sha256 != store.request_digest(payload):
             raise _refuse("generation-experiment-idempotency-conflict")
         response.status_code = 200
-        return _out(existing)
+        return _out(session, existing)
     services = cast("Services", request.app.state.services)
     resolution = await resolve_generation_experiment(
         services.orchestrator, services.settings, session, payload
@@ -113,7 +132,7 @@ async def create_generation_experiment(
         raise _refuse("generation-experiment-idempotency-conflict") from None
     if not created:
         response.status_code = 200
-    return _out(experiment)
+    return _out(session, experiment)
 
 
 @router.get("/generation-experiments/{experiment_id}", response_model=GenerationExperimentOut)
@@ -123,4 +142,47 @@ def read_generation_experiment(experiment_id: str, session: SessionDep) -> Gener
     experiment = session.get(GenerationExperiment, experiment_id)
     if experiment is None:
         raise _refuse("generation-experiment-not-found")
-    return _out(experiment)
+    return _out(session, experiment)
+
+
+@router.post(
+    "/generation-experiments/{experiment_id}/start",
+    response_model=GenerationExperimentOut,
+    status_code=202,
+)
+async def start_generation_experiment_route(
+    experiment_id: str,
+    payload: GenerationExperimentStart,
+    request: Request,
+    response: Response,
+    session: SessionDep,
+) -> GenerationExperimentOut:
+    """Queue one picture per choice, exactly as accepted, as independent work.
+
+    A retry with the same key and request returns the comparison already
+    started. Starting checks each choice's accepted identities again and
+    refuses, writing nothing, if either would now run differently.
+    """
+
+    services = cast("Services", request.app.state.services)
+    orchestrator = services.orchestrator
+    try:
+        outcome = start_generation_experiment(
+            orchestrator, services.settings, session, experiment_id, payload
+        )
+    except StartRefused as refused:
+        raise _refuse(refused.code, **refused.extra) from None
+    if outcome.created:
+        try:
+            await orchestrator.events.publish(
+                "work_plan.created", outcome.work_plan_id, outcome.announcement
+            )
+        finally:
+            for job_id, run_id in outcome.dispatch:
+                orchestrator.start(job_id, run_id)
+    else:
+        response.status_code = 200
+    experiment = session.get(GenerationExperiment, experiment_id, populate_existing=True)
+    if experiment is None:
+        raise _refuse("generation-experiment-not-found")
+    return _out(session, experiment)

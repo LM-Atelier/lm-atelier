@@ -31,6 +31,7 @@ from .domain import Operation
 from .engines import EngineNotConfiguredError, EngineSchemaUnavailableError
 from .generation_experiments_v1 import (
     CONTRACT_VERSION,
+    EXPERIMENT_CHAT_SCOPE,
     MAX_SEED,
     REFUSAL_MESSAGES,
     ArmPreflightOut,
@@ -61,7 +62,6 @@ if TYPE_CHECKING:
 
 Code = GenerationExperimentRefusalCode
 OPERATION = Operation.TEXT_TO_IMAGE
-EXPERIMENT_CHAT_SCOPE = "experiment"
 # Shared by both choices, so a choice cannot set one for itself.
 COMMON_SETTING_KEYS = frozenset({"negative_prompt", "seed", "width", "height", "batch_size"})
 # Inputs a comparison from words does not take.

@@ -185,6 +185,7 @@ from .engines import (
     EngineSchemaUnavailableError,
 )
 from .generation_experiment_api import router as generation_experiment_router
+from .generation_experiments_v1 import EXPERIMENT_CHAT_SCOPE
 from .generation_queue import (
     GenerationQueueConflict,
     change_generation_queue,
@@ -2773,6 +2774,9 @@ async def set_response_feedback(
     settings already live there - so nothing is copied and nothing trains.
     """
 
+    _refuse_comparison_message(
+        session, message_id, "message-not-found", "This response no longer exists"
+    )
     message = session.get(Message, message_id)
     if not message or message.role != MessageRole.ASSISTANT.value:
         raise api_error(404, "message-not-found", "This response no longer exists")
@@ -4262,6 +4266,28 @@ def _standard_chat_or_404(session: Session, chat_id: str) -> Chat:
     return chat
 
 
+def _refuse_comparison_chat(
+    session: Session, chat_id: str, code: str = "chat-not-found", detail: str = "chat not found"
+) -> None:
+    """A started comparison's hidden chat is reached through its comparison, never as a chat.
+
+    It takes no turns, edits, stop, selections or reads by chat id; the
+    caller's own not-found answer is given, so the chat's existence is not shown.
+    """
+
+    chat = session.get(Chat, chat_id)
+    if chat is not None and chat.scope == EXPERIMENT_CHAT_SCOPE:
+        raise api_error(404, code, detail)
+
+
+def _refuse_comparison_message(session: Session, message_id: str, code: str, detail: str) -> None:
+    """The same refusal for a route that names one of the hidden chat's messages."""
+
+    message = session.get(Message, message_id)
+    if message is not None:
+        _refuse_comparison_chat(session, message.chat_id, code, detail)
+
+
 @router.get("/chats/{chat_id}/composer-draft", response_model=ChatComposerDraftOut)
 async def get_chat_composer_draft(
     chat_id: str, session: ConversationSessionDep
@@ -4356,6 +4382,7 @@ async def _accept_turn(
     resolve_source: TurnSourceResolver | None = None,
     inherited_use_case_preset: InheritedWorkflowUseCasePreset | None = None,
 ) -> TurnAccepted:
+    _refuse_comparison_chat(session, chat_id)
     try:
         if edit_source_message_id is not None and isinstance(payload, PriorTurnEditRequest):
             return await queue_prior_turn_edit(
@@ -4453,6 +4480,7 @@ async def _accept_turn(
 
 @router.get("/messages/{message_id}", response_model=MessageOut)
 async def get_message(message_id: str, session: ConversationSessionDep) -> Message:
+    _refuse_comparison_message(session, message_id, "message-not-found", "message not found")
     message = session.scalar(
         select(Message)
         .options(
@@ -4472,6 +4500,9 @@ async def get_message(message_id: str, session: ConversationSessionDep) -> Messa
 async def fork_thread_from_message(message_id: str, session: ConversationSessionDep) -> Chat:
     """Start a new chat carrying the history up to this message."""
 
+    _refuse_comparison_message(
+        session, message_id, "fork-source-not-found", "the message to fork from was not found"
+    )
     try:
         fork = fork_chat_from_message(session, message_id)
     except ForkSourceNotFound as exc:
@@ -4493,6 +4524,7 @@ async def get_chat_item_removal_impact(
 ) -> ChatItemRemovalImpactOut:
     """Preview target-owned payload detachment without authorizing mutation."""
 
+    _refuse_comparison_message(session, message_id, "message-not-found", "message not found")
     try:
         impact = preview_chat_item_removal(session, message_id)
     except ChatItemRemovalNotFound as exc:
@@ -4521,6 +4553,7 @@ async def remove_chat_item_content(
     message = session.get(Message, message_id)
     if message is None:
         raise api_error(404, "message-not-found", "message not found")
+    _refuse_comparison_chat(session, message.chat_id, "message-not-found", "message not found")
     services = _services(request)
     chat_id = message.chat_id
     # End the path-to-chat lookup transaction before waiting for the lock.
@@ -4576,6 +4609,7 @@ async def delete_message_exchange(
     (`exchange-busy`).
     """
 
+    _refuse_comparison_message(session, message_id, "exchange-not-found", "exchange not found")
     try:
         result = delete_exchange(session, message_id)
     except ExchangeHasReplies as exc:
@@ -5663,6 +5697,7 @@ async def classify_chat_draft(
     drifted every time the router learned a new phrasing, so the composer showed
     the wrong controls for exactly the wording the server handled correctly.
     """
+    _refuse_comparison_chat(session, chat_id)
     chat = session.get(Chat, chat_id)
     if not chat:
         raise api_error(404, "chat-not-found", "chat not found")
@@ -5705,6 +5740,7 @@ async def cancel_active_chat_run(
 ) -> Job:
     if not session.get(Chat, chat_id):
         raise api_error(404, "chat-not-found", "chat not found")
+    _refuse_comparison_chat(session, chat_id)
     if not _current_chat_job(session, chat_id):
         raise api_error(409, "chat-run-absent", "chat has no cancellable run")
     refreshed = await _cancel_current_chat_work(request, session, chat_id)
@@ -5728,6 +5764,7 @@ async def stop_and_send_turn(
 ) -> TurnAccepted:
     if not session.get(Chat, chat_id):
         raise api_error(404, "chat-not-found", "chat not found")
+    _refuse_comparison_chat(session, chat_id)
     await _cancel_current_chat_work(request, session, chat_id)
     return await _accept_turn(
         _services(request).orchestrator,
@@ -10706,6 +10743,7 @@ async def list_chat_workflow_selections(
     chat_id: str,
     session: ConversationSessionDep,
 ) -> list[WorkflowSelectionOut]:
+    _refuse_comparison_chat(session, chat_id)
     chat = session.get(Chat, chat_id)
     if chat is None:
         raise api_error(404, "chat-not-found", "chat not found")
@@ -10725,6 +10763,7 @@ async def set_chat_workflow_selection(
     payload: ChatWorkflowSelectionIn,
     session: ConversationSessionDep,
 ) -> WorkflowSelectionOut:
+    _refuse_comparison_chat(session, chat_id)
     chat = session.get(Chat, chat_id)
     if chat is None:
         raise api_error(404, "chat-not-found", "chat not found")
@@ -14345,6 +14384,7 @@ async def preview_workflow_revision_source_fit(
 async def preview_chat_source_fit(
     chat_id: str, payload: TurnRequest, request: Request, session: ConversationSessionDep
 ) -> SourceFitPreviewOut:
+    _refuse_comparison_chat(session, chat_id)
     return await _preview_context_source_fit(
         _services(request).orchestrator, session, payload, chat_id=chat_id
     )
