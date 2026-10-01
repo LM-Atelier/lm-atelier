@@ -1353,9 +1353,9 @@ def test_the_ffmpeg_fetch_waits_long_enough_for_a_real_outage() -> None:
 def test_verification_has_room_to_finish_inside_the_merge_queue_window() -> None:
     """Each platform job's limit sits between what the suite needs and what the queue allows.
 
-    Passing Windows runs took up to 41 minutes and one change needed about 49,
-    and a passing Ubuntu run was cancelled at 45 on a busy runner, so a limit
-    below 50 cancels real verification. The queue waits at most its check
+    Passing Windows runs take up to 54 minutes as the suite grows, and passing
+    runs on both platforms were cancelled at 55 on busy runners, so a limit
+    below 70 cancels real verification. The queue waits at most its check
     response timeout for every required check, and the plan job runs first, so a
     limit that does not fit inside it dequeues the change instead.
     """
@@ -1372,7 +1372,7 @@ def test_verification_has_room_to_finish_inside_the_merge_queue_window() -> None
         return int(found.group(1))
 
     for job in (ubuntu, windows):
-        assert limit(job) >= 50
+        assert limit(job) >= 70
         assert limit(plan) + limit(job) <= queue["parameters"]["check_response_timeout_minutes"]
 
 

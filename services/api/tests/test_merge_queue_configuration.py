@@ -77,7 +77,7 @@ def configure_queue(
                 {
                     "type": "merge_queue",
                     "parameters": {
-                        "check_response_timeout_minutes": 60,
+                        "check_response_timeout_minutes": 90,
                         "grouping_strategy": "ALLGREEN",
                         "max_entries_to_build": 3,
                         "max_entries_to_merge": 1,
@@ -245,7 +245,7 @@ def test_queue_configuration_changes_only_queue_and_squash_settings(
     assert parameters["grouping_strategy"] == "ALLGREEN"
     assert parameters["max_entries_to_build"] == 3
     assert parameters["max_entries_to_merge"] == 1
-    assert parameters["check_response_timeout_minutes"] >= 60
+    assert parameters["check_response_timeout_minutes"] >= 90
     assert "applied and verified" in result.stdout
 
 
