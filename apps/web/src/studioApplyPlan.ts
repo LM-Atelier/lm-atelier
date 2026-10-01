@@ -15,6 +15,9 @@ export type StudioApplyPlan = {
   /** The selection is placed back over the source after the edit, rather than
    * handed to the workflow's own mask input. */
   blendSelection: boolean;
+  /** The selection reaches past what was marked before it is softened, so the
+   * edge of what is removed is redrawn too. */
+  growSelection?: boolean;
   /** A light map goes with the picture as a second input. */
   sendsLightMap: boolean;
   /** Said as an enlargement, so a workflow that sets its own size is still chosen as one. */
@@ -143,6 +146,7 @@ export function studioApplyPlan(
         ? `Remove ${target}. Fill the space it leaves to match what surrounds it, and leave everything else unchanged.`
         : "",
       blendSelection: true,
+      growSelection: true,
       sendsLightMap: false,
     };
   }

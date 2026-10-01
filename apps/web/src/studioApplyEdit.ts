@@ -5,8 +5,9 @@
  */
 
 import { studioApplyPlan, studioOffersResults } from "./studioApplyPlan";
+import { subjectReach } from "./studioBackground";
 import { renderLightMap } from "./studioLightMap";
-import { cloneMask, encodeMaskPng, feather, isEmpty, type MaskRaster } from "./studioMasks";
+import { cloneMask, dilate, encodeMaskPng, feather, isEmpty, type MaskRaster } from "./studioMasks";
 import type { EnlargementPreview } from "./studioEnlargement";
 import { toolUsesMask, type StudioToolState } from "./studioToolState";
 import type { EditTemplate, StudioToolCapability, TurnAccepted } from "./types";
@@ -90,7 +91,8 @@ export function applyStudioEdit(edit: StudioApplyEdit): void {
   } else if (selection) {
     // A selection that cannot be encoded is refused, never sent as an
     // edit of the whole picture it was drawn to protect.
-    void encodeMaskPng(plan.blendSelection ? softened(selection, tools.featherPx) : selection).then(
+    const grow = plan.growSelection ? subjectReach(selection.width, selection.height) : 0;
+    void encodeMaskPng(plan.blendSelection ? softened(selection, tools.featherPx, grow) : selection).then(
       (mask) => (mask ? send(mask) : edit.setError(SELECTION_NOT_PREPARED)),
       () => edit.setError(SELECTION_NOT_PREPARED),
     );
@@ -100,10 +102,13 @@ export function applyStudioEdit(edit: StudioApplyEdit): void {
 /** A copy of the selection with softened edges, leaving the one on the canvas as drawn.
  *
  * Text is placed back through its box, and a hard edge would show wherever the
- * edited picture differs slightly from the source just outside the words.
+ * edited picture differs slightly from the source just outside the words. What
+ * Remove takes out is grown first, by the reach a replaced subject is given:
+ * a selection held to the old outline keeps a ring of what was removed.
  */
-function softened(mask: MaskRaster, featherPx: number): MaskRaster {
+function softened(mask: MaskRaster, featherPx: number, growPx = 0): MaskRaster {
   const copy = cloneMask(mask);
+  if (growPx > 0) dilate(copy, growPx);
   if (featherPx > 0) feather(copy, featherPx);
   return copy;
 }

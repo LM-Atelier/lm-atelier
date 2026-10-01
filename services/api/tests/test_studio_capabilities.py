@@ -79,6 +79,51 @@ def test_extend_waits_for_a_workflow_that_paints_past_the_edge() -> None:
     assert _by_kind([outpaint])["enhance"].available is False
 
 
+def test_an_outpainter_alone_extends_a_picture_but_edits_nothing() -> None:
+    """Only Extend names margins, so only Extend may run a workflow that pads the picture."""
+
+    margins = {"type": "object", "x-lm-atelier-kind": "outpaint"}
+    outpaint: dict[str, Any] = {"type": "object", "properties": {"outpaint_margins": margins}}
+    with_mask: dict[str, Any] = {
+        "type": "object",
+        "properties": {"outpaint_margins": margins, **MASK_SCHEMA["properties"]},
+    }
+    with_upscale: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "outpaint_margins": margins,
+            "upscale_factor": {"type": "number", "x-lm-atelier-kind": "upscale"},
+        },
+    }
+    matting: dict[str, Any] = {
+        "type": "object",
+        "properties": {"matte": {"type": "boolean", "x-lm-atelier-kind": "matting"}},
+    }
+
+    tools = _by_kind([outpaint])
+    assert tools["extend"].available is True
+    for kind in ("instruct", "text", "remove"):
+        assert tools[kind].available is False
+        assert tools[kind].reason == "Install an image editing workflow to change a picture."
+    assert _by_kind([outpaint, PLAIN_SCHEMA])["remove"].available is True
+    assert _by_kind([with_mask])["brush"].available is False
+    assert _by_kind([with_upscale])["enhance"].available is False
+    background = {
+        tool.kind: tool
+        for tool in tool_capabilities(
+            edit_input_schemas=[matting, outpaint], matting_workflow_ids=["wfrev-matting"]
+        )
+    }["background"]
+    assert background.available is False
+    assert background.reason == "Install an image editing workflow to change a picture."
+    waiting = {
+        tool.kind: tool
+        for tool in tool_capabilities(edit_input_schemas=[], waiting_input_schemas=[outpaint])
+    }
+    assert waiting["remove"].reason == "Install an image editing workflow to change a picture."
+    assert waiting["extend"].reason is not None and "reviewed" in waiting["extend"].reason
+
+
 def test_isolate_waits_for_a_workflow_that_says_it_cuts_a_subject_out() -> None:
     """An editor is not a matting workflow, and a matting workflow is not an editor's mask."""
 
