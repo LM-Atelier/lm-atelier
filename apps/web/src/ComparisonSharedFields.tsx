@@ -47,5 +47,8 @@ export function ComparisonSharedFields({ value, onChange, sharedPresets, shapesK
           onChange={(event) => onChange({ ...value, seed: { ...value.seed, number: event.target.value } })} />
       </label>}
     </fieldset>
+    <label className="comparison-radio"><input type="checkbox" checked={value.blind}
+      onChange={(event) => onChange({ ...value, blind: event.target.checked })} />
+      Compare blind: hide which choice made each picture until you say which you prefer</label>
   </div>;
 }

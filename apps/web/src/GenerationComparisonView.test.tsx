@@ -26,6 +26,7 @@ vi.mock("./api", async (importOriginal) => {
       startGenerationExperiment: vi.fn(),
       run: vi.fn(),
       jobs: vi.fn(),
+      openBlindView: vi.fn(),
     },
   };
 });
@@ -67,7 +68,7 @@ function experiment(state: "ready" | "started", statuses: ("queued" | "complete"
     geometry: { mode: "size", width: 1024, height: 1024 }, seed_policy: { kind: "same_recorded_number", seed: 41 },
     seed_equivalence: "none", preflight_sha256: "a".repeat(64), snapshot_sha256: "b".repeat(64), estimate: compatible().estimate,
     created_at: "2026-10-01T00:00:00Z", work_plan_id: state === "started" ? "plan-1" : null, started_at: null,
-    evaluation: null,
+    evaluation: null, evaluation_mode: "unblinded", blind_pending: false,
     arms: [1, 2].map((ordinal) => {
       const preflight = arm(ordinal, ordinal === 1 ? "Choice A" : "Choice B");
       return {
@@ -157,6 +158,20 @@ describe("checking a comparison", () => {
     fireEvent.click(screen.getByRole("radio", { name: "Same starting noise (one model family only)" }));
     fireEvent.click(screen.getByRole("button", { name: "Use “Same number for both” instead" }));
     expect(screen.getByRole("radio", { name: "Same number for both" })).toBeChecked();
+  });
+
+  it("asks for a blind comparison when one is chosen", async () => {
+    vi.mocked(api.preflightGenerationExperiment).mockResolvedValue(compatible());
+    renderView();
+    fireEvent.click(screen.getByRole("checkbox", { name: /Compare blind/ }));
+    await screen.findAllByRole("option", { name: "Harbor model" });
+    await screen.findAllByRole("option", { name: "Scenes - Quick · v2" });
+    fireEvent.change(screen.getByRole("textbox", { name: "Prompt" }), { target: { value: "A quiet harbor" } });
+    choose("First choice", "profile-a", "revision-a");
+    choose("Second choice", "profile-b", "revision-b");
+    fireEvent.click(screen.getByRole("button", { name: "Check both choices" }));
+    await waitFor(() => expect(api.preflightGenerationExperiment).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(api.preflightGenerationExperiment).mock.calls[0][0]).toMatchObject({ evaluation_mode: "blind" });
   });
 
   it("refuses to send a draft it can already tell is incomplete", async () => {
@@ -256,6 +271,30 @@ describe("a remembered comparison", () => {
     expect(kept).toHaveLength(1);
     expect(kept[0].closest("section")).toHaveAccessibleName("Choice A");
     expect(screen.getByRole("group", { name: "Which do you prefer?" })).toBeInTheDocument();
+  });
+
+  it("shows a blind comparison only by position, and reads nothing that names a picture's choice", async () => {
+    window.sessionStorage.setItem("lm-atelier.generation-comparison", "gexp-1");
+    const named = experiment("started", ["complete", "complete"]);
+    vi.mocked(api.generationExperiment).mockResolvedValue({
+      ...named, evaluation_mode: "blind", blind_pending: true,
+      arms: named.arms.map((arm) => ({ ...arm, trials: arm.trials.map((trial) => ({
+        ...trial, work_step_id: null, run_id: null, job_id: null, status: null,
+      })) })),
+    });
+    vi.mocked(api.openBlindView).mockResolvedValue({ id: "gview-1", experiment_id: "gexp-1", evaluation: null, reveal: null,
+      positions: [{ position: 1, status: "complete", ready: true }, { position: 2, status: "complete", ready: true }] });
+    renderView();
+    expect(await screen.findByRole("region", { name: "Compared blind" })).toBeInTheDocument();
+    expect(await screen.findByRole("img", { name: "Shown at position 1" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Prefer picture 2" })).toBeInTheDocument();
+    // No picture is shown under its choice, and nothing leads from one to the other.
+    expect(screen.queryByRole("img", { name: /Made by/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Prefer Choice/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Keep as a recipe" })).toBeNull();
+    expect(screen.queryByText(/pictures ready|Both pictures are ready/, { selector: ".comparison-results > p" })).toBeNull();
+    expect(api.run).not.toHaveBeenCalled();
+    expect(api.jobs).not.toHaveBeenCalled();
   });
 
   it("goes back to a new comparison when the remembered one is gone", async () => {

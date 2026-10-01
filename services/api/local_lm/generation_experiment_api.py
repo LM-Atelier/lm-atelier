@@ -1,4 +1,4 @@
-"""Check two generation choices against one frozen request, accept it, start it, read it."""
+"""Check, accept, start and read a comparison of two generation choices; keep which is preferred."""
 
 from __future__ import annotations
 
@@ -6,7 +6,9 @@ from typing import TYPE_CHECKING, Annotated, cast
 
 from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
+from . import generation_experiment_blind as blind
 from . import generation_experiment_store as store
 from .api_errors import api_error
 from .db import get_session
@@ -14,6 +16,8 @@ from .generation_experiment_preflight import resolve_generation_experiment
 from .generation_experiment_recipe import RecipeDraftRefused, recipe_draft
 from .generation_experiment_start import StartRefused, start_generation_experiment
 from .generation_experiments_v1 import (
+    GenerationExperimentBlindEvaluationCreate,
+    GenerationExperimentBlindViewOut,
     GenerationExperimentCreate,
     GenerationExperimentEvaluationCreate,
     GenerationExperimentEvaluationMode,
@@ -54,6 +58,24 @@ REFUSALS: dict[str, tuple[int, str]] = {
     "generation-experiment-picture-not-ready": (
         409,
         "Wait for the picture before saying which you prefer.",
+    ),
+    "generation-experiment-blind": (
+        409,
+        "Say which picture you prefer before seeing which choice made it.",
+    ),
+    "generation-experiment-not-blind": (
+        409,
+        "This comparison names its choices, so there is nothing to compare blind.",
+    ),
+    "generation-experiment-revealed": (
+        409,
+        "These pictures were already compared blind.",
+    ),
+    "generation-experiment-blind-view-not-found": (404, "This blind viewing no longer exists."),
+    "generation-experiment-blind-picture-not-ready": (409, "This picture is not ready yet."),
+    "generation-experiment-blind-picture-unreadable": (
+        409,
+        "This picture could not be read.",
     ),
     "generation-experiment-recipe-unavailable": (
         409,
@@ -248,6 +270,8 @@ def evaluate_generation_experiment(
     _out(session, experiment)
     if experiment.state != GenerationExperimentState.STARTED.value:
         raise _refuse("generation-experiment-not-started")
+    if store.blind_pending(experiment):
+        raise _refuse("generation-experiment-blind")
     # Said only of pictures there are: none made yet, or preferring a choice
     # whose picture is not made, is refused. An unknown choice is left to the
     # saying itself, which refuses it as invalid.
@@ -261,3 +285,86 @@ def evaluate_generation_experiment(
     if updated is None:
         raise _refuse("generation-experiment-not-found")
     return _out(session, updated)
+
+
+def _checked(session: Session, experiment_id: str) -> GenerationExperiment:
+    """The comparison, refused if it is gone or its record no longer holds what was accepted."""
+
+    experiment = session.get(GenerationExperiment, experiment_id)
+    if experiment is None:
+        raise _refuse("generation-experiment-not-found")
+    _out(session, experiment)
+    return experiment
+
+
+@router.post(
+    "/generation-experiments/{experiment_id}/blind-views",
+    response_model=GenerationExperimentBlindViewOut,
+    status_code=201,
+)
+def open_blind_view(experiment_id: str, session: SessionDep) -> GenerationExperimentBlindViewOut:
+    """Begin a viewing of a blind comparison, with its own random order of the pictures."""
+
+    experiment = _checked(session, experiment_id)
+    try:
+        view = blind.open_view(session, experiment)
+        return blind.view_out(session, experiment, view)
+    except blind.BlindViewRefused as refused:
+        raise _refuse(refused.code) from None
+
+
+@router.get(
+    "/generation-experiments/{experiment_id}/blind-views/{view_id}",
+    response_model=GenerationExperimentBlindViewOut,
+)
+def read_blind_view(
+    experiment_id: str, view_id: str, session: SessionDep
+) -> GenerationExperimentBlindViewOut:
+    """Each picture's progress by position, and the reveal once the preference is said."""
+
+    experiment = _checked(session, experiment_id)
+    try:
+        return blind.view_out(session, experiment, blind.find_view(session, experiment, view_id))
+    except blind.BlindViewRefused as refused:
+        raise _refuse(refused.code) from None
+
+
+@router.get("/generation-experiments/{experiment_id}/blind-views/{view_id}/pictures/{position}")
+async def blind_view_picture(
+    experiment_id: str, view_id: str, position: int, request: Request, session: SessionDep
+) -> Response:
+    """The picture at a position, as a plain PNG under no name of its own."""
+
+    experiment = _checked(session, experiment_id)
+    services = cast("Services", request.app.state.services)
+    try:
+        view = blind.find_view(session, experiment, view_id)
+        # Decoding and encoding a large picture takes a while; it runs off the loop.
+        content = await run_in_threadpool(
+            blind.view_picture, session, services.artifacts, experiment, view, position
+        )
+    except blind.BlindViewRefused as refused:
+        raise _refuse(refused.code) from None
+    return Response(content=content, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@router.post(
+    "/generation-experiments/{experiment_id}/blind-views/{view_id}/evaluations",
+    response_model=GenerationExperimentBlindViewOut,
+    status_code=201,
+)
+def say_blind_preference(
+    experiment_id: str,
+    view_id: str,
+    payload: GenerationExperimentBlindEvaluationCreate,
+    session: SessionDep,
+) -> GenerationExperimentBlindViewOut:
+    """Keep the preference said in a viewing, and reveal which choice made each picture."""
+
+    experiment = _checked(session, experiment_id)
+    try:
+        view = blind.find_view(session, experiment, view_id)
+        updated = blind.say_blind(session, experiment, view, payload)
+        return blind.view_out(session, updated, view)
+    except blind.BlindViewRefused as refused:
+        raise _refuse(refused.code) from None

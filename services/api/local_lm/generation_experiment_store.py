@@ -45,6 +45,7 @@ from .generation_experiments_v1 import (
 from .models import (
     GenerationExperiment,
     GenerationExperimentArm,
+    GenerationExperimentBlindView,
     GenerationExperimentEvaluation,
     GenerationExperimentTrial,
     Job,
@@ -166,9 +167,18 @@ def choices_with_a_picture(session: Session, experiment: GenerationExperiment) -
 
 
 def request_digest(payload: GenerationExperimentCreate) -> str:
-    """Everything a create asked for except its key, so a retry is recognised as one."""
+    """Everything a create asked for except its key, so a retry is recognised as one.
 
-    return canonical_sha256(payload.model_dump(mode="json", exclude={"idempotency_key"}))
+    A comparison that names its choices hashes without its evaluation mode, the
+    shape every create had before blind comparison existed, so retrying one
+    accepted earlier still finds it. A blind one hashes the mode, as its preflight
+    digest already does, so a blind and a named create under one key never match.
+    """
+
+    excluded = {"idempotency_key"}
+    if payload.evaluation_mode == GenerationExperimentEvaluationMode.UNBLINDED:
+        excluded.add("evaluation_mode")
+    return canonical_sha256(payload.model_dump(mode="json", exclude=excluded))
 
 
 def draw_seeds(policy: SeedPolicy, arms: int) -> list[int]:
@@ -354,9 +364,15 @@ def _arm_out(arm: GenerationExperimentArm, progress: dict[str, TrialProgress]) -
 def out(
     experiment: GenerationExperiment, progress: dict[str, TrialProgress] | None = None
 ) -> GenerationExperimentOut:
-    """The comparison as it was accepted, or a refusal if any stored part has changed."""
+    """The comparison as it was accepted, or a refusal if any stored part has changed.
 
-    arms = [_arm_out(arm, progress or {}) for arm in experiment.arms]
+    While a blind comparison waits for its blind saying, no trial carries its
+    step, run, job or status, so nothing in the answer links a picture to the
+    choice that made it.
+    """
+
+    pending = blind_pending(experiment)
+    arms = [_arm_out(arm, {} if pending else progress or {}) for arm in experiment.arms]
     common = experiment.common_json
     shared = preflight_digest(
         common, [(arm.ordinal, arm.label, arm.snapshot_sha256) for arm in arms]
@@ -392,10 +408,23 @@ def out(
                 "started_at": experiment.started_at,
                 "arms": arms,
                 "evaluation": _latest_evaluation(experiment),
+                "evaluation_mode": common.get(
+                    "evaluation_mode", GenerationExperimentEvaluationMode.UNBLINDED.value
+                ),
+                "blind_pending": pending,
             }
         )
     except (KeyError, TypeError, ValueError):
         raise GenerationExperimentRecordError from None
+
+
+def blind_pending(experiment: GenerationExperiment) -> bool:
+    """Whether the comparison is blind and nothing has yet been said of it blind."""
+
+    blind = GenerationExperimentEvaluationMode.BLIND.value
+    return experiment.common_json.get("evaluation_mode") == blind and not any(
+        said.mode == blind for said in experiment.evaluations
+    )
 
 
 def _latest_evaluation(experiment: GenerationExperiment) -> ExperimentEvaluationOut | None:
@@ -421,6 +450,7 @@ def evaluate(
     experiment_id: str,
     payload: GenerationExperimentEvaluationCreate,
     mode: GenerationExperimentEvaluationMode,
+    blind_view_id: str | None = None,
 ) -> GenerationExperiment | None:
     """Keep one more thing said of a comparison's pictures, after everything said before.
 
@@ -440,15 +470,41 @@ def evaluate(
     if payload.arm_ordinal is not None and preferred is None:
         session.rollback()
         raise ValueError("A preference names one of the comparison's own choices.")
-    sequence = max((said.sequence for said in experiment.evaluations), default=0) + 1
-    experiment.evaluations.append(
-        GenerationExperimentEvaluation(
-            sequence=sequence,
-            mode=mode.value,
-            preference=payload.preference.value,
-            preferred_arm_id=preferred,
-            note=payload.note or None,
+    # Read under the lock, never from what this session held before it, so
+    # two sayings at once are kept one after the other.
+    said = session.execute(
+        select(GenerationExperimentEvaluation.sequence, GenerationExperimentEvaluation.mode).where(
+            GenerationExperimentEvaluation.experiment_id == experiment.id
         )
+    ).all()
+    view = None
+    if mode == GenerationExperimentEvaluationMode.BLIND:
+        view = (
+            session.get(GenerationExperimentBlindView, blind_view_id, populate_existing=True)
+            if blind_view_id is not None
+            else None
+        )
+        # One blind saying per comparison, made in one of its own viewings:
+        # two at once, in one viewing or in two, do not both count.
+        if (
+            any(row.mode == mode.value for row in said)
+            or view is None
+            or view.experiment_id != experiment.id
+            or view.evaluation_id is not None
+        ):
+            session.rollback()
+            raise ValueError("A comparison has one blind saying, made in one of its own viewings.")
+    evaluation = GenerationExperimentEvaluation(
+        sequence=max((row.sequence for row in said), default=0) + 1,
+        mode=mode.value,
+        preference=payload.preference.value,
+        preferred_arm_id=preferred,
+        note=payload.note or None,
     )
+    experiment.evaluations.append(evaluation)
+    if view is not None:
+        session.flush()
+        # The saying ends the viewing it was made in, in the same commit.
+        view.evaluation_id = evaluation.id
     session.commit()
     return experiment

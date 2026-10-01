@@ -44,6 +44,15 @@ describe("comparisonRequest", () => {
     });
   });
 
+  it("asks for a blind comparison only when one was chosen", () => {
+    const blind = comparisonRequest(draft({ blind: true }), []).request;
+    const named = comparisonRequest(draft(), []).request;
+    expect(blind).toMatchObject({ evaluation_mode: "blind" });
+    // Left out rather than sent as the default, so the request is exactly what it always was.
+    expect(named && "evaluation_mode" in named).toBe(false);
+    expect(blind && named && sameComparisonRequest(blind, named)).toBe(false);
+  });
+
   it("sends no seed for a random seed per picture, even when one was typed", () => {
     const built = comparisonRequest(draft({ seed: { kind: "random_per_trial", number: "7" } }), []);
     expect(built.request?.seed_policy).toEqual({ kind: "random_per_trial", seed: null });

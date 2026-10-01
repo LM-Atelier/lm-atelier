@@ -45,6 +45,8 @@ export interface GenerationExperimentRequest {
   geometry: ExperimentGeometry;
   seed_policy: SeedPolicy;
   arms: ExperimentArmRequest[];
+  /** Blind hides which picture each choice made until the preference is said; left out, the choices are named. */
+  evaluation_mode?: "blind";
 }
 
 export interface GenerationExperimentCreate extends GenerationExperimentRequest {
@@ -171,6 +173,9 @@ export interface GenerationExperiment {
   arms: ExperimentArm[];
   /** The latest thing said of the pictures; null until something is. */
   evaluation: ExperimentEvaluation | null;
+  evaluation_mode: "unblinded" | "blind";
+  /** True while a blind comparison waits for its blind saying: no trial is linked to its picture. */
+  blind_pending: boolean;
 }
 
 /** A setting a choice ran with that the recipe drafted from it does not hold, and why. */
@@ -196,3 +201,30 @@ export interface GenerationExperimentRecipeDraft {
   workflow_name: string;
   workflow_version: number | null;
 }
+
+/** One picture in a blind viewing, known only by where it is shown. */
+export interface BlindPosition {
+  position: number;
+  status: TrialWorkStatus | null;
+  ready: boolean;
+}
+
+export interface BlindReveal {
+  position: number;
+  arm_ordinal: number;
+  label: string;
+}
+
+/** A blind comparison as one viewing shows it: its own order, no choice named until the saying. */
+export interface GenerationExperimentBlindView {
+  id: string;
+  experiment_id: string;
+  positions: BlindPosition[];
+  evaluation: ExperimentEvaluation | null;
+  reveal: BlindReveal[] | null;
+}
+
+/** A preference said in a blind viewing: a picture by its position, or a tie, or neither. */
+export type GenerationExperimentBlindEvaluationCreate =
+  | { preference: "preferred"; position: number; note?: string }
+  | { preference: "tied" | "unsuitable"; note?: string };
