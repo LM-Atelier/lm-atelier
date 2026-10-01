@@ -24,7 +24,7 @@ from .accepted_turn_context import (
     capture_profile,
     capture_workflow,
 )
-from .auxiliary_assets import _family_key, workflow_model_family
+from .auxiliary_assets import _family_key, prompt_trigger_word_provenance, workflow_model_family
 from .config import Settings
 from .default_output_shape import default_output_size
 from .domain import Operation
@@ -111,6 +111,7 @@ class ResolvedArm:
     width: int
     height: int
     effective_settings: dict[str, Any]
+    trigger_words_applied: tuple[str, ...]
     snapshot: dict[str, Any]
     snapshot_sha256: str
 
@@ -162,6 +163,7 @@ class ExperimentResolution:
                     width=resolved.width,
                     height=resolved.height,
                     effective_settings=copy.deepcopy(resolved.effective_settings),
+                    trigger_words_applied=list(resolved.trigger_words_applied),
                     snapshot_sha256=resolved.snapshot_sha256,
                 )
             )
@@ -409,6 +411,14 @@ async def _resolve_arm(
     accepted = capture_profile(session, chosen_profile.id)
     workflow = capture_workflow(session, chosen_revision.id)
     model_family = workflow_model_family(session, chosen_revision)
+    # The words a turn appends to its prompt for this model and these LoRAs,
+    # decided here as a turn decides them when it is accepted, so what runs is
+    # what was compared.
+    trigger_words = prompt_trigger_word_provenance(
+        orchestrator._model_provenance(session, chosen_profile),
+        lora_resolution.provenance if lora_resolution else [],
+        request.prompt,
+    )
     snapshot = {
         "version": CONTRACT_VERSION,
         "operation": OPERATION.value,
@@ -425,6 +435,7 @@ async def _resolve_arm(
             "graph_sha256": lora_resolution.graph_sha256 if lora_resolution else None,
             "workflow": copy.deepcopy(lora_outcome.receipt) if lora_outcome else None,
         },
+        "trigger_words": copy.deepcopy(trigger_words),
         "geometry": shape,
         "adaptations": adaptations,
     }
@@ -440,6 +451,7 @@ async def _resolve_arm(
         width=shape["width"],
         height=shape["height"],
         effective_settings=effective,
+        trigger_words_applied=tuple(trigger_words["trigger_words_applied"]),
         snapshot=snapshot,
         snapshot_sha256=canonical_sha256(snapshot),
     )
@@ -463,6 +475,35 @@ def _estimate(
         work += int(figures["work_units"])
         output_bytes += int(figures["estimated_bytes"])
     return work, output_bytes
+
+
+def common_inputs(request: GenerationExperimentRequest) -> dict[str, Any]:
+    """What both choices share, in the form a comparison stores and digests it."""
+
+    return {
+        "prompt": request.prompt,
+        "negative_prompt": request.negative_prompt,
+        "geometry": request.geometry.model_dump(mode="json"),
+        "seed_policy": request.seed_policy.model_dump(mode="json"),
+        "output_count": 1,
+    }
+
+
+def preflight_digest(common: dict[str, Any], arms: list[tuple[int, str, str]]) -> str:
+    """One digest over the shared request and each choice's snapshot.
+
+    Random seeds are drawn only when a comparison is accepted, so they are not
+    part of it: a preflight and the create that follows it agree.
+    """
+
+    return canonical_sha256(
+        {
+            "contract_version": CONTRACT_VERSION,
+            "operation": OPERATION.value,
+            "common": common,
+            "arms": [list(arm) for arm in arms],
+        }
+    )
 
 
 async def resolve_generation_experiment(
@@ -549,19 +590,9 @@ async def resolve_generation_experiment(
     if refusals:
         seed_equivalence = "none"
     preflight_sha256 = (
-        canonical_sha256(
-            {
-                "contract_version": CONTRACT_VERSION,
-                "operation": OPERATION.value,
-                "common": {
-                    "prompt": request.prompt,
-                    "negative_prompt": request.negative_prompt,
-                    "geometry": request.geometry.model_dump(mode="json"),
-                    "seed_policy": request.seed_policy.model_dump(mode="json"),
-                    "output_count": 1,
-                },
-                "arms": [[arm.ordinal, arm.label, arm.snapshot_sha256] for arm in arms],
-            }
+        preflight_digest(
+            common_inputs(request),
+            [(arm.ordinal, arm.label, arm.snapshot_sha256) for arm in arms],
         )
         if not refusals
         else None

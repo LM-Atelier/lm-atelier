@@ -2922,3 +2922,94 @@ class RetentionPolicy(TimestampMixin, Base):
     revision: Mapped[int] = mapped_column(Integer, default=1)
     media_days: Mapped[int] = mapped_column(Integer)
     temporary_hours: Mapped[int] = mapped_column(Integer)
+
+
+class GenerationExperiment(TimestampMixin, Base):
+    """One comparison of two generation choices against one frozen request.
+
+    Everything both choices share is kept here as it was accepted, and each
+    choice keeps the exact snapshot it was resolved to. Digests over both are
+    checked whenever the comparison is read, so a record that changed after it
+    was accepted is refused rather than shown as if it were the one accepted.
+    """
+
+    __tablename__ = "generation_experiments"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_generation_experiment_idempotency"),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("gexp"))
+    name: Mapped[str] = mapped_column(String(200))
+    state: Mapped[str] = mapped_column(String(16))
+    operation: Mapped[str] = mapped_column(String(32))
+    contract_version: Mapped[int] = mapped_column(Integer)
+    app_version: Mapped[str] = mapped_column(String(32))
+    seed_policy: Mapped[str] = mapped_column(String(32))
+    seed_equivalence: Mapped[str] = mapped_column(String(16))
+    common_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    estimate_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
+    preflight_sha256: Mapped[str] = mapped_column(String(64))
+    snapshot_sha256: Mapped[str] = mapped_column(String(64))
+    idempotency_key: Mapped[str] = mapped_column(String(200))
+    request_sha256: Mapped[str] = mapped_column(String(64))
+
+    arms: Mapped[list[GenerationExperimentArm]] = relationship(
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="GenerationExperimentArm.ordinal",
+    )
+
+
+class GenerationExperimentArm(Base):
+    """One choice in a comparison, frozen to the exact model and workflow it resolved to.
+
+    The profile and revision are recorded by id without a foreign key, as a
+    work step records them: the snapshot carries what they were, so editing or
+    removing them later cannot change what this choice was.
+    """
+
+    __tablename__ = "generation_experiment_arms"
+    __table_args__ = (
+        UniqueConstraint("experiment_id", "ordinal", name="uq_generation_experiment_arm_ordinal"),
+        UniqueConstraint("experiment_id", "label", name="uq_generation_experiment_arm_label"),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("garm"))
+    experiment_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_experiments.id", ondelete="CASCADE")
+    )
+    ordinal: Mapped[int] = mapped_column(Integer)
+    label: Mapped[str] = mapped_column(String(80))
+    profile_id: Mapped[str] = mapped_column(String(40))
+    workflow_revision_id: Mapped[str] = mapped_column(String(40))
+    workflow_activation_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    model_family: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    requested_settings_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    effective_settings_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    snapshot_sha256: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    trials: Mapped[list[GenerationExperimentTrial]] = relationship(
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="GenerationExperimentTrial.ordinal",
+    )
+
+
+class GenerationExperimentTrial(Base):
+    """One picture a choice will make, with the seed it got when the comparison was accepted."""
+
+    __tablename__ = "generation_experiment_trials"
+    __table_args__ = (
+        UniqueConstraint("arm_id", "ordinal", name="uq_generation_experiment_trial_ordinal"),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("gtrial"))
+    arm_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_experiment_arms.id", ondelete="CASCADE")
+    )
+    ordinal: Mapped[int] = mapped_column(Integer)
+    seed: Mapped[int] = mapped_column(Integer)
+    state: Mapped[str] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
