@@ -1,3 +1,4 @@
+import { mockWorkflowFamilyPages } from "./workflowFamilyReadFixtures";
 import { mockWorkflowReadsFromFixture } from "./workflowReadFixtures";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -8,7 +9,7 @@ import { api } from "./api";
 import type { Workflow, WorkflowFamily, WorkflowFamilyRemovalImpact } from "./types";
 
 vi.mock("./api", () => ({ api: {
-  workflows: vi.fn(), workflowSummaries: vi.fn(), workflow: vi.fn(), workflowFamilies: vi.fn(), workflowFamilyRemovalImpact: vi.fn(),
+  workflows: vi.fn(), workflowSummaries: vi.fn(), workflow: vi.fn(), workflowFamilyOperations: vi.fn().mockResolvedValue([]), workflowFamilies: vi.fn(), workflowFamilyRemovalImpact: vi.fn(),
   updateWorkflowFamily: vi.fn(), setWorkflowFamilyPreference: vi.fn(),
 } }));
 vi.mock("./CustomNodesPanel", () => ({ CustomNodesPanel: () => null }));
@@ -46,7 +47,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   mockWorkflowReadsFromFixture(() => api.workflows());
   vi.mocked(api.workflows).mockResolvedValue([workflow("a"), workflow("b")]);
-  vi.mocked(api.workflowFamilies).mockResolvedValue([family("a"), family("b")]);
+  mockWorkflowFamilyPages([family("a"), family("b")]);
   vi.mocked(api.workflowFamilyRemovalImpact).mockResolvedValue(impact());
   vi.mocked(api.updateWorkflowFamily).mockResolvedValue({ ...family("b"), archived: true, enabled: false });
 });
@@ -115,7 +116,7 @@ describe("archiving workflow families from the page", () => {
   });
 
   it("does not offer family archival for an ungrouped workflow", async () => {
-    vi.mocked(api.workflowFamilies).mockResolvedValue([]);
+    mockWorkflowFamilyPages([]);
     wrap(<WorkflowsView />);
     fireEvent.click(await screen.findByText("Workflow a"));
     await screen.findByRole("button", { name: "New revision" });

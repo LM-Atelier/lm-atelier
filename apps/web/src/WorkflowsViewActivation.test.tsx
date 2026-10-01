@@ -1,3 +1,4 @@
+import { mockWorkflowFamilyPages } from "./workflowFamilyReadFixtures";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -6,7 +7,7 @@ import { api } from "./api";
 import type { Workflow, WorkflowActivation, WorkflowActivationChoice, WorkflowActivationPreparation } from "./types";
 
 vi.mock("./api", () => ({ api: {
-  workflowSummaries: vi.fn(), workflow: vi.fn(), workflowFamilies: vi.fn(),
+  workflowSummaries: vi.fn(), workflow: vi.fn(), workflowFamilyOperations: vi.fn().mockResolvedValue([]), workflowFamilies: vi.fn(),
   prepareWorkflowActivation: vi.fn(), activateWorkflowRevision: vi.fn(),
 } }));
 vi.mock("./CustomNodesPanel", () => ({ CustomNodesPanel: () => null }));
@@ -55,7 +56,7 @@ beforeEach(() => {
     operation: "text_to_image", current_revision_id: "revision-a", revision_count: 2,
     created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-01T00:00:00Z",
   }]);
-  vi.mocked(api.workflowFamilies).mockResolvedValue([]);
+  mockWorkflowFamilyPages([]);
   vi.mocked(api.workflow).mockImplementation(async () => detail());
   vi.mocked(api.prepareWorkflowActivation).mockResolvedValue(prepared());
   vi.mocked(api.activateWorkflowRevision).mockResolvedValue({

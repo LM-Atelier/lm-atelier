@@ -8,7 +8,7 @@ import type { ChatSummary, Project } from "./types";
 import { changeChatPages, restoreChatPages, snapshotChatPages, useChatPages } from "./useChatPages";
 import { useProjectMutations } from "./useProjectMutations";
 
-vi.mock("./api", () => ({ api: { chatSummaries: vi.fn(), importProject: vi.fn() } }));
+vi.mock("./api", () => ({ api: { projects: vi.fn(), project: vi.fn(), chatSummaries: vi.fn(), importProject: vi.fn() } }));
 
 const stamp = "2026-09-01T00:00:00Z";
 function chat(number: number): ChatSummary {
@@ -32,7 +32,7 @@ function setup() {
 }
 
 function sidebar(onChat = vi.fn()) {
-  return <ChatSidebar projects={[project]} engines={[]} presets={[]} currentChatId={null} view="chat"
+  return <ChatSidebar engines={[]} currentChatId={null} view="chat"
     onChat={onChat} onSetup={vi.fn()} onView={vi.fn()} onNewChat={vi.fn()} onNewProject={vi.fn()}
     onExportProject={vi.fn()} onImportProject={vi.fn()} onUpdateChat={vi.fn()} onDeleteChat={vi.fn()}
     onUpdateProject={vi.fn()} onDeleteProject={vi.fn()}
@@ -40,6 +40,7 @@ function sidebar(onChat = vi.fn()) {
 }
 
 beforeEach(() => {
+  vi.mocked(api.projects).mockResolvedValue([project]);
   vi.mocked(api.chatSummaries).mockReset();
   vi.mocked(api.chatSummaries).mockImplementation(async (_project, _archived, _query, options) => {
     expect(options?.limit).toBe(50);

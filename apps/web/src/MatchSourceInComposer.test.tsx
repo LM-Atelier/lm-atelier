@@ -12,8 +12,8 @@ import type { TurnEditorState } from "./useTurnEditorState";
 
 vi.mock("./api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./api")>();
-  return { ...actual, api: { ...actual.api,
-    workflowFamilies: vi.fn(), chatWorkflowSelections: vi.fn(), projectWorkflowSelections: vi.fn(),
+  return { ...actual, api: { ...actual.api, profilesPage: vi.fn().mockResolvedValue([]),
+    presetsPage: vi.fn().mockResolvedValue([]), workflowFamilies: vi.fn(), chatWorkflowSelections: vi.fn(), projectWorkflowSelections: vi.fn(),
     workflowRevisionSchema: vi.fn(), workflowRevisionOutputGeometry: vi.fn(), workflowLoraControls: vi.fn(),
     workflowRevisionSourceFit: vi.fn(), matchWorkflowRevisionOutputGeometryToSource: vi.fn(),
   } };
@@ -54,7 +54,7 @@ const ignore = () => {};
 
 function Harness({ initial }: { initial: Partial<TurnEditorState> }) {
   const [draft, setDraft] = useState<ComposerDraft>({ text: "", promptSource: null });
-  return <TurnEditor chat={chat} engines={[]} profiles={[]} presets={[]} stoppable={false} settings={{}}
+  return <TurnEditor chat={chat} engines={[]} stoppable={false} settings={{}}
     onSettings={ignore} settingsRole="video" onSettingsRole={ignore} presetId={null} onPreset={ignore}
     onMode={ignore} onSend={ignore} onStop={ignore} onStopAndSend={ignore} maxMediaOutputsPerPlan={4}
     draft={draft} onDraftChange={setDraft} initialState={initial} />;
@@ -68,6 +68,8 @@ function open(initial: Partial<TurnEditorState>) {
 }
 
 beforeEach(() => {
+  vi.mocked(api.profilesPage).mockResolvedValue([]);
+  vi.mocked(api.presetsPage).mockResolvedValue([]);
   vi.mocked(api.workflowFamilies).mockResolvedValue([frames]);
   vi.mocked(api.chatWorkflowSelections).mockResolvedValue([]);
   vi.mocked(api.projectWorkflowSelections).mockResolvedValue([]);

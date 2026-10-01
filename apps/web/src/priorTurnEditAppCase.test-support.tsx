@@ -85,7 +85,7 @@ export async function exercisePriorTurnEditor(
 
     fireEvent.click(await screen.findByRole("button", { name: "Turn settings" }));
     expect(screen.queryByRole("spinbutton", { name: /Context length/ })).not.toBeInTheDocument();
-    fireEvent.change(screen.getByRole("spinbutton", { name: /Maximum output/ }), { target: { value: "4096" } });
+    fireEvent.change(await screen.findByRole("spinbutton", { name: /Maximum output/ }), { target: { value: "4096" } });
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
     await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(chat.id, {
       generation_settings_json: { chat: { max_tokens: 4096 } },
@@ -96,8 +96,8 @@ export async function exercisePriorTurnEditor(
     const editedMessage = await within(editor).findByRole("textbox", { name: "Message" });
     fireEvent.change(editedMessage, { target: { value: "Count to 1000" } });
     fireEvent.click(within(editor).getByRole("button", { name: "Turn settings" }));
-    expect(screen.getByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(512);
-    fireEvent.change(screen.getByRole("spinbutton", { name: /Maximum output/ }), { target: { value: "1536" } });
+    expect(await screen.findByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(512);
+    fireEvent.change(await screen.findByRole("spinbutton", { name: /Maximum output/ }), { target: { value: "1536" } });
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
     fireEvent.click(within(editor).getByRole("button", { name: "Queue edited version" }));
     await within(editor).findByText("Queue full");

@@ -6,7 +6,7 @@ import { WorkflowRecipeManager } from "./WorkflowRecipeManager";
 import type { WorkflowUseCasePreset } from "./workflowUseCaseTypes";
 
 vi.mock("./api", () => ({ api: {
-  workflowUseCasePresets: vi.fn(), projects: vi.fn(), workflowSummaries: vi.fn(), engines: vi.fn(),
+  workflowUseCasePresets: vi.fn(), projects: vi.fn(), project: vi.fn(), workflowSummaries: vi.fn(), engines: vi.fn(),
   createWorkflowUseCasePreset: vi.fn(), replaceWorkflowUseCasePreset: vi.fn(), deleteWorkflowUseCasePreset: vi.fn(),
   workflowUseCaseDefault: vi.fn(), setWorkflowUseCaseDefault: vi.fn(), workflowUseCaseChoice: vi.fn(), setWorkflowUseCaseChoice: vi.fn(),
 } }));
@@ -22,6 +22,7 @@ beforeEach(() => {
   recipes = [recipe];
   vi.mocked(api.workflowUseCasePresets).mockImplementation(async () => recipes);
   vi.mocked(api.projects).mockResolvedValue([]);
+  vi.mocked(api.project).mockImplementation(async (id) => (await api.projects()).find((project) => project.id === id)!);
   vi.mocked(api.workflowSummaries).mockResolvedValue([]);
   vi.mocked(api.engines).mockResolvedValue([]);
   vi.mocked(api.workflowUseCaseDefault).mockResolvedValue({ preset_id: null });

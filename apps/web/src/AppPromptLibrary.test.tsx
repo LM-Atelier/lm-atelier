@@ -19,10 +19,10 @@ vi.mock("./api", () => ({
     chat: vi.fn(),
     workPlans: vi.fn(),
     engines: vi.fn(),
-    profiles: vi.fn(),
-    presets: vi.fn(),
+    profiles: vi.fn(), profilesPage: vi.fn(),
+    presets: vi.fn(), presetsPage: vi.fn(),
     workflows: vi.fn(),
-    workflowFamilies: vi.fn(),
+    workflowReadyRevisions: vi.fn(),
     chatWorkflowSelections: vi.fn(),
     projectWorkflowSelections: vi.fn(),
     classifyDraft: vi.fn(),
@@ -49,7 +49,7 @@ beforeEach(() => {
   vi.mocked(api.profiles).mockResolvedValue([]);
   vi.mocked(api.presets).mockResolvedValue([]);
   vi.mocked(api.workflows).mockResolvedValue([]);
-  vi.mocked(api.workflowFamilies).mockResolvedValue([]);
+  vi.mocked(api.workflowReadyRevisions).mockResolvedValue([]);
   vi.mocked(api.chatWorkflowSelections).mockResolvedValue([]);
   vi.mocked(api.projectWorkflowSelections).mockResolvedValue([]);
   vi.mocked(api.classifyDraft).mockResolvedValue({ references_prior_visual: false });
@@ -81,6 +81,8 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  vi.mocked(api.profilesPage).mockImplementation(async (options) => (await import("./test/modelLibraryPageFixtures")).profilePages(api, options));
+  vi.mocked(api.presetsPage).mockImplementation(async (options) => (await import("./test/modelLibraryPageFixtures")).presetPages(api, options));
 });
 
 function promptDigest(prompt: string): string {

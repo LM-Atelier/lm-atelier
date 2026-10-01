@@ -3,6 +3,8 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "./api";
 import { SettingControl } from "./SettingControl";
 import { useWorkflowRevisionSchema } from "./useWorkflowRevisionSchema";
+import { uniqueWorkflowRows, useWorkflowSummary, useWorkflowSummaryPages } from "./useWorkflowReadPages";
+import { WorkflowReadPageControls } from "./WorkflowReadPageControls";
 import { isRecipeSettingValue, recipeFields, recipeOperation, recipeRole, recipeValueError } from "./workflowRecipeFields";
 import { workflowUseCases } from "./workflowUseCaseTypes";
 import type { RecipeSettingValue, WorkflowUseCase, WorkflowUseCasePreset, WorkflowUseCasePresetCreate } from "./workflowUseCaseTypes";
@@ -19,14 +21,21 @@ export function WorkflowRecipeEditor({ recipe, saving, error, onSave, onCancel }
   const [workflowId, setWorkflowId] = useState("");
   const nameField = useRef<HTMLInputElement>(null);
   useEffect(() => { nameField.current?.focus(); }, []);
-  const workflows = useQuery({ queryKey: ["workflows", "summaries"], queryFn: () => api.workflowSummaries() });
   const engines = useQuery({ queryKey: ["engines"], queryFn: () => api.engines() });
   const operation = recipeOperation(useCase);
-  const references = workflows.error ? [] : (workflows.data ?? []).filter((workflow) => workflow.operation === operation && workflow.current_revision_id);
-  const reference = references.find((workflow) => workflow.id === workflowId);
+  const [search, setSearch] = useState("");
+  const workflows = useWorkflowSummaryPages(operation, search);
+  const selectedReference = useWorkflowSummary(workflowId);
+  const listError = workflows.isFetchNextPageError ? null : workflows.error;
+  const reference = selectedReference.isSuccess && selectedReference.data?.operation === operation
+    && selectedReference.data.current_revision_id ? selectedReference.data : undefined;
+  const references = uniqueWorkflowRows([
+    ...(listError ? [] : (workflows.data ?? []).filter(workflow => workflow.id !== workflowId)),
+    ...(reference ? [reference] : []),
+  ], workflow => workflow.id).filter((workflow) => workflow.operation === operation && workflow.current_revision_id);
   const revision = useWorkflowRevisionSchema(reference?.current_revision_id ?? null, operation);
   const engine = engines.error ? undefined : engines.data?.find((candidate) => candidate.roles.includes(recipeRole(useCase)));
-  const readError = workflows.error ?? engines.error ?? revision.error;
+  const readError = selectedReference.error ?? engines.error ?? revision.error;
   const fields = reference && revision.schema && engine && !readError ? recipeFields(engine, useCase, revision.schema) : [];
   const unavailable = Object.keys(settings).filter((key) => !fields.some((field) => field.key === key));
   const valueErrors = fields.flatMap((field) => Object.hasOwn(settings, field.key)
@@ -50,17 +59,25 @@ export function WorkflowRecipeEditor({ recipe, saving, error, onSave, onCancel }
     <label><input type="checkbox" checked={enabled} disabled={saving || recipe?.is_default}
       onChange={(event) => setEnabled(event.target.checked)} />Enabled</label>
     {recipe?.is_default && <p>Choose another workspace default before disabling this recipe.</p>}
-    <label>Reference workflow for settings<select value={workflowId} disabled={saving || workflows.isPending || Boolean(workflows.error)}
+    <label>Search reference workflows<input type="search" maxLength={500} value={search}
+      onChange={(event) => setSearch(event.target.value)} /></label>
+    <label>Reference workflow for settings<select value={workflowId} disabled={saving || workflows.isPending || Boolean(listError)}
       onChange={(event) => setWorkflowId(event.target.value)}>
-      <option value="">{workflows.isPending ? "Loading workflows…" : workflows.error ? "Cannot read workflows" : "Choose a reference workflow"}</option>
-      {workflowId && !reference && <option value={workflowId} disabled>Selected reference unavailable</option>}
+      <option value="">{workflows.isPending ? "Loading workflows…" : listError ? "Cannot read workflows" : "Choose a reference workflow"}</option>
+      {workflowId && !reference && <option value={workflowId} disabled>
+        {selectedReference.isSuccess ? "Selected reference unavailable" : "Selected reference workflow"}
+      </option>}
       {references.map((workflow) => <option key={workflow.id} value={workflow.id}>{workflow.name}</option>)}
     </select></label>
+    <WorkflowReadPageControls pages={workflows} label="workflows" />
+    {workflowId && selectedReference.isPending && <p role="status">Loading selected reference…</p>}
+    {workflowId && !selectedReference.isPending && !selectedReference.error && !reference
+      && <p role="status">Selected reference is unavailable. Choose another workflow.</p>}
     <p>The reference supplies setting controls. Your workflow choices still determine execution;
       compatibility is checked against the selected revision when you send.</p>
     {readError && <div role="alert">{readError.message}<button type="button" className="secondary compact-button"
-      onClick={() => { void workflows.refetch(); void engines.refetch(); if (reference) void revision.retry(); }}>Retry setting controls</button></div>}
-    {!workflows.isPending && !workflows.error && references.length === 0 && <p>No workflow for this request type is installed. Add one from the workflow library to edit its settings.</p>}
+      onClick={() => { void workflows.refetch(); if (workflowId) void selectedReference.refetch(); void engines.refetch(); if (reference) void revision.retry(); }}>Retry setting controls</button></div>}
+    {!workflows.isPending && !listError && references.length === 0 && <p>{search.trim() ? "No matching reference workflows." : "No workflow for this request type is installed. Add one from the workflow library to edit its settings."}</p>}
     {reference && !ready && !readError && <p role="status">{engines.isPending || revision.isLoading ? "Loading setting controls…" : "Setting controls are unavailable for this reference."}</p>}
     {ready && fields.length === 0 && <p>This reference offers no editable recipe settings.</p>}
     <fieldset disabled={saving} className="workflow-recipe-fields"><legend>Included settings</legend>

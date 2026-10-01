@@ -389,3 +389,247 @@ async def test_consumer_reads_do_not_flush_pending_work(
         response = await client.get(endpoint)
         assert response.status_code == 200
         assert len(session.new) == 1
+
+
+@pytest.mark.parametrize("route", ["workflow-summaries", "workflow-revision-choices"])
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        {"limit": "0"},
+        {"limit": "201"},
+        {"offset": "-1"},
+        {"offset": str(2**63)},
+        {"search": "x" * 501},
+    ],
+)
+async def test_workflow_pages_reject_invalid_bounds(
+    client: AsyncClient, route: str, parameters: dict[str, str]
+) -> None:
+    response = await client.get("/api/" + route, params=parameters)
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "route,field",
+    [
+        ("workflow-summaries", "workflow_id"),
+        ("workflow-revision-choices", "revision_id"),
+        ("workflow-revision-choices", "workflow_id"),
+    ],
+)
+async def test_workflow_pages_bound_exact_selection_batches(
+    client: AsyncClient, route: str, field: str
+) -> None:
+    response = await client.get(
+        "/api/" + route, params=[(field, f"selection-{index}") for index in range(201)]
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("route", ["workflow-summaries", "workflow-revision-choices"])
+async def test_workflow_pages_allow_the_largest_offset_for_literal_search(
+    session: Session, client: AsyncClient, route: str
+) -> None:
+    workflow(session, "example", 1)
+    session.commit()
+    response = await client.get(
+        "/api/" + route,
+        params={"limit": 200, "offset": str(2**63 - 1), "search": "example"},
+    )
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+@pytest.mark.parametrize("route", ["workflow-summaries", "workflow-revision-choices"])
+async def test_workflow_pages_keep_stable_name_and_id_ties(
+    session: Session, client: AsyncClient, route: str
+) -> None:
+    for identifier in ["c", "a", "b"]:
+        workflow(session, identifier, 1)
+    session.flush()
+    for identifier in ["a", "b", "c"]:
+        definition = session.get(WorkflowDefinition, identifier)
+        assert definition is not None
+        definition.name = "Same workflow name"
+    session.commit()
+    first = await client.get("/api/" + route, params={"limit": 2})
+    second = await client.get("/api/" + route, params={"limit": 2, "offset": 2})
+    assert first.status_code == second.status_code == 200
+    key = "id" if route == "workflow-summaries" else "workflow_id"
+    assert [row[key] for row in first.json()] == ["a", "b"]
+    assert [row[key] for row in second.json()] == ["c"]
+
+
+@pytest.mark.parametrize("route", ["workflow-summaries", "workflow-revision-choices"])
+async def test_workflow_pages_filter_operation_before_limiting(
+    session: Session, client: AsyncClient, route: str
+) -> None:
+    workflow(session, "a-other", 2)
+    workflow(session, "z-match", 2)
+    session.flush()
+    selected = session.get(WorkflowDefinition, "z-match")
+    assert selected is not None
+    selected.operation = "image_to_image"
+    session.commit()
+    response = await client.get("/api/" + route, params={"limit": 1, "operation": "image_to_image"})
+    assert response.status_code == 200
+    key = "id" if route == "workflow-summaries" else "workflow_id"
+    assert [row[key] for row in response.json()] == ["z-match"]
+
+
+@pytest.mark.parametrize("route", ["workflow-summaries", "workflow-revision-choices"])
+async def test_workflow_pages_search_unicode_names_literally(
+    session: Session, client: AsyncClient, route: str
+) -> None:
+    workflow(session, "literal", 1)
+    workflow(session, "wildcard", 1)
+    session.flush()
+    literal = session.get(WorkflowDefinition, "literal")
+    wildcard = session.get(WorkflowDefinition, "wildcard")
+    assert literal is not None and wildcard is not None
+    literal.name = "ÉTUDE 100%_neutral"
+    wildcard.name = "Étude 100XXneutral"
+    session.commit()
+    response = await client.get("/api/" + route, params={"limit": 1, "search": "étude 100%_"})
+    assert response.status_code == 200
+    key = "id" if route == "workflow-summaries" else "workflow_id"
+    assert [row[key] for row in response.json()] == ["literal"]
+
+
+@pytest.mark.parametrize("route", ["workflow-summaries", "workflow-revision-choices"])
+async def test_workflow_pages_exclude_package_drafts_before_limiting(
+    session: Session, client: AsyncClient, route: str
+) -> None:
+    workflow(session, "a-draft", 1)
+    workflow(session, "z-visible", 1)
+    session.flush()
+    draft = session.get(WorkflowRevision, "a-draft-r1")
+    assert draft is not None
+    draft.dependencies_json = {"workflow_package_draft": {"graph_sha256": "a" * 64}}
+    session.commit()
+    response = await client.get("/api/" + route, params={"limit": 1})
+    assert response.status_code == 200
+    key = "id" if route == "workflow-summaries" else "workflow_id"
+    assert [row[key] for row in response.json()] == ["z-visible"]
+
+
+async def test_summary_pages_resolve_exact_off_page_workflow_ids(
+    session: Session, client: AsyncClient
+) -> None:
+    for index in range(4):
+        workflow(session, f"workflow-entry-{index}", 1)
+    session.commit()
+    response = await client.get(
+        "/api/workflow-summaries",
+        params=[
+            ("workflow_id", "workflow-entry-3"),
+            ("workflow_id", "workflow-entry-2"),
+            ("limit", "2"),
+        ],
+    )
+    assert response.status_code == 200
+    assert [row["id"] for row in response.json()] == ["workflow-entry-2", "workflow-entry-3"]
+
+
+async def test_revision_pages_resolve_exact_historical_revision_ids(
+    session: Session, client: AsyncClient
+) -> None:
+    workflow(session, "example", 4)
+    session.commit()
+    response = await client.get(
+        "/api/workflow-revision-choices",
+        params=[
+            ("revision_id", "example-r3"),
+            ("revision_id", "example-r4"),
+            ("limit", "2"),
+        ],
+    )
+    assert response.status_code == 200
+    assert [row["revision_id"] for row in response.json()] == [
+        "example-r3",
+        "example-r4",
+    ]
+
+
+async def test_revision_pages_filter_the_selected_workflow_before_offset(
+    session: Session, client: AsyncClient
+) -> None:
+    workflow(session, "a-other", 4)
+    workflow(session, "z-selected", 4)
+    session.commit()
+    response = await client.get(
+        "/api/workflow-revision-choices",
+        params={"workflow_id": "z-selected", "limit": 2, "offset": 1},
+    )
+    assert response.status_code == 200
+    assert [row["revision_id"] for row in response.json()] == [
+        "z-selected-r2",
+        "z-selected-r3",
+    ]
+
+
+@pytest.mark.parametrize("route", ["workflow-summaries", "workflow-revision-choices"])
+async def test_workflow_pages_apply_search_offset_to_matches(
+    session: Session, client: AsyncClient, route: str
+) -> None:
+    for identifier in ["a-match", "b-other", "c-match", "d-other", "e-match"]:
+        workflow(session, identifier, 1)
+    session.commit()
+    response = await client.get(
+        "/api/" + route, params={"limit": 1, "offset": 1, "search": "match"}
+    )
+    assert response.status_code == 200
+    key = "id" if route == "workflow-summaries" else "workflow_id"
+    assert [row[key] for row in response.json()] == ["c-match"]
+
+
+async def test_revision_pages_span_one_workflow_history_without_payloads(
+    session: Session, client: AsyncClient
+) -> None:
+    workflow(session, "example", 5)
+    session.commit()
+    session.expunge_all()
+    loaded: list[object] = []
+
+    def track(_session: Session, instance: object) -> None:
+        loaded.append(instance)
+
+    event.listen(session, "loaded_as_persistent", track)
+    try:
+        response = await client.get(
+            "/api/workflow-revision-choices", params={"limit": 2, "offset": 2}
+        )
+    finally:
+        event.remove(session, "loaded_as_persistent", track)
+    assert response.status_code == 200
+    assert [row["revision_id"] for row in response.json()] == [
+        "example-r3",
+        "example-r4",
+    ]
+    assert "neutral_graph" not in response.text
+    assert loaded == []
+
+
+@pytest.mark.parametrize(
+    "role,expected",
+    [("chat", ["a-text"]), ("image", ["b-image", "c-edit"]), ("video", ["d-video", "e-animate"])],
+)
+async def test_revision_pages_filter_roles_before_limiting(
+    session: Session, client: AsyncClient, role: str, expected: list[str]
+) -> None:
+    for identifier, operation in [
+        ("a-text", "text"),
+        ("b-image", "text_to_image"),
+        ("c-edit", "image_to_image"),
+        ("d-video", "text_to_video"),
+        ("e-animate", "image_to_video"),
+    ]:
+        workflow(session, identifier, 1)
+        session.flush()
+        definition = session.get(WorkflowDefinition, identifier)
+        assert definition is not None
+        definition.operation = operation
+    session.commit()
+    response = await client.get("/api/workflow-revision-choices", params={"role": role, "limit": 2})
+    assert response.status_code == 200
+    assert [row["workflow_id"] for row in response.json()] == expected

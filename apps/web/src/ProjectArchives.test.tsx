@@ -42,7 +42,7 @@ it("lists every project, archived ones too, and exports with or without media", 
   show();
 
   expect(await screen.findByText("Old notes")).toBeTruthy();
-  expect(api.projects).toHaveBeenCalledWith(true);
+  expect(api.projects).toHaveBeenCalledWith(true, "", expect.objectContaining({ limit: 50, offset: 0, literalSearch: true }));
   expect(screen.getByText("Archived")).toBeTruthy();
 
   fireEvent.click(screen.getByRole("button", { name: "Export Garden with media" }));

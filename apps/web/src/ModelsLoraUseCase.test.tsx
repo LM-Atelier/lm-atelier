@@ -15,8 +15,8 @@ vi.mock("./useCatalogInstall", () => ({
 vi.mock("./api", async (original) => {
   const actual = await original<typeof import("./api")>();
   return { ...actual, api: { ...actual.api,
-    catalog: vi.fn(), recipes: vi.fn(), models: vi.fn(), modelAssets: vi.fn(),
-    updateModelAsset: vi.fn(), jobs: vi.fn(), modelStorage: vi.fn(), profiles: vi.fn(),
+    catalog: vi.fn(), recipes: vi.fn(), models: vi.fn(), modelsPage: vi.fn(() => api.models()), catalogInstallMatches: vi.fn(async () => ({ remote_ids: [], workflow_template_ids: [] })), modelAssets: vi.fn(),
+    updateModelAsset: vi.fn(), jobs: vi.fn(), modelStorage: vi.fn(), profiles: vi.fn(), profilesPage: vi.fn(async (options) => (await api.profiles()).filter((profile) => !options.installIds || options.installIds.includes(profile.model_install_id ?? "")).slice(0, options.limit)),
     runtimes: vi.fn(), system: vi.fn(),
   } };
 });

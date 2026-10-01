@@ -6,7 +6,7 @@ import { ModelUpdateProfileOffers } from "./ModelUpdateProfileOffers";
 import type { Job, ModelInstall, ModelProfile } from "./types";
 
 vi.mock("./api", () => ({ api: {
-  downloadJob: vi.fn(), modelInstall: vi.fn(), profiles: vi.fn(), updateProfileModel: vi.fn(),
+  downloadJob: vi.fn(), modelInstall: vi.fn(), profilesPage: vi.fn(), updateProfileModel: vi.fn(),
 } }));
 
 const download = { jobId: "download-a", previousInstallId: "old-install", modelName: "Landscape" };
@@ -26,13 +26,13 @@ function show() {
 beforeEach(() => {
   vi.mocked(api.downloadJob).mockResolvedValue({ status: "complete", result_json: { model_install_id: "new-install" } } as unknown as Job);
   vi.mocked(api.modelInstall).mockResolvedValue({ id: "new-install", active: true, readiness: "ready", role: "image", engine: "comfyui" } as ModelInstall);
-  vi.mocked(api.profiles).mockResolvedValue([profile]);
+  vi.mocked(api.profilesPage).mockResolvedValue([profile]);
   vi.mocked(api.updateProfileModel).mockResolvedValue({ ...profile, model_install_id: "new-install" });
 });
 afterEach(cleanup);
 
 it("offers an exact completed update and switches only the chosen profile on a click", async () => {
-  vi.mocked(api.profiles).mockResolvedValue([
+  vi.mocked(api.profilesPage).mockResolvedValue([
     profile, { ...profile, id: "other", name: "Other", model_install_id: "unrelated" },
     { ...profile, id: "wrong-role", name: "Wrong role", role: "chat" },
   ]);
@@ -43,7 +43,7 @@ it("offers an exact completed update and switches only the chosen profile on a c
   expect(api.updateProfileModel).not.toHaveBeenCalled();
   expect(screen.queryByRole("button", { name: "Switch Other" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Switch Wrong role" })).not.toBeInTheDocument();
-  vi.mocked(api.profiles).mockResolvedValue([{ ...profile, model_install_id: "new-install" }]);
+  vi.mocked(api.profilesPage).mockResolvedValue([{ ...profile, model_install_id: "new-install" }]);
   fireEvent.click(button);
   await screen.findByText("Updated My landscapes.");
   expect(api.updateProfileModel).toHaveBeenCalledExactlyOnceWith("profile-a", {
@@ -77,7 +77,7 @@ it.each([
   vi.mocked(api.modelInstall).mockResolvedValue({ ...state, id: "new-install", role: "image", engine: "comfyui" } as ModelInstall);
   show();
   await screen.findByText(/needs current runtime verification/);
-  expect(api.profiles).not.toHaveBeenCalled();
+  expect(api.profilesPage).not.toHaveBeenCalled();
   expect(screen.queryByRole("button", { name: /Switch/ })).not.toBeInTheDocument();
 });
 

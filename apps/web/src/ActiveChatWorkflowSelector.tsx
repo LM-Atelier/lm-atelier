@@ -1,3 +1,4 @@
+import { WorkflowFamilyBrowseControls } from "./WorkflowFamilyBrowseControls";
 import { useId } from "react";
 import { variantServesComposerCapability } from "./activeWorkflowCapability";
 import { useActiveChatWorkflowSelection } from "./useActiveChatWorkflowSelection";
@@ -72,10 +73,10 @@ export function ActiveChatWorkflowSelector({
   const blockedVariants = applicableVariants.filter(
     (variant) => variant.readiness !== "ready",
   );
-  const noApplicableVariant = Boolean(chosenFamily && applicableVariants.length === 0);
+  const noApplicableVariant = Boolean(chosenFamily && (chosenFamily.variant_count ?? applicableVariants.length) === 0);
   const fullyBlocked = Boolean(
     applicableVariants.length > 0
-    && blockedVariants.length === applicableVariants.length,
+    && (chosenFamily?.ready_variant_count ?? applicableVariants.length - blockedVariants.length) === 0,
   );
 
   return (
@@ -116,6 +117,7 @@ export function ActiveChatWorkflowSelector({
       {state.current?.mode === "legacy" && (
         <small>Choosing a workflow replaces the existing model setup.</small>
       )}
+      <WorkflowFamilyBrowseControls browse={state.browse} label={`${state.capability} workflows`} />
       {state.saveError && <small role="alert">{state.saveError.message}</small>}
       {noApplicableVariant && (
         <small role="status">This workflow has no {state.capability} variant.</small>

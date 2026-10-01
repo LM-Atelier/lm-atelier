@@ -1,3 +1,4 @@
+import { mockWorkflowFamilyPages } from "./workflowFamilyReadFixtures";
 import { mockWorkflowReadsFromFixture } from "./workflowReadFixtures";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -7,7 +8,7 @@ import { api } from "./api";
 import type { Job, Workflow, WorkflowFamily, WorkflowInstallOffer } from "./types";
 
 vi.mock("./api", () => ({ api: {
-  workflows: vi.fn(), workflowSummaries: vi.fn(), workflow: vi.fn(), workflowFamilies: vi.fn(), workflowFamilyRemovalImpact: vi.fn(),
+  workflows: vi.fn(), workflowSummaries: vi.fn(), workflow: vi.fn(), workflowFamilyOperations: vi.fn().mockResolvedValue([]), workflowFamilies: vi.fn(), workflowFamilyRemovalImpact: vi.fn(),
   updateWorkflowFamily: vi.fn(), setWorkflowFamilyPreference: vi.fn(), installWorkflowOffer: vi.fn(),
 } }));
 vi.mock("./CustomNodesPanel", () => ({ CustomNodesPanel: () => null }));
@@ -56,7 +57,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   mockWorkflowReadsFromFixture(() => api.workflows());
   vi.mocked(api.workflows).mockResolvedValue([workflow()]);
-  vi.mocked(api.workflowFamilies).mockResolvedValue([family()]);
+  mockWorkflowFamilyPages([family()]);
   vi.mocked(api.installWorkflowOffer).mockResolvedValue([queued]);
 });
 afterEach(() => { cleanup(); clients.splice(0).forEach((client) => client.clear()); });
@@ -68,7 +69,7 @@ it.each(["card", "details"])("reviews an exact download from the %s before sendi
   let area: HTMLElement = document.body;
   if (location === "details") {
     fireEvent.click(screen.getByRole("button", { name: /^Detail variant Text to image/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Show operation variants" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Show operation variants" }));
     area = screen.getByRole("region", { name: "Operation variants" });
   }
   fireEvent.click(within(area).getByRole("button", { name: "Review downloads for Detail variant" }));
@@ -124,7 +125,7 @@ it.each(["no-offer", "attention", "ready", "queued", "wrong-revision", "disabled
       if (scenario === "queued") variant.install_offer.status = "queued";
       else variant.install_offer.workflow_revision_id = "other-revision";
     }
-    vi.mocked(api.workflowFamilies).mockResolvedValue([value]);
+    mockWorkflowFamilyPages([value]);
     show();
     await screen.findByRole("heading", { name: "Detail collection" });
     expect(screen.queryByRole("button", { name: "Review downloads for Detail variant" })).not.toBeInTheDocument();

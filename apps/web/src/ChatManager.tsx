@@ -1,18 +1,17 @@
 import { useState } from "react";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { useConfirm } from "./useConfirm";
-import type { Chat, Project } from "./types";
+import type { Chat } from "./types";
+import { ProjectPicker } from "./ProjectPicker";
 
 /** Rename, refile, archive, or delete one conversation. */
 export function ChatManager({
   chat,
-  projects,
   onClose,
   onSave,
   onDelete,
 }: {
   chat: Chat;
-  projects: Project[];
   onClose: () => void;
   onSave: (values: Partial<Chat>) => void;
   onDelete: (deleteGeneratedMedia: boolean) => void;
@@ -41,7 +40,7 @@ export function ChatManager({
       className="workspace-editor"
     >
       <label>Title<input value={title} onChange={(event) => setTitle(event.target.value)} /></label>
-      <label>Project<select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">Unfiled</option>{projects.filter((project) => !project.archived).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
+      <ProjectPicker value={projectId} onChange={setProjectId} />
       <label className="toggle-row"><span className="toggle-copy"><strong>Confirm uncertain media</strong><small>Ask before Auto mode starts an image or video when the planner is unsure.</small></span><input type="checkbox" checked={confirmUncertainMedia} onChange={(event) => setConfirmUncertainMedia(event.target.checked)} /></label>
       <label className="toggle-row"><span className="toggle-copy"><strong>Review image edits</strong><small>Check the result locally and retry once when the requested change is missing.</small></span><input type="checkbox" checked={verifyImageEdits} onChange={(event) => setVerifyImageEdits(event.target.checked)} /></label>
       <label className="toggle-row"><span className="toggle-copy"><strong>Compose visual prompts</strong><small>When a request asks to picture something written earlier, rewrite that passage as one scene description before generating.</small></span><input type="checkbox" checked={compileVisualPrompts} onChange={(event) => setCompileVisualPrompts(event.target.checked)} /></label>

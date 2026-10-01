@@ -1,4 +1,5 @@
 import type { QueueLane, QueueOrderCommand, QueueOrderPage, QueueOrderResult } from "./queueOrderTypes";
+import { workflowFamilyQuery, workflowReadQuery, type WorkflowFamilyReadOptions, type WorkflowReadPageOptions } from "./workflowReadQuery";
 import type { WorkflowRecipeTarget, WorkflowUseCase, WorkflowUseCaseChoice, WorkflowUseCaseDefault, WorkflowUseCasePreset, WorkflowUseCasePresetCreate } from "./workflowUseCaseTypes";
 import { buildTurnRequest, SOURCE_FIT_BINDING_ERROR, type TurnRequestPayload } from "./turnRequest";
 import { defaultOutputShapes } from "./outputShapePreferences";
@@ -41,6 +42,7 @@ import type {
   CatalogModel,
   CatalogPage,
   CatalogDetail,
+  CatalogInstallMatches,
   CatalogPreflight,
   CatalogVersions,
   Chat,
@@ -119,6 +121,7 @@ import type {
   WorkflowAssetReview,
   WorkflowPackageAnalysis,
   WorkflowRevisionChoice,
+  WorkflowReadyRevision,
   WorkflowRevisionSchema,
   WorkflowSummary,
   WorkflowRevision,
@@ -355,8 +358,15 @@ export const api = {
   setupReadiness: () => request<SetupReadinessReport>("/api/setup/readiness"),
   verifySetupRole: (role: SetupVerification["role"]) =>
     request<SetupVerification>(`/api/setup/verify/${role}`, { method: "POST" }),
-  projects: (includeArchived = false, query = "") =>
-    request<Project[]>(`/api/projects?${new URLSearchParams({ include_archived: String(includeArchived), query })}`),
+  projects: (includeArchived = false, query = "", options: { limit?: number; offset?: number; projectIds?: string[]; literalSearch?: boolean; signal?: AbortSignal } = {}) => {
+    const parameters = new URLSearchParams({ include_archived: String(includeArchived), query });
+    if (options.limit !== undefined) parameters.set("limit", String(options.limit));
+    if (options.offset !== undefined) parameters.set("offset", String(options.offset));
+    for (const id of options.projectIds ?? []) parameters.append("project_id", id);
+    if (options.literalSearch) parameters.set("literal_search", "true");
+    return request<Project[]>(`/api/projects?${parameters}`, options.signal ? { signal: options.signal } : undefined);
+  },
+  project: (id: string, signal?: AbortSignal) => request<Project>(`/api/projects/${encodeURIComponent(id)}`, signal ? { signal } : undefined),
   createProject: (name: string) =>
     request<Project>("/api/projects", { method: "POST", body: JSON.stringify({ name }) }),
   updateProject: (id: string, values: Partial<Project>) =>
@@ -774,6 +784,25 @@ export const api = {
       method: "DELETE",
     }),
   models: () => request<ModelInstall[]>("/api/models"),
+  modelsPage: (options: {
+    limit: number; offset?: number; search?: string; role?: "chat" | "image" | "video";
+    chatCapability?: "text" | "vision"; modelIds?: string[];
+  }) => {
+    const parameters = new URLSearchParams({ limit: String(options.limit), offset: String(options.offset ?? 0) });
+    if (options.search) parameters.set("search", options.search);
+    if (options.role) parameters.set("role", options.role);
+    if (options.chatCapability) parameters.set("chat_capability", options.chatCapability);
+    for (const id of options.modelIds ?? []) parameters.append("model_id", id);
+    return request<ModelInstall[]>(`/api/models?${parameters}`);
+  },
+  catalogInstallMatches: (options: {
+    role: "chat" | "image" | "video"; remoteIds: string[]; workflowTemplateIds: string[];
+  }) => {
+    const parameters = new URLSearchParams({ role: options.role });
+    for (const id of options.remoteIds) parameters.append("remote_id", id);
+    for (const id of options.workflowTemplateIds) parameters.append("workflow_template_id", id);
+    return request<CatalogInstallMatches>(`/api/models/catalog-matches?${parameters}`);
+  },
   modelInstall: async (installId: string) => {
     const installs = await request<ModelInstall[]>("/api/models?install_id=" + encodeURIComponent(installId));
     return installs.find((install) => install.id === installId) ?? null;
@@ -795,6 +824,20 @@ export const api = {
       method: "POST",
     }),
   profiles: () => request<ModelProfile[]>("/api/profiles"),
+  profilesPage: (options: {
+    limit: number; offset?: number; search?: string; role?: string; engine?: string;
+    inputModality?: "text" | "image"; installIds?: string[]; profileIds?: string[]; defaultsOnly?: boolean;
+  }) => {
+    const parameters = new URLSearchParams({ limit: String(options.limit), offset: String(options.offset ?? 0) });
+    if (options.search) parameters.set("search", options.search);
+    if (options.role) parameters.set("role", options.role);
+    if (options.inputModality) parameters.set("input_modality", options.inputModality);
+    if (options.engine) parameters.set("engine", options.engine);
+    if (options.defaultsOnly !== undefined) parameters.set("defaults_only", String(options.defaultsOnly));
+    for (const id of options.installIds ?? []) parameters.append("install_id", id);
+    for (const id of options.profileIds ?? []) parameters.append("profile_id", id);
+    return request<ModelProfile[]>(`/api/profiles?${parameters}`);
+  },
   createProfile: (model: ModelInstall, isDefault = false) =>
     request<ModelProfile>("/api/profiles", {
       method: "POST",
@@ -845,6 +888,16 @@ export const api = {
   importProfile: (bundle: ModelProfileBundle) =>
     request<ModelProfile>("/api/profiles/import", { method: "POST", body: JSON.stringify(bundle) }),
   presets: () => request<GenerationPreset[]>("/api/presets"),
+  presetsPage: (options: {
+    limit: number; offset?: number; search?: string; role?: string; presetIds?: string[]; defaultsOnly?: boolean;
+  }) => {
+    const parameters = new URLSearchParams({ limit: String(options.limit), offset: String(options.offset ?? 0) });
+    if (options.search) parameters.set("search", options.search);
+    if (options.role) parameters.set("role", options.role);
+    if (options.defaultsOnly !== undefined) parameters.set("defaults_only", String(options.defaultsOnly));
+    for (const id of options.presetIds ?? []) parameters.append("preset_id", id);
+    return request<GenerationPreset[]>(`/api/presets?${parameters}`);
+  },
   createPreset: (role: GenerationPreset["role"], name: string) =>
     request<GenerationPreset>("/api/presets", {
       method: "POST",
@@ -1242,14 +1295,17 @@ export const api = {
       `/api/workflow-revisions/${encodeURIComponent(revisionId)}/output-geometry/match-source`,
       { method: "POST", body: JSON.stringify({ source_artifact_id: sourceArtifactId }) },
     ),
-  workflowSummaries: () => request<WorkflowSummary[]>("/api/workflow-summaries"),
+  workflowSummaries: (options: WorkflowReadPageOptions = {}, signal?: AbortSignal) =>
+    request<WorkflowSummary[]>("/api/workflow-summaries" + workflowReadQuery(options), { signal }),
   workflow: (id: string, signal?: AbortSignal) =>
     request<Workflow>("/api/workflows/" + encodeURIComponent(id), { signal }).then((value) => {
       if (value.id !== id) throw new Error("The selected workflow could not be read.");
       return value;
     }),
-  workflowRevisionChoices: (signal?: AbortSignal) =>
-    request<WorkflowRevisionChoice[]>("/api/workflow-revision-choices", { signal }),
+  workflowReadyRevisions: (options: WorkflowReadPageOptions = {}, signal?: AbortSignal) =>
+    request<WorkflowReadyRevision[]>("/api/workflow-ready-revisions" + workflowReadQuery(options), { signal }),
+  workflowRevisionChoices: (signal?: AbortSignal, options: WorkflowReadPageOptions = {}) =>
+    request<WorkflowRevisionChoice[]>("/api/workflow-revision-choices" + workflowReadQuery(options), { signal }),
   /** The LoRAs a workflow revision applies, read-only. */
   workflowLoraControls: (revisionId: string, signal?: AbortSignal) =>
     request<WorkflowLoraControls>(
@@ -1295,8 +1351,10 @@ export const api = {
         signal,
       },
     ),
-  workflowFamily: (familyId: string) =>
-    request<WorkflowFamily>(`/api/workflow-families/${encodeURIComponent(familyId)}`),
+  workflowFamily: (familyId: string, options: WorkflowFamilyReadOptions = {}, signal?: AbortSignal) => {
+    const query = workflowFamilyQuery(options).toString();
+    return request<WorkflowFamily>(`/api/workflow-families/${encodeURIComponent(familyId)}${query ? `?${query}` : ""}`, { signal });
+  },
   updateWorkflowFamily: (familyId: string, changes: WorkflowFamilyUpdate) =>
     request<WorkflowFamily>(`/api/workflow-families/${encodeURIComponent(familyId)}`, {
       method: "PATCH",
@@ -1319,14 +1377,16 @@ export const api = {
     request<WorkflowResourceConsumers>(
       `/api/workflow-dependencies/${kind}/${encodeURIComponent(resourceId)}/consumers`,
     ),
-  workflowFamilies: (capability?: WorkflowSelectorCapability, includeArchived = false, includeDependencies = false) => {
-    const parameters = new URLSearchParams();
+  workflowFamilies: (capability?: WorkflowSelectorCapability, includeArchived = false, includeDependencies = false, options: WorkflowFamilyReadOptions = {}, signal?: AbortSignal) => {
+    const parameters = workflowFamilyQuery(options);
     if (capability) parameters.set("selector_capability", capability);
     if (includeArchived) parameters.set("include_archived", "true");
     if (includeDependencies) parameters.set("include_dependencies", "true");
     const query = parameters.toString();
-    return request<WorkflowFamily[]>(`/api/workflow-families${query ? `?${query}` : ""}`);
+    return request<WorkflowFamily[]>(`/api/workflow-families${query ? `?${query}` : ""}`, { signal });
   },
+  workflowFamilyOperations: (includeArchived = false, signal?: AbortSignal) =>
+    request<string[]>(`/api/workflow-family-operations${includeArchived ? "?include_archived=true" : ""}`, { signal }),
   workflowUseCasePresets: (useCase?: WorkflowUseCase, offset = 0, signal?: AbortSignal) => {
     const query = new URLSearchParams({ limit: "200", offset: String(offset) });
     if (useCase) query.set("use_case", useCase);

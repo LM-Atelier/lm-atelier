@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState, type SetStateAction } from "react";
-import { useQuery } from "@tanstack/react-query";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { api, turnConfirmationForError } from "./api";
 import { useTurnConfirmation } from "./useTurnConfirmation";
 import type { ComposerProps } from "./chatComposerContracts";
 import { ErrorCallout } from "./ErrorCallout";
+import { ProfilePicker, ProfileReadStatus } from "./ProfilePicker";
+import { useProfileLibrary } from "./useProfileLibrary";
+import { GenerationPresetPicker } from "./GenerationPresetPicker";
+import { useGenerationPresetLibrary } from "./useGenerationPresetLibrary";
 import {
   buildPriorTurnEditPreviewRequest, confirmPriorTurnEditSubmission, initializePriorTurnEditDraft, preparePriorTurnEditSubmission, readPriorTurnEditDraft,
   removePriorTurnEditDraft, writePriorTurnEditDraft, priorTurnEditConfigurationSource, selectPriorTurnEditConfiguration,
@@ -16,10 +19,15 @@ import type { EngineRole, Message, PriorTurnEditAccepted, RoutingMode, TurnWorkf
 import { workflowRevisionForTurn } from "./turnEditorContext";
 import { operationForTurn } from "./turnWorkflow";
 import { useWorkflowRevisionSchema } from "./useWorkflowRevisionSchema";
-import { priorTurnSourceCanvasRevision } from "./priorTurnSourceCanvas";
+import { uniqueWorkflowRows, useWorkflowRevisionChoice, useWorkflowRevisionPages } from "./useWorkflowReadPages";
+import { WorkflowReadPageControls } from "./WorkflowReadPageControls";
+import { WorkflowFamilyBrowseControls } from "./WorkflowFamilyBrowseControls";
+import { usePriorWorkflowFamilies } from "./usePriorWorkflowFamilies";
+import { useWorkflowResolutionFamilies } from "./useWorkflowResolutionFamilies";
+import { priorTurnImageWorkflowChoice, priorTurnSourceCanvasRevision } from "./priorTurnSourceCanvas";
 import type { SourceFitPreviewContext } from "./useSourceFitCanvas";
 
-type Props = Pick<ComposerProps, "chat" | "engines" | "profiles" | "presets" | "maxMediaOutputsPerPlan"> & {
+type Props = Pick<ComposerProps, "chat" | "engines" | "maxMediaOutputsPerPlan"> & {
   messageId: string;
   onAccepted: (accepted: PriorTurnEditAccepted) => void;
   onClose: () => void;
@@ -48,7 +56,7 @@ function priorEditPreview(
 }
 
 /** One source and one durable draft; every control changes only this request. */
-export function PriorTurnEditor({ chat, messageId, engines, profiles, presets,
+export function PriorTurnEditor({ chat, messageId, engines,
   maxMediaOutputsPerPlan, onAccepted, onClose, PromptHelper }: Props) {
   const [draft, setDraft] = useState<PriorTurnEditDraft | null>(null);
   const current = useRef<PriorTurnEditDraft | null>(null);
@@ -58,7 +66,6 @@ export function PriorTurnEditor({ chat, messageId, engines, profiles, presets,
   const [confirmationDialog, confirmTurn] = useTurnConfirmation();
   const pending = useRef(false);
   const accepted = useRef(false);
-  const families = useQuery({ queryKey: ["workflow-families"], queryFn: () => api.workflowFamilies() });
   useEffect(() => {
     let alive = true;
     void (async () => {
@@ -90,6 +97,7 @@ export function PriorTurnEditor({ chat, messageId, engines, profiles, presets,
   const stepTarget = draft?.configurations && "stepId" in draft.configurations.target;
   const roleOverrides = stepTarget ? draft.configurations?.roles[role] : undefined;
   const effectivePreset = draft?.presetChoice.kind === "explicit" ? draft.presetChoice.value : roleOverrides?.preset_id;
+  const presetLibrary = useGenerationPresetLibrary(role, [effectivePreset], Boolean(draft), false);
   const inheritedSettings = { ...(roleOverrides?.preset_id ? {} : configurationSource?.settings), ...roleOverrides?.settings };
   const capability = role === "chat" ? "chat" : role === "image" ? "image" : "video";
   const workflowChoice = draft?.workflowChoice;
@@ -107,30 +115,52 @@ export function PriorTurnEditor({ chat, messageId, engines, profiles, presets,
   const sameRole = Boolean(configurationSource);
   const inheritsSchema = Boolean(draft && workflowChoice?.kind === "inherit"
     && selectedWorkflow === undefined && sameRole);
+  const imageChoice = priorTurnImageWorkflowChoice(draft);
+  const resolution = useWorkflowResolutionFamilies([
+    role !== "chat" && !inheritsSchema && (!selectedWorkflow || selectedWorkflow.mode === "family" || selectedWorkflow.mode === "default")
+      ? { capability: role, operation: operationForTurn(role, Boolean(draft?.editor.attachments.length)),
+        familyId: selectedWorkflow?.mode === "family" ? selectedWorkflow.workflow_family_id : null } : null,
+    imageChoice?.mode === "family" || imageChoice?.mode === "default"
+      ? { capability: "image", operation: "image_to_image",
+        familyId: imageChoice.mode === "family" ? imageChoice.workflow_family_id : null } : null,
+  ]);
+  const families = usePriorWorkflowFamilies(selectedWorkflow?.mode === "family" ? selectedWorkflow.workflow_family_id : null);
+  const missingFamily = workflowValue.startsWith("family:")
+    && !families.families.some(family => "family:" + family.id === workflowValue);
   const revisionId = inheritsSchema ? null : selectedWorkflow?.mode === "revision"
     ? selectedWorkflow.workflow_revision_id
     : workflowRevisionForTurn(role === "chat" ? "text" : role,
-        Boolean(draft?.editor.attachments.length), families.data ?? [], selection);
+        Boolean(draft?.editor.attachments.length), resolution.families, selection);
   // An explicit historical choice keeps that revision's own operation, as before.
   const expectedOperation = selectedWorkflow?.mode === "revision" ? undefined : role === "chat" ? "text"
     : operationForTurn(role, Boolean(draft?.editor.attachments.length));
   const schemaRead = useWorkflowRevisionSchema(revisionId, expectedOperation);
   const schema = inheritsSchema ? configurationSource?.workflow_schema : schemaRead.schema;
-  const revisionChoices = useQuery({
-    queryKey: ["workflows", "revision-choices"],
-    queryFn: ({ signal }) => api.workflowRevisionChoices(signal),
-  });
-  const visibleRevisions = (revisionChoices.isError ? [] : revisionChoices.data ?? [])
+  const [revisionSearch, setRevisionSearch] = useState("");
+  const revisionChoices = useWorkflowRevisionPages(role, revisionSearch);
+  const selectedRevision = useWorkflowRevisionChoice(
+    selectedWorkflow?.mode === "revision" ? selectedWorkflow.workflow_revision_id : "", role,
+  );
+  const revisionListError = revisionChoices.isFetchNextPageError ? null : revisionChoices.error;
+  const visibleRevisions = uniqueWorkflowRows([
+    ...(revisionListError ? [] : revisionChoices.data ?? []),
+    ...(!selectedRevision.error && selectedRevision.data ? [selectedRevision.data] : []),
+  ], revision => revision.revision_id)
     .filter((revision) => role === "chat" ? revision.operation === "text"
       : role === "video" ? revision.operation.includes("video")
         : revision.operation.includes("image") && !revision.operation.includes("video"));
   const missingPinnedRevision = workflowValue.startsWith("revision:")
     && !visibleRevisions.some((revision) => "revision:" + revision.revision_id === workflowValue);
   const profileChoice = draft?.profileChoice;
-  const profileId = profileChoice?.kind === "explicit" ? profileChoice.value
-    : roleOverrides && Object.hasOwn(roleOverrides, "profile_id") ? roleOverrides.profile_id : configurationSource?.profile_id;
-  const profile = profiles.find((item) => item.id === profileId);
-  const profileValues = draft && profileChoice?.kind === "inherit" && !Object.hasOwn(roleOverrides ?? {}, "profile_id") && sameRole ? configurationSource?.profile_settings ?? {}
+  const inheritsProfile = profileChoice?.kind === "inherit" && !Object.hasOwn(roleOverrides ?? {}, "profile_id") && sameRole;
+  const hasProfileOverride = profileChoice?.kind === "explicit" || Object.hasOwn(roleOverrides ?? {}, "profile_id");
+  const profileId = profileChoice?.kind === "explicit" ? profileChoice.value : roleOverrides?.profile_id;
+  const profileLibrary = useProfileLibrary(role, inheritsProfile ? null : profileId, Boolean(draft), !inheritsProfile && profileId !== "__auto__");
+  const visionChoice = draft?.visionProfileChoice;
+  const visionId = visionChoice?.kind === "explicit" ? visionChoice.value : roleOverrides?.vision_profile_id;
+  const visionLibrary = useProfileLibrary("chat", visionId, Boolean(draft) && role === "chat", false, "image");
+  const profile = profileLibrary.identity.profile;
+  const profileValues = inheritsProfile ? configurationSource?.profile_settings ?? {}
     : { ...profile?.load_settings_json, ...profile?.request_settings_json };
   const pickWorkflow = (value: string) => {
     if (value === "inherit") { update((value) => ({ ...value, workflowChoice: { kind: "inherit" } })); return; }
@@ -151,32 +181,34 @@ export function PriorTurnEditor({ chat, messageId, engines, profiles, presets,
     {confirmationDialog}
     <p>The original and current generations will continue.</p>
     {error && <ErrorCallout message={error} />}
-    {(revisionChoices.error || schemaRead.error) && <div>
+    {(revisionListError || selectedRevision.error || schemaRead.error) && <div>
       <ErrorCallout message="Workflow choices or settings could not be loaded." />
       <button type="button" onClick={() => {
         if (revisionChoices.error) void revisionChoices.refetch();
+        if (selectedRevision.error) void selectedRevision.refetch();
         if (schemaRead.error) void schemaRead.retry();
       }}>Retry workflow reads</button>
     </div>}
     {!draft ? <div role="status">{error
       ? <button onClick={() => setReload((value) => value + 1)}>Try loading again</button> : "Loading original turn…"}</div>
       : <>
-        <label>Model for this version<select aria-label="Model for this version"
+        <ProfilePicker library={profileLibrary} label="Model for this version" searchLabel="Search models for this version"
           disabled={accepting} value={draft.profileChoice.kind === "inherit" ? "inherit" : draft.profileChoice.value ?? "default"}
-          onChange={(event) => update((value) => ({ ...value, profileChoice: event.target.value === "inherit"
-            ? { kind: "inherit" } : { kind: "explicit", value: event.target.value === "default" ? null : event.target.value } }))}>
+          selectedId={draft.profileChoice.kind === "explicit" ? draft.profileChoice.value : null}
+          onChange={(selected) => update((value) => ({ ...value, profileChoice: selected === "inherit"
+            ? { kind: "inherit" } : { kind: "explicit", value: selected === "default" ? null : selected } }))}>
           <option value="inherit">{stepTarget ? "Original model and role settings" : sameRole ? "Original model configuration" : "Current model selection"}</option>
           <option value="default">Current default</option>
-          {profiles.filter((item) => item.role === role).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-        </select></label>
-        {role === "chat" && <label>Vision model for this version<select aria-label="Vision model for this version"
+          {draft.profileChoice.kind === "explicit" && draft.profileChoice.value === "__auto__" && <option value="__auto__">Automatic</option>}
+        </ProfilePicker>
+        {role === "chat" && <ProfilePicker library={visionLibrary} label="Vision model for this version" searchLabel="Search vision models for this version"
           disabled={accepting} value={draft.visionProfileChoice.kind === "inherit" ? "inherit" : draft.visionProfileChoice.value ?? "none"}
-          onChange={(event) => update((value) => ({ ...value, visionProfileChoice: event.target.value === "inherit"
-            ? { kind: "inherit" } : { kind: "explicit", value: event.target.value === "none" ? null : event.target.value } }))}>
+          selectedId={draft.visionProfileChoice.kind === "explicit" ? draft.visionProfileChoice.value : null}
+          onChange={(selected) => update((value) => ({ ...value, visionProfileChoice: selected === "inherit"
+            ? { kind: "inherit" } : { kind: "explicit", value: selected === "none" ? null : selected } }))}>
           <option value="inherit">Original vision configuration</option><option value="none">No vision model</option>
-          {profiles.filter((item) => item.role === "chat" && item.input_modalities?.includes("image"))
-            .map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-        </select></label>}
+          {draft.visionProfileChoice.kind === "explicit" && draft.visionProfileChoice.value === "__auto__" && <option value="__auto__">Automatic</option>}
+        </ProfilePicker>}
         <div aria-label="References for this version">
           {draft.source.references.filter((reference) => !(draft.removedReferenceSubjectIds ?? []).includes(reference.reference_subject_id))
             .map((reference) => <span key={reference.reference_subject_id}>{reference.subject_name}
@@ -186,7 +218,7 @@ export function PriorTurnEditor({ chat, messageId, engines, profiles, presets,
             </span>)}
         </div>
         <TurnEditor chat={{ ...chat, routing_mode: draft.editor.mode, messages: contextMessages(draft), active_head_message_id: null }}
-          engines={engines} profiles={profiles} presets={presets} maxMediaOutputsPerPlan={maxMediaOutputsPerPlan}
+          engines={engines} maxMediaOutputsPerPlan={maxMediaOutputsPerPlan}
           stoppable={false} onStop={ignore} onStopAndSend={ignore} onSend={ignore}
           editorState={draft.editor} onEditorStateChange={(change) => update((value) => ({
             ...value, editor: typeof change === "function" ? change(value.editor) : change,
@@ -200,7 +232,7 @@ export function PriorTurnEditor({ chat, messageId, engines, profiles, presets,
           presetId={draft.presetChoice.kind === "explicit" ? draft.presetChoice.value
             : roleOverrides && Object.hasOwn(roleOverrides, "preset_id") ? roleOverrides.preset_id ?? null : configurationSource?.preset_id ?? null}
           onPreset={(presetId) => update((value) => ({ ...value, presetChoice: { kind: "explicit", value: presetId },
-            settings: presetId ? { ...presets.find((item) => item.id === presetId)?.settings_json } : value.settings }))}
+            settings: presetId ? { ...presetLibrary.choices.find((item) => item.id === presetId)?.settings_json } : value.settings }))}
           editSettings={{
             configurationControl: <label>Settings for this version<select aria-label="Settings for this version" disabled={accepting}
               value={draft.configurations && "stepId" in draft.configurations.target
@@ -220,48 +252,71 @@ export function PriorTurnEditor({ chat, messageId, engines, profiles, presets,
               settings: inheritedSettings, explicitSettingsKeys: [],
               presetChoice: { kind: "inherit" }, editor: { ...value.editor, templateSettings: null },
             })),
-            presetControl: <label className="setting-row"><span><strong>Preset</strong></span>
-              <select aria-label="Preset for this version" value={draft.presetChoice.kind === "inherit" ? "inherit" : draft.presetChoice.value ?? "none"}
-                onChange={(event) => {
-                  const selected = event.target.value;
-                  update((value) => {
-                    if (selected === "inherit") return { ...value, presetChoice: { kind: "inherit" },
-                      settings: inheritedSettings, explicitSettingsKeys: [] };
-                    if (selected === "none") return { ...value, presetChoice: { kind: "explicit", value: null } };
-                    const settings = { ...presets.find((item) => item.id === selected)?.settings_json };
-                    return { ...value, presetChoice: { kind: "explicit", value: selected }, settings,
-                      explicitSettingsKeys: Object.keys(settings) };
-                  });
-                }}>
-                <option value="inherit">{sameRole ? "Original preset settings" : "Current default preset"}</option>
-                <option value="none">No preset</option>
-                {presets.filter((item) => item.role === draft.settingsRole).map((item) =>
-                  <option key={item.id} value={item.id}>{item.name}</option>)}
-              </select>
-            </label>,
+            presetControl: <><GenerationPresetPicker library={presetLibrary} label="Preset for this version"
+              searchLabel="Search presets for this version" disabled={accepting}
+              value={draft.presetChoice.kind === "inherit" ? "inherit" : draft.presetChoice.value ?? "none"}
+              selectedId={draft.presetChoice.kind === "explicit" ? draft.presetChoice.value : null}
+              onChange={(selected) => {
+                update((value) => {
+                  if (selected === "inherit") return { ...value, presetChoice: { kind: "inherit" },
+                    settings: inheritedSettings, explicitSettingsKeys: [] };
+                  if (selected === "none") return { ...value, presetChoice: { kind: "explicit", value: null } };
+                  const settings = { ...presetLibrary.choices.find((item) => item.id === selected)?.settings_json };
+                  return { ...value, presetChoice: { kind: "explicit", value: selected }, settings,
+                    explicitSettingsKeys: Object.keys(settings) };
+                });
+              }}>
+              <option value="inherit">{sameRole ? "Original preset settings" : "Current default preset"}</option>
+              <option value="none">No preset</option>
+            </GenerationPresetPicker>
+              {effectivePreset && presetLibrary.pending && <p role="status">Loading selected preset…</p>}
+              {(presetLibrary.error || presetLibrary.missing) && <ErrorCallout
+                message={presetLibrary.error?.message ?? "The selected preset is unavailable."}
+                action={<button type="button" onClick={presetLibrary.retry}>Retry selected preset</button>} />}
+            </>,
           }}
           classificationSource={{ source_message_id: draft.source.source_user_message_id,
             source_run_id: draft.source.source_run_id, source_snapshot_sha256: draft.source.source_snapshot_sha256 }}
           contextMessages={contextMessages(draft)} contextVisualArtifacts={draft.source.context_visual_artifacts ?? []}
+          profileSettingsUnavailable={!profileLibrary.identity.ready ? <ProfileReadStatus read={profileLibrary.identity} /> : undefined}
           profileValuesOverride={profileValues} workflowSchemaOverride={schema ?? null} workflowSelection={selection}
-          sourceCanvasRevisionId={priorTurnSourceCanvasRevision(draft, families.data ?? [])}
-          sourceFitPreviewContext={priorEditPreview(messageId, draft, priorTurnSourceCanvasRevision(draft, families.data ?? []))}
-          workflowControl={<label>Workflow for this version<select aria-label="Workflow for this version" value={workflowValue}
+          sourceCanvasRevisionId={priorTurnSourceCanvasRevision(draft, resolution.families)}
+          sourceFitPreviewContext={priorEditPreview(messageId, draft, priorTurnSourceCanvasRevision(draft, resolution.families))}
+          workflowControl={<>
+            <WorkflowFamilyBrowseControls browse={families.browse} label="workflow families" />
+            {families.selected.isError && <p role="alert">Selected family could not be read. <button type="button"
+              onClick={() => void families.selected.refetch()}>Retry selected family</button></p>}
+            {resolution.error && <p role="alert">Selected workflow settings could not be resolved. <button type="button"
+              onClick={() => void resolution.refetch()}>Retry workflow settings</button></p>}
+            <label>Search workflow revisions<input type="search" maxLength={500} value={revisionSearch}
+              onChange={(event) => setRevisionSearch(event.target.value)} /></label>
+            <label>Workflow for this version<select aria-label="Workflow for this version" value={workflowValue}
             onChange={(event) => pickWorkflow(event.target.value)}>
             <option value="inherit">{sameRole ? "Original workflow" : "Current workflow selection"}</option>
             <option value="current">Current selection</option><option value="default">Default</option><option value="automatic">Auto</option>
-            {(families.data ?? []).filter((family) => family.enabled && !family.archived).map((family) =>
+            {families.families.map((family) =>
               <option key={family.id} value={"family:" + family.id}>{family.name}</option>)}
+            {missingFamily && <option value={workflowValue}>
+              {families.selected.isSuccess ? "Selected family (currently unavailable)" : "Selected family (details unavailable)"}
+            </option>}
             {missingPinnedRevision && <option value={workflowValue} disabled>
-              {revisionChoices.isPending ? "Selected workflow (loading details…)" : "Selected workflow (details unavailable)"}
+              {selectedRevision.isPending ? "Selected workflow (loading details…)" : "Selected workflow (details unavailable)"}
             </option>}
             {visibleRevisions.map((revision) => <option key={revision.revision_id} value={"revision:" + revision.revision_id}>
                 {revision.workflow_name} · version {revision.version}
               </option>)}
-          </select></label>} PromptHelper={PromptHelper} submitLabel="Queue edited version"
+          </select></label>
+          <WorkflowReadPageControls pages={revisionChoices} label="workflow revisions" />
+          </>} PromptHelper={PromptHelper} submitLabel="Queue edited version"
           onAccept={async (submission) => {
             if (revisionId && (schemaRead.isLoading || schemaRead.error)) {
               throw new Error("Wait for the selected workflow settings to load, then try again.");
+            }
+            if ((hasProfileOverride && !profileLibrary.identity.ready) || !visionLibrary.identity.ready) {
+              throw new Error("Wait for the selected model settings to load, or choose another model.");
+            }
+            if (effectivePreset && !presetLibrary.ready) {
+              throw new Error("Wait for the selected preset to load, or choose another preset.");
             }
             if (!current.current) throw new Error("The source draft is unavailable.");
             const prepared = preparePriorTurnEditSubmission(current.current, submission);

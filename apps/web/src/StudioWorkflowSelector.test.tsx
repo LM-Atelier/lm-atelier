@@ -9,6 +9,13 @@ vi.mock("./useActiveChatWorkflowSelection", () => ({
   useActiveChatWorkflowSelection: vi.fn(),
 }));
 
+const browse = {
+  search: "", setSearch: vi.fn(),
+  pages: { error: null, isPending: false, isFetchingNextPage: false,
+    isFetchNextPageError: false, hasNextPage: false,
+    fetchNextPage: vi.fn(), refetch: vi.fn() },
+};
+
 const editFamily = (overrides: Partial<WorkflowFamily> = {}): WorkflowFamily => ({
   id: "family-edit",
   name: "Krea Identity Edit",
@@ -48,6 +55,7 @@ function readyState(overrides: Partial<Extract<
 >> = {}): Extract<ActiveChatWorkflowSelectionState, { kind: "ready" }> {
   return {
     kind: "ready",
+      browse,
     capability: "image",
     choiceKind: "default",
     current: undefined,

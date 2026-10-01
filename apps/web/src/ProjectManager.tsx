@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { AccessibleDialog } from "./AccessibleDialog";
-import { GenerationSettingsPanel } from "./GenerationSettingsPanel";
+import { PagedGenerationSettingsPanel } from "./PagedGenerationSettingsPanel";
 import { WorkflowSelector } from "./WorkflowSelector";
 import { useConfirm } from "./useConfirm";
-import type { EngineCapabilities, EngineRole, GenerationPreset, Project } from "./types";
+import type { EngineCapabilities, EngineRole, Project } from "./types";
 
 /** Everything a project can be told about itself.
  *
@@ -14,7 +14,6 @@ import type { EngineCapabilities, EngineRole, GenerationPreset, Project } from "
 export function ProjectManager({
   project,
   engines,
-  presets,
   onClose,
   onSave,
   onDelete,
@@ -22,7 +21,6 @@ export function ProjectManager({
 }: {
   project: Project;
   engines: EngineCapabilities[];
-  presets: GenerationPreset[];
   onClose: () => void;
   onSave: (values: Partial<Project>) => void;
   onDelete: () => void;
@@ -101,13 +99,12 @@ export function ProjectManager({
             </button>
           ))}
         </div>
-        <GenerationSettingsPanel
+        <PagedGenerationSettingsPanel
           key={settingsRole}
           role={settingsRole}
           engines={engines}
           values={generationSettings[settingsRole] ?? {}}
           onValues={setRoleSettings}
-          presets={presets}
           presetId={generationPresetIds[settingsRole] ?? null}
           onPreset={setRolePreset}
           presetLabel={`${settingsRole} project preset`}

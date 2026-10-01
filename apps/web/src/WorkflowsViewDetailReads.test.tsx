@@ -1,3 +1,4 @@
+import { mockWorkflowFamilyPages } from "./workflowFamilyReadFixtures";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -6,7 +7,7 @@ import { api } from "./api";
 import type { Workflow, WorkflowSummary } from "./types";
 
 vi.mock("./api", () => ({ api: {
-  workflows: vi.fn(), workflowSummaries: vi.fn(), workflow: vi.fn(), workflowFamilies: vi.fn(),
+  workflows: vi.fn(), workflowSummaries: vi.fn(), workflow: vi.fn(), workflowFamilyOperations: vi.fn().mockResolvedValue([]), workflowFamilies: vi.fn(),
   validateWorkflow: vi.fn(), createWorkflow: vi.fn(), createWorkflowRevision: vi.fn(), updateWorkflow: vi.fn(),
 } }));
 vi.mock("./CustomNodesPanel", () => ({ CustomNodesPanel: () => null }));
@@ -33,7 +34,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(api.workflows).mockRejectedValue(new Error("Bulk graphs must not be requested"));
   vi.mocked(api.workflowSummaries).mockResolvedValue([summary("a"), summary("b")]);
-  vi.mocked(api.workflowFamilies).mockResolvedValue([]);
+  mockWorkflowFamilyPages([]);
   vi.mocked(api.workflow).mockImplementation(async (id) => detail(id));
 });
 afterEach(() => { cleanup(); clients.splice(0).forEach(client => client.clear()); });

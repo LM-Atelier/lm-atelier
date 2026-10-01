@@ -1,6 +1,7 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRef } from "react";
-import { api } from "./api";
+import { useQueryClient } from "@tanstack/react-query";
+import { useRef, useState } from "react";
+import { useProjectPages } from "./useProjectPages";
+import { ProjectPageControls } from "./ProjectPageControls";
 import { ErrorCallout } from "./ErrorCallout";
 import { useProjectMutations } from "./useProjectMutations";
 
@@ -20,9 +21,10 @@ export function ProjectArchives() {
   // Importing from the sidebar opens the imported chat; from Settings the
   // person stays where they are and is told what arrived.
   const { exportProject, importProject } = useProjectMutations({ client });
-  const projects = useQuery({ queryKey: ["projects", "including-archived"], queryFn: () => api.projects(true) });
+  const [search, setSearch] = useState("");
+  const projects = useProjectPages(search, true);
   const picker = useRef<HTMLInputElement>(null);
-  const error = exportProject.error ?? importProject.error ?? projects.error;
+  const error = exportProject.error ?? importProject.error;
 
   return (
     <section aria-labelledby="project-archives-heading">
@@ -59,7 +61,8 @@ export function ProjectArchives() {
       {importProject.data && (
         <div className="callout success" role="status">Imported {importProject.data.name}.</div>
       )}
-      {projects.data && projects.data.length === 0 && <p className="muted">No projects to export yet.</p>}
+      <label>Search projects to export<input type="search" maxLength={500} value={search} onChange={(event) => setSearch(event.target.value)} /></label>
+      {projects.data && projects.data.length === 0 && !projects.error && <p className="muted">{search.trim() ? "No matching projects." : "No projects to export yet."}</p>}
       {projects.data && projects.data.length > 0 && (
         <div className="backup-list">
           {projects.data.map((project) => (
@@ -91,6 +94,7 @@ export function ProjectArchives() {
         </div>
       )}
       {error && <ErrorCallout message={error.message} />}
+      <ProjectPageControls pages={projects} />
     </section>
   );
 }

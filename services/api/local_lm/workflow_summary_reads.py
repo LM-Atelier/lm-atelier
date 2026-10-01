@@ -2,18 +2,39 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from itertools import islice
+from typing import Literal
+
 from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy.orm import Session, aliased, selectinload
 
 from .models import WorkflowDefinition, WorkflowRevision
-from .schemas import WorkflowRevisionChoiceOut, WorkflowRevisionSchemaOut, WorkflowSummaryOut
-from .workflow_package_drafts import WORKFLOW_PACKAGE_DRAFT_MARKER, is_workflow_package_draft
+from .schemas import (
+    WorkflowRevisionChoiceOut,
+    WorkflowRevisionSchemaOut,
+    WorkflowSummaryOut,
+)
+from .workflow_package_drafts import (
+    WORKFLOW_PACKAGE_DRAFT_MARKER,
+    is_workflow_package_draft,
+)
 
 
-def list_workflow_summaries(session: Session) -> list[WorkflowSummaryOut]:
+def list_workflow_summaries(
+    session: Session,
+    *,
+    limit: int | None = None,
+    offset: int = 0,
+    search: str = "",
+    operation: str | None = None,
+    workflow_ids: Sequence[str] = (),
+    ungrouped_only: bool = False,
+) -> list[WorkflowSummaryOut]:
     counts = (
         select(
-            WorkflowRevision.workflow_id, func.count(WorkflowRevision.id).label("revision_count")
+            WorkflowRevision.workflow_id,
+            func.count(WorkflowRevision.id).label("revision_count"),
         )
         .group_by(WorkflowRevision.workflow_id)
         .subquery()
@@ -44,7 +65,28 @@ def list_workflow_summaries(session: Session) -> list[WorkflowSummaryOut]:
         .order_by(WorkflowDefinition.name, WorkflowDefinition.id)
         .execution_options(autoflush=False)
     )
-    return [WorkflowSummaryOut(**row) for row in session.execute(statement).mappings()]
+    if operation is not None:
+        statement = statement.where(WorkflowDefinition.operation == operation)
+    if workflow_ids:
+        statement = statement.where(WorkflowDefinition.id.in_(workflow_ids))
+    if ungrouped_only:
+        statement = statement.where(WorkflowDefinition.family_id.is_(None))
+    query = search.strip().casefold()
+    if not query:
+        statement = statement.offset(offset)
+        if limit is not None:
+            statement = statement.limit(limit)
+    rows = session.execute(statement.execution_options(yield_per=200)).mappings()
+    matches = (
+        row
+        for row in rows
+        if not query
+        or query in str(row["name"]).casefold()
+        or query in str(row["description"] or "").casefold()
+    )
+    start = offset if query else 0
+    page = islice(matches, start, None)
+    return [WorkflowSummaryOut(**row) for row in islice(page, limit)]
 
 
 def load_workflow_detail(session: Session, workflow_id: str) -> WorkflowDefinition | None:
@@ -83,7 +125,17 @@ def _visible_workflow_ids() -> Select[tuple[str]]:
     )
 
 
-def list_workflow_revision_choices(session: Session) -> list[WorkflowRevisionChoiceOut]:
+def list_workflow_revision_choices(
+    session: Session,
+    *,
+    limit: int | None = None,
+    offset: int = 0,
+    search: str = "",
+    operation: str | None = None,
+    workflow_ids: Sequence[str] = (),
+    revision_ids: Sequence[str] = (),
+    role: Literal["chat", "image", "video"] | None = None,
+) -> list[WorkflowRevisionChoiceOut]:
     statement = (
         select(
             WorkflowRevision.id.label("revision_id"),
@@ -102,7 +154,31 @@ def list_workflow_revision_choices(session: Session) -> list[WorkflowRevisionCho
         )
         .execution_options(autoflush=False)
     )
-    return [WorkflowRevisionChoiceOut(**row) for row in session.execute(statement).mappings()]
+    if operation is not None:
+        statement = statement.where(WorkflowDefinition.operation == operation)
+    if workflow_ids:
+        statement = statement.where(WorkflowDefinition.id.in_(workflow_ids))
+    if revision_ids:
+        statement = statement.where(WorkflowRevision.id.in_(revision_ids))
+    if role == "chat":
+        statement = statement.where(WorkflowDefinition.operation == "text")
+    elif role == "video":
+        statement = statement.where(WorkflowDefinition.operation.contains("video"))
+    elif role == "image":
+        statement = statement.where(
+            WorkflowDefinition.operation.contains("image"),
+            ~WorkflowDefinition.operation.contains("video"),
+        )
+    query = search.strip().casefold()
+    if not query:
+        statement = statement.offset(offset)
+        if limit is not None:
+            statement = statement.limit(limit)
+    rows = session.execute(statement.execution_options(yield_per=200)).mappings()
+    matches = (row for row in rows if not query or query in str(row["workflow_name"]).casefold())
+    start = offset if query else 0
+    page = islice(matches, start, None)
+    return [WorkflowRevisionChoiceOut(**row) for row in islice(page, limit)]
 
 
 def load_workflow_revision_schema(

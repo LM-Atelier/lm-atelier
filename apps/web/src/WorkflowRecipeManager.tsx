@@ -7,6 +7,8 @@ import { WorkflowRecipeChoices } from "./WorkflowRecipeChoices";
 import { WorkflowRecipeEditor } from "./WorkflowRecipeEditor";
 import { workflowRecipeCatalog } from "./workflowRecipeCatalog";
 import { workflowUseCases } from "./workflowUseCaseTypes";
+import { ProjectPicker } from "./ProjectPicker";
+import { useProject } from "./useProjectPages";
 import type { WorkflowUseCasePreset, WorkflowUseCasePresetCreate } from "./workflowUseCaseTypes";
 import "./WorkflowRecipeManager.css";
 
@@ -19,10 +21,10 @@ export function WorkflowRecipeManagerAction() {
 export function WorkflowRecipeManager({ onClose }: { onClose: () => void }) {
   const client = useQueryClient();
   const catalog = useQuery({ queryKey: ["workflow-recipes"], queryFn: ({ signal }) => workflowRecipeCatalog(signal) });
-  const projects = useQuery({ queryKey: ["projects", "recipe-choices"], queryFn: () => api.projects() });
   const [editing, setEditing] = useState<WorkflowUseCasePreset | "new" | null>(null);
   const [deleting, setDeleting] = useState<WorkflowUseCasePreset | null>(null);
   const [projectId, setProjectId] = useState("");
+  const selectedProject = useProject(projectId);
   const [notice, setNotice] = useState("");
   const [defaultsOpen, setDefaultsOpen] = useState(false);
   const [projectsOpen, setProjectsOpen] = useState(false);
@@ -47,7 +49,7 @@ export function WorkflowRecipeManager({ onClose }: { onClose: () => void }) {
     onSuccess: () => { setDeleting(null); setNotice("Recipe deleted."); refresh(); },
   });
   const busy = save.isPending || remove.isPending;
-  const project = projects.error ? undefined : projects.data?.find((item) => item.id === projectId);
+  const project = selectedProject.error || selectedProject.data?.archived ? undefined : selectedProject.data;
   return <AccessibleDialog title="Workflow recipes" eyebrow="Reusable settings" closeLabel="Close recipe manager"
     onClose={() => { if (!busy) onClose(); }} className="workflow-recipe-manager">
     {editing !== null ? <WorkflowRecipeEditor key={editing === "new" ? "new" : editing.id}
@@ -79,12 +81,7 @@ export function WorkflowRecipeManager({ onClose }: { onClose: () => void }) {
         <WorkflowRecipeChoices scope={{ kind: "workspace" }} /></>}</details>
       <details open={projectsOpen} onToggle={(event) => setProjectsOpen(event.currentTarget.open)}><summary>Project choices</summary>
         {projectsOpen && <>
-        <label>Project for recipe choices<select value={projectId} disabled={projects.isPending || Boolean(projects.error)} onChange={(event) => setProjectId(event.target.value)}>
-          <option value="">{projects.isPending ? "Loading projects…" : projects.error ? "Cannot read projects" : "Choose a project"}</option>
-          {projectId && !project && <option value={projectId} disabled>Selected project unavailable</option>}
-          {!projects.error && projects.data?.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-        </select></label>
-        {projects.error && <p role="alert">{projects.error.message}<button type="button" className="secondary compact-button" onClick={() => void projects.refetch()}>Retry projects</button></p>}
+        <ProjectPicker value={projectId} onChange={setProjectId} label="Project for recipe choices" emptyLabel="Choose a project" />
         {project && <WorkflowRecipeChoices scope={{ kind: "project", id: project.id }} />}
         </>}
       </details>

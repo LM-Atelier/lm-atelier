@@ -17,7 +17,7 @@ import { openWorkflowEditorPopup, runWorkflowEditor } from "./workflowEditorBrid
 vi.mock("./api", () => ({
   api: {
     workflows: vi.fn(), workflowSummaries: vi.fn(), workflow: vi.fn(),
-    workflowFamilies: vi.fn().mockResolvedValue([]),
+    workflowFamilyOperations: vi.fn().mockResolvedValue([]), workflowFamilies: vi.fn().mockResolvedValue([]),
     workflowCatalog: vi.fn().mockResolvedValue({ items: [], next_cursor: null, stale: false }),
     workflowCatalogGraph: vi.fn(),
     analyzeWorkflowPackage: vi.fn(),

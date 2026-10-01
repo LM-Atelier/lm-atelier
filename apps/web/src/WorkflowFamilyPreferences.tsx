@@ -79,7 +79,7 @@ function FamilyPreferences({ family }: { family: WorkflowFamily }) {
         <ErrorCallout message={refusal ?? (save.error as Error).message} />
       )}
       <ul>
-        {CAPABILITIES.filter(({ key }) => family.variants.some(
+        {CAPABILITIES.filter(({ key }) => family.supported_selector_capabilities?.includes(key) ?? family.variants.some(
           (variant) => OPERATIONS[key].includes(variant.operation),
         )).map(({ key, label }) => {
           const preference = known(key);

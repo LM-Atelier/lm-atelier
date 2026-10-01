@@ -9,7 +9,7 @@ import type { ChatDetail, EngineCapabilities, WorkflowLoraControls } from "./typ
 
 vi.mock("./api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./api")>();
-  return { ...actual, api: { ...actual.api, workflowFamilies: vi.fn(), workflowLoraControls: vi.fn() } };
+  return { ...actual, api: { ...actual.api, profilesPage: vi.fn().mockResolvedValue([]), workflowFamilies: vi.fn(), workflowLoraControls: vi.fn() } };
 });
 
 const revision = "wfrev_landscape";
@@ -51,7 +51,7 @@ function Harness({ send, selected = true, stoppable = false }: {
 }) {
   const [draft, setDraft] = useState<ComposerDraft>({ text: "Paint a landscape", promptSource: null });
   const [settings, setSettings] = useState<Record<string, unknown>>({ width: 640, ...(selected ? { loras: stack } : {}) });
-  return <TurnEditor chat={chat} engines={[engine]} profiles={[]} presets={[]}
+  return <TurnEditor chat={chat} engines={[engine]}
     stoppable={stoppable} settings={settings} onSettings={setSettings} settingsRole="image" onSettingsRole={ignore}
     presetId={null} onPreset={ignore} onMode={ignore} onSend={send} onStop={ignore} onStopAndSend={send}
     maxMediaOutputsPerPlan={4} draft={draft} onDraftChange={setDraft}
@@ -72,7 +72,7 @@ function mount(send: TurnEditorProps["onSend"], initial?: WorkflowLoraControls, 
   return client;
 }
 
-beforeEach(() => vi.mocked(api.workflowFamilies).mockResolvedValue([]));
+beforeEach(() => { vi.mocked(api.profilesPage).mockResolvedValue([]); vi.mocked(api.workflowFamilies).mockResolvedValue([]); });
 afterEach(() => {
   cleanup();
   for (const client of clients.splice(0)) client.clear();

@@ -1,4 +1,5 @@
 export type * from "./queueOrderTypes";
+export type * from "./workflowReadTypes";
 export type * from "./chatEditLineageTypes";
 import type { HardwareFitAdvice } from "./hardwareFitTypes";
 export type * from "./hardwareFitTypes";
@@ -920,6 +921,11 @@ export interface EmptyChatDeletion {
   deleted_ids: string[];
   deleted_at: string;
   replayed: boolean;
+}
+
+export interface CatalogInstallMatches {
+  remote_ids: string[];
+  workflow_template_ids: string[];
 }
 
 export interface ModelInstall {
@@ -2031,6 +2037,10 @@ export interface WorkflowFamily {
   archived: boolean;
   compatibility: boolean;
   variants: WorkflowFamilyVariant[];
+  supported_selector_capabilities?: WorkflowSelectorCapability[] | null;
+  variant_count?: number | null;
+  ready_variant_count?: number | null;
+  best_readiness?: WorkflowVariantReadiness | null;
   preferences: WorkflowFamilyPreference[];
   dependency_summary?: WorkflowFamilyDependencySummary | null;
   created_at: string;

@@ -1,3 +1,4 @@
+import { mockWorkflowFamilyPages } from "./workflowFamilyReadFixtures";
 import { mockWorkflowReadsFromFixture } from "./workflowReadFixtures";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
@@ -7,7 +8,7 @@ import { api } from "./api";
 import type { Workflow, WorkflowRevision } from "./types";
 
 vi.mock("./api", () => ({ api: {
-  workflows: vi.fn(), workflowSummaries: vi.fn(), workflow: vi.fn(), workflowFamilies: vi.fn(), restoreWorkflowRevision: vi.fn(),
+  workflows: vi.fn(), workflowSummaries: vi.fn(), workflow: vi.fn(), workflowFamilyOperations: vi.fn().mockResolvedValue([]), workflowFamilies: vi.fn(), restoreWorkflowRevision: vi.fn(),
   updateWorkflow: vi.fn(), cloneWorkflow: vi.fn(),
 } }));
 vi.mock("./CustomNodesPanel", () => ({ CustomNodesPanel: () => null }));
@@ -31,7 +32,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   mockWorkflowReadsFromFixture(() => api.workflows());
   vi.mocked(api.workflows).mockResolvedValue([workflow()]);
-  vi.mocked(api.workflowFamilies).mockResolvedValue([]);
+  mockWorkflowFamilyPages([]);
 });
 afterEach(() => { cleanup(); clients.splice(0).forEach((client) => client.clear()); });
 async function openHistory() {

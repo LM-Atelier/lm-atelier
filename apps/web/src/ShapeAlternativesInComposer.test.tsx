@@ -11,8 +11,8 @@ import type { ChatDetail, WorkflowFamily, WorkflowOutputGeometryCapability, Work
 
 vi.mock("./api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./api")>();
-  return { ...actual, api: { ...actual.api,
-    workflowFamilies: vi.fn(), chatWorkflowSelections: vi.fn(), projectWorkflowSelections: vi.fn(),
+  return { ...actual, api: { ...actual.api, profilesPage: vi.fn().mockResolvedValue([]),
+    presetsPage: vi.fn().mockResolvedValue([]), workflowFamilies: vi.fn(), chatWorkflowSelections: vi.fn(), projectWorkflowSelections: vi.fn(),
     setChatWorkflowSelection: vi.fn(), workflowRevisionSchema: vi.fn(), workflowRevisionOutputGeometry: vi.fn(),
     workflowLoraControls: vi.fn(), workflowRevisionSourceFit: vi.fn(),
   } };
@@ -56,13 +56,15 @@ const ignore = () => {};
 
 function Harness() {
   const [draft, setDraft] = useState<ComposerDraft>({ text: "", promptSource: null });
-  return <TurnEditor chat={chat} engines={[]} profiles={[]} presets={[]} stoppable={false} settings={{}}
+  return <TurnEditor chat={chat} engines={[]} stoppable={false} settings={{}}
     onSettings={ignore} settingsRole="image" onSettingsRole={ignore} presetId={null} onPreset={ignore}
     onMode={ignore} onSend={ignore} onStop={ignore} onStopAndSend={ignore} maxMediaOutputsPerPlan={4}
     draft={draft} onDraftChange={setDraft} />;
 }
 
 beforeEach(() => {
+  vi.mocked(api.profilesPage).mockResolvedValue([]);
+  vi.mocked(api.presetsPage).mockResolvedValue([]);
   selections = [{
     selector_capability: "image", mode: "family", workflow_family_id: "sized",
     workflow_revision_id: null, legacy_profile_id: null,

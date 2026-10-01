@@ -12,8 +12,6 @@ import type {
   ChatTranscriptContext,
   EngineCapabilities,
   EngineRole,
-  GenerationPreset,
-  ModelProfile,
   Project,
   PriorTurnEditAccepted,
   RoutingMode,
@@ -37,13 +35,11 @@ export interface ComposerProps {
   chat: ChatDetail;
   transcriptContext?: ChatTranscriptContext;
   engines: EngineCapabilities[];
-  profiles: ModelProfile[];
   stoppable: boolean;
   settings: Record<string, unknown>;
   onSettings: (settings: Record<string, unknown>, changedKeys?: string[]) => void;
   settingsRole: EngineRole;
   onSettingsRole: (role: EngineRole) => void;
-  presets: GenerationPreset[];
   presetId: string | null;
   onPreset: (presetId: string | null) => void;
   onMode: (mode: RoutingMode) => void;
@@ -63,7 +59,6 @@ export interface ChatViewProps {
   onOpenStudio: (artifactId: string) => void;
   chat?: ChatDetail;
   engines: EngineCapabilities[];
-  profiles: ModelProfile[];
   project?: Project;
   liveText: Record<string, string>;
   pendingTurns: PendingTurn[];
@@ -71,7 +66,6 @@ export interface ChatViewProps {
   settings: Record<string, unknown>;
   settingsRole: EngineRole;
   onSettingsRole: (role: EngineRole) => void;
-  presets: GenerationPreset[];
   presetId: string | null;
   onSettings: (settings: Record<string, unknown>, changedKeys?: string[]) => void;
   onPreset: (presetId: string | null) => void;

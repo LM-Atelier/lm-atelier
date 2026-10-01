@@ -3,6 +3,7 @@ import { api } from "./api";
 import { operationForTurn, revisionForTurn, type TurnOperation } from "./turnWorkflow";
 import { orderFamilies, servesCapability } from "./workflowFamilies";
 import type { WorkflowFamily } from "./types";
+import type { WorkflowFamilyBrowseState } from "./useWorkflowFamilyChoices";
 
 /** Another installed workflow that could answer this turn, with the revision it would run. */
 export interface ShapeAlternative {
@@ -13,6 +14,7 @@ export interface ShapeAlternative {
 
 /** What the shape row needs to offer the workflows that take a shape. */
 export interface ShapeAlternatives {
+  browse?: WorkflowFamilyBrowseState;
   candidates: ShapeAlternative[];
   onChoose: (familyId: string) => void;
   choosing: boolean;

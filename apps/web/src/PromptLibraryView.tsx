@@ -7,7 +7,8 @@ import { clockOptions, useClockChoice } from "./clockPreference";
 import { EmptyState } from "./EmptyState";
 import { ErrorCallout } from "./ErrorCallout";
 import { useConfirm } from "./useConfirm";
-import { servesCapability } from "./workflowFamilies";
+import { useReadyWorkflowChoices } from "./useReadyWorkflowChoices";
+import { ReadyWorkflowBrowseControls } from "./ReadyWorkflowBrowseControls";
 import type {
   PromptTemplateContract,
   PromptTemplateDetail,
@@ -352,37 +353,6 @@ function TemplateEditor({
   );
 }
 
-type ReadyWorkflowChoice = { id: string; label: string };
-
-function useReadyImageWorkflows(): {
-  choices: ReadyWorkflowChoice[];
-  query: ReturnType<typeof useQuery<import("./types").WorkflowFamily[]>>;
-} {
-  const query = useQuery({
-    queryKey: ["workflow-families", "image"],
-    queryFn: () => api.workflowFamilies("image"),
-  });
-  const choices = useMemo(() => {
-    const revisions: ReadyWorkflowChoice[] = [];
-    const seen = new Set<string>();
-    for (const family of query.data ?? []) {
-      if (!servesCapability(family, "image")) continue;
-      for (const variant of family.variants) {
-        if (!variant.current_revision_id || variant.readiness !== "ready") continue;
-        if (variant.operation !== "text_to_image") continue;
-        if (seen.has(variant.current_revision_id)) continue;
-        seen.add(variant.current_revision_id);
-        revisions.push({
-          id: variant.current_revision_id,
-          label: `${family.name} - ${variant.name}${variant.current_revision_version ? ` - revision ${variant.current_revision_version}` : ""}`,
-        });
-      }
-    }
-    return revisions;
-  }, [query.data]);
-  return { choices, query };
-}
-
 function installedLoraDigest(asset: { manifest_json: Record<string, unknown> }): string | null {
   const value = asset.manifest_json.sha256;
   return typeof value === "string" && SHA256.test(value) ? value : null;
@@ -395,7 +365,10 @@ function FixedResourceEditor({
   onChange: (resources: Extract<PromptTemplateResourcePolicy, { mode: "fixed" }>) => void;
 }) {
   const policy = resources.lora_policy;
-  const workflows = useReadyImageWorkflows();
+  const workflows = useReadyWorkflowChoices([resources.workflow_revision_id]);
+  const choices = workflows.rows.map(row => ({
+    id: row.revision_id, label: `${row.family_name} - ${row.workflow_name} - revision ${row.revision_version}`,
+  }));
   const [stackKeys, setStackKeys] = useState(() => policy.mode === "pool"
     ? policy.stacks.map(() => crypto.randomUUID())
     : []);
@@ -403,13 +376,12 @@ function FixedResourceEditor({
     ? policy.stacks.reduce((total, stack) => total + stack.length, 0)
     : 0;
   return <>
-    {workflows.query.isPending && <p className="prompt-pool-count">Checking ready image workflows...</p>}
-    {workflows.query.isError && <p className="prompt-pool-count">Workflows could not be loaded. <button type="button" className="secondary compact-button" onClick={() => void workflows.query.refetch()}>Retry</button></p>}
+    <ReadyWorkflowBrowseControls workflows={workflows} />
     <label>Workflow<select aria-label="Workflow" value={resources.workflow_revision_id} onChange={(event) => onChange({ ...resources, workflow_revision_id: event.target.value })}>
       <option value="">Choose a ready image workflow</option>
-      {workflows.choices.map((workflow) => <option key={workflow.id} value={workflow.id}>{workflow.label}</option>)}
-      {resources.workflow_revision_id && !workflows.choices.some((workflow) => workflow.id === resources.workflow_revision_id)
-        && <option value={resources.workflow_revision_id}>Previously selected workflow (currently unavailable)</option>}
+      {choices.map((workflow) => <option key={workflow.id} value={workflow.id}>{workflow.label}</option>)}
+      {resources.workflow_revision_id && !choices.some((workflow) => workflow.id === resources.workflow_revision_id)
+        && <option value={resources.workflow_revision_id}>{workflows.missingLabel}</option>}
     </select></label>
     <label>LoRA policy<select aria-label="LoRA policy" value={policy.mode} onChange={(event) => {
       const mode = event.target.value as PromptTemplateLoraPolicy["mode"];
@@ -525,40 +497,10 @@ function WorkflowPoolEditor({
 }) {
   const { options } = resources;
   const [optionKeys, setOptionKeys] = useState(() => options.map(() => crypto.randomUUID()));
-  // The bounded source of workflow identity the client already has. No API
-  // surface is added for this: a pool option may only name a revision that is
-  // current and ready, which is the same set the workflow selector offers.
-  // The capability argument joins an image preference but does not require it
-  // to be enabled, so the same `servesCapability` check the workflow selector
-  // applies is applied here - otherwise a family the user has turned off for
-  // image still contributes revisions, and the claim that this is the set the
-  // selector offers would be false.
-  //
-  // The capability also filters FAMILIES rather than variants, and one family
-  // can carry both text_to_image and image_to_image, so the operation is
-  // filtered too. Prompt Library templates are text-to-image only.
-  const families = useQuery({
-    queryKey: ["workflow-families", "image"],
-    queryFn: () => api.workflowFamilies("image"),
-  });
-  const readyRevisions = useMemo(() => {
-    const revisions: { id: string; label: string }[] = [];
-    const seen = new Set<string>();
-    for (const family of families.data ?? []) {
-      if (!servesCapability(family, "image")) continue;
-      for (const variant of family.variants) {
-        if (!variant.current_revision_id || variant.readiness !== "ready") continue;
-        if (variant.operation !== "text_to_image") continue;
-        if (seen.has(variant.current_revision_id)) continue;
-        seen.add(variant.current_revision_id);
-        revisions.push({
-          id: variant.current_revision_id,
-          label: `${family.name} · ${variant.name} (ready)`,
-        });
-      }
-    }
-    return revisions;
-  }, [families.data]);
+  const workflows = useReadyWorkflowChoices(options.map(option => option.workflow_revision_id));
+  const readyRevisions = workflows.rows.map(row => ({
+    id: row.revision_id, label: `${row.family_name} · ${row.workflow_name} (ready)`,
+  }));
   const pooledLoras = options.reduce(
     (total, option) => total + (option.lora_policy.mode === "fixed" ? option.lora_policy.stack.length : 0),
     0,
@@ -568,24 +510,15 @@ function WorkflowPoolEditor({
     options: options.map((option, optionIndex) => optionIndex === index ? next : option),
   });
   return <>
-    {families.isPending && <p className="prompt-pool-count">Checking which image workflows are ready…</p>}
-    {families.isError && <p className="prompt-pool-count">Could not read which image workflows are ready. Pinned workflows are kept as they are. <button type="button" className="secondary compact-button" onClick={() => void families.refetch()}>Retry</button></p>}
+    <ReadyWorkflowBrowseControls workflows={workflows} />
     <label>Pool strategy<select aria-label="Pool strategy" value={resources.strategy} onChange={(event) => onChange({ ...resources, strategy: event.target.value as "random" | "round_robin" })}><option value="round_robin">Round robin by draft</option><option value="random">Deterministic random</option></select></label>
     <p className="prompt-pool-count">{options.length} option{options.length === 1 ? "" : "s"} · {pooledLoras} paired LoRA{pooledLoras === 1 ? "" : "s"} of 64</p>
     {options.map((option, index) => <fieldset key={optionKeys[index]} className="prompt-pool-option"><legend>Option {index + 1}</legend>
       <label>Workflow revision<select aria-label={`Option ${index + 1} workflow revision`} value={option.workflow_revision_id} onChange={(event) => replaceOption(index, { ...option, workflow_revision_id: event.target.value })}>
         <option value="">Choose a ready image workflow</option>
         {readyRevisions.map((revision) => <option key={revision.id} value={revision.id}>{revision.label}</option>)}
-        {/* A template authored earlier can pin a revision that is no longer
-          current or ready. Keep it selectable and say so, rather than
-          silently moving the template onto today's tip.
-
-          Only say it once the read succeeded. While the query is loading or
-          failed the ready set is empty, and calling a pinned revision stale on
-          that basis would turn an unknown read state into a false claim about
-          the workflow. */}
         {option.workflow_revision_id && !readyRevisions.some((revision) => revision.id === option.workflow_revision_id)
-          && <option value={option.workflow_revision_id}>{families.isSuccess ? "Previously selected workflow (currently unavailable)" : "Previously selected workflow"}</option>}
+          && <option value={option.workflow_revision_id}>{workflows.missingLabel}</option>}
       </select></label>
       <label>LoRA policy<select aria-label={`Option ${index + 1} LoRA policy`} value={option.lora_policy.mode} onChange={(event) => {
         const mode = event.target.value as PromptTemplateOptionLoraPolicy["mode"];

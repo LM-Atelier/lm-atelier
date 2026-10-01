@@ -9,7 +9,7 @@ import type { ChatDetail, RoutingMode, WorkflowSelection } from "./types";
 
 vi.mock("./api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./api")>();
-  return { ...actual, api: { ...actual.api,
+  return { ...actual, api: { ...actual.api, profilesPage: vi.fn().mockResolvedValue([]),
     workflowFamilies: vi.fn(), chatWorkflowSelections: vi.fn(),
     projectWorkflowSelections: vi.fn(), setChatWorkflowSelection: vi.fn(),
   } };
@@ -27,8 +27,8 @@ const clients: QueryClient[] = [];
 function Harness({ workflowControl }: { workflowControl?: ReactNode }) {
   const [mode, setMode] = useState<RoutingMode>("auto");
   const [draft, setDraft] = useState<ComposerDraft>({ text: "", promptSource: null });
-  return <TurnEditor chat={{ ...chat, routing_mode: mode }} engines={[]} profiles={[]}
-    presets={[]} stoppable={false} settings={{}} onSettings={ignore} settingsRole="chat"
+  return <TurnEditor chat={{ ...chat, routing_mode: mode }} engines={[]}
+    stoppable={false} settings={{}} onSettings={ignore} settingsRole="chat"
     onSettingsRole={ignore} presetId={null} onPreset={ignore} onMode={setMode} onSend={ignore}
     onStop={ignore} onStopAndSend={ignore} maxMediaOutputsPerPlan={4}
     draft={draft} onDraftChange={setDraft} workflowControl={workflowControl} workflowSchemaOverride={null} />;
@@ -39,6 +39,7 @@ function show(workflowControl?: ReactNode) {
   return render(<QueryClientProvider client={client}><Harness workflowControl={workflowControl} /></QueryClientProvider>);
 }
 beforeEach(() => {
+  vi.mocked(api.profilesPage).mockResolvedValue([]);
   selections = [
     { selector_capability: "chat", mode: "automatic", workflow_family_id: null, workflow_revision_id: null, legacy_profile_id: null },
     { selector_capability: "image", mode: "family", workflow_family_id: "missing-image-family", workflow_revision_id: null, legacy_profile_id: null },
@@ -63,7 +64,7 @@ it("shows all three stored workflow choices in routing Auto and preserves the ot
   const image = screen.getByRole("combobox", { name: "Image workflow" });
   const video = screen.getByRole("combobox", { name: "Video workflow" });
   await waitFor(() => expect(text).toHaveValue("automatic"));
-  expect(image).toHaveValue("missing-image-family");
+  await waitFor(() => expect(image).toHaveValue("missing-image-family"));
   expect(video).toHaveValue("compatibility:revision");
   expect(screen.getByRole("option", { name: "Selected workflow (unavailable)" })).toBeDisabled();
   expect(screen.getByRole("combobox", { name: "Generation mode" })).toHaveValue("auto");

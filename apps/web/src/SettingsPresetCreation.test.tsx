@@ -9,8 +9,8 @@ import type { GenerationPreset } from "./types";
 vi.mock("./api", () => ({ api: {
   system: vi.fn().mockResolvedValue(null),
   about: vi.fn().mockResolvedValue(null),
-  profiles: vi.fn().mockResolvedValue([]),
-  presets: vi.fn().mockResolvedValue([]),
+  profilesPage: vi.fn().mockResolvedValue([]),
+  presetsPage: vi.fn().mockResolvedValue([]),
   workers: vi.fn().mockResolvedValue([]),
   runtimes: vi.fn().mockResolvedValue([]),
   backups: vi.fn().mockResolvedValue([]),

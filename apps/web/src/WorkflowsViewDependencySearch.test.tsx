@@ -1,3 +1,4 @@
+import { mockWorkflowFamilyPages } from "./workflowFamilyReadFixtures";
 import { mockWorkflowReadsFromFixture } from "./workflowReadFixtures";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -6,7 +7,7 @@ import { WorkflowsView } from "./WorkflowsView";
 import { api } from "./api";
 import type { Workflow, WorkflowFamily } from "./types";
 
-vi.mock("./api", () => ({ api: { workflowSummaries: vi.fn(), workflow: vi.fn(), workflows: vi.fn(), workflowFamilies: vi.fn() } }));
+vi.mock("./api", () => ({ api: { workflowSummaries: vi.fn(), workflow: vi.fn(), workflows: vi.fn(), workflowFamilyOperations: vi.fn().mockResolvedValue([]), workflowFamilies: vi.fn() } }));
 vi.mock("./CustomNodesPanel", () => ({ CustomNodesPanel: () => null }));
 vi.mock("./RegistryInstallsPanel", () => ({ RegistryInstallsPanel: () => null }));
 vi.mock("./WorkflowRevisionReviewPanel", () => ({ WorkflowRevisionReviewPanel: () => null }));
@@ -41,47 +42,47 @@ beforeEach(() => {
 afterEach(() => { cleanup(); clients.splice(0).forEach((client) => client.clear()); });
 
 it("requests dependency summaries and finds a family by a current dependency name", async () => {
-  vi.mocked(api.workflowFamilies).mockResolvedValue([
+  mockWorkflowFamilyPages([
     family("a", { dependency_count: 2, names: ["Landscape checkpoint", "Encoder"] }),
     family("b", { dependency_count: 1, names: ["Other checkpoint"] }),
   ]);
   show();
   await screen.findByRole("heading", { name: "Family a" });
-  expect(api.workflowFamilies).toHaveBeenCalledWith(undefined, false, true);
-  expect(within(screen.getByRole("region", { name: "Family a" })).getByText("2 recorded dependencies")).toBeInTheDocument();
+  await waitFor(() => expect(api.workflowFamilies).toHaveBeenCalledWith(undefined, false, true, expect.objectContaining({ limit: 10, variantLimit: 5 }), expect.any(AbortSignal)));
+  await waitFor(() => expect(within(screen.getByRole("region", { name: "Family a" })).getByText("2 recorded dependencies")).toBeInTheDocument());
   fireEvent.change(screen.getByRole("searchbox", { name: "Search workflow families" }),
     { target: { value: " LANDSCAPE CHECKPOINT " } });
-  expect(screen.getByRole("heading", { name: "Family a" })).toBeInTheDocument();
-  expect(screen.queryByRole("heading", { name: "Family b" })).not.toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole("heading", { name: "Family a" })).toBeInTheDocument());
+  await waitFor(() => expect(screen.queryByRole("heading", { name: "Family b" })).not.toBeInTheDocument());
   fireEvent.click(screen.getByText("Workflow a"));
   expect(await screen.findByRole("button", { name: "New revision" })).toBeInTheDocument();
 });
 
 it("shows exact empty and single-dependency counts without treating an unknown summary as empty", async () => {
-  vi.mocked(api.workflowFamilies).mockResolvedValue([
+  mockWorkflowFamilyPages([
     family("a", { dependency_count: 0, names: [] }), family("b", { dependency_count: 1, names: ["Encoder"] }),
     family("c"),
   ]);
   show();
   await screen.findByRole("heading", { name: "Family a" });
-  expect(within(screen.getByRole("region", { name: "Family a" })).getByText("0 recorded dependencies")).toBeInTheDocument();
-  expect(within(screen.getByRole("region", { name: "Family b" })).getByText("1 recorded dependency")).toBeInTheDocument();
-  expect(within(screen.getByRole("region", { name: "Family c" })).queryByText(/recorded dependenc/)).not.toBeInTheDocument();
+  await waitFor(() => expect(within(screen.getByRole("region", { name: "Family a" })).getByText("0 recorded dependencies")).toBeInTheDocument());
+  await waitFor(() => expect(within(screen.getByRole("region", { name: "Family b" })).getByText("1 recorded dependency")).toBeInTheDocument());
+  await waitFor(() => expect(within(screen.getByRole("region", { name: "Family c" })).queryByText(/recorded dependenc/)).not.toBeInTheDocument());
 });
 
 it("drops a dependency-name match after the current family summary changes", async () => {
   let current = family("a", { dependency_count: 1, names: ["Previous checkpoint"] });
-  vi.mocked(api.workflowFamilies).mockImplementation(async () => [current]);
+  mockWorkflowFamilyPages(async () => [current]);
   const client = show();
   await screen.findByRole("heading", { name: "Family a" });
   fireEvent.change(screen.getByRole("searchbox", { name: "Search workflow families" }),
     { target: { value: "Previous checkpoint" } });
-  expect(screen.getByRole("heading", { name: "Family a" })).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole("heading", { name: "Family a" })).toBeInTheDocument());
   current = family("a", { dependency_count: 1, names: ["Replacement checkpoint"] });
   await client.invalidateQueries({ queryKey: ["workflow-families"] });
   await waitFor(() => expect(screen.queryByRole("heading", { name: "Family a" })).not.toBeInTheDocument());
-  expect(screen.getByText("No workflows match these filters.")).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByText("No workflows match these filters.")).toBeInTheDocument());
   fireEvent.change(screen.getByRole("searchbox", { name: "Search workflow families" }),
     { target: { value: "Replacement checkpoint" } });
-  expect(screen.getByRole("heading", { name: "Family a" })).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole("heading", { name: "Family a" })).toBeInTheDocument());
 });

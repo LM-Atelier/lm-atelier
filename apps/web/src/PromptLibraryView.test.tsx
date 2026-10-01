@@ -1,3 +1,4 @@
+import { readyWorkflowPage } from "./readyWorkflowReadFixtures";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, configure, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -31,7 +32,7 @@ vi.mock("./api", async (importOriginal) => {
     promptBatch: vi.fn(),
     updatePromptBatchItem: vi.fn(),
     queuePromptBatch: vi.fn(),
-    workflowFamilies: vi.fn(),
+    workflowReadyRevisions: vi.fn(),
     modelAssets: vi.fn(),
     },
   };
@@ -187,7 +188,7 @@ beforeEach(() => {
     offset: 0,
   });
   vi.mocked(api.promptTemplate).mockResolvedValue(detail);
-  vi.mocked(api.workflowFamilies).mockResolvedValue(imageFamilies);
+  vi.mocked(api.workflowReadyRevisions).mockImplementation(async options => readyWorkflowPage(imageFamilies, options));
   vi.mocked(api.modelAssets).mockResolvedValue(installedLoras);
   vi.mocked(api.promptTemplateRevisions).mockResolvedValue([currentRevision, previousRevision]);
   vi.mocked(api.createPromptTemplate).mockResolvedValue(writeResult);
@@ -497,6 +498,7 @@ describe("Prompt Library", { timeout: CASE_TIMEOUT_MS }, () => {
     fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "pool" } });
     await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
     fireEvent.change(screen.getByLabelText("Option 1 workflow revision"), { target: { value: "shared-revision" } });
+    await within(screen.getByLabelText("Option 2 workflow revision")).findByRole("option", { name: "Portrait · Shared (ready)" });
     fireEvent.change(screen.getByLabelText("Option 2 workflow revision"), { target: { value: "shared-revision" } });
     fireEvent.change(screen.getByLabelText("Option 2 LoRA policy"), { target: { value: "none" } });
     fireEvent.click(screen.getByRole("button", { name: "Save revision" }));
@@ -522,6 +524,7 @@ describe("Prompt Library", { timeout: CASE_TIMEOUT_MS }, () => {
     fireEvent.change(screen.getByLabelText("Resource policy"), { target: { value: "pool" } });
     await screen.findAllByRole("option", { name: "Portrait · Base (ready)" });
     fireEvent.change(screen.getByLabelText("Option 1 workflow revision"), { target: { value: "same-revision" } });
+    await within(screen.getByLabelText("Option 2 workflow revision")).findByRole("option", { name: "Portrait · Same (ready)" });
     fireEvent.change(screen.getByLabelText("Option 2 workflow revision"), { target: { value: "same-revision" } });
     fireEvent.click(screen.getByRole("button", { name: "Save revision" }));
 
@@ -625,9 +628,7 @@ describe("Prompt Library", { timeout: CASE_TIMEOUT_MS }, () => {
   });
 
   it("omits a ready variant whose operation is not text to image", async () => {
-    // workflowFamilies("image") filters FAMILIES by selector preference, so a
-    // family can carry an image-to-image variant that is perfectly ready and
-    // still wrong for a prompt template.
+    // An image family can contain ready variants for different operations.
     renderLibrary();
     await screen.findByRole("heading", { name: "Portrait variants" });
     beginNewTemplate();
@@ -643,7 +644,7 @@ describe("Prompt Library", { timeout: CASE_TIMEOUT_MS }, () => {
 
   it("does not call a pinned revision stale when the readiness read failed", async () => {
     // An empty ready set means "we could not look", not "your workflow is gone".
-    vi.mocked(api.workflowFamilies).mockRejectedValue(new Error("offline"));
+    vi.mocked(api.workflowReadyRevisions).mockRejectedValue(new Error("offline"));
     vi.mocked(api.promptTemplate).mockResolvedValue({
       ...detail,
       current_revision: {
@@ -665,8 +666,8 @@ describe("Prompt Library", { timeout: CASE_TIMEOUT_MS }, () => {
     await screen.findByRole("heading", { name: "Portrait variants" });
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
 
-    expect(await screen.findByText(/Could not read which image workflows are ready/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(await screen.findByText(/Selected workflows could not be checked/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry selected workflows" })).toBeInTheDocument();
     // The pinned values survive, and neither is described as stale.
     expect(screen.getByLabelText("Option 1 workflow revision")).toHaveValue("retired-revision");
     expect(screen.getByLabelText("Option 1 workflow revision")).toHaveTextContent("Previously selected workflow");

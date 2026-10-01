@@ -1,3 +1,4 @@
+import { WorkflowFamilyBrowseControls } from "./WorkflowFamilyBrowseControls";
 import { useEffect, useId } from "react";
 import type { ActiveChatWorkflowSelectionState } from "./useActiveChatWorkflowSelection";
 import { useActiveChatWorkflowSelection } from "./useActiveChatWorkflowSelection";
@@ -27,7 +28,9 @@ function studioWorkflowUnavailableReason(
   const variants = editVariants(family);
   if (variants.length === 0) return "The selected workflow cannot edit an existing image.";
   const blocked = variants.filter((variant) => variant.readiness !== "ready");
-  if (blocked.length === variants.length) return readinessReason(blocked[0]);
+  if ((family.ready_variant_count ?? variants.length - blocked.length) === 0) {
+    return readinessReason(blocked[0]);
+  }
   return null;
 }
 
@@ -44,7 +47,7 @@ export function StudioWorkflowSelector({
   onSelectionChange: () => void;
 }) {
   const selectorId = useId();
-  const state = useActiveChatWorkflowSelection(chatId, "image");
+  const state = useActiveChatWorkflowSelection(chatId, "image", "image_to_image");
   const unavailableReason = studioWorkflowUnavailableReason(state);
   useEffect(() => {
     onAvailabilityChange(unavailableReason);
@@ -127,7 +130,8 @@ export function StudioWorkflowSelector({
         )}
         {editFamilies.map((family) => {
           const variants = editVariants(family);
-          const blocked = variants.every((variant) => variant.readiness !== "ready");
+          const blocked = (family.ready_variant_count
+            ?? variants.filter(variant => variant.readiness === "ready").length) === 0;
           return (
             <option key={family.id} value={family.id} disabled={blocked}>
               {family.name}
@@ -137,6 +141,7 @@ export function StudioWorkflowSelector({
           );
         })}
       </select>
+      <WorkflowFamilyBrowseControls browse={state.browse} label="editing workflows" />
       <small>Choose which installed workflow edits this Studio session.</small>
       {state.current?.mode === "revision" && (
         <small>Choosing a workflow replaces the existing exact revision.</small>
