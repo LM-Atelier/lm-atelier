@@ -240,7 +240,7 @@ def _scrubbed_git_env() -> dict[str, str]:
 def _repo_root_default() -> Path:
     # The module's own location, never the launch cwd: a tool started from
     # inside some other repository must not point the machine lease there.
-    return Path(__file__).resolve().parent
+    return Path(__file__).resolve().parents[1]
 
 
 def _common_dir(repo: Path | None) -> Path:

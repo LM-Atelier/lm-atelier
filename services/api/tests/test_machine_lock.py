@@ -1160,6 +1160,30 @@ def _linked_worktree(anchor: Path, tmp_path: Path) -> tuple[Path, Path, Path, by
     return linked, other, pointer, pointer.read_bytes()
 
 
+@pytest.mark.parametrize("linked_checkout", [False, True])
+def test_default_lease_uses_its_script_checkout_from_another_repository(
+    anchor: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, linked_checkout: bool
+) -> None:
+    linked, other, _pointer, _original = _linked_worktree(anchor, tmp_path)
+    checkout = linked if linked_checkout else anchor
+    scripts = checkout / "scripts"
+    scripts.mkdir()
+    script = scripts / "machine_lock.py"
+    shutil.copyfile(ROOT / "scripts" / "machine_lock.py", script)
+    namespace = runpy.run_path(str(script))
+    monkeypatch.chdir(other)
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(other))
+    monkeypatch.setenv("GIT_COMMON_DIR", str(other / ".git"))
+    with namespace["hold_lease"]("default-script-checkout") as lease:
+        lease.assert_bound()
+        assert "default-script-checkout" in namespace["status"]()
+        with pytest.raises(LeaseRefused, match="default-script-checkout"):
+            _NAMESPACE["acquire"]("explicit-checkout", repo=anchor)
+        lease.assert_bound()
+    assert _NAMESPACE["status"](anchor).startswith("free")
+
+
 def _redirect(other: Path) -> bytes:
     return f"gitdir: {(other / '.git').as_posix()}\n".encode()
 
