@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import asyncio
 from copy import deepcopy
 from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
-from run_waits import wait_for_terminal_status
+from run_waits import wait_for_terminal_status, wait_until
 from sqlalchemy import select
 
 from local_lm.db import SessionLocal
@@ -46,16 +45,19 @@ async def test_accepts_turns_while_paused_and_resumes_the_same_snapshot(
     run_id = accepted["run"]["id"]
     plan_id = accepted["run"]["work_plan_id"]
 
-    async def phase(expected: str) -> None:
-        while True:
-            with SessionLocal() as session:
-                job = session.scalar(select(Job).where(Job.run_id == run_id))
-                assert job is not None and job.status == "queued" and job.claim_owner is None
-                if job.phase == expected:
-                    return
-            await asyncio.sleep(0.03)
+    async def job_phase() -> str:
+        with SessionLocal() as session:
+            job = session.scalar(select(Job).where(Job.run_id == run_id))
+            # Every read, not only the last: the job waits unclaimed throughout.
+            assert job is not None and job.status == "queued" and job.claim_owner is None
+            return job.phase
 
-    await asyncio.wait_for(phase("generation paused"), timeout=5)
+    async def phase(expected: str) -> None:
+        await wait_until(
+            job_phase, lambda current: current == expected, what="the accepted job's phase"
+        )
+
+    await phase("generation paused")
     with SessionLocal() as session:
         run = session.get(Run, run_id)
         assert run is not None
@@ -75,7 +77,7 @@ async def test_accepts_turns_while_paused_and_resumes_the_same_snapshot(
     )
     assert resumed.status_code == 200 and resumed.json()["dispatch_state"] == "open"
     if hold_after_acceptance:
-        await asyncio.wait_for(phase("held"), timeout=5)
+        await phase("held")
         released = await client.post(
             "/api/queue/items/" + plan_id + "/release",
             json={"expected_revision": 1, "idempotency_key": "release-accepted"},
