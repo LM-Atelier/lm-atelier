@@ -1072,6 +1072,15 @@ html[data-text-size="larger"] { --text-scale: 1.25; font-size: 125%; }
 .generation-identity { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: calc(2px * var(--spacing-scale, 1)) calc(7px * var(--spacing-scale, 1)); margin: 0; color: var(--muted); font-size: calc(11px * var(--text-scale, 1)); }
 .generation-identity dt { color: var(--cream); font-weight: 600; }
 .generation-identity dd { min-width: 0; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.generation-details { min-width: 0; padding: calc(9px * var(--spacing-scale, 1)) calc(12px * var(--spacing-scale, 1)); color: var(--ink-secondary); font-size: calc(12px * var(--text-scale, 1)); }
+.generation-details summary { cursor: pointer; width: fit-content; color: var(--accent); }
+.generation-details summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.generation-details-content { min-width: 0; margin-top: calc(7px * var(--spacing-scale, 1)); overflow-wrap: anywhere; }
+.generation-details-content .generation-identity dd { overflow: visible; white-space: normal; }
+.generation-details-content p { margin: calc(7px * var(--spacing-scale, 1)) 0; }
+.generation-details-content ul { margin: calc(7px * var(--spacing-scale, 1)) 0; padding-left: calc(18px * var(--spacing-scale, 1)); }
+.generation-details-content li > strong { display: block; white-space: normal; overflow: visible; }
+.generation-details-content li > small { display: block; }
 
 /* Above the composer, which says how far up it reaches: over it, the panel hid
    the text box, and in a narrow window the attach and send buttons, while
