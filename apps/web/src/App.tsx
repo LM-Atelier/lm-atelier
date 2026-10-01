@@ -20,6 +20,7 @@ import { ReferencesLibrary } from "./ReferencesLibrary";
 import { SettingsView } from "./SettingsView";
 import { SetupSurface } from "./SetupSurface";
 import { FirstRunSetup } from "./SetupWizard";
+import { GenerationComparisonView } from "./GenerationComparisonView";
 import { StudioView } from "./StudioView";
 import { WorkflowsView } from "./WorkflowsView";
 import { api } from "./api";
@@ -187,7 +188,7 @@ export default function App() {
           onUseInChat={(picture) => sendStudioPicture(picture, studioSource?.chatId ?? activeChatId)}/>
       );
     }
-    const topLevelView = view === "media" ? <MediaLibraryView onEditImage={openLibraryImage} /> : view === "models" ? <ModelsView key={modelLibraryRole} initialRole={modelLibraryRole} /> : view === "references" ? <ReferencesLibrary /> : view === "prompts" ? <PromptLibraryView /> : view === "workflows" ? <WorkflowsView /> : null;
+    const topLevelView = view === "media" ? <MediaLibraryView onEditImage={openLibraryImage} /> : view === "models" ? <ModelsView key={modelLibraryRole} initialRole={modelLibraryRole} /> : view === "references" ? <ReferencesLibrary /> : view === "prompts" ? <PromptLibraryView /> : view === "workflows" ? <WorkflowsView /> : view === "compare" ? <GenerationComparisonView /> : null;
     if (topLevelView) return topLevelView;
     if (view === "settings") return <SettingsView engines={engines.data ?? []} appearance={appearance} destinationId={settingsDestination} onDestinationChange={setSettingsDestination} focusRequest={settingsFocusRequest} />;
     const displayedChat = chat.data

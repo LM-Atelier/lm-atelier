@@ -1700,3 +1700,28 @@ it("prepares and activates an exact workflow revision through the bound API rout
   expect(JSON.parse(fetchMock.mock.calls[2][1]?.body as string)).toEqual(payload);
   expect(fetchMock.mock.calls[2][1]?.signal).toBe(controller.signal);
 });
+
+it("keeps a comparison refusal's reasons with the error and escapes its id in every route", async () => {
+  const refusals = [{ code: "arm-profile-unavailable", arm_ordinal: 1, setting: null, alternative: null, message: "Not available." }];
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), { status: 200, headers: { "content-type": "application/json" } }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ detail: "A choice cannot run.", code: "generation-experiment-refused", refusals }),
+      { status: 422, headers: { "content-type": "application/json" } }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ id: "gexp/1" }), { status: 202, headers: { "content-type": "application/json" } }));
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api, ApiError } = await import("./api");
+  const request = { name: "A and B", operation: "text_to_image" } as never;
+  const failure = await api.createGenerationExperiment(request).then(() => null, (error: unknown) => error);
+  expect(failure).toBeInstanceOf(ApiError);
+  expect((failure as InstanceType<typeof ApiError>).code).toBe("generation-experiment-refused");
+  expect((failure as InstanceType<typeof ApiError>).payload?.refusals).toEqual(refusals);
+  expect(fetchMock.mock.calls[1][0]).toBe("/api/generation-experiments");
+  expect(JSON.parse(fetchMock.mock.calls[1][1]?.body as string)).toEqual(request);
+
+  const start = { idempotency_key: "key-1", snapshot_sha256: "b".repeat(64), confirm_expensive: false };
+  await api.startGenerationExperiment("gexp/1", start);
+  expect(fetchMock.mock.calls[2][0]).toBe("/api/generation-experiments/gexp%2F1/start");
+  expect(fetchMock.mock.calls[2][1]?.method).toBe("POST");
+  expect(JSON.parse(fetchMock.mock.calls[2][1]?.body as string)).toEqual(start);
+});

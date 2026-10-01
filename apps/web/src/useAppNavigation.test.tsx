@@ -35,6 +35,13 @@ it("opens a valid Settings deep link without requesting focus", () => {
   expect(result.current.settingsFocusRequest).toBeUndefined();
 });
 
+it("opens the comparison page from a link", () => {
+  window.history.replaceState(null, "", "/?view=compare");
+  const { result } = renderHook(useAppNavigation);
+  expect(result.current.view).toBe("compare");
+  expect(new URL(window.location.href).searchParams.get("view")).toBe("compare");
+});
+
 it("falls back for an invalid section rather than rendering an empty page", () => {
   window.history.replaceState(null, "", "/?view=settings&settings=retired");
   const { result } = renderHook(useAppNavigation);
