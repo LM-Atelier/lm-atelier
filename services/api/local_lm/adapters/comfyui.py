@@ -648,8 +648,16 @@ class ComfyUIAdapter:
             if cancel_event.is_set():
                 yield MediaEvent(type="cancelled")
                 return
-            assets = await self._collect_outputs(prompt_id, request.operation)
-            outputs_collected = True
+            assets = await self._collect_outputs(prompt_id, request.operation, cancel_event)
+            # Collected outputs were removed from the backend as they were read.
+            # Nothing collected means a stop ended the wait for the run's record,
+            # and the teardown still has to look for its files.
+            outputs_collected = bool(assets)
+            if cancel_event.is_set():
+                # A stop that arrives while the result is being collected wins,
+                # as it does just before: the run ends cancelled, not complete.
+                yield MediaEvent(type="cancelled")
+                return
             yield MediaEvent(
                 type="complete",
                 progress=1,
@@ -772,7 +780,11 @@ class ComfyUIAdapter:
         if not completed:
             raise RuntimeError("ComfyUI did not produce media during the model activation probe.")
 
-    async def _finished_history(self, prompt_id: str) -> dict[str, Any]:
+    async def _finished_history(
+        self,
+        prompt_id: str,
+        cancel_event: asyncio.Event | None = None,
+    ) -> dict[str, Any] | None:
         """The backend's record of a finished prompt, once it has written one.
 
         ComfyUI reports success from inside the run and stores the run's
@@ -781,6 +793,9 @@ class ComfyUIAdapter:
         find no record of a run that did produce output. A missing record is
         therefore read again, for a bounded time, before it counts as no output;
         a record that is present is final as it stands.
+
+        None means a stop arrived while the record was still missing; waiting
+        out the rest of the bound would only delay the cancellation.
         """
 
         deadline = time.monotonic() + _HISTORY_SETTLE_SECONDS
@@ -794,14 +809,27 @@ class ComfyUIAdapter:
                 raise RuntimeError("ComfyUI returned invalid output history")
             if prompt_id in payload or time.monotonic() >= deadline:
                 break
-            await asyncio.sleep(_HISTORY_POLL_SECONDS)
+            if cancel_event is None:
+                await asyncio.sleep(_HISTORY_POLL_SECONDS)
+                continue
+            with suppress(TimeoutError):
+                await asyncio.wait_for(cancel_event.wait(), timeout=_HISTORY_POLL_SECONDS)
+            if cancel_event.is_set():
+                return None
         history = payload.get(prompt_id, {})
         if not isinstance(history, dict):
             raise RuntimeError("ComfyUI returned invalid output history")
         return history
 
-    async def _collect_outputs(self, prompt_id: str, operation: str) -> list[GeneratedAsset]:
-        history = await self._finished_history(prompt_id)
+    async def _collect_outputs(
+        self,
+        prompt_id: str,
+        operation: str,
+        cancel_event: asyncio.Event | None = None,
+    ) -> list[GeneratedAsset]:
+        history = await self._finished_history(prompt_id, cancel_event)
+        if history is None:
+            return []
         outputs = history.get("outputs") or {}
         if not isinstance(outputs, dict):
             raise RuntimeError("ComfyUI returned invalid output history")
