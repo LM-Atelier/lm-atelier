@@ -4,6 +4,19 @@ from .schemas import DownloadRequest, RecipeFile, RecipeHardware, ReferenceRecip
 
 _WAN_REPOSITORY = "Comfy-Org/Wan_2.1_ComfyUI_repackaged"
 _WAN_REVISION = "06e001fc51048fb03433a6fb25334de7836704a5"
+_LTX_REPOSITORY = "Lightricks/LTX-Video"
+_LTX_REVISION = "8984fa25007f376c1a299016d0957a37a2f797bb"
+_LTX_RECIPE = "ltx-video-2b-0.9.5-i2v"
+
+#: A recipe that installs through one of ComfyUI's own workflow templates names
+#: it and pins its digest: the template decides the graph, the companion files
+#: and their sources, so a changed template is a different recipe.
+RECIPE_WORKFLOW_TEMPLATES: dict[str, tuple[str, str]] = {
+    _LTX_RECIPE: (
+        "ltxv_image_to_video",
+        "96bf9ddbbf4591af29df2b707933c2ea25d9c3a406296ade0fbe1ae91d43b0d0",
+    ),
+}
 
 
 REFERENCE_RECIPES: tuple[ReferenceRecipe, ...] = (
@@ -247,6 +260,54 @@ REFERENCE_RECIPES: tuple[ReferenceRecipe, ...] = (
         node_policy="ComfyUI core nodes only",
         notes=["Uses the official Comfy-Org safe-tensor repack instead of upstream .pth files."],
     ),
+    ReferenceRecipe(
+        id=_LTX_RECIPE,
+        version=1,
+        name="LTX-Video 2B 0.9.5 image-to-video",
+        summary="Image-to-video through ComfyUI's LTX-Video template, measured on a 16 GB GPU.",
+        role="video",
+        engine="comfyui",
+        operations=["image_to_video"],
+        license_id="ltx-video-2b-0.9.5-openrail-m",
+        status="certified",
+        certified=True,
+        remote_id=_LTX_REPOSITORY,
+        revision=_LTX_REVISION,
+        files=[
+            RecipeFile(
+                path="ltx-video-2b-v0.9.5.safetensors",
+                size_bytes=6_340_729_500,
+                sha256="720d15c9f19f7d0f6b2a92bbbc34410e2cfb2f6856a100b38f734fbf973d4adf",
+            ),
+            RecipeFile(
+                path="t5xxl_fp16.safetensors",
+                size_bytes=9_787_841_024,
+                sha256="6e480b09fae049a72d2a8c5fbccb8d3e92febeb233bbe9dfe7256958a9167635",
+            ),
+        ],
+        total_size_bytes=16_128_570_524,
+        hardware=RecipeHardware(
+            tier="midrange-gpu",
+            minimum_ram_gb=32,
+            recommended_ram_gb=32,
+            minimum_vram_gb=16,
+            recommended_vram_gb=16,
+            guidance=(
+                "Measured on a 16 GB GPU with 32 GB of memory at 768 by 512, 49 and 97 frames, "
+                "with the chat model unloaded: about 15.7 GB of GPU memory at peak and 24 to 35 "
+                "seconds a clip. Larger sizes were not measured."
+            ),
+        ),
+        default_settings={"width": 768, "height": 512, "frames": 97, "fps": 24, "steps": 30},
+        node_policy="ComfyUI core nodes only",
+        notes=[
+            "Installs ComfyUI's own LTX-Video image-to-video template with the 2B 0.9.5 "
+            "checkpoint and the T5-XXL text encoder that template names.",
+            "The 2B 0.9.5 checkpoint has its own Open RAIL-M license, whose use restrictions "
+            "pass on to anyone using it or its outputs; later LTX-Video versions use a different "
+            "license. Review it before downloading.",
+        ],
+    ),
 )
 
 
@@ -256,6 +317,12 @@ def list_reference_recipes() -> list[ReferenceRecipe]:
 
 def get_reference_recipe(recipe_id: str) -> ReferenceRecipe | None:
     return next((recipe for recipe in REFERENCE_RECIPES if recipe.id == recipe_id), None)
+
+
+def recipe_workflow_template(recipe: ReferenceRecipe) -> tuple[str, str] | None:
+    """The ComfyUI template and its digest a recipe installs through, if it names one."""
+
+    return RECIPE_WORKFLOW_TEMPLATES.get(recipe.id)
 
 
 def recipe_download_request(recipe: ReferenceRecipe) -> DownloadRequest:
