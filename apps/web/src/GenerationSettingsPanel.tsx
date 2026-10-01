@@ -147,6 +147,8 @@ export function GenerationSettingsPanel({
   resetLabel,
   onReset,
   editSettings,
+  presetControl,
+  settingsUnavailable,
   shapeAlternatives,
   shapeSource,
 }: {
@@ -168,6 +170,8 @@ export function GenerationSettingsPanel({
   resetLabel: string;
   onReset: () => void;
   editSettings?: { presetControl: ReactNode };
+  presetControl?: ReactNode;
+  settingsUnavailable?: ReactNode;
   /** Other workflows for this turn, offered when the chosen one sets its own size. */
   shapeAlternatives?: ShapeAlternatives;
   /** A picture the output can take the shape of, such as a video's start frame. */
@@ -263,7 +267,7 @@ export function GenerationSettingsPanel({
         ))}
       </div>
       <div className="settings-list">
-        {editSettings?.presetControl ?? <label className="setting-row">
+        {editSettings?.presetControl ?? presetControl ?? <label className="setting-row">
           <span><strong>Preset</strong></span>
           <select
             aria-label={presetLabel}
@@ -276,6 +280,8 @@ export function GenerationSettingsPanel({
             ))}
           </select>
         </label>}
+        {settingsUnavailable}
+        {!settingsUnavailable && <>
         {imageEdit && strengthField && (
           <ImageEditStrengthControl
             manualLabel={editSettings ? "Set for this version" : "Set for this chat"}
@@ -322,8 +328,9 @@ export function GenerationSettingsPanel({
           />
         ))}
         {!engine && <p className="muted">No {role} engine is configured.</p>}
+        </>}
       </div>
-      <LorasSection
+      {!settingsUnavailable && <LorasSection
         revisionId={workflowRevisionId}
         editing={{
           layers: [
@@ -352,7 +359,7 @@ export function GenerationSettingsPanel({
             {workflowRevisionId && <LoraSuggestions revisionId={workflowRevisionId} />}
           </>
         )}
-      </LorasSection>
+      </LorasSection>}
       <div className="generation-settings-actions">
         <button className="secondary" type="button" onClick={onReset}>{resetLabel}</button>
       </div>

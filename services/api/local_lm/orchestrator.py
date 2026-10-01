@@ -11566,30 +11566,32 @@ class ConversationOrchestrator:
                     model_install_id=model_install_id,
                     role="video" if is_video else "image",
                 )
-        definitions = session.scalars(
+        generic: WorkflowRevision | None = None
+        with session.scalars(
             select(WorkflowDefinition)
             .where(WorkflowDefinition.operation == operation.value)
             .order_by(WorkflowDefinition.created_at.desc())
-        ).all()
-        generic: list[WorkflowRevision] = []
-        for definition in definitions:
-            if not definition.current_revision_id:
-                continue
-            revision = session.get(WorkflowRevision, definition.current_revision_id)
-            if not revision or not self._workflow_matches_engine(revision):
-                continue
-            # A workflow that only cuts a subject out is chosen by name, by the
-            # tool that asks for a cutout. Picked for an ordinary edit it would
-            # hand back a cutout instead of the edit asked for, and it declares
-            # no model, so without this it would be the first generic choice.
-            if workflow_declares_matting(revision.input_schema_json):
-                continue
-            if self._revision_declares_a_model(revision):
-                if self._revision_accepts_install(session, revision, model_install_id):
-                    return revision
-                continue
-            generic.append(revision)
-        return generic[0] if generic else None
+            .execution_options(yield_per=50)
+        ) as definitions:
+            for definition in definitions:
+                if not definition.current_revision_id:
+                    continue
+                revision = session.get(WorkflowRevision, definition.current_revision_id)
+                if not revision or not self._workflow_matches_engine(revision):
+                    continue
+                # A workflow that only cuts a subject out is chosen by name, by the
+                # tool that asks for a cutout. Picked for an ordinary edit it would
+                # hand back a cutout instead of the edit asked for, and it declares
+                # no model, so without this it would be the first generic choice.
+                if workflow_declares_matting(revision.input_schema_json):
+                    continue
+                if self._revision_declares_a_model(revision):
+                    if self._revision_accepts_install(session, revision, model_install_id):
+                        return revision
+                    continue
+                if generic is None:
+                    generic = revision
+        return generic
 
     def installed_lighting_adapter_ids(self, session: Session) -> list[str]:
         """Installed, verified LoRAs that are exactly the declared lighting adapter."""

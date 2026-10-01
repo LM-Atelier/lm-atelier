@@ -1803,6 +1803,11 @@ class ModelInstallOut(ApiModel):
     updated_at: datetime
 
 
+class CatalogInstallMatches(ApiModel):
+    remote_ids: list[str]
+    workflow_template_ids: list[str]
+
+
 class ModelUpdateOut(ApiModel):
     """One installed asset's staleness verdict against its provider.
 
@@ -2259,6 +2264,16 @@ class WorkflowFamilyVariantOut(ApiModel):
     install_progress: WorkflowInstallProgressOut | None = None
 
 
+class WorkflowReadyRevisionOut(ApiModel):
+    family_id: str
+    family_name: str
+    workflow_id: str
+    workflow_name: str
+    revision_id: str
+    revision_version: int
+    operation: Operation
+
+
 class WorkflowFamilyPreferenceOut(ApiModel):
     selector_capability: WorkflowSelectorCapability
     enabled: bool
@@ -2282,6 +2297,10 @@ class WorkflowFamilyOut(ApiModel):
     archived: bool
     compatibility: bool
     variants: list[WorkflowFamilyVariantOut] = Field(default_factory=list)
+    supported_selector_capabilities: list[WorkflowSelectorCapability] | None = None
+    variant_count: int | None = Field(default=None, ge=0)
+    ready_variant_count: int | None = Field(default=None, ge=0)
+    best_readiness: WorkflowVariantReadiness | None = None
     preferences: list[WorkflowFamilyPreferenceOut] = Field(default_factory=list)
     dependency_summary: WorkflowFamilyDependencySummaryOut | None = None
     created_at: datetime

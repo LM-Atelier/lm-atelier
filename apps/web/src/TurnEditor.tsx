@@ -11,6 +11,8 @@ import { ChatWorkflowChoices } from "./ChatWorkflowChoices";
 import { AttachControls } from "./AttachControls";
 import { ComposerPromptTemplatesAction } from "./ComposerPromptTemplatesAction";
 import { EditingStudio } from "./EditingStudio";
+import { useProfileIdentity } from "./useProfileLibrary";
+import { ProfileReadStatus } from "./ProfilePicker";
 import { ErrorCallout } from "./ErrorCallout";
 import { MessageField } from "./MessageField";
 import { OutputCountControl } from "./OutputCountControl";
@@ -28,7 +30,8 @@ import { drawerRoleView, roleForMode } from "./viewHelpers";
 import { useWorkflowRevisionSchema } from "./useWorkflowRevisionSchema";
 import { useComposerLoraControls } from "./useComposerLoraControls";
 import { operationForTurn } from "./turnWorkflow";
-import { useShapeAlternatives } from "./shapeAlternatives";
+import { usePagedShapeAlternatives } from "./usePagedShapeAlternatives";
+import { useWorkflowResolutionFamilies, workflowFamilyTarget, workflowSelectionForCapability } from "./useWorkflowResolutionFamilies";
 import { initialTurnEditorState, useTurnEditorState, type TurnEditorState } from "./useTurnEditorState";
 export type { TurnEditorState } from "./useTurnEditorState";
 import type { Artifact, ChatDetail, EngineCapabilities, EngineRole, Message, PriorTurnEditBinding, RoutingMode, WorkflowSelection } from "./types";
@@ -63,6 +66,7 @@ export type TurnEditorProps = ComposerProps & {
   contextMessages?: Message[];
   classificationSource?: PriorTurnEditBinding;
   contextVisualArtifacts?: Artifact[];
+  profileSettingsUnavailable?: ReactNode;
   profileValuesOverride?: Record<string, unknown>;
   editSettings?: EditedVersionSettings;
   /** Supply a controlled workflow choice when editing one turn in isolation. */
@@ -157,13 +161,11 @@ export function TurnEditor({
   chat,
   transcriptContext,
   engines,
-  profiles,
   stoppable,
   settings,
   onSettings,
   settingsRole,
   onSettingsRole,
-  presets,
   presetId,
   onPreset,
   onMode,
@@ -182,7 +184,7 @@ export function TurnEditor({
   contextMessages,
   classificationSource,
   contextVisualArtifacts,
-  profileValuesOverride,
+  profileValuesOverride, profileSettingsUnavailable,
   editSettings,
   workflowControl,
   workflowSelection,
@@ -280,12 +282,8 @@ export function TurnEditor({
   // the picked role, not the composer's local mode.
   const { drawerMode, drawerImageEdit } = drawerRoleView(onAccept ? "auto" : chat.routing_mode, settingsRole, editableImageAttached);
   const needsWorkflowSchema =
-    mode === "image" || mode === "video" || drawerMode === "image" || drawerMode === "video";
-  const families = useQuery({
-    queryKey: ["workflow-families"],
-    queryFn: () => api.workflowFamilies(),
-    enabled: needsWorkflowSchema,
-  });
+    mode === "image" || mode === "video" || drawerMode === "image" || drawerMode === "video"
+    || (mode === "auto" && attachments[0]?.kind === "image");
   const selections = useQuery({
     queryKey: ["chat", chat?.id, "workflow-selections"],
     queryFn: () => api.chatWorkflowSelections(chat!.id),
@@ -294,22 +292,32 @@ export function TurnEditor({
   const projectSelections = useQuery({ queryKey: ["project", project?.id, "workflow-selections"],
     queryFn: () => api.projectWorkflowSelections(project!.id),
     enabled: needsWorkflowSchema && workflowControl === undefined && Boolean(project?.id) });
-  const imageProfile = profiles.find((profile) => profile.id === chat.active_image_profile_id)
-    ?? profiles.find((profile) => profile.role === "image" && profile.is_default);
+  const imageProfileRead = useProfileIdentity("image", chat.active_image_profile_id, profileValuesOverride === undefined, true);
+  const imageProfile = imageProfileRead.profile;
   const profileValues = profileValuesOverride ?? {
     ...(imageProfile?.load_settings_json ?? {}),
     ...(imageProfile?.request_settings_json ?? {}),
   };
   const hasWorkflowAttachments = attachments.length > 0 || usePriorVisual;
+  const chatChoice = (capability: RoutingMode) => workflowSelectionForCapability(selections.data, capability);
+  const projectChoice = (capability: RoutingMode) => project ? workflowSelectionForCapability(projectSelections.data, capability) : null;
+  const families = useWorkflowResolutionFamilies([
+    workflowSchemaOverride === undefined
+      ? workflowFamilyTarget(mode, hasWorkflowAttachments, workflowSelection ?? chatChoice(mode), projectChoice(mode)) : null,
+    workflowSchemaOverride === undefined && drawerMode !== mode
+      ? workflowFamilyTarget(drawerMode, hasWorkflowAttachments, chatChoice(drawerMode), projectChoice(drawerMode)) : null,
+    sourceCanvasRevisionId === undefined && (mode === "image" || mode === "auto") && attachments[0]?.kind === "image"
+      ? workflowFamilyTarget("image", true, workflowSelection ?? chatChoice("image"), projectChoice("image")) : null,
+  ]);
   const workflowRevisionId = workflowSchemaOverride !== undefined ? null : workflowRevisionForTurn(
-    mode, hasWorkflowAttachments, families.data ?? [],
+    mode, hasWorkflowAttachments, families.families,
     workflowSelection ?? selections.data?.find((one) => one.selector_capability === mode),
     project ? projectSelections.data?.find((one) => one.selector_capability === mode) : null,
   );
   const drawerWorkflowRevisionId = workflowSchemaOverride !== undefined ? null : drawerMode === mode
     ? workflowRevisionId
     : workflowRevisionForTurn(
-        drawerMode, hasWorkflowAttachments, families.data ?? [],
+        drawerMode, hasWorkflowAttachments, families.families,
         selections.data?.find((one) => one.selector_capability === drawerMode),
         project ? projectSelections.data?.find((one) => one.selector_capability === drawerMode) : null,
       );
@@ -324,15 +332,15 @@ export function TurnEditor({
   const previewSubmission = composerSubmission({ mode, engines, workflowSchema, acceptsAddedLoras, settings, templateSettings,
     text, mentions: state.mentions, draft, inputCount: attachments.length, outputCount, accepting: Boolean(onAccept) });
   const { primarySourceId, canvas: sourceCanvas, shown: sourceFitShown, forSend } = useTurnEditorSourceFit({
-    mode, attachments, value: state.sourceFit, families: families.data, sourceCanvasRevisionId, workflowSelection,
+    mode, attachments, value: state.sourceFit, families: families.families, sourceCanvasRevisionId, workflowSelection,
     selections: selections.data, projectSelections: project ? projectSelections.data : null, updateState, setAcceptanceError,
     previewContext: sourceFitPreviewContext ?? (onAccept ? undefined : turnPreviewContext(chat.id, text, mode, attachments, previewSubmission, state.sourceFit)),
   });
   const drawerWorkflowSchema = workflowSchemaOverride !== undefined
     ? workflowSchemaOverride ?? undefined : drawerWorkflowRead.schema;
-  const shapeAlternatives = useShapeAlternatives({
+  const shapeAlternatives = usePagedShapeAlternatives({
     chatId: chat.id, capability: drawerMode === "image" || drawerMode === "video" ? drawerMode : null,
-    hasAttachments: hasWorkflowAttachments, families: families.data ?? [], currentRevisionId: drawerWorkflowRevisionId,
+    hasAttachments: hasWorkflowAttachments, currentRevisionId: drawerWorkflowRevisionId,
     // Only the chat's own choice can be changed from here, not one a caller fixed.
     enabled: !onAccept && workflowControl === undefined && workflowSelection === undefined && workflowSchemaOverride === undefined,
   });
@@ -401,9 +409,10 @@ export function TurnEditor({
         {uploadError && <ErrorCallout message={uploadError} />}
         {acceptanceError && <ErrorCallout message={acceptanceError} />}
         {loraError}
-        {(workflowRead.error || drawerWorkflowRead.error) && <div>
+        {(families.error || workflowRead.error || drawerWorkflowRead.error) && <div>
           <ErrorCallout message="The selected workflow settings could not be loaded." />
           <button type="button" onClick={() => {
+            if (families.error) void families.refetch();
             if (workflowRead.error) void workflowRead.retry();
             if (drawerWorkflowRead.error) void drawerWorkflowRead.retry();
           }}>Retry workflow settings</button>
@@ -531,7 +540,6 @@ export function TurnEditor({
         engines={engines}
         values={settings}
         onValues={onSettings}
-        presets={presets}
         presetId={presetId}
         onPreset={onPreset}
         workflowSchema={drawerWorkflowSchema}
@@ -539,6 +547,7 @@ export function TurnEditor({
         inheritedValues={onAccept ? undefined : project?.generation_settings_json?.[settingsRole]}
         inheritedPresetId={onAccept ? undefined : project?.generation_preset_ids_json?.[settingsRole]}
         profileValues={profileValues}
+        settingsUnavailable={profileSettingsUnavailable ?? (drawerMode === "image" && !imageProfileRead.ready ? <ProfileReadStatus read={imageProfileRead} /> : undefined)}
         imageEdit={drawerImageEdit}
         imageEditPrompt={text}
         shapeAlternatives={shapeAlternatives}

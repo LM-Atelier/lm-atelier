@@ -2,7 +2,8 @@ import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Plus } from "lucide-react";
 import { api } from "./api";
-import { servesCapability } from "./workflowFamilies";
+import { useReadyWorkflowChoices } from "./useReadyWorkflowChoices";
+import { ReadyWorkflowBrowseControls } from "./ReadyWorkflowBrowseControls";
 import type { PromptTemplateLora } from "./types";
 import type { SimplePromptTemplateResourcePolicy } from "./promptTemplateImageSetup";
 
@@ -28,22 +29,10 @@ export function PromptTemplateImageSetupPicker({
   value: SimplePromptTemplateResourcePolicy;
   onChange: (value: SimplePromptTemplateResourcePolicy) => void;
 }) {
-  const workflows = useQuery({
-    queryKey: ["workflow-families", "image"],
-    queryFn: () => api.workflowFamilies("image"),
-  });
-  const workflowChoices = useMemo(() => {
-    const seen = new Set<string>();
-    return (workflows.data ?? []).flatMap((family) => {
-      if (!servesCapability(family, "image")) return [];
-      return family.variants.flatMap((variant) => {
-        const id = variant.current_revision_id;
-        if (!id || variant.operation !== "text_to_image" || variant.readiness !== "ready" || seen.has(id)) return [];
-        seen.add(id);
-        return [{ id, label: `${family.name} - ${variant.name}` }];
-      });
-    });
-  }, [workflows.data]);
+  const workflows = useReadyWorkflowChoices(value.mode === "fixed" ? [value.workflow_revision_id] : []);
+  const workflowChoices = workflows.rows.map(row => ({
+    id: row.revision_id, label: `${row.family_name} - ${row.workflow_name}`,
+  }));
   const assets = useQuery({
     queryKey: ["model-assets", "lora"],
     queryFn: () => api.modelAssets("lora"),
@@ -93,6 +82,7 @@ export function PromptTemplateImageSetupPicker({
       </label>
       {value.mode === "fixed" && (
         <>
+          <ReadyWorkflowBrowseControls workflows={workflows} />
           <label>
             Workflow
             <select
@@ -101,10 +91,11 @@ export function PromptTemplateImageSetupPicker({
               onChange={(event) => onChange({ ...value, workflow_revision_id: event.target.value })}
             >
               <option value="">Choose a ready image workflow</option>
+              {value.workflow_revision_id && !workflowChoices.some(row => row.id === value.workflow_revision_id)
+                && <option value={value.workflow_revision_id}>{workflows.missingLabel}</option>}
               {workflowChoices.map((workflow) => <option key={workflow.id} value={workflow.id}>{workflow.label}</option>)}
             </select>
           </label>
-          {workflows.isError && <p className="muted">Ready workflows could not be loaded.</p>}
           <label>
             LoRAs
             <select

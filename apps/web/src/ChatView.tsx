@@ -33,7 +33,6 @@ export function ChatView({
   onOpenStudio,
   chat,
   engines,
-  profiles,
   project,
   liveText,
   pendingTurns,
@@ -41,7 +40,6 @@ export function ChatView({
   settings,
   settingsRole,
   onSettingsRole,
-  presets,
   presetId,
   onSettings,
   onPreset,
@@ -341,11 +339,11 @@ export function ChatView({
           liveText={liveText[message.id]} onOpenEdit={setEditMessageId} readImageHistory={Boolean(transcript)} />)}
       </section>}
       {editMessageId && <PriorTurnEditor key={editMessageId} messageId={editMessageId} chat={chat}
-        engines={engines} profiles={profiles} presets={presets}
+        engines={engines}
         maxMediaOutputsPerPlan={maxMediaOutputsPerPlan} PromptHelper={PromptHelperDialog}
         onAccepted={onEditAccepted} onClose={() => setEditMessageId(null)} />}
       <WorkspaceComposerDraft chatId={chat.id} draft={composerDraft} onDraft={onComposerDraft} />
-      <TurnEditor transcriptContext={transcript?.context} PromptHelper={PromptHelperDialog} chat={chat} engines={engines} profiles={profiles} stoppable={stoppable} settings={settings} onSettings={onSettings} settingsRole={settingsRole} onSettingsRole={onSettingsRole} presets={presets} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} onStopAndSend={onStopAndSend} maxMediaOutputsPerPlan={maxMediaOutputsPerPlan} project={project} visualTarget={visualTarget} quoteTarget={quoteTarget} draft={composerDraft} onDraftChange={onComposerDraft} />
+      <TurnEditor transcriptContext={transcript?.context} PromptHelper={PromptHelperDialog} chat={chat} engines={engines} stoppable={stoppable} settings={settings} onSettings={onSettings} settingsRole={settingsRole} onSettingsRole={onSettingsRole} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} onStopAndSend={onStopAndSend} maxMediaOutputsPerPlan={maxMediaOutputsPerPlan} project={project} visualTarget={visualTarget} quoteTarget={quoteTarget} draft={composerDraft} onDraftChange={onComposerDraft} />
     </div>
   );
 }

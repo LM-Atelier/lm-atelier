@@ -19,6 +19,7 @@ export function useProjectMutations({
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: ["projects"] });
       void client.invalidateQueries({ queryKey: ["chats"] });
+      void client.invalidateQueries({ queryKey: ["chat"] });
     },
   });
   const exportProject = useMutation({

@@ -1,3 +1,4 @@
+import { mockWorkflowFamilyPages } from "./workflowFamilyReadFixtures";
 import { mockWorkflowReadsFromFixture } from "./workflowReadFixtures";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -7,7 +8,7 @@ import { api } from "./api";
 import type { Workflow, WorkflowRevision } from "./types";
 
 vi.mock("./api", () => ({ api: {
-  workflows: vi.fn(), workflowSummaries: vi.fn(), workflow: vi.fn(), workflowFamilies: vi.fn(), validateWorkflow: vi.fn(),
+  workflows: vi.fn(), workflowSummaries: vi.fn(), workflow: vi.fn(), workflowFamilyOperations: vi.fn().mockResolvedValue([]), workflowFamilies: vi.fn(), validateWorkflow: vi.fn(),
 } }));
 vi.mock("./CustomNodesPanel", () => ({ CustomNodesPanel: () => null }));
 vi.mock("./RegistryInstallsPanel", () => ({ RegistryInstallsPanel: () => null }));
@@ -28,7 +29,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   mockWorkflowReadsFromFixture(() => api.workflows());
   vi.mocked(api.workflows).mockResolvedValue([workflow()]);
-  vi.mocked(api.workflowFamilies).mockResolvedValue([]);
+  mockWorkflowFamilyPages([]);
   vi.mocked(api.validateWorkflow).mockResolvedValue({
     valid: true, errors: [], warnings: [], revision_id: "revision-2",
   });

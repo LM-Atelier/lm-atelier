@@ -35,7 +35,8 @@ for (const width of [1280, 375]) {
     let preparations = 0;
     const submissions: WorkflowActivationRequest[] = [];
     await page.route("**/api/workflow-families?*", route => route.fulfill({ json: [] }));
-    await page.route("**/api/workflow-summaries", route => route.fulfill({ json: [{
+    await page.route("**/api/workflow-family-operations", route => route.fulfill({ json: ["text_to_image"] }));
+    await page.route("**/api/workflow-summaries?*", route => route.fulfill({ json: [{
       id: workflow.id, family_id: null, name: workflow.name, description: workflow.description,
       operation: workflow.operation, current_revision_id: workflow.current_revision_id,
       revision_count: 1, created_at: stamp, updated_at: stamp,

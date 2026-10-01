@@ -33,7 +33,8 @@ for (const width of [1280, 375]) {
       await route.fulfill({ status: 500, json: { detail: "Bulk graphs are forbidden in this test" } });
     });
     await page.route("**/api/workflow-families?*", (route) => route.fulfill({ json: [] }));
-    await page.route("**/api/workflow-summaries", (route) => route.fulfill({
+    await page.route("**/api/workflow-family-operations", route => route.fulfill({ json: ["text_to_image"] }));
+    await page.route("**/api/workflow-summaries?*", (route) => route.fulfill({
       json: [summary("a"), summary("b")],
     }));
     await page.route(/\/api\/workflows\/[ab]$/, async (route) => {

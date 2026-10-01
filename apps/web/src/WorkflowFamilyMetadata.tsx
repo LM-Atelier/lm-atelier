@@ -33,7 +33,9 @@ export function WorkflowFamilyMetadata({ family }: { family: WorkflowFamily }) {
     mutationFn: ({ familyId, values }: { familyId: string; values: { name: string; use_case?: string } }) =>
       api.updateWorkflowFamily(familyId, values),
     onSuccess: (updated, { familyId }) => {
-      client.setQueriesData<WorkflowFamily[]>({ queryKey: ["workflow-families"] },
+      client.setQueriesData<WorkflowFamily[]>({ queryKey: ["workflow-families"],
+        predicate: (query) => Array.isArray(query.state.data)
+          && query.queryKey[1] !== "operations" },
         (families) => families?.map((one) => one.id === familyId ? updated : one));
       client.setQueryData(["workflow-family", familyId], updated);
       void client.invalidateQueries({ queryKey: ["workflow-families"] });

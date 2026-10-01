@@ -13,8 +13,8 @@ vi.mock("./api", () => ({ api: {
   }),
   system: vi.fn().mockResolvedValue(null),
   about: vi.fn().mockResolvedValue(null),
-  profiles: vi.fn(),
-  presets: vi.fn().mockResolvedValue([]),
+  profilesPage: vi.fn(),
+  presetsPage: vi.fn().mockResolvedValue([]),
   workers: vi.fn().mockResolvedValue([]),
   runtimes: vi.fn().mockResolvedValue([]),
   backups: vi.fn().mockResolvedValue([]),
@@ -48,7 +48,7 @@ const appearance: Appearance = {
 };
 
 function show(value = profile) {
-  vi.mocked(api.profiles).mockResolvedValue([value]);
+  vi.mocked(api.profilesPage).mockResolvedValue([value]);
   vi.mocked(api.updateProfile).mockResolvedValue(value);
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   render(<QueryClientProvider client={client}><SettingsView engines={[]} appearance={appearance} destinationId="models-and-generation" onDestinationChange={() => undefined} /></QueryClientProvider>);

@@ -9,6 +9,7 @@ import { ErrorCallout } from "./ErrorCallout";
 import { RegistryInstallsPanel } from "./RegistryInstallsPanel";
 import { WorkflowFamilyArchive } from "./WorkflowFamilyArchive";
 import { WorkflowFamilyList } from "./WorkflowFamilyList";
+import { useSelectedWorkflowFamily } from "./useWorkflowLibraryReads";
 import { WorkflowFamilyUsage } from "./WorkflowFamilyUsage";
 import { WorkflowInstallStatus } from "./WorkflowInstallStatus";
 import { WorkflowInstallOfferDialog } from "./WorkflowInstallOfferDialog";
@@ -115,11 +116,6 @@ export function WorkflowsView() {
   const client = useQueryClient();
   const [includeArchived, setIncludeArchived] = useState(false);
   const { installReview, setInstallReview, downloadsQueued, setDownloadsQueued, reviewInstall } = useWorkflowInstallReview();
-  const workflows = useQuery({ queryKey: ["workflows", "summaries"], queryFn: api.workflowSummaries });
-  const families = useQuery({
-    queryKey: ["workflow-families", "library", includeArchived, "dependencies"],
-    queryFn: () => api.workflowFamilies(undefined, includeArchived, true),
-  });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selectedDetail = useQuery({
     queryKey: ["workflows", "detail", selectedId],
@@ -128,7 +124,8 @@ export function WorkflowsView() {
   });
   const selected = !selectedDetail.error && selectedDetail.data?.id === selectedId
     ? selectedDetail.data : null;
-  const selectedFamily = families.data?.find((family) => family.variants.some((variant) => variant.id === selectedId));
+  const selectedFamilyRead = useSelectedWorkflowFamily(selectedId);
+  const selectedFamily = selectedFamilyRead.error ? undefined : selectedFamilyRead.data ?? undefined;
   const [archiveFamily, setArchiveFamily] = useState<WorkflowFamily | null>(null);
   const [selectedRevisionId, setSelectedRevisionId] = useState<string | null>(null);
   const [newOpen, setNewOpen] = useState(false);
@@ -348,13 +345,10 @@ export function WorkflowsView() {
         {/* Library actions show the library first: a dialog under a hidden region would lock the page invisibly. */}
         <div className="storage-actions"><WorkflowRecipeManagerAction /><input ref={importInput} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0]); event.target.value = ""; }} /><button className="secondary" onClick={() => { showDestination("library"); importInput.current?.click(); }}>Import bundle</button><button className="primary" onClick={() => { showDestination("library"); openCreate(); }}><Plus size={17} />New workflow</button></div></header>
       <div hidden={destination !== "library"}>
-      {/* A list that could not be read is not an empty list, and a family
-          list that failed is not "no preferences". Both used to render as
-          the unselected state, which invites the reader to pick from
-          nothing and tells them nothing went wrong. */}
-      {(workflows.error || families.error) && (
-        <ErrorCallout message={((workflows.error ?? families.error) as Error).message} />
-      )}
+      {selectedFamilyRead.error && <div>
+        <ErrorCallout message={selectedFamilyRead.error.message} />
+        <button className="secondary compact-button" onClick={() => void selectedFamilyRead.refetch()}>Retry workflow family</button>
+      </div>}
       {selectedDetail.error && (
         <div>
           <ErrorCallout message={selectedDetail.error.message} />
@@ -449,8 +443,6 @@ export function WorkflowsView() {
         onQueued={() => { setInstallReview(null); setDownloadsQueued(true); }} />}
       <div className="workflow-layout">
         <WorkflowFamilyList
-          families={families.data ?? []}
-          workflows={workflows.data ?? []}
           selectedId={selectedId}
           onSelect={(workflow) => {
             setSelectedId(workflow.id);
@@ -458,7 +450,6 @@ export function WorkflowsView() {
           }}
           includeArchived={includeArchived}
           onIncludeArchivedChange={setIncludeArchived}
-          loading={families.isPending || workflows.isPending}
           onReviewInstall={reviewInstall}
           installationInDetails={detailInstall.workflowId}
         />
@@ -475,7 +466,9 @@ export function WorkflowsView() {
           />
           <WorkflowRevisionActivation workflowId={selected.id} revision={selectedRevision}
             current={viewingCurrentRevision}
-            available={!(selectedFamily?.archived || selectedFamily?.enabled === false)} />
+            available={!selectedFamilyRead.isLoading && !selectedFamilyRead.error
+              && !(selected?.family_id && !selectedFamily)
+              && !(selectedFamily?.archived || selectedFamily?.enabled === false)} />
           {!viewingCurrentRevision && <p className="muted">Select the current revision to validate it.</p>}
           <section className="workflow-input-section"><h3>Declared controls</h3><WorkflowControls schema={selectedRevision.input_schema_json} /></section><details open><summary>Executable graph</summary><pre>{JSON.stringify(selectedRevision.api_graph_json, null, 2)}</pre></details><details><summary>Dependencies</summary><pre>{JSON.stringify(selectedRevision.dependencies_json, null, 2)}</pre></details>{currentRevision && currentRevision.id !== selectedRevision.id && <WorkflowRevisionComparison key={selectedRevision.id + ":" + currentRevision.id} selected={selectedRevision} current={currentRevision} />}{verdict && <div className={`callout ${verdict.valid ? "success" : "error"}`} role={verdict.valid ? "status" : "alert"}>{verdict.valid ? "Workflow and declared dependencies are valid for the active media engine." : verdict.errors.join("\n")}{verdict.warnings.map((warning) => `\nWarning: ${warning}`)}</div>}</> : selectedId && selectedDetail.isPending ? <p role="status">Loading workflow details…</p> : selectedDetail.error ? <p className="muted">Workflow details are unavailable.</p> : <EmptyState icon={<WorkflowIcon />} title="Select a workflow" body="Review its revision, inputs, dependencies, and validation." />}</div>
       </div>

@@ -1,3 +1,5 @@
+import { useWorkflowFamilyVariantPages } from "./useWorkflowLibraryReads";
+import { WorkflowReadPageControls } from "./WorkflowReadPageControls";
 import { useState } from "react";
 import { WorkflowInstallStatus } from "./WorkflowInstallStatus";
 import type { WorkflowFamily, WorkflowInstallOffer } from "./types";
@@ -14,7 +16,8 @@ export function WorkflowFamilyVariants({ family, onReviewInstall }: {
   family: WorkflowFamily; onReviewInstall?: (offer: WorkflowInstallOffer, workflowName: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const variants = [...family.variants].sort((a, b) =>
+  const pages = useWorkflowFamilyVariantPages(family.id, undefined, undefined, undefined, expanded);
+  const variants = [...(pages.data ?? [])].sort((a, b) =>
     a.operation.localeCompare(b.operation) || a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
   return (
     <section className="workflow-family-variants" aria-label="Operation variants">
@@ -23,7 +26,8 @@ export function WorkflowFamilyVariants({ family, onReviewInstall }: {
         onClick={() => setExpanded((value) => !value)}>
         {expanded ? "Hide operation variants" : "Show operation variants"}
       </button>
-      {expanded && (variants.length === 0 ? <p>No operation variants.</p> : (
+      {expanded && <WorkflowReadPageControls pages={pages} label={`${family.name} operation variants`} />}
+      {expanded && !pages.isPending && (variants.length === 0 ? <p>No operation variants.</p> : (
         <ul>{variants.map((variant) => (
           <li key={variant.id}>
             <strong>{variant.name}</strong>

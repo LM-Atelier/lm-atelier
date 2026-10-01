@@ -86,11 +86,11 @@ export function OutputRatioControl({
     if (!sizeIsTheWorkflowsOwn) return null;
     return (
       <div className="setting-row output-ratio-control">
-        <span>
+        <div>
           <strong>Shape</strong>
           <small>This workflow sets the picture size itself.</small>
           {alternatives && <ShapeAlternativeList alternatives={alternatives} />}
-        </span>
+        </div>
       </div>
     );
   }

@@ -1,0 +1,37 @@
+import { useState } from "react";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { api } from "./api";
+import { uniqueWorkflowRows } from "./useWorkflowReadPages";
+
+const PAGE_SIZE = 50;
+
+export function useReadyWorkflowChoices(selectedIds: string[]) {
+  const [search, setSearch] = useState("");
+  const query = search.trim();
+  const ids = [...new Set(selectedIds.filter(Boolean))].sort();
+  const pages = useInfiniteQuery({
+    queryKey: ["workflow-families", "ready-revisions", query],
+    initialPageParam: 0,
+    queryFn: ({ pageParam, signal }) => api.workflowReadyRevisions({
+      operation: "text_to_image", limit: PAGE_SIZE, offset: pageParam, search: query,
+    }, signal),
+    getNextPageParam: (last, loaded) => last.length === PAGE_SIZE
+      ? loaded.reduce((count, page) => count + page.length, 0) : undefined,
+    select: data => uniqueWorkflowRows(data.pages.flat(), row => row.revision_id),
+  });
+  const selected = useQuery({
+    queryKey: ["workflow-families", "selected-ready-revisions", ids],
+    enabled: ids.length > 0,
+    queryFn: ({ signal }) => api.workflowReadyRevisions({
+      operation: "text_to_image", limit: 200, revisionIds: ids,
+    }, signal),
+  });
+  const rows = (pages.data ?? []).filter(row => !ids.includes(row.revision_id));
+  if (selected.isSuccess) rows.push(...selected.data.filter(row => ids.includes(row.revision_id)));
+  return {
+    rows, search, setSearch, pages, selected,
+    hasSelection: ids.length > 0,
+    missingLabel: selected.isSuccess
+      ? "Previously selected workflow (currently unavailable)" : "Previously selected workflow",
+  };
+}

@@ -9,8 +9,8 @@ import type { GenerationPreset, ModelProfile } from "./types";
 vi.mock("./api", () => ({ api: {
   system: vi.fn().mockResolvedValue(null),
   about: vi.fn().mockResolvedValue(null),
-  profiles: vi.fn(),
-  presets: vi.fn(),
+  profilesPage: vi.fn(),
+  presetsPage: vi.fn(),
   workers: vi.fn().mockResolvedValue([]),
   runtimes: vi.fn().mockResolvedValue([]),
   backups: vi.fn().mockResolvedValue([]),
@@ -51,8 +51,8 @@ function holdSave() {
 }
 
 beforeEach(() => {
-  vi.mocked(api.profiles).mockResolvedValue([profile]);
-  vi.mocked(api.presets).mockResolvedValue([preset]);
+  vi.mocked(api.profilesPage).mockResolvedValue([profile]);
+  vi.mocked(api.presetsPage).mockResolvedValue([preset]);
   vi.mocked(api.updateProfile).mockReset();
   vi.mocked(api.updatePreset).mockReset();
 });

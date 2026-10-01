@@ -9,7 +9,7 @@ vi.mock("./api", () => ({
   api: {
     searchConfiguration: vi.fn(), setupReadiness: vi.fn(), projects: vi.fn(), chats: vi.fn(),
     chat: vi.fn(), chatMetadata: vi.fn(), chatMessages: vi.fn(), chatContext: vi.fn(), chatSearches: vi.fn(), chatEditLineage: vi.fn(),
-    workPlans: vi.fn(), engines: vi.fn(), profiles: vi.fn(), presets: vi.fn(), workflows: vi.fn(),
+    workPlans: vi.fn(), engines: vi.fn(), profiles: vi.fn(), profilesPage: vi.fn(), presets: vi.fn(), presetsPage: vi.fn(), workflows: vi.fn(),
     workflowFamilies: vi.fn(), chatWorkflowSelections: vi.fn(), projectWorkflowSelections: vi.fn(),
     about: vi.fn(), jobs: vi.fn(), system: vi.fn(), workers: vi.fn(), runtimes: vi.fn(), backups: vi.fn(),
     editedBranches: vi.fn(), composerDraft: vi.fn(), saveComposerDraft: vi.fn(), classifyDraft: vi.fn(),
@@ -33,6 +33,8 @@ const chat: ChatDetail = {
 
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.mocked(api.profilesPage).mockImplementation(async (options) => (await import("./test/modelLibraryPageFixtures")).profilePages(api, options));
+  vi.mocked(api.presetsPage).mockImplementation(async (options) => (await import("./test/modelLibraryPageFixtures")).presetPages(api, options));
   vi.mocked(connectEvents).mockResolvedValue(() => undefined);
   localStorage.clear(); sessionStorage.clear();
   localStorage.setItem("local-lm-chat", chat.id);

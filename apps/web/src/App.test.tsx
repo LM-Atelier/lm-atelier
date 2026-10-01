@@ -1,6 +1,6 @@
 import { installChatReadFixtures } from "./chatReadFixtures";
 import { exerciseWorkspaceHistory } from "./workspaceHistoryAppCase.test-support";
-import { mockWorkflowReadsFromFixture, mockWorkflowConsumerReadsFromFixture } from "./workflowReadFixtures";
+import { mockWorkflowFamilyPages, mockWorkflowReadsFromFixture, mockWorkflowConsumerReadsFromFixture } from "./workflowReadFixtures";
 import { exerciseEditedBranchNavigation } from "./editedBranchAppCase.test-support";
 import { exerciseQueuedOutputActions } from "./queuedOutputActions.test-support";
 import { exercisePriorTurnEditor } from "./priorTurnEditAppCase.test-support";
@@ -119,7 +119,7 @@ vi.mock("./api", async (importOriginal) => ({
     initialize: vi.fn().mockResolvedValue(undefined),
     setupReadiness: vi.fn().mockResolvedValue({ version: 2, state: "ready", roles: [] }),
     verifySetupRole: vi.fn(),
-    projects: vi.fn().mockResolvedValue([]),
+    projects: vi.fn().mockResolvedValue([]), project: vi.fn(),
     chats: vi.fn().mockResolvedValue([]), chatSummaries: vi.fn((...args: Parameters<typeof api.chats>) => api.chats(...args).then((rows) => rows.map(asChatSummary))),
     chat: vi.fn(), chatMetadata: vi.fn((id: string) => api.chat(id)),
     classifyDraft: vi.fn(),
@@ -225,21 +225,21 @@ vi.mock("./api", async (importOriginal) => ({
     credentialStatus: vi.fn((provider: "huggingface" | "civitai" | "crw") => Promise.resolve({ provider, configured: false, source: "none", vault_available: true })),
     setCredentialToken: vi.fn(),
     deleteCredentialToken: vi.fn(),
-    models: vi.fn(),
+    models: vi.fn(), modelsPage: vi.fn(async (options) => (await import("./test/modelLibraryPageFixtures")).modelPages(api, options)), catalogInstallMatches: vi.fn(async (options) => (await import("./test/modelLibraryPageFixtures")).catalogMatches(api, options)),
     modelAssets: vi.fn().mockResolvedValue([]),
     updateModelAsset: vi.fn(),
     deleteModelAsset: vi.fn(),
     modelStorage: vi.fn().mockResolvedValue({ installed_bytes: 0, partial_download_bytes: 0, catalog_cache_bytes: 0, installed_count: 0, partial_download_count: 0 }),
     deleteModel: vi.fn(),
     cleanupDownloads: vi.fn(),
-    profiles: vi.fn().mockResolvedValue([]),
+    profiles: vi.fn().mockResolvedValue([]), profilesPage: vi.fn(async (options) => (await import("./test/modelLibraryPageFixtures")).profilePages(api, options)),
     updateProfile: vi.fn(),
     cloneProfile: vi.fn(),
     resetProfile: vi.fn(),
     deleteProfile: vi.fn(),
     exportProfile: vi.fn(),
     importProfile: vi.fn(),
-    presets: vi.fn().mockResolvedValue([]),
+    presets: vi.fn().mockResolvedValue([]), presetsPage: vi.fn(async (options) => (await import("./test/modelLibraryPageFixtures")).presetPages(api, options)),
     createPreset: vi.fn(),
     updatePreset: vi.fn(),
     clonePreset: vi.fn(),
@@ -275,8 +275,8 @@ vi.mock("./api", async (importOriginal) => ({
     workflowSummaries: vi.fn().mockResolvedValue([]),
     workflow: vi.fn(),
     workflowRevisionChoices: vi.fn().mockResolvedValue([]),
-    workflowRevisionSchema: vi.fn(),
-    workflows: vi.fn(), workflowFamilies: vi.fn().mockResolvedValue([]), setWorkflowFamilyPreference: vi.fn(), chatWorkflowSelections: vi.fn().mockResolvedValue([]), setChatWorkflowSelection: vi.fn(), projectWorkflowSelections: vi.fn().mockResolvedValue([]), setProjectWorkflowSelection: vi.fn(),
+    workflowRevisionSchema: vi.fn(), workflowReadyRevisions: vi.fn().mockResolvedValue([]),
+    workflows: vi.fn(), workflowFamilyOperations: vi.fn().mockResolvedValue([]), workflowFamilies: vi.fn().mockResolvedValue([]), setWorkflowFamilyPreference: vi.fn(), chatWorkflowSelections: vi.fn().mockResolvedValue([]), setChatWorkflowSelection: vi.fn(), projectWorkflowSelections: vi.fn().mockResolvedValue([]), setProjectWorkflowSelection: vi.fn(),
     editTemplates: vi.fn().mockResolvedValue([]),
     createEditTemplate: vi.fn(),
     deleteEditTemplate: vi.fn(),
@@ -363,7 +363,7 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
     localStorage.clear();
     sessionStorage.clear();
     vi.mocked(api.setupReadiness).mockResolvedValue({ version: 2, state: "ready", roles: [] });
-    vi.mocked(api.projects).mockResolvedValue([]); vi.mocked(api.profiles).mockResolvedValue([]);
+    vi.mocked(api.projects).mockResolvedValue([]); vi.mocked(api.profiles).mockResolvedValue([]); vi.mocked(api.project).mockImplementation(async (id) => (await api.projects()).find((project) => project.id === id)!);
     vi.mocked(api.presets).mockResolvedValue([]); vi.mocked(api.chats).mockResolvedValue([]);
     // No prior visual to reuse is the resting state for most of this suite.
     vi.mocked(api.classifyDraft).mockResolvedValue({ references_prior_visual: false });
@@ -408,14 +408,14 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
     vi.mocked(api.workflows).mockRejectedValue(new Error("Bulk workflow reads are forbidden"));
     mockWorkflowReadsFromFixture(async () => workflowFixtures);
     mockWorkflowConsumerReadsFromFixture(async () => workflowFixtures);
-    vi.mocked(api.workflowFamilies).mockImplementation(async () => familiesForWorkflows(workflowFixtures));
+    mockWorkflowFamilyPages(async () => familiesForWorkflows(workflowFixtures));
     vi.mocked(api.chatWorkflowSelections).mockResolvedValue(DEFAULT_CHAT_WORKFLOW_SELECTIONS);
     vi.mocked(api.projectWorkflowSelections).mockResolvedValue(DEFAULT_PROJECT_WORKFLOW_SELECTIONS);
     vi.mocked(api.customNodes).mockResolvedValue([]);
   });
   it("opens the workspace and workflow Library without requesting bulk graphs", async () => {
     vi.mocked(api.workflows).mockRejectedValue(new Error("Bulk workflow reads are forbidden"));
-    vi.mocked(api.workflowFamilies).mockResolvedValue([]);
+    mockWorkflowFamilyPages([]);
     vi.mocked(api.workflowSummaries).mockResolvedValue([]);
     renderApp();
     const library = await screen.findByRole("button", { name: "Workflows" });
@@ -650,9 +650,7 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
     );
 
     // 6 GB + 8 GB remaining at a combined 100 MB/s: one figure to plan around.
-    expect(await screen.findByRole("status")).toHaveTextContent(
-      "14 GB left to download · about 2 min at the current speed",
-    );
+    expect(await screen.findByText("14 GB left to download · about 2 min at the current speed")).toHaveAttribute("role", "status");
   });
 
   it("names the load a ready role has not paid yet and offers to pay it now", async () => {
@@ -1259,27 +1257,27 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
     fireEvent.click(await screen.findByRole("button", { name: "Manage Creative work" }));
     const dialog = screen.getByRole("dialog", { name: "Manage project" });
     expect(dialog).toHaveAttribute("aria-modal", "true");
-    expect(screen.getByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(2048);
-    fireEvent.change(screen.getByRole("spinbutton", { name: /Maximum output/ }), {
+    expect(await screen.findByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(2048);
+    fireEvent.change(await screen.findByRole("spinbutton", { name: /Maximum output/ }), {
       target: { value: "4096" },
     });
 
     fireEvent.click(screen.getByRole("button", { name: "image" }));
-    expect(screen.getByLabelText(/Negative prompt/)).toHaveValue("noise");
+    expect(await screen.findByLabelText(/Negative prompt/)).toHaveValue("noise");
     fireEvent.change(screen.getByRole("combobox", { name: "image project preset" }), {
       target: { value: imagePreset.id },
     });
-    fireEvent.change(screen.getByLabelText(/Negative prompt/), {
+    fireEvent.change(await screen.findByLabelText(/Negative prompt/), {
       target: { value: "fog" },
     });
 
     fireEvent.click(screen.getByRole("button", { name: "video" }));
-    expect(screen.getByRole("spinbutton", { name: /Frames/ })).toHaveValue(49);
-    fireEvent.change(screen.getByRole("spinbutton", { name: /Frames/ }), {
+    expect(await screen.findByRole("spinbutton", { name: /Frames/ })).toHaveValue(49);
+    fireEvent.change(await screen.findByRole("spinbutton", { name: /Frames/ }), {
       target: { value: "81" },
     });
     fireEvent.click(screen.getByRole("button", { name: "chat" }));
-    expect(screen.getByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(4096);
+    expect(await screen.findByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(4096);
     fireEvent.click(screen.getByRole("button", { name: "Save project" }));
 
     await waitFor(() => expect(api.updateProject).toHaveBeenCalledWith(
@@ -1438,10 +1436,10 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Turn settings" }));
-    expect(screen.getByRole("combobox", { name: "image preset" }))
-      .toHaveDisplayValue("Inherit · Project image");
-    expect(screen.getByLabelText(/Negative prompt/)).toHaveValue("project value");
-    fireEvent.change(screen.getByLabelText(/Negative prompt/), {
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "image preset" }))
+      .toHaveDisplayValue("Inherit · Project image"));
+    expect(await screen.findByLabelText(/Negative prompt/)).toHaveValue("project value");
+    fireEvent.change(await screen.findByLabelText(/Negative prompt/), {
       target: { value: "chat value" },
     });
 
@@ -1584,7 +1582,7 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Turn settings" }));
     expect(screen.getByRole("dialog", { name: "Chat settings" })).toBeInTheDocument();
-    expect(screen.getByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(2048);
+    expect(await screen.findByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(2048);
 
     const rolePicker = screen.getByRole("group", { name: "Settings role" });
     expect(rolePicker).toBeInTheDocument();
@@ -1595,11 +1593,11 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
     fireEvent.click(imageTab);
     expect(screen.getByRole("dialog", { name: "Image settings" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "image" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByLabelText(/Negative prompt/)).toHaveValue("noise");
+    expect(await screen.findByLabelText(/Negative prompt/)).toHaveValue("noise");
 
     // The backend scopes an image-routed turn to generation_settings_json.image,
     // so the Auto-mode edit must land in that bag and leave the others alone.
-    fireEvent.change(screen.getByLabelText(/Negative prompt/), { target: { value: "fog" } });
+    fireEvent.change(await screen.findByLabelText(/Negative prompt/), { target: { value: "fog" } });
     await waitFor(() => expect(api.updateChat).toHaveBeenCalledWith(
       chat.id,
       expect.objectContaining({
@@ -1625,7 +1623,7 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
     expect(screen.getByRole("dialog", { name: "Video settings" })).toBeInTheDocument();
     // Value 81 comes from the chat's video bag, not the field default (49),
     // proving the video role reads its own bag rather than merely retitling.
-    expect(screen.getByRole("spinbutton", { name: /Frames/ })).toHaveValue(81);
+    expect(await screen.findByRole("spinbutton", { name: /Frames/ })).toHaveValue(81);
 
     fireEvent.click(screen.getByRole("button", { name: "image" }));
     fireEvent.keyDown(screen.getByRole("dialog", { name: "Image settings" }), { key: "Escape" });
@@ -1774,7 +1772,7 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
     expect(screen.queryByRole("group", { name: "Image edit change strength mode" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "image" }));
     expect(screen.getByRole("dialog", { name: "Image settings" })).toBeInTheDocument();
-    expect(screen.getByRole("group", { name: "Image edit change strength mode" })).toBeInTheDocument();
+    expect(await screen.findByRole("group", { name: "Image edit change strength mode" })).toBeInTheDocument();
     fireEvent.keyDown(screen.getByRole("dialog", { name: "Image settings" }), { key: "Escape" });
 
     // The attachment Edit button persists routing_mode without touching the
@@ -1787,7 +1785,7 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
     expect(screen.getByRole("dialog", { name: "Image settings" })).toBeInTheDocument();
     expect(screen.queryByRole("group", { name: "Settings role" })).not.toBeInTheDocument();
-    expect(screen.getByRole("group", { name: "Image edit change strength mode" })).toBeInTheDocument();
+    expect(await screen.findByRole("group", { name: "Image edit change strength mode" })).toBeInTheDocument();
     fireEvent.keyDown(screen.getByRole("dialog", { name: "Image settings" }), { key: "Escape" });
 
     // Returning to Auto through the mode select brings the picker back on
@@ -3104,8 +3102,8 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
       </QueryClientProvider>,
     );
 
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(/Preparing chat model/));
-    const status = screen.getByRole("status");
+    const status = (await screen.findByText(/Preparing chat model/)).closest('[role="status"]');
+    expect(status).toHaveTextContent(/Preparing chat model/);
     expect(status).toHaveTextContent(/· 0s/);
   });
 
@@ -3409,11 +3407,11 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
       name: "Installed chat capability",
     });
     fireEvent.change(capability, { target: { value: "vision" } });
-    expect(screen.getByRole("button", { name: "Delete Visual observer" })).toBeEnabled();
+    expect(await screen.findByRole("button", { name: "Delete Visual observer" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "Delete Text specialist" })).not.toBeInTheDocument();
 
     fireEvent.change(capability, { target: { value: "text" } });
-    expect(screen.getByRole("button", { name: "Delete Text specialist" })).toBeEnabled();
+    expect(await screen.findByRole("button", { name: "Delete Text specialist" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "Delete Visual observer" })).not.toBeInTheDocument();
   });
 
@@ -5698,7 +5696,7 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Turn settings" }));
     const frames = await screen.findByRole("spinbutton", { name: /Frames/ });
-    expect(frames).toHaveValue(81);
+    await waitFor(() => expect(frames).toHaveValue(81));
     expect(frames).toBeDisabled();
     expect(screen.getByText(/Fixed by this workflow at 81/)).toBeInTheDocument();
   });
@@ -6087,7 +6085,7 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
     expect(screen.getByText("Uploaded image")).toBeVisible();
     fireEvent.change(composer, { target: { value: "Replace the jacket" } });
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
-    expect(screen.getByRole("group", { name: "Image edit change strength mode" })).toBeInTheDocument();
+    expect(await screen.findByRole("group", { name: "Image edit change strength mode" })).toBeInTheDocument();
     expect(screen.getByText("Predicted: replacement")).toBeInTheDocument();
   });
 
@@ -6258,20 +6256,20 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Turn settings" }));
-    fireEvent.change(screen.getByRole("spinbutton", { name: /Maximum output/ }), { target: { value: "4096" } });
+    fireEvent.change(await screen.findByRole("spinbutton", { name: /Maximum output/ }), { target: { value: "4096" } });
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
 
     fireEvent.click(screen.getByText(secondChat.title));
     await screen.findByRole("heading", { name: secondChat.title });
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
-    expect(screen.getByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(1024);
-    fireEvent.change(screen.getByRole("spinbutton", { name: /Maximum output/ }), { target: { value: "2048" } });
+    expect(await screen.findByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(1024);
+    fireEvent.change(await screen.findByRole("spinbutton", { name: /Maximum output/ }), { target: { value: "2048" } });
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
 
     fireEvent.click(screen.getByText(firstChat.title));
     await screen.findByRole("heading", { name: firstChat.title });
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
-    expect(screen.getByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(4096);
+    expect(await screen.findByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(4096);
   });
 
   it("persists each chat mode, role defaults, and preset binding without leakage", async () => {
@@ -6336,11 +6334,11 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
       firstChat.id,
       { routing_mode: "image" },
     ));
-    fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Turn settings" })); await screen.findByRole("option", { name: imagePreset.name });
     fireEvent.change(screen.getByRole("combobox", { name: "image preset" }), {
       target: { value: imagePreset.id },
     });
-    fireEvent.change(screen.getByLabelText(/Negative prompt/), {
+    fireEvent.change(await screen.findByLabelText(/Negative prompt/), {
       target: { value: "no fog" },
     });
     await waitFor(() => {
@@ -6357,7 +6355,7 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
     await screen.findByRole("heading", { name: secondChat.title });
     expect(screen.getByDisplayValue("Video")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
-    expect(screen.getByRole("spinbutton", { name: /Frames/ })).toHaveValue(81);
+    expect(await screen.findByRole("spinbutton", { name: /Frames/ })).toHaveValue(81);
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
 
     fireEvent.click(screen.getByText(firstChat.title));
@@ -6365,7 +6363,7 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
     expect(screen.getByDisplayValue("Image")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
     expect(screen.getByRole("combobox", { name: "image preset" })).toHaveValue(imagePreset.id);
-    expect(screen.getByLabelText(/Negative prompt/)).toHaveValue("no fog");
+    expect(await screen.findByLabelText(/Negative prompt/)).toHaveValue("no fog");
   });
 
   it("shows message timestamps and quotes an answer into the composer", async () => {

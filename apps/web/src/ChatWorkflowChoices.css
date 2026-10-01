@@ -4,7 +4,7 @@
 .chat-workflow-choice-fields .workflow-selector select { width: 100%; min-width: 0; text-overflow: ellipsis; }
 .chat-workflow-choice-fields .workflow-selector small { overflow-wrap: anywhere; }
 .chat-workflow-choices > small { color: var(--ink-muted); font-size: 11px; }
-@media (max-width: 600px) { .chat-workflow-choice-fields { grid-template-columns: 1fr; } }
+@media (max-width: 600px) { .chat-workflow-choice-fields { grid-template-columns: 1fr; max-height: min(24vh, 200px); overflow: auto; } }
 
 .turn-editor-with-workflow-choices .composer-wrap { position: relative; padding-top: calc(12px * var(--spacing-scale, 1)); }
 .chat-view:has(> .turn-editor-with-workflow-choices) > .messages { padding-bottom: calc(24px * var(--spacing-scale, 1)); }

@@ -8,6 +8,13 @@ vi.mock("./useActiveChatWorkflowSelection", () => ({
   useActiveChatWorkflowSelection: vi.fn(),
 }));
 
+const browse = {
+  search: "", setSearch: vi.fn(),
+  pages: { error: null, isPending: false, isFetchingNextPage: false,
+    isFetchNextPageError: false, hasNextPage: false,
+    fetchNextPage: vi.fn(), refetch: vi.fn() },
+};
+
 function family(overrides: Partial<WorkflowFamily> = {}): WorkflowFamily {
   return {
     id: "family-1",
@@ -65,6 +72,7 @@ describe("ActiveChatWorkflowSelector", () => {
     const choose = vi.fn();
     vi.mocked(useActiveChatWorkflowSelection).mockReturnValue({
       kind: "ready",
+      browse,
       capability: "image",
       choiceKind: "default",
       current: undefined,
@@ -114,6 +122,7 @@ describe("ActiveChatWorkflowSelector", () => {
     const choose = vi.fn();
     vi.mocked(useActiveChatWorkflowSelection).mockReturnValue({
       kind: "ready",
+      browse,
       capability: "image",
       choiceKind: "compatibility",
       current: {
@@ -141,6 +150,7 @@ describe("ActiveChatWorkflowSelector", () => {
   it("keeps an unavailable selected family visible", () => {
     vi.mocked(useActiveChatWorkflowSelection).mockReturnValue({
       kind: "ready",
+      browse,
       capability: "image",
       choiceKind: "explicit",
       current: {
@@ -167,6 +177,7 @@ describe("ActiveChatWorkflowSelector", () => {
   it("explains when every variant in the chosen family is blocked", () => {
     vi.mocked(useActiveChatWorkflowSelection).mockReturnValue({
       kind: "ready",
+      browse,
       capability: "image",
       choiceKind: "explicit",
       current: {
@@ -210,6 +221,7 @@ describe("ActiveChatWorkflowSelector", () => {
     };
     vi.mocked(useActiveChatWorkflowSelection).mockReturnValue({
       kind: "ready",
+      browse,
       capability: "image",
       choiceKind: "explicit",
       current: {
@@ -237,6 +249,7 @@ describe("ActiveChatWorkflowSelector", () => {
   it("reports a family with no variant for the active capability", () => {
     vi.mocked(useActiveChatWorkflowSelection).mockReturnValue({
       kind: "ready",
+      browse,
       capability: "image",
       choiceKind: "explicit",
       current: {

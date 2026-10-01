@@ -11,7 +11,7 @@ import os
 import re
 import shutil
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack, suppress
 from datetime import UTC, datetime
 from itertools import islice
@@ -202,6 +202,7 @@ from .install_plan_contract_v1 import (
 )
 from .lora_suggestions import lora_suggestion_scope, suggested_loras
 from .message_window_v1 import DEFAULT_WINDOW, MAX_WINDOW
+from .model_library_reads import catalog_install_matches, read_library_matches, read_library_page
 from .model_manifests import (
     COMFY_MODEL_ASSET_KINDS,
     MAX_METADATA_BYTES,
@@ -246,6 +247,7 @@ from .models import (
     Message,
     MessagePart,
     ModelAssetInstall,
+    ModelCapabilityEvidence,
     ModelInstall,
     ModelProfile,
     Project,
@@ -418,6 +420,7 @@ from .schemas import (
     BoundWorkflowAssetOut,
     CatalogDetail,
     CatalogFileVariant,
+    CatalogInstallMatches,
     CatalogModel,
     CatalogPage,
     CatalogPreflight,
@@ -618,6 +621,7 @@ from .schemas import (
     WorkflowPackageIssueOut,
     WorkflowPackagePrepareRequest,
     WorkflowPackageRequirementOut,
+    WorkflowReadyRevisionOut,
     WorkflowResourceConsumerOut,
     WorkflowResourceConsumersOut,
     WorkflowRevisionChoiceOut,
@@ -766,6 +770,13 @@ from .workflow_editor_shell import (
     workflow_editor_shell_document,
 )
 from .workflow_family_dependencies import workflow_family_dependency_summaries
+from .workflow_family_reads import (
+    family_operation_choices,
+    family_supported_selector_capabilities,
+    read_family_page,
+    read_family_variants,
+    read_ready_revision_page,
+)
 from .workflow_graph_settings import (
     bind_compiled_workflow_settings,
     generated_workflow_setting_paths,
@@ -2068,13 +2079,57 @@ async def list_projects(
     session: SessionDep,
     include_archived: bool = False,
     query: str = Query(default="", max_length=500),
+    limit: int | None = Query(default=None, ge=1, le=200),
+    offset: int = Query(default=0, ge=0, le=2**63 - 1),
+    project_id: Annotated[list[str] | None, Query(max_length=200)] = None,
+    literal_search: bool = False,
 ) -> list[Project]:
-    statement = select(Project).order_by(Project.pinned.desc(), Project.updated_at.desc())
+    statement = select(Project).order_by(
+        Project.pinned.desc(), Project.updated_at.desc(), Project.id.desc()
+    )
     if not include_archived:
         statement = statement.where(Project.archived.is_(False))
+    if project_id is not None:
+        statement = statement.where(Project.id.in_(project_id))
+    if literal_search and query.strip():
+        # Match browser name searches, including Unicode and literal wildcard
+        # characters. Read names in batches and hydrate only the selected page.
+        needle = query.strip().lower()
+        matches: list[str] = []
+        skipped = 0
+        names = session.execute(
+            statement.with_only_columns(Project.id, Project.name).execution_options(yield_per=200)
+        )
+        try:
+            for identity, name in names:
+                if needle not in name.lower():
+                    continue
+                if skipped < offset:
+                    skipped += 1
+                    continue
+                matches.append(identity)
+                if limit is not None and len(matches) >= limit:
+                    break
+        finally:
+            names.close()
+        if not matches:
+            return []
+        return list(session.scalars(statement.where(Project.id.in_(matches))).all())
     if query.strip():
         statement = statement.where(Project.name.ilike(f"%{query.strip()}%"))
+    if limit is not None:
+        statement = statement.limit(limit)
+    if offset:
+        statement = statement.offset(offset)
     return list(session.scalars(statement).all())
+
+
+@router.get("/projects/{project_id}", response_model=ProjectOut)
+async def get_project(project_id: str, session: SessionDep) -> Project:
+    project = session.get(Project, project_id)
+    if project is None:
+        raise api_error(404, "project-not-found", "Project not found")
+    return project
 
 
 def _validate_project_workflow_pins(session: Session, values: dict[str, Any]) -> None:
@@ -7840,25 +7895,91 @@ def _assert_recipe_pins_hold(recipe: ReferenceRecipe, plan: ResolvedInstallPlan 
 
 @router.get("/models", response_model=list[ModelInstallOut])
 async def list_models(
-    request: Request, session: SessionDep, install_id: str | None = None
+    request: Request,
+    session: SessionDep,
+    install_id: str | None = None,
+    role: Literal["chat", "image", "video"] | None = None,
+    chat_capability: Literal["text", "vision"] | None = None,
+    limit: int | None = Query(None, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=2**63 - 1),
+    search: str = Query("", max_length=500),
+    model_ids: Annotated[list[str] | None, Query(alias="model_id", max_length=200)] = None,
 ) -> list[ModelInstallOut]:
     query = select(ModelInstall).where(ModelInstall.active.is_(True))
     if install_id is not None:
         query = query.where(ModelInstall.id == install_id)
-    installs = list(session.scalars(query.order_by(ModelInstall.updated_at.desc())).all())
+    if model_ids:
+        query = query.where(ModelInstall.id.in_(model_ids))
+    if role is not None:
+        query = query.where(ModelInstall.role == role)
+    query = query.order_by(ModelInstall.updated_at.desc(), ModelInstall.id)
     services = _services(request)
-    evidence_by_install = {
-        install.id: evidence
-        for install in installs
-        if (
-            evidence := current_capability_evidence(
-                session,
-                install,
-                services.settings,
-                services.runtimes,
+    if chat_capability is not None:
+        query = query.where(
+            ModelInstall.role == "chat",
+            select(ModelProfile.id)
+            .where(
+                ModelProfile.model_install_id == ModelInstall.id,
+                ModelProfile.role == ModelInstall.role,
+                ModelProfile.engine == ModelInstall.engine,
             )
+            .exists(),
+            select(ModelCapabilityEvidence.id)
+            .where(
+                ModelCapabilityEvidence.model_install_id == ModelInstall.id,
+            )
+            .exists(),
         )
-    }
+
+        def matching_model(
+            install: ModelInstall,
+        ) -> tuple[ModelInstall, ModelCapabilityEvidence] | None:
+            evidence = current_capability_evidence(
+                session, install, services.settings, services.runtimes
+            )
+            if evidence is None:
+                return None
+            modalities = evidence_input_modalities(evidence)
+            if chat_capability == "vision":
+                matches = "image" in modalities
+            else:
+                matches = "text" in modalities and "image" not in modalities
+            return (install, evidence) if matches else None
+
+        matches = read_library_matches(
+            session,
+            query,
+            ModelInstall.id,
+            ModelInstall.name,
+            match=matching_model,
+            limit=limit,
+            offset=offset,
+            search=search,
+        )
+        installs = [install for install, _ in matches]
+        evidence_by_install = {install.id: evidence for install, evidence in matches}
+    else:
+        installs = read_library_page(
+            session,
+            query,
+            ModelInstall.id,
+            ModelInstall.name,
+            limit=limit,
+            offset=offset,
+            search=search,
+        )
+        evidence_by_install = {
+            install.id: evidence
+            for install in installs
+            if (
+                evidence := current_capability_evidence(
+                    session,
+                    install,
+                    services.settings,
+                    services.runtimes,
+                )
+            )
+        }
     return [
         ModelInstallOut.model_validate(install).model_copy(
             update={
@@ -7880,6 +8001,18 @@ async def list_models(
         )
         for install in installs
     ]
+
+
+@router.get("/models/catalog-matches", response_model=CatalogInstallMatches)
+async def read_catalog_install_matches(
+    session: SessionDep,
+    role: Literal["chat", "image", "video"],
+    remote_ids: Annotated[list[str] | None, Query(alias="remote_id", max_length=200)] = None,
+    workflow_template_ids: Annotated[
+        list[str] | None, Query(alias="workflow_template_id", max_length=200)
+    ] = None,
+) -> CatalogInstallMatches:
+    return catalog_install_matches(session, role, remote_ids or [], workflow_template_ids or [])
 
 
 @router.post("/references", response_model=ReferenceSubjectOut, status_code=201)
@@ -8991,6 +9124,14 @@ async def list_profiles(
     request: Request,
     session: SessionDep,
     role: str | None = None,
+    engine: str | None = None,
+    input_modality: Literal["text", "image"] | None = None,
+    limit: int | None = Query(None, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=2**63 - 1),
+    search: str = Query("", max_length=500),
+    profile_ids: Annotated[list[str] | None, Query(alias="profile_id", max_length=200)] = None,
+    install_ids: Annotated[list[str] | None, Query(alias="install_id", max_length=200)] = None,
+    defaults_only: bool = False,
 ) -> list[ModelProfileOut]:
     statement = (
         select(ModelProfile)
@@ -9005,13 +9146,21 @@ async def list_profiles(
                 ),
             )
         )
-        .order_by(ModelProfile.role, ModelProfile.name)
+        .order_by(ModelProfile.role, ModelProfile.name, ModelProfile.id)
     )
     if role:
         statement = statement.where(ModelProfile.role == role)
+    if engine:
+        statement = statement.where(ModelProfile.engine == engine)
+    if profile_ids:
+        statement = statement.where(ModelProfile.id.in_(profile_ids))
+    if install_ids:
+        statement = statement.where(ModelProfile.model_install_id.in_(install_ids))
+    if defaults_only:
+        statement = statement.where(ModelProfile.is_default.is_(True))
     services = _services(request)
-    results: list[ModelProfileOut] = []
-    for profile in session.scalars(statement).all():
+
+    def project(profile: ModelProfile) -> ModelProfileOut:
         evidence = None
         if profile.model_install_id:
             install = session.get(ModelInstall, profile.model_install_id)
@@ -9022,12 +9171,36 @@ async def list_profiles(
                     services.settings,
                     services.runtimes,
                 )
-        results.append(
-            ModelProfileOut.model_validate(profile).model_copy(
-                update={"input_modalities": evidence_input_modalities(evidence)}
-            )
+        return ModelProfileOut.model_validate(profile).model_copy(
+            update={"input_modalities": evidence_input_modalities(evidence)}
         )
-    return results
+
+    if input_modality:
+
+        def match(profile: ModelProfile) -> ModelProfileOut | None:
+            projected = project(profile)
+            return projected if input_modality in projected.input_modalities else None
+
+        return read_library_matches(
+            session,
+            statement,
+            ModelProfile.id,
+            ModelProfile.name,
+            match=match,
+            limit=limit,
+            offset=offset,
+            search=search,
+        )
+    profiles = read_library_page(
+        session,
+        statement,
+        ModelProfile.id,
+        ModelProfile.name,
+        limit=limit,
+        offset=offset,
+        search=search,
+    )
+    return [project(profile) for profile in profiles]
 
 
 @router.post("/profiles", response_model=ModelProfileOut, status_code=201)
@@ -9314,11 +9487,34 @@ async def import_profile(
 
 
 @router.get("/presets", response_model=list[PresetOut])
-async def list_presets(session: SessionDep, role: str | None = None) -> list[GenerationPreset]:
-    statement = select(GenerationPreset).order_by(GenerationPreset.role, GenerationPreset.name)
+async def list_presets(
+    session: SessionDep,
+    role: str | None = None,
+    limit: int | None = Query(None, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=2**63 - 1),
+    search: str = Query("", max_length=500),
+    preset_ids: Annotated[list[str] | None, Query(alias="preset_id", max_length=200)] = None,
+    defaults_only: bool = False,
+) -> list[GenerationPreset]:
+    statement = select(GenerationPreset).order_by(
+        GenerationPreset.role, GenerationPreset.name, GenerationPreset.id
+    )
     if role:
         statement = statement.where(GenerationPreset.role == role)
-    return list(session.scalars(statement).all())
+    if preset_ids:
+        statement = statement.where(GenerationPreset.id.in_(preset_ids))
+    if defaults_only:
+        statement = statement.where(GenerationPreset.is_default.is_(True))
+    presets = read_library_page(
+        session,
+        statement,
+        GenerationPreset.id,
+        GenerationPreset.name,
+        limit=limit,
+        offset=offset,
+        search=search,
+    )
+    return presets
 
 
 @router.post("/presets", response_model=PresetOut, status_code=201)
@@ -9956,6 +10152,13 @@ def _workflow_family_out(
     session: Session,
     services: Services,
     family: WorkflowFamily,
+    *,
+    variant_limit: int | None = None,
+    variant_offset: int = 0,
+    operation: Operation | None = None,
+    readiness: WorkflowVariantReadiness | None = None,
+    variant_capability: WorkflowSelectorCapability | None = None,
+    workflow_ids: Sequence[str] = (),
 ) -> WorkflowFamilyOut:
     compatibility = session.scalar(
         select(WorkflowProfileCompatibility).where(
@@ -9963,6 +10166,32 @@ def _workflow_family_out(
         )
     )
     profile = session.get(ModelProfile, compatibility.model_profile_id) if compatibility else None
+    page = (
+        read_family_variants(
+            session,
+            family.id,
+            lambda definition: _workflow_family_variant_out(
+                session,
+                services,
+                family,
+                definition,
+                compatibility,
+            ),
+            limit=variant_limit,
+            offset=variant_offset,
+            operation=operation,
+            readiness=readiness,
+            capability=variant_capability,
+            workflow_ids=workflow_ids,
+        )
+        if variant_limit is not None
+        or variant_offset
+        or operation is not None
+        or readiness is not None
+        or variant_capability is not None
+        or workflow_ids
+        else None
+    )
     return WorkflowFamilyOut(
         id=family.id,
         name=family.name,
@@ -9975,7 +10204,10 @@ def _workflow_family_out(
         enabled=family.enabled,
         archived=family.archived,
         compatibility=compatibility is not None,
-        variants=[
+        supported_selector_capabilities=family_supported_selector_capabilities(session, family.id),
+        variants=page.variants
+        if page is not None
+        else [
             _workflow_family_variant_out(
                 session,
                 services,
@@ -9988,6 +10220,9 @@ def _workflow_family_out(
                 key=lambda item: (item.operation, item.variant_key or "", item.id),
             )
         ],
+        variant_count=page.count if page is not None else None,
+        ready_variant_count=page.ready_count if page is not None else None,
+        best_readiness=page.best_readiness if page is not None else None,
         preferences=[
             WorkflowFamilyPreferenceOut(
                 selector_capability=_workflow_selector_capability(preference.selector_capability),
@@ -10071,7 +10306,71 @@ async def list_workflow_families(
     selector_capability: WorkflowSelectorCapability | None = None,
     include_archived: bool = False,
     include_dependencies: bool = False,
+    limit: int | None = Query(None, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=2**63 - 1),
+    variant_limit: int | None = Query(None, ge=1, le=200),
+    variant_offset: int = Query(0, ge=0, le=2**63 - 1),
+    search: str = Query("", max_length=500),
+    operation: Operation | None = None,
+    readiness: WorkflowVariantReadiness | None = None,
+    variant_capability: WorkflowSelectorCapability | None = None,
+    source: Literal["profile", "workflow"] | None = None,
+    order: Literal["name", "readiness", "preference"] = "name",
+    defaults_only: bool = False,
+    enabled_only: bool = False,
+    family_ids: Annotated[list[str] | None, Query(max_length=200)] = None,
+    workflow_ids: Annotated[list[str] | None, Query(max_length=200)] = None,
 ) -> list[WorkflowFamilyOut]:
+    if (
+        limit is not None
+        or offset
+        or variant_limit is not None
+        or variant_offset
+        or search
+        or operation is not None
+        or readiness is not None
+        or variant_capability is not None
+        or source is not None
+        or order != "name"
+        or defaults_only
+        or enabled_only
+        or family_ids
+        or workflow_ids
+    ):
+        services = _services(request)
+        return read_family_page(
+            session,
+            lambda family: _workflow_family_out(
+                session,
+                services,
+                family,
+                variant_limit=variant_limit or 50,
+                variant_offset=variant_offset,
+                operation=operation,
+                readiness=readiness,
+                variant_capability=variant_capability,
+                workflow_ids=workflow_ids or (),
+            ),
+            limit=limit,
+            offset=offset,
+            search=search,
+            selector_capability=selector_capability,
+            include_archived=include_archived,
+            include_dependencies=include_dependencies,
+            family_ids=family_ids or (),
+            workflow_ids=workflow_ids or (),
+            defaults_only=defaults_only,
+            enabled_only=enabled_only,
+            source=source,
+            order=order,
+            require_variants=not family_ids
+            and (
+                limit is not None
+                or operation is not None
+                or readiness is not None
+                or variant_capability is not None
+            ),
+        )
     query = select(WorkflowFamily).options(
         selectinload(WorkflowFamily.definitions),
         selectinload(WorkflowFamily.preferences),
@@ -10103,12 +10402,75 @@ async def list_workflow_families(
     return result
 
 
+@router.get("/workflow-ready-revisions", response_model=list[WorkflowReadyRevisionOut])
+async def workflow_ready_revisions(
+    request: Request,
+    session: SessionDep,
+    selector_capability: WorkflowSelectorCapability = "image",
+    operation: Operation = Operation.TEXT_TO_IMAGE,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=2**63 - 1),
+    search: str = Query("", max_length=500),
+    revision_id: Annotated[list[str] | None, Query(max_length=200)] = None,
+) -> list[WorkflowReadyRevisionOut]:
+    services = _services(request)
+    return read_ready_revision_page(
+        session,
+        lambda definition, family, compatibility: _workflow_family_variant_out(
+            session,
+            services,
+            family,
+            definition,
+            compatibility,
+        ),
+        capability=selector_capability,
+        operation=operation,
+        limit=limit,
+        offset=offset,
+        search=search,
+        revision_ids=revision_id or (),
+    )
+
+
+@router.get("/workflow-family-operations", response_model=list[Operation])
+async def list_workflow_family_operations(
+    session: SessionDep,
+    include_archived: bool = False,
+) -> list[Operation]:
+    return family_operation_choices(session, include_archived=include_archived)
+
+
 @router.get("/workflow-families/{family_id}", response_model=WorkflowFamilyOut)
 async def get_workflow_family(
     family_id: str,
     request: Request,
     session: SessionDep,
+    variant_limit: int | None = Query(None, ge=1, le=200),
+    variant_offset: int = Query(0, ge=0, le=2**63 - 1),
+    operation: Operation | None = None,
+    readiness: WorkflowVariantReadiness | None = None,
+    variant_capability: WorkflowSelectorCapability | None = None,
 ) -> WorkflowFamilyOut:
+    if (
+        variant_limit is not None
+        or variant_offset
+        or operation is not None
+        or readiness is not None
+        or variant_capability is not None
+    ):
+        family = session.get(WorkflowFamily, family_id)
+        if family is None:
+            raise api_error(404, "workflow-family-not-found", "workflow family not found")
+        return _workflow_family_out(
+            session,
+            _services(request),
+            family,
+            variant_limit=variant_limit or 50,
+            variant_offset=variant_offset,
+            operation=operation,
+            readiness=readiness,
+            variant_capability=variant_capability,
+        )
     family = _workflow_family_row(session, family_id)
     return _workflow_family_out(session, _services(request), family)
 
@@ -10494,13 +10856,47 @@ async def set_project_workflow_selection(
 
 
 @router.get("/workflow-summaries", response_model=list[WorkflowSummaryOut])
-async def workflow_summaries(session: SessionDep) -> list[WorkflowSummaryOut]:
-    return list_workflow_summaries(session)
+async def workflow_summaries(
+    session: SessionDep,
+    limit: int | None = Query(default=None, ge=1, le=200),
+    offset: int = Query(default=0, ge=0, le=2**63 - 1),
+    search: str = Query(default="", max_length=500),
+    operation: str | None = Query(default=None, max_length=100),
+    workflow_id: Annotated[list[str] | None, Query(max_length=200)] = None,
+    ungrouped_only: bool = False,
+) -> list[WorkflowSummaryOut]:
+    return list_workflow_summaries(
+        session,
+        limit=limit,
+        offset=offset,
+        search=search,
+        operation=operation,
+        workflow_ids=workflow_id or (),
+        ungrouped_only=ungrouped_only,
+    )
 
 
 @router.get("/workflow-revision-choices", response_model=list[WorkflowRevisionChoiceOut])
-async def workflow_revision_choices(session: SessionDep) -> list[WorkflowRevisionChoiceOut]:
-    return list_workflow_revision_choices(session)
+async def workflow_revision_choices(
+    session: SessionDep,
+    limit: int | None = Query(default=None, ge=1, le=200),
+    offset: int = Query(default=0, ge=0, le=2**63 - 1),
+    search: str = Query(default="", max_length=500),
+    operation: str | None = Query(default=None, max_length=100),
+    workflow_id: Annotated[list[str] | None, Query(max_length=200)] = None,
+    revision_id: Annotated[list[str] | None, Query(max_length=200)] = None,
+    role: Literal["chat", "image", "video"] | None = None,
+) -> list[WorkflowRevisionChoiceOut]:
+    return list_workflow_revision_choices(
+        session,
+        limit=limit,
+        offset=offset,
+        search=search,
+        operation=operation,
+        workflow_ids=workflow_id or (),
+        revision_ids=revision_id or (),
+        role=role,
+    )
 
 
 @router.get(

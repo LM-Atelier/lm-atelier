@@ -28,6 +28,7 @@ for (const width of [1280, 375]) {
     await expect(image).toHaveValue("inherit");
     await expect(choices.getByRole("combobox")).toHaveCount(8);
     for (const select of await choices.getByRole("combobox").all()) {
+      await expect(select).toBeEnabled();
       await select.focus();
       await expect(select).toBeFocused();
       const bounds = await select.boundingBox();

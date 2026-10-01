@@ -13,8 +13,8 @@ import type { EngineCapabilities, EngineRole, SettingField } from "./types";
 vi.mock("./api", () => ({ api: {
   system: vi.fn().mockResolvedValue(null),
   about: vi.fn().mockResolvedValue(null),
-  profiles: vi.fn(),
-  presets: vi.fn(),
+  profilesPage: vi.fn(),
+  presetsPage: vi.fn(),
   workers: vi.fn().mockResolvedValue([]),
   runtimes: vi.fn().mockResolvedValue([]),
   backups: vi.fn().mockResolvedValue([]),
@@ -58,10 +58,10 @@ function pressed(group: HTMLElement): string | undefined {
 
 beforeEach(() => {
   localStorage.clear();
-  vi.mocked(api.presets).mockResolvedValue([
+  vi.mocked(api.presetsPage).mockResolvedValue([
     { id: "preset-1", name: "Everyday", role: "image", settings_json: {}, is_default: false },
   ]);
-  vi.mocked(api.profiles).mockResolvedValue([
+  vi.mocked(api.profilesPage).mockResolvedValue([
     {
       id: "profile-1", model_install_id: null, name: "Painter", use_case: "", role: "image", engine: "mock",
       load_settings_json: {}, request_settings_json: {}, is_default: false,
@@ -116,18 +116,18 @@ it("opens a profile editor at the saved level", async () => {
   expect(within(dialog).getByText("Seed")).toBeTruthy();
 });
 
-it("opens the chat settings at the saved level each time, whatever was chosen inside last time", () => {
+it("opens the chat settings at the saved level each time, whatever was chosen inside last time", async () => {
   localStorage.setItem(SETTING_DETAIL_KEY, "advanced");
   const role: EngineRole = "image";
   const drawer = (open: boolean) => (
     <QueryClientProvider client={new QueryClient()}>
       <SettingsDrawer open={open} onClose={() => undefined} mode="image" role={role} onRole={() => undefined}
-        engines={ENGINES} values={{}} onValues={() => undefined} presets={[]} presetId={null}
+        engines={ENGINES} values={{}} onValues={() => undefined} presetId={null}
         onPreset={() => undefined} imageEdit={false} imageEditPrompt="" />
     </QueryClientProvider>
   );
   const view = render(drawer(true));
-  const detail = screen.getByRole("group", { name: "Settings detail level" });
+  const detail = await screen.findByRole("group", { name: "Settings detail level" });
   expect(pressed(detail)).toBe("advanced");
 
   fireEvent.click(within(detail).getByRole("button", { name: "basic" }));
@@ -135,7 +135,7 @@ it("opens the chat settings at the saved level each time, whatever was chosen in
 
   view.rerender(drawer(false));
   view.rerender(drawer(true));
-  expect(pressed(screen.getByRole("group", { name: "Settings detail level" }))).toBe("advanced");
+  expect(pressed(await screen.findByRole("group", { name: "Settings detail level" }))).toBe("advanced");
   expect(storedSettingDetail()).toBe("advanced");
 });
 

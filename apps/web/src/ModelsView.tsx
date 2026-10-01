@@ -13,6 +13,7 @@ import { InstructionEditCapability } from "./InstructionEditCapability";
 import { LoraTriggerWordsEditor } from "./LoraTriggerWordsEditor";
 import { measuredTriggerWords } from "./loraTriggerWords";
 import { useCatalogInstall } from "./useCatalogInstall";
+import { useCatalogInstallMatches } from "./useCatalogInstallMatches";
 import { ModelCard } from "./ModelCard";
 import { ModelUpdatesPanel } from "./ModelUpdatesPanel";
 import { ModelUpdateProfileOffers } from "./ModelUpdateProfileOffers";
@@ -34,10 +35,9 @@ import { useConfirm } from "./useConfirm";
 
 function InstalledModelRow({
   model,
-  profile,
   creating,
   deleting,
-  saving,
+  savingProfileId,
   defaulting,
   onCreate,
   onDelete,
@@ -45,16 +45,22 @@ function InstalledModelRow({
   onSetDefault,
 }: {
   model: ModelInstall;
-  profile?: ModelProfile;
   creating: boolean;
   deleting: boolean;
-  saving: boolean;
+  savingProfileId?: string;
   defaulting: boolean;
   onCreate: () => void;
   onDelete: () => void;
-  onSaveUseCase: (value: string) => Promise<boolean>;
-  onSetDefault: () => void;
+  onSaveUseCase: (profileId: string, value: string) => Promise<boolean>;
+  onSetDefault: (profile?: ModelProfile) => void;
 }) {
+  const profileRead = useQuery({
+    queryKey: ["profiles", "installed-model", model.id, model.role, model.engine],
+    queryFn: () => api.profilesPage({ limit: 1, installIds: [model.id], role: model.role, engine: model.engine }),
+  });
+  const profile = profileRead.data?.[0];
+  const profileReady = profileRead.isSuccess && !profileRead.isError;
+  const saving = Boolean(profile && savingProfileId === profile.id);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(profile?.use_case ?? "");
   const [submitting, setSubmitting] = useState(false);
@@ -64,7 +70,7 @@ function InstalledModelRow({
   const editor = useRef<HTMLFormElement>(null);
   const wasEditing = useRef(false);
   const restoreFocus = useRef(false);
-  const busy = saving || submitting;
+  const busy = saving || submitting || !profileReady;
   const unchanged = draft.trim() === (profile?.use_case ?? "").trim();
   useEffect(() => {
     if (editing) useCaseField.current?.focus();
@@ -81,7 +87,7 @@ function InstalledModelRow({
     inFlight.current = true;
     setSubmitting(true);
     try {
-      if (await onSaveUseCase(draft.trim())) {
+      if (await onSaveUseCase(profile.id, draft.trim())) {
         restoreFocus.current = editor.current?.contains(document.activeElement) ?? false;
         setEditing(false);
       }
@@ -104,15 +110,20 @@ function InstalledModelRow({
       </span>
       <span className="model-install-size">{formatBytes(model.size_bytes)}</span>
       <span className="row-actions">
+        {!profileReady && (profileRead.isError
+          ? <button className="secondary compact-button" aria-label={`Retry profile for ${model.name}`} aria-disabled={profileRead.isFetching} onClick={() => { if (!profileRead.isFetching) void profileRead.refetch(); }}>Retry profile</button>
+          : <span role="status">Loading profile…</span>)}
+        {profileReady && <>
         {profile?.is_default
           ? <span className="badge tested">Default</span>
-          : <button className="secondary compact-button" aria-label={`Set ${model.name} as default ${model.role} model`} disabled={creating || defaulting} onClick={onSetDefault}>{defaulting ? "Setting..." : "Set default"}</button>}
+          : <button className="secondary compact-button" aria-label={`Set ${model.name} as default ${model.role} model`} disabled={creating || defaulting} onClick={() => onSetDefault(profile)}>{defaulting ? "Setting..." : "Set default"}</button>}
         {profile
           ? <button ref={editButton} className="secondary compact-button" aria-label={`Edit use case for ${model.name}`} onClick={startEditing} aria-disabled={editing || busy}>Edit use case</button>
           : <button className="secondary compact-button" aria-label={`Add ${model.name} to model selectors`} disabled={creating} onClick={onCreate}>Add to selectors</button>}
         {profile && <UseCaseSuggestion kind="profile" id={profile.id} name={model.name} savedText={profile.use_case}
           available={typeof model.manifest_json.provider_description === "string" && !!model.manifest_json.provider_description.trim()}
             busy={editing || busy || deleting} />}
+        </>}
         <button className="secondary compact-button danger" aria-label={`Delete ${model.name}`} disabled={deleting} onClick={onDelete}>Delete</button>
       </span>
       {editing && profile && (
@@ -356,7 +367,8 @@ export function ModelsView({ initialRole }: { initialRole: EngineRole }) {
   const [quantization, setQuantization] = useState("");
   const [maxSizeGb, setMaxSizeGb] = useState("");
   const [updatedWithinDays, setUpdatedWithinDays] = useState("");
-  const [installedChatCapability, setInstalledChatCapability] = useState("");
+  const [installedChatCapability, setInstalledChatCapability] = useState<"" | "text" | "vision">("");
+  const [installedSearch, setInstalledSearch] = useState("");
   const [importOpen, setImportOpen] = useState(false);
   const [importName, setImportName] = useState("");
   const [importPath, setImportPath] = useState("");
@@ -379,12 +391,18 @@ export function ModelsView({ initialRole }: { initialRole: EngineRole }) {
   const catalogItems = rawCatalogItems;
   const catalogIsStale = catalog.data?.pages.some((page) => page.stale) ?? false;
   const recipes = useQuery({ queryKey: ["recipes"], queryFn: api.recipes });
-  const installed = useQuery({ queryKey: ["models"], queryFn: api.models });
+  const installed = useInfiniteQuery({
+    queryKey: ["models", "installed", installedSearch, installedChatCapability],
+    queryFn: ({ pageParam }) => api.modelsPage({ limit: 50, offset: pageParam, search: installedSearch, chatCapability: installedChatCapability || undefined }),
+    initialPageParam: 0,
+    getNextPageParam: (page, pages) => page.length === 50 ? pages.length * 50 : undefined,
+  });
+  const installedModels = installed.data?.pages.flat() ?? [];
+  const catalogMatches = useCatalogInstallMatches(catalogItems, role);
   const modelAssets = useQuery({ queryKey: ["model-assets"], queryFn: () => api.modelAssets() });
   const baseModels = useMemo(() => recordedBaseModels(modelAssets.data ?? []), [modelAssets.data]);
   const jobs = useQuery({ queryKey: ["jobs"], queryFn: api.jobs, refetchInterval: 3_000 });
   const storage = useQuery({ queryKey: ["model-storage"], queryFn: api.modelStorage });
-  const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
   const runtimes = useQuery({ queryKey: ["runtimes"], queryFn: api.runtimes });
   const machine = useQuery({ queryKey: ["system"], queryFn: api.system });
   const runtimeFor = (model: CatalogModel) => runtimes.data?.find(
@@ -467,20 +485,10 @@ export function ModelsView({ initialRole }: { initialRole: EngineRole }) {
       void client.invalidateQueries({ queryKey: ["model-storage"] });
     },
   });
-  const installedRemoteIds = new Set(
-    (
-      role === "lora"
-        ? modelAssets.data
-          ?.filter((asset) => asset.kind === "lora" && asset.active)
-          .map((asset) => asset.manifest_json.remote_id)
-        : installed.data
-          ?.filter((model) => model.role === role && model.active)
-          ?.flatMap((model) => [
-            model.manifest_json.remote_id,
-            model.manifest_json.source_remote_id,
-          ])
-    )?.filter((remoteId): remoteId is string => typeof remoteId === "string") ?? [],
-  );
+  const installedRemoteIds = new Set(modelAssets.data
+    ?.filter((asset) => asset.kind === "lora" && asset.active)
+    .map((asset) => asset.manifest_json.remote_id)
+    .filter((id): id is string => typeof id === "string") ?? []);
   const activeDownloadIds = new Set(
     jobs.data
       ?.filter((job) =>
@@ -495,30 +503,18 @@ export function ModelsView({ initialRole }: { initialRole: EngineRole }) {
       .map((job) => job.payload_json.remote_id)
       .filter((remoteId): remoteId is string => typeof remoteId === "string") ?? [],
   );
-  const installedModels = (installed.data ?? []).filter((model) => {
-    if (!installedChatCapability) return true;
-    if (model.role !== "chat" || model.readiness !== "ready") return false;
-    const profile = profiles.data?.find((candidate) => candidate.model_install_id === model.id);
-    const modalities = profile?.input_modalities ?? [];
-    return installedChatCapability === "vision"
-      ? modalities.includes("image")
-      : modalities.includes("text") && !modalities.includes("image");
-  });
-  const installedTemplateIds = new Set(installed.data?.filter((model) => model.role === role && model.active).map((model) => model.manifest_json.workflow_template_id).filter((value): value is string => typeof value === "string") ?? []);
-  // A workflow card is installed only when ITS template is: variants share one
-  // repository, and installing one must not disable the others.
-  const statusFor = (model: CatalogModel): "idle" | "preparing" | "downloading" | "installed" => (
-    (model.workflow_template_id ? installedTemplateIds.has(model.workflow_template_id) : installedRemoteIds.has(model.remote_id))
-      ? "installed"
-      : activeDownloadIds.has(model.remote_id)
-        ? "downloading"
-        : download.isPending && download.variables?.model.remote_id === model.remote_id && (download.variables?.model.workflow_template_id ?? null) === (model.workflow_template_id ?? null)
-          ? "preparing"
-          : "idle"
-  );
+  const statusFor = (model: CatalogModel) => {
+    const match = role === "lora"
+      ? modelAssets.isError ? "unavailable" : !modelAssets.data ? "checking" : installedRemoteIds.has(model.remote_id) ? "installed" : "idle"
+      : catalogMatches.statusFor(model);
+    if (match === "installed") return match;
+    if (activeDownloadIds.has(model.remote_id)) return "downloading";
+    if (download.isPending && download.variables?.model.remote_id === model.remote_id && (download.variables?.model.workflow_template_id ?? null) === (model.workflow_template_id ?? null)) return "preparing";
+    return match;
+  };
   return (
     <div className="page-view">
-      <header className="page-header"><div><h1>Model library</h1></div><div className="storage-actions"><div className="storage-pill"><HardDrive size={17} />{storage.data?.installed_count ?? installed.data?.length ?? 0} installed · {formatBytes(storage.data?.installed_bytes)}</div><button className="secondary compact-button" onClick={() => setImportOpen(true)}><Folder size={16} />Import local</button>{Boolean(storage.data?.partial_download_count) && <button className="secondary compact-button" disabled={cleanupDownloads.isPending} onClick={() => cleanupDownloads.mutate()}>Clean {storage.data?.partial_download_count} partial</button>}</div></header>
+      <header className="page-header"><div><h1>Model library</h1></div><div className="storage-actions"><div className="storage-pill"><HardDrive size={17} />{storage.data?.installed_count ?? "…"} installed · {formatBytes(storage.data?.installed_bytes)}</div><button className="secondary compact-button" onClick={() => setImportOpen(true)}><Folder size={16} />Import local</button>{Boolean(storage.data?.partial_download_count) && <button className="secondary compact-button" disabled={cleanupDownloads.isPending} onClick={() => cleanupDownloads.mutate()}>Clean {storage.data?.partial_download_count} partial</button>}</div></header>
       <ModelUpdatesPanel onInstall={(model, selectedRole, previousInstallId) => download.mutate({ model, selectedRole, previousInstallId })} />
       <ModelUpdateProfileOffers downloads={updateDownloads} onDismiss={dismissUpdate} />
       <section className="recipe-section">
@@ -533,44 +529,46 @@ export function ModelsView({ initialRole }: { initialRole: EngineRole }) {
         <select aria-label="Model source" value={catalogSource} onChange={(event) => setCatalogSource(event.target.value)}><option value="huggingface">Hugging Face</option><option value="civitai">CivitAI</option></select><select aria-label="Model order" value={sort} onChange={(event) => setSort(event.target.value)}><option value="trending">Trending</option><option value="downloads">Downloads</option><option value="likes">Likes</option><option value="newest">Newest</option><option value="updated">Recently updated</option><option value="compatible">Compatible first</option></select>
       </div>
       <div className="catalog-filters"><select aria-label="Compatibility filter" value={compatibility} onChange={(event) => setCompatibility(event.target.value)}><option value="">All compatibility</option><option value="likely">Automatic test available</option><option value="advanced_import">Advanced import</option><option value="unsupported">Unsupported</option></select><select aria-label="Last updated filter" value={updatedWithinDays} onChange={(event) => setUpdatedWithinDays(event.target.value)}><option value="">Updated any time</option><option value="7">Updated this week</option><option value="30">Updated this month</option><option value="90">Updated in 3 months</option><option value="365">Updated this year</option></select><input aria-label="Quantization filter" placeholder="Quantization (Q4_K_M, FP8…)" value={quantization} onChange={(event) => setQuantization(event.target.value)} /><input aria-label="Maximum download size" type="number" min="0" placeholder="Max download (GB)" value={maxSizeGb} onChange={(event) => setMaxSizeGb(event.target.value)} /></div>
-      {(installed.data?.length ?? 0) > 0 && <section>
+      <section>
         <div className="section-heading">
           <h2>Installed models</h2>
           <select
             aria-label="Installed chat capability"
             value={installedChatCapability}
-            onChange={(event) => setInstalledChatCapability(event.target.value)}
+            onChange={(event) => setInstalledChatCapability(event.target.value as "" | "text" | "vision")}
           >
             <option value="">All capabilities</option>
             <option value="text">Text only</option>
             <option value="vision">Vision capable</option>
           </select>
         </div>
+        <label className="search-box"><Search size={18} /><input aria-label="Search installed models" maxLength={500} value={installedSearch} onChange={(event) => setInstalledSearch(event.target.value)} /></label>
+        {installed.isPending && <p role="status">Loading installed models…</p>}
+        <ErrorCallout message={installed.error?.message} action={<button className="secondary compact-button" aria-disabled={installed.isFetching} onClick={() => { if (!installed.isFetching) void (installed.isFetchNextPageError ? installed.fetchNextPage() : installed.refetch()); }}>Retry installed models</button>} />
+        {!installed.isPending && !installed.isError && installedModels.length === 0 && <p>No installed models match.</p>}
         <div className="profile-table model-installs">{installedModels.map((model) => {
-        const profile = profiles.data?.find((candidate) => candidate.model_install_id === model.id);
         return <InstalledModelRow
           key={model.id}
           model={model}
-          profile={profile}
           creating={createProfile.isPending && createProfile.variables?.id === model.id}
           deleting={deleteModel.isPending && deleteModel.variables === model.id}
-          saving={updateUseCase.isPending && updateUseCase.variables?.profileId === profile?.id}
+          savingProfileId={updateUseCase.isPending ? updateUseCase.variables?.profileId : undefined}
           defaulting={setDefaultModel.isPending && setDefaultModel.variables?.model.id === model.id}
           onCreate={() => createProfile.mutate(model)}
           onDelete={() => void confirm({ title: `Delete ${model.name}?`, question: "This removes the model file and its saved settings from local storage. Downloading it again is the only way back.", detail: <WorkflowConsumers kind="model_install" resourceId={model.id} />, confirmLabel: "Delete model" }).then((ok) => ok && deleteModel.mutate(model.id))}
-          onSaveUseCase={async (value) => {
-            if (!profile) return false;
+          onSaveUseCase={async (profileId, value) => {
             try {
-              await updateUseCase.mutateAsync({ profileId: profile.id, useCase: value });
+              await updateUseCase.mutateAsync({ profileId, useCase: value });
               return true;
             } catch {
               return false;
             }
           }}
-          onSetDefault={() => setDefaultModel.mutate({ model, profile })}
+          onSetDefault={(profile) => setDefaultModel.mutate({ model, profile })}
         />;
         })}</div>
-      </section>}
+        {installed.hasNextPage && <div className="load-more"><button className="secondary" aria-disabled={installed.isFetching} onClick={() => { if (!installed.isFetching) void installed.fetchNextPage(); }}>{installed.isFetchingNextPage ? "Loading installed models…" : "More installed models"}</button></div>}
+      </section>
       {(modelAssets.data?.length ?? 0) > 0 && <section>
         <div className="section-heading"><h2>Installed workflow assets</h2></div>
         <div className="profile-table model-installs">
@@ -620,7 +618,8 @@ export function ModelsView({ initialRole }: { initialRole: EngineRole }) {
       )}
       <ErrorCallout message={catalog.error?.message} action={<button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Retry</button>} />
       {catalogIsStale && !catalog.error && <div className="callout warning action-callout" role="status"><span>{catalogUnavailableMessage(catalogSource)}</span><button className="secondary compact-button" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>Refresh</button></div>}
-      <div className={`model-grid ${catalog.isFetching && !catalog.isFetchingNextPage ? "superseded" : ""}`}>{catalogItems.map((model) => <ModelCard key={model.remote_id} model={model} role={role} runtime={runtimeFor(model)} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} onChooseVersion={model.provider === "civitai" && model.parent_model_id ? () => setChoosingVersions(model) : undefined} />)}</div>
+      <ErrorCallout message={role === "lora" ? modelAssets.error?.message : catalogMatches.error?.message} action={<button className="secondary compact-button" onClick={() => { if (role === "lora") void modelAssets.refetch(); else catalogMatches.retry(); }}>Retry installation status</button>} />
+      <div className={`model-grid ${catalog.isFetching && !catalog.isFetchingNextPage ? "superseded" : ""}`}>{catalogItems.map((model) => <ModelCard key={`${model.remote_id}:${model.workflow_template_id ?? ""}`} model={model} role={role} runtime={runtimeFor(model)} status={statusFor(model)} onDownload={() => download.mutate({ model, selectedRole: role })} onChooseVersion={model.provider === "civitai" && model.parent_model_id ? () => setChoosingVersions(model) : undefined} />)}</div>
       {choosingVersions?.parent_model_id && (
         <VersionChooser modelId={choosingVersions.parent_model_id} modelName={choosingVersions.parent_model_name ?? choosingVersions.name}
           onClose={() => setChoosingVersions(null)}

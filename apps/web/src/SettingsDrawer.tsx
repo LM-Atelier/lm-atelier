@@ -1,8 +1,8 @@
 import type { ReactNode } from "react";
 import { AccessibleDialog } from "./AccessibleDialog";
-import { GenerationSettingsPanel } from "./GenerationSettingsPanel";
+import { PagedGenerationSettingsPanel } from "./PagedGenerationSettingsPanel";
 import type { ShapeAlternatives } from "./shapeAlternatives";
-import type { EngineCapabilities, EngineRole, GenerationPreset, RoutingMode } from "./types";
+import type { EngineCapabilities, EngineRole, RoutingMode } from "./types";
 
 export interface EditedVersionSettings {
   configurationControl?: ReactNode;
@@ -20,7 +20,6 @@ export function SettingsDrawer({
   engines,
   values,
   onValues,
-  presets,
   presetId,
   onPreset,
   workflowSchema,
@@ -28,6 +27,7 @@ export function SettingsDrawer({
   inheritedValues,
   inheritedPresetId,
   profileValues,
+  settingsUnavailable,
   imageEdit,
   imageEditPrompt,
   editSettings,
@@ -45,13 +45,13 @@ export function SettingsDrawer({
   engines: EngineCapabilities[];
   values: Record<string, unknown>;
   onValues: (values: Record<string, unknown>, changedKeys?: string[]) => void;
-  presets: GenerationPreset[];
   presetId: string | null;
   onPreset: (presetId: string | null) => void;
   workflowSchema?: Record<string, unknown>;
   workflowRevisionId?: string | null;
   inheritedValues?: Record<string, unknown>;
   inheritedPresetId?: string | null;
+  settingsUnavailable?: ReactNode;
   profileValues?: Record<string, unknown>;
   imageEdit: boolean;
   imageEditPrompt: string;
@@ -92,12 +92,11 @@ export function SettingsDrawer({
           was resetting exactly one thing: the reader's basic/advanced/expert
           choice, which is a disclosure level and has nothing to do with which
           role is being edited. */}
-      <GenerationSettingsPanel
+      <PagedGenerationSettingsPanel
         role={role}
         engines={engines}
         values={values}
         onValues={onValues}
-        presets={presets}
         presetId={presetId}
         onPreset={onPreset}
         workflowSchema={workflowSchema}
@@ -105,6 +104,7 @@ export function SettingsDrawer({
         inheritedValues={editSettings?.inheritedValues ?? inheritedValues}
         inheritedPresetId={inheritedPresetId}
         profileValues={profileValues}
+        settingsUnavailable={settingsUnavailable}
         imageEdit={imageEdit}
         imageEditPrompt={imageEditPrompt}
         editSettings={editSettings}

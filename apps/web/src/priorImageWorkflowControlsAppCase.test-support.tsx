@@ -145,7 +145,7 @@ export async function exercisePriorImageWorkflowControls(
     "image",
   ));
   fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
-  expect(screen.getByLabelText(/Fresh image exclusion/)).toBeInTheDocument();
+  expect(await screen.findByLabelText(/Fresh image exclusion/)).toBeInTheDocument();
   expect(screen.queryByLabelText(/Edit image exclusion/)).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
 

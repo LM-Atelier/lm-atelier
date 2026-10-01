@@ -5,7 +5,7 @@ import { api } from "./api";
 import { ChatManagerLoader } from "./ChatManagerLoader";
 import type { Chat } from "./types";
 
-vi.mock("./api", () => ({ api: { chat: vi.fn(), chatMetadata: vi.fn() } }));
+vi.mock("./api", () => ({ api: { chat: vi.fn(), chatMetadata: vi.fn(), projects: vi.fn(), project: vi.fn() } }));
 
 const chat: Chat = {
   id: "chat-settings", title: "Harbor sketches", project_id: null, archived: true,
@@ -16,6 +16,7 @@ const chat: Chat = {
 };
 
 beforeEach(() => {
+  vi.mocked(api.projects).mockReset().mockResolvedValue([]);
   vi.mocked(api.chat).mockReset().mockResolvedValue({ ...chat, messages: [] });
   vi.mocked(api.chatMetadata).mockReset().mockResolvedValue(chat);
 });
@@ -24,7 +25,7 @@ afterEach(cleanup);
 function openManager(onSave = vi.fn()) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<QueryClientProvider client={client}>
-    <ChatManagerLoader chatId={chat.id} projects={[]} onClose={vi.fn()}
+    <ChatManagerLoader chatId={chat.id} onClose={vi.fn()}
       onSave={onSave} onDelete={vi.fn()} />
   </QueryClientProvider>);
 }

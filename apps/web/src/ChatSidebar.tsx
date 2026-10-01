@@ -10,13 +10,13 @@ import { SidebarFooter } from "./SidebarFooter";
 import { SidebarResizer } from "./SidebarResizer";
 import type { View } from "./rooms";
 import type { SidebarLayout } from "./sidebarLayout";
-import type { Chat, ChatSummary, Project, EngineCapabilities, GenerationPreset, SetupReadinessReport } from "./types";
+import type { Chat, ChatSummary, Project, EngineCapabilities, SetupReadinessReport } from "./types";
 import { useChatPages } from "./useChatPages";
+import { projectsInSidebarOrder, useProjectPages, useProjectParents } from "./useProjectPages";
+import { ProjectPageControls } from "./ProjectPageControls";
 
 export function ChatSidebar({
-  projects,
   engines,
-  presets,
   currentChatId,
   view,
   setupState,
@@ -33,9 +33,7 @@ export function ChatSidebar({
   onDeleteProject,
   sidebar,
 }: {
-  projects: Project[];
   engines: EngineCapabilities[];
-  presets: GenerationPreset[];
   currentChatId: string | null;
   view: View;
   setupState?: SetupReadinessReport["state"] | undefined;
@@ -62,10 +60,20 @@ export function ChatSidebar({
   const projectImport = useRef<HTMLInputElement>(null);
   const chatPages = useChatPages(search, showArchived);
   const chats = chatPages.data ?? [];
+  const projectPages = useProjectPages(search, showArchived);
+  const parents = useProjectParents(chats.map((chat) => chat.project_id));
+  const projects = projectsInSidebarOrder([...(projectPages.data ?? []), ...parents.data]);
   const normalizedSearch = search.trim().toLowerCase();
+  const matchingProjectIds = new Set((projectPages.data ?? []).map(project => project.id));
   const visibleChats = chats.filter((chat) => (showArchived || !chat.archived) && (!normalizedSearch || chat.title.toLowerCase().includes(normalizedSearch)));
-  const visibleProjects = projects.filter((project) => (showArchived || !project.archived) && (!normalizedSearch || project.name.toLowerCase().includes(normalizedSearch) || visibleChats.some((chat) => chat.project_id === project.id)));
-  const unfiled = visibleChats.filter((chat) => !chat.project_id);
+  const visibleProjects = projects.filter((project) => (showArchived || !project.archived) && (!normalizedSearch || (matchingProjectIds.has(project.id) || project.name.toLowerCase().includes(normalizedSearch)) || visibleChats.some((chat) => chat.project_id === project.id)));
+  // The server also searches project names. Keep its matching chats reachable
+  // while a missing parent name loads, even when the chat title does not match.
+  const unfiled = chats.filter((chat) => (showArchived || !chat.archived) && (
+    !chat.project_id ? !normalizedSearch || chat.title.toLowerCase().includes(normalizedSearch)
+      : !projects.some((project) => project.id === chat.project_id)
+        && (!chatPages.isPlaceholderData || !normalizedSearch || chat.title.toLowerCase().includes(normalizedSearch))
+  ));
   const chatRow = (chat: ChatSummary) => <div className="sidebar-chat-row" key={chat.id}><button className={`chat-main ${view === "chat" && currentChatId === chat.id ? "active" : ""}`} aria-current={view === "chat" && currentChatId === chat.id ? "page" : undefined} onClick={() => { onChat(chat.id); setMobileOpen(false); }}><span>{chat.title}</span><ChatActivityIndicators chatId={chat.id} activity={chat.activity} />{chat.archived && <small>Archived</small>}</button><button className={`inline-add sidebar-pin ${chat.pinned ? "pinned" : ""}`} aria-label={chat.pinned ? `Unpin ${chat.title}` : `Pin ${chat.title}`} aria-pressed={chat.pinned} title={chat.pinned ? "Unpin" : "Pin"} onClick={() => onUpdateChat(chat.id, { pinned: !chat.pinned })}><Pin size={13} /></button><button className="inline-add" aria-label={`Manage ${chat.title}`} onClick={() => setManagedChat(chat)}><MoreHorizontal size={13} /></button></div>;
   return (
     <>
@@ -74,12 +82,12 @@ export function ChatSidebar({
       <button className="new-chat" onClick={() => { onNewChat(null); setMobileOpen(false); }}><Plus size={18} />New chat</button>
       <nav className="primary-nav"><button className={view === "media" ? "active" : ""} aria-current={view === "media" ? "page" : undefined} onClick={() => { onView("media"); setMobileOpen(false); }}><ImageIcon />Media library</button><button className={view === "models" ? "active" : ""} aria-current={view === "models" ? "page" : undefined} onClick={() => { onView("models"); setMobileOpen(false); }}><Library />Model library</button><button className={view === "references" ? "active" : ""} aria-current={view === "references" ? "page" : undefined} onClick={() => { onView("references"); setMobileOpen(false); }}><Star />References</button><button className={view === "prompts" ? "active" : ""} aria-current={view === "prompts" ? "page" : undefined} onClick={() => { onView("prompts"); setMobileOpen(false); }}><Quote />Prompt library</button><button className={view === "workflows" ? "active" : ""} aria-current={view === "workflows" ? "page" : undefined} onClick={() => { onView("workflows"); setMobileOpen(false); }}><WorkflowIcon />Workflows</button><button className={view === "studio" ? "active" : ""} aria-current={view === "studio" ? "page" : undefined} onClick={() => { onView("studio"); setMobileOpen(false); }}><ImageStudioIcon />Image Studio</button></nav>
       <div className="workspace-search"><Search size={14} /><input aria-label="Search projects and chats" placeholder="Search workspace" maxLength={500} value={search} onChange={(event) => setSearch(event.target.value)} /><button className={showArchived ? "active" : ""} aria-pressed={showArchived} onClick={() => setShowArchived((value) => !value)}>Archived</button></div>
-      <div className="workspace-tree" role="region" aria-label="Projects and chats" aria-busy={chatPages.isFetching}>
+      <div className="workspace-tree" role="region" aria-label="Projects and chats" aria-busy={chatPages.isFetching || projectPages.isFetching || parents.isFetching}>
         <div className="sidebar-section">
           <div className="section-title"><span>Projects</span><input ref={projectImport} hidden type="file" accept=".zip,.lm-atelier.zip,application/zip" onChange={(event) => { const file = event.target.files?.[0]; if (file) onImportProject(file); event.target.value = ""; }} /><button aria-label="Import project" onClick={() => projectImport.current?.click()}><Upload size={14} /></button><button aria-label="New project" onClick={() => setNaming(true)}><Plus size={15} /></button></div>
           {visibleProjects.map((project) => {
             const open = !closedProjects.has(project.id);
-            const projectMatches = normalizedSearch && project.name.toLowerCase().includes(normalizedSearch);
+            const projectMatches = normalizedSearch && (matchingProjectIds.has(project.id) || project.name.toLowerCase().includes(normalizedSearch));
             const projectChats = chats.filter((chat) => chat.project_id === project.id && (showArchived || !chat.archived) && (!normalizedSearch || projectMatches || chat.title.toLowerCase().includes(normalizedSearch)));
             return (
               <div className="project-group" key={project.id}>
@@ -102,6 +110,8 @@ export function ChatSidebar({
               </div>
             );
           })}
+          <ProjectPageControls pages={projectPages} />
+          {parents.error && <p role="alert">{parents.error.message} <button onClick={() => void parents.refetch()}>Retry project names</button></p>}
         </div>
         {unfiled.length > 0 && <div className="sidebar-section"><div className="section-title"><span>Chats</span></div><div className="chat-list standalone">{unfiled.map(chatRow)}</div></div>}
         {chatPages.isPending && <p>Loading chats…</p>}
@@ -110,8 +120,8 @@ export function ChatSidebar({
       </div>
       {naming && <PromptDialog title="New project" label="Project name" confirmLabel="Create project" placeholder="Portrait studies" onCancel={() => setNaming(false)} onConfirm={(name) => { setNaming(false); onNewProject(name); }} />}
       <SidebarFooter setupState={setupState} view={view} onSetup={onSetup} onView={onView} onNavigate={() => setMobileOpen(false)} />
-      {managedChat && <ChatManagerLoader chatId={managedChat.id} projects={projects} onClose={() => setManagedChat(null)} onSave={(values) => { onUpdateChat(managedChat.id, values); setManagedChat(null); }} onDelete={(deleteGeneratedMedia) => { onDeleteChat(managedChat.id, deleteGeneratedMedia); setManagedChat(null); }} />}
-      {managedProject && <ProjectManager project={managedProject} engines={engines} presets={presets} onClose={() => setManagedProject(null)} onSave={(values) => { onUpdateProject(managedProject.id, values); setManagedProject(null); }} onDelete={() => { onDeleteProject(managedProject.id); setManagedProject(null); }} onExport={(includeMedia) => onExportProject(managedProject.id, includeMedia)} />}
+      {managedChat && <ChatManagerLoader chatId={managedChat.id} onClose={() => setManagedChat(null)} onSave={(values) => { onUpdateChat(managedChat.id, values); setManagedChat(null); }} onDelete={(deleteGeneratedMedia) => { onDeleteChat(managedChat.id, deleteGeneratedMedia); setManagedChat(null); }} />}
+      {managedProject && <ProjectManager project={managedProject} engines={engines} onClose={() => setManagedProject(null)} onSave={(values) => { onUpdateProject(managedProject.id, values); setManagedProject(null); }} onDelete={() => { onDeleteProject(managedProject.id); setManagedProject(null); }} onExport={(includeMedia) => onExportProject(managedProject.id, includeMedia)} />}
     </aside>
       <SidebarResizer layout={sidebar} />
     </>

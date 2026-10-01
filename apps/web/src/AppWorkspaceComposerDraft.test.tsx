@@ -17,8 +17,8 @@ vi.mock("./api", () => ({
     chat: vi.fn(),
     workPlans: vi.fn(),
     engines: vi.fn(),
-    profiles: vi.fn(),
-    presets: vi.fn(),
+    profiles: vi.fn(), profilesPage: vi.fn(),
+    presets: vi.fn(), presetsPage: vi.fn(),
     workflows: vi.fn(),
     workflowFamilies: vi.fn(),
     chatWorkflowSelections: vi.fn(),
@@ -133,6 +133,8 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  vi.mocked(api.profilesPage).mockImplementation(async (options) => (await import("./test/modelLibraryPageFixtures")).profilePages(api, options));
+  vi.mocked(api.presetsPage).mockImplementation(async (options) => (await import("./test/modelLibraryPageFixtures")).presetPages(api, options));
 });
 
 function renderApp() {

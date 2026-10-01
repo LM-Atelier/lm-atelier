@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "./api";
 import { ErrorCallout } from "./ErrorCallout";
@@ -34,7 +34,16 @@ function UpdateOffer({ download, onDismiss }: {
     retry: false,
   });
   const ready = model.data?.active && model.data.readiness === "ready";
-  const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles, enabled: Boolean(ready) });
+  const profiles = useInfiniteQuery({
+    queryKey: ["profiles", "model-update", download.previousInstallId, model.data?.role, model.data?.engine],
+    queryFn: ({ pageParam }) => api.profilesPage({
+      limit: 50, offset: pageParam, installIds: [download.previousInstallId],
+      role: model.data?.role, engine: model.data?.engine,
+    }),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage, _pages, offset) => lastPage.length === 50 ? offset + 50 : undefined,
+    enabled: Boolean(ready), retry: false,
+  });
   const change = useMutation({
     mutationFn: (profile: ModelProfile) => api.updateProfileModel(profile.id, {
       expected_install_id: download.previousInstallId, download_job_id: download.jobId,
@@ -49,7 +58,7 @@ function UpdateOffer({ download, onDismiss }: {
   });
   const terminal = complete || ["failed", "cancelled"].includes(job.data?.status ?? "");
   if (!terminal && !job.error) return null;
-  const eligible = (profiles.data ?? []).filter((profile) => (
+  const eligible = (profiles.data?.pages.flat() ?? []).filter((profile) => (
     profile.model_install_id === download.previousInstallId
     && profile.role === model.data?.role && profile.engine === model.data.engine
   ));
@@ -60,7 +69,8 @@ function UpdateOffer({ download, onDismiss }: {
     {complete && !model.isLoading && !ready && !model.error && <p>The update needs current runtime verification before a profile can switch to it.</p>}
     {ready && <>
       <p>The update passed its runtime checks. Switch a profile to use it for future work; the previous version stays installed.</p>
-      {eligible.length === 0 && !profiles.isLoading && switched.length === 0 && <p>No profiles use the previous version.</p>}
+      {profiles.isPending && <p role="status">Finding profiles...</p>}
+      {eligible.length === 0 && profiles.isSuccess && !profiles.isFetching && switched.length === 0 && <p>No profiles use the previous version.</p>}
     </>}
     {switched.length > 0 && <p role="status">Updated {switched.join(", ")}.</p>}
     <ErrorCallout message={error instanceof Error ? error.message : null} />
@@ -69,6 +79,14 @@ function UpdateOffer({ download, onDismiss }: {
         aria-disabled={change.isPending}
         onClick={() => { if (!change.isPending) change.mutate(profile); }}
       >Switch {profile.name}</button>)}
+    {ready && profiles.isError && <button type="button" className="secondary compact-button"
+      aria-disabled={profiles.isFetching}
+      onClick={() => { if (!profiles.isFetching) void (profiles.isFetchNextPageError ? profiles.fetchNextPage() : profiles.refetch()); }}
+    >Retry profiles</button>}
+    {ready && profiles.hasNextPage && !profiles.isError && <button type="button" className="secondary compact-button"
+      aria-disabled={profiles.isFetching}
+      onClick={() => { if (!profiles.isFetching) void profiles.fetchNextPage(); }}
+    >{profiles.isFetchingNextPage ? "Loading profiles..." : "More profiles"}</button>}
     <button type="button" className="secondary compact-button" aria-disabled={change.isPending}
       onClick={() => { if (!change.isPending) onDismiss(download.jobId); }}>Dismiss update</button>
     </div>

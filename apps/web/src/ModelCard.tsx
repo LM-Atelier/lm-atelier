@@ -15,11 +15,13 @@ export function ModelCard({
   onDownload: () => void;
   /** Opened instead of installing when this card stands for several versions. */
   onChooseVersion?: () => void;
-  status: "idle" | "preparing" | "downloading" | "installed";
+  status: "idle" | "preparing" | "downloading" | "installed" | "checking" | "unavailable";
   runtime?: RuntimeStatus;
 }) {
   const label = {
     idle: "Install",
+    checking: "Checking installation…",
+    unavailable: "Status unavailable",
     preparing: "Checking model…",
     downloading: "Downloading…",
     installed: "Installed",

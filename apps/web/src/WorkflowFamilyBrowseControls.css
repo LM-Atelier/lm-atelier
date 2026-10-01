@@ -1,0 +1,1 @@
+.workflow-family-search { width: 100%; min-width: 0; color: var(--ink-primary); border: 1px solid var(--line-control); border-radius: 8px; background: var(--panel-2); padding: calc(8px * var(--spacing-scale, 1)); font-size: calc(12px * var(--text-scale, 1)); }

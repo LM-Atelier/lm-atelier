@@ -24,6 +24,7 @@ import {
 } from "./settings";
 import { useConfirm } from "./useConfirm";
 import { SettingsNavigation } from "./SettingsNavigation";
+import { SettingsLibraryPages } from "./SettingsLibraryPages";
 import { AppearanceSettings } from "./AppearanceSettings";
 import { StorageSummary } from "./StorageSummary";
 import { ThirdPartyNotices } from "./ThirdPartyNotices";
@@ -248,8 +249,6 @@ export function SettingsView({ engines, appearance, destinationId, onDestination
   const presetImport = useRef<HTMLInputElement>(null);
   const system = useQuery({ queryKey: ["system"], queryFn: api.system });
   const about = useQuery({ queryKey: ["about"], queryFn: api.about });
-  const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
-  const presets = useQuery({ queryKey: ["presets"], queryFn: api.presets });
   const workers = useQuery({ queryKey: ["workers"], queryFn: api.workers, refetchInterval: 3_000 });
   const runtimes = useQuery({
     queryKey: ["runtimes"],
@@ -399,14 +398,18 @@ export function SettingsView({ engines, appearance, destinationId, onDestination
       <section>
         <div className="detail-title"><div><h2>Model profiles</h2></div><button className="secondary" onClick={() => profileImport.current?.click()}>Import profile</button></div>
         <input ref={profileImport} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0], "profile"); event.target.value = ""; }} />
-        <div className="profile-table interactive">{profiles.data?.map((profile: ModelProfile) => <div key={profile.id}><span className="badge">{profile.role}</span><span className="model-install-copy"><strong>{profile.name}{profile.is_default ? " · default" : ""}</strong>{profile.use_case_derived && <small title="Derived from model metadata">Derived</small>}</span><span title={profile.use_case}>{profile.use_case || "No Auto use case yet"}</span><span className="row-actions">{!profile.is_default && <button className="secondary compact-button" aria-label={`Set ${profile.name} as default ${profile.role} model`} disabled={setDefaultProfile.isPending} onClick={() => setDefaultProfile.mutate(profile)}>Set default</button>}{profile.role === "chat" && profile.model_install_id && <button className="secondary compact-button" aria-label={`Load profile: ${profile.name}`} disabled={chatWorkerBusy || loadChat.isPending} title={chatWorkerBusy ? "Wait for active and queued jobs before changing the worker" : "Load this chat profile"} onClick={() => loadChat.mutate(profile.id)}>Load</button>}<button className="secondary compact-button" aria-label={`Edit profile: ${profile.name}`} onClick={() => setSelectedProfile(profile)}>Edit</button></span></div>)}</div>
+        <SettingsLibraryPages resource="profiles" label="model profiles" fetchPage={api.profilesPage}>{(rows) =>
+        <div className="profile-table interactive">{rows.map((profile: ModelProfile) => <div key={profile.id}><span className="badge">{profile.role}</span><span className="model-install-copy"><strong>{profile.name}{profile.is_default ? " · default" : ""}</strong>{profile.use_case_derived && <small title="Derived from model metadata">Derived</small>}</span><span title={profile.use_case}>{profile.use_case || "No Auto use case yet"}</span><span className="row-actions">{!profile.is_default && <button className="secondary compact-button" aria-label={`Set ${profile.name} as default ${profile.role} model`} disabled={setDefaultProfile.isPending} onClick={() => setDefaultProfile.mutate(profile)}>Set default</button>}{profile.role === "chat" && profile.model_install_id && <button className="secondary compact-button" aria-label={`Load profile: ${profile.name}`} disabled={chatWorkerBusy || loadChat.isPending} title={chatWorkerBusy ? "Wait for active and queued jobs before changing the worker" : "Load this chat profile"} onClick={() => loadChat.mutate(profile.id)}>Load</button>}<button className="secondary compact-button" aria-label={`Edit profile: ${profile.name}`} onClick={() => setSelectedProfile(profile)}>Edit</button></span></div>)}</div>
+        }</SettingsLibraryPages>
         {setDefaultProfile.error && <ErrorCallout message={setDefaultProfile.error.message} />}
       </section>
       <section>
         <div className="detail-title"><div><h2>Generation presets</h2><p>Reuse response length, sampling, image size, video length, and seed settings.</p></div><button className="secondary" onClick={() => presetImport.current?.click()}>Import preset</button></div>
         <input ref={presetImport} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0], "preset"); event.target.value = ""; }} />
         <div className="preset-create"><input aria-label="New preset name" placeholder="New preset name" value={presetName} onChange={(event) => setPresetName(event.target.value)} /><select aria-label="New preset role" value={presetRole} onChange={(event) => setPresetRole(event.target.value as GenerationPreset["role"])}><option value="chat">Chat</option><option value="image">Image</option><option value="video">Video</option></select><button className="primary" aria-disabled={!presetName.trim() || createPreset.isPending} onClick={() => { if (!presetName.trim() || createPreset.isPending) return; createPreset.mutate(); }}><Plus size={15} />Create preset</button></div>
-        <div className="profile-table interactive">{presets.data?.map((preset) => <div key={preset.id}><span className="badge">{preset.role}</span><strong>{preset.name}{preset.is_default ? " · default" : ""}</strong><span>{Object.keys(preset.settings_json).length} overrides</span><button className="secondary compact-button" aria-label={`Edit preset: ${preset.name}`} onClick={() => setSelectedPreset(preset)}>Edit</button></div>)}</div>
+        <SettingsLibraryPages resource="presets" label="generation presets" fetchPage={api.presetsPage}>{(rows) =>
+        <div className="profile-table interactive">{rows.map((preset) => <div key={preset.id}><span className="badge">{preset.role}</span><strong>{preset.name}{preset.is_default ? " · default" : ""}</strong><span>{Object.keys(preset.settings_json).length} overrides</span><button className="secondary compact-button" aria-label={`Edit preset: ${preset.name}`} onClick={() => setSelectedPreset(preset)}>Edit</button></div>)}</div>
+        }</SettingsLibraryPages>
         {(createPreset.error || importError) && <ErrorCallout message={createPreset.error?.message || importError} />}
       </section>
       </>)}

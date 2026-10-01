@@ -9,7 +9,8 @@ import type { Artifact, ChatDetail, EngineCapabilities, EngineRole, GenerationPr
 
 vi.mock("./api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./api")>();
-  return { ...actual, api: { ...actual.api,
+  return { ...actual, api: { ...actual.api, profilesPage: vi.fn().mockResolvedValue([]),
+    presetsPage: vi.fn(async (options) => (await import("./test/modelLibraryPageFixtures")).presetPages({ presets: async () => presets }, options)),
     workflowFamilies: vi.fn(), chatWorkflowSelections: vi.fn(), projectWorkflowSelections: vi.fn(),
     classifyDraft: vi.fn(), references: vi.fn(), upload: vi.fn(), setChatWorkflowSelection: vi.fn(),
     workflowRevisionSourceFit: vi.fn(), previewWorkflowRevisionSourceFit: vi.fn(), previewTurnSourceFit: vi.fn(),
@@ -76,7 +77,7 @@ function Harness({ initial, initialText = "Paint a green landscape", onAccept, o
   const [visible, setVisible] = useState(true);
   return <>
     {remountable && <button onClick={() => setVisible((current) => !current)}>Toggle editor</button>}
-    {visible && <TurnEditor chat={chat} engines={[engine]} profiles={[]} presets={presets}
+    {visible && <TurnEditor chat={chat} engines={[engine]}
       stoppable={stoppable} settings={settings} onSettings={setSettings} settingsRole={settingsRole} onSettingsRole={ignore}
       presetId={presetId} onPreset={setPresetId} onMode={ignore} onSend={onSend} onStop={ignore} onStopAndSend={onStopAndSend}
       sourceFitPreviewContext={sourceFitPreviewContext}
@@ -97,6 +98,7 @@ function mount(element: ReactNode) {
 }
 
 beforeEach(() => {
+  vi.mocked(api.profilesPage).mockResolvedValue([]);
   vi.mocked(api.workflowFamilies).mockResolvedValue([]);
   vi.mocked(api.workflowRevisionSourceFit).mockResolvedValue({
     available: false, reason: "source_fit_workflow_unsupported", modes: [], request_authorized: false,
@@ -245,7 +247,8 @@ describe("TurnEditor", () => {
     mount(<Harness onAccept={accept} />);
     fireEvent.change(screen.getByLabelText("Number of outputs"), { target: { value: "4" } });
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
-    fireEvent.change(screen.getByRole("spinbutton", { name: "Width" }), { target: { value: "1024" } });
+    fireEvent.change(await screen.findByRole("spinbutton", { name: "Width" }), { target: { value: "1024" } });
+    await screen.findByRole("option", { name: "Landscape" });
     fireEvent.change(screen.getByLabelText("image preset"), { target: { value: "preset-one" } });
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
     fireEvent.click(screen.getByRole("button", { name: "Queue edited version" }));

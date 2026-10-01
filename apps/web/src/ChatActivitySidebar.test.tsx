@@ -8,7 +8,7 @@ import { asChatSummary } from "./chatSummaryFixtures";
 import { changeChatPages, useChatPages } from "./useChatPages";
 import type { ChatDetail } from "./types";
 
-vi.mock("./api", () => ({ api: { chatSummaries: vi.fn(), chatMetadata: vi.fn() } }));
+vi.mock("./api", () => ({ api: { projects: vi.fn(), project: vi.fn(), chatSummaries: vi.fn(), chatMetadata: vi.fn() } }));
 const stamp = "2026-09-20T00:00:00Z";
 const detail: ChatDetail = {
   id: "chat", title: "Color study", project_id: null, archived: false, pinned: false,
@@ -25,13 +25,13 @@ function setup() {
   return { client, wrapper };
 }
 function sidebar(onUpdateChat = vi.fn()) {
-  return <ChatSidebar projects={[]} engines={[]} presets={[]} currentChatId="chat" view="chat"
+  return <ChatSidebar engines={[]} currentChatId="chat" view="chat"
     onChat={vi.fn()} onSetup={vi.fn()} onView={vi.fn()} onNewChat={vi.fn()} onNewProject={vi.fn()}
     onExportProject={vi.fn()} onImportProject={vi.fn()} onUpdateChat={onUpdateChat} onDeleteChat={vi.fn()}
     onUpdateProject={vi.fn()} onDeleteProject={vi.fn()}
     sidebar={{ width: 272, collapsed: false, setWidth: vi.fn(), toggle: vi.fn() }} />;
 }
-beforeEach(() => { vi.mocked(api.chatSummaries).mockResolvedValue([summary]); vi.mocked(api.chatMetadata).mockResolvedValue(detail); });
+beforeEach(() => { vi.mocked(api.projects).mockResolvedValue([]); vi.mocked(api.chatSummaries).mockResolvedValue([summary]); vi.mocked(api.chatMetadata).mockResolvedValue(detail); });
 afterEach(cleanup);
 
 it("loads exact chat settings before showing management controls", async () => {

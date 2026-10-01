@@ -1,3 +1,4 @@
+import { mockWorkflowFamilyPages } from "./workflowFamilyReadFixtures";
 import { mockWorkflowReadsFromFixture } from "./workflowReadFixtures";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -7,7 +8,7 @@ import { api } from "./api";
 import type { Workflow, WorkflowFamily, WorkflowInstallProgress } from "./types";
 
 vi.mock("./api", () => ({ api: {
-  workflows: vi.fn(), workflowSummaries: vi.fn(), workflow: vi.fn(), workflowFamilies: vi.fn(),
+  workflows: vi.fn(), workflowSummaries: vi.fn(), workflow: vi.fn(), workflowFamilyOperations: vi.fn().mockResolvedValue([]), workflowFamilies: vi.fn(),
   workflowInstallProgress: vi.fn(), installWorkflowOffer: vi.fn(), retryJob: vi.fn(),
 } }));
 vi.mock("./CustomNodesPanel", () => ({ CustomNodesPanel: () => null }));
@@ -49,7 +50,7 @@ function show() {
   return render(<QueryClientProvider client={client}><WorkflowsView /></QueryClientProvider>);
 }
 function arrange(snapshot: WorkflowInstallProgress) {
-  vi.mocked(api.workflowFamilies).mockResolvedValue([family(snapshot)]);
+  mockWorkflowFamilyPages([family(snapshot)]);
   vi.mocked(api.workflowInstallProgress).mockResolvedValue(snapshot);
 }
 beforeEach(() => {

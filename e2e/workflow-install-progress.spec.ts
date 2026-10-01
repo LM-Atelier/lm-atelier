@@ -61,7 +61,9 @@ for (const width of [1280, 375]) {
     let releaseRead: (() => void) | undefined;
     let installRequests = 0;
     await page.route("**/api/workflow-families?*", route => route.fulfill({ json: [family(progress(phase))] }));
-    await page.route("**/api/workflow-summaries", route => route.fulfill({ json: [{
+    await page.route("**/api/workflow-family-operations", route => route.fulfill({ json: ["text_to_image"] }));
+    await page.route("**/api/workflow-summaries?*", route => route.fulfill({ json:
+      new URL(route.request().url()).searchParams.get("ungrouped_only") === "true" ? [] : [{
       id: workflow.id, family_id: workflow.family_id, name: workflow.name, description: workflow.description,
       operation: workflow.operation, current_revision_id: workflow.current_revision_id,
       revision_count: 1, created_at: stamp, updated_at: stamp,

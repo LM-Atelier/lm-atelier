@@ -2,6 +2,7 @@ import { useQueries } from "@tanstack/react-query";
 import { api } from "./api";
 import { arrangedShapes, useOutputShapes } from "./outputShapePreferences";
 import type { ShapeAlternatives } from "./shapeAlternatives";
+import { WorkflowFamilyBrowseControls } from "./WorkflowFamilyBrowseControls";
 
 /** The workflows among the alternatives that take a shape, each one choice away.
  *
@@ -24,10 +25,11 @@ export function ShapeAlternativeList({ alternatives }: { alternatives: ShapeAlte
     const mode = proof.operation === "text_to_image" ? "image" : "video";
     return arrangedShapes(proof.preset_ids, shapes[mode]).length > 0;
   });
-  if (shaped.length === 0) return null;
+  if (shaped.length === 0 && !alternatives.browse) return null;
   return (
-    <small>
-      {"These workflows take a shape: "}
+    <div>
+      {alternatives.browse && <WorkflowFamilyBrowseControls browse={alternatives.browse} label="alternative workflows" />}
+      {shaped.length > 0 && <small>{"These workflows take a shape: "}
       {shaped.map((candidate, index) => (
         <span key={candidate.familyId}>
           {index > 0 && ", "}
@@ -44,7 +46,8 @@ export function ShapeAlternativeList({ alternatives }: { alternatives: ShapeAlte
           </button>
         </span>
       ))}
+      </small>}
       {alternatives.error && <span role="alert">{` ${alternatives.error}`}</span>}
-    </small>
+    </div>
   );
 }
