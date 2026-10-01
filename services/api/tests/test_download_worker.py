@@ -337,19 +337,23 @@ def test_download_holds_the_nested_parent_through_the_stream(
         captured["parent"] = child
         return child
 
-    original_stream = transfer_module._stream_response
+    original_stream = transfer_module._stream_with_client
     seen: list[str] = []
 
     def wrap_stream(
-        client: httpx.Client, request: HttpsArtifactRequest, partial: Path, starting_size: int
-    ) -> int:
+        client: httpx.Client,
+        request: HttpsArtifactRequest,
+        descriptor: int,
+        starting_size: int,
+        digest: Any,
+    ) -> tuple[int, str]:
         from local_lm.filesystem_links import list_entries
 
         seen.extend(entry.name for entry in list_entries(captured["parent"]))
-        return original_stream(client, request, partial, starting_size)
+        return original_stream(client, request, descriptor, starting_size, digest)
 
     monkeypatch.setattr(transfer_module, "open_child_directory", wrap_open_child)
-    monkeypatch.setattr(transfer_module, "_stream_response", wrap_stream)
+    monkeypatch.setattr(transfer_module, "_stream_with_client", wrap_stream)
 
     def handler(request: httpx.Request) -> httpx.Response:
         return _response(200, content, headers={"content-length": str(len(content))})
@@ -359,6 +363,337 @@ def test_download_holds_the_nested_parent_through_the_stream(
     )
     assert Path(path).read_bytes() == content
     assert "sentinel" in seen
+
+
+def test_https_transfer_does_not_follow_a_partial_replaced_before_the_write(
+    tmp_path: Path,
+) -> None:
+    """Replacing the partial name during the response must not receive the body.
+
+    The destination directory is already held when the response arrives.
+    Pointing the partial name at another file has to leave that file alone.
+    """
+    content = b"verified artifact"
+    payload = _https_payload(tmp_path, content)
+    partial = (
+        tmp_path
+        / "models"
+        / f".example.safetensors.{payload['expected_sha256'][:12]}.https-partial"
+    )
+    outside = tmp_path / "outside-body"
+    outside.write_bytes(b"")
+
+    refused = False
+    swapped = False
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal refused, swapped
+        partial.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if partial.is_symlink() or partial.exists():
+                partial.unlink()
+            os.link(outside, partial)
+        except PermissionError:
+            # The partial is open, so this host will not let the name go.
+            refused = True
+        else:
+            swapped = True
+        return _response(200, content, headers={"content-length": str(len(content))})
+
+    path = download_https_artifact(payload, transport=httpx.MockTransport(handler))
+
+    assert outside.read_bytes() == b""
+    destination = Path(path)
+    assert not destination.is_symlink()
+    assert destination.read_bytes() == content
+    if os.name == "nt":
+        assert refused
+        assert not swapped
+    else:
+        assert swapped
+        assert not refused
+
+
+def _partial(tmp_path: Path, payload: dict[str, Any]) -> Path:
+    return (
+        tmp_path
+        / "models"
+        / f".example.safetensors.{payload['expected_sha256'][:12]}.https-partial"
+    )
+
+
+class _BytesThenReadError(httpx.SyncByteStream):
+    """Yield one chunk, then fail the way a dropped connection does."""
+
+    def __init__(self, chunk: bytes) -> None:
+        self._chunk = chunk
+
+    def __iter__(self) -> Any:
+        yield self._chunk
+        raise httpx.ReadError("connection reset")
+
+
+def test_a_complete_partial_publishes_the_verified_bytes_when_its_name_is_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A verified partial is published from the descriptor that was hashed.
+
+    Closing it and renaming the name lets a replacement at that name become
+    the destination. The other file's bytes must not land there.
+    """
+
+    content = b"verified artifact"
+    payload = _https_payload(tmp_path, content)
+    partial = _partial(tmp_path, payload)
+    partial.parent.mkdir()
+    partial.write_bytes(content)
+    outside = tmp_path / "outside-body"
+    outside.write_bytes(b"x" * len(content))
+
+    def swap() -> None:
+        try:
+            if partial.is_symlink() or partial.exists():
+                partial.unlink()
+            os.link(outside, partial)
+        except OSError:
+            pass
+
+    real_rename = transfer_module.rename_entry
+    real_publish = transfer_module.publish_opened_file
+
+    def rename_after_swap(*args: Any, **kwargs: Any) -> None:
+        swap()
+        real_rename(*args, **kwargs)
+
+    def publish_after_swap(*args: Any, **kwargs: Any) -> None:
+        swap()
+        real_publish(*args, **kwargs)
+
+    monkeypatch.setattr(transfer_module, "rename_entry", rename_after_swap)
+    monkeypatch.setattr(transfer_module, "publish_opened_file", publish_after_swap)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("a verified partial does not contact the server")
+
+    path = download_https_artifact(payload, transport=httpx.MockTransport(handler))
+
+    assert Path(path).read_bytes() == content
+    assert outside.read_bytes() == b"x" * len(content)
+
+
+def test_a_resumed_transfer_survives_a_dropped_connection(tmp_path: Path) -> None:
+    """Bytes received before a network error stay on the canonical partial.
+
+    A hidden resume copy left beside that partial makes the next attempt
+    refuse, so the interrupted download can never finish.
+    """
+
+    content = b"0123456789" * 4 + b"abcdef"
+    assert len(content) == 46
+    payload = _https_payload(tmp_path, content)
+    partial = _partial(tmp_path, payload)
+    partial.parent.mkdir()
+    split = 5
+    partial.write_bytes(content[:split])
+    attempts = {"count": 0}
+
+    def fail_then_finish(request: httpx.Request) -> httpx.Response:
+        start = int(request.headers["range"].removeprefix("bytes=").rstrip("-"))
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            assert start == split
+            return httpx.Response(
+                206,
+                stream=_BytesThenReadError(content[split : split + 4]),
+                headers={"content-range": f"bytes {split}-{len(content) - 1}/{len(content)}"},
+            )
+        assert start == len(partial.read_bytes())
+        return _response(
+            206,
+            content[start:],
+            headers={"content-range": f"bytes {start}-{len(content) - 1}/{len(content)}"},
+        )
+
+    with pytest.raises(HttpsTransferError) as raised:
+        download_https_artifact(payload, transport=httpx.MockTransport(fail_then_finish))
+
+    assert raised.value.code == "network_error"
+    assert content.startswith(partial.read_bytes())
+    assert len(partial.read_bytes()) >= split
+    assert not list(tmp_path.rglob("*.resume"))
+
+    path = download_https_artifact(payload, transport=httpx.MockTransport(fail_then_finish))
+
+    assert Path(path).read_bytes() == content
+    assert not list(tmp_path.rglob("*.https-partial"))
+    assert not list(tmp_path.rglob("*.resume"))
+
+
+def test_a_resumed_transfer_survives_a_filesystem_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write error keeps the bytes already stored and the next attempt finishes."""
+
+    content = b"0123456789" * 4 + b"abcdef"
+    payload = _https_payload(tmp_path, content)
+    partial = _partial(tmp_path, payload)
+    partial.parent.mkdir()
+    split = 5
+    partial.write_bytes(content[:split])
+    kept = 4
+    remainder = content[split:]
+    real_write = os.write
+
+    def fail_after_the_new_bytes(descriptor: int, data: bytes) -> int:
+        if bytes(data) == remainder:
+            real_write(descriptor, data[:kept])
+            raise OSError("no space")
+        return real_write(descriptor, data)
+
+    monkeypatch.setattr(os, "write", fail_after_the_new_bytes)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        start = int(request.headers["range"].removeprefix("bytes=").rstrip("-"))
+        assert start == split
+        return _response(
+            206,
+            remainder,
+            headers={"content-range": f"bytes {split}-{len(content) - 1}/{len(content)}"},
+        )
+
+    with pytest.raises(HttpsTransferError) as raised:
+        download_https_artifact(payload, transport=httpx.MockTransport(handler))
+
+    assert raised.value.code == "filesystem_error"
+    assert partial.read_bytes() == content[: split + kept]
+    assert not list(tmp_path.rglob("*.resume"))
+
+    monkeypatch.undo()
+
+    def finish(request: httpx.Request) -> httpx.Response:
+        start = int(request.headers["range"].removeprefix("bytes=").rstrip("-"))
+        assert start == split + 4
+        return _response(
+            206,
+            content[start:],
+            headers={"content-range": f"bytes {start}-{len(content) - 1}/{len(content)}"},
+        )
+
+    path = download_https_artifact(payload, transport=httpx.MockTransport(finish))
+
+    assert Path(path).read_bytes() == content
+
+
+def test_a_completed_resume_survives_a_failed_final_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sync failure after the resumed body is stored folds that file back.
+
+    The final sync is outside the stream's error handler. Leaving the resume
+    file in place makes the next attempt refuse, so the finished bytes never
+    land at the destination.
+    """
+
+    content = b"0123456789" * 4 + b"abcdef"
+    payload = _https_payload(tmp_path, content)
+    partial = _partial(tmp_path, payload)
+    partial.parent.mkdir()
+    split = 5
+    partial.write_bytes(content[:split])
+    calls = {"count": 0}
+    real_fsync = os.fsync
+
+    def fail_the_final_sync(descriptor: int) -> None:
+        calls["count"] += 1
+        if calls["count"] >= 2:
+            raise OSError("sync failed")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", fail_the_final_sync)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        start = int(request.headers["range"].removeprefix("bytes=").rstrip("-"))
+        assert start == split
+        return _response(
+            206,
+            content[split:],
+            headers={"content-range": f"bytes {split}-{len(content) - 1}/{len(content)}"},
+        )
+
+    with pytest.raises(HttpsTransferError) as raised:
+        download_https_artifact(payload, transport=httpx.MockTransport(handler))
+
+    assert raised.value.code == "filesystem_error"
+    assert partial.read_bytes() == content
+    assert not list(tmp_path.rglob("*.resume"))
+
+    monkeypatch.undo()
+
+    def refuse_network(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("the stored body is already complete")
+
+    path = download_https_artifact(payload, transport=httpx.MockTransport(refuse_network))
+
+    assert Path(path).read_bytes() == content
+
+
+def test_a_leftover_resume_file_does_not_block_the_next_attempt(tmp_path: Path) -> None:
+    """A resume file left beside the partial must not stop the next attempt.
+
+    The partial holds the last folded prefix. The leftover name is stale, so
+    the transfer continues from that prefix and stores the whole body.
+    """
+
+    content = b"0123456789" * 4 + b"abcdef"
+    assert len(content) == 46
+    payload = _https_payload(tmp_path, content)
+    partial = _partial(tmp_path, payload)
+    partial.parent.mkdir()
+    split = 5
+    partial.write_bytes(content[:split])
+    leftover = partial.with_name(partial.name + ".resume")
+    leftover.write_bytes(content[:9])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        start = int(request.headers["range"].removeprefix("bytes=").rstrip("-"))
+        assert start == split
+        return _response(
+            206,
+            content[start:],
+            headers={"content-range": f"bytes {start}-{len(content) - 1}/{len(content)}"},
+        )
+
+    path = download_https_artifact(payload, transport=httpx.MockTransport(handler))
+
+    assert Path(path).read_bytes() == content
+    assert not list(tmp_path.rglob("*.https-partial"))
+    assert not list(tmp_path.rglob("*.resume"))
+
+
+def test_a_full_partial_with_the_wrong_digest_is_replaced_by_the_body(tmp_path: Path) -> None:
+    """A complete partial that does not match is removed, and the next fetch stores the body."""
+
+    content = b"verified artifact"
+    payload = _https_payload(tmp_path, content)
+    partial = _partial(tmp_path, payload)
+    partial.parent.mkdir()
+    partial.write_bytes(b"x" * len(content))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.headers.get("range"):
+            return httpx.Response(416, headers={"content-range": f"bytes */{len(content)}"})
+        return _response(200, content, headers={"content-length": str(len(content))})
+
+    with pytest.raises(HttpsTransferError) as raised:
+        download_https_artifact(payload, transport=httpx.MockTransport(handler))
+
+    assert raised.value.code == "digest_mismatch"
+    assert not list(tmp_path.rglob("*.https-partial"))
+    assert not list(tmp_path.rglob("*.resume"))
+
+    path = download_https_artifact(payload, transport=httpx.MockTransport(handler))
+
+    assert Path(path).read_bytes() == content
 
 
 def test_https_transfer_resumes_only_from_the_exact_content_range(tmp_path: Path) -> None:

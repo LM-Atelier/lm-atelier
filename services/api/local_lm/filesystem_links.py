@@ -590,6 +590,39 @@ def create_entry(anchor: AnchoredDirectory, name: str) -> int:
         _refuse()
 
 
+def create_publishable_entry(anchor: AnchoredDirectory, name: str) -> int:
+    """Create a new file and return a descriptor publish_opened_file can move.
+
+    create_entry's descriptor is for writing only. Publishing moves that same
+    object, and on Windows the move right has to be on the handle from the
+    moment it is opened. Callers that will not publish keep using create_entry,
+    which does not hold delete rights.
+
+    The descriptor is readable as well as writable. When a host cannot hard-link
+    an open file, publication copies the bytes back from this descriptor, and a
+    write-only one has nothing to read.
+    """
+
+    _require_entry_name(name)
+    if anchor.descriptor is not None:
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            return os.open(name, flags, 0o600, dir_fd=anchor.descriptor)
+        except FileExistsError:
+            raise AnchoredEntryExists(CONTAINMENT_REFUSED) from None
+        except OSError:
+            _refuse()
+    handle = anchor.handle
+    if handle is None:
+        _refuse()
+    created = _nt_open_relative(handle, name, intent="create_publishable_file")
+    try:
+        return _descriptor_from_handle(created)
+    except OSError:
+        _close_windows_handle(created)
+        _refuse()
+
+
 def open_entry(anchor: AnchoredDirectory, name: str) -> int | None:
     """Open an EXISTING entry through the held directory and hand back a descriptor.
 
@@ -682,6 +715,43 @@ def take_regular_file(anchor: AnchoredDirectory, name: str) -> int | None:
     if handle is None:
         _refuse()
     opened, status = _nt_try_open_relative(handle, name, intent="rename_source")
+    if status in (_STATUS_OBJECT_NAME_NOT_FOUND, _STATUS_OBJECT_PATH_NOT_FOUND):
+        return None
+    if status != _STATUS_SUCCESS or not opened:
+        _refuse()
+    if _nt_is_reparse(opened):
+        _close_windows_handle(opened)
+        _refuse()
+    try:
+        descriptor = _descriptor_from_handle(opened)
+    except OSError:
+        _close_windows_handle(opened)
+        _refuse()
+    return _require_regular(descriptor)
+
+
+def open_publishable_entry(anchor: AnchoredDirectory, name: str) -> int | None:
+    """Open an existing regular file for reading, with move rights.
+
+    None means the name is absent. The descriptor is the object a later
+    publish_opened_file moves, so the bytes just read and the published file
+    are the same object. Windows cannot add move rights after the open.
+    """
+
+    _require_entry_name(name)
+    if anchor.descriptor is not None:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        try:
+            descriptor = os.open(name, flags, dir_fd=anchor.descriptor)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            _refuse()
+        return _require_regular(descriptor)
+    handle = anchor.handle
+    if handle is None:
+        _refuse()
+    opened, status = _nt_try_open_relative(handle, name, intent="open_publishable_file")
     if status in (_STATUS_OBJECT_NAME_NOT_FOUND, _STATUS_OBJECT_PATH_NOT_FOUND):
         return None
     if status != _STATUS_SUCCESS or not opened:
@@ -2212,8 +2282,9 @@ def _nt_try_open_relative(parent: int | None, name: str, *, intent: str) -> tupl
     does not need that distinction goes through _nt_open_relative.
 
     `intent` is one of open_dir, create_dir, open_security_dir, create_security_dir,
-    open_file, create_file,
-    delete_directory or rename_source. It is spelled out rather than inferred from a flag because
+    open_file, open_publishable_file, create_file, create_publishable_file,
+    delete_directory, delete_source or rename_source. It is spelled out rather
+    than inferred from a flag because
     the access mask and the disposition have to agree, and getting that pair
     wrong fails in ways that look like a filesystem problem rather than a
     coding one.
@@ -2248,8 +2319,20 @@ def _nt_try_open_relative(parent: int | None, name: str, *, intent: str) -> tupl
         access |= _FILE_WRITE_DATA
         options |= _FILE_NON_DIRECTORY_FILE
         disposition = _FILE_CREATE
+    elif intent == "create_publishable_file":
+        # Delete is what lets publication rename this handle. It stays off
+        # create_file: a caller that only writes has no business moving the name.
+        access |= _FILE_READ_DATA | _FILE_WRITE_DATA | _DELETE
+        options |= _FILE_NON_DIRECTORY_FILE
+        disposition = _FILE_CREATE
     elif intent == "open_file":
         access |= _FILE_READ_DATA
+        options |= _FILE_NON_DIRECTORY_FILE
+        disposition = _FILE_OPEN
+    elif intent == "open_publishable_file":
+        # Read so the caller can hash this object, and delete so publication
+        # can rename the same handle. open_file stays without delete rights.
+        access |= _FILE_READ_DATA | _DELETE
         options |= _FILE_NON_DIRECTORY_FILE
         disposition = _FILE_OPEN
     elif intent == "delete_directory":
