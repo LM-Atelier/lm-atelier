@@ -153,6 +153,16 @@ class ChatUpdate(ApiModel):
     web_settings_json: WebSettings | None = None
 
 
+class GenerationRetryPolicyOut(ApiModel):
+    max_retries: StrictInt = Field(default=3, ge=0, le=10)
+    revision: StrictInt = Field(default=0, ge=0)
+
+
+class GenerationRetryPolicyUpdate(ApiModel):
+    max_retries: StrictInt = Field(ge=0, le=10)
+    expected_revision: StrictInt = Field(ge=0)
+
+
 class GenerationIdentityOut(ApiModel):
     model_profile_name: str | None = None
     workflow_family_name: str | None = None

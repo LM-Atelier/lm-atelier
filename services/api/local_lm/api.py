@@ -190,6 +190,11 @@ from .generation_queue import (
     change_generation_queue,
     read_generation_queue,
 )
+from .generation_retry import (
+    GenerationRetryPolicyConflict,
+    read_retry_policy,
+    write_retry_policy,
+)
 from .gguf import (
     GGUFSelectionError,
     automatic_gguf_selection,
@@ -471,6 +476,8 @@ from .schemas import (
     ExchangeDeletionOut,
     GenerationIdentityOut,
     GenerationQueuePolicyOut,
+    GenerationRetryPolicyOut,
+    GenerationRetryPolicyUpdate,
     HealthOut,
     InstallQueuePolicyOut,
     JobActivityOut,
@@ -6297,6 +6304,35 @@ async def cleanup_artifacts(
         reclaimed_bytes=cleanup.reclaimed_bytes,
         truncated=cleanup.truncated,
     )
+
+
+@router.get("/settings/generation-retries", response_model=GenerationRetryPolicyOut)
+def get_generation_retry_policy(session: ConversationSessionDep) -> GenerationRetryPolicyOut:
+    try:
+        return read_retry_policy(session)
+    except ValueError as exc:
+        raise api_error(
+            409,
+            "generation-retry-setting-invalid",
+            "The saved generation retry setting is invalid.",
+        ) from exc
+
+
+@router.put("/settings/generation-retries", response_model=GenerationRetryPolicyOut)
+def put_generation_retry_policy(
+    payload: GenerationRetryPolicyUpdate, session: ConversationSessionDep
+) -> GenerationRetryPolicyOut:
+    try:
+        result = write_retry_policy(session, payload)
+    except GenerationRetryPolicyConflict as exc:
+        session.rollback()
+        raise api_error(
+            409,
+            "generation-retry-setting-changed",
+            "The generation retry setting changed. Refresh it.",
+        ) from exc
+    session.commit()
+    return result
 
 
 @router.get("/artifacts/retention", response_model=RetentionPolicyOut)

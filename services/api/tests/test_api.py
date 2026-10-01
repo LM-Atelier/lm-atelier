@@ -2371,6 +2371,10 @@ async def test_ordered_retry_preserves_completed_predecessor(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    choice = await client.put(
+        "/api/settings/generation-retries", json={"max_retries": 0, "expected_revision": 0}
+    )
+    assert choice.status_code == 200
     original_generate = MockMediaAdapter.generate
 
     async def fail_media_step(

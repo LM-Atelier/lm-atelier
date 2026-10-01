@@ -6,6 +6,7 @@ import {
 } from "./completionNotifications";
 import { setSoundWhenFinished, useSoundWhenFinished } from "./completionSound";
 import { setSendKeyChoice, useSendKeyChoice, type SendKeyChoice } from "./sendKey";
+import { GenerationRetrySetting } from "./GenerationRetrySetting";
 
 const SEND_KEYS: readonly { value: SendKeyChoice; label: string }[] = [
   { value: "enter", label: "Enter sends" },
@@ -113,6 +114,7 @@ export function GeneralSettings() {
         </div>
       </section>
       <NotificationSetting />
+      <GenerationRetrySetting />
     </>
   );
 }

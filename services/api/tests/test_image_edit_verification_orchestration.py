@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
@@ -209,6 +209,7 @@ async def test_verifier_starts_after_media_handoff_and_inside_primary_lease(
         work_plan_id="plan-source",
         work_step_id="step-source",
         standalone_prompt="Make the top red",
+        provenance_json={},
     )
 
     class FakeSession:
@@ -368,11 +369,18 @@ async def test_preemption_cancels_the_running_check_before_foreground_execution(
     assert orchestrator._preempted_image_edit_verifications == set()
 
 
-async def test_automatic_edit_retry_does_not_preempt_its_own_check() -> None:
+async def test_automatic_edit_retry_does_not_preempt_its_own_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     orchestrator = _orchestrator()
     orchestrator._is_image_edit_verification_retry = Mock(return_value=True)  # type: ignore[method-assign]
     orchestrator._preempt_running_image_edit_verifications = AsyncMock()  # type: ignore[method-assign]
     orchestrator._execute = AsyncMock()  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        orchestrator,
+        "session_factory",
+        lambda: nullcontext(SimpleNamespace(get=lambda *_args: None)),
+    )
 
     await orchestrator._execute_after_preempting_verification("job-retry", "run-retry")
 

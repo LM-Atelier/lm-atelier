@@ -1098,6 +1098,13 @@ export const api = {
     }
     return page;
   },
+  generationRetryPolicy: () =>
+    request<import("./generationRetryTypes").GenerationRetryPolicy>("/api/settings/generation-retries"),
+  updateGenerationRetryPolicy: (maxRetries: number, expectedRevision: number) =>
+    request<import("./generationRetryTypes").GenerationRetryPolicy>("/api/settings/generation-retries", {
+      method: "PUT",
+      body: JSON.stringify({ max_retries: maxRetries, expected_revision: expectedRevision }),
+    }),
   artifact: (artifactId: string) =>
     request<Artifact>(`/api/artifacts/${encodeURIComponent(artifactId)}`),
   favoriteArtifact: (artifactId: string, favorite: boolean) =>
