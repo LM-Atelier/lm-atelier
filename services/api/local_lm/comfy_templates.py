@@ -707,6 +707,23 @@ _VIDEO_OUTPUTS = frozenset({"saveanimatedpng", "saveanimatedwebp", "savevideo", 
 
 
 def _role_for_template(template_id: str, value: dict[str, Any] | None = None) -> str | None:
+    """Whether a template makes pictures or videos, read from what its graph saves.
+
+    The id prefix is only a catalog convention, and some templates break it: an
+    image editing template can carry a "video_" prefix and a first-frame video
+    template an "image_" one. Offered under the wrong role, a template is
+    installed as the wrong kind of workflow. The prefix and the node names
+    decide only for a graph that saves neither.
+    """
+
+    if value:
+        saved = {
+            str(node.get("type") or "").casefold() for node in _all_nodes(value) if _runs(node)
+        }
+        if saved & (_VIDEO_OUTPUTS | {"vhs_videocombine"}):
+            return "video"
+        if saved & _PICTURE_OUTPUTS:
+            return "image"
     if template_id.startswith("image_"):
         return "image"
     if template_id.startswith("video_"):

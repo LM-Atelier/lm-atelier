@@ -2130,6 +2130,96 @@ def test_a_video_template_that_loads_a_picture_installs_as_image_to_video(tmp_pa
     assert compiled.api_graph["1"]["inputs"]["image"] == "${input_image}"
 
 
+def test_a_template_role_follows_what_its_graph_saves_before_its_id() -> None:
+    """Some catalog templates break the id convention: an image editing template
+    with a "video_" prefix was offered for video, and a first-frame video template
+    with an "image_" prefix for pictures, so each installed as the wrong kind."""
+    from local_lm.comfy_templates import _role_for_template
+
+    def graph(*nodes: tuple[str, int]) -> dict[str, Any]:
+        return {
+            "nodes": [
+                {"id": index, "type": kind, "mode": mode}
+                for index, (kind, mode) in enumerate(nodes)
+            ]
+        }
+
+    picture = graph(("LoadImage", 0), ("SaveImage", 0))
+    video = graph(("LoadImage", 0), ("CreateVideo", 0), ("SaveVideo", 0))
+    assert _role_for_template("video_example_image_editing", picture) == "image"
+    assert (
+        _role_for_template("Example_image_edit", graph(("TextEncodeVideo", 0), ("SaveImage", 0)))
+        == "image"
+    )
+    assert _role_for_template("image_example_first_frame", video) == "video"
+    assert _role_for_template("example_preview", graph(("PreviewImage", 0))) == "image"
+    assert _role_for_template("example_animation", graph(("SaveAnimatedWEBP", 0))) == "video"
+    # A save that does not run says nothing about what the template makes.
+    assert _role_for_template("image_example", graph(("SaveImage", 0), ("SaveVideo", 4))) == "image"
+    # Without a save to read, the id prefix and the node names still decide.
+    assert _role_for_template("video_example_unsaved", graph(("LoadImage", 0))) == "video"
+    assert _role_for_template("image_example_unsaved", graph(("LoadImage", 0))) == "image"
+    assert _role_for_template("example_unsaved", graph(("VideoSampler", 0))) == "video"
+    assert _role_for_template("image_example") == "image"
+
+
+def test_templates_are_offered_under_the_role_their_graph_saves(tmp_path: Path) -> None:
+    registry = _registry(tmp_path)
+    revision = "d" * 40
+    model = {
+        "directory": "checkpoints",
+        "name": "either.safetensors",
+        "url": f"https://huggingface.co/owner/either/resolve/{revision}/either.safetensors",
+    }
+
+    def template(save: str) -> dict[str, Any]:
+        return {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "LoadImage",
+                    "inputs": [],
+                    "outputs": [],
+                    "properties": {"cnr_id": "comfy-core"},
+                    "widgets_values": ["authored-sample.png", "image"],
+                },
+                {
+                    "id": 2,
+                    "type": "CheckpointLoaderSimple",
+                    "inputs": [],
+                    "outputs": [],
+                    "properties": {"cnr_id": "comfy-core", "models": [model]},
+                    "widgets_values": ["either.safetensors"],
+                },
+                {
+                    "id": 3,
+                    "type": save,
+                    "inputs": [],
+                    "outputs": [],
+                    "properties": {"cnr_id": "comfy-core"},
+                    "widgets_values": [],
+                },
+            ],
+            "links": [],
+        }
+
+    templates = _installed_templates(registry)
+    (templates / "video_example_image_editing.json").write_text(
+        json.dumps(template("SaveImage")), encoding="utf-8"
+    )
+    (templates / "image_example_first_frame.json").write_text(
+        json.dumps(template("SaveVideo")), encoding="utf-8"
+    )
+
+    images = {item.id: item.operation for item in registry.available("image")}
+    videos = {item.id: item.operation for item in registry.available("video")}
+
+    assert images.get("video_example_image_editing") == "image_to_image"
+    assert "video_example_image_editing" not in videos
+    assert videos.get("image_example_first_frame") == "image_to_video"
+    assert "image_example_first_frame" not in images
+
+
 def test_declared_acceleration_ignores_non_media_operations() -> None:
     subgraph = _four_step_edit_graph()
     ui_graph = {"nodes": [], "definitions": {"subgraphs": [subgraph]}}
