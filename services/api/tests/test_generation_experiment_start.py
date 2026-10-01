@@ -23,6 +23,7 @@ from test_generation_experiment_preflight import (
     _revision,
 )
 from test_generation_experiment_records import CREATE
+from test_generation_retry import choose_retries, failing_media
 
 from local_lm import generation_experiment_start as start_module
 from local_lm.accepted_turn_context import accepted_context
@@ -215,6 +216,29 @@ async def test_each_picture_runs_exactly_its_accepted_choice(
         assert request.prompt == "A lighthouse on a cliff"
     assert sorted(request.parameters["seed"] for request in seen) == [4, 5]
     assert (await client.get(f"{CREATE}/{accepted['id']}")).status_code == 200
+
+
+async def test_a_picture_that_fails_is_retried_as_a_turns_would_be_and_its_sibling_is_not(
+    app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    attempts = failing_media(app, monkeypatch, 1)
+    accepted = await _accepted(client, _choices("A harbor in fog"))
+    started = (await _start(client, accepted)).json()
+
+    finished = [await _terminal(client, run_id) for run_id in _run_ids(started)]
+
+    assert [run["status"] for run in finished] == ["complete", "complete"]
+    # Whichever picture was asked for first failed once and was made again,
+    # within the allowance frozen when the comparison started.
+    retried = {run["id"]: run["provenance_json"]["failure_retries"] for run in finished}
+    assert sorted(retry["used"] for retry in retried.values()) == [0, 1]
+    assert all(retry["limit"] == 3 and retry["pending"] is False for retry in retried.values())
+    failed_first = attempts[0].run_id
+    assert retried[failed_first]["used"] == 1
+    assert [request.run_id for request in attempts].count(failed_first) == 2
+    with SessionLocal() as session:
+        jobs = {job.run_id: job.attempt for job in session.scalars(select(Job))}
+    assert sorted(jobs[run_id] for run_id in retried) == [1, 2]
 
 
 async def test_a_picture_runs_as_an_ordinary_turn_with_the_same_choice_would(
@@ -468,6 +492,8 @@ async def test_stopping_one_picture_leaves_the_other(
 async def test_retrying_one_picture_reruns_only_it_with_its_seed(
     app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # With no automatic retries, the failed picture waits to be retried by hand.
+    await choose_retries(client, 0)
     accepted = await _accepted(client, _choices("A row of candles"))
     failing: set[str] = set()
     seen: list[MediaRequest] = []

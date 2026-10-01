@@ -42,6 +42,7 @@ from .generation_experiments_v1 import (
     GenerationExperimentState,
     ResourceEvidenceOut,
 )
+from .generation_retry import capture_retry_budget
 from .models import (
     Chat,
     GenerationExperiment,
@@ -370,6 +371,12 @@ def _write_work(
             provenance_json=provenance,
         )
         _require_consistent_workflow_witness(step, run)
+        # The automatic retries a turn's picture gets, frozen with the run as a
+        # turn freezes them, so changing the setting later cannot extend them.
+        run.provenance_json = {
+            **run.provenance_json,
+            "failure_retries": capture_retry_budget(session, run.operation),
+        }
         session.add(run)
         session.flush()
         step.run_id = run.id
