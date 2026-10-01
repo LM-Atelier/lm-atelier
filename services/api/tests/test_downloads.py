@@ -13,6 +13,7 @@ import pytest
 from sqlalchemy import select
 
 from local_lm.adapters.base import ChatEvent, ChatRequest, MediaRequest
+from local_lm.adapters.comfyui import ComfyUIAdapter
 from local_lm.auxiliary_assets import workflow_lora_extension
 from local_lm.comfy_templates import (
     ComfyModelDependency,
@@ -1754,6 +1755,56 @@ async def test_adaptive_checkpoint_activation_runs_a_small_bounded_generation(
         "denoise": 1.0,
     }
     assert adapter.timeout_seconds == 300
+
+
+async def test_a_video_template_probe_fills_the_length_rate_and_codec_it_binds(
+    settings: Settings,
+) -> None:
+    """A video graph binds settings an image graph does not; the probe fills them from the
+    template's own defaults, so ComfyUI never receives one as an unfilled placeholder."""
+
+    adapter = FakeProbeAdapter()
+    manager = DownloadManager(
+        settings,
+        EventBroker(),
+        media_adapter=adapter,  # type: ignore[arg-type]
+    )
+    graph = {
+        "source": {"class_type": "LoadImage", "inputs": {"image": "${input_image}"}},
+        "latent": {
+            "class_type": "ImageToVideoLatent",
+            "inputs": {"width": "${width}", "height": "${height}", "length": "${frames}"},
+        },
+        "video": {"class_type": "CreateVideo", "inputs": {"fps": "${fps}"}},
+        "save": {"class_type": "SaveVideo", "inputs": {"codec": "${codec}"}},
+    }
+    compiled = Mock(
+        spec_set=["api_graph", "input_schema", "template"],
+        api_graph=graph,
+        input_schema={
+            "properties": {
+                "input_image": {"type": "string"},
+                "width": {"type": "integer", "default": 768},
+                "height": {"type": "integer", "default": 512},
+                "frames": {"type": "integer", "default": 97},
+                "fps": {"type": "number", "default": 24},
+                "codec": {"type": "string", "default": "auto"},
+                "steps": {"type": "integer", "default": 30},
+            }
+        },
+        template=SimpleNamespace(operation="image_to_video"),
+    )
+
+    await manager._probe_adaptive_checkpoint(compiled)
+
+    assert adapter.request
+    parameters = adapter.request.parameters
+    assert adapter.request.operation == "image_to_video"
+    assert (parameters["frames"], parameters["fps"], parameters["codec"]) == (97, 24, "auto")
+    # The probe stays small: its own size and step count replace the template's.
+    assert (parameters["width"], parameters["height"], parameters["steps"]) == (256, 256, 1)
+    filled = ComfyUIAdapter._compile(graph, parameters)
+    assert "${" not in json.dumps({key: filled[key] for key in ("latent", "video", "save")})
 
 
 async def test_native_edit_activation_uses_ephemeral_inputs_for_each_loader(

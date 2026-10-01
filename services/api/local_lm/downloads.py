@@ -2702,7 +2702,12 @@ class DownloadManager:
                     negative_prompt="",
                     input_paths=[probe_path] * source_count if probe_path else [],
                     workflow=compiled.api_graph,
+                    # The template's own values first: a setting only some graphs
+                    # bind, such as a video's length, rate and codec, would
+                    # otherwise reach ComfyUI as its unfilled placeholder and be
+                    # refused. The probe's small values then replace the costly ones.
                     parameters={
+                        **self._template_defaults(compiled),
                         "width": 256,
                         "height": 256,
                         "batch_size": 1,
@@ -3094,7 +3099,8 @@ class DownloadManager:
 
     @staticmethod
     def _template_defaults(compiled: CompiledComfyTemplate) -> dict[str, Any]:
-        properties = compiled.input_schema.get("properties")
+        input_schema = getattr(compiled, "input_schema", {})
+        properties = input_schema.get("properties") if isinstance(input_schema, dict) else None
         if not isinstance(properties, dict):
             return {}
         return {
