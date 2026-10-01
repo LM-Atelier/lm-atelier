@@ -167,8 +167,10 @@ const OWN_WORKFLOW_TOOLS: readonly string[] = ["relight", "isolate", "subject"];
  * the whole instruction. Text takes its words from its own fields, and without
  * a box it would change the whole picture; Remove, too, needs a marked part as
  * well as its words. Isolate asks for nothing and runs only the workflow the
- * report names. Replacing a subject needs the picture it comes from, and runs
- * only the workflows the report names, so the studio's own choice never matters.
+ * report names. Replacing a subject needs the picture it comes from and a name
+ * for what to take from it: unnamed, the redraw takes that picture's backdrop
+ * along with its subject. It runs only the workflows the report names, so the
+ * studio's own choice never matters.
  */
 export function studioToolReady(
   tools: StudioToolState,
@@ -185,7 +187,10 @@ export function studioToolReady(
   if (tools.kind === "text" && (!tools.newWords.trim() || selectionCoverage === 0)) return false;
   if (tools.kind === "remove" && selectionCoverage === 0) return false;
   if ((tools.kind === "isolate" || tools.kind === "background") && !ownWorkflow) return false;
-  if (tools.kind === "subject" && (!ownWorkflow || !isolateTool?.workflow_revision_id || !tools.subjectPicture)) {
+  if (
+    tools.kind === "subject"
+    && (!ownWorkflow || !isolateTool?.workflow_revision_id || !tools.subjectPicture || !instruction.trim())
+  ) {
     return false;
   }
   if (!WORDLESS_TOOLS.includes(tools.kind) && !instruction.trim()) return false;
