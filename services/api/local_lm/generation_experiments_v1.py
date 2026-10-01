@@ -9,6 +9,7 @@ cannot run means the comparison accepts no work at all.
 
 import hashlib
 import json
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal, Self
 
@@ -18,6 +19,7 @@ from pydantic import (
     Field,
     JsonValue,
     StringConstraints,
+    field_serializer,
     model_validator,
 )
 
@@ -236,6 +238,8 @@ class ArmPreflightOut(BaseModel):
     width: int | None = None
     height: int | None = None
     effective_settings: dict[str, JsonValue] = Field(default_factory=dict)
+    # Appended to the prompt for this choice's model and LoRAs, as a turn does.
+    trigger_words_applied: list[str] = Field(default_factory=list)
     snapshot_sha256: str | None = None
 
 
@@ -254,3 +258,74 @@ def canonical_sha256(value: Any) -> str:
 
     encoded = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+class GenerationExperimentState(StrEnum):
+    READY = "ready"
+
+
+class GenerationExperimentTrialState(StrEnum):
+    PLANNED = "planned"
+
+
+Digest = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+
+
+class GenerationExperimentCreate(GenerationExperimentRequest):
+    """Accept a comparison the preflight answered for, exactly as it answered.
+
+    The digest is the one the preflight returned. If either choice would now
+    run differently, it no longer matches and nothing is accepted.
+    """
+
+    idempotency_key: str = Field(min_length=1, max_length=200)
+    preflight_sha256: Digest
+
+
+class ExperimentTrialOut(BaseModel):
+    id: str
+    ordinal: int
+    seed: int
+    state: GenerationExperimentTrialState
+
+
+class ExperimentArmOut(BaseModel):
+    id: str
+    ordinal: int
+    label: str
+    profile_id: str
+    profile_name: str | None = None
+    workflow_revision_id: str
+    workflow_version: int | None = None
+    workflow_activation_id: str | None = None
+    model_family: str | None = None
+    width: int
+    height: int
+    effective_settings: dict[str, JsonValue]
+    trigger_words_applied: list[str]
+    snapshot_sha256: str
+    trials: list[ExperimentTrialOut]
+
+
+class GenerationExperimentOut(BaseModel):
+    id: str
+    name: str
+    state: GenerationExperimentState
+    operation: Literal["text_to_image"]
+    prompt: str
+    negative_prompt: str
+    geometry: Geometry
+    seed_policy: SeedPolicy
+    seed_equivalence: Literal["same_family", "none"]
+    preflight_sha256: str
+    snapshot_sha256: str
+    estimate: list[ResourceEvidenceOut]
+    created_at: datetime
+    arms: list[ExperimentArmOut]
+
+    @field_serializer("created_at", when_used="json")
+    def serialize_created_at_as_utc(self, value: datetime) -> str:
+        """The database keeps it without a zone and it is UTC; say so in every answer."""
+
+        normalized = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        return normalized.isoformat().replace("+00:00", "Z")

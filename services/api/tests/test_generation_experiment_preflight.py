@@ -542,3 +542,43 @@ async def test_a_workflow_bound_to_another_model_names_the_model_it_runs(
     accepted = (await client.post(PREFLIGHT, json=_request(first, right))).json()
     assert accepted["outcome"] == "compatible", accepted["refusals"]
     assert accepted["arms"][1]["workflow_activation_id"] is not None
+
+
+async def test_a_choice_carries_the_trigger_words_its_turn_would_append(
+    app: FastAPI, client: AsyncClient
+) -> None:
+    with SessionLocal() as session:
+        install = ModelInstall(
+            name="Worded base",
+            role="image",
+            engine="mock",
+            local_path="C:/managed/worded",
+            manifest_json={"trigger_words": ["harborlight"]},
+            active=True,
+        )
+        session.add(install)
+        session.commit()
+        install_id = install.id
+    worded = _arm(
+        "Worded", _profile("Worded model", model_install_id=install_id), _revision("Worded")
+    )
+    plain = _arm("Plain", _profile("Plain model"), _revision("Plain"))
+    body = (await client.post(PREFLIGHT, json=_request(worded, plain))).json()
+    assert body["outcome"] == "compatible", body["refusals"]
+    assert [arm["trigger_words_applied"] for arm in body["arms"]] == [["harborlight"], []]
+    chat = await client.post("/api/chats", json={"title": "Worded turn"})
+    async with app.state.services.scheduler.lease("primary"):
+        turn = await client.post(
+            f"/api/chats/{chat.json()['id']}/turns",
+            json={
+                "text": PROMPT,
+                "mode": "image",
+                "profile_id": worded["profile_id"],
+                "workflow_revision_id": worded["workflow_revision_id"],
+                "preset_id": None,
+                "settings": {"negative_prompt": NEGATIVE, "width": 512, "height": 384, "seed": 41},
+            },
+        )
+        assert turn.status_code == 202, turn.text
+        recorded = turn.json()["run"]["provenance_json"]["auxiliary_assets"]
+        assert recorded["trigger_words_applied"] == ["harborlight"]
