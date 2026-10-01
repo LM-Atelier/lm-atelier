@@ -233,6 +233,7 @@ from .schemas import (
 )
 from .settings_registry import (
     WORKFLOW_LORA_OVERRIDES_SETTING_KEY,
+    builtin_settings_for_role,
     compatible_stored_settings,
     resolve_generation_settings,
     validate_settings,
@@ -288,6 +289,13 @@ from .studio_relight import (
     split_relight_setting,
 )
 from .turn_inheritance import TurnInheritance, TurnSourceResolver, inherited_profile_configuration
+from .upscale_preview import UpscalePreviewOut, UpscaleSelectionUnavailable, project_upscale_preview
+from .upscale_workflows import (
+    UPSCALE_SETTING_KEY,
+    effective_upscale_schema,
+    fixed_upscale_factor,
+    without_inert_upscale_setting,
+)
 from .video_length import (
     VIDEO_DURATION_SETTING_KEY,
     resolve_video_length_settings,
@@ -398,6 +406,7 @@ from .workflow_selection import (
 from .workflow_use_case_execution import (
     InheritedWorkflowUseCasePreset,
     WorkflowUseCaseExecution,
+    enlargement_revision_eligibility,
     prepare_workflow_use_case_execution,
     workflow_use_case_inputs,
 )
@@ -406,7 +415,9 @@ from .workflow_use_case_preset_provenance import (
     capture_workflow_use_case_preset,
     read_workflow_use_case_preset,
 )
+from .workflow_use_case_preset_resolution import resolve_workflow_use_case_preset
 from .workflow_use_case_preset_settings import WorkflowUseCasePresetSettingsError
+from .workflow_use_cases_v1 import classify_workflow_use_case
 
 logger = logging.getLogger(__name__)
 
@@ -1528,6 +1539,78 @@ class ConversationOrchestrator:
         if not isinstance(result, TurnAccepted):
             raise RuntimeError("Turn preparation did not return accepted work.")
         return result
+
+    def preview_turn_upscale(
+        self, session: Session, chat_id: str, request: TurnRequest
+    ) -> UpscalePreviewOut:
+        """Resolve the selected enlargement without probing or starting an engine."""
+        if session.new or session.dirty or session.deleted:
+            raise ValueError("An enlargement preview requires a read-only session.")
+        request = request.for_role("image")
+        if (
+            request.mode != RoutingMode.IMAGE
+            or not request.upscale
+            or len(request.input_artifact_ids) != 1
+            or request.prompt_source is not None
+            or request.source_fit is not None
+            or request.references
+            or request.ordered_settings
+            or request.output_count not in {None, 1}
+            or OrderedPlanCompiler.deterministic(
+                request.text, RoutingMode.IMAGE, has_media_input=True
+            )
+            is not None
+        ):
+            raise ValueError("Choose one source image and one enlargement to preview.")
+        if self.engines.settings.media_engine not in {"comfyui", "mock"}:
+            raise ValueError("This engine does not provide offline enlargement controls.")
+        with session.no_autoflush:
+            chat = session.get(Chat, chat_id)
+            source = session.get(Artifact, request.input_artifact_ids[0])
+            if chat is None or source is None:
+                raise LookupError("The conversation or source image is unavailable.")
+            if not source.media_type.startswith("image/"):
+                raise ValueError("Choose an image to enlarge.")
+            facts = workflow_use_case_inputs(Operation.IMAGE_TO_IMAGE, request, source_present=True)
+            preset = resolve_workflow_use_case_preset(
+                session, classify_workflow_use_case(facts).use_case, chat_id=chat.id
+            )
+            engine_fields = builtin_settings_for_role("image")
+            execution = (
+                None
+                if preset.mode in {"unconfigured", "automatic"}
+                else WorkflowUseCaseExecution(preset, facts, tuple(engine_fields))
+            )
+            profile, _, revision = self._execution_for_turn(
+                session,
+                chat,
+                Operation.IMAGE_TO_IMAGE,
+                request.text,
+                request,
+                revision_eligibility=execution.eligibility(session) if execution else None,
+            )
+            if revision is None or revision.engine != self.engines.settings.media_engine:
+                raise ValueError("Choose a ready enlargement workflow for the active engine.")
+            if profile is not None and profile.engine != revision.engine:
+                raise ValueError("The selected model does not use the workflow's engine.")
+            _queued_workflow_activation(session, revision)
+            admission = execution.admit(session, revision) if execution else None
+            fields = workflow_settings(
+                engine_fields,
+                effective_upscale_schema(revision.api_graph_json, revision.input_schema_json),
+                accepts_added_loras=revision_accepts_added_loras(revision),
+            )
+            layers = self.resolve_turn_setting_layers(
+                session,
+                chat,
+                Operation.IMAGE_TO_IMAGE,
+                profile,
+                request,
+                fields,
+                use_case_preset=admission,
+                workflow_revision=revision,
+            )
+            return project_upscale_preview(revision, fields, layers.effective_settings)
 
     async def preview_turn_source_fit(
         self,
@@ -2834,6 +2917,7 @@ class ConversationOrchestrator:
                 "source_fit_request": (
                     request.source_fit.model_dump(mode="json") if request.source_fit else None
                 ),
+                "upscale": request.upscale,
                 "media_plan_estimate": (
                     self._media_plan_estimate(plan.operation, output_settings, 1)
                     if output_context is not None
@@ -3003,7 +3087,7 @@ class ConversationOrchestrator:
             # after every await above: the turn becomes durable only if
             # the claim still owns its row at the commit.
             before_commit(session, runs[0])
-        if request.source_fit is not None:
+        if request.source_fit is not None or request.upscale:
             for accepted_run in runs:
                 if accepted_context(session, accepted_run) is None:
                     self._freeze_turn_context(session, accepted_run)
@@ -3066,6 +3150,8 @@ class ConversationOrchestrator:
                 else None
             )
             if selected_definition is None:
+                if request.upscale:
+                    raise UpscaleSelectionUnavailable
                 raise ValueError("The selected turn workflow revision no longer exists.")
             if (
                 self._role_for_operation(Operation(selected_definition.operation))
@@ -3349,6 +3435,7 @@ class ConversationOrchestrator:
                     "intent": step_intent,
                     "operation": operation,
                     "profile": profile,
+                    "upscale": step_request.upscale,
                     "profile_id": profile_id,
                     "vision_profile_id": vision_profile.id if vision_profile else None,
                     "workflow": workflow_revision,
@@ -3609,6 +3696,7 @@ class ConversationOrchestrator:
                         for scope, preset, preset_settings in resolved["preset_layers"]
                     ],
                     "workflow": workflow_provenance,
+                    "upscale": resolved["upscale"],
                     **(
                         {"workflow_use_case_preset": copy.deepcopy(resolved["use_case_receipt"])}
                         if resolved["use_case_receipt"] is not None
@@ -3727,6 +3815,12 @@ class ConversationOrchestrator:
             # after every await above: the turn becomes durable only if
             # the claim still owns its row at the commit.
             before_commit(session, runs[0])
+        for accepted_run in runs:
+            if (
+                accepted_run.provenance_json.get("upscale") is True
+                and accepted_context(session, accepted_run) is None
+            ):
+                self._freeze_turn_context(session, accepted_run)
         session.commit()
         accepted = self._accepted_for_run(session, runs[0])
         await self.events.publish(
@@ -6911,6 +7005,10 @@ class ConversationOrchestrator:
             # as an input reference: it is instruction, not content, and must
             # not appear as an attachment or count toward edit lineage.
             parameters: dict[str, Any] = copy.deepcopy(execution_settings)
+            if revision is not None:
+                fixed_factor = fixed_upscale_factor(workflow, revision.input_schema_json)
+                if fixed_factor is not None:
+                    parameters[UPSCALE_SETTING_KEY] = fixed_factor
             parameters.pop(WORKFLOW_LORA_OVERRIDES_SETTING_KEY, None)
             parameters.pop(OUTPAINT_SETTING_KEY, None)
             if revision and workflow_video_length(revision.input_schema_json):
@@ -8040,6 +8138,7 @@ class ConversationOrchestrator:
                     "workflow_revision_id": snapshot.workflow_revision_id,
                     "workflow_selection": None,
                     "preset_id": None,
+                    "upscale": snapshot.upscale,
                 }
             ), TurnInheritance(
                 profile=snapshot.profile,
@@ -10160,6 +10259,9 @@ class ConversationOrchestrator:
         ordered: bool = False,
         revision_eligibility: RevisionEligibility | None = None,
     ) -> tuple[ModelProfile | None, dict[str, Any], WorkflowRevision | None]:
+        revision_eligibility = enlargement_revision_eligibility(
+            session, operation, request, revision_eligibility
+        )
         choice = request.workflow_selection
         if choice is not None and choice.mode == "revision":
             selected_revision = session.get(WorkflowRevision, choice.workflow_revision_id)
@@ -10190,6 +10292,8 @@ class ConversationOrchestrator:
             revision = session.get(WorkflowRevision, revision_id)
             definition = session.get(WorkflowDefinition, revision.workflow_id) if revision else None
             if revision is None or definition is None:
+                if request.upscale:
+                    raise UpscaleSelectionUnavailable
                 raise ValueError("The selected turn workflow revision no longer exists.")
             revision_role = self._role_for_operation(Operation(definition.operation))
             if ordered and revision_role != role:
@@ -10216,20 +10320,41 @@ class ConversationOrchestrator:
             revision_id, choice = setup_id, None
         if revision_id is not None:
             capability = operation_selector_capability(operation)
-            revision, activation, bound_profile = resolve_exact_workflow_revision(
-                session,
-                revision_id,
-                capability=capability,
-                operation=operation,
-                engine=self.engines.settings.chat_engine
-                if operation == Operation.TEXT
-                else self.engines.settings.media_engine,
-            )
-            _require_revision_eligibility(operation, revision, revision_eligibility)
+            try:
+                revision, activation, bound_profile = resolve_exact_workflow_revision(
+                    session,
+                    revision_id,
+                    capability=capability,
+                    operation=operation,
+                    engine=self.engines.settings.chat_engine
+                    if operation == Operation.TEXT
+                    else self.engines.settings.media_engine,
+                )
+                _require_revision_eligibility(operation, revision, revision_eligibility)
+            except ValueError:
+                if request.upscale:
+                    raise UpscaleSelectionUnavailable from None
+                raise
             if bound_profile is not None:
                 if profile_id is not None and bound_profile.id != profile_id:
                     raise ValueError("The selected model does not match the turn workflow.")
                 profile_id = bound_profile.id
+            if (
+                operation == Operation.IMAGE_TO_IMAGE
+                and request.upscale
+                and bound_profile is None
+                and profile_id is None
+            ):
+                return (
+                    None,
+                    {
+                        "mode": "explicit",
+                        "profile_id": None,
+                        "workflow_revision_id": revision.id,
+                        "workflow_activation_id": activation.id if activation else None,
+                    },
+                    revision,
+                )
             if operation == Operation.TEXT:
                 if bound_profile is None:
                     raise ValueError("The selected text workflow has no ready model binding.")
@@ -11184,7 +11309,11 @@ class ConversationOrchestrator:
         )
         fields = workflow_settings(
             engine_fields,
-            workflow_revision.input_schema_json if workflow_revision else None,
+            effective_upscale_schema(
+                workflow_revision.api_graph_json, workflow_revision.input_schema_json
+            )
+            if workflow_revision
+            else None,
             # A workflow can carry the insertion point the run reads and
             # declare no setting for it. Without this the settings validator
             # has no field for a stack the panel does offer, and a turn that
@@ -11236,6 +11365,10 @@ class ConversationOrchestrator:
         mask: Any = None
         relight: Any = None
         tunables = workflow_lora_layers.ordinary("turn")
+        if workflow_revision is not None:
+            tunables = without_inert_upscale_setting(
+                tunables, workflow_revision.api_graph_json, workflow_revision.input_schema_json
+            )
         if not ordered:
             mask, tunables = split_mask_setting(tunables)
             # A relight request is not a workflow field either, for the same reason.
@@ -11396,6 +11529,7 @@ class ConversationOrchestrator:
         values: dict[str, Any],
         *,
         input_schema: dict[str, Any] | None = None,
+        api_graph: dict[str, Any] | None = None,
         engine: str | None = None,
         accepts_added_loras: bool = False,
     ) -> dict[str, Any]:
@@ -11408,7 +11542,9 @@ class ConversationOrchestrator:
         role = self._role_for_operation(operation)
         fields = workflow_settings(
             await self.engines.settings_for_role(role, engine=engine),
-            input_schema,
+            effective_upscale_schema(api_graph, input_schema)
+            if api_graph is not None
+            else input_schema,
             accepts_added_loras=accepts_added_loras,
         )
         request_fields = [field for field in fields if field.scope != "load"]
@@ -12358,6 +12494,7 @@ class ConversationOrchestrator:
             visual_artifact_ids=[artifact.id for artifact in visuals],
             strict_artifact_ids=strict_ids,
             source_fit=source_fit,
+            upscale=run.provenance_json.get("upscale") is True,
             verification_profile_id=(
                 verifier.id
                 if chat is not None

@@ -20,6 +20,9 @@ export interface TurnRequestInput {
   sourceFit?: SourceFitIntent | SourceFitSelection;
   /** Sent only when one is chosen, so a turn without any reads as it always did. */
   defaultOutputShapes?: DefaultOutputShapes;
+  /** An enlargement, said as one rather than read from a scale factor that a
+   * workflow which sets its own size does not take. */
+  upscale?: boolean;
 }
 
 export interface TurnRequestPayload {
@@ -34,6 +37,7 @@ export interface TurnRequestPayload {
   prompt_source?: ComposerPromptSource;
   source_fit?: SourceFitIntent;
   default_output_shapes?: DefaultOutputShapes;
+  upscale?: true;
   confirm_media: boolean;
 }
 
@@ -63,6 +67,8 @@ export function buildTurnRequest(input: TurnRequestInput): TurnRequestPayload {
     idempotency_key: input.idempotencyKey,
     prompt_source: input.promptSource,
     default_output_shapes: shapes && (shapes.image || shapes.video) ? shapes : undefined,
+    // Only an enlargement says so; every other turn reads as it always did.
+    upscale: input.upscale ? true : undefined,
   };
   return JSON.parse(JSON.stringify(payload)) as TurnRequestPayload;
 }

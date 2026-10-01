@@ -45,7 +45,7 @@ _RUNTIME_PARAMETERS = {
 _SUPPRESSED_RUNTIME_NAMES = frozenset({"motion_strength"})
 _PRIMITIVE_WIDGET_TYPES = {"BOOLEAN", "COMBO", "COMFY_DYNAMICCOMBO_V3", "FLOAT", "INT", "STRING"}
 _CONTROL_AFTER_GENERATE = {"decrement", "fixed", "increment", "randomize"}
-COMFY_TEMPLATE_COMPILER_VERSION = 24
+COMFY_TEMPLATE_COMPILER_VERSION = 25
 DEFAULT_IMAGE_EDIT_DENOISE = 0.9
 _ADAPTIVE_CHECKPOINT_PREFIX = "lma_image_checkpoint_v1_"
 _ADAPTIVE_CHECKPOINT_PLACEHOLDER = "__LM_ATELIER_CHECKPOINT__"
@@ -1910,6 +1910,8 @@ def _compile_ui_graph(
         _bind_video_frame_settings(
             api_graph, object_info, schema_properties, default_candidates, shared_widget_targets
         )
+
+    _bind_image_scale_setting(api_graph, object_info, schema_properties)
     for runtime_name in sorted(
         set(_RUNTIME_PARAMETERS.values()) | _SUPPRESSED_RUNTIME_NAMES | {"negative_prompt"}
     ):
@@ -1980,6 +1982,38 @@ def _bind_video_frame_settings(
         _bind_runtime_parameter(
             graph[key]["inputs"], "length", "frames", properties, spec, default_candidates
         )
+
+
+def _bind_image_scale_setting(
+    graph: dict[str, Any],
+    object_info: dict[str, Any],
+    properties: dict[str, Any],
+) -> None:
+    """Expose a multiplier when one resample connects the source to every output."""
+    executed = _executed_workflow_nodes(graph, object_info)
+    scales = [key for key in executed if graph[key]["class_type"] == "ImageScaleBy"]
+    sources = [key for key in executed if graph[key]["class_type"] == "LoadImage"]
+    if len(scales) != 1 or len(sources) != 1:
+        return
+    scale_id, source_id = scales[0], sources[0]
+    inputs = graph[scale_id]["inputs"]
+    if inputs.get("image") != [source_id, 0]:
+        return
+    if graph[source_id]["inputs"].get("image") != "${input_image}":
+        return
+    for key in executed - {scale_id, source_id}:
+        node = graph[key]
+        if node["class_type"] not in {"SaveImage", "PreviewImage"}:
+            return
+        if node["inputs"].get("images") != [scale_id, 0]:
+            return
+    value = inputs.get("scale_by")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return
+    spec = _node_widget_spec(object_info.get("ImageScaleBy"), "scale_by")
+    if not _is_widget_spec(spec) or spec[0] not in {"FLOAT", "INT"}:
+        return
+    _bind_runtime_parameter(inputs, "scale_by", "upscale_factor", properties, spec)
 
 
 def _route_links_as_queued(
@@ -2286,7 +2320,7 @@ def _bind_runtime_parameter(
     property_schema: dict[str, Any]
     if runtime_name in {"batch_size", "frames", "height", "seed", "steps", "width"}:
         property_schema = {"type": "integer"}
-    elif runtime_name in {"cfg", "denoise", "fps"}:
+    elif runtime_name in {"cfg", "denoise", "fps", "upscale_factor"}:
         property_schema = {"type": "number"}
     else:
         property_schema = {"type": "string"}

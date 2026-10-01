@@ -9,6 +9,7 @@
  * not a reducer action: see its note for why.
  */
 
+import type { StudioUpscaleChoice } from "./studioEnlargement";
 import { cropRatio, fittedBox, type CropShape } from "./studioCropShape";
 import { PerspectiveTool, pictureCorners } from "./studioPerspective";
 import { STRAIGHTEN_LIMIT } from "./studioStraighten";
@@ -110,7 +111,8 @@ export type StudioToolState = {
   /** How far a color may differ from the clicked one and still join the wand's selection. */
   readonly colorTolerance: number;
   /** How much larger Enhance should make the picture. */
-  readonly upscaleFactor: number;
+  /** The enlargement factor the person chose, and the preview it was chosen under. */
+  readonly upscaleChoice: StudioUpscaleChoice | null;
   /** How far past each edge to paint, as a fraction of the picture. */
   readonly margins: { top: number; right: number; bottom: number; left: number };
   /** The words as they read in the picture now, when the reader gives them. */
@@ -158,7 +160,7 @@ export type StudioToolAction =
   | { type: "set-feather"; px: number }
   | { type: "set-selection-mode"; mode: "add" | "remove" }
   | { type: "set-color-tolerance"; tolerance: number }
-  | { type: "set-upscale-factor"; factor: number }
+  | { type: "choose-upscale-factor"; choice: StudioUpscaleChoice }
   | { type: "set-margin"; side: "top" | "right" | "bottom" | "left"; fraction: number }
   | { type: "set-margins"; margins: { top: number; right: number; bottom: number; left: number } }
   | { type: "clear-margins" }
@@ -205,7 +207,7 @@ export function initialToolState(): StudioToolState {
     featherPx: 4,
     selectionMode: "add",
     colorTolerance: 32,
-    upscaleFactor: 2,
+    upscaleChoice: null,
     margins: { top: 0, right: 0, bottom: 0, left: 0 },
     currentWords: "",
     newWords: "",
@@ -249,8 +251,9 @@ export function studioToolReducer(
       return { ...state, selectionMode: action.mode };
     case "set-color-tolerance":
       return { ...state, colorTolerance: clamp(action.tolerance, 0, 255) };
-    case "set-upscale-factor":
-      return { ...state, upscaleFactor: clamp(action.factor, 1, 8) };
+    case "choose-upscale-factor":
+      // Kept with the preview it was made under; the workflow's own field decides what is sent.
+      return Number.isFinite(action.choice.factor) ? { ...state, upscaleChoice: action.choice } : state;
     case "set-margin":
       return {
         ...state,
@@ -441,7 +444,8 @@ export const CUTOUT_INSTRUCTION = "Cut the subject out onto a transparent backgr
  * filmstrip, which is where this ends up.
  */
 export function defaultInstruction(state: StudioToolState): string {
-  if (state.kind === "enhance") return `Enhance to ${state.upscaleFactor}x`;
+  // The size is the workflow's to say, so the words do not name one.
+  if (state.kind === "enhance") return "Enlarge the picture and restore its detail";
   if (state.kind === "text") return replaceWordsInstruction(state);
   // The workflow reads no words; these are what the history shows it did.
   if (state.kind === "isolate") return CUTOUT_INSTRUCTION;

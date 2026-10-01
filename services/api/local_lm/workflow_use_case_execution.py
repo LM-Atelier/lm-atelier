@@ -12,7 +12,6 @@ from .models import WorkflowDefinition, WorkflowRevision
 from .outpaint_workflows import OUTPAINT_SETTING_KEY
 from .schemas import SettingField, TurnRequest
 from .studio_masks import MASK_APPLY_BLEND, MASK_SETTING_KEY
-from .upscale_workflows import UPSCALE_SETTING_KEY
 from .workflow_selection import RevisionEligibility
 from .workflow_use_case_preset_admission import (
     AdmittedWorkflowUseCasePreset,
@@ -24,6 +23,7 @@ from .workflow_use_case_preset_resolution import (
     ResolvedWorkflowUseCasePreset,
     resolve_workflow_use_case_preset,
 )
+from .workflow_use_case_structure import assess_workflow_use_case_structure
 from .workflow_use_cases_v1 import (
     SelectionApplication,
     WorkflowUseCaseInputs,
@@ -90,8 +90,37 @@ def workflow_use_case_inputs(
         source_present=source_present,
         selection=selection,
         extend=request.source_fit is not None or OUTPAINT_SETTING_KEY in request.settings,
-        upscale=UPSCALE_SETTING_KEY in request.settings,
+        upscale=request.upscale,
     )
+
+
+def enlargement_revision_eligibility(
+    session: Session,
+    operation: Operation,
+    request: TurnRequest,
+    recipe_eligibility: RevisionEligibility | None,
+) -> RevisionEligibility | None:
+    """Require enlargement support even when no settings recipe is selected."""
+    if not request.upscale:
+        return recipe_eligibility
+    facts = workflow_use_case_inputs(operation, request, source_present=True)
+
+    def check(revision: WorkflowRevision | None) -> str | None:
+        definition = session.get(WorkflowDefinition, revision.workflow_id) if revision else None
+        if revision is None or definition is None:
+            return "workflow-use-case-upscale-unsupported"
+        structure = assess_workflow_use_case_structure(
+            facts,
+            operation=definition.operation,
+            engine=revision.engine,
+            api_graph=revision.api_graph_json,
+            input_schema=revision.input_schema_json,
+        )
+        if structure.reason is not None:
+            return structure.reason
+        return recipe_eligibility(revision) if recipe_eligibility is not None else None
+
+    return check
 
 
 async def prepare_workflow_use_case_execution(

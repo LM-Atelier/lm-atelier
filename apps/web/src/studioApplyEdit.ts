@@ -7,6 +7,7 @@
 import { studioApplyPlan, studioOffersResults } from "./studioApplyPlan";
 import { renderLightMap } from "./studioLightMap";
 import { cloneMask, encodeMaskPng, feather, isEmpty, type MaskRaster } from "./studioMasks";
+import type { EnlargementPreview } from "./studioEnlargement";
 import { toolUsesMask, type StudioToolState } from "./studioToolState";
 import type { EditTemplate, StudioToolCapability, TurnAccepted } from "./types";
 import type { useStudioBackground } from "./useStudioBackground";
@@ -36,6 +37,10 @@ export type StudioApplyEdit = {
   /** Runs once the edit is taken, with its turn when it was sent as one: a replaced
    * background or subject is two turns, and says only that both were taken. */
   onAccepted: (accepted?: TurnAccepted) => void;
+  /** Which workflow an Enhance runs and what it takes, as the server previewed it. */
+  enlargement?: EnlargementPreview | null;
+  /** Runs when the turn is refused, so a preview it was built on can be asked again. */
+  onRefused?: () => void;
 };
 
 export function applyStudioEdit(edit: StudioApplyEdit): void {
@@ -43,7 +48,7 @@ export function applyStudioEdit(edit: StudioApplyEdit): void {
   const selection = toolUsesMask(tools.kind) && tools.mask && !isEmpty(tools.mask)
     ? tools.mask
     : null;
-  const plan = studioApplyPlan(tools, edit.instruction, recipe, edit.activeTool, edit.isolateTool);
+  const plan = studioApplyPlan(tools, edit.instruction, recipe, edit.activeTool, edit.isolateTool, edit.enlargement);
   if (plan.cutout) {
     // Drawn at the picture's own size, so the subject lines up with it.
     if (!bitmap) return;
@@ -68,8 +73,9 @@ export function applyStudioEdit(edit: StudioApplyEdit): void {
       plan.workflowRevisionId,
       edit.onAccepted,
       secondPicture,
-      undefined,
+      edit.onRefused,
       studioOffersResults(tools.kind) ? edit.results : 1,
+      plan.upscale,
     );
   };
   edit.setError(null);

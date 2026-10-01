@@ -37,6 +37,7 @@ _RE_EXPORTED = re.compile(r'^export type \* from "\./([A-Za-z0-9_]+)";$', re.M)
 # Server-only models (requests, bundles the browser posts blindly) and
 # browser-only view models are deliberately absent.
 CHECKED_CONTRACTS = {
+    "EnlargementPreview": "UpscalePreviewOut",
     "QueueOrderOwner": "QueueOrderOwner",
     "QueueOrderNeighbours": "QueueOrderNeighbours",
     "QueueOrderCommand": "QueueOrderCommand",

@@ -1,6 +1,7 @@
 import type { QueueLane, QueueOrderCommand, QueueOrderPage, QueueOrderResult } from "./queueOrderTypes";
 import { workflowFamilyQuery, workflowReadQuery, type WorkflowFamilyReadOptions, type WorkflowReadPageOptions } from "./workflowReadQuery";
 import type { WorkflowRecipeTarget, WorkflowUseCase, WorkflowUseCaseChoice, WorkflowUseCaseDefault, WorkflowUseCasePreset, WorkflowUseCasePresetCreate } from "./workflowUseCaseTypes";
+import type { EnlargementPreview } from "./studioEnlargement";
 import { buildTurnRequest, SOURCE_FIT_BINDING_ERROR, type TurnRequestPayload } from "./turnRequest";
 import { defaultOutputShapes } from "./outputShapePreferences";
 export { buildTurnRequest } from "./turnRequest";
@@ -562,6 +563,13 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   studioCapabilities: () => request<StudioCapabilityReport>("/api/studio/capabilities"),
+  /** Which workflow an enlargement of this turn's picture would run, and what it lets the person choose. */
+  previewEnlargement: (chatId: string, payload: TurnRequestPayload, signal?: AbortSignal) =>
+    request<EnlargementPreview>(`/api/chats/${encodeURIComponent(chatId)}/upscale/preview`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+      signal,
+    }),
   sendTurn: async (
     chatId: string,
     text: string,
@@ -579,11 +587,13 @@ export const api = {
     promptSource?: ComposerPromptSource,
     confirmTurn?: TurnConfirmationHandler,
     sourceFit?: SourceFitSelection,
+    upscale?: boolean,
   ) => {
     const payload = buildTurnRequest({
       text, mode, inputArtifactIds, settings, idempotencyKey, workflowRevisionId,
       references, outputCount, promptSource, sourceFit,
       defaultOutputShapes: defaultOutputShapes(),
+      upscale,
     });
     const submit = (selectedMode: RoutingMode, confirmed = false) => {
       if (payload.source_fit && selectedMode !== "image" && selectedMode !== "auto") throw new Error(SOURCE_FIT_BINDING_ERROR);

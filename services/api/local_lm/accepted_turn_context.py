@@ -34,6 +34,7 @@ from .workflow_use_case_preset_provenance import (
     WorkflowUseCasePresetSnapshot,
     read_workflow_use_case_preset,
 )
+from .workflow_use_cases_v1 import WorkflowUseCase
 
 
 class ContextMessage(BaseModel):
@@ -279,6 +280,7 @@ class AcceptedContext(BaseModel):
     vision_bridge_max_tokens: int = Field(ge=1)
     context_limit: int = Field(ge=1)
     operation: str
+    upscale: bool = False
     routing_mode: RoutingMode | None = None
     image_edit_strength: dict[str, Any] | None = None
     profile_id: str | None
@@ -328,6 +330,28 @@ class AcceptedContext(BaseModel):
         return self
 
 
+def recorded_enlargement(run: Run, snapshot: AcceptedContext | None) -> bool:
+    """Read explicit intent, or an older validated enlargement recipe receipt."""
+    if snapshot is not None and "upscale" in snapshot.model_fields_set:
+        return snapshot.upscale
+    if "upscale" in run.provenance_json:
+        return run.provenance_json["upscale"] is True
+    if snapshot is not None:
+        recipe = snapshot.workflow_use_case_preset
+        operation = snapshot.operation
+    else:
+        recipe = read_workflow_use_case_preset(
+            run.provenance_json.get("workflow_use_case_preset"),
+            workflow_revision_id=run.workflow_revision_id,
+        )
+        operation = run.operation
+    return (
+        operation == Operation.IMAGE_TO_IMAGE.value
+        and recipe is not None
+        and recipe.use_case == WorkflowUseCase.IMAGE_UPSCALE
+    )
+
+
 def _digest(value: dict[str, Any]) -> str:
     encoded = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -353,6 +377,7 @@ def save_accepted_context(
     context_artifact_ids: set[str],
     verification_profile_id: str | None = None,
     source_fit: SourceFitRecipe | None = None,
+    upscale: bool = False,
     inherited_context: AcceptedContext | None = None,
     inherited_configuration: AcceptedContext | None = None,
     inherit_profile_configuration: bool = False,
@@ -531,6 +556,7 @@ def save_accepted_context(
         vision_bridge_max_tokens=vision_bridge_max_tokens,
         context_limit=context_limit,
         operation=run.operation,
+        upscale=upscale,
         routing_mode=work_plan.summary_json.get("routing_mode") if work_plan else None,
         profile_id=run.profile_id,
         vision_profile_id=run.vision_profile_id,

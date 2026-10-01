@@ -147,9 +147,36 @@ def test_upscale_preserves_the_difference_between_detail_and_resampling(
     graph = {"node": {"class_type": node, "inputs": {"image": "${input_image}"}}}
     facts = _edit(upscale=True)
     assert _assess(facts, api_graph=graph).reason == "workflow-use-case-upscale-unsupported"
-    result = _assess(facts, api_graph=graph, input_schema=_schema("upscale_factor", "upscale"))
+    schema = _schema("upscale_factor", "upscale")
+    schema["properties"]["upscale_factor"]["readOnly"] = True
+    result = _assess(facts, api_graph=graph, input_schema=schema)
     assert result.reason is None
     assert result.upscale_kind == kind
+
+
+def test_an_editable_factor_must_reach_the_graph() -> None:
+    graph = {"node": {"class_type": "ImageScaleBy", "inputs": {"image": "${input_image}"}}}
+    schema = _schema("upscale_factor", "upscale")
+
+    result = _assess(_edit(upscale=True), api_graph=graph, input_schema=schema)
+
+    assert result.reason == "workflow-use-case-upscale-binding-missing"
+
+
+def test_an_explicitly_bound_factor_remains_usable() -> None:
+    graph = {
+        "node": {
+            "class_type": "ImageScaleBy",
+            "inputs": {"image": "${input_image}", "scale_by": "${upscale_factor}"},
+        }
+    }
+
+    result = _assess(
+        _edit(upscale=True), api_graph=graph, input_schema=_schema("upscale_factor", "upscale")
+    )
+
+    assert result.reason is None
+    assert result.upscale_kind == "resample"
 
 
 def test_a_scale_declaration_does_not_invent_an_upscale_node() -> None:

@@ -4,6 +4,7 @@
  * it can be checked without drawing anything.
  */
 
+import { chosenFactor, enlargementFactor, type EnlargementPreview } from "./studioEnlargement";
 import { defaultInstruction, type StudioSubjectPicture, type StudioToolState } from "./studioToolState";
 import type { EditTemplate, StudioToolCapability } from "./types";
 
@@ -16,6 +17,8 @@ export type StudioApplyPlan = {
   blendSelection: boolean;
   /** A light map goes with the picture as a second input. */
   sendsLightMap: boolean;
+  /** Said as an enlargement, so a workflow that sets its own size is still chosen as one. */
+  upscale?: boolean;
   /** A cutout run first, whose subject decides what the words may redraw. */
   cutout?: {
     words: string;
@@ -42,7 +45,24 @@ export function studioApplyPlan(
   activeTool: StudioToolCapability | undefined,
   /** Isolate's entry in the report, which names the workflow every cutout runs on. */
   isolateTool?: StudioToolCapability,
+  /** Which workflow an Enhance runs and what it takes, as the server previewed it. */
+  enlargement?: EnlargementPreview | null,
 ): StudioApplyPlan {
+  if (tools.kind === "enhance") {
+    const factor = enlargement
+      ? enlargementFactor(enlargement.factor, chosenFactor(enlargement, tools.upscaleChoice))
+      : null;
+    return {
+      words: defaultInstruction(tools),
+      // Only a factor the workflow applies is sent; one that sets its own size is given none.
+      settings: factor !== null ? { upscale_factor: factor } : undefined,
+      // The workflow the preview named, so the run is the one the person was shown.
+      workflowRevisionId: enlargement?.workflow_revision_id,
+      upscale: true,
+      blendSelection: false,
+      sendsLightMap: false,
+    };
+  }
   if (tools.kind === "relight") {
     const adapter = activeTool?.adapter_asset_id;
     return {
@@ -134,13 +154,11 @@ export function studioApplyPlan(
     : instruction.trim() || defaultInstruction(tools);
   return {
     words,
-    settings: tools.kind === "enhance"
-      ? { upscale_factor: tools.upscaleFactor }
-      : tools.kind === "extend"
-        ? { outpaint_margins: tools.margins }
-        : recipe
-          ? recipe.settings_json
-          : undefined,
+    settings: tools.kind === "extend"
+      ? { outpaint_margins: tools.margins }
+      : recipe
+        ? recipe.settings_json
+        : undefined,
     workflowRevisionId: recipe?.workflow_revision_id ?? undefined,
     blendSelection: tools.kind === "text",
     sendsLightMap: false,
@@ -181,7 +199,11 @@ export function studioToolReady(
   isolateTool: StudioToolCapability | undefined,
   /** Why the chat's own workflow choice cannot run, if it cannot. */
   workflowUnavailable: string | null,
+  /** Which workflow an Enhance runs, once the server has said. */
+  enlargement?: EnlargementPreview | null,
 ): boolean {
+  // An enlargement runs the workflow the preview names, so it waits for one.
+  if (tools.kind === "enhance") return Boolean(enlargement);
   const ownWorkflow = Boolean(activeTool?.workflow_revision_id);
   if (tools.kind === "extend" && !Object.values(tools.margins).some(Boolean)) return false;
   if (tools.kind === "text" && (!tools.newWords.trim() || selectionCoverage === 0)) return false;
@@ -205,7 +227,12 @@ export function studioToolReady(
  * tool has marked something, "Apply edit" otherwise, and "Applying…" while
  * an edit is arriving, whatever the tool.
  */
-export function studioApplyLabel(tools: StudioToolState, busy: boolean, selectionCoverage: number): string {
+export function studioApplyLabel(
+  tools: StudioToolState,
+  busy: boolean,
+  selectionCoverage: number,
+  enlargement?: EnlargementPreview | null,
+): string {
   if (busy) return "Applying…";
   switch (tools.kind) {
     case "extend":
@@ -223,7 +250,9 @@ export function studioApplyLabel(tools: StudioToolState, busy: boolean, selectio
     case "subject":
       return "Replace subject";
     case "enhance":
-      return `Enlarge ${tools.upscaleFactor}x`;
+      // Only a size the workflow's graph proves is named. A factor the person
+      // chooses sets the workflow's scale, which another step may multiply.
+      return enlargement && enlargement.fixed_factor !== null ? `Enlarge ${enlargement.fixed_factor}x` : "Enlarge";
     default:
       return tools.kind !== "instruct" && selectionCoverage > 0 ? "Apply to selection" : "Apply edit";
   }
