@@ -1268,6 +1268,155 @@ async def test_managed_outputs_are_removed_when_collection_fails(tmp_path: Path)
     assert not second.exists()
 
 
+async def test_a_run_whose_history_is_written_after_its_success_report_is_collected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ComfyUI reports success before it stores the run's history.
+
+    With large models the gap is long enough that the first read finds no
+    record, and a finished run used to fail as having produced nothing.
+    """
+
+    prompt_id = "prompt-late-history"
+    history_reads: list[int] = []
+
+    class Socket:
+        def __init__(self) -> None:
+            self.messages = iter(
+                [
+                    json.dumps({"type": "execution_start", "data": {"prompt_id": prompt_id}}),
+                    json.dumps({"type": "execution_success", "data": {"prompt_id": prompt_id}}),
+                ]
+            )
+
+        async def __aenter__(self) -> Socket:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        def __aiter__(self) -> Socket:
+            return self
+
+        async def __anext__(self) -> str:
+            try:
+                return next(self.messages)
+            except StopIteration as exc:
+                raise StopAsyncIteration from exc
+
+    def connect(*_args: Any, **_kwargs: Any) -> Socket:
+        return Socket()
+
+    async def comfy(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/prompt":
+            return httpx.Response(200, json={"prompt_id": prompt_id, "node_errors": {}})
+        if request.url.path == f"/history/{prompt_id}":
+            history_reads.append(len(history_reads))
+            if len(history_reads) < 3:
+                return httpx.Response(200, json={})
+            return httpx.Response(
+                200,
+                json={
+                    prompt_id: {
+                        "outputs": {
+                            "save": {
+                                "images": [
+                                    {"filename": "late.png", "subfolder": "", "type": "output"}
+                                ]
+                            }
+                        }
+                    }
+                },
+            )
+        if request.url.path == "/view":
+            return httpx.Response(
+                200, content=b"\x89PNG\r\n\x1a\n", headers={"content-type": "image/png"}
+            )
+        raise AssertionError(f"unexpected ComfyUI request: {request.method} {request.url}")
+
+    monkeypatch.setattr("local_lm.adapters.comfyui.websockets.connect", connect)
+    monkeypatch.setattr("local_lm.adapters.comfyui._HISTORY_POLL_SECONDS", 0)
+    adapter = ComfyUIAdapter("http://comfy.test")
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(comfy),
+    )
+    try:
+        generated = [
+            event async for event in adapter.generate(media_request(operation="text_to_image"))
+        ]
+    finally:
+        await adapter.close()
+
+    assert generated[-1].type == "complete"
+    assert [asset.name for asset in generated[-1].assets] == ["late.png"]
+    assert len(history_reads) == 3
+
+
+async def test_a_prompt_that_never_reaches_the_history_still_fails_once_the_wait_ends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompt_id = "prompt-never-recorded"
+    history_reads = 0
+
+    async def comfy(request: httpx.Request) -> httpx.Response:
+        nonlocal history_reads
+        if request.url.path == f"/history/{prompt_id}":
+            history_reads += 1
+            return httpx.Response(200, json={})
+        raise AssertionError(f"unexpected ComfyUI request: {request.method} {request.url}")
+
+    monkeypatch.setattr("local_lm.adapters.comfyui._HISTORY_SETTLE_SECONDS", 0.05)
+    monkeypatch.setattr("local_lm.adapters.comfyui._HISTORY_POLL_SECONDS", 0.01)
+    adapter = ComfyUIAdapter("http://comfy.test")
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(comfy),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="without collectible image or video outputs"):
+            await adapter._collect_outputs(prompt_id, "text_to_image")
+    finally:
+        await adapter.close()
+
+    assert history_reads > 1
+
+
+async def test_a_recorded_prompt_with_no_outputs_fails_without_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a missing record is waited for; an empty one is the backend's answer."""
+
+    prompt_id = "prompt-recorded-empty"
+    history_reads = 0
+
+    async def comfy(request: httpx.Request) -> httpx.Response:
+        nonlocal history_reads
+        if request.url.path == f"/history/{prompt_id}":
+            history_reads += 1
+            return httpx.Response(200, json={prompt_id: {"outputs": {}}})
+        raise AssertionError(f"unexpected ComfyUI request: {request.method} {request.url}")
+
+    # Were an empty record waited for, this would read it about twenty times.
+    monkeypatch.setattr("local_lm.adapters.comfyui._HISTORY_SETTLE_SECONDS", 0.2)
+    monkeypatch.setattr("local_lm.adapters.comfyui._HISTORY_POLL_SECONDS", 0.01)
+    adapter = ComfyUIAdapter("http://comfy.test")
+    await adapter._client.aclose()
+    adapter._client = httpx.AsyncClient(
+        base_url="http://comfy.test",
+        transport=httpx.MockTransport(comfy),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="without collectible image or video outputs"):
+            await adapter._collect_outputs(prompt_id, "text_to_image")
+    finally:
+        await adapter.close()
+
+    assert history_reads == 1
+
+
 async def test_output_collection_enforces_total_byte_limit_and_removes_source(
     tmp_path: Path,
 ) -> None:
