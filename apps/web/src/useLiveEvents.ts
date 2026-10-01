@@ -270,6 +270,11 @@ export function useLiveEvents(
         if (["generation.progress", "generation.preview"].includes(event.type)) {
           scheduleMediaRefresh();
         }
+        if (event.type === "run.retrying") {
+          for (const key of ["chat", "chats", "jobs", "work-plans"]) {
+            void client.invalidateQueries({ queryKey: [key] });
+          }
+        }
         if (["run.completed", "run.failed", "run.cancelled"].includes(event.type)) {
           if (mediaRefresh !== undefined) window.clearTimeout(mediaRefresh);
           mediaRefresh = undefined;

@@ -379,7 +379,7 @@ async def test_exhausted_media_storage_rejects_before_any_turn_is_written(
     assert (await client.get("/api/work-plans", params={"chat_id": chat["id"]})).json() == []
 
 
-async def test_media_oom_fails_truthfully_then_retries_without_duplicate_output(
+async def test_media_oom_exhausts_retries_then_recovers_without_duplicate_output(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -401,9 +401,22 @@ async def test_media_oom_fails_truthfully_then_retries_without_duplicate_output(
     assert accepted.status_code == 202
     run_id = accepted.json()["run"]["id"]
     failed = await _wait_for_run(client, run_id, "failed")
+    assert "out of memory" in str(failed["error"]).casefold()
+    with SessionLocal() as session:
+        job = session.scalar(select(Job).where(Job.run_id == run_id))
+        assert job and job.attempt == 4
+    assert failed["provenance_json"]["failure_retries"] == {
+        "limit": 3,
+        "used": 3,
+        "pending": False,
+    }
     assert failed["provenance_json"].get("outputs") in (None, [])
     message_id = accepted.json()["assistant_message"]["id"]
     failed_message = (await client.get(f"/api/messages/{message_id}")).json()
+    assert any(
+        part["type"] == "error" and "out of memory" in (part.get("text") or "").casefold()
+        for part in failed_message["parts"]
+    )
     assert not any(part["type"] == "image" for part in failed_message["parts"])
 
     monkeypatch.setattr(MockMediaAdapter, "generate", original_generate)
@@ -416,7 +429,7 @@ async def test_media_oom_fails_truthfully_then_retries_without_duplicate_output(
     assert sum(part["type"] == "image" for part in completed_message["parts"]) == 1
     with SessionLocal() as session:
         job = session.scalar(select(Job).where(Job.run_id == run_id))
-        assert job and job.attempt == 2
+        assert job and job.attempt == 5
 
 
 async def test_video_postprocessing_never_holds_a_sqlite_write_transaction(

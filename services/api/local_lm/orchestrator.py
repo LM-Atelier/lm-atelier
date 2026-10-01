@@ -94,6 +94,7 @@ from .generation_offers import (
     routing_plan_for_offer,
     should_extract_generation_offer,
 )
+from .generation_retry import capture_retry_budget, reserve_retry, retry_is_pending
 from .image_edit_difference import (
     INCOMPARABLE,
     ChangedArea,
@@ -2910,6 +2911,10 @@ class ConversationOrchestrator:
                 provenance_json=provenance,
             )
             _require_consistent_workflow_witness(work_step, run)
+            run.provenance_json = {
+                **run.provenance_json,
+                "failure_retries": capture_retry_budget(session, run.operation),
+            }
             session.add(run)
             session.flush()
             work_step.run_id = run.id
@@ -3665,6 +3670,10 @@ class ConversationOrchestrator:
                 },
             )
             _require_consistent_workflow_witness(work_step, run)
+            run.provenance_json = {
+                **run.provenance_json,
+                "failure_retries": capture_retry_budget(session, run.operation),
+            }
             session.add(run)
             session.flush()
             work_step.run_id = run.id
@@ -3832,7 +3841,22 @@ class ConversationOrchestrator:
     ) -> None:
         if run_id and not self._is_image_edit_verification_retry(run_id):
             await self._preempt_running_image_edit_verifications()
-        await self._execute(job_id, run_id)
+        while not self._closing:
+            await self._execute(job_id, run_id)
+            if run_id is None:
+                return
+            with self.session_factory() as session:
+                job = session.get(Job, job_id)
+                run = session.get(Run, run_id)
+                pending = (
+                    job is not None
+                    and job.status == JobStatus.QUEUED.value
+                    and run is not None
+                    and retry_is_pending(run.provenance_json)
+                )
+            if not pending:
+                return
+            await asyncio.sleep(1)
 
     def _is_image_edit_verification_retry(self, run_id: str) -> bool:
         with self.session_factory() as session:
@@ -4188,6 +4212,14 @@ class ConversationOrchestrator:
                     ):
                         return
                     self._resolve_step_inputs(session, run)
+                    if retry_is_pending(run.provenance_json):
+                        run.provenance_json = {
+                            **run.provenance_json,
+                            "failure_retries": {
+                                **run.provenance_json["failure_retries"],
+                                "pending": False,
+                            },
+                        }
                     run.status = RunStatus.RUNNING.value
                     run.started_at = job.started_at or utcnow()
                     self._set_work_status(session, run, JobStatus.RUNNING.value)
@@ -9092,53 +9124,107 @@ class ConversationOrchestrator:
                     job_id,
                 )
                 return
-            cancel_pending_search(session, run)
-            run.status = RunStatus.FAILED.value
-            run.error = error
-            run.completed_at = now
-            self._set_work_status(session, run, JobStatus.FAILED.value, error=error)
-            update_job_progress(job, stage="failed", indeterminate=True, now=now)
-            message = session.get(Message, run.assistant_message_id)
-            if message:
-                preview_ids = self._temporary_preview_ids(message)
-                message.status = MessageStatus.FAILED.value
-                if run.operation == Operation.TEXT.value:
-                    self._remove_chat_progress(message)
-                    # Flush removed progress rows before reusing their positions
-                    # for a terminal error part.
-                    session.flush()
-                    error_part = next(
-                        (part for part in message.parts if part.type == PartType.ERROR.value),
-                        None,
-                    )
-                    if error_part:
-                        error_part.text = error
-                    else:
-                        message.parts.append(
-                            MessagePart(
-                                position=max((part.position for part in message.parts), default=-1)
-                                + 1,
-                                type=PartType.ERROR.value,
-                                text=error,
-                            )
+            retry = (
+                self._reserve_failed_media_retry(session, job, run, claim)
+                if reserve_retry(run.provenance_json, run.operation) is not None
+                else None
+            )
+            if retry is None:
+                cancel_pending_search(session, run)
+                run.status = RunStatus.FAILED.value
+                run.error = error
+                run.completed_at = now
+                self._set_work_status(session, run, JobStatus.FAILED.value, error=error)
+                update_job_progress(job, stage="failed", indeterminate=True, now=now)
+                message = session.get(Message, run.assistant_message_id)
+                if message:
+                    preview_ids = self._temporary_preview_ids(message)
+                    message.status = MessageStatus.FAILED.value
+                    if run.operation == Operation.TEXT.value:
+                        self._remove_chat_progress(message)
+                        # Flush removed progress rows before reusing their positions
+                        # for a terminal error part.
+                        session.flush()
+                        error_part = next(
+                            (part for part in message.parts if part.type == PartType.ERROR.value),
+                            None,
                         )
-                else:
-                    self._replace_parts(
+                        if error_part:
+                            error_part.text = error
+                        else:
+                            message.parts.append(
+                                MessagePart(
+                                    position=max(
+                                        (part.position for part in message.parts), default=-1
+                                    )
+                                    + 1,
+                                    type=PartType.ERROR.value,
+                                    text=error,
+                                )
+                            )
+                    else:
+                        self._replace_parts(
+                            message,
+                            [MessagePart(position=0, type=PartType.ERROR.value, text=error)],
+                        )
+                    self._finalize_response_revision(
+                        session,
+                        run,
                         message,
-                        [MessagePart(position=0, type=PartType.ERROR.value, text=error)],
+                        promote=False,
                     )
-                self._finalize_response_revision(
-                    session,
-                    run,
-                    message,
-                    promote=False,
-                )
-                session.flush()
-                for artifact_id in preview_ids:
-                    self.artifacts.delete_temporary_preview(session, artifact_id)
+                    session.flush()
+                    for artifact_id in preview_ids:
+                        self.artifacts.delete_temporary_preview(session, artifact_id)
             session.commit()
         await self.scheduler.publish_job(job_id)
-        await self.events.publish("run.failed", run_id, {"job_id": job_id, "error": error})
+        if retry is not None:
+            await self.events.publish(
+                "run.retrying",
+                run_id,
+                {"job_id": job_id, "used": retry["used"], "limit": retry["limit"]},
+            )
+        else:
+            await self.events.publish("run.failed", run_id, {"job_id": job_id, "error": error})
+
+    def _reserve_failed_media_retry(
+        self, session: Session, job: Job, run: Run, claim: JobClaim | None
+    ) -> dict[str, Any] | None:
+        """Requeue one owned media failure with its accepted configuration intact."""
+        if self._closing or claim is None or setup_verification_for_chat(session, run.chat_id):
+            return None
+        retry = reserve_retry(run.provenance_json, run.operation)
+        if retry is None:
+            return None
+        work_step = session.get(WorkStep, run.work_step_id) if run.work_step_id else None
+        if work_step is None:
+            return None
+        try:
+            _require_consistent_workflow_witness(work_step, run)
+            self.preflight_workflow_lora_replay(session, run)
+        except (RuntimeError, WorkflowLoraAdmissionError):
+            return None
+        self.prepare_retry(session, run)
+        run.provenance_json = {**run.provenance_json, "failure_retries": retry}
+        run.status = RunStatus.QUEUED.value
+        run.error = None
+        run.completed_at = None
+        job.status = JobStatus.QUEUED.value
+        job.error = None
+        job.progress = 0
+        job.started_at = None
+        job.completed_at = None
+        job.enqueued_at = utcnow()
+        job.claim_owner = None
+        job.claim_expires_at = None
+        job.heartbeat_at = None
+        update_job_progress(
+            job,
+            stage=f"Retry queued ({retry['used']} of {retry['limit']})",
+            queue_resource=job.queue_resource or "media_compute",
+            indeterminate=True,
+        )
+        return retry
 
     def _claim_still_owns(self, job_id: str, claim: JobClaim) -> bool:
         """A read-only ownership probe for effects that are not database

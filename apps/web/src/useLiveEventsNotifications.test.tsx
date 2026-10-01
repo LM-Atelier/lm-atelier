@@ -66,6 +66,23 @@ it("announces a run the live connection reports finished", async () => {
   expect(shown).toEqual([{ body: "A result is ready.", tag: "run:live-run-1" }]);
 });
 
+it("refreshes a queued retry without announcing a terminal failure", async () => {
+  vi.stubGlobal("Notification", class {
+    static permission: NotificationPermission = "granted";
+    static requestPermission = vi.fn(async () => "granted" as NotificationPermission);
+    constructor(_title: string, options?: NotificationOptions) {
+      shown.push(options ?? {});
+    }
+  });
+  await setNotifyWhenFinished(true);
+  const { deliver, invalidate } = await connected();
+  await deliver(runEvent("run.retrying", "retrying-run"));
+  expect(shown).toEqual([]);
+  expect(invalidatedRoots(invalidate)).toEqual(
+    expect.arrayContaining(["chat", "chats", "jobs", "work-plans"]),
+  );
+});
+
 it("keeps every refresh a finished run triggers when the notification itself fails", async () => {
   vi.stubGlobal("Notification", class {
     static permission: NotificationPermission = "granted";
