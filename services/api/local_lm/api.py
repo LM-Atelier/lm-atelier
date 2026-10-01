@@ -184,6 +184,7 @@ from .engines import (
     EngineRegistry,
     EngineSchemaUnavailableError,
 )
+from .generation_experiment_api import router as generation_experiment_router
 from .generation_queue import (
     GenerationQueueConflict,
     change_generation_queue,
@@ -923,6 +924,7 @@ def _services(request: Request) -> Services:
 router = APIRouter(prefix="/api")
 router.include_router(workflow_use_case_preset_router)
 router.include_router(use_case_summary_router)
+router.include_router(generation_experiment_router)
 logger = logging.getLogger(__name__)
 
 
