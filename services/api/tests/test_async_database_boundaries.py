@@ -32,6 +32,17 @@ AUDITED_AWAITS = {
     # test_workflow_package_completion.py proves another connection commits
     # while that startup is awaited.
     ("workflow_package_preparation.py", "prepare_workflow_package", "on_prepared"),
+    # A verification's automatic retry runs on a session opened by assignment.
+    # It is fresh, with no write, when the creation helper is awaited (the
+    # helper commits before its own awaits), and rolled back before recovery
+    # is awaited. The writer case in test_retry_execution_binding.py proves
+    # another connection commits while each of them is awaited.
+    (
+        "orchestrator.py",
+        "_execute_image_edit_verification",
+        "self._create_image_edit_verification_retry",
+    ),
+    ("orchestrator.py", "_execute_image_edit_verification", "self._converge_on_bound_retry"),
 }
 
 
@@ -46,12 +57,28 @@ def _expression_name(expression: ast.expr) -> str:
     return type(expression).__name__
 
 
+def _opens_database_session(expression: ast.expr | None) -> bool:
+    return isinstance(expression, ast.Call) and _expression_name(expression).endswith(
+        ("SessionLocal", "session_factory")
+    )
+
+
 def _binds_database_session(statement: ast.With) -> bool:
-    for item in statement.items:
-        context_name = _expression_name(item.context_expr)
-        if context_name.endswith(("SessionLocal", "session_factory")):
-            return True
-    return False
+    return any(_opens_database_session(item.context_expr) for item in statement.items)
+
+
+def _assigned_session(statement: ast.AST) -> str | None:
+    """The name a statement assigns a newly opened session to, if it opens one."""
+
+    if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+        target, value = statement.targets[0], statement.value
+    elif isinstance(statement, ast.AnnAssign):
+        target, value = statement.target, statement.value
+    else:
+        return None
+    if isinstance(target, ast.Name) and _opens_database_session(value):
+        return target.id
+    return None
 
 
 def _awaits_inside_database_sessions() -> set[tuple[str, str, str]]:
@@ -62,14 +89,37 @@ def _awaits_inside_database_sessions() -> set[tuple[str, str, str]]:
         for node in ast.walk(tree):
             for child in ast.iter_child_nodes(node):
                 parents[child] = node
+        functions: dict[ast.AST, ast.AsyncFunctionDef | ast.FunctionDef] = {}
+        for node in ast.walk(tree):
+            parent = parents.get(node)
+            while parent is not None and not isinstance(
+                parent, (ast.AsyncFunctionDef, ast.FunctionDef)
+            ):
+                parent = parents.get(parent)
+            if isinstance(parent, (ast.AsyncFunctionDef, ast.FunctionDef)):
+                functions[node] = parent
+        # A session opened by assignment is open from that line until the
+        # function closes it by name, or to the end of the function.
+        assigned_spans: list[tuple[ast.AST, int, int]] = []
+        for node, function in functions.items():
+            name = _assigned_session(node)
+            if name is None:
+                continue
+            closes = [
+                call.lineno
+                for call in ast.walk(function)
+                if isinstance(call, ast.Call) and _expression_name(call) == f"{name}.close"
+            ]
+            end = max(closes) if closes else function.end_lineno or node.lineno
+            assigned_spans.append((function, node.lineno, end))
         for awaited in (node for node in ast.walk(tree) if isinstance(node, ast.Await)):
-            function_name = ""
-            nested_in_session = False
+            function = functions.get(awaited)
+            nested_in_session = any(
+                function is owner and start < awaited.lineno <= end
+                for owner, start, end in assigned_spans
+            )
             parent = parents.get(awaited)
-            while parent is not None:
-                if isinstance(parent, (ast.AsyncFunctionDef, ast.FunctionDef)):
-                    function_name = parent.name
-                    break
+            while parent is not None and parent is not function:
                 if isinstance(parent, ast.With) and _binds_database_session(parent):
                     nested_in_session = True
                 parent = parents.get(parent)
@@ -77,7 +127,7 @@ def _awaits_inside_database_sessions() -> set[tuple[str, str, str]]:
                 findings.add(
                     (
                         path.relative_to(SOURCE_ROOT).as_posix(),
-                        function_name,
+                        function.name if function else "",
                         _expression_name(awaited.value),
                     )
                 )
@@ -95,10 +145,11 @@ def test_async_database_session_boundaries_remain_explicit() -> None:
 # the scheduler heartbeat's write raises OperationalError, the claim stops being
 # renewed, and an unrelated running generation is interrupted.
 #
-# The audit above cannot see this. It recognises a session only from a `with`
-# statement whose callee ends in SessionLocal or session_factory, and this session
-# arrives as a parameter. Widening it was measured on 2026-09-03 and rejected: the
-# receives-a-session rule matches 172 sites. So this pins the one function instead.
+# The audit above cannot see this. It recognises a session only where it is opened,
+# by a `with` statement or an assignment whose callee ends in SessionLocal or
+# session_factory, and this session arrives as a parameter. Widening it was measured
+# on 2026-09-03 and rejected: the receives-a-session rule matches 172 sites. So this
+# pins the one function instead.
 WRITER_LOCK_SPANS = {
     (
         "orchestrator.py",
