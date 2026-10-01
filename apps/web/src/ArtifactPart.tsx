@@ -9,6 +9,7 @@ import {
   Star,
 } from "lucide-react";
 import { CompareButton } from "./CompareButton";
+import { GenerationDetails } from "./GenerationDetails";
 import { ImageStudioIcon } from "./ImageStudioIcon";
 import { LineageButton } from "./LineageButton";
 import { PagedImageHistory, type ImageHistoryTarget } from "./PagedImageHistory";
@@ -33,6 +34,7 @@ export function ArtifactPart({
   compareSourceUrl,
   lineage,
   editHistory,
+  generationProvenance,
 }: {
   part: MessagePart;
   origin: MediaOrigin | null;
@@ -44,6 +46,7 @@ export function ArtifactPart({
   compareSourceUrl?: string | null;
   lineage?: EditLineageStep[];
   editHistory?: ImageHistoryTarget;
+  generationProvenance?: unknown;
 }) {
   const proxyId = typeof part.metadata_json.browser_proxy_artifact_id === "string" ? part.metadata_json.browser_proxy_artifact_id : null;
   const posterId = typeof part.metadata_json.poster_artifact_id === "string"
@@ -154,6 +157,7 @@ export function ArtifactPart({
             </a>
           )}
         </figcaption>
+        {!preview && !inputReference && origin !== null && origin !== "uploaded" && <GenerationDetails provenance={generationProvenance} />}
         {/* Beside the picture rather than in place of it: the run succeeded and
             the picture is real, it simply is not the shape that was asked for.
             A status role announces it once when it appears without stealing
@@ -180,6 +184,7 @@ export function ArtifactPart({
         <Film size={14} /> {label}
         <a href={source} download>Download</a>
       </figcaption>
+      {!preview && !inputReference && origin !== null && origin !== "uploaded" && <GenerationDetails provenance={generationProvenance} />}
     </figure>
   );
 }

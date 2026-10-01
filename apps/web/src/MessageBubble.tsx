@@ -51,6 +51,7 @@ function PartView({
   compareSourceUrl,
   lineage,
   editHistory,
+  generationProvenance,
 }: {
   part: MessagePart;
   liveText?: string;
@@ -67,13 +68,14 @@ function PartView({
   compareSourceUrl?: string | null;
   lineage?: EditLineageStep[];
   editHistory?: ImageHistoryTarget;
+  generationProvenance?: unknown;
 }) {
   if (part.type === "text") {
     const text = liveText || part.text || "";
     return markdown ? <MarkdownText text={text} /> : <MentionText text={text} references={references} />;
   }
   if (part.type === "image" || part.type === "video" || part.type === "attachment") {
-    return <ArtifactPart part={part} origin={origin} onEditImage={onEditImage} onOpenStudio={onOpenStudio} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} onToggleFavorite={onToggleFavorite} compareSourceUrl={compareSourceUrl} lineage={lineage} editHistory={editHistory} />;
+    return <ArtifactPart part={part} origin={origin} onEditImage={onEditImage} onOpenStudio={onOpenStudio} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} onToggleFavorite={onToggleFavorite} compareSourceUrl={compareSourceUrl} lineage={lineage} editHistory={editHistory} generationProvenance={generationProvenance} />;
   }
   if (part.type === "progress") return <GenerationProgress part={part} />;
   if (part.type === "error") return <div className="message-error" role="alert">{part.text}</div>;
@@ -234,7 +236,7 @@ export function MessageBubble({
     <article className={`message ${message.role}`}>
       <div className="avatar">{message.role === "user" ? "You" : <Bot size={19} />}</div>
       <div className="message-content">
-        {contentRemoved ? <div className="message-removed">Message removed</div> : editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part, index) => <Fragment key={part.id}><VisibleChatActivity activity={["text", "image", "video", "error"].includes(part.type) && !part.metadata_json.preview ? visibleActivity : null}><PartView part={part} liveText={streamingText} markdown={message.role === "assistant"} references={message.references} origin={mediaOriginForPart(part, operation, message.role === "assistant" ? "generated" : null)} onEditImage={onEditImage} onOpenStudio={onOpenStudio} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} onToggleFavorite={onToggleFavorite} compareSourceUrl={message.role === "assistant" ? compareSourceUrl : undefined} lineage={message.role === "assistant" ? lineage : undefined} editHistory={readImageHistory && message.role === "assistant" ? { chatId: message.chat_id, resultId: message.id } : undefined} /></VisibleChatActivity>{index === messageActionPartIndex && userMessageMeta}</Fragment>)}
+        {contentRemoved ? <div className="message-removed">Message removed</div> : editing ? <div className="message-edit"><textarea aria-label="Edit message" rows={4} value={draft} onChange={(event) => setDraft(event.target.value)} /><div><button onClick={() => { setDraft(userText); setEditing(false); }}>Cancel</button><button className="primary" disabled={!draft.trim()} onClick={() => { onEdit?.(message.id, draft.trim()); setEditing(false); }}>Send edited message</button></div></div> : renderedParts.map((part, index) => <Fragment key={part.id}><VisibleChatActivity activity={["text", "image", "video", "error"].includes(part.type) && !part.metadata_json.preview ? visibleActivity : null}><PartView part={part} liveText={streamingText} markdown={message.role === "assistant"} references={message.references} origin={mediaOriginForPart(part, operation, message.role === "assistant" ? "generated" : null)} onEditImage={onEditImage} onOpenStudio={onOpenStudio} onAnimateImage={onAnimateImage} onReferenceMedia={onReferenceMedia} onToggleFavorite={onToggleFavorite} compareSourceUrl={message.role === "assistant" ? compareSourceUrl : undefined} lineage={message.role === "assistant" ? lineage : undefined} editHistory={readImageHistory && message.role === "assistant" ? { chatId: message.chat_id, resultId: message.id } : undefined} generationProvenance={provenance} /></VisibleChatActivity>{index === messageActionPartIndex && userMessageMeta}</Fragment>)}
         {!contentRemoved && streamingText && !visibleParts.some((part) => part.type === "text") && (
           <MarkdownText text={streamingText} />
         )}
@@ -246,7 +248,7 @@ export function MessageBubble({
           </VisibleChatActivity>
           {otherAttempt.parts.filter((part) => ["text", "image", "video", "error"].includes(part.type) && !part.metadata_json.preview).map((part) => (
             <VisibleChatActivity key={part.id} activity={otherActivity}>
-              <PartView part={part} markdown origin={null} />
+              <PartView part={part} markdown origin="generated" generationProvenance={otherAttempt.parts.find((item) => item.type === "generation_metadata")?.metadata_json.provenance} />
             </VisibleChatActivity>
           ))}
         </section>}

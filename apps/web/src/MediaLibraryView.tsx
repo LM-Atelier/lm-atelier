@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useInfiniteQuery, useMutation } from "@tanstack/react-query";
 import { Image as ImageIcon, Pencil, RefreshCw, Search, Star } from "lucide-react";
 import { api } from "./api";
+import { ArtifactGenerationDetails } from "./ArtifactGenerationDetails";
 import {
   ARTIFACT_LIBRARY_PAGE_ERROR,
   flattenArtifactLibraryPages,
@@ -161,6 +162,7 @@ export function MediaLibraryView({
                   <div>
                     <strong>{entry.display_name}</strong>
                     <small>{formatBytes(entry.size_bytes)} · Added {new Date(Math.floor(entry.created_at_epoch_micros / 1000)).toLocaleString(undefined, clockOptions(clock))}</small>
+                    <ArtifactGenerationDetails key={entry.artifact_id} artifactId={entry.artifact_id} />
                     <span>
                       <button
                         className={`icon-button ${entry.favorite ? "favorite-active" : ""}`}
