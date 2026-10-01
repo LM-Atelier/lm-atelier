@@ -41,6 +41,9 @@ logger = logging.getLogger(__name__)
 _CANCELLED = object()
 _MAX_COMFY_JSON_BYTES = 32 * 1024 * 1024
 _MAX_COMFY_OUTPUTS = 64
+#: How long a finished prompt's history may take to appear, and how often to look.
+_HISTORY_SETTLE_SECONDS = 30.0
+_HISTORY_POLL_SECONDS = 0.25
 
 #: The one subfolder every conditioning upload is addressed to. The backend's
 #: temp directory also holds files this adapter did not write, so this is the
@@ -769,17 +772,36 @@ class ComfyUIAdapter:
         if not completed:
             raise RuntimeError("ComfyUI did not produce media during the model activation probe.")
 
-    async def _collect_outputs(self, prompt_id: str, operation: str) -> list[GeneratedAsset]:
-        response = await self._client.get(f"/history/{prompt_id}", timeout=30)
-        response.raise_for_status()
-        if len(response.content) > _MAX_COMFY_JSON_BYTES:
-            raise RuntimeError("ComfyUI output history is too large")
-        payload = response.json()
-        if not isinstance(payload, dict):
-            raise RuntimeError("ComfyUI returned invalid output history")
+    async def _finished_history(self, prompt_id: str) -> dict[str, Any]:
+        """The backend's record of a finished prompt, once it has written one.
+
+        ComfyUI reports success from inside the run and stores the run's
+        history only afterwards, once its end-of-run work is done. With large
+        models that work can take long enough for a read made on the report to
+        find no record of a run that did produce output. A missing record is
+        therefore read again, for a bounded time, before it counts as no output;
+        a record that is present is final as it stands.
+        """
+
+        deadline = time.monotonic() + _HISTORY_SETTLE_SECONDS
+        while True:
+            response = await self._client.get(f"/history/{prompt_id}", timeout=30)
+            response.raise_for_status()
+            if len(response.content) > _MAX_COMFY_JSON_BYTES:
+                raise RuntimeError("ComfyUI output history is too large")
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise RuntimeError("ComfyUI returned invalid output history")
+            if prompt_id in payload or time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(_HISTORY_POLL_SECONDS)
         history = payload.get(prompt_id, {})
         if not isinstance(history, dict):
             raise RuntimeError("ComfyUI returned invalid output history")
+        return history
+
+    async def _collect_outputs(self, prompt_id: str, operation: str) -> list[GeneratedAsset]:
+        history = await self._finished_history(prompt_id)
         outputs = history.get("outputs") or {}
         if not isinstance(outputs, dict):
             raise RuntimeError("ComfyUI returned invalid output history")
