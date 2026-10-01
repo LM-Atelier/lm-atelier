@@ -21,6 +21,7 @@ import pytest_asyncio
 from fastapi import FastAPI
 from httpx2 import ASGITransport, AsyncClient
 from PIL import Image
+from run_waits import wait_until
 from sqlalchemy import delete, event, select, text, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session, sessionmaker
@@ -641,17 +642,19 @@ async def test_a_late_internal_descendant_obeys_hold_after_its_source_job_is_del
         session.commit()
     with claimant(sessions, job_id="verification") as entered:
 
-        async def wait_for_held_progress() -> None:
-            while True:
-                with sessions() as session:
-                    job = session.get(Job, "verification")
-                    assert job is not None
-                    if job.phase == "held":
-                        assert job.status == "queued" and job.claim_owner is None
-                        return
-                await asyncio.sleep(0.01)
+        async def verification_state() -> tuple[str, str, str | None]:
+            with sessions() as session:
+                job = session.get(Job, "verification")
+                assert job is not None
+                return job.phase, job.status, job.claim_owner
 
-        await asyncio.wait_for(wait_for_held_progress(), timeout=5)
+        phase, status, claim_owner = await wait_until(
+            verification_state,
+            lambda state: state[0] == "held",
+            what="the verification job's phase, status and claim",
+            interval=0.01,
+        )
+        assert phase == "held" and status == "queued" and claim_owner is None
         assert not entered.is_set()
         released = await queue_client.post(
             "/api/queue/items/plan-a/release",
