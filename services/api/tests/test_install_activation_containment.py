@@ -14,6 +14,7 @@ from local_lm.filesystem_links import (
     AnchoredDirectory,
     AnchoredDirectoryError,
     AnchoredEntryExists,
+    create_publishable_entry,
     publish_opened_file,
     take_regular_file,
 )
@@ -219,6 +220,46 @@ def test_held_file_publish_keeps_the_opened_object_after_a_name_swap(
 
     assert (dest_dir / "weights.bin").read_bytes() == b"staged-bytes"
     assert outside.read_bytes() == b"foreign-bytes"
+
+
+def test_a_created_file_publishes_the_opened_object_after_a_name_swap(tmp_path: Path) -> None:
+    """A file created to be published stays that file when its name is replaced.
+
+    The descriptor has to carry move rights from the moment it is created.
+    Opening a write-only file and renaming it later follows whatever the name
+    points at by then.
+    """
+
+    directory = tmp_path / "models"
+    directory.mkdir()
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"")
+
+    with AnchoredDirectory(directory) as parent:
+        descriptor = create_publishable_entry(parent, "partial.bin")
+        try:
+            os.write(descriptor, b"staged-bytes")
+            original = directory / "partial.bin"
+            if os.name == "nt":
+                with pytest.raises(PermissionError):
+                    original.unlink()
+            else:
+                original.unlink()
+                if not _make_link_file(original, outside):
+                    pytest.skip("this host cannot create a file link")
+            publish_opened_file(
+                parent,
+                "partial.bin",
+                descriptor,
+                into=parent,
+                destination="weights.bin",
+            )
+        finally:
+            os.close(descriptor)
+
+    assert (directory / "weights.bin").read_bytes() == b"staged-bytes"
+    assert outside.read_bytes() == b""
+    assert not (directory / "partial.bin").exists()
 
 
 def test_take_regular_file_refuses_a_replacement_link(tmp_path: Path) -> None:
