@@ -1,4 +1,4 @@
-"""Explain recipe admission failures without exposing stored values or identifiers."""
+"""Explain workflow admission failures without exposing stored values or identifiers."""
 
 from .workflow_selection import WorkflowFamilySelectionError
 from .workflow_use_case_preset_admission import WorkflowUseCasePresetAdmissionError
@@ -11,6 +11,10 @@ _CHOOSE = (
     "under Recipes for this chat."
 )
 _MESSAGES = {
+    "workflow-instruction-edit-required": (
+        "Automatic localized edits need a ready instruction-edit workflow. "
+        "Enable one in Workflows, or choose a workflow explicitly to use a strength edit."
+    ),
     "workflow-use-case-preset-not-found": (
         "The selected recipe no longer exists. Choose another recipe or Automatic "
         "(no recipe) under Recipes for this chat."
@@ -115,7 +119,7 @@ _MESSAGES = {
 
 
 def workflow_use_case_error(exc: ValueError) -> tuple[str, str] | None:
-    """Recognize typed recipe failures while leaving unrelated errors unchanged."""
+    """Recognize typed workflow failures while leaving unrelated errors unchanged."""
     if isinstance(exc, WorkflowFamilySelectionError):
         code = exc.reason
         if code == "no_ready_workflow":

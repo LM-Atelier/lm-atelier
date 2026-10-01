@@ -102,6 +102,7 @@ from .image_edit_difference import (
     compare_region,
     crop_changed_area,
 )
+from .image_edit_eligibility import automatic_image_edit_eligibility
 from .image_edit_kind import image_edit_kind
 from .image_edit_strength import (
     EditScope,
@@ -10701,6 +10702,12 @@ class ConversationOrchestrator:
                 model_install_id=profile.model_install_id,
             )
 
+        combined_eligibility = (
+            automatic_image_edit_eligibility(operation, prompt, revision_eligibility)
+            if mode == "automatic" and engine != "mock"
+            else revision_eligibility
+        )
+        requires_instruction_edit = combined_eligibility is not revision_eligibility
         try:
             resolved = resolve_workflow_family(
                 session,
@@ -10712,13 +10719,15 @@ class ConversationOrchestrator:
                 engine=engine,
                 legacy_revision_resolver=legacy_revision,
                 preferred_revision=self._instruction_edit_preference(operation, prompt),
-                revision_eligibility=revision_eligibility,
+                revision_eligibility=combined_eligibility,
             )
         except WorkflowFamilySelectionError as exc:
             reasons = (
                 set(exc.candidate_reasons) if exc.reason == "no_ready_workflow" else {exc.reason}
             )
-            if revision_eligibility is not None and reasons != {"engine_mismatch"}:
+            if requires_instruction_edit or (
+                revision_eligibility is not None and reasons != {"engine_mismatch"}
+            ):
                 raise
             # A missing workflow default during the additive compatibility
             # window retains the existing role-default behavior. Real explicit

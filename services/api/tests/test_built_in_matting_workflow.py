@@ -27,6 +27,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
+from test_automatic_image_edit_selection import _graphs
 
 from local_lm.comfy_templates import compile_authored_workflow
 from local_lm.config import Settings
@@ -401,9 +402,12 @@ def test_with_only_the_cutout_installed_an_ordinary_edit_finds_nothing(
     assert _orchestrator()._workflow_for_operation(memory_session, Operation.IMAGE_TO_IMAGE) is None
 
 
-def test_auto_never_hands_an_edit_to_the_cutout(memory_session: Session) -> None:
+@pytest.mark.parametrize(
+    "prompt", ["Remove the background.", "Turn it into a watercolor painting."]
+)
+def test_auto_never_hands_an_edit_to_the_cutout(memory_session: Session, prompt: str) -> None:
     earlier = datetime(2026, 1, 1, tzinfo=UTC)
-    # Described, and the default, so every other rule would choose it first.
+    # The default would win a global edit unless cutouts are excluded.
     _edit_workflow(
         memory_session,
         "Remove background",
@@ -419,6 +423,7 @@ def test_auto_never_hands_an_edit_to_the_cutout(memory_session: Session) -> None
         created_at=earlier + timedelta(days=1),
         use_case="studio photos",
     )
+    ordinary.ui_graph_json, ordinary.api_graph_json = _graphs(instruction=True)
     chat = Chat(title="Edits")
     memory_session.add(chat)
     memory_session.flush()
@@ -428,7 +433,7 @@ def test_auto_never_hands_an_edit_to_the_cutout(memory_session: Session) -> None
     memory_session.flush()
 
     _profile, selection, revision = _orchestrator()._profile_and_workflow_for_operation(
-        memory_session, chat, Operation.IMAGE_TO_IMAGE, "Remove the background."
+        memory_session, chat, Operation.IMAGE_TO_IMAGE, prompt
     )
 
     assert revision is not None and revision.id == ordinary.id
