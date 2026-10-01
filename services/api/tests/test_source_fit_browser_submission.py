@@ -20,6 +20,10 @@ from local_lm.db import SessionLocal
 from local_lm.models import Run
 
 ROOT = Path(__file__).resolve().parents[3]
+# Starting Vite and compiling the draft module took more than 30 seconds on a
+# busy Windows runner with nothing wrong. The limit only stops a hung process,
+# so it is set far above any healthy start rather than near a typical one.
+SERIALIZE_TIMEOUT_SECONDS = 180
 
 _SERIALIZE = """
 import fs from "node:fs";
@@ -58,7 +62,7 @@ async def browser_request(source: dict[str, Any], mode: str, tmp_path: Path) -> 
         cwd=ROOT,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=SERIALIZE_TIMEOUT_SECONDS,
     )
     assert completed.returncode == 0, completed.stderr
     messages = [
