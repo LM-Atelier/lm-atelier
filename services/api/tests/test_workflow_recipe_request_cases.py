@@ -175,6 +175,7 @@ async def test_every_recipe_use_case_reaches_its_selected_revision(
         settings["outpaint_margins"] = {"right": 0.25}
     if use_case == "image_upscale":
         settings["upscale_factor"] = 2
+        payload["upscale"] = True
     payload["settings"] = settings
     async with app.state.services.scheduler.lease("primary"):
         response = await client.post(f"/api/chats/{chat['id']}/turns", json=payload)

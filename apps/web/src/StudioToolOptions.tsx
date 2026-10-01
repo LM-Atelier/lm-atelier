@@ -11,9 +11,11 @@ import { StudioResizeTool } from "./StudioResizeTool";
 import { StudioSubjectPanel } from "./StudioSubjectPanel";
 import { StudioTransformTool } from "./StudioTransformTool";
 import { autoAdjustments } from "./studioAutoAdjust";
+import { StudioEnhanceTool } from "./StudioEnhanceTool";
 import { pictureCorners } from "./studioPerspective";
 import type { StudioToolAction, StudioToolState } from "./studioToolState";
 import type { StudioLocalEditDetails, StudioLocalEditOperation } from "./types";
+import type { StudioEnlargement } from "./useStudioEnlargement";
 
 /** The panel's tool-specific control: what this tool needs said before it runs.
  *
@@ -36,6 +38,7 @@ export function StudioToolOptions({
   onLocalEdit,
   busy = false,
   pixels = null,
+  enlargement,
 }: {
   tools: StudioToolState;
   dispatch: Dispatch<StudioToolAction>;
@@ -46,6 +49,8 @@ export function StudioToolOptions({
   busy?: boolean;
   /** The picture's own colors, where they can be read, for tools that start from them. */
   pixels?: Uint8ClampedArray | null;
+  /** Which workflow Enhance runs and what it takes, while Enhance is in hand. */
+  enlargement?: StudioEnlargement;
 }) {
   if (tools.kind === "transform") {
     return onLocalEdit ? (
@@ -139,23 +144,10 @@ export function StudioToolOptions({
     );
   }
   if (tools.kind === "enhance") {
-    return (
-      <label>
-        <span>
-          <strong>Enlarge by</strong> {tools.upscaleFactor}x
-        </span>
-        <input
-          type="range"
-          min={1}
-          max={8}
-          step={1}
-          value={tools.upscaleFactor}
-          onChange={(event) =>
-            dispatch({ type: "set-upscale-factor", factor: Number(event.target.value) })
-          }
-        />
-      </label>
-    );
+    return enlargement ? (
+      <StudioEnhanceTool enlargement={enlargement} choice={tools.upscaleChoice}
+        onChoose={(choice) => dispatch({ type: "choose-upscale-factor", choice })} />
+    ) : null;
   }
   if (tools.kind === "relight") {
     return (

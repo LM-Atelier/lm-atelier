@@ -8,6 +8,7 @@ from typing import Literal
 from .models import WorkflowRevision
 from .schemas import SettingField
 from .settings_registry import validate_settings, workflow_settings
+from .upscale_workflows import effective_upscale_schema, without_inert_upscale_setting
 from .workflow_use_case_preset_resolution import ResolvedWorkflowUseCasePreset
 from .workflow_use_case_presets_v1 import PROMPT_SETTING_KEYS
 from .workflow_use_cases_v1 import WorkflowUseCase
@@ -73,7 +74,8 @@ def validate_workflow_use_case_preset_settings(
 
     The caller supplies the selected engine's fields and exact revision. Trust,
     readiness and structural input eligibility remain separate admission checks.
-    No saved value is aliased, coerced or silently removed.
+    An obsolete factor that the graph never reads is omitted from the effective
+    layer. The saved recipe and retained revision remain unchanged.
     """
     if (
         not isinstance(expected_revision_id, str)
@@ -95,9 +97,11 @@ def validate_workflow_use_case_preset_settings(
         )
 
     engine_fields = list(fields)
-    schema = revision.input_schema_json
-    if schema is not None and not isinstance(schema, Mapping):
+    revision_schema = revision.input_schema_json
+    if revision_schema is not None and not isinstance(revision_schema, Mapping):
         raise WorkflowUseCasePresetSettingsError("workflow-use-case-preset-schema-invalid")
+    schema = effective_upscale_schema(revision.api_graph_json, revision_schema)
+    settings = without_inert_upscale_setting(preset.settings_json, revision.api_graph_json, schema)
     try:
         validate_settings({}, engine_fields)
         definitions = workflow_settings(
@@ -110,7 +114,7 @@ def validate_workflow_use_case_preset_settings(
         ) from None
     by_key = {field.key: field for field in definitions}
     properties = schema.get("properties", {}) if schema else {}
-    for key in preset.settings_json:
+    for key in settings:
         declaration = properties.get(key) if isinstance(properties, Mapping) else None
         if isinstance(declaration, Mapping) and declaration.get("readOnly") is True:
             raise WorkflowUseCasePresetSettingsError("workflow-use-case-preset-setting-unavailable")
@@ -120,7 +124,7 @@ def validate_workflow_use_case_preset_settings(
         if field.scope == "load" or not field.available:
             raise WorkflowUseCasePresetSettingsError("workflow-use-case-preset-setting-unavailable")
     try:
-        validated = validate_settings(preset.settings_json, definitions)
+        validated = validate_settings(settings, definitions)
     except (ValueError, TypeError, OverflowError):
         raise WorkflowUseCasePresetSettingsError(
             "workflow-use-case-preset-settings-invalid"

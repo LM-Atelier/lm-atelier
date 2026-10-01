@@ -1122,6 +1122,7 @@ class SourceFitRequest(ApiModel):
 class TurnRoleOverrides(ApiModel):
     """Deliberate choices for whichever steps route to this role."""
 
+    upscale: StrictBool = False
     settings: dict[str, Any] = Field(default_factory=dict)
     preset_id: str | None = Field(default=None, min_length=1, max_length=40)
     profile_id: str | None = Field(default=None, min_length=1, max_length=40)
@@ -1131,6 +1132,7 @@ class TurnRoleOverrides(ApiModel):
 
 
 class TurnRequest(ApiModel):
+    upscale: StrictBool = False
     source_fit: SourceFitRequest | None = None
     default_output_shapes: DefaultOutputShapesIn | None = None
     text: str = Field(min_length=1, max_length=200_000)
@@ -1260,6 +1262,7 @@ class PriorTurnEditRequest(TurnRequest):
 
 
 class PriorTurnEditConfiguration(ApiModel):
+    upscale: bool = False
     source_fit: SourceFitRequest | None = None
     image_edit_strength: dict[str, Any] | None = None
     operation: str

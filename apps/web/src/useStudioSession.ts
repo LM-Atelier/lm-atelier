@@ -54,6 +54,8 @@ type StudioApply = {
    * server counting the seed on from one to the next, so they sit beside one
    * another as alternatives. */
   results?: number;
+  /** Said as an enlargement, whatever factor goes with it. */
+  upscale?: boolean;
 };
 
 export type StudioStep = {
@@ -157,6 +159,7 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
       secondPicture,
       alsoGiven,
       results,
+      upscale,
     }: StudioApply) => {
       // Refused rather than raced. Between switching pictures and the new
       // session opening there is no session for what is on screen, and the
@@ -186,6 +189,10 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
           : null;
       const inputs = second ? [artifactId, second.id] : [artifactId, ...(alsoGiven ?? [])];
       // One result is the request as it always was, with no count in it.
+      if (upscale) {
+        return api.sendTurn(sessionId, instruction, "image", inputs, turnSettings, undefined, undefined, workflowRevisionId,
+          [], results && results > 1 ? results : undefined, undefined, undefined, undefined, true);
+      }
       return results && results > 1
         ? api.sendTurn(sessionId, instruction, "image", inputs, turnSettings, undefined, undefined, workflowRevisionId, [], results)
         : api.sendTurn(sessionId, instruction, "image", inputs, turnSettings, undefined, undefined, workflowRevisionId);
@@ -265,9 +272,10 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
       /** Runs when the turn is refused, so a caller waiting on it can stop. */
       onRefused?: () => void,
       results?: number,
+      upscale?: boolean,
     ) =>
       apply.mutate(
-        { instruction, artifactId, mask, settings, workflowRevisionId, secondPicture, results },
+        { instruction, artifactId, mask, settings, workflowRevisionId, secondPicture, results, upscale },
         { onSuccess: onAccepted, onError: onRefused },
       ),
     /** The same edit again on the same pictures, as Try another sends it. */
@@ -279,6 +287,7 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
           alsoGiven: replay.inputs.slice(1),
           settings: replay.settings,
           workflowRevisionId: replay.workflowRevisionId,
+          upscale: replay.upscale,
         },
         { onSuccess: onAccepted },
       ),

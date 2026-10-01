@@ -177,6 +177,8 @@ class PriorTurnInheritance:
             inherit_loras=request.preset_id is None and "loras" not in request.settings,
         )
         values: dict[str, object] = {}
+        if operation == Operation.IMAGE_TO_IMAGE and "upscale" not in fields_set:
+            values["upscale"] = source.values.upscale
         source_fit = request.source_fit
         if operation == Operation.IMAGE_TO_IMAGE and "source_fit" not in fields_set:
             source_fit = source.values.source_fit

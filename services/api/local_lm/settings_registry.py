@@ -8,6 +8,7 @@ from typing import Any, Final, Literal, cast
 from .auxiliary_assets import lora_setting_property
 from .saved_settings import MAX_SETTING_FIELDS, unusable_as_a_number
 from .schemas import EngineCapabilities, SettingField
+from .upscale_workflows import UPSCALE_SCHEMA_KIND, UPSCALE_SETTING_KEY
 from .video_length import video_duration_field, workflow_video_length
 from .workflow_graph_settings_v1 import (
     GRAPH_SETTING_KEYS,
@@ -990,6 +991,11 @@ def workflow_settings(
                 }
             )
             or not isinstance(property_schema, Mapping)
+            or (
+                key == UPSCALE_SETTING_KEY
+                and property_schema.get("x-lm-atelier-kind") == UPSCALE_SCHEMA_KIND
+                and property_schema.get("readOnly") is True
+            )
             or not any(name in property_schema for name in ("default", "const", "enum"))
         ):
             continue

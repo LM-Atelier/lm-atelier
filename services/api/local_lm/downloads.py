@@ -126,9 +126,9 @@ from .scheduler import JobClaim, ResourceScheduler
 from .schemas import DownloadRequest
 from .subprocess_env import subprocess_environment
 from .upscale_workflows import (
-    UPSCALE_SCHEMA_KIND,
     UPSCALE_SETTING_KEY,
     upscale_capability,
+    upscale_setting_schema,
 )
 from .workflow_completion_jobs import (
     complete_workflow_job,
@@ -3208,10 +3208,6 @@ class DownloadManager:
                     "default": [],
                     "maxItems": 8,
                 }
-        # A graph that can enlarge is offered as one that can be asked to. The
-        # setting is declared only where the graph carries an upscale node, so
-        # the studio's Enhance tool is offered exactly when something installed
-        # can honor it.
         if graph_can_outpaint(compiled.api_graph):
             properties = input_schema.setdefault("properties", {})
             if isinstance(properties, dict):
@@ -3225,15 +3221,9 @@ class DownloadManager:
         if upscale_capability(compiled.api_graph):
             properties = input_schema.setdefault("properties", {})
             if isinstance(properties, dict):
-                properties[UPSCALE_SETTING_KEY] = {
-                    "type": "number",
-                    "title": "Enlarge by",
-                    "description": "How much larger the result should be.",
-                    "x-lm-atelier-kind": UPSCALE_SCHEMA_KIND,
-                    "default": 2,
-                    "minimum": 1,
-                    "maximum": 8,
-                }
+                properties[UPSCALE_SETTING_KEY] = upscale_setting_schema(
+                    compiled.api_graph, input_schema
+                )
         # Both bindings are recorded. The install ids are what this machine uses
         # today; the components are what another machine can resolve, since a
         # local UUID means nothing after an export.

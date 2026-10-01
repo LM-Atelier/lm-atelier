@@ -38,6 +38,7 @@ import { useCaptionPreview } from "./useCaptionPreview";
 import { useStraightenPreview } from "./useStraightenPreview";
 import { paintRgb } from "./studioPaint";
 import {
+  defaultInstruction,
   initialToolState,
   snapshotBeforeGesture,
   studioToolReducer,
@@ -48,6 +49,7 @@ import {
 } from "./studioToolState";
 import { useStudioCompare } from "./useStudioCompare";
 import { SUBJECT_ELSEWHERE, useStudioSubjectSelection } from "./useStudioSubjectSelection";
+import { useStudioEnlargement } from "./useStudioEnlargement";
 import { useStudioImage } from "./useStudioImage";
 import { useStudioSession, type StudioStep } from "./useStudioSession";
 import { useStudioDraft } from "./useStudioDraft";
@@ -185,6 +187,10 @@ export function StudioView({
   });
   const { bitmap, error: imageError, reload } = useStudioImage(currentArtifactId);
   const compare = useStudioCompare(current, bitmap, Boolean(previewArtifactId), steps, hidden);
+  const enlargement = useStudioEnlargement({
+    sessionId, artifactId: currentArtifactId, active: tools.kind === "enhance" && !previewArtifactId,
+    words: defaultInstruction(tools), recipeRevisionId: recipe?.workflow_revision_id ?? undefined,
+  });
   // Read for the wand and the light and color preview, from the picture on the canvas, and again for each new one.
   const readsColors = tools.kind === "wand" || tools.kind === "adjust";
   const sourcePixels = useMemo(() => (readsColors && bitmap ? readSourcePixels(bitmap) : null), [readsColors, bitmap]);
@@ -215,7 +221,8 @@ export function StudioView({
   }, [bitmap]);
   useEffect(() => draft.track({ artifactId: currentArtifactId, tools, instruction, selectedId }));
   const applyDisabled = unchecked !== null || busy || !current || Boolean(unavailable)
-    || !studioToolReady(tools, instruction, recipe, selectionCoverage, activeTool, isolateTool, workflowUnavailable);
+    || !studioToolReady(tools, instruction, recipe, selectionCoverage, activeTool, isolateTool, workflowUnavailable,
+      enlargement.preview);
   if (!sourceArtifactId) {
     return (
       <div className="page-view studio-view">
@@ -338,6 +345,7 @@ export function StudioView({
             busy={busy}
             onLocalEdit={(operation, details) => current && localEdit(operation, current.artifactId, () => setSelectedId(null), details)}
             pixels={sourcePixels}
+            enlargement={enlargement}
           />
           <StudioRecipes
             disabled={busy || !current}
@@ -369,6 +377,9 @@ export function StudioView({
                   tools, instruction, recipe, activeTool, isolateTool, current, bitmap, results, apply,
                   cutout: cutoutEdit,
                   setError: setSelectionError,
+                  enlargement: enlargement.preview,
+                  // A refused enlargement may have been previewed on a workflow that has since changed.
+                  onRefused: enlargement.refresh,
                   onAccepted: (accepted) => {
                     // Read with care: an answer without its request cannot be offered back, and must not stop the rest.
                     const requestId = accepted?.user_message?.id;
@@ -379,7 +390,7 @@ export function StudioView({
                 });
               }}
             >
-              {studioApplyLabel(tools, busy, selectionCoverage)}
+              {studioApplyLabel(tools, busy, selectionCoverage, enlargement.preview)}
             </button>
           )}
           {applyProgress && <StudioRunningEdit part={applyProgress.part} place={applyProgress.place} stopping={stopping} onStop={stop} />}

@@ -34,6 +34,8 @@ const AUTHORITATIVE_QUERY_ROOTS = new Set([
   "workflow-family",
   "workflow-install-progress",
   "studio-capabilities",
+  // Which workflow an enlargement runs may have changed while the link was down.
+  "studio-enlargement",
   "workflows",
 ]);
 

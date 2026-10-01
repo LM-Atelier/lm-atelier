@@ -5,6 +5,7 @@ import type { HardwareFitAdvice } from "./hardwareFitTypes";
 export type * from "./hardwareFitTypes";
 export type * from "./priorTurnEditTypes";
 export type * from "./studioLocalEditTypes";
+export type * from "./enlargementTypes";
 import type { PriorTurnEditConfiguration } from "./priorTurnEditTypes";
 
 import type { ComposerPromptSource } from "./composerPromptSource";

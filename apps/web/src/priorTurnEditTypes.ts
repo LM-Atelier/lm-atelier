@@ -49,4 +49,6 @@ export interface PriorTurnEditConfiguration {
   workflow_revision_id: string | null;
   workflow_schema: Record<string, unknown> | null;
   profile_settings?: Record<string, unknown>;
+  /** The turn was an enlargement; an edit of it stays one unless it says otherwise. */
+  upscale?: boolean;
 }

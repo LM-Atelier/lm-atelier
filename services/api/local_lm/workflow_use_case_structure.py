@@ -8,7 +8,13 @@ from .graph_placeholders import binds_parameter
 from .media_references import reference_capacity
 from .outpaint_workflows import source_pad_node, workflow_declares_outpaint
 from .studio_masks import workflow_accepts_mask
-from .upscale_workflows import upscale_capability, workflow_declares_upscale
+from .upscale_workflows import (
+    UPSCALE_SETTING_KEY,
+    effective_upscale_schema,
+    fixed_upscale_factor,
+    upscale_capability,
+    workflow_declares_upscale,
+)
 from .workflow_use_cases_v1 import WorkflowUseCaseInputs, classify_workflow_use_case
 
 StructureRefusal = Literal[
@@ -64,6 +70,17 @@ def assess_workflow_use_case_structure(
     if requirements.requires_outpaint_input and source_pad_node(api_graph) is None:
         return WorkflowUseCaseStructure("workflow-use-case-outpaint-binding-missing")
     if requirements.requires_upscale_input:
+        input_schema = effective_upscale_schema(api_graph, input_schema)
+        assert input_schema is not None
+        try:
+            fixed_upscale_factor(api_graph, input_schema)
+        except ValueError:
+            return WorkflowUseCaseStructure("workflow-use-case-upscale-binding-missing")
+        factor = input_schema["properties"][UPSCALE_SETTING_KEY]
+        if factor.get("readOnly") is not True and not binds_parameter(
+            api_graph, UPSCALE_SETTING_KEY
+        ):
+            return WorkflowUseCaseStructure("workflow-use-case-upscale-binding-missing")
         kind = upscale_capability(api_graph)
         if kind == "model":
             return WorkflowUseCaseStructure(upscale_kind="model")

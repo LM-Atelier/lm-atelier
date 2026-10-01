@@ -10,6 +10,7 @@ from local_lm.upscale_workflows import (
     UPSCALE_SCHEMA_KIND,
     UPSCALE_SETTING_KEY,
     upscale_capability,
+    upscale_setting_schema,
     workflow_declares_upscale,
 )
 
@@ -63,6 +64,35 @@ def test_the_declared_setting_is_what_the_tool_needs() -> None:
     }
 
     assert workflow_declares_upscale(schema) is True
+
+
+def test_an_unbound_factor_is_declared_as_fixed_enlargement() -> None:
+    graph = _graph("ImageUpscaleWithModel")
+    schema = {"properties": {"upscale_factor": {"type": "number", "default": 2}}}
+
+    field = upscale_setting_schema(graph, schema)
+
+    assert field["readOnly"] is True
+    assert "default" not in field
+    assert "const" not in field
+    assert workflow_declares_upscale({"properties": {"upscale_factor": field}})
+
+
+def test_an_explicit_factor_keeps_its_authored_constraints() -> None:
+    graph = {"scale": {"class_type": "ImageScaleBy", "inputs": {"scale_by": "${upscale_factor}"}}}
+    authored = {"type": "number", "default": 2.5, "minimum": 0.5, "maximum": 4, "multipleOf": 0.5}
+
+    field = upscale_setting_schema(graph, {"properties": {"upscale_factor": authored}})
+
+    assert field == {**authored, "x-lm-atelier-kind": "upscale"}
+    assert "x-lm-atelier-kind" not in authored
+
+
+def test_a_placeholder_inside_text_is_not_an_adjustable_factor() -> None:
+    graph = {"scale": {"inputs": {"label": "Use ${upscale_factor}"}}}
+    schema = {"properties": {"upscale_factor": {"type": "number", "default": 2}}}
+
+    assert upscale_setting_schema(graph, schema)["readOnly"] is True
 
 
 def test_a_setting_of_the_right_name_but_the_wrong_kind_is_not_it() -> None:

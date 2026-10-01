@@ -15,6 +15,7 @@ from .accepted_turn_context import (
     AcceptedContext,
     accepted_context,
     capture_image_edit_strength,
+    recorded_enlargement,
     settings_workflow,
 )
 from .auxiliary_assets import revision_accepts_added_loras
@@ -45,6 +46,7 @@ from .schemas import (
 )
 from .source_fit_preview import SourceFitPreviewOut
 from .turn_inheritance import inherited_edit_strength
+from .upscale_workflows import effective_upscale_schema
 from .workflow_use_case_execution import InheritedWorkflowUseCasePreset
 from .workflow_use_case_preset_provenance import read_workflow_use_case_preset
 
@@ -130,7 +132,11 @@ def _configuration(
     workflow = settings_workflow(session, prior, snapshot)
     profile_id = snapshot.profile_id if snapshot is not None else prior.profile_id
     profile = session.get(ModelProfile, profile_id) if profile_id else None
-    input_schema = copy.deepcopy(workflow.input_schema_json) if workflow is not None else None
+    input_schema = (
+        copy.deepcopy(effective_upscale_schema(workflow.api_graph_json, workflow.input_schema_json))
+        if workflow is not None
+        else None
+    )
     resolved_settings = copy.deepcopy(
         snapshot.settings if snapshot is not None else prior.settings_json
     )
@@ -148,6 +154,7 @@ def _configuration(
     output = prior.provenance_json.get("media_output") or {}
     return (
         PriorTurnEditConfiguration(
+            upscale=recorded_enlargement(prior, snapshot),
             source_fit=(
                 SourceFitRequest(
                     mode=snapshot.source_fit.mode,
@@ -479,6 +486,8 @@ async def prepare_prior_turn_edit(
             if editor_source.source_fit is not None
             else None
         )
+    if same_role and "upscale" not in payload.model_fields_set:
+        values["upscale"] = editor_source.upscale
     if same_role and not workflow_override and "profile_id" not in payload.model_fields_set:
         values["profile_id"] = snapshot.profile_id if snapshot is not None else prior.profile_id
     if (
@@ -520,6 +529,7 @@ async def prepare_prior_turn_edit(
             prior_operation,
             settings,
             input_schema=workflow.input_schema_json if workflow is not None else None,
+            api_graph=workflow.api_graph_json if workflow is not None else None,
             engine=snapshot.profile.engine
             if snapshot and snapshot.profile
             else profile.engine

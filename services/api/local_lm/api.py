@@ -42,7 +42,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.responses import FileResponse, HTMLResponse
 
 from . import __version__
-from .accepted_turn_context import accepted_context
+from .accepted_turn_context import accepted_context, recorded_enlargement
 from .adapter_grammar_review import review_adapter_grammar
 from .api_errors import ApiError, api_error
 from .artifact_library import (
@@ -690,6 +690,7 @@ from .studio_sessions import (
     studio_session_title,
 )
 from .turn_inheritance import TurnInheritance, TurnSourceResolver
+from .upscale_preview import UpscalePreviewOut, UpscaleSelectionUnavailable
 from .use_case_summary_api import (
     check_use_case_update,
     prepare_use_case_update,
@@ -4443,6 +4444,13 @@ async def _accept_turn(
         raise api_error(422, "prompt-source-invalid", str(exc)) from exc
     except WorkflowLoraAdmissionError as exc:
         raise api_error(409 if exc.conflict else 422, exc.code, str(exc)) from exc
+    except UpscaleSelectionUnavailable:
+        raise api_error(
+            409,
+            "upscale-selection-unavailable",
+            "The selected enlargement workflow is no longer available. Refresh Enhance "
+            "before applying this edit.",
+        ) from None
     except ValueError as exc:
         recipe_error = workflow_use_case_error(exc)
         if recipe_error is not None:
@@ -4722,9 +4730,10 @@ async def _regenerate_message_locked(
         raise api_error(404, "assistant-run-not-found", "assistant run not found")
     _require_run_replay_sources(session, prior_run)
     prior_context = accepted_context(session, prior_run)
+    upscale = recorded_enlargement(prior_run, prior_context)
     source_context = (
         prior_context
-        if prior_context is not None and prior_context.source_fit is not None
+        if prior_context is not None and (prior_context.source_fit is not None or upscale)
         else None
     )
     source_fit = (
@@ -4772,6 +4781,7 @@ async def _regenerate_message_locked(
         prior_settings = await orchestrator.request_settings_for_operation(
             Operation(prior_run.operation),
             source_context.settings if source_context is not None else prior_run.settings_json,
+            api_graph=settings_document.api_graph_json if settings_document is not None else None,
             input_schema=(
                 source_context.workflow.input_schema_json
                 if source_context is not None and source_context.workflow is not None
@@ -4803,6 +4813,7 @@ async def _regenerate_message_locked(
         prior_settings.pop("height", None)
     turn = TurnRequest(
         source_fit=source_fit,
+        upscale=upscale,
         text=text,
         mode=mode,
         parent_message_id=user_message.parent_id,
@@ -5022,6 +5033,7 @@ async def edit_and_branch(
                     Operation(prior_run.operation),
                     prior_run.settings_json,
                     input_schema=(prior_revision.input_schema_json if prior_revision else None),
+                    api_graph=prior_revision.api_graph_json if prior_revision else None,
                     engine=prior_profile.engine if prior_profile else None,
                     accepts_added_loras=(
                         prior_revision is not None and revision_accepts_added_loras(prior_revision)
@@ -14338,6 +14350,29 @@ async def preview_workflow_revision_source_fit(
             422,
             "source-fit-preview-unavailable",
             "The source image or requested canvas cannot be used with this workflow.",
+        ) from None
+
+
+@router.post("/chats/{chat_id}/upscale/preview", response_model=UpscalePreviewOut)
+async def preview_chat_upscale(
+    chat_id: str, payload: TurnRequest, request: Request, session: ConversationSessionDep
+) -> UpscalePreviewOut:
+    try:
+        return _services(request).orchestrator.preview_turn_upscale(session, chat_id, payload)
+    except LookupError:
+        raise api_error(
+            404, "upscale-preview-not-found", "The conversation or source image is unavailable."
+        ) from None
+    except ValueError as exc:
+        recipe_error = workflow_use_case_error(exc)
+        if recipe_error is not None:
+            code, message = recipe_error
+            raise api_error(409, code, message) from None
+        raise api_error(
+            409,
+            "upscale-preview-unavailable",
+            "Choose a ready enlargement workflow. Review its dependencies in Workflows "
+            "before applying this edit.",
         ) from None
 
 

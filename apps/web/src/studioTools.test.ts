@@ -225,8 +225,9 @@ describe("what travels with a turn", () => {
   it("gives the wordless tools something true to say", () => {
     // The turn contract requires text and these two ask for none, so an empty
     // box was refused by the server before anything ran.
-    const enhance = { ...initialToolState(), kind: "enhance" as const, upscaleFactor: 2 };
-    expect(defaultInstruction(enhance)).toBe("Enhance to 2x");
+    const enhance = { ...initialToolState(), kind: "enhance" as const };
+    // The size is the workflow's to say, so the words name none.
+    expect(defaultInstruction(enhance)).toBe("Enlarge the picture and restore its detail");
 
     const extend = {
       ...initialToolState(),

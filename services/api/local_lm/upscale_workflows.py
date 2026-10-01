@@ -21,7 +21,10 @@ The distinction is kept rather than flattened, because a tool that says
 
 from __future__ import annotations
 
+import math
 from typing import Any
+
+from .graph_placeholders import binds_parameter
 
 MODEL_UPSCALE_NODES = frozenset({"ImageUpscaleWithModel", "UltimateSDUpscale"})
 RESAMPLE_NODES = frozenset({"ImageScale", "ImageScaleBy"})
@@ -47,12 +50,7 @@ def upscale_capability(graph: dict[str, Any]) -> str | None:
 
 
 def workflow_declares_upscale(input_schema: dict[str, Any] | None) -> bool:
-    """Whether this workflow accepts a scale factor as a setting.
-
-    A graph that can enlarge is not the same as one that lets the user say by
-    how much. The tool needs both: the ability, and somewhere to put the
-    number.
-    """
+    """Whether this workflow declares fixed or adjustable enlargement."""
     if not isinstance(input_schema, dict):
         return False
     properties = input_schema.get("properties")
@@ -62,6 +60,134 @@ def workflow_declares_upscale(input_schema: dict[str, Any] | None) -> bool:
     if not isinstance(declared, dict):
         return False
     return declared.get("x-lm-atelier-kind") == UPSCALE_SCHEMA_KIND
+
+
+def upscale_setting_schema(graph: dict[str, Any], input_schema: dict[str, Any]) -> dict[str, Any]:
+    """Preserve a bound factor's constraints or declare enlargement as fixed."""
+    properties = input_schema.get("properties")
+    field = properties.get(UPSCALE_SETTING_KEY) if isinstance(properties, dict) else None
+    if (
+        isinstance(field, dict)
+        and field.get("type") in {"number", "integer"}
+        and binds_parameter(graph, UPSCALE_SETTING_KEY)
+    ):
+        declared = {**field, "x-lm-atelier-kind": UPSCALE_SCHEMA_KIND}
+        fixed_upscale_factor(graph, {"properties": {UPSCALE_SETTING_KEY: declared}})
+        return declared
+    return {
+        "type": "number",
+        "readOnly": True,
+        "title": "Enlargement",
+        "description": "The workflow determines the output size.",
+        "x-lm-atelier-kind": UPSCALE_SCHEMA_KIND,
+    }
+
+
+def effective_upscale_schema(
+    graph: dict[str, Any], input_schema: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """Show an unbound enlargement declaration as fixed without changing its revision."""
+    if not workflow_declares_upscale(input_schema) or binds_parameter(graph, UPSCALE_SETTING_KEY):
+        return input_schema
+    assert input_schema is not None
+    field = input_schema["properties"][UPSCALE_SETTING_KEY]
+    if (
+        field.get("readOnly") is True
+        or upscale_capability(graph) is None
+        or field.get("type") != "number"
+        or field.get("default") != 2
+        or field.get("minimum") != 1
+        or field.get("maximum") != 8
+        or set(field)
+        - {"type", "default", "minimum", "maximum", "title", "description", "x-lm-atelier-kind"}
+    ):
+        return input_schema
+    return {
+        **input_schema,
+        "properties": {
+            **input_schema["properties"],
+            UPSCALE_SETTING_KEY: upscale_setting_schema(graph, input_schema),
+        },
+    }
+
+
+def without_inert_upscale_setting(
+    values: dict[str, Any], graph: dict[str, Any], input_schema: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Discard a stored factor when the declared enlargement never reads it."""
+    schema = effective_upscale_schema(graph, input_schema)
+    if (
+        UPSCALE_SETTING_KEY in values
+        and workflow_declares_upscale(schema)
+        and schema is not None
+        and schema["properties"][UPSCALE_SETTING_KEY].get("readOnly") is True
+        and not binds_parameter(graph, UPSCALE_SETTING_KEY)
+        and upscale_capability(graph) is not None
+    ):
+        return {key: value for key, value in values.items() if key != UPSCALE_SETTING_KEY}
+    return values
+
+
+def fixed_upscale_factor(
+    graph: dict[str, Any], input_schema: dict[str, Any] | None
+) -> int | float | None:
+    """Resolve an authored fixed binding without creating an editable setting."""
+    if not workflow_declares_upscale(input_schema):
+        return None
+    assert input_schema is not None
+    field = input_schema["properties"][UPSCALE_SETTING_KEY]
+    if field.get("readOnly") is not True or not binds_parameter(graph, UPSCALE_SETTING_KEY):
+        return None
+    choices = field.get("enum")
+    value = field.get("const", field.get("default"))
+    if (
+        "const" not in field
+        and "default" not in field
+        and isinstance(choices, list)
+        and len(choices) == 1
+    ):
+        value = choices[0]
+    reason = "The fixed enlargement factor has no valid declared value."
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int | float)
+        or not math.isfinite(value)
+        or value <= 0
+        or field.get("type") not in {"number", "integer"}
+        or (field.get("type") == "integer" and not isinstance(value, int))
+    ):
+        raise ValueError(reason)
+    for name in ("minimum", "maximum"):
+        if name in field:
+            bound = field[name]
+            if (
+                isinstance(bound, bool)
+                or not isinstance(bound, int | float)
+                or not math.isfinite(bound)
+                or (name == "minimum" and value < bound)
+                or (name == "maximum" and value > bound)
+            ):
+                raise ValueError(reason)
+    if choices is not None and (
+        not isinstance(choices, list)
+        or not any(not isinstance(choice, bool) and choice == value for choice in choices)
+    ):
+        raise ValueError(reason)
+    if "multipleOf" in field:
+        multiple = field["multipleOf"]
+        if (
+            isinstance(multiple, bool)
+            or not isinstance(multiple, int | float)
+            or not math.isfinite(multiple)
+            or multiple <= 0
+        ):
+            raise ValueError(reason)
+        quotient = value / multiple
+        if not math.isfinite(quotient) or not math.isclose(
+            quotient, round(quotient), rel_tol=1e-9, abs_tol=1e-9
+        ):
+            raise ValueError(reason)
+    return value
 
 
 def _class_types(value: Any) -> frozenset[str]:

@@ -18,6 +18,8 @@ export type StudioReplay = {
   inputs: string[];
   settings: Record<string, unknown>;
   workflowRevisionId?: string;
+  /** The run was an enlargement: said again, since its settings may hold no factor to say it. */
+  upscale?: boolean;
 };
 
 /** What a single result had to itself besides its seed, which is replaced rather than dropped. */
@@ -39,5 +41,6 @@ export function studioReplay(run: Run, words: string, inputs: string[]): StudioR
     inputs,
     settings: { ...settings, seed: -1 },
     ...(workflowRevisionId ? { workflowRevisionId } : {}),
+    ...(run.provenance_json.upscale === true ? { upscale: true } : {}),
   };
 }

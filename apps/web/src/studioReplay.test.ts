@@ -46,4 +46,12 @@ describe("the same edit again", () => {
     expect(studioReplay(run({ resolved_settings: ["not", "settings"] }), "w", ["art-1"])).toBeNull();
     expect(studioReplay(run({ resolved_settings: {} }), "w", [])).toBeNull();
   });
+
+  it("says an enlargement again as one, sending its factor only where the run resolved one", () => {
+    const fixed = studioReplay(run({ resolved_settings: { steps: 1 }, upscale: true }, "rev-enlarge"), "w", ["art-1"]);
+    const plain = studioReplay(run({ resolved_settings: { steps: 1 } }, "rev-edit"), "w", ["art-1"]);
+
+    expect(fixed).toEqual({ words: "w", inputs: ["art-1"], settings: { steps: 1, seed: -1 }, workflowRevisionId: "rev-enlarge", upscale: true });
+    expect(plain).not.toHaveProperty("upscale");
+  });
 });

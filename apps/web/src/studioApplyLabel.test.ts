@@ -2,6 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 import { studioApplyLabel } from "./studioApplyPlan";
+import { enlargementIdentity } from "./studioEnlargement";
 import { initialToolState, type StudioToolState } from "./studioToolState";
 
 function tools(kind: StudioToolState["kind"], changes: Partial<StudioToolState> = {}): StudioToolState {
@@ -22,8 +23,19 @@ describe("the apply button's words", () => {
     expect(studioApplyLabel(tools(kind), false, 0)).toBe(label);
   });
 
-  it("says how much Enhance enlarges", () => {
-    expect(studioApplyLabel(tools("enhance", { upscaleFactor: 4 }), false, 0)).toBe("Enlarge 4x");
+  it("names how much Enhance enlarges only when the workflow's graph proves it", () => {
+    expect(studioApplyLabel(tools("enhance"), false, 0)).toBe("Enlarge");
+    const range = { key: "upscale_factor", label: "", type: "integer" as const, default: 2, minimum: 1, maximum: 4, step: 1,
+      choices: [], scope: "workflow" as const, visibility: "basic" as const, restart_required: false, available: true,
+      unavailable_reason: null, help: "" };
+    const answer = { version: 1 as const, status: "ready" as const, workflow_revision_id: "rev", factor: range,
+      fixed_factor: null, request_authorized: false as const };
+    // A factor the person can change sets the workflow's scale, which another
+    // step may multiply, so neither its default nor a chosen one is named as the size.
+    expect(studioApplyLabel(tools("enhance"), false, 0, answer)).toBe("Enlarge");
+    const chosen = tools("enhance", { upscaleChoice: { preview: enlargementIdentity(answer), factor: 4 } });
+    expect(studioApplyLabel(chosen, false, 0, answer)).toBe("Enlarge");
+    expect(studioApplyLabel(tools("enhance"), false, 0, { ...answer, factor: null, fixed_factor: 2 })).toBe("Enlarge 2x");
   });
 
   it("applies to the selection once a selecting tool has marked something, and not before", () => {
