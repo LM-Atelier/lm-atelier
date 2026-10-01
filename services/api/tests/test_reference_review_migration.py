@@ -8,6 +8,7 @@ from threading import Event
 import pytest
 from alembic import command
 from alembic_head import EXPECTED_ALEMBIC_HEAD
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 
@@ -245,7 +246,7 @@ def test_a9_write_fence_blocks_a_concurrent_settled_writer(tmp_path: Path) -> No
         if "NEW." in statement:
             return
         preflight_seen.set()
-        if writer_started.wait(5):
+        if writer_started.wait(PATIENCE_SECONDS):
             writer_was_blocked.append(not writer_done.wait(0.2))
 
     def register_trace(dbapi_connection: object, _record: object) -> None:
@@ -255,10 +256,12 @@ def test_a9_write_fence_blocks_a_concurrent_settled_writer(tmp_path: Path) -> No
         command.upgrade(config, "head")
 
     def write_settled_row() -> str:
-        assert preflight_seen.wait(5)
+        assert preflight_seen.wait(PATIENCE_SECONDS)
         writer_started.set()
         try:
-            with sqlite3.connect(database, timeout=5) as connection:
+            # The writer waits out the fence, which lasts until the upgrade
+            # commits; on a loaded runner that has taken longer than five seconds.
+            with sqlite3.connect(database, timeout=PATIENCE_SECONDS) as connection:
                 connection.execute(
                     """
                     INSERT INTO reference_assets
@@ -283,8 +286,8 @@ def test_a9_write_fence_blocks_a_concurrent_settled_writer(tmp_path: Path) -> No
         with ThreadPoolExecutor(max_workers=2) as executor:
             upgrade_result = executor.submit(upgrade)
             writer_result = executor.submit(write_settled_row)
-            upgrade_result.result(timeout=15)
-            outcome = writer_result.result(timeout=15)
+            upgrade_result.result(timeout=3 * PATIENCE_SECONDS)
+            outcome = writer_result.result(timeout=3 * PATIENCE_SECONDS)
     finally:
         event.remove(Engine, "connect", register_trace)
 
@@ -588,7 +591,7 @@ def test_downgrade_fence_blocks_a_concurrent_settle_writer(tmp_path: Path) -> No
             return
         preflight_seen.set()
         writer_result = executor.submit(write_racing_settle)
-        if writer_started.wait(5):
+        if writer_started.wait(PATIENCE_SECONDS):
             writer_was_blocked.append(not writer_done.wait(0.2))
 
     def register_trace(dbapi_connection: object, _record: object) -> None:
@@ -598,10 +601,10 @@ def test_downgrade_fence_blocks_a_concurrent_settle_writer(tmp_path: Path) -> No
         command.downgrade(config, "f9b7a1c42d60")
 
     def write_racing_settle() -> str:
-        assert preflight_seen.wait(5)
+        assert preflight_seen.wait(PATIENCE_SECONDS)
         writer_started.set()
         try:
-            with sqlite3.connect(database, timeout=5) as connection:
+            with sqlite3.connect(database, timeout=PATIENCE_SECONDS) as connection:
                 _settle(connection)
         except sqlite3.OperationalError as error:
             return str(error)
@@ -613,9 +616,9 @@ def test_downgrade_fence_blocks_a_concurrent_settle_writer(tmp_path: Path) -> No
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
             downgrade_result = executor.submit(downgrade)
-            downgrade_result.result(timeout=15)
+            downgrade_result.result(timeout=3 * PATIENCE_SECONDS)
             assert writer_result is not None
-            outcome = writer_result.result(timeout=15)
+            outcome = writer_result.result(timeout=3 * PATIENCE_SECONDS)
     finally:
         event.remove(Engine, "connect", register_trace)
 

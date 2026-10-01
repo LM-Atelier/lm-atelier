@@ -19,6 +19,7 @@ from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from alembic.util.exc import CommandError
 from alembic_head import EXPECTED_ALEMBIC_HEAD
+from run_waits import PATIENCE_SECONDS
 from sqlalchemy import UniqueConstraint, create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
@@ -529,7 +530,7 @@ def test_artifact_library_migration_fence_blocks_concurrent_dangling_writer(
         if "SELECT CASE" not in statement or audit_started.is_set():
             return
         audit_started.set()
-        if writer_started.wait(5):
+        if writer_started.wait(PATIENCE_SECONDS):
             writer_was_blocked.append(not writer_done.wait(0.2))
 
     def register_trace(dbapi_connection: object, _record: object) -> None:
@@ -539,10 +540,12 @@ def test_artifact_library_migration_fence_blocks_concurrent_dangling_writer(
         command.upgrade(config, "head")
 
     def write_dangling_reference() -> str:
-        assert audit_started.wait(5)
+        assert audit_started.wait(PATIENCE_SECONDS)
         writer_started.set()
         try:
-            with sqlite3.connect(database, timeout=5) as connection:
+            # The writer waits out the fence, which lasts until the upgrade
+            # commits; on a loaded runner that has taken longer than five seconds.
+            with sqlite3.connect(database, timeout=PATIENCE_SECONDS) as connection:
                 connection.execute(
                     """
                     INSERT INTO jobs
@@ -568,8 +571,8 @@ def test_artifact_library_migration_fence_blocks_concurrent_dangling_writer(
         with ThreadPoolExecutor(max_workers=2) as executor:
             upgrade_result = executor.submit(upgrade)
             writer_result = executor.submit(write_dangling_reference)
-            upgrade_result.result(timeout=15)
-            outcome = writer_result.result(timeout=15)
+            upgrade_result.result(timeout=3 * PATIENCE_SECONDS)
+            outcome = writer_result.result(timeout=3 * PATIENCE_SECONDS)
     finally:
         event.remove(Engine, "connect", register_trace)
 
