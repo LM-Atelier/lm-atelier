@@ -17,6 +17,7 @@ from unittest.mock import Mock
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from run_waits import PATIENCE_SECONDS
 
 from local_lm.backups import BackupManager
 from local_lm.config import Settings
@@ -178,7 +179,9 @@ def test_simultaneous_daily_checks_create_only_one_snapshot(tmp_path: Path) -> N
     barrier = threading.Barrier(callers)
 
     def check() -> str:
-        barrier.wait(timeout=2)
+        # Eight pool threads have to start before any passes; on a loaded runner
+        # that alone has taken longer than two seconds.
+        barrier.wait(timeout=PATIENCE_SECONDS)
         return manager.ensure_daily_backup(now=now).name
 
     with ThreadPoolExecutor(max_workers=callers) as executor:
@@ -388,7 +391,9 @@ async def test_backup_cadence_checks_long_running_sessions() -> None:
         )
     )
     try:
-        observed = await asyncio.wait_for(asyncio.to_thread(checked.wait, 1), timeout=2)
+        observed = await asyncio.wait_for(
+            asyncio.to_thread(checked.wait, PATIENCE_SECONDS), timeout=PATIENCE_SECONDS + 1
+        )
         assert observed is True
     finally:
         maintenance.cancel()
@@ -403,12 +408,14 @@ async def test_cancelling_backup_check_waits_for_filesystem_transaction() -> Non
     class BlockingBackups:
         def ensure_daily_backup(self) -> None:
             started.set()
-            assert release.wait(timeout=2)
+            assert release.wait(timeout=PATIENCE_SECONDS)
 
     check = asyncio.create_task(
         ensure_automatic_recovery_backup(Mock(spec_set=BackupManager, wraps=BlockingBackups())),
     )
-    observed = await asyncio.wait_for(asyncio.to_thread(started.wait, 1), timeout=2)
+    observed = await asyncio.wait_for(
+        asyncio.to_thread(started.wait, PATIENCE_SECONDS), timeout=PATIENCE_SECONDS + 1
+    )
     assert observed is True
     check.cancel()
     await asyncio.sleep(0)
