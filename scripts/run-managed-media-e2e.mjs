@@ -27,7 +27,7 @@ import {
   readinessToken,
   removeTemporaryRoot,
   repositoryRoot,
-  reserveLoopbackPort,
+  reserveLoopbackPorts,
   sharedEnvironment,
   spawnUvicorn,
   waitForReady,
@@ -69,8 +69,7 @@ async function main() {
     ?? path.join(temporaryRoot, "playwright-output");
   const engineDirectory = await stageEngine(temporaryRoot);
 
-  const appPort = await reserveLoopbackPort();
-  const enginePort = await reserveLoopbackPort();
+  const [appPort, enginePort] = await reserveLoopbackPorts(2);
   const baseURL = `http://127.0.0.1:${appPort}`;
   const engineOrigin = `http://127.0.0.1:${enginePort}`;
   const productReadyToken = readinessToken();

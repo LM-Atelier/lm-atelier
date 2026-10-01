@@ -7,6 +7,7 @@ import os
 import re
 import runpy
 import shutil
+import socket
 import subprocess
 import sys
 import tomllib
@@ -1770,6 +1771,49 @@ def test_browser_runners_do_not_execute_an_environment_selected_program() -> Non
     # refusal has to cover every one of them rather than the two it started with.
     for source_file in (*choosing, *delegating):
         assert "LM_ATELIER_E2E_PYTHON" not in source_file.read_text()
+
+
+def test_isolated_runs_reserve_all_their_ports_while_holding_them() -> None:
+    """One run's ports are all distinct, so none of its servers finds its port taken.
+
+    Reserving a port and closing it before reserving the next let the system
+    hand the same port to two of a run's servers, and the second could not
+    bind it. Each runner now asks for all of its ports at once, and the harness
+    holds every listener until each has a port.
+    """
+
+    harness = ROOT / "scripts/isolated-e2e-harness.mjs"
+    assert "reserveLoopbackPort(" not in harness.read_text()
+    for runner, count in (
+        ("scripts/run-workflow-editor-e2e.mjs", 3),
+        ("scripts/run-managed-media-e2e.mjs", 2),
+    ):
+        source = (ROOT / runner).read_text()
+        assert source.count("reserveLoopbackPorts(") == 1
+        assert f"await reserveLoopbackPorts({count});" in source
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Reserving ports is checked with the repository's Node.")
+    reserved = subprocess.run(
+        [
+            node,
+            "--input-type=module",
+            "-e",
+            f"const harness = await import({json.dumps(harness.as_uri())});"
+            "console.log(JSON.stringify(await harness.reserveLoopbackPorts(8)));",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    ports = json.loads(reserved.stdout)
+    assert len(ports) == 8 and len(set(ports)) == 8
+    # Each is free again once reserved: the run's own server is the next to bind it.
+    for port in ports:
+        with socket.create_server(("127.0.0.1", port)):
+            pass
 
 
 def test_frozen_installer_contracts_are_explicit() -> None:
