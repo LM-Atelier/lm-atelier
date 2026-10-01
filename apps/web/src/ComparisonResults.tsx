@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { ReactNode, Ref } from "react";
 import { api } from "./api";
 import { ComparisonChoiceSummary, ComparisonEstimate, ComparisonRefusals, ComparisonSettings } from "./ComparisonCheckResult";
+import { ComparisonKeepRecipe } from "./ComparisonKeepRecipe";
 import { ErrorCallout } from "./ErrorCallout";
 import { GenerationDetails } from "./GenerationDetails";
 import { comparisonFailure, comparisonIsWorking, keptPicture, trialIsWorking } from "./generationComparison";
@@ -49,12 +50,14 @@ function TrialPicture({ experimentId, arm, trial, job }: {
 }
 
 /** An accepted comparison: start it, then both pictures side by side as they are made. */
-export function ComparisonResults({ experimentId, onStart, starting, startError, onNew, headingRef, children }: {
+export function ComparisonResults({ experimentId, onStart, starting, startError, onNew, onOpenChat, headingRef, children }: {
   experimentId: string;
   onStart: (experiment: GenerationExperiment) => void;
   starting: boolean;
   startError: unknown;
   onNew: () => void;
+  /** Show a chat set up with a choice that was kept. */
+  onOpenChat?: (chatId: string) => void;
   headingRef?: Ref<HTMLHeadingElement>;
   children?: ReactNode;
 }) {
@@ -100,6 +103,9 @@ export function ComparisonResults({ experimentId, onStart, starting, startError,
       <h3 id={`comparison-arm-${arm.ordinal}`}>{arm.label}</h3>
       {arm.trials.map((trial) => <TrialPicture key={trial.id} experimentId={experiment.id} arm={arm} trial={trial}
         job={(jobs.data ?? []).find((job) => job.id === trial.job_id)} />)}
+      {/* Kept once its picture is seen: the reason to keep a setup is what it made. */}
+      {arm.trials.some((trial) => trial.status === "complete")
+        && <ComparisonKeepRecipe experimentId={experiment.id} arm={arm} onOpenChat={onOpenChat} />}
       <ComparisonChoiceSummary arm={arm} seed={arm.trials[0]?.seed ?? null} />
     </section>)}</div>
     <ComparisonSettings arms={experiment.arms} />

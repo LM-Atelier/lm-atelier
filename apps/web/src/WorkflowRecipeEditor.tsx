@@ -10,15 +10,21 @@ import { workflowUseCases } from "./workflowUseCaseTypes";
 import type { RecipeSettingValue, WorkflowUseCase, WorkflowUseCasePreset, WorkflowUseCasePresetCreate } from "./workflowUseCaseTypes";
 import "./WorkflowRecipeManager.css";
 
-export function WorkflowRecipeEditor({ recipe, saving, error, onSave, onCancel }: {
-  recipe: WorkflowUseCasePreset | null; saving: boolean; error: Error | null;
+export function WorkflowRecipeEditor({ recipe, draft, referenceWorkflowId, saving, error, onSave, onCancel }: {
+  recipe: WorkflowUseCasePreset | null;
+  /** A new recipe's starting values when they were drafted elsewhere, such as from a comparison. */
+  draft?: WorkflowUseCasePresetCreate;
+  /** The workflow whose controls the drafted settings came from. */
+  referenceWorkflowId?: string;
+  saving: boolean; error: Error | null;
   onSave: (payload: WorkflowUseCasePresetCreate) => void; onCancel: () => void;
 }) {
-  const [name, setName] = useState(recipe?.name ?? "");
-  const [useCase, setUseCase] = useState<WorkflowUseCase>(recipe?.use_case ?? "image_generation");
-  const [enabled, setEnabled] = useState(recipe?.enabled ?? true);
-  const [settings, setSettings] = useState<Record<string, RecipeSettingValue>>(() => structuredClone(recipe?.settings_json ?? {}));
-  const [workflowId, setWorkflowId] = useState("");
+  const start = recipe ?? draft ?? null;
+  const [name, setName] = useState(start?.name ?? "");
+  const [useCase, setUseCase] = useState<WorkflowUseCase>(start?.use_case ?? "image_generation");
+  const [enabled, setEnabled] = useState(start?.enabled ?? true);
+  const [settings, setSettings] = useState<Record<string, RecipeSettingValue>>(() => structuredClone(start?.settings_json ?? {}));
+  const [workflowId, setWorkflowId] = useState(referenceWorkflowId ?? "");
   const nameField = useRef<HTMLInputElement>(null);
   useEffect(() => { nameField.current?.focus(); }, []);
   const engines = useQuery({ queryKey: ["engines"], queryFn: () => api.engines() });
@@ -41,7 +47,7 @@ export function WorkflowRecipeEditor({ recipe, saving, error, onSave, onCancel }
   const valueErrors = fields.flatMap((field) => Object.hasOwn(settings, field.key)
     ? [recipeValueError(field, settings[field.key])].filter((message): message is string => message !== null) : []);
   const ready = Boolean(reference && revision.schema && engine && !readError);
-  const settingsChanged = JSON.stringify(settings) !== JSON.stringify(recipe?.settings_json ?? {}) || useCase !== (recipe?.use_case ?? useCase);
+  const settingsChanged = JSON.stringify(settings) !== JSON.stringify(start?.settings_json ?? {}) || useCase !== (start?.use_case ?? useCase);
   const canSave = Boolean(name.trim()) && !saving && !valueErrors.length
     && (!Object.keys(settings).length || !settingsChanged || ready);
   function remove(key: string) {

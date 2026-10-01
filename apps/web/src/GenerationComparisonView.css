@@ -19,6 +19,9 @@
 .comparison-differs { font-weight: 600; color: var(--ink-primary); }
 .comparison-picture { margin: 0; }
 .comparison-picture img { display: block; width: 100%; max-height: 520px; object-fit: contain; border-radius: var(--cut); background: var(--panel); }
+.comparison-recipe { display: grid; gap: calc(12px * var(--spacing-scale, 1)); }
+.comparison-recipe-left-out { display: grid; gap: calc(4px * var(--spacing-scale, 1)); }
+.comparison-recipe-left-out ul { display: grid; gap: calc(4px * var(--spacing-scale, 1)); margin: 0; padding-left: 18px; }
 .generation-comparison .primary[aria-disabled="true"], .generation-comparison .secondary.compact-button[aria-disabled="true"] { cursor: default; opacity: 0.6; }
 @media (max-width: 720px) {
   .comparison-columns { grid-template-columns: minmax(0, 1fr); }

@@ -11,11 +11,13 @@ from . import generation_experiment_store as store
 from .api_errors import api_error
 from .db import get_session
 from .generation_experiment_preflight import resolve_generation_experiment
+from .generation_experiment_recipe import RecipeDraftRefused, recipe_draft
 from .generation_experiment_start import StartRefused, start_generation_experiment
 from .generation_experiments_v1 import (
     GenerationExperimentCreate,
     GenerationExperimentOut,
     GenerationExperimentPreflightOut,
+    GenerationExperimentRecipeDraftOut,
     GenerationExperimentRequest,
     GenerationExperimentStart,
 )
@@ -41,6 +43,11 @@ REFUSALS: dict[str, tuple[int, str]] = {
         "This request key was already used for a different comparison.",
     ),
     "generation-experiment-not-found": (404, "This comparison no longer exists."),
+    "generation-experiment-arm-not-found": (404, "This comparison has no such choice."),
+    "generation-experiment-recipe-unavailable": (
+        409,
+        "The workflow this choice ran on cannot take a recipe now.",
+    ),
     "generation-experiment-record-invalid": (
         409,
         "This comparison's stored record no longer matches what was accepted.",
@@ -186,3 +193,23 @@ async def start_generation_experiment_route(
     if experiment is None:
         raise _refuse("generation-experiment-not-found")
     return _out(session, experiment)
+
+
+@router.get(
+    "/generation-experiments/{experiment_id}/arms/{arm_ordinal}/recipe-draft",
+    response_model=GenerationExperimentRecipeDraftOut,
+)
+async def draft_generation_experiment_recipe(
+    experiment_id: str, arm_ordinal: int, request: Request, session: SessionDep
+) -> GenerationExperimentRecipeDraftOut:
+    """A recipe to review from one choice: the settings it ran with that a recipe can hold.
+
+    Nothing is saved. The answer names the choice's model and workflow beside
+    the settings, and says why any setting it ran with was left out.
+    """
+
+    services = cast("Services", request.app.state.services)
+    try:
+        return await recipe_draft(services.orchestrator, session, experiment_id, arm_ordinal)
+    except RecipeDraftRefused as refused:
+        raise _refuse(refused.code) from None
