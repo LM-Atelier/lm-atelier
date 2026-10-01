@@ -4,8 +4,8 @@
  * alpha says exactly where the subject is. Inverted, it covers everything
  * around the subject, and a redraw placed back through it changes the
  * background while the subject keeps its own pixels. As it is, grown a little,
- * it covers the subject, and a redraw placed back through it changes the
- * subject while everything around it keeps its own.
+ * it covers the subject, and a removal placed back through it takes the
+ * subject away while everything around it keeps its own.
  */
 
 import { readSourcePixels } from "./studioSourcePixels";
@@ -32,12 +32,12 @@ export function cutoutOutcome(session: ChatDetail | null, messageId: string): Cu
     : { state: "failed" };
 }
 
-/** How far past its outline a subject's selection reaches, in pixels.
+/** How far past its outline a removed subject's selection reaches, in pixels.
  *
- * A new subject is rarely the old one's exact shape, and a selection held to
- * the old outline would clip whatever the new one adds. A small share of the
- * picture's shorter side gives it room, with a floor so a small picture still
- * gets some.
+ * A selection held to the old outline leaves a ring of what was removed, since
+ * a cutout's edge never quite reaches it. A small share of the picture's
+ * shorter side covers the ring, with a floor so a small picture still gets
+ * some.
  */
 export function subjectReach(width: number, height: number): number {
   return Math.max(8, Math.round(Math.min(width, height) * 0.04));

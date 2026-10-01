@@ -535,9 +535,11 @@ export async function encodeMaskPng(mask: MaskRaster): Promise<Blob | null> {
 }
 
 /** The smallest box around everything selected, in the raster's own pixels,
- * or null when nothing is. */
+ * or null when nothing is. Only coverage from `least` up counts, so a faint
+ * edge can be left out of the box. */
 export function maskBounds(
   mask: MaskRaster,
+  least = 1,
 ): { left: number; top: number; width: number; height: number } | null {
   let left = mask.width;
   let top = mask.height;
@@ -546,7 +548,7 @@ export function maskBounds(
   for (let y = 0; y < mask.height; y += 1) {
     const row = y * mask.width;
     for (let x = 0; x < mask.width; x += 1) {
-      if (mask.data[row + x] === 0) continue;
+      if (mask.data[row + x] < least) continue;
       if (x < left) left = x;
       if (x > right) right = x;
       if (y < top) top = y;

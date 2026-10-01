@@ -162,8 +162,8 @@ def test_replacing_a_background_needs_a_cutout_and_an_editor() -> None:
     assert ready.workflow_revision_id == "wfrev-matting"
 
 
-def test_replacing_a_subject_needs_a_cutout_and_an_editor_that_reads_a_second_picture() -> None:
-    """The cutout finds the subject; the redraw takes the new one from a second picture."""
+def test_replacing_a_subject_needs_a_cutout_and_an_editor() -> None:
+    """Both subjects are cut out, and an ordinary edit removes the old one."""
 
     matting: dict[str, Any] = {
         "type": "object",
@@ -173,21 +173,19 @@ def test_replacing_a_subject_needs_a_cutout_and_an_editor_that_reads_a_second_pi
     def subject(**kwargs: Any) -> Any:
         return next(tool for tool in tool_capabilities(**kwargs) if tool.kind == "subject")
 
-    cutout_only = subject(edit_input_schemas=[matting, PLAIN_SCHEMA])
+    cutout_only = subject(edit_input_schemas=[matting], matting_workflow_ids=["wfrev-matting"])
     assert cutout_only.available is False
-    assert "takes a second picture" in (cutout_only.reason or "")
-    editor_only = subject(edit_input_schemas=[PLAIN_SCHEMA], reference_workflow_ids=["wfrev-two"])
+    assert cutout_only.reason == "Install an image editing workflow to change a picture."
+    editor_only = subject(edit_input_schemas=[PLAIN_SCHEMA])
     assert editor_only.available is False
     assert "background removal" in (editor_only.reason or "")
     ready = subject(
-        edit_input_schemas=[matting, PLAIN_SCHEMA],
-        matting_workflow_ids=["wfrev-matting"],
-        reference_workflow_ids=["wfrev-two", "wfrev-three"],
+        edit_input_schemas=[matting, PLAIN_SCHEMA], matting_workflow_ids=["wfrev-matting"]
     )
     assert ready.available is True and ready.reason is None
-    # Always the first that reads a second picture: the studio's own choice
-    # may read only one.
-    assert ready.workflow_revision_id == "wfrev-two"
+    # The cutouts run on the workflow the report names, as Isolate's does; the
+    # old subject is removed on the studio's own, which is never named.
+    assert ready.workflow_revision_id == "wfrev-matting"
 
 
 def test_a_plain_editor_runs_instruct_but_not_a_selection() -> None:

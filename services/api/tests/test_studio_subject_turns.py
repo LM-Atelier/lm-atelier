@@ -1,4 +1,4 @@
-"""Replacing a subject: the new one comes from a second picture the workflow only reads."""
+"""Pictures an edit only reads, and what the report needs before a subject can be replaced."""
 
 from __future__ import annotations
 
@@ -214,7 +214,7 @@ async def test_the_new_subject_is_placed_back_into_the_first_picture(
             assert out.getpixel((x, y)) == (REDRAWN if inside else source.getpixel((x, y)))
 
 
-async def test_the_report_offers_a_subject_once_a_cutout_and_a_second_picture_are_readable(
+async def test_the_report_offers_a_subject_once_a_cutout_and_an_editor_are_installed(
     client: AsyncClient,
 ) -> None:
     async def subject() -> dict[str, Any]:
@@ -223,21 +223,12 @@ async def test_the_report_offers_a_subject_once_a_cutout_and_a_second_picture_ar
 
     nothing = await subject()
     assert nothing["available"] is False
-    assert "takes a second picture" in nothing["reason"]
+    assert "background removal" in nothing["reason"]
 
-    # An editor that reads one picture is not enough, however many there are.
-    _workflow(
-        "One-picture editor",
-        {"1": {"class_type": "LoadImage", "inputs": {"image": "${input_image}"}}},
-        {},
-    )
-    assert (await subject())["available"] is False
-    editor_id = _two_picture_editor()
-    no_cutout = await subject()
-    assert no_cutout["available"] is False
-    assert "background removal" in no_cutout["reason"]
-
-    _workflow(
+    # The editor that removes the old subject is installed here already, and
+    # it reads one picture, which is enough: the new subject is placed, not
+    # redrawn. A cutout is all that is missing.
+    cutout_id = _workflow(
         "Cutout",
         {"1": {"class_type": "LoadImage", "inputs": {"image": "${input_image}"}}},
         {"matte": {"type": "boolean", "x-lm-atelier-kind": "matting"}},
@@ -245,6 +236,6 @@ async def test_the_report_offers_a_subject_once_a_cutout_and_a_second_picture_ar
     both = await subject()
     assert both["available"] is True
     assert both["reason"] is None
-    # The redraw goes to the editor that reads the second picture; the cutout
-    # runs on the workflow Isolate names.
-    assert both["workflow_revision_id"] == editor_id
+    # Both cutouts run on the workflow Isolate names; the old subject is
+    # removed on the studio's own, which the report never names.
+    assert both["workflow_revision_id"] == cutout_id

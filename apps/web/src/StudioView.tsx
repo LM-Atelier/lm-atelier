@@ -54,6 +54,7 @@ import { useStudioImage } from "./useStudioImage";
 import { useStudioSession, type StudioStep } from "./useStudioSession";
 import { useStudioDraft } from "./useStudioDraft";
 import { useStudioBackground } from "./useStudioBackground";
+import { useStudioSubjectPlace } from "./useStudioSubjectPlace";
 import type { EditTemplate, GenerationIdentity } from "./types";
 
 /** Tools that make their edit without a model, each from its own panel, so they have no Apply of the model's. */
@@ -115,8 +116,10 @@ export function StudioView({
   // Cleared from the box once an edit is taken, and offered back if it fails.
   const [sentWords, setSentWords] = useState<StudioSentWords | null>(null);
   const [results, setResults] = useState(1);
-  // Replacing a background or a subject is two applies; the studio stays busy in between.
+  // Replacing a background or a subject takes several steps; the studio stays busy in between.
   const cutoutEdit = useStudioBackground(sessionId, session, apply, setSelectionError);
+  const subjectEdit = useStudioSubjectPlace(sessionId, session, apply, localEdit, setSelectionError);
+  const replacing = cutoutEdit.busy || subjectEdit.busy;
   const applyProgress = studioApplyProgress(session);
   // The recipe an apply should run under. Cleared whenever the instruction is
   // edited by hand: at that point the words are no longer the recipe's, and
@@ -168,7 +171,7 @@ export function StudioView({
   // Finding the subject is a cutout too, whose alpha becomes the selection of the picture it was found in.
   const subjectSearch = useStudioSubjectSelection(sessionId, session, apply, setSelectionError, (artifactId, mask) =>
     artifactId === currentArtifactId ? dispatch({ type: "select-subject", mask }) : setSelectionError(SUBJECT_ELSEWHERE));
-  const busy = sessionBusy || cutoutEdit.busy || subjectSearch.busy;
+  const busy = sessionBusy || replacing || subjectSearch.busy;
   // Offered where a workflow can cut a subject out, which the report names under Isolate.
   const subjectWorkflow = isolateTool?.available ? isolateTool.workflow_revision_id : null;
   const artifact = useQuery({
@@ -262,7 +265,7 @@ export function StudioView({
               {onUseInChat && <StudioUseInChat ready={Boolean(artifact.data)} onUse={() => onUseInChat({ artifactId: current.artifactId, artifact: artifact.data ?? null, origin: current.isSource ? (artifact.data?.original_name ? "uploaded" : "generated") : "edited" })} />}
             </>
           )}
-          <StudioCloseButton halfway={cutoutEdit.busy} onClose={onClose} />
+          <StudioCloseButton halfway={replacing} onClose={onClose} />
         </div>
       </header>
       {/* A save that fails must not look like a save that worked. The button
@@ -376,6 +379,7 @@ export function StudioView({
                 applyStudioEdit({
                   tools, instruction, recipe, activeTool, isolateTool, current, bitmap, results, apply,
                   cutout: cutoutEdit,
+                  subject: subjectEdit,
                   setError: setSelectionError,
                   enlargement: enlargement.preview,
                   // A refused enlargement may have been previewed on a workflow that has since changed.

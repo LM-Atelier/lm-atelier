@@ -229,9 +229,8 @@ export function StudioToolOptions({
   }
   if (tools.kind === "subject") {
     return (
-      <StudioSubjectPanel picture={tools.subjectPicture} instruction={instruction}
-        onPicture={(picture) => dispatch({ type: "set-subject-picture", picture })}
-        onInstructionChange={onInstructionChange} />
+      <StudioSubjectPanel picture={tools.subjectPicture}
+        onPicture={(picture) => dispatch({ type: "set-subject-picture", picture })} />
     );
   }
   if (tools.kind === "remove") {

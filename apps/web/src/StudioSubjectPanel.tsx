@@ -1,35 +1,29 @@
 import { Library } from "lucide-react";
-import { useId, useState } from "react";
+import { useState } from "react";
 import { LibraryImagePicker } from "./LibraryImagePicker";
 import type { StudioSubjectPicture } from "./studioToolState";
 
-/** Where a replaced subject comes from, and what to take from it.
+/** Where a replaced subject comes from.
  *
  * The new subject's picture is either chosen from the computer or taken from
- * the library, such as an earlier result; one from the library is sent as the
+ * the library, such as an earlier result; one from the library is used as the
  * picture it already is, not uploaded again. Choosing either replaces the
- * other. The subject's name is asked for as well, and Replace subject waits
- * for it: the redraw draws what it is told to take, and unnamed it takes the
- * second picture's backdrop too.
+ * other. Its subject is cut out of it and placed where the old one stood, so
+ * nothing needs naming: whatever the cutout finds is what is placed.
  */
 export function StudioSubjectPanel({
   picture,
-  instruction,
   onPicture,
-  onInstructionChange,
 }: {
   picture: StudioSubjectPicture | null;
-  instruction: string;
   onPicture: (picture: StudioSubjectPicture) => void;
-  onInstructionChange: (instruction: string) => void;
 }) {
   const [browsing, setBrowsing] = useState(false);
-  const nameHint = useId();
   return (
     <div className="studio-tool-options">
       <small>
-        Cuts the subject out first, then redraws it from a second picture. Everything
-        around it keeps its own pixels.
+        Removes the subject, then places the subject of a second picture where it
+        stood, as large as fits its place. Everything around it keeps its own pixels.
       </small>
       <label>
         <span>
@@ -49,22 +43,6 @@ export function StudioSubjectPanel({
         <Library size={14} aria-hidden="true" /> Choose from the library
       </button>
       {picture && <small>{picture.name}</small>}
-      <label>
-        <span>
-          <strong>Name of the new subject</strong>
-        </span>
-        <input
-          type="text"
-          value={instruction}
-          placeholder="e.g. the dog"
-          aria-required="true"
-          aria-describedby={nameHint}
-          onChange={(event) => onInstructionChange(event.target.value)}
-        />
-      </label>
-      <small id={nameHint}>
-        A few words for what to take from the picture. Replace subject waits for them.
-      </small>
       {browsing && (
         <LibraryImagePicker
           title="Picture of the new subject"

@@ -61,6 +61,7 @@ _DESCRIPTIONS: dict[StudioLocalEditOperation, str] = {
     "paint": "Paint over part of the picture",
     "caption": "Add text",
     "canvas": "Change the canvas size",
+    "subject": "Replace the subject",
 }
 #: How the edited picture is named in the library, after the source's own name.
 _NAME_SUFFIXES: dict[StudioLocalEditOperation, str] = {
@@ -78,6 +79,7 @@ _NAME_SUFFIXES: dict[StudioLocalEditOperation, str] = {
     "paint": "painted",
     "caption": "with text",
     "canvas": "canvas changed",
+    "subject": "with a new subject",
 }
 # Pillow names a rotation by its counterclockwise angle.
 _TRANSPOSITIONS = {
@@ -182,10 +184,11 @@ _FILLS = {
 
 @dataclass(frozen=True)
 class CaptionOverlay:
-    """Words the browser drew at the picture's size, as uploaded picture bytes."""
+    """What the browser drew at the picture's size to lay over it, as uploaded picture bytes:
+    added words, or a new subject placed where the old one stood."""
 
     overlay: bytes
-    #: The uploaded overlay, named in the step so the words can be retraced.
+    #: The uploaded overlay, named in the step so what was laid down can be retraced.
     overlay_artifact_id: str
 
 
@@ -290,6 +293,10 @@ def render_local_edit(
         result = _painted(picture, paint, orientation)
     elif operation == "caption":
         result = _captioned(picture, caption)
+    elif operation == "subject":
+        # A placed subject arrives in the same slot as drawn words: both are
+        # pictures the browser made at this picture's size, laid over it.
+        result = _with_subject(picture, caption)
     else:
         result = picture.transpose(_TRANSPOSITIONS[operation])
     # Conversion carries the source's metadata along, and saving falls back to
@@ -488,6 +495,26 @@ def _captioned(picture: Image.Image, caption: CaptionOverlay | None) -> Image.Im
     return words if picture.mode == "RGBA" else words.convert("RGB")
 
 
+def _with_subject(picture: Image.Image, placed: CaptionOverlay | None) -> Image.Image:
+    if placed is None:
+        raise LocalEditError("studio-subject-missing", "Choose the new subject again.")
+    try:
+        drawn = decode_picture(placed.overlay, "placed subject")
+    except RegionEditError as exc:
+        raise LocalEditError(
+            "studio-subject-unreadable", "The placed subject could not be read."
+        ) from exc
+    # Placed over the picture the subject was taken out of, so it must be that
+    # size; stretching it would move the subject from the place it was given.
+    if drawn.size != picture.size:
+        raise LocalEditError(
+            "studio-subject-size-mismatch",
+            "The new subject was placed for a picture of another size. Replace it again.",
+        )
+    with_subject = Image.alpha_composite(picture.convert("RGBA"), drawn.convert("RGBA"))
+    return with_subject if picture.mode == "RGBA" else with_subject.convert("RGB")
+
+
 def _placed(room: int, part: int) -> int:
     # The share of the room before the picture, rounded toward zero, so an odd
     # pixel always goes after it, whether the canvas grows or shrinks.
@@ -621,7 +648,11 @@ def record_local_edit(
             "mask_artifact_id": paint.mask_artifact_id,
         }
     if caption is not None:
-        record["caption"] = {"overlay_artifact_id": caption.overlay_artifact_id}
+        # Drawn words and a placed subject share the overlay's shape; the
+        # operation says which one this was.
+        record["subject" if operation == "subject" else "caption"] = {
+            "overlay_artifact_id": caption.overlay_artifact_id
+        }
     result = store.ingest_bytes(
         session,
         edited,

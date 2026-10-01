@@ -72,9 +72,10 @@ TOOL_WORKFLOW_CLASSES: dict[StudioToolKind, str] = {
     # Replacing a background cuts the subject out first, so it runs the matting
     # workflow, and then redraws around it, so it needs an edit workflow too.
     "background": "matting",
-    # Replacing a subject redraws it from a second picture, so it needs an edit
-    # workflow that reads two, and it cuts the subject out first to find it.
-    "subject": "reference_edit",
+    # Replacing a subject cuts the old one out to find it, removes it with an
+    # edit workflow, and places the new one cut out of the second picture, so
+    # it runs the matting workflow and needs an edit workflow too.
+    "subject": "matting",
     # Turning, flipping, correcting the perspective, cropping, resizing,
     # adjusting light and color, blurring or painting a marked area, adding
     # words and changing the canvas are pixel operations the studio makes
@@ -100,10 +101,6 @@ _CLASS_GUIDANCE = {
         "a picture."
     ),
     "matting": "Install a background removal workflow to cut a subject out of a picture.",
-    "reference_edit": (
-        "Install an image editing workflow that takes a second picture to replace a subject "
-        "with one from another picture."
-    ),
 }
 _NO_LIGHTING_ADAPTER = "Install the Qwen Multi-Angle Lighting LoRA to relight a picture."
 #: For a tool whose workflow is installed but refused by the run: installing
@@ -134,7 +131,6 @@ def tool_capabilities(
     relight_workflow_ids: Sequence[str] = (),
     lighting_adapter_ids: Sequence[str] = (),
     matting_workflow_ids: Sequence[str] = (),
-    reference_workflow_ids: Sequence[str] = (),
     waiting_input_schemas: Sequence[dict[str, Any] | None] = (),
 ) -> list[ToolCapability]:
     """Judge every tool from the schemas of the installed edit workflows.
@@ -172,7 +168,6 @@ def tool_capabilities(
         # Relight needs both halves: a workflow that can take the light map and
         # a LoRA, and the one adapter whose behaviour was checked.
         "relight": bool(relight_workflow_ids) and bool(lighting_adapter_ids),
-        "reference_edit": bool(reference_workflow_ids),
         # Nothing to install: the edit is made here, without a model.
         "local": True,
     }
@@ -194,9 +189,9 @@ def tool_capabilities(
         if kind == "background" and ready and not can_edit:
             # The cutout alone replaces nothing: an edit redraws around it.
             ready, reason = False, guidance("image_to_image")
-        if kind == "subject" and ready and not can_matte:
-            # The cutout is what says where the subject is.
-            ready, reason = False, guidance("matting")
+        if kind == "subject" and ready and not can_edit:
+            # The cutouts place nothing on their own: an edit removes the old subject.
+            ready, reason = False, guidance("image_to_image")
         if workflow_class == "relight" and relight_workflow_ids and not lighting_adapter_ids:
             reason = _NO_LIGHTING_ADAPTER
         capabilities.append(
@@ -209,17 +204,14 @@ def tool_capabilities(
                 # since they differ; otherwise the studio's chosen one runs and
                 # the server checks it can. Every matting workflow does the same
                 # job, and the studio's chosen one never does, so one is always
-                # named: the first, in the order given. A subject is redrawn on
-                # the first workflow that reads a second picture, since the
-                # studio's chosen one may read only one, and it is cut out on
-                # the workflow Isolate names.
+                # named: the first, in the order given. A replaced subject is
+                # cut out on the workflow Isolate names, both times, and the old
+                # one is removed on the studio's own.
                 workflow_revision_id=(
                     relight_workflow_ids[0]
                     if workflow_class == "relight" and len(relight_workflow_ids) == 1
                     else matting_workflow_ids[0]
                     if workflow_class == "matting" and matting_workflow_ids
-                    else reference_workflow_ids[0]
-                    if workflow_class == "reference_edit" and reference_workflow_ids
                     else None
                 ),
                 adapter_asset_id=(

@@ -575,6 +575,44 @@ def test_words_that_cannot_be_laid_down_are_refused(
     assert refused.value.code == code
 
 
+def test_a_new_subject_is_laid_over_the_picture_where_it_was_placed() -> None:
+    placed = CaptionOverlay(overlay=_drawn(), overlay_artifact_id="subject")
+
+    result = _open(render_local_edit(_png(_tiles()), "subject", caption=placed))
+
+    assert result.mode == "RGB"
+    assert result.getpixel((1, 0)) == (0, 0, 255)
+    # Its soft edge: half the subject over the picture beneath.
+    red, green, blue = _pixel(result, (2, 1))
+    assert 120 <= red <= 130 and 120 <= green <= 130 and blue > 245
+    # Where nothing was placed the picture is exactly what it was.
+    assert result.getpixel((0, 0)) == RED
+    assert result.getpixel((2, 0)) == GREEN
+
+
+@pytest.mark.parametrize(
+    ("placed", "code"),
+    [
+        (None, "studio-subject-missing"),
+        (
+            CaptionOverlay(overlay=_drawn((4, 2)), overlay_artifact_id="s"),
+            "studio-subject-size-mismatch",
+        ),
+        (
+            CaptionOverlay(overlay=b"not a picture", overlay_artifact_id="s"),
+            "studio-subject-unreadable",
+        ),
+    ],
+)
+def test_a_new_subject_that_cannot_be_placed_is_refused(
+    placed: CaptionOverlay | None, code: str
+) -> None:
+    with pytest.raises(LocalEditError) as refused:
+        render_local_edit(_png(_tiles()), "subject", caption=placed)
+
+    assert refused.value.code == code
+
+
 def test_a_blur_without_a_marked_area_is_refused() -> None:
     with pytest.raises(LocalEditError) as refused:
         render_local_edit(_png(_checkers()), "blur")
@@ -1117,6 +1155,39 @@ async def test_added_words_are_recorded_with_the_drawn_overlay(client: AsyncClie
     assert detail.json()["original_name"] == "tiles (with text).png"
 
 
+async def test_a_new_subject_is_recorded_with_the_placed_overlay(client: AsyncClient) -> None:
+    source_id = await _upload(client, "tiles.png", _png(_tiles()))
+    subject_id = await _upload(client, "studio-subject.png", _drawn())
+    session_id = await _session_over(client, source_id)
+
+    response = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={
+            "source_artifact_id": source_id,
+            "operation": "subject",
+            "subject": {"overlay_artifact_id": subject_id},
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    request, answer = response.json()["messages"]
+    assert request["parts"][0]["text"] == "Replace the subject"
+    image, metadata = answer["parts"]
+    # Named as the subject it is, not as words.
+    assert metadata["metadata_json"]["provenance"] == {
+        "local_edit": {
+            "operation": "subject",
+            "source_artifact_id": source_id,
+            "subject": {"overlay_artifact_id": subject_id},
+        }
+    }
+    with_subject = await _content(client, image["artifact_id"])
+    assert with_subject.getpixel((1, 0)) == (0, 0, 255)
+    assert with_subject.getpixel((0, 0)) == RED
+    detail = await client.get(f"/api/artifacts/{image['artifact_id']}")
+    assert detail.json()["original_name"] == "tiles (with a new subject).png"
+
+
 async def test_only_a_picture_in_the_session_can_be_edited_through_it(
     client: AsyncClient,
 ) -> None:
@@ -1213,6 +1284,22 @@ async def test_a_refused_edit_leaves_the_session_as_it_was(client: AsyncClient) 
             "source_artifact_id": source_id,
             "operation": "caption",
             "caption": {"overlay_artifact_id": "sha256:" + "0" * 64},
+        },
+    )
+    no_subject = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={
+            "source_artifact_id": source_id,
+            "operation": "subject",
+            "subject": {"overlay_artifact_id": "sha256:" + "0" * 64},
+        },
+    )
+    subject_as_words = await client.post(
+        f"/api/studio/sessions/{session_id}/local-edits",
+        json={
+            "source_artifact_id": source_id,
+            "operation": "subject",
+            "caption": {"overlay_artifact_id": source_id},
         },
     )
     stray_canvas = await client.post(
@@ -1325,6 +1412,9 @@ async def test_a_refused_edit_leaves_the_session_as_it_was(client: AsyncClient) 
     assert stray_canvas.status_code == 422
     assert no_words.status_code == 422
     assert no_words.json()["code"] == "studio-caption-missing"
+    assert no_subject.status_code == 422
+    assert no_subject.json()["code"] == "studio-subject-missing"
+    assert subject_as_words.status_code == 422
     assert strange_color.status_code == 422
     assert strange_anchor.status_code == 422
     assert absent.status_code == 404
