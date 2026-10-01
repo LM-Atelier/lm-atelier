@@ -809,6 +809,148 @@ async def test_chat_plan_downloads_a_pinned_projector_from_a_companion_repo(
         assert session.query(ModelCapabilityEvidence).one().evidence_key
 
 
+async def test_a_reused_component_is_reported_as_reused_while_the_next_one_downloads(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The second file's transfer is told what was reused, and the reused file is
+    not counted twice while it is verified."""
+
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    model_content = gguf_bytes("qwen")
+    projector_content = gguf_bytes("clip")
+    model_digest = hashlib.sha256(model_content).hexdigest()
+    projector_digest = hashlib.sha256(projector_content).hexdigest()
+    model_name = "Neutral-Model-Q4_K_M.gguf"
+    projector_name = "mmproj-Neutral-Model-f16.gguf"
+    inspection = inspect_repository_metadata(
+        {model_name: model_content, projector_name: projector_content},
+        [model_name, projector_name],
+        role="chat",
+    )
+    resolved = resolve_install_plan(
+        remote_id="neutral/model",
+        revision="a" * 40,
+        role="chat",
+        engine="llama.cpp",
+        selected_files=[
+            {"filename": model_name, "size": len(model_content), "sha256": model_digest},
+            {
+                "filename": projector_name,
+                "size": len(projector_content),
+                "sha256": projector_digest,
+            },
+        ],
+        inspection=inspection,
+    )
+    with SessionLocal() as session:
+        plan = persist_install_plan(session, resolved)
+        session.commit()
+        request = DownloadRequest(
+            install_plan_id=plan.id,
+            remote_id=plan.remote_id,
+            revision=plan.revision,
+            role="chat",
+            engine=plan.engine,
+            allow_patterns=[model_name, projector_name],
+            expected_sha256={model_name: model_digest, projector_name: projector_digest},
+        )
+        session.add(
+            Job(
+                id="job_reused_then_downloaded",
+                kind=JobKind.DOWNLOAD.value,
+                status=JobStatus.QUEUED.value,
+                payload_json=request.model_dump(mode="json"),
+            )
+        )
+        session.commit()
+    # The model's verified bytes sit in an earlier plan's staging, so they are reused.
+    earlier = settings.download_dir / f"plan-{'d' * 64}.partial"
+    earlier.mkdir(parents=True)
+    (earlier / model_name).write_bytes(model_content)
+
+    class ChatAdapter:
+        async def capabilities(self) -> object:
+            return SimpleNamespace(
+                healthy=True, version="llama", input_modalities=["text", "image"]
+            )
+
+        async def count_tokens(self, _messages: list[dict[str, Any]]) -> int:
+            return 3
+
+        async def stream(self, _request: ChatRequest):  # type: ignore[no-untyped-def]
+            yield ChatEvent(type="token", text="OK")
+            yield ChatEvent(type="complete")
+
+    class Processes:
+        runtimes = None
+
+        def statuses(self) -> list[object]:
+            return [SimpleNamespace(name="chat", running=False, profile_id=None)]
+
+        async def load_chat(self, _profile: ModelProfile, _install: ModelInstall) -> None:
+            return None
+
+        async def stop(self, _name: str) -> None:
+            return None
+
+    info = SimpleNamespace(
+        siblings=[
+            SimpleNamespace(
+                rfilename=model_name, size=len(model_content), lfs={"sha256": model_digest}
+            ),
+            SimpleNamespace(
+                rfilename=projector_name,
+                size=len(projector_content),
+                lfs={"sha256": projector_digest},
+            ),
+        ],
+        sha="a" * 40,
+        pipeline_tag="image-text-to-text",
+        tags=["gguf"],
+        gated=False,
+    )
+    manager = DownloadManager(
+        settings,
+        EventBroker(),
+        chat_adapter=ChatAdapter(),  # type: ignore[arg-type]
+        processes=Processes(),  # type: ignore[arg-type]
+    )
+    manager._api = SimpleNamespace(model_info=lambda *_args, **_kwargs: info)  # type: ignore[assignment]
+    transfers: list[dict[str, Any]] = []
+
+    async def download_file(**kwargs: Any) -> str:
+        transfers.append(kwargs)
+        target = kwargs["staging"] / kwargs["filename"]
+        target.write_bytes(projector_content)
+        return str(target)
+
+    import local_lm.downloads as downloads_module
+
+    written: list[dict[str, Any]] = []
+    record = downloads_module.update_job_progress
+
+    def recording(job: Job, **kwargs: Any) -> dict[str, Any]:
+        written.append(kwargs)
+        return record(job, **kwargs)
+
+    monkeypatch.setattr(downloads_module, "update_job_progress", recording)
+    monkeypatch.setattr(manager, "_download_file", download_file)
+    await manager._download("job_reused_then_downloaded")
+
+    with SessionLocal() as session:
+        job = session.get(Job, "job_reused_then_downloaded")
+        assert job and job.status == JobStatus.COMPLETE.value, job.error if job else None
+    assert [transfer["filename"] for transfer in transfers] == [projector_name]
+    (transfer,) = transfers
+    assert transfer["bytes_reused"] == len(model_content)
+    assert (transfer["file_index"], transfer["file_count"]) == (2, 2)
+    verifying = next(item for item in written if item["stage"] == f"verifying {model_name}")
+    assert verifying["completed_units"] == len(model_content)
+
+
 def test_companion_relocation_rejects_a_worker_path_outside_staging(
     tmp_path: Path,
 ) -> None:
@@ -2803,12 +2945,11 @@ async def test_a_slow_large_transfer_still_reports_its_speed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Transfer rate needs byte samples closer together than five seconds.
+    """A slow transfer on a large install still shows its speed.
 
-    The monitor used to write one only when overall progress advanced a tenth
-    of a percent. On a 40 GB install that is 40 MB of movement, which on a
-    normal connection takes far longer than the rate window - so the speed the
-    user was promised never appeared.
+    The monitor used to write a sample only when overall progress advanced a
+    tenth of a percent. On a 40 GB install that is 40 MB of movement, which on
+    a normal connection took so long that no speed ever appeared.
     """
     settings.prepare()
     configure_database(settings)
@@ -2873,3 +3014,285 @@ async def test_a_slow_large_transfer_still_reports_its_speed(
     assert progress["unit"] == "bytes"
     assert progress["completed_units"] > 0
     assert progress["rate_bytes_per_second"], "a moving transfer must report its speed"
+
+
+async def _monitor_samples(
+    manager: DownloadManager,
+    monkeypatch: pytest.MonkeyPatch,
+    staging: Path,
+    counters: list[int],
+    clock: list[float] | None = None,
+    **monitor: Any,
+) -> dict[str, Any]:
+    """Run the transfer monitor over a scripted worker counter: one second per sample,
+    or the given clock, whose first reading is the monitor's start."""
+
+    seconds = iter(clock if clock is not None else range(10_000))
+    monkeypatch.setattr("local_lm.downloads._TRANSFER_SAMPLE_SECONDS", 0.001)
+    monkeypatch.setattr(
+        "local_lm.downloads.time",
+        SimpleNamespace(perf_counter=lambda: float(next(seconds))),
+        raising=False,
+    )
+    stop = asyncio.Event()
+    remaining = list(counters)
+
+    def written_bytes(_pid: int) -> int:
+        if len(remaining) == 1:
+            stop.set()
+            return remaining[0]
+        return remaining.pop(0)
+
+    monkeypatch.setattr(DownloadManager, "_process_tree_write_bytes", staticmethod(written_bytes))
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                id=monitor["job_id"],
+                kind=JobKind.DOWNLOAD.value,
+                status=JobStatus.RUNNING.value,
+                phase="downloading",
+                payload_json={},
+            )
+        )
+        session.commit()
+    await asyncio.wait_for(
+        manager._monitor_transfer(
+            filename="model.safetensors",
+            staging=staging,
+            process=SimpleNamespace(pid=1234),  # type: ignore[arg-type]
+            stop=stop,
+            **monitor,
+        ),
+        timeout=30,
+    )
+    with SessionLocal() as session:
+        job = session.get(Job, monitor["job_id"])
+        assert job is not None
+        return dict(job.progress_json)
+
+
+async def test_a_transfer_arriving_in_blocks_reports_its_speed_across_the_window(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A worker writes in blocks seconds apart, with only small unrelated writes
+    between them; the speed shown is the transfer's, not the last second's trickle."""
+
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    block = 8 * 1024**2
+    # The worker's write counter when the monitor starts, then once a second.
+    counters = [0, 1024, 2048, block, block + 1024, block + 2048, 2 * block, 2 * block + 1024]
+
+    progress = await _monitor_samples(
+        DownloadManager(settings, EventBroker()),
+        monkeypatch,
+        staging,
+        counters,
+        job_id="job_block_transfer",
+        file_size=64 * block,
+        completed_bytes=0,
+        total_size=64 * block,
+    )
+
+    assert progress["completed_units"] == 2 * block + 1024
+    # Seven seconds after the start, twice the block has arrived.
+    assert progress["rate_bytes_per_second"] == pytest.approx((2 * block + 1024) / 7)
+    remaining = 64 * block - (2 * block + 1024)
+    assert progress["eta_seconds"] == round(remaining / ((2 * block + 1024) / 7))
+
+
+async def test_transfer_samples_keep_the_reused_bytes_and_the_files_place(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Every sample of the second file's transfer still says what was reused and where it is."""
+
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    reused = 4096
+
+    progress = await _monitor_samples(
+        DownloadManager(settings, EventBroker()),
+        monkeypatch,
+        staging,
+        [0, 1024, 2048],
+        job_id="job_reused_transfer",
+        file_size=8192,
+        completed_bytes=reused,
+        total_size=reused + 8192,
+        bytes_reused=reused,
+        file_index=2,
+        file_count=2,
+    )
+
+    assert progress["completed_units"] == reused + 2048
+    assert progress["bytes_reused"] == reused
+    assert (progress["file_index"], progress["file_count"]) == (2, 2)
+    assert progress["overall_progress"] == pytest.approx((reused + 2048) / (reused + 8192))
+    # The reused bytes were never transferred, so they do not count toward the speed.
+    assert progress["rate_bytes_per_second"] == pytest.approx(2048 / 2)
+
+
+async def test_the_transfer_rate_follows_the_last_half_minute_not_the_whole_transfer(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A transfer that started fast and then slowed down shows its present speed."""
+
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    mib = 1024**2
+    # A fast first ten seconds, a stall, then ten MiB in the last half minute.
+    progress = await _monitor_samples(
+        DownloadManager(settings, EventBroker()),
+        monkeypatch,
+        staging,
+        [0, 100 * mib, 100 * mib + 1, 100 * mib + 2, 110 * mib],
+        clock=[0.0, 10.0, 20.0, 40.0, 50.0],
+        job_id="job_slowed_transfer",
+        file_size=1000 * mib,
+        completed_bytes=0,
+        total_size=1000 * mib,
+    )
+
+    # The newest sample at least thirty seconds old is the one taken at twenty seconds.
+    assert progress["rate_bytes_per_second"] == pytest.approx((10 * mib - 1) / 30)
+
+
+async def test_bytes_already_on_disk_do_not_count_toward_the_transfer_rate(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A retry starts over a partial file; only what this attempt moves is speed."""
+
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    partial = 64 * 1024
+    (staging / "model.safetensors.incomplete").write_bytes(bytes(partial))
+
+    progress = await _monitor_samples(
+        DownloadManager(settings, EventBroker()),
+        monkeypatch,
+        staging,
+        [0, 1024, 2048],
+        job_id="job_resumed_transfer",
+        file_size=1024 * 1024,
+        completed_bytes=0,
+        total_size=1024 * 1024,
+    )
+
+    assert progress["completed_units"] == partial + 2048
+    assert progress["rate_bytes_per_second"] == pytest.approx(2048 / 2)
+
+
+async def test_a_component_batch_reports_its_speed_across_the_window(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Several components downloading together measure their speed the same way."""
+
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    manager = DownloadManager(settings, EventBroker())
+    seconds = iter(range(10_000))
+    monkeypatch.setattr(
+        "local_lm.downloads.time",
+        SimpleNamespace(perf_counter=lambda: float(next(seconds))),
+        raising=False,
+    )
+    block = 8 * 1024**2
+    remaining = [0, 1024, block, block + 1024]
+    stop = asyncio.Event()
+
+    def written_bytes(_pid: int) -> int:
+        if len(remaining) == 1:
+            stop.set()
+            return remaining[0]
+        return remaining.pop(0)
+
+    monkeypatch.setattr(DownloadManager, "_process_tree_write_bytes", staticmethod(written_bytes))
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                id="job_component_batch",
+                kind=JobKind.DOWNLOAD.value,
+                status=JobStatus.RUNNING.value,
+                phase="downloading",
+                payload_json={},
+            )
+        )
+        session.commit()
+    await asyncio.wait_for(
+        manager._monitor_component_batch(
+            job_id="job_component_batch",
+            process=SimpleNamespace(pid=1234),  # type: ignore[arg-type]
+            completed_bytes=4096,
+            total_size=4096 + 64 * block,
+            batch_size=64 * block,
+            bytes_reused=4096,
+            file_count=3,
+            stop=stop,
+        ),
+        timeout=30,
+    )
+    with SessionLocal() as session:
+        job = session.get(Job, "job_component_batch")
+        assert job is not None
+        progress = dict(job.progress_json)
+
+    assert progress["bytes_reused"] == 4096
+    assert progress["completed_units"] == 4096 + block + 1024
+    assert progress["rate_bytes_per_second"] == pytest.approx((block + 1024) / 3)
+
+
+async def test_the_transfer_is_told_what_was_reused_and_where_its_file_is(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reused bytes and the file's place travel from the download call to the monitor."""
+
+    manager = DownloadManager(settings, EventBroker())
+    monkeypatch.setattr(
+        "local_lm.downloads.subprocess.Popen",
+        lambda command, **_kwargs: FakeCompletedWorker(command),
+    )
+    watched: list[dict[str, Any]] = []
+
+    async def monitor(**kwargs: Any) -> None:
+        watched.append(kwargs)
+
+    monkeypatch.setattr(manager, "_monitor_transfer", monitor)
+    await manager._download_file(
+        job_id="job_forwarded",
+        remote_id="owner/model",
+        filename="model.gguf",
+        revision="a" * 40,
+        staging=Path("C:/staging"),
+        file_size=1024,
+        completed_bytes=4096,
+        total_size=5120,
+        bytes_reused=4096,
+        file_index=2,
+        file_count=2,
+    )
+
+    (call,) = watched
+    assert (call["bytes_reused"], call["file_index"], call["file_count"]) == (4096, 2, 2)

@@ -12,6 +12,8 @@ import re
 import shutil
 import subprocess
 import sys
+import time
+from collections import deque
 from collections.abc import Callable, Mapping
 from contextlib import nullcontext, suppress
 from dataclasses import dataclass
@@ -150,10 +152,13 @@ _CIVITAI_ID = re.compile(r"^[1-9][0-9]{0,11}$")
 # reason for each host is recorded there.
 _CIVITAI_ALLOWED_DOWNLOAD_HOSTS = ALLOWED_DOWNLOAD_HOSTS
 _TRANSFER_ATTEMPTS = 3
-# How often a running transfer records a byte sample. Must stay comfortably
-# under the five-second window `progress._byte_rate` allows between samples,
-# or the displayed transfer rate silently disappears.
+# How often a running transfer records a byte sample.
 _TRANSFER_SAMPLE_SECONDS = 1.0
+# A transfer's rate is taken across this window rather than across one sample
+# gap: a worker's bytes arrive in write blocks seconds apart, and between blocks
+# only small unrelated writes move the counters, so a one-gap rate read as a few
+# hundred bytes a second while megabytes a second were arriving.
+_TRANSFER_RATE_WINDOW_SECONDS = 30.0
 _PROVISIONAL_INSTALL_KEY = "_provisional_install"
 _WORKFLOW_ASSET_KINDS = COMFY_MODEL_ASSET_KINDS | {"gguf_model"}
 logger = logging.getLogger(__name__)
@@ -273,6 +278,21 @@ def _failure_reason(exc: BaseException) -> str:
 
     message = str(exc).strip()
     return message or f"{type(exc).__name__} (no further detail)"
+
+
+class _TransferRate:
+    """Bytes per second across the last stretch of samples, not the last gap."""
+
+    def __init__(self, transferred: int) -> None:
+        self._samples: deque[tuple[float, int]] = deque([(time.perf_counter(), transferred)])
+
+    def sample(self, transferred: int) -> float:
+        now = time.perf_counter()
+        self._samples.append((now, transferred))
+        while len(self._samples) > 2 and now - self._samples[1][0] >= _TRANSFER_RATE_WINDOW_SECONDS:
+            self._samples.popleft()
+        started, base = self._samples[0]
+        return (transferred - base) / (now - started) if now > started else 0.0
 
 
 def _template_workflow_name(template_id: str) -> str:
@@ -1655,6 +1675,9 @@ class DownloadManager:
                             file_size=file_sizes.get(filename) or None,
                             completed_bytes=completed_bytes,
                             total_size=total_size or None,
+                            bytes_reused=reused_bytes,
+                            file_index=index + 1,
+                            file_count=len(filenames),
                         )
                         if file_source.filename != filename:
                             downloaded_path = self._relocate_companion_download(
@@ -1671,7 +1694,8 @@ class DownloadManager:
                                 update_job_progress(
                                     job,
                                     stage=f"verifying {filename}",
-                                    completed_units=completed_bytes + file_sizes.get(filename, 0),
+                                    completed_units=completed_bytes
+                                    + (0 if reused else file_sizes.get(filename, 0)),
                                     total_units=total_size or None,
                                     unit="bytes" if total_size else None,
                                     bytes_reused=reused_bytes,
@@ -3877,6 +3901,7 @@ class DownloadManager:
         initial_write_bytes = self._process_tree_write_bytes(process.pid)
         maximum_transferred = 0
         last_reported = -1
+        rate = _TransferRate(completed_bytes)
         while not stop.is_set():
             current_write_bytes = self._process_tree_write_bytes(process.pid)
             if current_write_bytes is not None and initial_write_bytes is not None:
@@ -3885,6 +3910,7 @@ class DownloadManager:
                     min(batch_size, max(0, current_write_bytes - initial_write_bytes)),
                 )
             reported = completed_bytes + maximum_transferred
+            measured_rate = rate.sample(reported)
             if total_size and reported != last_reported:
                 with SessionLocal() as session:
                     job = session.get(Job, job_id)
@@ -3899,6 +3925,7 @@ class DownloadManager:
                         bytes_reused=bytes_reused,
                         file_count=file_count,
                         queue_resource=job.queue_resource,
+                        measured_rate=measured_rate,
                     )
                     session.commit()
                 await self.scheduler.publish_job(job_id)
@@ -3922,6 +3949,9 @@ class DownloadManager:
         file_size: int | None = None,
         completed_bytes: int = 0,
         total_size: int | None = None,
+        bytes_reused: int = 0,
+        file_index: int | None = None,
+        file_count: int | None = None,
     ) -> str:
         from .db import SessionLocal
 
@@ -3939,6 +3969,9 @@ class DownloadManager:
                     file_size=file_size,
                     completed_bytes=completed_bytes,
                     total_size=total_size,
+                    bytes_reused=bytes_reused,
+                    file_index=file_index,
+                    file_count=file_count,
                 )
             except RuntimeError:
                 if attempt >= _TRANSFER_ATTEMPTS:
@@ -3949,6 +3982,9 @@ class DownloadManager:
                         update_job_progress(
                             job,
                             stage=f"retrying {filename} ({attempt + 1}/{_TRANSFER_ATTEMPTS})",
+                            bytes_reused=bytes_reused,
+                            file_index=file_index,
+                            file_count=file_count,
                             queue_resource=job.queue_resource,
                             indeterminate=True,
                         )
@@ -3980,6 +4016,9 @@ class DownloadManager:
         file_size: int | None = None,
         completed_bytes: int = 0,
         total_size: int | None = None,
+        bytes_reused: int = 0,
+        file_index: int | None = None,
+        file_count: int | None = None,
     ) -> str:
         """Run a blocking transfer in a process that pause/cancel can terminate."""
         if provider == "civitai":
@@ -4045,6 +4084,9 @@ class DownloadManager:
                     file_size=file_size,
                     completed_bytes=completed_bytes,
                     total_size=total_size,
+                    bytes_reused=bytes_reused,
+                    file_index=file_index,
+                    file_count=file_count,
                     stop=monitor_stop,
                 )
             )
@@ -4084,12 +4126,17 @@ class DownloadManager:
         completed_bytes: int,
         total_size: int | None,
         stop: asyncio.Event,
+        bytes_reused: int = 0,
+        file_index: int | None = None,
+        file_count: int | None = None,
     ) -> None:
         from .db import SessionLocal
 
         initial_current_bytes = self._staged_current_file_bytes(staging, completed_bytes, file_size)
         initial_write_bytes = self._process_tree_write_bytes(process.pid)
         maximum_transferred = initial_current_bytes
+        # Bytes already on disk when the attempt starts were not transferred by it.
+        rate = _TransferRate(completed_bytes + initial_current_bytes)
         last_reported = -1.0
         last_written_bytes = -1
         while not stop.is_set():
@@ -4106,13 +4153,14 @@ class DownloadManager:
             if file_size:
                 maximum_transferred = min(maximum_transferred, file_size)
             transferred_bytes = completed_bytes + maximum_transferred
+            measured_rate = rate.sample(transferred_bytes)
             progress = min(transferred_bytes / total_size, 1.0) if total_size else 0.0
             # Record a sample whenever bytes actually moved, not only when the
-            # overall fraction advances a tenth of a percent. Transfer rate is
-            # derived from the gap between consecutive byte samples and is
-            # discarded when that gap exceeds five seconds, so on a large
-            # install the old threshold (0.1% of tens of gigabytes) meant the
-            # samples were always too far apart and no speed was ever shown.
+            # overall fraction advances a tenth of a percent: on a large install
+            # that threshold (0.1% of tens of gigabytes) left the samples so far
+            # apart that no speed was ever shown. The speed written with each
+            # sample is measured across the transfer's recent window, not taken
+            # from the gap since the previous write.
             if last_reported < 0 or transferred_bytes > last_written_bytes:
                 with SessionLocal() as session:
                     job = session.get(Job, job_id)
@@ -4124,7 +4172,12 @@ class DownloadManager:
                         completed_units=transferred_bytes,
                         total_units=total_size,
                         unit="bytes",
+                        overall_progress=progress if total_size else None,
+                        bytes_reused=bytes_reused,
+                        file_index=file_index,
+                        file_count=file_count,
                         queue_resource=job.queue_resource,
+                        measured_rate=measured_rate,
                     )
                     session.commit()
                 await self.scheduler.publish_job(job_id)
