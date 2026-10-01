@@ -2952,6 +2952,13 @@ class GenerationExperiment(TimestampMixin, Base):
     snapshot_sha256: Mapped[str] = mapped_column(String(64))
     idempotency_key: Mapped[str] = mapped_column(String(200))
     request_sha256: Mapped[str] = mapped_column(String(64))
+    # Set once, when the comparison is started; its work plan holds the pictures.
+    work_plan_id: Mapped[str | None] = mapped_column(
+        ForeignKey("work_plans.id", ondelete="SET NULL"), nullable=True, unique=True
+    )
+    start_idempotency_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    start_request_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     arms: Mapped[list[GenerationExperimentArm]] = relationship(
         cascade="all, delete-orphan",
@@ -3013,3 +3020,10 @@ class GenerationExperimentTrial(Base):
     seed: Mapped[int] = mapped_column(Integer)
     state: Mapped[str] = mapped_column(String(16))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # The step and run that make this picture, once the comparison is started.
+    work_step_id: Mapped[str | None] = mapped_column(
+        ForeignKey("work_steps.id", ondelete="SET NULL"), nullable=True, unique=True
+    )
+    run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL"), nullable=True, unique=True
+    )

@@ -312,6 +312,10 @@ def _tamper(experiment_id: str, part: str) -> None:
             arm.model_family = "another"
         elif part == "requested_settings":
             arm.requested_settings_json = {"steps": 99}
+        elif part == "trial state":
+            arm.trials[0].state = "unknown"
+        elif part == "comparison state":
+            experiment.state = "unknown"
         else:
             raise AssertionError(part)
         session.commit()
@@ -332,6 +336,8 @@ def _tamper(experiment_id: str, part: str) -> None:
         "workflow_activation_id",
         "model_family",
         "requested_settings",
+        "trial state",
+        "comparison state",
     ],
 )
 async def test_a_record_that_changed_after_it_was_accepted_is_refused(
@@ -384,7 +390,7 @@ async def test_a_missing_comparison_is_not_found(client: AsyncClient) -> None:
 def test_every_refusal_has_one_kebab_case_code_and_a_status() -> None:
     for code, (status, message) in REFUSALS.items():
         assert re.fullmatch(r"[a-z]+(?:-[a-z]+)+", code), code
-        assert status in {404, 409, 422} and message.endswith(".")
+        assert status in {404, 409, 422, 503} and message.endswith(".")
 
 
 @pytest.mark.parametrize("same_request", [True, False])

@@ -10,13 +10,15 @@ from __future__ import annotations
 
 import copy
 import secrets
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, cast, get_args
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import __version__
+from .domain import utcnow
 from .generation_experiment_preflight import (
     ExperimentResolution,
     ResolvedArm,
@@ -29,13 +31,22 @@ from .generation_experiments_v1 import (
     ExperimentTrialOut,
     GenerationExperimentCreate,
     GenerationExperimentOut,
+    GenerationExperimentStart,
     GenerationExperimentState,
     GenerationExperimentTrialState,
     SeedPolicy,
     SeedPolicyKind,
+    TrialWorkStatus,
     canonical_sha256,
 )
-from .models import GenerationExperiment, GenerationExperimentArm, GenerationExperimentTrial
+from .models import (
+    GenerationExperiment,
+    GenerationExperimentArm,
+    GenerationExperimentTrial,
+    Job,
+    Run,
+    WorkStep,
+)
 from .orchestrator import MEDIA_SEED_SPACE
 
 
@@ -45,6 +56,96 @@ class GenerationExperimentRecordError(Exception):
 
 class GenerationExperimentKeyConflict(Exception):
     """One idempotency key was already used for a different request."""
+
+
+def _work_status(value: str) -> TrialWorkStatus | None:
+    """A step's status as a picture's, or None for a value a step should never hold."""
+
+    return cast(TrialWorkStatus, value) if value in get_args(TrialWorkStatus) else None
+
+
+@dataclass(frozen=True)
+class TrialProgress:
+    """Where one started picture's work stands, read from its own step, run and job."""
+
+    work_step_id: str | None
+    run_id: str | None
+    job_id: str | None
+    status: TrialWorkStatus
+
+
+def start_request_digest(payload: GenerationExperimentStart) -> str:
+    """Everything a start asked for except its key, so a retry is recognised as one."""
+
+    return canonical_sha256(payload.model_dump(mode="json", exclude={"idempotency_key"}))
+
+
+def link_started_work(
+    experiment: GenerationExperiment,
+    payload: GenerationExperimentStart,
+    work_plan_id: str,
+    links: dict[str, tuple[str, str]],
+) -> None:
+    """Record, once, the work plan and each picture's step and run."""
+
+    if experiment.state != GenerationExperimentState.READY.value or experiment.work_plan_id:
+        raise GenerationExperimentRecordError
+    experiment.state = GenerationExperimentState.STARTED.value
+    experiment.work_plan_id = work_plan_id
+    experiment.start_idempotency_key = payload.idempotency_key
+    experiment.start_request_sha256 = start_request_digest(payload)
+    experiment.started_at = utcnow()
+    for arm in experiment.arms:
+        for trial in arm.trials:
+            if trial.work_step_id or trial.run_id:
+                raise GenerationExperimentRecordError
+            trial.work_step_id, trial.run_id = links[trial.id]
+            trial.state = GenerationExperimentTrialState.STARTED.value
+
+
+def read_trial_progress(
+    session: Session, experiment: GenerationExperiment
+) -> dict[str, TrialProgress]:
+    """Each started picture's status, after checking its rows still describe that picture.
+
+    The step, run and job are rows of their own, written when the comparison
+    started; a link that no longer leads back to this picture's choice and
+    seed is a damaged record, not a status. Work deleted since reads as removed.
+    """
+
+    progress: dict[str, TrialProgress] = {}
+    if experiment.state != GenerationExperimentState.STARTED.value:
+        return progress
+    for arm in experiment.arms:
+        for trial in arm.trials:
+            if trial.work_step_id is None or trial.run_id is None:
+                progress[trial.id] = TrialProgress(
+                    trial.work_step_id, trial.run_id, None, "removed"
+                )
+                continue
+            step = session.get(WorkStep, trial.work_step_id)
+            run = session.get(Run, trial.run_id)
+            if step is None or run is None:
+                progress[trial.id] = TrialProgress(None, None, None, "removed")
+                continue
+            witness = (run.provenance_json or {}).get("generation_experiment") or {}
+            status = _work_status(step.status)
+            if (
+                step.plan_id != experiment.work_plan_id
+                or step.run_id != run.id
+                or run.work_step_id != step.id
+                or run.profile_id != arm.profile_id
+                or run.workflow_revision_id != arm.workflow_revision_id
+                or (run.settings_json or {}).get("seed") != trial.seed
+                or witness.get("trial_id") != trial.id
+                or status is None
+            ):
+                raise GenerationExperimentRecordError
+            job = session.scalar(select(Job).where(Job.work_step_id == step.id))
+            progress[trial.id] = TrialProgress(
+                step.id, run.id, job.id if job is not None else None, status
+            )
+    return progress
 
 
 def request_digest(payload: GenerationExperimentCreate) -> str:
@@ -176,7 +277,7 @@ def create(
     return experiment, True
 
 
-def _arm_out(arm: GenerationExperimentArm) -> ExperimentArmOut:
+def _arm_out(arm: GenerationExperimentArm, progress: dict[str, TrialProgress]) -> ExperimentArmOut:
     snapshot: dict[str, Any] = arm.snapshot_json
     if canonical_sha256(snapshot) != arm.snapshot_sha256:
         raise GenerationExperimentRecordError
@@ -195,39 +296,50 @@ def _arm_out(arm: GenerationExperimentArm) -> ExperimentArmOut:
     ):
         raise GenerationExperimentRecordError
     geometry = snapshot.get("geometry") or {}
-    return ExperimentArmOut(
-        id=arm.id,
-        ordinal=arm.ordinal,
-        label=arm.label,
-        profile_id=arm.profile_id,
-        profile_name=profile.get("name"),
-        workflow_revision_id=arm.workflow_revision_id,
-        workflow_version=workflow.get("version"),
-        workflow_activation_id=arm.workflow_activation_id,
-        model_family=arm.model_family,
-        width=geometry["width"],
-        height=geometry["height"],
-        effective_settings=copy.deepcopy(arm.effective_settings_json),
-        trigger_words_applied=list(
-            (snapshot.get("trigger_words") or {}).get("trigger_words_applied", [])
-        ),
-        snapshot_sha256=arm.snapshot_sha256,
-        trials=[
-            ExperimentTrialOut(
-                id=trial.id,
-                ordinal=trial.ordinal,
-                seed=trial.seed,
-                state=GenerationExperimentTrialState(trial.state),
-            )
-            for trial in arm.trials
-        ],
-    )
+    # A stored value the answer cannot hold, such as a state no release wrote,
+    # is a record that changed: refused like any other, never a server error.
+    try:
+        return ExperimentArmOut(
+            id=arm.id,
+            ordinal=arm.ordinal,
+            label=arm.label,
+            profile_id=arm.profile_id,
+            profile_name=profile.get("name"),
+            workflow_revision_id=arm.workflow_revision_id,
+            workflow_version=workflow.get("version"),
+            workflow_activation_id=arm.workflow_activation_id,
+            model_family=arm.model_family,
+            width=geometry["width"],
+            height=geometry["height"],
+            effective_settings=copy.deepcopy(arm.effective_settings_json),
+            trigger_words_applied=list(
+                (snapshot.get("trigger_words") or {}).get("trigger_words_applied", [])
+            ),
+            snapshot_sha256=arm.snapshot_sha256,
+            trials=[
+                ExperimentTrialOut(
+                    id=trial.id,
+                    ordinal=trial.ordinal,
+                    seed=trial.seed,
+                    state=GenerationExperimentTrialState(trial.state),
+                    work_step_id=progress[trial.id].work_step_id if trial.id in progress else None,
+                    run_id=progress[trial.id].run_id if trial.id in progress else None,
+                    job_id=progress[trial.id].job_id if trial.id in progress else None,
+                    status=progress[trial.id].status if trial.id in progress else None,
+                )
+                for trial in arm.trials
+            ],
+        )
+    except (KeyError, TypeError, ValueError):
+        raise GenerationExperimentRecordError from None
 
 
-def out(experiment: GenerationExperiment) -> GenerationExperimentOut:
+def out(
+    experiment: GenerationExperiment, progress: dict[str, TrialProgress] | None = None
+) -> GenerationExperimentOut:
     """The comparison as it was accepted, or a refusal if any stored part has changed."""
 
-    arms = [_arm_out(arm) for arm in experiment.arms]
+    arms = [_arm_out(arm, progress or {}) for arm in experiment.arms]
     common = experiment.common_json
     shared = preflight_digest(
         common, [(arm.ordinal, arm.label, arm.snapshot_sha256) for arm in arms]
@@ -259,6 +371,8 @@ def out(experiment: GenerationExperiment) -> GenerationExperimentOut:
                 "snapshot_sha256": experiment.snapshot_sha256,
                 "estimate": experiment.estimate_json,
                 "created_at": experiment.created_at,
+                "work_plan_id": experiment.work_plan_id,
+                "started_at": experiment.started_at,
                 "arms": arms,
             }
         )
