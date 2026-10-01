@@ -24,7 +24,7 @@ import {
   readinessToken,
   removeTemporaryRoot,
   repositoryRoot,
-  reserveLoopbackPort,
+  reserveLoopbackPorts,
   sharedEnvironment,
   spawnUvicorn,
   waitForReady,
@@ -41,9 +41,7 @@ async function main() {
   const outputDirectory = path.join(temporaryRoot, "playwright-output");
   await mkdir(fixtureDirectory, { recursive: true });
 
-  const appPort = await reserveLoopbackPort();
-  const comfyPort = await reserveLoopbackPort();
-  const attackerPort = await reserveLoopbackPort();
+  const [appPort, comfyPort, attackerPort] = await reserveLoopbackPorts(3);
   const baseURL = `http://127.0.0.1:${appPort}`;
   const comfyOrigin = `http://127.0.0.1:${comfyPort}`;
   const attackerOrigin = `http://127.0.0.1:${attackerPort}`;

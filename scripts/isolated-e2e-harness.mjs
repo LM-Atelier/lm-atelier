@@ -41,7 +41,25 @@ export function childExit(child) {
   });
 }
 
-export async function reserveLoopbackPort() {
+// As many distinct loopback ports as a run asks for, each free when this
+// returns. Every listener stays open until all of them have a port: reserving
+// one and closing it before the next lets the system hand the same port out
+// twice, and the run's second server then cannot bind it.
+export async function reserveLoopbackPorts(count) {
+  const listeners = [];
+  try {
+    for (let index = 0; index < count; index += 1) {
+      listeners.push(await openLoopbackListener());
+    }
+    return listeners.map((server) => server.address().port);
+  } finally {
+    await Promise.all(listeners.map((server) => new Promise((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    })));
+  }
+}
+
+function openLoopbackListener() {
   return new Promise((resolve, reject) => {
     const server = createServer();
     server.once("error", reject);
@@ -52,10 +70,7 @@ export async function reserveLoopbackPort() {
         reject(new Error("Could not reserve a loopback port"));
         return;
       }
-      server.close((error) => {
-        if (error) reject(error);
-        else resolve(address.port);
-      });
+      resolve(server);
     });
   });
 }
