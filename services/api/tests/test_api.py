@@ -9348,7 +9348,9 @@ async def test_real_adapter_backend_events_reach_the_writer_with_provenance(
     async def _stub_parameters(self: object, request: object) -> dict[str, object]:
         return {}
 
-    async def _stub_collect(self: object, prompt_id: str, operation: str):  # type: ignore[no-untyped-def]
+    async def _stub_collect(  # type: ignore[no-untyped-def]
+        self: object, prompt_id: str, operation: str, cancel_event: object = None
+    ):
         return [
             GeneratedAsset(
                 content=b"seam payload",
