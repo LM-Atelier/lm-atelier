@@ -264,6 +264,17 @@ def _workflow_source_image_count(compiled: CompiledComfyTemplate) -> int:
     return count
 
 
+def _failure_reason(exc: BaseException) -> str:
+    """What a failed install or activation says about itself, never nothing.
+
+    Some exceptions, an HTTP client's timeouts among them, carry no message;
+    their type is then the only description there is.
+    """
+
+    message = str(exc).strip()
+    return message or f"{type(exc).__name__} (no further detail)"
+
+
 def _template_workflow_name(template_id: str) -> str:
     return f"ComfyUI template \u00b7 {template_id}"
 
@@ -1036,15 +1047,16 @@ class DownloadManager:
             await self.events.publish("model.activated", job_id, {"install_id": install_id})
         except Exception as exc:  # noqa: BLE001 - surfaced on the job for the user
             logger.exception("Model re-activation failed for %s", install_id or job_id)
+            reason = _failure_reason(exc)
             with SessionLocal() as session:
                 job = session.get(Job, job_id)
                 if job:
                     job.status = JobStatus.FAILED.value
-                    job.error = str(exc)
+                    job.error = reason
                     job.completed_at = utcnow()
                     job.result_json = {
                         "failure_code": self._stable_failure_code(exc),
-                        "failure_reason": str(exc)[:1_000],
+                        "failure_reason": reason[:1_000],
                     }
                     update_job_progress(
                         job,
@@ -1054,7 +1066,7 @@ class DownloadManager:
                     )
                     session.commit()
             await self.scheduler.publish_job(job_id)
-            await self.events.publish("model.activation_failed", job_id, {"error": str(exc)})
+            await self.events.publish("model.activation_failed", job_id, {"error": reason})
 
     async def _reactivate_media(
         self,
@@ -2119,6 +2131,8 @@ class DownloadManager:
                 await self._restore_media_worker(previous_media_running)
             except Exception:
                 logger.exception("Could not safely clean failed model install %s", job_id)
+            logger.error("Model install %s failed", job_id, exc_info=exc)
+            reason = _failure_reason(exc)
             with SessionLocal() as session:
                 job = session.get(Job, job_id)
                 if job:
@@ -2129,13 +2143,13 @@ class DownloadManager:
                         if failed_plan:
                             failed_plan.status = "failed"
                             failed_plan.failure_code = failure_code
-                            failed_plan.failure_reason = str(exc)[:1_000]
+                            failed_plan.failure_reason = reason[:1_000]
                         job.result_json = {
                             "failure_code": failure_code,
-                            "failure_reason": str(exc)[:1_000],
+                            "failure_reason": reason[:1_000],
                         }
                     job.status = JobStatus.FAILED.value
-                    job.error = str(exc)
+                    job.error = reason
                     job.completed_at = utcnow()
                     update_job_progress(
                         job,
@@ -2145,7 +2159,7 @@ class DownloadManager:
                     )
                     session.commit()
             await self.scheduler.publish_job(job_id)
-            await self.events.publish("download.failed", job_id, {"error": str(exc)})
+            await self.events.publish("download.failed", job_id, {"error": reason})
 
         finally:
             await self.reconcile_workflow_install_offers(job_id)

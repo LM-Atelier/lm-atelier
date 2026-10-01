@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import struct
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
+import httpx
 import pytest
 from sqlalchemy import select
 
@@ -2256,6 +2258,232 @@ async def test_adaptive_activation_failure_is_removed_before_retry(
         assert len(profiles) == 1
         assert profiles[0].model_install_id == installs[0].id
     assert (destination / "model.safetensors").read_bytes() == b"safe"
+
+
+async def test_an_install_failure_without_a_message_still_says_what_failed(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An HTTP client's timeout carries no message; the failed job names it and the log
+    keeps its traceback, instead of an empty reason and no line at all."""
+
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    compiled = Mock(
+        spec_set=["template", "ui_graph", "api_graph", "input_schema"],
+        template=SimpleNamespace(
+            id="adaptive-image",
+            operation="text_to_image",
+            runtime_adaptive=True,
+            selected_files=["model.safetensors"],
+            component_folders={"model.safetensors": "checkpoints"},
+            sha256="a" * 64,
+        ),
+        ui_graph={},
+        api_graph={"loader": {"class_type": "CheckpointLoaderSimple", "inputs": {}}},
+        input_schema={},
+    )
+
+    class FakeProcesses:
+        async def start_media(self, _model_paths: object = None) -> None:
+            return None
+
+    class FakeMediaAdapter:
+        async def object_info(self) -> dict[str, object]:
+            return {}
+
+        async def validate_workflow(self, _graph: dict[str, object]) -> list[str]:
+            return []
+
+    broker = EventBroker()
+    manager = DownloadManager(
+        settings,
+        broker,
+        media_adapter=FakeMediaAdapter(),  # type: ignore[arg-type]
+        processes=FakeProcesses(),  # type: ignore[arg-type]
+    )
+    info = SimpleNamespace(
+        siblings=[SimpleNamespace(rfilename="model.safetensors", size=4, lfs=None)],
+        sha="b" * 40,
+        pipeline_tag="text-to-image",
+        tags=[],
+        gated=False,
+    )
+    manager._api = SimpleNamespace(model_info=lambda *_args, **_kwargs: info)  # type: ignore[assignment]
+
+    async def prepare(_request: DownloadRequest) -> object:
+        return compiled
+
+    async def download_file(**kwargs: Any) -> str:
+        target = kwargs["staging"] / kwargs["filename"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"safe")
+        return str(target)
+
+    async def probe(_compiled: object) -> None:
+        raise httpx.ReadTimeout("")
+
+    monkeypatch.setattr(manager, "_prepare_comfy_template", prepare)
+    monkeypatch.setattr(manager, "_download_file", download_file)
+    monkeypatch.setattr(manager, "_probe_adaptive_checkpoint", probe)
+    monkeypatch.setattr(manager, "_validate_standard_checkpoint_safetensors", lambda _path: None)
+    monkeypatch.setattr(manager.comfy_templates, "compile", lambda *_args, **_kwargs: compiled)
+    request = DownloadRequest(
+        remote_id="owner/adaptive",
+        revision="main",
+        role="image",
+        engine="comfyui",
+        allow_patterns=["model.safetensors"],
+        comfy_paths={"checkpoints": "."},
+        workflow_template_id="adaptive-image",
+        workflow_template_sha256="a" * 64,
+    )
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                id="job_silent_failure",
+                kind=JobKind.DOWNLOAD.value,
+                status=JobStatus.QUEUED.value,
+                payload_json=request.model_dump(mode="json"),
+            )
+        )
+        session.commit()
+
+    with caplog.at_level(logging.ERROR, logger="local_lm.downloads"):
+        await manager._download("job_silent_failure")
+
+    with SessionLocal() as session:
+        failed = session.get(Job, "job_silent_failure")
+        assert failed and failed.status == JobStatus.FAILED.value
+        assert failed.error == "ReadTimeout (no further detail)"
+    event = next(event for event in broker.since(0) if event.type == "download.failed")
+    assert event.payload["error"] == "ReadTimeout (no further detail)"
+    logged = [record for record in caplog.records if "job_silent_failure" in record.getMessage()]
+    assert any(
+        record.exc_info and isinstance(record.exc_info[1], httpx.ReadTimeout) for record in logged
+    )
+
+
+async def test_a_planned_install_failure_without_a_message_names_it_on_the_plan(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The plan and the job's result carry the same named reason as the job itself."""
+
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+
+    class FakeProcesses:
+        def statuses(self) -> list[object]:
+            return [SimpleNamespace(name="media", running=False)]
+
+    manager = DownloadManager(
+        settings,
+        EventBroker(),
+        processes=FakeProcesses(),  # type: ignore[arg-type]
+    )
+
+    async def prepare(_request: DownloadRequest) -> object:
+        raise httpx.ReadTimeout("")
+
+    monkeypatch.setattr(manager, "_prepare_comfy_template", prepare)
+    with SessionLocal() as session:
+        session.add(
+            InstallPlan(
+                id="plan_silent_failure",
+                remote_id="owner/adaptive",
+                revision="main",
+                role="image",
+                engine="comfyui",
+                plan_hash="c" * 64,
+                resolver_version="test",
+                compatibility="supported",
+            )
+        )
+        request = DownloadRequest(
+            remote_id="owner/adaptive",
+            revision="main",
+            role="image",
+            engine="comfyui",
+            allow_patterns=["model.safetensors"],
+            comfy_paths={"checkpoints": "."},
+            workflow_template_id="adaptive-image",
+            workflow_template_sha256="a" * 64,
+            install_plan_id="plan_silent_failure",
+        )
+        session.add(
+            Job(
+                id="job_planned_silent_failure",
+                kind=JobKind.DOWNLOAD.value,
+                status=JobStatus.QUEUED.value,
+                payload_json=request.model_dump(mode="json"),
+            )
+        )
+        session.commit()
+
+    await manager._download("job_planned_silent_failure")
+
+    with SessionLocal() as session:
+        plan = session.get(InstallPlan, "plan_silent_failure")
+        failed = session.get(Job, "job_planned_silent_failure")
+        assert plan and failed
+        assert (plan.status, plan.failure_reason) == ("failed", "ReadTimeout (no further detail)")
+        assert failed.result_json["failure_reason"] == "ReadTimeout (no further detail)"
+
+
+async def test_a_reactivation_failure_without_a_message_still_says_what_failed(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A probe's own time limit raises a bare TimeoutError; re-activation names it too."""
+
+    settings.prepare()
+    configure_database(settings)
+    init_db()
+    broker = EventBroker()
+    manager = DownloadManager(settings, broker)
+
+    def measure(_destination: Path) -> tuple[dict[str, str], dict[str, object]]:
+        raise TimeoutError
+
+    monkeypatch.setattr(manager, "measured_install_identity", measure)
+    with SessionLocal() as session:
+        session.add(
+            ModelInstall(
+                id="model_silent_reactivation",
+                name="Silent",
+                role="chat",
+                engine="llama.cpp",
+                local_path=str(settings.model_dir / "silent"),
+                manifest_json={"files": ["silent.gguf"]},
+                active=False,
+            )
+        )
+        session.add(
+            Job(
+                id="job_silent_reactivation",
+                kind=JobKind.DOWNLOAD.value,
+                status=JobStatus.QUEUED.value,
+                payload_json={"install_id": "model_silent_reactivation"},
+            )
+        )
+        session.commit()
+
+    await manager._reactivate_claimed("job_silent_reactivation")
+
+    with SessionLocal() as session:
+        failed = session.get(Job, "job_silent_reactivation")
+        assert failed and failed.status == JobStatus.FAILED.value
+        assert failed.error == "TimeoutError (no further detail)"
+        assert failed.result_json == {
+            "failure_code": "activation_probe_timeout",
+            "failure_reason": "TimeoutError (no further detail)",
+        }
+    event = next(event for event in broker.since(0) if event.type == "model.activation_failed")
+    assert event.payload["error"] == "TimeoutError (no further detail)"
 
 
 async def test_cancel_removes_provisional_install_and_abandoned_partial(
