@@ -3,6 +3,7 @@ import type { ReactNode, Ref } from "react";
 import { api } from "./api";
 import { ComparisonChoiceSummary, ComparisonEstimate, ComparisonRefusals, ComparisonSettings } from "./ComparisonCheckResult";
 import { ComparisonKeepRecipe } from "./ComparisonKeepRecipe";
+import { ComparisonPreference } from "./ComparisonPreference";
 import { ErrorCallout } from "./ErrorCallout";
 import { GenerationDetails } from "./GenerationDetails";
 import { comparisonFailure, comparisonIsWorking, keptPicture, trialIsWorking } from "./generationComparison";
@@ -108,6 +109,8 @@ export function ComparisonResults({ experimentId, onStart, starting, startError,
         && <ComparisonKeepRecipe experimentId={experiment.id} arm={arm} onOpenChat={onOpenChat} />}
       <ComparisonChoiceSummary arm={arm} seed={arm.trials[0]?.seed ?? null} />
     </section>)}</div>
+    {/* Said once there is a picture to say it of. */}
+    {experiment.state === "started" && ready > 0 && <ComparisonPreference experiment={experiment} />}
     <ComparisonSettings arms={experiment.arms} />
     <button type="button" className="secondary" onClick={onNew}>New comparison</button>
   </section>;

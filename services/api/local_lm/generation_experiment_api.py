@@ -15,11 +15,14 @@ from .generation_experiment_recipe import RecipeDraftRefused, recipe_draft
 from .generation_experiment_start import StartRefused, start_generation_experiment
 from .generation_experiments_v1 import (
     GenerationExperimentCreate,
+    GenerationExperimentEvaluationCreate,
+    GenerationExperimentEvaluationMode,
     GenerationExperimentOut,
     GenerationExperimentPreflightOut,
     GenerationExperimentRecipeDraftOut,
     GenerationExperimentRequest,
     GenerationExperimentStart,
+    GenerationExperimentState,
 )
 from .models import GenerationExperiment
 
@@ -44,6 +47,14 @@ REFUSALS: dict[str, tuple[int, str]] = {
     ),
     "generation-experiment-not-found": (404, "This comparison no longer exists."),
     "generation-experiment-arm-not-found": (404, "This comparison has no such choice."),
+    "generation-experiment-not-started": (
+        409,
+        "Make the pictures before saying which you prefer.",
+    ),
+    "generation-experiment-picture-not-ready": (
+        409,
+        "Wait for the picture before saying which you prefer.",
+    ),
     "generation-experiment-recipe-unavailable": (
         409,
         "The workflow this choice ran on cannot take a recipe now.",
@@ -213,3 +224,40 @@ async def draft_generation_experiment_recipe(
         return await recipe_draft(services.orchestrator, session, experiment_id, arm_ordinal)
     except RecipeDraftRefused as refused:
         raise _refuse(refused.code) from None
+
+
+@router.post(
+    "/generation-experiments/{experiment_id}/evaluations",
+    response_model=GenerationExperimentOut,
+    status_code=201,
+)
+def evaluate_generation_experiment(
+    experiment_id: str, payload: GenerationExperimentEvaluationCreate, session: SessionDep
+) -> GenerationExperimentOut:
+    """Keep which picture the person preferred, a tie, or neither suiting, with the choices named.
+
+    Only a picture that is made can be spoken of: nothing is kept before one
+    is, and a preferred choice must have its own. Every saying is kept, and
+    the latest is the comparison's answer from then on.
+    """
+
+    experiment = session.get(GenerationExperiment, experiment_id)
+    if experiment is None:
+        raise _refuse("generation-experiment-not-found")
+    # A record that changed after it was accepted takes nothing more.
+    _out(session, experiment)
+    if experiment.state != GenerationExperimentState.STARTED.value:
+        raise _refuse("generation-experiment-not-started")
+    # Said only of pictures there are: none made yet, or preferring a choice
+    # whose picture is not made, is refused. An unknown choice is left to the
+    # saying itself, which refuses it as invalid.
+    made = store.choices_with_a_picture(session, experiment)
+    named = payload.arm_ordinal
+    if not made or (named in {arm.ordinal for arm in experiment.arms} and named not in made):
+        raise _refuse("generation-experiment-picture-not-ready")
+    updated = store.evaluate(
+        session, experiment_id, payload, GenerationExperimentEvaluationMode.UNBLINDED
+    )
+    if updated is None:
+        raise _refuse("generation-experiment-not-found")
+    return _out(session, updated)

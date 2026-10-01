@@ -95,3 +95,33 @@ def test_started_comparisons_refuse_to_go_back_and_ready_ones_keep_their_rows(
         assert connection.execute("SELECT id, state FROM generation_experiments").fetchall() == [
             ("gexp_started", "ready")
         ]
+
+
+def test_recorded_preferences_refuse_to_go_back_until_none_is_kept(tmp_path: Path) -> None:
+    settings, database = _migrated(tmp_path)
+    with sqlite3.connect(database) as connection:
+        assert "generation_experiment_evaluations" in _tables(database)
+        connection.execute(
+            "INSERT INTO generation_experiments (id, name, state, operation, contract_version, "
+            "app_version, seed_policy, seed_equivalence, common_json, estimate_json, "
+            "preflight_sha256, snapshot_sha256, idempotency_key, request_sha256, created_at, "
+            "updated_at) VALUES ('gexp_said', 'Said', 'ready', 'text_to_image', 1, '0.0.0', "
+            "'random_per_trial', 'none', '{}', '[]', ?, ?, 'said', ?, "
+            "'2026-10-01 00:00:00', '2026-10-01 00:00:00')",
+            ("a" * 64, "b" * 64, "c" * 64),
+        )
+        connection.execute(
+            "INSERT INTO generation_experiment_evaluations (id, experiment_id, sequence, mode, "
+            "preference, created_at) VALUES ('geval_said', 'gexp_said', 1, 'unblinded', 'tied', "
+            "'2026-10-01 00:00:00')"
+        )
+    with pytest.raises(RuntimeError, match="Recorded comparison preferences"):
+        command.downgrade(alembic_config(settings), "374ee9525865")
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT id FROM generation_experiment_evaluations"
+        ).fetchall() == [("geval_said",)]
+        connection.execute("DELETE FROM generation_experiment_evaluations")
+    command.downgrade(alembic_config(settings), "374ee9525865")
+    assert "generation_experiment_evaluations" not in _tables(database)
+    assert "generation_experiments" in _tables(database)

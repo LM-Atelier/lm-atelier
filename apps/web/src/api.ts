@@ -1,5 +1,5 @@
 import type { QueueLane, QueueOrderCommand, QueueOrderPage, QueueOrderResult } from "./queueOrderTypes";
-import type { GenerationExperiment, GenerationExperimentCreate, GenerationExperimentPreflight, GenerationExperimentRecipeDraft, GenerationExperimentRequest, GenerationExperimentStart } from "./generationExperimentTypes";
+import type { GenerationExperiment, GenerationExperimentCreate, GenerationExperimentEvaluationCreate, GenerationExperimentPreflight, GenerationExperimentRecipeDraft, GenerationExperimentRequest, GenerationExperimentStart } from "./generationExperimentTypes";
 import { workflowFamilyQuery, workflowReadQuery, type WorkflowFamilyReadOptions, type WorkflowReadPageOptions } from "./workflowReadQuery";
 import type { WorkflowRecipeTarget, WorkflowUseCase, WorkflowUseCaseChoice, WorkflowUseCaseDefault, WorkflowUseCasePreset, WorkflowUseCasePresetCreate } from "./workflowUseCaseTypes";
 import type { EnlargementPreview } from "./studioEnlargement";
@@ -481,6 +481,9 @@ export const api = {
     request<GenerationExperiment>(`/api/generation-experiments/${encodeURIComponent(experimentId)}`, { signal }),
   startGenerationExperiment: (experimentId: string, payload: GenerationExperimentStart) =>
     request<GenerationExperiment>(`/api/generation-experiments/${encodeURIComponent(experimentId)}/start`, { method: "POST", body: JSON.stringify(payload) }),
+  /** Keep which picture is preferred, or a tie, or neither suiting; the answer carries the latest. */
+  evaluateGenerationExperiment: (experimentId: string, payload: GenerationExperimentEvaluationCreate) =>
+    request<GenerationExperiment>(`/api/generation-experiments/${encodeURIComponent(experimentId)}/evaluations`, { method: "POST", body: JSON.stringify(payload) }),
   /** A recipe to review from one choice of a comparison; nothing is saved. */
   generationExperimentRecipeDraft: (experimentId: string, ordinal: number, signal?: AbortSignal) =>
     request<GenerationExperimentRecipeDraft>(`/api/generation-experiments/${encodeURIComponent(experimentId)}/arms/${ordinal}/recipe-draft`, { signal }),

@@ -176,6 +176,7 @@ CHECKED_CONTRACTS = {
     "WorkStep": "WorkStepOut",
     "ArmPreflight": "ArmPreflightOut",
     "ExperimentArm": "ExperimentArmOut",
+    "ExperimentEvaluation": "ExperimentEvaluationOut",
     "ExperimentRefusal": "ExperimentRefusalOut",
     "ExperimentTrial": "ExperimentTrialOut",
     "GenerationExperiment": "GenerationExperimentOut",
