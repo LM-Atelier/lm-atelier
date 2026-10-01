@@ -45,7 +45,7 @@ _RUNTIME_PARAMETERS = {
 _SUPPRESSED_RUNTIME_NAMES = frozenset({"motion_strength"})
 _PRIMITIVE_WIDGET_TYPES = {"BOOLEAN", "COMBO", "COMFY_DYNAMICCOMBO_V3", "FLOAT", "INT", "STRING"}
 _CONTROL_AFTER_GENERATE = {"decrement", "fixed", "increment", "randomize"}
-COMFY_TEMPLATE_COMPILER_VERSION = 23
+COMFY_TEMPLATE_COMPILER_VERSION = 24
 DEFAULT_IMAGE_EDIT_DENOISE = 0.9
 _ADAPTIVE_CHECKPOINT_PREFIX = "lma_image_checkpoint_v1_"
 _ADAPTIVE_CHECKPOINT_PLACEHOLDER = "__LM_ATELIER_CHECKPOINT__"
@@ -1680,6 +1680,7 @@ def _compile_ui_graph(
     group_outputs: dict[str, dict[int, tuple[str, int]]] = {}
     instance_slots: dict[str, dict[int, int]] = {}
     parameter_overrides: dict[tuple[str, str], str] = {}
+    shared_widget_targets: list[set[tuple[str, str]]] = []
 
     for node in ui_graph.get("nodes", []):
         if not isinstance(node, dict) or node.get("id") is None:
@@ -1728,6 +1729,7 @@ def _compile_ui_graph(
         group_inputs[node_id] = subgraph_input_targets
         group_outputs[node_id] = outputs
         for targets in subgraph_input_targets.values():
+            filled: set[tuple[str, str]] = set()
             for target_key, target_slot, parameter, parameter_label in targets:
                 target_node = flat_nodes.get(target_key)
                 if not target_node:
@@ -1736,6 +1738,7 @@ def _compile_ui_graph(
                 if target_slot >= len(target_inputs):
                     continue
                 input_name = str(target_inputs[target_slot].get("name") or "")
+                filled.add((target_key, input_name))
                 input_type = str(target_inputs[target_slot].get("type") or "")
                 runtime_name = _subgraph_runtime_parameter(
                     parameter,
@@ -1746,6 +1749,7 @@ def _compile_ui_graph(
                 )
                 if runtime_name:
                     parameter_overrides[(target_key, input_name)] = runtime_name
+            shared_widget_targets.append(filled)
 
     for raw_link in ui_graph.get("links", []):
         normalized = _normalize_link(raw_link)
@@ -1759,7 +1763,17 @@ def _compile_ui_graph(
                 links.append((*resolved_origin, inner_target, inner_slot))
         else:
             links.append((*resolved_origin, target, target_slot))
-    links, primitive_values = _route_links_as_queued(flat_nodes, links)
+    links, primitive_values, primitive_targets = _route_links_as_queued(flat_nodes, links)
+    for widget_targets in primitive_targets.values():
+        filled = set()
+        for target, slot in widget_targets:
+            target_node = flat_nodes.get(target)
+            if target_node is None:
+                continue
+            target_inputs = target_node.get("inputs") or []
+            if slot < len(target_inputs):
+                filled.add((target, str(target_inputs[slot].get("name") or "")))
+        shared_widget_targets.append(filled)
 
     linked_inputs: dict[tuple[str, str], list[Any]] = {}
     for origin, origin_slot, target, target_slot in links:
@@ -1892,6 +1906,10 @@ def _compile_ui_graph(
         for input_name, value in list(compiled["inputs"].items()):
             if isinstance(value, list) and len(value) == 2 and str(value[0]) not in api_graph:
                 del compiled["inputs"][input_name]
+    if operation.endswith("_video"):
+        _bind_video_frame_settings(
+            api_graph, object_info, schema_properties, default_candidates, shared_widget_targets
+        )
     for runtime_name in sorted(
         set(_RUNTIME_PARAMETERS.values()) | _SUPPRESSED_RUNTIME_NAMES | {"negative_prompt"}
     ):
@@ -1909,10 +1927,69 @@ def _compile_ui_graph(
     return api_graph, {"type": "object", "properties": schema_properties}
 
 
+def _bind_video_frame_settings(
+    graph: dict[str, Any],
+    object_info: dict[str, Any],
+    properties: dict[str, Any],
+    default_candidates: dict[str, list[Any]],
+    shared_widget_targets: list[set[tuple[str, str]]],
+) -> None:
+    """Bind integer lengths on executed spatial latent producers in video graphs."""
+    executed = _executed_workflow_nodes(graph, object_info)
+    lengths: dict[str, Any] = {}
+    for key in sorted(executed):
+        node = graph[key]
+        info = object_info.get(node["class_type"])
+        outputs = info.get("output") if isinstance(info, dict) else None
+        if not isinstance(info, dict) or not isinstance(outputs, list) or "LATENT" not in outputs:
+            continue
+        specs = {name: _node_widget_spec(info, name) for name in ("width", "height", "length")}
+        if not all(_is_widget_spec(spec) and spec[0] == "INT" for spec in specs.values()):
+            continue
+        if any(
+            isinstance(spec, list) and spec and spec[0] == "LATENT"
+            for section in ("required", "optional")
+            for spec in ((info.get("input") or {}).get(section) or {}).values()
+        ):
+            continue
+        value = node["inputs"].get("length")
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+            or not float(value).is_integer()
+        ):
+            return
+        lengths[key] = specs["length"]
+    if not lengths or "frames" in default_candidates:
+        return
+    if len({graph[key]["inputs"]["length"] for key in lengths}) != 1:
+        return
+    if any(
+        key not in lengths
+        and _node_widget_spec(object_info.get(graph[key]["class_type"]), "length") is not None
+        for key in executed
+    ):
+        return
+    eligible = {(key, "length") for key in lengths}
+    for targets in shared_widget_targets:
+        active_targets = {target for target in targets if target[0] in executed}
+        if active_targets & eligible and not active_targets <= eligible:
+            return
+    for key, spec in lengths.items():
+        _bind_runtime_parameter(
+            graph[key]["inputs"], "length", "frames", properties, spec, default_candidates
+        )
+
+
 def _route_links_as_queued(
     nodes: dict[str, dict[str, Any]],
     links: list[tuple[str, int, str, int]],
-) -> tuple[list[tuple[str, int, str, int]], dict[tuple[str, int], Any]]:
+) -> tuple[
+    list[tuple[str, int, str, int]],
+    dict[tuple[str, int], Any],
+    dict[str, set[tuple[str, int]]],
+]:
     """Resolve the connections the ComfyUI frontend resolves before it queues a graph.
 
     A reroute carries whatever feeds it. A bypassed node passes each output
@@ -1922,8 +1999,8 @@ def _route_links_as_queued(
     would reach the runtime as a link to a node the compiled graph does not
     hold, and the runtime refuses such a graph outright.
 
-    Returns the routed links, and each primitive's value by the target node and
-    input slot it fills.
+    Returns the routed links, each primitive's value by the target node and
+    input slot it fills, and the targets sharing each primitive's value.
     """
 
     feeding: dict[tuple[str, int], _Link] = {
@@ -1932,6 +2009,7 @@ def _route_links_as_queued(
     }
     routed: list[tuple[str, int, str, int]] = []
     primitive_values: dict[tuple[str, int], Any] = {}
+    primitive_targets: dict[str, set[tuple[str, int]]] = {}
     for origin, origin_slot, target, target_slot in links:
         current: tuple[str, int] | None = (origin, origin_slot)
         visited: set[tuple[str, int]] = set()
@@ -1960,9 +2038,10 @@ def _route_links_as_queued(
             values = nodes[current[0]].get("widgets_values")
             if isinstance(values, list) and values:
                 primitive_values[(target, target_slot)] = values[0]
+                primitive_targets.setdefault(current[0], set()).add((target, target_slot))
             continue
         routed.append((current[0], current[1], target, target_slot))
-    return routed, primitive_values
+    return routed, primitive_values, primitive_targets
 
 
 def _source_reaches_conditioning(
@@ -2237,7 +2316,47 @@ def _bind_runtime_parameter(
         if runtime_name == "seed" and "minimum" in property_schema:
             property_schema["minimum"] = min(property_schema["minimum"], -1)
 
+    if runtime_name == "frames" and input_name == "length":
+        minimum = property_schema.get("minimum", 1)
+        maximum = property_schema.get("maximum", 1024)
+        step = property_schema.get("multipleOf", 1)
+        values = (minimum, maximum, step)
+        if not all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            and float(value).is_integer()
+            for value in values
+        ):
+            raise ValueError("ComfyUI video frame widgets need integer bounds and steps")
+        offset = int(minimum) % int(step)
+        if offset:
+            base = next(field for field in VIDEO_SETTINGS if field.key == "frames")
+            lower = max(int(minimum), int(base.minimum or 1))
+            upper = min(int(maximum), int(base.maximum or 1024))
+            first = lower + (offset - lower) % int(step)
+            choices = list(range(first, upper + 1, int(step)))
+            if not choices:
+                raise ValueError("ComfyUI video frame widget has no supported frame count")
+            property_schema.pop("multipleOf", None)
+            property_schema["x-lm-atelier-step"] = step
+            property_schema["minimum"] = choices[0]
+            property_schema["maximum"] = choices[-1]
+            property_schema["enum"] = choices
+
     previous = schema_properties.get(runtime_name, {})
+    if runtime_name == "frames" and input_name == "length" and previous.get("type") == "integer":
+        choices = sorted(_frame_widget_choices(previous) & _frame_widget_choices(property_schema))
+        if not choices:
+            raise ValueError("ComfyUI widgets have no common setting choice")
+        property_schema["enum"] = choices
+        property_schema["minimum"] = choices[0]
+        property_schema["maximum"] = choices[-1]
+        property_schema.pop("multipleOf", None)
+        if len(choices) > 1:
+            property_schema["x-lm-atelier-step"] = choices[1] - choices[0]
+        schema_properties[runtime_name] = property_schema
+        return
     for key, combine in (("minimum", max), ("maximum", min)):
         if key in previous:
             property_schema[key] = combine(previous[key], property_schema.get(key, previous[key]))
@@ -2260,6 +2379,20 @@ def _bind_runtime_parameter(
     schema_properties[runtime_name] = property_schema
 
 
+def _frame_widget_choices(prop: dict[str, Any]) -> set[int]:
+    """Enumerate the frame counts allowed by both widget and application bounds."""
+    base = next(field for field in VIDEO_SETTINGS if field.key == "frames")
+    lower = max(int(prop.get("minimum", 1)), int(base.minimum or 1))
+    upper = min(int(prop.get("maximum", 1024)), int(base.maximum or 1024))
+    step = prop.get("multipleOf")
+    return {
+        value
+        for value in range(lower, upper + 1)
+        if ("enum" not in prop or value in prop["enum"])
+        and (step is None or math.isclose(value % step, 0))
+    }
+
+
 def _resolve_widget_defaults(
     fields: list[SettingField],
     properties: dict[str, Any],
@@ -2274,7 +2407,14 @@ def _resolve_widget_defaults(
         # Prefer an authored value that survives the intersection. The stable
         # scalar ordering also settles graphs with several valid saved values.
         values = sorted(candidates[base.key], key=lambda value: (type(value).__name__, value))
-        values.extend(sorted(field.choices, key=lambda value: json.dumps(value, sort_keys=True)))
+        if base.key == "frames" and all(
+            isinstance(value, int) and not isinstance(value, bool) for value in field.choices
+        ):
+            values.extend(sorted(field.choices))
+        else:
+            values.extend(
+                sorted(field.choices, key=lambda value: json.dumps(value, sort_keys=True))
+            )
         values.append(base.default)
         if field.type in {"integer", "number"}:
             value = base.default
