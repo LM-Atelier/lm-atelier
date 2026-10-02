@@ -78,11 +78,11 @@ target-version = "py312"
 select = ["E", "F", "I", "UP", "B", "SIM", "C901", "PLR0912", "PLR0915"]
 
 [tool.ruff.lint.mccabe]
-max-complexity = 75
+max-complexity = 70
 
 [tool.ruff.lint.pylint]
-max-branches = 76
-max-statements = 326
+max-branches = 72
+max-statements = 319
 
 [tool.mypy]
 python_version = "3.12"
