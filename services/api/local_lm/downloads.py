@@ -595,7 +595,15 @@ class DownloadManager:
         metadata: dict[str, bytes] = {}
         for filename in filenames:
             relative = PurePosixPath(filename)
-            path = staging.joinpath(*relative.parts)
+            # open follows a link, so a staged name that points somewhere else
+            # would be read as model metadata. Refuse the name and each
+            # directory under staging before the read. The staging directory
+            # itself may sit under a link.
+            path = staging
+            for part in relative.parts:
+                path = path.joinpath(part)
+                if _path_is_link(path):
+                    raise ValueError("staged model file is a filesystem link")
             lowered = filename.casefold()
             if lowered.endswith(".json"):
                 with path.open("rb") as handle:
