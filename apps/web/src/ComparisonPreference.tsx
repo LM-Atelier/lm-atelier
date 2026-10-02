@@ -41,8 +41,9 @@ export function ComparisonPreference({ experiment }: { experiment: GenerationExp
 }
 
 function saying(said: ExperimentEvaluation, experiment: GenerationExperiment): string {
-  if (said.preference === "tied") return "You called it a tie.";
-  if (said.preference === "unsuitable") return "You said neither suits.";
+  const blind = said.mode === "blind" ? " You said so before knowing which choice made which picture." : "";
+  if (said.preference === "tied") return `You called it a tie.${blind}`;
+  if (said.preference === "unsuitable") return `You said neither suits.${blind}`;
   const label = experiment.arms.find((arm) => arm.ordinal === said.arm_ordinal)?.label ?? "one choice";
-  return `You preferred ${label}.`;
+  return `You preferred ${label}.${blind}`;
 }

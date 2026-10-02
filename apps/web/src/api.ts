@@ -1,5 +1,5 @@
 import type { QueueLane, QueueOrderCommand, QueueOrderPage, QueueOrderResult } from "./queueOrderTypes";
-import type { GenerationExperiment, GenerationExperimentCreate, GenerationExperimentEvaluationCreate, GenerationExperimentPreflight, GenerationExperimentRecipeDraft, GenerationExperimentRequest, GenerationExperimentStart } from "./generationExperimentTypes";
+import type { GenerationExperiment, GenerationExperimentBlindEvaluationCreate, GenerationExperimentBlindView, GenerationExperimentCreate, GenerationExperimentEvaluationCreate, GenerationExperimentPreflight, GenerationExperimentRecipeDraft, GenerationExperimentRequest, GenerationExperimentStart } from "./generationExperimentTypes";
 import { workflowFamilyQuery, workflowReadQuery, type WorkflowFamilyReadOptions, type WorkflowReadPageOptions } from "./workflowReadQuery";
 import type { WorkflowRecipeTarget, WorkflowUseCase, WorkflowUseCaseChoice, WorkflowUseCaseDefault, WorkflowUseCasePreset, WorkflowUseCasePresetCreate } from "./workflowUseCaseTypes";
 import type { EnlargementPreview } from "./studioEnlargement";
@@ -484,6 +484,14 @@ export const api = {
   /** Keep which picture is preferred, or a tie, or neither suiting; the answer carries the latest. */
   evaluateGenerationExperiment: (experimentId: string, payload: GenerationExperimentEvaluationCreate) =>
     request<GenerationExperiment>(`/api/generation-experiments/${encodeURIComponent(experimentId)}/evaluations`, { method: "POST", body: JSON.stringify(payload) }),
+  /** Begin a viewing of a blind comparison, with its own random order of the pictures. */
+  openBlindView: (experimentId: string) =>
+    request<GenerationExperimentBlindView>(`/api/generation-experiments/${encodeURIComponent(experimentId)}/blind-views`, { method: "POST" }),
+  blindView: (experimentId: string, viewId: string, signal?: AbortSignal) =>
+    request<GenerationExperimentBlindView>(`/api/generation-experiments/${encodeURIComponent(experimentId)}/blind-views/${encodeURIComponent(viewId)}`, { signal }),
+  /** Keep the preference said in a viewing; the answer carries the reveal. */
+  sayBlindPreference: (experimentId: string, viewId: string, payload: GenerationExperimentBlindEvaluationCreate) =>
+    request<GenerationExperimentBlindView>(`/api/generation-experiments/${encodeURIComponent(experimentId)}/blind-views/${encodeURIComponent(viewId)}/evaluations`, { method: "POST", body: JSON.stringify(payload) }),
   /** A recipe to review from one choice of a comparison; nothing is saved. */
   generationExperimentRecipeDraft: (experimentId: string, ordinal: number, signal?: AbortSignal) =>
     request<GenerationExperimentRecipeDraft>(`/api/generation-experiments/${encodeURIComponent(experimentId)}/arms/${ordinal}/recipe-draft`, { signal }),

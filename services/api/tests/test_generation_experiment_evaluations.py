@@ -13,8 +13,13 @@ from test_generation_experiment_records import CREATE, _accept, _tamper
 from test_generation_experiment_start import _run_ids, _start, _terminal
 from test_generation_retry import choose_retries, failing_media
 
+from local_lm import generation_experiment_store as store
 from local_lm.db import SessionLocal
-from local_lm.models import GenerationExperimentEvaluation
+from local_lm.generation_experiments_v1 import (
+    GenerationExperimentEvaluationCreate,
+    GenerationExperimentEvaluationMode,
+)
+from local_lm.models import GenerationExperiment, GenerationExperimentEvaluation
 
 
 def _evaluations() -> list[tuple[int, str, str, str | None]]:
@@ -179,3 +184,28 @@ async def test_a_comparison_that_changed_or_is_gone_keeps_nothing(client: AsyncC
     assert missing.status_code == 404
     assert missing.json()["code"] == "generation-experiment-not-found"
     assert _count() == 0
+
+
+async def test_a_saying_made_from_an_earlier_read_still_comes_after_the_latest(
+    client: AsyncClient,
+) -> None:
+    started = await _started(client)
+    unblinded = GenerationExperimentEvaluationMode.UNBLINDED
+    with SessionLocal() as early, SessionLocal() as other:
+        # This session read the comparison, sayings and all, before the other said anything.
+        held = early.get(GenerationExperiment, started["id"])
+        assert held is not None and held.evaluations == []
+        store.evaluate(
+            other,
+            started["id"],
+            GenerationExperimentEvaluationCreate(preference="tied"),
+            unblinded,
+        )
+        store.evaluate(
+            early,
+            started["id"],
+            GenerationExperimentEvaluationCreate(preference="unsuitable"),
+            unblinded,
+        )
+
+    assert _evaluations() == [(1, "unblinded", "tied", None), (2, "unblinded", "unsuitable", None)]

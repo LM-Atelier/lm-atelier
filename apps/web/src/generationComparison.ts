@@ -32,6 +32,8 @@ export interface ComparisonDraft {
   size: ComparisonSizeDraft;
   seed: { kind: SeedPolicyKind; number: string };
   choices: [ComparisonChoiceDraft, ComparisonChoiceDraft];
+  /** Hide which choice made each picture until the preference is said. */
+  blind: boolean;
 }
 
 export const EMPTY_COMPARISON: ComparisonDraft = {
@@ -43,6 +45,7 @@ export const EMPTY_COMPARISON: ComparisonDraft = {
     { label: "Choice A", profileId: "", revisionId: "" },
     { label: "Choice B", profileId: "", revisionId: "" },
   ],
+  blind: false,
 };
 
 export const SEED_POLICY_LABELS: Record<SeedPolicyKind, string> = {
@@ -105,6 +108,8 @@ export function comparisonRequest(draft: ComparisonDraft, sharedPresets: OutputR
       arms: draft.choices.map((choice, index) => ({
         label: labels[index], profile_id: choice.profileId, workflow_revision_id: choice.revisionId, settings: {},
       })),
+      // Sent only when blind, so a comparison that names its choices is asked for exactly as before.
+      ...(draft.blind ? { evaluation_mode: "blind" as const } : {}),
     },
     problems: [],
   };
@@ -131,6 +136,12 @@ export function sharedPresetIds(first: ShapeCapability | undefined, second: Shap
   if (!first?.available || !second?.available) return [];
   return first.preset_ids.filter((presetId) => second.preset_ids.includes(presetId));
 }
+
+export const TRIAL_STATUS_TEXT: Record<TrialWorkStatus, string> = {
+  queued: "Waiting to start", running: "Being made", paused: "Paused", blocked: "Waiting",
+  complete: "Finished", failed: "Failed", cancelled: "Stopped", interrupted: "Interrupted",
+  removed: "Its work was removed",
+};
 
 export function trialIsWorking(status: TrialWorkStatus | null): boolean {
   return status === "queued" || status === "running" || status === "paused" || status === "blocked";
@@ -243,4 +254,9 @@ export function recipeDraftPayload(draft: GenerationExperimentRecipeDraft): Work
     enabled: true,
     is_default: false,
   };
+}
+
+/** Where a blind viewing's picture is read from: by position only, under no name of its own. */
+export function blindPictureSource(experimentId: string, viewId: string, position: number): string {
+  return `/api/generation-experiments/${encodeURIComponent(experimentId)}/blind-views/${encodeURIComponent(viewId)}/pictures/${position}`;
 }

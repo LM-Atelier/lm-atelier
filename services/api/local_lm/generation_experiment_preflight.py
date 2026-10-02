@@ -37,6 +37,7 @@ from .generation_experiments_v1 import (
     ArmPreflightOut,
     ExperimentArmRequest,
     ExperimentRefusalOut,
+    GenerationExperimentEvaluationMode,
     GenerationExperimentPreflightOut,
     GenerationExperimentRefusalCode,
     GenerationExperimentRequest,
@@ -480,13 +481,18 @@ def _estimate(
 def common_inputs(request: GenerationExperimentRequest) -> dict[str, Any]:
     """What both choices share, in the form a comparison stores and digests it."""
 
-    return {
+    common: dict[str, Any] = {
         "prompt": request.prompt,
         "negative_prompt": request.negative_prompt,
         "geometry": request.geometry.model_dump(mode="json"),
         "seed_policy": request.seed_policy.model_dump(mode="json"),
         "output_count": 1,
     }
+    # Kept only when blind, so a comparison that names its choices is stored,
+    # and digested, exactly as one made before blind comparisons existed.
+    if request.evaluation_mode == GenerationExperimentEvaluationMode.BLIND:
+        common["evaluation_mode"] = request.evaluation_mode.value
+    return common
 
 
 def preflight_digest(common: dict[str, Any], arms: list[tuple[int, str, str]]) -> str:

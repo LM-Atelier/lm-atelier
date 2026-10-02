@@ -125,3 +125,29 @@ def test_recorded_preferences_refuse_to_go_back_until_none_is_kept(tmp_path: Pat
     command.downgrade(alembic_config(settings), "374ee9525865")
     assert "generation_experiment_evaluations" not in _tables(database)
     assert "generation_experiments" in _tables(database)
+
+
+def test_blind_viewings_refuse_to_go_back_until_none_is_kept(tmp_path: Path) -> None:
+    settings, database = _migrated(tmp_path)
+    with sqlite3.connect(database) as connection:
+        assert "generation_experiment_blind_views" in _tables(database)
+        connection.execute(
+            "INSERT INTO generation_experiments (id, name, state, operation, contract_version, "
+            "app_version, seed_policy, seed_equivalence, common_json, estimate_json, "
+            "preflight_sha256, snapshot_sha256, idempotency_key, request_sha256, created_at, "
+            "updated_at) VALUES ('gexp_viewed', 'Viewed', 'started', 'text_to_image', 1, "
+            "'0.0.0', 'random_per_trial', 'none', '{}', '[]', ?, ?, 'viewed', ?, "
+            "'2026-10-01 00:00:00', '2026-10-01 00:00:00')",
+            ("a" * 64, "b" * 64, "c" * 64),
+        )
+        connection.execute(
+            "INSERT INTO generation_experiment_blind_views (id, experiment_id, order_json, "
+            "created_at) VALUES ('gview_kept', 'gexp_viewed', '[]', '2026-10-01 00:00:00')"
+        )
+    with pytest.raises(RuntimeError, match="Blind comparison views"):
+        command.downgrade(alembic_config(settings), "53c96f3f738a")
+    with sqlite3.connect(database) as connection:
+        connection.execute("DELETE FROM generation_experiment_blind_views")
+    command.downgrade(alembic_config(settings), "53c96f3f738a")
+    assert "generation_experiment_blind_views" not in _tables(database)
+    assert "generation_experiment_evaluations" in _tables(database)

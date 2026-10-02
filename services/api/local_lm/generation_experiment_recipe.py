@@ -62,6 +62,10 @@ async def recipe_draft(
         store.out(experiment)
     except store.GenerationExperimentRecordError:
         raise RecipeDraftRefused("generation-experiment-record-invalid") from None
+    # Until a blind comparison's preference is said, which picture a choice
+    # made is not to be known, and a draft would lead from one to the other.
+    if store.blind_pending(experiment):
+        raise RecipeDraftRefused("generation-experiment-blind")
     arm = next((arm for arm in experiment.arms if arm.ordinal == arm_ordinal), None)
     if arm is None:
         raise RecipeDraftRefused("generation-experiment-arm-not-found")

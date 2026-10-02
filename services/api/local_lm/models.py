@@ -3062,3 +3062,22 @@ class GenerationExperimentEvaluation(Base):
     )
     note: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class GenerationExperimentBlindView(Base):
+    """One viewing of a blind comparison: its own order of the pictures, and its saying."""
+
+    __tablename__ = "generation_experiment_blind_views"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("gview"))
+    experiment_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_experiments.id", ondelete="CASCADE"), index=True
+    )
+    # The choices' ids in the order this viewing shows their pictures.
+    order_json: Mapped[list[str]] = mapped_column(JSON)
+    evaluation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generation_experiment_evaluations.id", ondelete="SET NULL"),
+        nullable=True,
+        unique=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

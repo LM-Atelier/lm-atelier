@@ -1,23 +1,18 @@
 import { useQuery } from "@tanstack/react-query";
 import type { ReactNode, Ref } from "react";
 import { api } from "./api";
+import { ComparisonBlindReview } from "./ComparisonBlindReview";
 import { ComparisonChoiceSummary, ComparisonEstimate, ComparisonRefusals, ComparisonSettings } from "./ComparisonCheckResult";
 import { ComparisonKeepRecipe } from "./ComparisonKeepRecipe";
 import { ComparisonPreference } from "./ComparisonPreference";
 import { ErrorCallout } from "./ErrorCallout";
 import { GenerationDetails } from "./GenerationDetails";
-import { comparisonFailure, comparisonIsWorking, keptPicture, trialIsWorking } from "./generationComparison";
-import type { ExperimentArm, ExperimentTrial, GenerationExperiment, TrialWorkStatus } from "./generationExperimentTypes";
+import { comparisonFailure, comparisonIsWorking, keptPicture, TRIAL_STATUS_TEXT, trialIsWorking } from "./generationComparison";
+import type { ExperimentArm, ExperimentTrial, GenerationExperiment } from "./generationExperimentTypes";
 import { jobProgressFraction, jobProgressText } from "./jobProgress";
 import { artifactSource } from "./messageMedia";
 import type { Job } from "./types";
 import "./GenerationComparisonView.css";
-
-const STATUS_TEXT: Record<TrialWorkStatus, string> = {
-  queued: "Waiting to start", running: "Being made", paused: "Paused", blocked: "Waiting",
-  complete: "Finished", failed: "Failed", cancelled: "Stopped", interrupted: "Interrupted",
-  removed: "Its work was removed",
-};
 
 function TrialPicture({ experimentId, arm, trial, job }: {
   experimentId: string; arm: ExperimentArm; trial: ExperimentTrial; job: Job | undefined;
@@ -32,7 +27,7 @@ function TrialPicture({ experimentId, arm, trial, job }: {
   const picture = run.data ? keptPicture(run.data, trial) : null;
   const fraction = job ? jobProgressFraction(job) : null;
   return <>
-    <p>{trial.status ? STATUS_TEXT[trial.status] : "Not started"}</p>
+    <p>{trial.status ? TRIAL_STATUS_TEXT[trial.status] : "Not started"}</p>
     {trialIsWorking(trial.status) && job && <div className="progress-track" role="progressbar"
       aria-label={`${arm.label} progress`} aria-valuemin={0} aria-valuemax={100}
       aria-valuenow={fraction === null ? undefined : Math.round(fraction * 100)}>
@@ -89,7 +84,7 @@ export function ComparisonResults({ experimentId, onStart, starting, startError,
   const labels = experiment.arms.map((arm) => arm.label);
   return <section className="comparison-results" aria-labelledby="comparison-results-heading">
     <h2 id="comparison-results-heading" ref={headingRef} tabIndex={-1}>{experiment.name}</h2>
-    {experiment.state === "started" && <p role="status">{ready === trials.length
+    {experiment.state === "started" && !experiment.blind_pending && <p role="status">{ready === trials.length
       ? "Both pictures are ready" : `${ready} of ${trials.length} pictures ready`}</p>}
     {experiment.state === "ready" && <>
       <ComparisonEstimate estimate={experiment.estimate} />
@@ -99,7 +94,9 @@ export function ComparisonResults({ experimentId, onStart, starting, startError,
     {failure && <><ErrorCallout message={failure.message} />
       <ComparisonRefusals refusals={failure.refusals} labels={labels} /></>}
     {children}
-    <div className="comparison-columns">{experiment.arms.map((arm) => <section key={arm.id}
+    {/* While blind, the pictures are shown only by position, and nothing on the page says which choice made which. */}
+    {experiment.state === "started" && experiment.blind_pending && <ComparisonBlindReview experiment={experiment} />}
+    {!(experiment.state === "started" && experiment.blind_pending) && <div className="comparison-columns">{experiment.arms.map((arm) => <section key={arm.id}
       aria-labelledby={`comparison-arm-${arm.ordinal}`}>
       <h3 id={`comparison-arm-${arm.ordinal}`}>{arm.label}</h3>
       {arm.trials.map((trial) => <TrialPicture key={trial.id} experimentId={experiment.id} arm={arm} trial={trial}
@@ -108,7 +105,7 @@ export function ComparisonResults({ experimentId, onStart, starting, startError,
       {arm.trials.some((trial) => trial.status === "complete")
         && <ComparisonKeepRecipe experimentId={experiment.id} arm={arm} onOpenChat={onOpenChat} />}
       <ComparisonChoiceSummary arm={arm} seed={arm.trials[0]?.seed ?? null} />
-    </section>)}</div>
+    </section>)}</div>}
     {/* Said once there is a picture to say it of. */}
     {experiment.state === "started" && ready > 0 && <ComparisonPreference experiment={experiment} />}
     <ComparisonSettings arms={experiment.arms} />

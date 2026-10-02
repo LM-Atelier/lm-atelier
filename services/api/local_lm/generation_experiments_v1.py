@@ -176,6 +176,24 @@ class SeedPolicy(_Contract):
         return self
 
 
+class GenerationExperimentPreference(StrEnum):
+    """What the person said of the two pictures.
+
+    Their own judgement, kept as said: nothing ranks a choice by it.
+    """
+
+    PREFERRED = "preferred"
+    TIED = "tied"
+    UNSUITABLE = "unsuitable"
+
+
+class GenerationExperimentEvaluationMode(StrEnum):
+    """Whether the pictures were shown with their choices named when it was said."""
+
+    UNBLINDED = "unblinded"
+    BLIND = "blind"
+
+
 class ExperimentArmRequest(_Contract):
     """One choice: an exact model, an exact workflow revision and its own settings."""
 
@@ -193,6 +211,11 @@ class GenerationExperimentRequest(_Contract):
     geometry: Geometry
     seed_policy: SeedPolicy
     arms: list[ExperimentArmRequest] = Field(min_length=2, max_length=2)
+    # Blind hides which picture each choice made until the person says which
+    # they prefer, so it is chosen before any picture exists.
+    evaluation_mode: GenerationExperimentEvaluationMode = Field(
+        default=GenerationExperimentEvaluationMode.UNBLINDED, strict=False
+    )
 
     @model_validator(mode="after")
     def require_distinct_labels(self) -> Self:
@@ -347,24 +370,6 @@ class ExperimentArmOut(BaseModel):
     trials: list[ExperimentTrialOut]
 
 
-class GenerationExperimentPreference(StrEnum):
-    """What the person said of the two pictures.
-
-    Their own judgement, kept as said: nothing ranks a choice by it.
-    """
-
-    PREFERRED = "preferred"
-    TIED = "tied"
-    UNSUITABLE = "unsuitable"
-
-
-class GenerationExperimentEvaluationMode(StrEnum):
-    """Whether the pictures were shown with their choices named when it was said."""
-
-    UNBLINDED = "unblinded"
-    BLIND = "blind"
-
-
 class GenerationExperimentEvaluationCreate(_Contract):
     """One choice preferred, or a tie, or neither suiting, with an optional short note."""
 
@@ -417,6 +422,12 @@ class GenerationExperimentOut(BaseModel):
     arms: list[ExperimentArmOut]
     # The latest thing said of the pictures; none until something is.
     evaluation: ExperimentEvaluationOut | None = None
+    evaluation_mode: GenerationExperimentEvaluationMode = (
+        GenerationExperimentEvaluationMode.UNBLINDED
+    )
+    # True while a blind comparison waits for its blind saying: until then no
+    # answer links a picture to the choice that made it.
+    blind_pending: bool = False
 
     @field_serializer("created_at", "started_at", when_used="json")
     def serialize_times_as_utc(self, value: datetime | None) -> str | None:
@@ -470,3 +481,47 @@ class GenerationExperimentRecipeDraftOut(BaseModel):
     workflow_revision_id: str
     workflow_name: str
     workflow_version: int | None = None
+
+
+class BlindPositionOut(BaseModel):
+    """One picture in a blind view, known only by where it is shown."""
+
+    position: int
+    status: TrialWorkStatus | None = None
+    ready: bool
+
+
+class BlindRevealOut(BaseModel):
+    position: int
+    arm_ordinal: int
+    label: str
+
+
+class GenerationExperimentBlindViewOut(BaseModel):
+    """A blind comparison as one viewing shows it: its own order, and no choice named.
+
+    The reveal comes with the saying and not before.
+    """
+
+    id: str
+    experiment_id: str
+    positions: list[BlindPositionOut]
+    evaluation: ExperimentEvaluationOut | None = None
+    reveal: list[BlindRevealOut] | None = None
+
+
+class GenerationExperimentBlindEvaluationCreate(_Contract):
+    """A preference said in a blind view: a picture by its position, or a tie, or neither."""
+
+    preference: GenerationExperimentPreference = Field(strict=False)
+    position: int | None = Field(default=None, ge=1, le=2)
+    note: Annotated[str, StringConstraints(strip_whitespace=True, max_length=500)] | None = None
+
+    @model_validator(mode="after")
+    def require_a_picture_only_when_preferred(self) -> Self:
+        preferred = self.preference == GenerationExperimentPreference.PREFERRED
+        if preferred != (self.position is not None):
+            raise ValueError(
+                "A preference names the picture preferred, and a tie or neither does not."
+            )
+        return self
