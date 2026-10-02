@@ -87,6 +87,29 @@ it("offers no prompt, read-only, load-time or unavailable setting controls", asy
   expect(screen.getAllByRole("checkbox").map((input) => input.parentElement?.textContent)).toEqual(["Enabled", "Include Steps"]);
 });
 
+it.each([true, false])("offers enlargement controls only for an adjustable schema (fixed %s)", async (fixed) => {
+  vi.mocked(api.engines).mockResolvedValue([{ ...engine, settings: [field,
+    { ...field, key: "upscale_factor", label: "Enlarge by", type: "number", default: 2, minimum: 1, maximum: 8 },
+  ] }]);
+  vi.mocked(api.workflowRevisionSchema).mockResolvedValue({ ...schema, input_schema_json: { properties: {
+    upscale_factor: fixed
+      ? { type: "number", readOnly: true, title: "Enlargement", "x-lm-atelier-kind": "upscale" }
+      : { type: "number", default: 2, minimum: 1, maximum: 8, title: "Enlarge by", "x-lm-atelier-kind": "upscale" },
+  } } });
+  const { save } = show();
+  await reference();
+  if (fixed) {
+    expect(screen.queryByRole("checkbox", { name: "Include Enlarge by" })).toBeNull();
+    expect(screen.queryByRole("spinbutton", { name: "Enlarge by" })).toBeNull();
+  } else {
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include Enlarge by" }));
+    expect(screen.getByRole("spinbutton", { name: "Enlarge by" })).toHaveValue(2);
+  }
+  fireEvent.change(screen.getByRole("textbox", { name: "Recipe name" }), { target: { value: "Picture size" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save recipe" }));
+  expect(save.mock.calls[0][0].settings_json).toEqual(fixed ? {} : { upscale_factor: 2 });
+});
+
 it("refuses to reuse cached schema controls after a failed refresh without losing the draft", async () => {
   const { client, save } = show(existing);
   await reference();

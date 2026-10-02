@@ -143,6 +143,51 @@ async def test_missing_detail_is_a_typed_error(client: AsyncClient) -> None:
     assert response.json()["code"] == "workflow-not-found"
 
 
+@pytest.mark.parametrize("bound", [False, True], ids=["fixed", "adjustable"])
+async def test_selected_schema_projects_the_enlargement_the_graph_applies(
+    session: Session, client: AsyncClient, bound: bool
+) -> None:
+    workflow(session, "selected", 1)
+    session.flush()
+    revision = session.get(WorkflowRevision, "selected-r1")
+    assert revision is not None
+    authored = {
+        "properties": {
+            "upscale_factor": {
+                "type": "number",
+                "title": "Enlarge by",
+                "default": 2,
+                "minimum": 1,
+                "maximum": 8,
+                "x-lm-atelier-kind": "upscale",
+            }
+        }
+    }
+    graph = {
+        "scale": {
+            "class_type": "ImageScaleBy",
+            "inputs": {"scale_by": "${upscale_factor}" if bound else 2},
+        }
+    }
+    revision.input_schema_json = authored
+    revision.api_graph_json = graph
+    session.commit()
+    response = await client.get("/api/workflow-revisions/selected-r1/settings-schema")
+    assert response.status_code == 200
+    projected = response.json()["input_schema_json"]["properties"]["upscale_factor"]
+    if bound:
+        assert projected == authored["properties"]["upscale_factor"]
+    else:
+        assert projected["readOnly"] is True
+        assert projected["x-lm-atelier-kind"] == "upscale"
+        assert "default" not in projected
+    session.expire_all()
+    unchanged = session.get(WorkflowRevision, "selected-r1")
+    assert unchanged is not None
+    assert unchanged.input_schema_json == authored
+    assert unchanged.api_graph_json == graph
+
+
 @pytest.mark.parametrize(
     "marker,hidden",
     [

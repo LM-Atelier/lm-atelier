@@ -15,6 +15,11 @@ from .schemas import (
     WorkflowRevisionSchemaOut,
     WorkflowSummaryOut,
 )
+from .upscale_workflows import (
+    UPSCALE_SETTING_KEY,
+    effective_upscale_schema,
+    workflow_declares_upscale,
+)
 from .workflow_package_drafts import (
     WORKFLOW_PACKAGE_DRAFT_MARKER,
     is_workflow_package_draft,
@@ -199,4 +204,21 @@ def load_workflow_revision_schema(
         .execution_options(autoflush=False)
     )
     row = session.execute(statement).mappings().one_or_none()
-    return None if row is None else WorkflowRevisionSchemaOut(**row)
+    if row is None:
+        return None
+    schema = row["input_schema_json"]
+    if (
+        workflow_declares_upscale(schema)
+        and schema["properties"][UPSCALE_SETTING_KEY].get("readOnly") is not True
+    ):
+        # Only enlargement declarations need the selected graph to distinguish
+        # an adjustable factor from a fixed output size.
+        graph = session.scalar(
+            select(WorkflowRevision.api_graph_json)
+            .where(WorkflowRevision.id == revision_id)
+            .execution_options(autoflush=False)
+        )
+        if graph is None:
+            return None
+        schema = effective_upscale_schema(graph, schema)
+    return WorkflowRevisionSchemaOut(**{**row, "input_schema_json": schema})
