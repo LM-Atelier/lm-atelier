@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 from fastapi import FastAPI
 from httpx import AsyncClient
@@ -38,5 +40,35 @@ async def test_acceptance_returns_the_complete_output_chain_in_transcript_order(
         assert replay.status_code == 202
         replayed = replay.json()["assistant_messages"]
         for original, current in zip(outputs, replayed, strict=True):
-            assert current["updated_at"] >= original["updated_at"]
-            assert current == {**original, "updated_at": current["updated_at"]}
+            _accept_replay(original, current)
+
+
+def _accept_replay(original: dict[str, object], current: dict[str, object]) -> None:
+    """Compare replay time as an instant, then require every other field to match."""
+
+    assert datetime.fromisoformat(str(current["updated_at"])) >= datetime.fromisoformat(
+        str(original["updated_at"])
+    )
+    assert current == {**original, "updated_at": current["updated_at"]}
+
+
+def test_a_whole_second_replay_is_not_treated_as_earlier() -> None:
+    original = {
+        "id": "message-1",
+        "body": "A neutral fixture.",
+        "updated_at": "2026-01-01T00:00:01.000",
+    }
+    same_instant = {**original, "updated_at": "2026-01-01T00:00:01"}
+    later = {**original, "updated_at": "2026-01-01T00:00:01.001000"}
+    earlier = {**original, "updated_at": "2026-01-01T00:00:00.900000"}
+    changed = {**same_instant, "body": "A different fixture."}
+
+    _accept_replay(original, same_instant)
+    _accept_replay(
+        {**original, "updated_at": "2026-01-01T00:00:01"},
+        later,
+    )
+    with pytest.raises(AssertionError):
+        _accept_replay(original, earlier)
+    with pytest.raises(AssertionError):
+        _accept_replay(original, changed)
