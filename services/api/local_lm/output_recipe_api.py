@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 from urllib.parse import quote
 
 from fastapi import APIRouter, Query, Request, Response
+from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from .api_errors import api_error
 from .db import SessionLocal
 from .output_recipe import OutputRecipe, OutputRecipeUnavailable, build_output_recipe
+from .output_recipe_check import OutputRecipeCheckRefused, check_output_recipe
 
 if TYPE_CHECKING:
     from .artifacts import ArtifactStore
@@ -71,3 +73,24 @@ def _build(
             artifact_id=artifact_id,
             include_prompts=include_prompts,
         )
+
+
+@router.post("/output-recipes/check")
+async def check_output_recipe_against_this_install(request: Request) -> JSONResponse:
+    """Which of a record's requirements this installation holds, by exact identity.
+
+    The record arrives as the file's own bytes, because only those can be checked
+    against its digest. Nothing is installed, trusted or kept.
+    """
+
+    content = await request.body()
+    try:
+        report = await run_in_threadpool(_check, content)
+    except OutputRecipeCheckRefused as exc:
+        raise api_error(exc.status, exc.code, exc.message) from exc
+    return JSONResponse(report, headers={"Cache-Control": "no-store"})
+
+
+def _check(content: bytes) -> dict[str, Any]:
+    with SessionLocal() as session:
+        return check_output_recipe(session, content)
