@@ -380,6 +380,29 @@ async def test_a_stale_failure_cannot_spend_the_current_generations_retry_budget
         assert job.claim_owner == "current-attempt" and job.attempt == 2
         assert run.provenance_json["failure_retries"] == {"limit": 3, "used": 0, "pending": False}
 
+    # The current failure can finish truthfully even though this run has lost its work step.
+    await app.state.services.orchestrator._fail(
+        job_id,
+        run_id,
+        "Neutral failure without a work step",
+        claim=JobClaim(token="current-attempt", attempt=2),
+    )
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        run = session.get(Run, run_id)
+        assert job is not None and run is not None
+        assert run.work_step_id is None and job.work_step_id is None
+        assert job.status == run.status == "failed" and job.attempt == 2
+        assert job.error == run.error == "Neutral failure without a work step"
+        assert job.completed_at is not None and run.completed_at is not None
+        assert run.provenance_json["failure_retries"] == {"limit": 3, "used": 0, "pending": False}
+        message = session.get(Message, run.assistant_message_id)
+        assert message is not None and message.status == "failed"
+        assert [(part.type, part.text) for part in message.parts] == [
+            ("error", "Neutral failure without a work step")
+        ]
+        assert len(session.scalars(select(Job).where(Job.run_id == run_id)).all()) == 1
+
 
 async def test_queued_restart_recovery_preserves_the_reserved_allowance(
     app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
