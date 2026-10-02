@@ -93,6 +93,10 @@ export function generationRecordFileName(summary: Pick<GenerationRecordSummary, 
   return `generation-record-${summary.outputSha256.slice(0, 12)}.json`;
 }
 
+export function generationRecordBundleFileName(summary: Pick<GenerationRecordSummary, "outputSha256">): string {
+  return `generation-record-${summary.outputSha256.slice(0, 12)}.zip`;
+}
+
 function object(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("The generation record is malformed.");

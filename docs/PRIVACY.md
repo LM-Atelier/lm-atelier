@@ -60,7 +60,11 @@ operation, the seed and settings, the workflow, model and LoRA files by hash,
 and the inputs by hash. The prompt is left out unless you choose to include it,
 and text a workflow takes as a setting follows the same choice. The record never
 names your chats, messages or files on this computer, and it lists what it left
-out. It does not contain the picture or video itself.
+out. It does not contain the picture or video itself. For a picture, **Download
+with picture** saves a ZIP file holding that same record beside a PNG copy of
+the picture with only its pixels. Nothing else written inside the picture file,
+such as the workflow that made it, is copied; a picture with its own color
+profile is converted to sRGB first, so the profile stays behind too.
 
 Before sharing issue details, inspect them and remove tokens, private prompts,
 chats, media, model inputs, and identifying file paths.
