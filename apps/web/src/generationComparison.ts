@@ -3,12 +3,15 @@ import type {
   ExperimentRefusal,
   ExperimentTrial,
   GenerationExperiment,
+  GenerationExperimentRecipeDraft,
   GenerationExperimentRequest,
   ResourceEvidence,
   SeedPolicyKind,
   TrialWorkStatus,
 } from "./generationExperimentTypes";
 import type { OutputRatioPresetId, Run } from "./types";
+import { isRecipeSettingValue } from "./workflowRecipeFields";
+import type { RecipeSettingValue, WorkflowUseCasePresetCreate } from "./workflowUseCaseTypes";
 
 export const MAX_SEED = 2_147_483_647;
 const MAX_DIMENSION = 1_000_000;
@@ -227,4 +230,17 @@ export function comparisonFailure(error: unknown): ComparisonFailure {
     default:
       return { ...failure, next: "retry" };
   }
+}
+
+/** A recipe draft as the recipe editor starts from it: only values a recipe can hold, never a default. */
+export function recipeDraftPayload(draft: GenerationExperimentRecipeDraft): WorkflowUseCasePresetCreate {
+  return {
+    name: draft.name,
+    use_case: draft.use_case,
+    settings_json: Object.fromEntries(
+      Object.entries(draft.settings_json).filter((entry): entry is [string, RecipeSettingValue] => isRecipeSettingValue(entry[1])),
+    ),
+    enabled: true,
+    is_default: false,
+  };
 }

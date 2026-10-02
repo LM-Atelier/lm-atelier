@@ -373,3 +373,47 @@ class GenerationExperimentOut(BaseModel):
             return None
         normalized = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
         return normalized.isoformat().replace("+00:00", "Z")
+
+
+# Why a setting a choice ran with is not in the recipe drafted from it: one
+# fixed sentence each, so a value never reaches the answer through a reason.
+RECIPE_LEFT_OUT_MESSAGES: dict[str, str] = {
+    "recipe-prompt": "A recipe never holds the words; each request brings its own.",
+    "comparison-adapted": (
+        "The comparison changed this for its own pictures, so the recipe leaves it to each request."
+    ),
+    "workflow-use-case-preset-setting-unavailable": "This workflow does not let a recipe set this.",
+    "workflow-use-case-preset-settings-invalid": (
+        "This workflow does not accept this value from a recipe."
+    ),
+    "recipe-unsupported": "A recipe for this workflow cannot hold this setting.",
+}
+
+
+class RecipeDraftLeftOut(BaseModel):
+    setting: str
+    reason: str
+    message: str
+
+
+class GenerationExperimentRecipeDraftOut(BaseModel):
+    """A recipe to review before saving: the settings one choice ran with, as a recipe holds them.
+
+    The model and workflow are named, not held: a recipe has neither, and both
+    already exist to be chosen beside it.
+    """
+
+    experiment_id: str
+    arm_ordinal: int
+    use_case: Literal["image_generation"]
+    name: str
+    settings_json: dict[str, JsonValue]
+    left_out: list[RecipeDraftLeftOut]
+    profile_id: str
+    profile_name: str | None = None
+    workflow_id: str
+    # The family a chat chooses its workflow by; none for a workflow outside one.
+    workflow_family_id: str | None = None
+    workflow_revision_id: str
+    workflow_name: str
+    workflow_version: int | None = None

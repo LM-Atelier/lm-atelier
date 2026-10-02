@@ -154,3 +154,27 @@ export interface GenerationExperiment {
   started_at: string | null;
   arms: ExperimentArm[];
 }
+
+/** A setting a choice ran with that the recipe drafted from it does not hold, and why. */
+export interface RecipeDraftLeftOut {
+  setting: string;
+  reason: string;
+  message: string;
+}
+
+/** A recipe to review before saving: one choice's settings, as a recipe holds them, beside the model and workflow it ran on. */
+export interface GenerationExperimentRecipeDraft {
+  experiment_id: string;
+  arm_ordinal: number;
+  use_case: "image_generation";
+  name: string;
+  settings_json: Record<string, unknown>;
+  left_out: RecipeDraftLeftOut[];
+  profile_id: string;
+  profile_name: string | null;
+  workflow_id: string;
+  workflow_family_id: string | null;
+  workflow_revision_id: string;
+  workflow_name: string;
+  workflow_version: number | null;
+}

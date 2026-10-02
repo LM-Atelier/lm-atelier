@@ -248,6 +248,10 @@ describe("a remembered comparison", () => {
     expect(screen.getByText("Failed")).toBeInTheDocument();
     expect(screen.getByText("1 of 2 pictures ready")).toBeInTheDocument();
     expect(api.run).toHaveBeenCalledTimes(1);
+    // Only the choice whose picture is finished can be kept as a recipe.
+    const kept = screen.getAllByRole("button", { name: "Keep as a recipe" });
+    expect(kept).toHaveLength(1);
+    expect(kept[0].closest("section")).toHaveAccessibleName("Choice A");
   });
 
   it("goes back to a new comparison when the remembered one is gone", async () => {

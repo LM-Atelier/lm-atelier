@@ -188,7 +188,7 @@ export default function App() {
           onUseInChat={(picture) => sendStudioPicture(picture, studioSource?.chatId ?? activeChatId)}/>
       );
     }
-    const topLevelView = view === "media" ? <MediaLibraryView onEditImage={openLibraryImage} /> : view === "models" ? <ModelsView key={modelLibraryRole} initialRole={modelLibraryRole} /> : view === "references" ? <ReferencesLibrary /> : view === "prompts" ? <PromptLibraryView /> : view === "workflows" ? <WorkflowsView /> : view === "compare" ? <GenerationComparisonView /> : null;
+    const topLevelView = view === "media" ? <MediaLibraryView onEditImage={openLibraryImage} /> : view === "models" ? <ModelsView key={modelLibraryRole} initialRole={modelLibraryRole} /> : view === "references" ? <ReferencesLibrary /> : view === "prompts" ? <PromptLibraryView /> : view === "workflows" ? <WorkflowsView /> : view === "compare" ? <GenerationComparisonView onOpenChat={openChat} /> : null;
     if (topLevelView) return topLevelView;
     if (view === "settings") return <SettingsView engines={engines.data ?? []} appearance={appearance} destinationId={settingsDestination} onDestinationChange={setSettingsDestination} focusRequest={settingsFocusRequest} />;
     const displayedChat = chat.data
@@ -267,7 +267,7 @@ export default function App() {
         send.mutate({ chatId: displayedChat.id, id: crypto.randomUUID(), text, mode, artifacts, settings, references, outputCount, promptSource, sourceFit });
       }
     }} />;
-  }, [openWorkflows, studioSource, studioHandOver, sendStudioPicture, studioPictureTaken, activeChatId, view, setView, appearance, settingsDestination, setSettingsDestination, settingsFocusRequest, modelLibraryRole, engines.data, applicationInfo.data, selectedProject, chat.data, chat.reads, chatDrafts, autoSettingsRoles, rememberSettingsRole, composerDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, removeItem, forkThread, client, openLibraryImage, applyAcceptedTurn]);
+  }, [openWorkflows, studioSource, studioHandOver, sendStudioPicture, studioPictureTaken, activeChatId, view, setView, appearance, settingsDestination, setSettingsDestination, settingsFocusRequest, modelLibraryRole, engines.data, applicationInfo.data, selectedProject, chat.data, chat.reads, chatDrafts, autoSettingsRoles, rememberSettingsRole, composerDrafts, liveText, pendingTurns, workPlans.data, send, regenerate, selectResponseRevision, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, deleteExchange, removeItem, forkThread, client, openLibraryImage, applyAcceptedTurn, openChat]);
 
   if (firstRunSetup && setupReadiness.data) {
     return <FirstRunSetup report={setupReadiness.data} onExit={exitFirstRunSetup} onOpenModels={(role) => { exitFirstRunSetup(); setModelLibraryRole(role); setView("models"); }} onOpenWorkflows={() => { exitFirstRunSetup(); setView("workflows"); }} />;

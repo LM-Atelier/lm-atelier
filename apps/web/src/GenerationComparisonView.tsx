@@ -29,7 +29,10 @@ function useShape(revisionId: string) {
 }
 
 /** Compare two generation choices against one prompt, then see both pictures side by side. */
-export function GenerationComparisonView() {
+export function GenerationComparisonView({ onOpenChat }: {
+  /** Show a chat set up with a choice that was kept. */
+  onOpenChat?: (chatId: string) => void;
+} = {}) {
   const comparison = useGenerationComparison();
   const [draft, setDraft] = useState<ComparisonDraft>(EMPTY_COMPARISON);
   const [problems, setProblems] = useState<string[]>([]);
@@ -108,7 +111,7 @@ export function GenerationComparisonView() {
       <header className="page-header"><div><h1>Compare generation choices</h1></div></header>
       <ComparisonResults experimentId={comparison.experimentId} onStart={(experiment) => void start(experiment)}
         starting={startComparison.isPending} startError={startComparison.error}
-        onNew={fresh} headingRef={resultsHeading} />
+        onNew={fresh} onOpenChat={onOpenChat} headingRef={resultsHeading} />
       {confirmation}
     </div>;
   }

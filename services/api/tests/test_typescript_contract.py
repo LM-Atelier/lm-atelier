@@ -180,6 +180,8 @@ CHECKED_CONTRACTS = {
     "ExperimentTrial": "ExperimentTrialOut",
     "GenerationExperiment": "GenerationExperimentOut",
     "GenerationExperimentPreflight": "GenerationExperimentPreflightOut",
+    "GenerationExperimentRecipeDraft": "GenerationExperimentRecipeDraftOut",
+    "RecipeDraftLeftOut": "RecipeDraftLeftOut",
     "RefusalAlternative": "RefusalAlternativeOut",
     "ResourceEvidence": "ResourceEvidenceOut",
 }
