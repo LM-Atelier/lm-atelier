@@ -1343,6 +1343,9 @@ html[data-motion="reduced"] .progress-track > div.indeterminate { width: 100% !i
 .generation-record-facts { display: grid; grid-template-columns: auto 1fr; gap: calc(4px * var(--spacing-scale, 1)) calc(12px * var(--spacing-scale, 1)); margin: 0; }
 .generation-record-facts dt { color: var(--muted); }
 .generation-record-facts dd { margin: 0; }
+.generation-record-requirements { display: grid; gap: calc(6px * var(--spacing-scale, 1)); list-style: none; margin: 0; padding: 0; }
+.generation-record-requirements li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: calc(8px * var(--spacing-scale, 1)); }
+.generation-record-requirements code { color: var(--muted); }
 .markdown-image-reference { color: var(--muted); font-style: italic; }
 /* A destructive confirmation whose two buttons look identical is not a
    confirmation. These inherit .message-meta button, which is transparent
