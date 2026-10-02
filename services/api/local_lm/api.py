@@ -289,6 +289,7 @@ from .orchestrator import (
     ResponseRevisionConflict,
 )
 from .ordered_planning import OrderedPlanConfirmationRequired
+from .output_recipe_api import router as output_recipe_router
 from .picture_export import (
     DEFAULT_EXPORT_QUALITY,
     EXPORT_FORMATS,
@@ -936,6 +937,7 @@ router = APIRouter(prefix="/api")
 router.include_router(workflow_use_case_preset_router)
 router.include_router(use_case_summary_router)
 router.include_router(generation_experiment_router)
+router.include_router(output_recipe_router)
 logger = logging.getLogger(__name__)
 
 
