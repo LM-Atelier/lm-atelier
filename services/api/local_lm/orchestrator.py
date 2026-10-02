@@ -2087,89 +2087,14 @@ class ConversationOrchestrator:
             # extension paints new canvas at full strength.
             extension=request.source_fit is not None and request.source_fit.mode == "extend",
         )
-        # A selection is validated where the workflow is known, so a mask
-        # aimed at a workflow that cannot apply one refuses before the turn
-        # is accepted rather than after it silently produces an unmasked edit.
-        if plan.operation != Operation.TEXT and effective_settings.get(MASK_SETTING_KEY):
-            if not workflow_revision:
-                raise ValueError("A selection requires a media workflow that accepts one.")
-            try:
-                mask_selection = parse_mask_setting(
-                    effective_settings,
-                    workflow_revision.input_schema_json,
-                    operation=plan.operation.value,
-                    source_count=len(resolved_input_ids),
-                )
-            except MaskContractError as exc:
-                raise ValueError(str(exc)) from exc
-            # An outpainter hands back a larger canvas or, with nothing to pad,
-            # the picture unchanged, so a selection placed back over the source
-            # can never hold what it returns. Refused here rather than after the run.
-            if (
-                mask_selection is not None
-                and mask_selection.blend
-                and request.source_fit is None
-                and workflow_declares_outpaint(workflow_revision.input_schema_json)
-            ):
-                raise ValueError(
-                    "This workflow paints past the picture's edge, so what it returns cannot be "
-                    "placed back through a selection. Choose a workflow that edits the picture."
-                )
-        # Checked here for the same reason as the selection: a relight that
-        # cannot run is refused before the turn exists, not after a generation.
-        if plan.operation != Operation.TEXT and RELIGHT_SETTING_KEY in effective_settings:
-            try:
-                relight_setting = parse_relight_setting(effective_settings)
-                if relight_setting is not None:
-                    require_relight_turn(
-                        relight_setting,
-                        operation=plan.operation.value,
-                        source_count=len(resolved_input_ids),
-                        loras=effective_settings.get("loras"),
-                        adapter_asset_ids=self.installed_lighting_adapter_ids(session),
-                    )
-            except RelightContractError as exc:
-                raise ValueError(str(exc)) from exc
-        # Margins reach here as an ordinary object setting, and the schema
-        # layer only bounds a value's size and nesting - it has no opinion
-        # about what the numbers inside mean. Without this, a negative margin,
-        # a margin of nine hundred, and a margin of "lots" were all accepted
-        # and handed to a workflow that would do something arbitrary with
-        # each. The contract that refuses them existed already and nothing
-        # called it. Margins of nothing that the turn did not name are the
-        # workflow's declared default rather than a request, and would refuse
-        # every ordinary edit and every Extend that fits its canvas instead.
-        if OUTPAINT_SETTING_KEY not in request.settings and extends_by_nothing(
-            effective_settings.get(OUTPAINT_SETTING_KEY)
-        ):
-            del effective_settings[OUTPAINT_SETTING_KEY]
-        if plan.operation != Operation.TEXT and OUTPAINT_SETTING_KEY in effective_settings:
-            if (
-                not workflow_revision
-                or not workflow_declares_outpaint(workflow_revision.input_schema_json)
-                or source_pad_node(workflow_revision.api_graph_json) is None
-            ):
-                raise ValueError(
-                    "This workflow cannot extend a picture past its edge; choose one built "
-                    "for outpainting."
-                )
-            effective_settings[OUTPAINT_SETTING_KEY] = normalize_margins(
-                effective_settings[OUTPAINT_SETTING_KEY]
-            )
-        # Same reasoning as the mask above: the workflow is known here, so a
-        # turn handing over more references than the graph can consume refuses
-        # now rather than producing a picture conditioned on the first and
-        # saying nothing. Silently using one of four is indistinguishable from
-        # a bad model, which is the worst kind of failure to debug.
-        if plan.operation != Operation.TEXT and workflow_revision:
-            over = exceeds_capacity(workflow_revision.api_graph_json, len(resolved_input_ids))
-            if over is not None:
-                raise ValueError(
-                    f"This workflow uses {over or 'no'} reference image"
-                    f"{'' if over == 1 else 's'}, and {len(resolved_input_ids)} were "
-                    "attached. Choose a workflow built for multiple references, or "
-                    "attach fewer."
-                )
+        self._refuse_settings_the_workflow_cannot_take(
+            session,
+            plan,
+            request,
+            effective_settings,
+            workflow_revision,
+            resolved_input_ids,
+        )
         lora_resolution: ResolvedLoraStack | None = None
         workflow_lora_outcome: _WorkflowLoraOutcome | None = None
         workflow_loras_relevant = plan.operation != Operation.TEXT and (
@@ -2792,6 +2717,106 @@ class ConversationOrchestrator:
         for queued_job, queued_run in zip(jobs, runs, strict=True):
             self.start(queued_job.id, queued_run.id)
         return accepted
+
+    def _refuse_settings_the_workflow_cannot_take(
+        self,
+        session: Session,
+        plan: RoutingPlan,
+        request: TurnRequest,
+        effective_settings: dict[str, Any],
+        workflow_revision: WorkflowRevision | None,
+        resolved_input_ids: list[str],
+    ) -> None:
+        """Refuse a selection, relight, margins or references the chosen workflow cannot take.
+
+        Each is checked here, where the workflow is known, so the turn is refused
+        before it exists rather than after a generation. Margins of nothing that
+        the turn did not name are dropped from the settings, and any others
+        normalized, in place.
+        """
+        # A selection is validated where the workflow is known, so a mask
+        # aimed at a workflow that cannot apply one refuses before the turn
+        # is accepted rather than after it silently produces an unmasked edit.
+        if plan.operation != Operation.TEXT and effective_settings.get(MASK_SETTING_KEY):
+            if not workflow_revision:
+                raise ValueError("A selection requires a media workflow that accepts one.")
+            try:
+                mask_selection = parse_mask_setting(
+                    effective_settings,
+                    workflow_revision.input_schema_json,
+                    operation=plan.operation.value,
+                    source_count=len(resolved_input_ids),
+                )
+            except MaskContractError as exc:
+                raise ValueError(str(exc)) from exc
+            # An outpainter hands back a larger canvas or, with nothing to pad,
+            # the picture unchanged, so a selection placed back over the source
+            # can never hold what it returns. Refused here rather than after the run.
+            if (
+                mask_selection is not None
+                and mask_selection.blend
+                and request.source_fit is None
+                and workflow_declares_outpaint(workflow_revision.input_schema_json)
+            ):
+                raise ValueError(
+                    "This workflow paints past the picture's edge, so what it returns cannot be "
+                    "placed back through a selection. Choose a workflow that edits the picture."
+                )
+        # Checked here for the same reason as the selection: a relight that
+        # cannot run is refused before the turn exists, not after a generation.
+        if plan.operation != Operation.TEXT and RELIGHT_SETTING_KEY in effective_settings:
+            try:
+                relight_setting = parse_relight_setting(effective_settings)
+                if relight_setting is not None:
+                    require_relight_turn(
+                        relight_setting,
+                        operation=plan.operation.value,
+                        source_count=len(resolved_input_ids),
+                        loras=effective_settings.get("loras"),
+                        adapter_asset_ids=self.installed_lighting_adapter_ids(session),
+                    )
+            except RelightContractError as exc:
+                raise ValueError(str(exc)) from exc
+        # Margins reach here as an ordinary object setting, and the schema
+        # layer only bounds a value's size and nesting - it has no opinion
+        # about what the numbers inside mean. Without this, a negative margin,
+        # a margin of nine hundred, and a margin of "lots" were all accepted
+        # and handed to a workflow that would do something arbitrary with
+        # each. The contract that refuses them existed already and nothing
+        # called it. Margins of nothing that the turn did not name are the
+        # workflow's declared default rather than a request, and would refuse
+        # every ordinary edit and every Extend that fits its canvas instead.
+        if OUTPAINT_SETTING_KEY not in request.settings and extends_by_nothing(
+            effective_settings.get(OUTPAINT_SETTING_KEY)
+        ):
+            del effective_settings[OUTPAINT_SETTING_KEY]
+        if plan.operation != Operation.TEXT and OUTPAINT_SETTING_KEY in effective_settings:
+            if (
+                not workflow_revision
+                or not workflow_declares_outpaint(workflow_revision.input_schema_json)
+                or source_pad_node(workflow_revision.api_graph_json) is None
+            ):
+                raise ValueError(
+                    "This workflow cannot extend a picture past its edge; choose one built "
+                    "for outpainting."
+                )
+            effective_settings[OUTPAINT_SETTING_KEY] = normalize_margins(
+                effective_settings[OUTPAINT_SETTING_KEY]
+            )
+        # Same reasoning as the mask above: the workflow is known here, so a
+        # turn handing over more references than the graph can consume refuses
+        # now rather than producing a picture conditioned on the first and
+        # saying nothing. Silently using one of four is indistinguishable from
+        # a bad model, which is the worst kind of failure to debug.
+        if plan.operation != Operation.TEXT and workflow_revision:
+            over = exceeds_capacity(workflow_revision.api_graph_json, len(resolved_input_ids))
+            if over is not None:
+                raise ValueError(
+                    f"This workflow uses {over or 'no'} reference image"
+                    f"{'' if over == 1 else 's'}, and {len(resolved_input_ids)} were "
+                    "attached. Choose a workflow built for multiple references, or "
+                    "attach fewer."
+                )
 
     def _materialize_turn_output(
         self,
