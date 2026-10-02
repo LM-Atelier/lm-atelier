@@ -138,3 +138,92 @@ export function readGenerationRecord(bytes: ArrayBuffer): GenerationRecordSummar
     missing: names(reproducibility.missing),
   };
 }
+
+export type RequirementKind = "workflow" | "model_file" | "lora" | "input";
+export type RequirementState = "present" | "inactive" | "missing";
+
+export type GenerationRecordRequirement = {
+  kind: RequirementKind;
+  sha256: string;
+  role: string | null;
+  state: RequirementState;
+};
+
+export type GenerationRecordCheck = {
+  digest: string;
+  operation: string;
+  requirements: GenerationRecordRequirement[];
+  allPresent: boolean;
+  missing: string[];
+};
+
+const KIND_TEXT: Record<RequirementKind, string> = {
+  workflow: "Workflow",
+  model_file: "Model file",
+  lora: "LoRA",
+  input: "Input picture",
+};
+
+const STATE_TEXT: Record<RequirementState, string> = {
+  present: "Here and ready",
+  inactive: "Here, not ready",
+  missing: "Not here",
+};
+
+export function requirementKindText(kind: RequirementKind): string {
+  return KIND_TEXT[kind];
+}
+
+export function requirementStateText(state: RequirementState): string {
+  return STATE_TEXT[state];
+}
+
+const KINDS = new Set<string>(Object.keys(KIND_TEXT));
+const STATES = new Set<string>(Object.keys(STATE_TEXT));
+const HEX64 = /^[0-9a-f]{64}$/;
+
+/** The check's answer, read strictly: anything unexpected is refused rather than shown. */
+export function readGenerationRecordCheck(value: unknown): GenerationRecordCheck {
+  const report = object(value);
+  if (typeof report.digest !== "string" || typeof report.operation !== "string" || !Array.isArray(report.requirements)) {
+    throw new Error("The check's answer is malformed.");
+  }
+  const requirements = report.requirements.map((item): GenerationRecordRequirement => {
+    const entry = object(item);
+    if (
+      typeof entry.kind !== "string" || !KINDS.has(entry.kind)
+      || typeof entry.state !== "string" || !STATES.has(entry.state)
+      || typeof entry.sha256 !== "string" || !HEX64.test(entry.sha256)
+      || (entry.role !== null && typeof entry.role !== "string")
+    ) {
+      throw new Error("The check's answer is malformed.");
+    }
+    return {
+      kind: entry.kind as RequirementKind,
+      sha256: entry.sha256,
+      role: entry.role as string | null,
+      state: entry.state as RequirementState,
+    };
+  });
+  const reproducibility = object(report.reproducibility);
+  return {
+    digest: report.digest,
+    operation: report.operation,
+    requirements,
+    allPresent: report.all_present === true && requirements.every((item) => item.state === "present"),
+    missing: names(reproducibility.missing),
+  };
+}
+
+/** A chosen file's exact bytes, read the way every browser and test DOM supports. */
+export function readFileBytes(file: Blob): Promise<ArrayBuffer> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (reader.result instanceof ArrayBuffer) resolve(reader.result);
+      else reject(new Error("The file could not be read."));
+    };
+    reader.onerror = () => reject(new Error("The file could not be read."));
+    reader.readAsArrayBuffer(file);
+  });
+}

@@ -484,6 +484,9 @@ export const api = {
     request<ChatDetail>(`/api/studio/sessions/${encodeURIComponent(sessionId)}`),
   /** One run, with what it resolved and recorded: how a Studio result's edit is made again. */
   run: (runId: string) => request<Run>(`/api/runs/${encodeURIComponent(runId)}`),
+  /** Which of a record's requirements this installation holds; nothing is installed or kept. */
+  checkGenerationRecord: (content: ArrayBuffer) =>
+    request<unknown>("/api/output-recipes/check", { method: "POST", body: content }),
   /** One output's portable generation record, as the exact bytes its digest covers. */
   generationRecord: (
     runId: string,

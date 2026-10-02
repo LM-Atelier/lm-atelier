@@ -31,6 +31,7 @@ import type {
   ModelInstall,
   ModelProfile,
 } from "./types";
+import { GenerationRecordCheck } from "./GenerationRecordCheck";
 import { useConfirm } from "./useConfirm";
 
 function InstalledModelRow({
@@ -514,7 +515,7 @@ export function ModelsView({ initialRole }: { initialRole: EngineRole }) {
   };
   return (
     <div className="page-view">
-      <header className="page-header"><div><h1>Model library</h1></div><div className="storage-actions"><div className="storage-pill"><HardDrive size={17} />{storage.data?.installed_count ?? "…"} installed · {formatBytes(storage.data?.installed_bytes)}</div><button className="secondary compact-button" onClick={() => setImportOpen(true)}><Folder size={16} />Import local</button>{Boolean(storage.data?.partial_download_count) && <button className="secondary compact-button" disabled={cleanupDownloads.isPending} onClick={() => cleanupDownloads.mutate()}>Clean {storage.data?.partial_download_count} partial</button>}</div></header>
+      <header className="page-header"><div><h1>Model library</h1></div><div className="storage-actions"><div className="storage-pill"><HardDrive size={17} />{storage.data?.installed_count ?? "…"} installed · {formatBytes(storage.data?.installed_bytes)}</div><button className="secondary compact-button" onClick={() => setImportOpen(true)}><Folder size={16} />Import local</button><GenerationRecordCheck />{Boolean(storage.data?.partial_download_count) && <button className="secondary compact-button" disabled={cleanupDownloads.isPending} onClick={() => cleanupDownloads.mutate()}>Clean {storage.data?.partial_download_count} partial</button>}</div></header>
       <ModelUpdatesPanel onInstall={(model, selectedRole, previousInstallId) => download.mutate({ model, selectedRole, previousInstallId })} />
       <ModelUpdateProfileOffers downloads={updateDownloads} onDismiss={dismissUpdate} />
       <section className="recipe-section">
