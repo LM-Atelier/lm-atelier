@@ -4365,6 +4365,7 @@ class ConversationOrchestrator:
                     job_id=job_id,
                     run_id=run_id,
                 )
+                media_failed = False
                 try:
                     if operation == Operation.TEXT.value:
                         try:
@@ -4377,6 +4378,12 @@ class ConversationOrchestrator:
                         queued_verification_job_id = await self._execute_media(
                             job_id, run_id, claim
                         )
+                except Exception:
+                    # `_fail` writes this failure once the lease is released,
+                    # after the handoff below; noting it here is what lets the
+                    # handoff tell an attempt that is about to be retried.
+                    media_failed = operation != Operation.TEXT.value
+                    raise
                 finally:
                     if operation == Operation.TEXT.value:
                         self._release_deferred_media_restart()
@@ -4399,7 +4406,10 @@ class ConversationOrchestrator:
                         # Skipping owes nothing either way - `_ensure_chat_worker`
                         # loads whatever the next text execution needs.
                         if pending and (claim is None or self._attempt_current(job_id, claim)):
-                            await self._complete_media_handoff(pending)
+                            if media_failed and self._media_failure_retries(job_id, run_id, claim):
+                                await self._hold_media_handoff_for_retry(pending)
+                            else:
+                                await self._complete_media_handoff(pending)
                 if queued_verification_job_id:
                     self.start(queued_verification_job_id, None)
         except asyncio.CancelledError:
@@ -6193,6 +6203,75 @@ class ConversationOrchestrator:
             self._media_restart_after_chat_activity = True
         else:
             self._schedule_media_restart()
+
+    def _media_failure_retries(
+        self, job_id: str, run_id: str | None, claim: JobClaim | None
+    ) -> bool:
+        """Whether the media failure leaving this attempt will be retried.
+
+        `_fail` decides that only once the lease is released, by which time the
+        handoff has already run. This asks the same run the same question first,
+        through the predicate `_reserve_failed_media_retry` itself uses, while
+        the attempt still holds the device.
+
+        `_fail` writes nothing to a row its attempt has already finished, so an
+        error raised after the run completed is not retried, and it is not
+        counted as one here.
+        """
+
+        if run_id is None or claim is None:
+            return False
+        with self.session_factory() as session:
+            job = session.get(Job, job_id)
+            run = session.get(Run, run_id)
+            return (
+                job is not None
+                and run is not None
+                and job.status == JobStatus.RUNNING.value
+                and job.attempt == claim.attempt
+                and self._failed_media_retry(session, run, claim) is not None
+            )
+
+    async def _hold_media_handoff_for_retry(self, chat_profile_id: str) -> None:
+        """Leave chat down for the retry of the attempt that displaced it.
+
+        The retry is this same job, queued again a moment from now. Loading chat
+        here only for that retry to stop it again costs a model load per failed
+        attempt, and under ComfyUI a media worker restart as well. This is the
+        queued-image case of `_complete_media_handoff`, answered before the retry
+        is in the queue: the debt is recorded, so whichever attempt ends the run
+        gives the model back, and the readiness latch is released because this
+        handoff is over.
+
+        A text run that is already next still gets its model now, as it would
+        after any image.
+        """
+
+        self._displaced_chat_profile_id = chat_profile_id
+        if self._text_run_queued_next():
+            await self._complete_media_handoff(chat_profile_id)
+            return
+        self._chat_planner_ready.set()
+
+    def _text_run_queued_next(self) -> bool:
+        """Whether the next dispatchable job is a text run.
+
+        Narrower than the text answer of `_handoff_chat_target`, which also counts
+        a queued edit verification: that is background work, and the retry of a
+        foreground media job is dispatched ahead of it. A peek that fails answers
+        yes, so the handoff falls back to restoring chat as it always has.
+        """
+
+        try:
+            candidate = self.scheduler.peek_next_eligible_job("primary")
+        except Exception:
+            logger.exception("Could not inspect the next job before a media retry")
+            return True
+        if not isinstance(candidate, tuple) or len(candidate) != 2 or candidate[1] is None:
+            return False
+        with self.session_factory() as session:
+            run = session.get(Run, candidate[1])
+            return run is not None and run.operation == Operation.TEXT.value
 
     def schedule_media_restart(self) -> None:
         """Bring the media worker back after something borrowed the device.
@@ -9299,10 +9378,10 @@ class ConversationOrchestrator:
         else:
             await self.events.publish("run.failed", run_id, {"job_id": job_id, "error": error})
 
-    def _reserve_failed_media_retry(
-        self, session: Session, job: Job, run: Run, claim: JobClaim | None
+    def _failed_media_retry(
+        self, session: Session, run: Run, claim: JobClaim | None
     ) -> dict[str, Any] | None:
-        """Requeue one owned media failure with its accepted configuration intact."""
+        """The retry an owned media failure of this run would reserve, changing nothing."""
         if self._closing or claim is None or setup_verification_for_chat(session, run.chat_id):
             return None
         retry = reserve_retry(run.provenance_json, run.operation)
@@ -9315,6 +9394,15 @@ class ConversationOrchestrator:
             _require_consistent_workflow_witness(work_step, run)
             self.preflight_workflow_lora_replay(session, run)
         except (RuntimeError, WorkflowLoraAdmissionError):
+            return None
+        return retry
+
+    def _reserve_failed_media_retry(
+        self, session: Session, job: Job, run: Run, claim: JobClaim | None
+    ) -> dict[str, Any] | None:
+        """Requeue one owned media failure with its accepted configuration intact."""
+        retry = self._failed_media_retry(session, run, claim)
+        if retry is None:
             return None
         self.prepare_retry(session, run)
         run.provenance_json = {**run.provenance_json, "failure_retries": retry}
