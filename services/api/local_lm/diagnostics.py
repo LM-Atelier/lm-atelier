@@ -14,6 +14,7 @@ from . import __version__
 from .artifacts import ArtifactStore
 from .config import Settings
 from .domain import ArtifactKind, utcnow
+from .filesystem_links import is_link_or_reparse
 from .hardware import collect_system_info
 from .models import Artifact, Chat, Job, ModelInstall, Project, Run, WorkflowDefinition
 from .processes import ProcessSupervisor
@@ -37,7 +38,18 @@ class DiagnosticBundleBuilder:
         job_statuses = Counter(session.scalars(select(Job.status)).all())
         # The windows retention actually uses, which Settings may have changed.
         retention = windows_for(session, self.settings)
-        log_files = [path for path in self.settings.log_dir.iterdir() if path.is_file()]
+        # is_file follows a link, so a name in the log directory would be
+        # measured as a local log when it points somewhere else. Skip it first.
+        log_files = [
+            path
+            for path in self.settings.log_dir.iterdir()
+            if not is_link_or_reparse(
+                path,
+                missing="assume_link",
+                unreadable="assume_link",
+            )
+            and path.is_file()
+        ]
         payload = {
             "format": "lm-atelier-diagnostics",
             "version": 1,
