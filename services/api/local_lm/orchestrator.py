@@ -1678,24 +1678,9 @@ class ConversationOrchestrator:
         chat = session.get(Chat, chat_id)
         if not chat:
             raise LookupError("chat not found")
-        if request.prompt_source is not None and inherited_prompt_source is not None:
-            raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
-        if prompt_batch_selection is not None and (
-            request.prompt_source is not None or inherited_prompt_source is not None
-        ):
-            raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
-        has_prompt_source = request.prompt_source is not None or inherited_prompt_source is not None
-        if has_prompt_source and (
-            (
-                request.mode != RoutingMode.IMAGE
-                and not (request.mode == RoutingMode.AUTO and inherited_prompt_source is not None)
-            )
-            or request.input_artifact_ids
-            or request.references
-            or request.output_count not in {None, 1}
-            or request.ordered_settings
-        ):
-            raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
+        has_prompt_source = self._turn_uses_prompt_source(
+            request, inherited_prompt_source, prompt_batch_selection
+        )
         prompt_source_resources = None
         prompt_batch_resources: tuple[PromptSourceResourceOverrides, ...] = ()
         if prompt_batch_selection is not None:
@@ -1761,45 +1746,12 @@ class ConversationOrchestrator:
                 ),
             )
         )
-        replacement_message = (
-            session.get(Message, replacement_message_id) if replacement_message_id else None
+        replacement_message = self._turn_replacement_message(
+            session, chat_id, replacement_message_id
         )
-        if replacement_message_id and (
-            not replacement_message
-            or replacement_message.chat_id != chat_id
-            or replacement_message.role != MessageRole.ASSISTANT.value
-            or not replacement_message.transcript_visible
-        ):
-            raise LookupError("replacement assistant message not found in this chat")
-        if replacement_message:
-            if replacement_message.status != MessageStatus.COMPLETE.value:
-                raise ResponseRevisionConflict(
-                    "only a completed visible response can be regenerated"
-                )
-            pending_revision = session.scalar(
-                select(ResponseRevision.id).where(
-                    ResponseRevision.message_id == replacement_message.id,
-                    ResponseRevision.status == MessageStatus.PENDING.value,
-                )
-            )
-            if pending_revision:
-                raise ResponseRevisionConflict("this response is already being regenerated")
-        parent_message_id = request.parent_message_id
-        if parent_message_id:
-            parent = session.get(Message, parent_message_id)
-            if not parent or parent.chat_id != chat_id:
-                raise LookupError("parent message not found in this chat")
-        elif not use_explicit_parent:
-            parent_message_id = chat.active_head_message_id
-            if not parent_message_id:
-                parent_message_id = session.scalar(
-                    select(Message.id)
-                    .where(Message.chat_id == chat_id)
-                    .order_by(
-                        Message.updated_at.desc(), Message.created_at.desc(), Message.id.desc()
-                    )
-                    .limit(1)
-                )
+        parent_message_id = self._turn_parent_message_id(
+            session, chat, chat_id, request, use_explicit_parent=use_explicit_parent
+        )
         pending_dependency_step_id = self._pending_parent_step_id(
             session,
             chat_id,
@@ -1817,12 +1769,7 @@ class ConversationOrchestrator:
                 parent_message_id,
             )
         )
-        explicit_artifacts: dict[str, Artifact] = {}
-        for artifact_id in request.input_artifact_ids:
-            artifact = session.get(Artifact, artifact_id)
-            if not artifact:
-                raise LookupError(f"input artifact not found: {artifact_id}")
-            explicit_artifacts[artifact_id] = artifact
+        explicit_artifacts = self._turn_input_artifacts(session, request)
 
         accepted_offer = None
         if (
@@ -1838,44 +1785,25 @@ class ConversationOrchestrator:
             )
 
         mode = request.mode or RoutingMode(chat.routing_mode)
-        ordered_intent = None
-        if accepted_offer and len(accepted_offer.items) > 1:
-            ordered_intent = ordered_intent_for_offer(accepted_offer)
-        elif replacement_message is None and prompt_batch_selection is None:
-            ordered_intent = OrderedPlanCompiler.deterministic(
-                request.text,
-                mode,
-                has_media_input=bool(explicit_artifacts),
-            )
-            if (
-                ordered_intent is None
-                and mode == RoutingMode.AUTO
-                and await self._chat_planner_available()
-            ):
-                ordered_intent = await OrderedPlanCompiler.plan_with_model(
-                    adapter=self.engines.chat,
-                    text=request.text,
-                    mode=mode,
-                    conversation=self._routing_context(
-                        session,
-                        chat,
-                        context_head_message_id,
-                    ),
-                    has_media_input=bool(explicit_artifacts),
-                )
-        if accepted_offer and ordered_intent and not request.confirm_media:
-            raise OrderedPlanConfirmationRequired(ordered_intent)
-        if (
-            ordered_intent
-            and chat.confirm_uncertain_media
-            and (ordered_intent.requires_confirmation or ordered_intent.confidence < 0.8)
-            and not request.confirm_media
-        ):
-            raise OrderedPlanConfirmationRequired(ordered_intent)
-        if ordered_intent and (has_prompt_source or prompt_batch_selection is not None):
-            raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
-        if ordered_intent and request.source_fit is not None:
-            raise ValueError("Choose a single image edit to fit its source canvas.")
+        ordered_intent = await self._turn_ordered_intent(
+            session,
+            chat,
+            request,
+            mode,
+            accepted_offer=accepted_offer,
+            replacement_message=replacement_message,
+            prompt_batch_selection=prompt_batch_selection,
+            explicit_artifacts=explicit_artifacts,
+            context_head_message_id=context_head_message_id,
+        )
+        self._refuse_an_ordered_turn_it_cannot_take(
+            ordered_intent,
+            chat,
+            request,
+            accepted_offer=accepted_offer,
+            has_prompt_source=has_prompt_source,
+            prompt_batch_selection=prompt_batch_selection,
+        )
         if ordered_intent:
             return await self._create_ordered_turn(
                 session,
@@ -1903,48 +1831,15 @@ class ConversationOrchestrator:
         )
         has_prior_image = prior_image is not None
         routing_context = self._routing_context(session, chat, context_head_message_id)
-        if prompt_batch_selection is not None:
-            plan = RoutingPlan(
-                operation=Operation.TEXT_TO_IMAGE,
-                standalone_prompt=prompt_batch_selection.items[0].reviewed_prompt,
-                output_count=len(prompt_batch_selection.items),
-                confidence=1.0,
-                reason_code=RoutingReasonCode.EXPLICIT_IMAGE_MODE,
-                reason="Queued reviewed Prompt Library drafts.",
-            )
-        elif accepted_offer:
-            plan = routing_plan_for_offer(accepted_offer)
-            if not request.confirm_media:
-                raise RouteConfirmationRequired(plan)
-        else:
-            planner_available = (
-                await self._chat_planner_available() if mode == RoutingMode.AUTO else True
-            )
-            if planner_available:
-                plan = await self.router.plan_with_model(
-                    adapter=self.engines.chat,
-                    text=request.text,
-                    mode=mode,
-                    input_artifact_ids=request.input_artifact_ids,
-                    has_prior_image=has_prior_image,
-                    conversation=routing_context,
-                )
-            else:
-                plan = self.router.plan(
-                    text=request.text,
-                    mode=mode,
-                    input_artifact_ids=request.input_artifact_ids,
-                    has_prior_image=has_prior_image,
-                    conversation=routing_context,
-                )
-        if (
-            mode == RoutingMode.AUTO
-            and chat.confirm_uncertain_media
-            and plan.operation != Operation.TEXT
-            and plan.confidence < 0.8
-            and not request.confirm_media
-        ):
-            raise RouteConfirmationRequired(plan)
+        plan = await self._turn_routing_plan(
+            chat,
+            request,
+            mode,
+            accepted_offer=accepted_offer,
+            prompt_batch_selection=prompt_batch_selection,
+            has_prior_image=has_prior_image,
+            routing_context=routing_context,
+        )
         resolved_input_ids = list(dict.fromkeys(request.input_artifact_ids))
         prior_prompt: str | None = None
         if plan.operation in {Operation.IMAGE_TO_IMAGE, Operation.IMAGE_TO_VIDEO}:
@@ -10096,6 +9991,233 @@ class ConversationOrchestrator:
             rows.append(message)
             current_id = message.parent_id
         return rows
+
+    async def _turn_ordered_intent(
+        self,
+        session: Session,
+        chat: Chat,
+        request: TurnRequest,
+        mode: RoutingMode,
+        *,
+        accepted_offer: GenerationOffer | None,
+        replacement_message: Message | None,
+        prompt_batch_selection: PromptBatchQueueSelection | None,
+        explicit_artifacts: dict[str, Artifact],
+        context_head_message_id: str | None,
+    ) -> OrderedWorkIntent | None:
+        """The ordered plan a turn asks for: an accepted offer of several, or its words compiled."""
+
+        ordered_intent = None
+        if accepted_offer and len(accepted_offer.items) > 1:
+            ordered_intent = ordered_intent_for_offer(accepted_offer)
+        elif replacement_message is None and prompt_batch_selection is None:
+            ordered_intent = OrderedPlanCompiler.deterministic(
+                request.text,
+                mode,
+                has_media_input=bool(explicit_artifacts),
+            )
+            if (
+                ordered_intent is None
+                and mode == RoutingMode.AUTO
+                and await self._chat_planner_available()
+            ):
+                ordered_intent = await OrderedPlanCompiler.plan_with_model(
+                    adapter=self.engines.chat,
+                    text=request.text,
+                    mode=mode,
+                    conversation=self._routing_context(
+                        session,
+                        chat,
+                        context_head_message_id,
+                    ),
+                    has_media_input=bool(explicit_artifacts),
+                )
+        return ordered_intent
+
+    @staticmethod
+    def _refuse_an_ordered_turn_it_cannot_take(
+        ordered_intent: OrderedWorkIntent | None,
+        chat: Chat,
+        request: TurnRequest,
+        *,
+        accepted_offer: GenerationOffer | None,
+        has_prompt_source: bool,
+        prompt_batch_selection: PromptBatchQueueSelection | None,
+    ) -> None:
+        """Ask before an ordered plan that needs confirming, and refuse one the turn cannot take."""
+
+        if accepted_offer and ordered_intent and not request.confirm_media:
+            raise OrderedPlanConfirmationRequired(ordered_intent)
+        if (
+            ordered_intent
+            and chat.confirm_uncertain_media
+            and (ordered_intent.requires_confirmation or ordered_intent.confidence < 0.8)
+            and not request.confirm_media
+        ):
+            raise OrderedPlanConfirmationRequired(ordered_intent)
+        if ordered_intent and (has_prompt_source or prompt_batch_selection is not None):
+            raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
+        if ordered_intent and request.source_fit is not None:
+            raise ValueError("Choose a single image edit to fit its source canvas.")
+
+    async def _turn_routing_plan(
+        self,
+        chat: Chat,
+        request: TurnRequest,
+        mode: RoutingMode,
+        *,
+        accepted_offer: GenerationOffer | None,
+        prompt_batch_selection: PromptBatchQueueSelection | None,
+        has_prior_image: bool,
+        routing_context: list[dict[str, str]],
+    ) -> RoutingPlan:
+        """What a single turn makes, asking first when an uncertain media plan needs confirming."""
+
+        if prompt_batch_selection is not None:
+            plan = RoutingPlan(
+                operation=Operation.TEXT_TO_IMAGE,
+                standalone_prompt=prompt_batch_selection.items[0].reviewed_prompt,
+                output_count=len(prompt_batch_selection.items),
+                confidence=1.0,
+                reason_code=RoutingReasonCode.EXPLICIT_IMAGE_MODE,
+                reason="Queued reviewed Prompt Library drafts.",
+            )
+        elif accepted_offer:
+            plan = routing_plan_for_offer(accepted_offer)
+            if not request.confirm_media:
+                raise RouteConfirmationRequired(plan)
+        else:
+            planner_available = (
+                await self._chat_planner_available() if mode == RoutingMode.AUTO else True
+            )
+            if planner_available:
+                plan = await self.router.plan_with_model(
+                    adapter=self.engines.chat,
+                    text=request.text,
+                    mode=mode,
+                    input_artifact_ids=request.input_artifact_ids,
+                    has_prior_image=has_prior_image,
+                    conversation=routing_context,
+                )
+            else:
+                plan = self.router.plan(
+                    text=request.text,
+                    mode=mode,
+                    input_artifact_ids=request.input_artifact_ids,
+                    has_prior_image=has_prior_image,
+                    conversation=routing_context,
+                )
+        if (
+            mode == RoutingMode.AUTO
+            and chat.confirm_uncertain_media
+            and plan.operation != Operation.TEXT
+            and plan.confidence < 0.8
+            and not request.confirm_media
+        ):
+            raise RouteConfirmationRequired(plan)
+        return plan
+
+    @staticmethod
+    def _turn_uses_prompt_source(
+        request: TurnRequest,
+        inherited_prompt_source: object | None,
+        prompt_batch_selection: PromptBatchQueueSelection | None,
+    ) -> bool:
+        """Whether the turn expands a prompt source, refusing one it cannot use."""
+
+        if request.prompt_source is not None and inherited_prompt_source is not None:
+            raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
+        if prompt_batch_selection is not None and (
+            request.prompt_source is not None or inherited_prompt_source is not None
+        ):
+            raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
+        has_prompt_source = request.prompt_source is not None or inherited_prompt_source is not None
+        if has_prompt_source and (
+            (
+                request.mode != RoutingMode.IMAGE
+                and not (request.mode == RoutingMode.AUTO and inherited_prompt_source is not None)
+            )
+            or request.input_artifact_ids
+            or request.references
+            or request.output_count not in {None, 1}
+            or request.ordered_settings
+        ):
+            raise PromptExpansionUseError(PROMPT_SOURCE_INVALID)
+        return has_prompt_source
+
+    @staticmethod
+    def _turn_replacement_message(
+        session: Session,
+        chat_id: str,
+        replacement_message_id: str | None,
+    ) -> Message | None:
+        """The response a turn regenerates, if it names one this chat can regenerate now."""
+
+        replacement_message = (
+            session.get(Message, replacement_message_id) if replacement_message_id else None
+        )
+        if replacement_message_id and (
+            not replacement_message
+            or replacement_message.chat_id != chat_id
+            or replacement_message.role != MessageRole.ASSISTANT.value
+            or not replacement_message.transcript_visible
+        ):
+            raise LookupError("replacement assistant message not found in this chat")
+        if replacement_message:
+            if replacement_message.status != MessageStatus.COMPLETE.value:
+                raise ResponseRevisionConflict(
+                    "only a completed visible response can be regenerated"
+                )
+            pending_revision = session.scalar(
+                select(ResponseRevision.id).where(
+                    ResponseRevision.message_id == replacement_message.id,
+                    ResponseRevision.status == MessageStatus.PENDING.value,
+                )
+            )
+            if pending_revision:
+                raise ResponseRevisionConflict("this response is already being regenerated")
+        return replacement_message
+
+    @staticmethod
+    def _turn_parent_message_id(
+        session: Session,
+        chat: Chat,
+        chat_id: str,
+        request: TurnRequest,
+        *,
+        use_explicit_parent: bool,
+    ) -> str | None:
+        """The message a turn answers: the one it names, else the chat's head or latest."""
+
+        parent_message_id = request.parent_message_id
+        if parent_message_id:
+            parent = session.get(Message, parent_message_id)
+            if not parent or parent.chat_id != chat_id:
+                raise LookupError("parent message not found in this chat")
+        elif not use_explicit_parent:
+            parent_message_id = chat.active_head_message_id
+            if not parent_message_id:
+                parent_message_id = session.scalar(
+                    select(Message.id)
+                    .where(Message.chat_id == chat_id)
+                    .order_by(
+                        Message.updated_at.desc(), Message.created_at.desc(), Message.id.desc()
+                    )
+                    .limit(1)
+                )
+        return parent_message_id
+
+    @staticmethod
+    def _turn_input_artifacts(session: Session, request: TurnRequest) -> dict[str, Artifact]:
+        """The pictures a turn names, each of which must exist."""
+
+        explicit_artifacts: dict[str, Artifact] = {}
+        for artifact_id in request.input_artifact_ids:
+            artifact = session.get(Artifact, artifact_id)
+            if not artifact:
+                raise LookupError(f"input artifact not found: {artifact_id}")
+            explicit_artifacts[artifact_id] = artifact
+        return explicit_artifacts
 
     @staticmethod
     def _pending_parent_step_id(
