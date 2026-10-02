@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -302,6 +304,72 @@ def test_template_discovery_prefers_the_configured_interpreter(tmp_path: Path) -
     discovered = ComfyTemplateRegistry(settings)._template_files()
 
     assert [path.name for path in discovered] == ["from_interpreter.json"]
+
+
+def _make_link_dir(link: Path, target: Path) -> bool:
+    """Create a directory-shaped redirection, or False without privileges."""
+
+    if os.name == "nt":
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True,
+            check=False,
+        )
+        return completed.returncode == 0
+    try:
+        os.symlink(target, link, target_is_directory=True)
+    except OSError:
+        return False
+    return True
+
+
+def test_a_linked_template_directory_is_not_listed(tmp_path: Path) -> None:
+    settings = _discovery_settings(tmp_path, "portable")
+    executable = settings.comfy_executable
+    assert executable is not None
+    templates = (
+        executable.parent
+        / "Lib"
+        / "site-packages"
+        / "comfyui_workflow_templates_json"
+        / "templates"
+    )
+    real = templates.with_name("templates-real")
+    templates.rename(real)
+    if not _make_link_dir(templates, real):
+        pytest.skip("directory links are unavailable")
+
+    discovered = ComfyTemplateRegistry(settings)._template_files()
+
+    assert discovered == []
+    assert (real / "example.json").is_file()
+
+
+def test_a_linked_template_file_is_not_listed(tmp_path: Path) -> None:
+    settings = _discovery_settings(tmp_path, "portable")
+    executable = settings.comfy_executable
+    assert executable is not None
+    templates = (
+        executable.parent
+        / "Lib"
+        / "site-packages"
+        / "comfyui_workflow_templates_json"
+        / "templates"
+    )
+    outside = tmp_path / "outside.json"
+    outside.write_text("A neutral fixture.", encoding="utf-8")
+    linked = templates / "example.json"
+    linked.unlink()
+    try:
+        linked.symlink_to(outside)
+    except OSError:
+        pytest.skip("file symlinks are unavailable")
+
+    discovered = ComfyTemplateRegistry(settings)._template_files()
+
+    assert discovered == []
+    assert outside.read_text(encoding="utf-8") == "A neutral fixture."
+    assert linked.is_symlink()
 
 
 def test_registry_requires_the_exact_backend_declared_repository(tmp_path: Path) -> None:

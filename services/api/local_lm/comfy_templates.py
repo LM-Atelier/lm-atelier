@@ -13,6 +13,7 @@ from urllib.parse import unquote, urlparse
 from .comfy_subgraphs import BYPASS_MODE, _bypass_source, _Link, _slot_types
 from .comfy_workflow_packages import FRONTEND_SYSTEM_NODE_TYPES
 from .config import Settings
+from .filesystem_links import is_link_or_reparse
 from .schemas import SettingField
 from .settings_registry import (
     IMAGE_SETTINGS,
@@ -292,7 +293,7 @@ class ComfyTemplateRegistry:
                     role=role,
                     operation=operation,
                     score=0,
-                    sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                    sha256=hashlib.sha256(_template_bytes(path)).hexdigest(),
                     dependencies=dependencies,
                     published_date=_metadata_string(template_metadata, "date"),
                     general_purpose=_is_general_purpose_template(
@@ -419,7 +420,7 @@ class ComfyTemplateRegistry:
                 role=role,
                 operation=operation,
                 score=0,
-                sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                sha256=hashlib.sha256(_template_bytes(path)).hexdigest(),
                 dependencies=dependencies,
                 published_date=_metadata_string(template_metadata, "date"),
                 general_purpose=_is_general_purpose_template(
@@ -544,8 +545,9 @@ class ComfyTemplateRegistry:
 
     def _template_files(self) -> list[Path]:
         for candidate in self._template_directories():
-            if candidate.is_dir():
-                return sorted(candidate.glob("*.json"))
+            if _is_link(candidate) or not candidate.is_dir():
+                continue
+            return [path for path in sorted(candidate.glob("*.json")) if not _is_link(path)]
         return []
 
     def _template_directories(self) -> list[Path]:
@@ -596,7 +598,7 @@ def _tokens(value: str) -> set[str]:
 
 def _template_index_metadata(paths: list[Path]) -> dict[str, dict[str, Any]]:
     index_path = next((path for path in paths if path.name == "index.json"), None)
-    if index_path is None:
+    if index_path is None or _is_link(index_path):
         return {}
     try:
         raw = json.loads(index_path.read_text(encoding="utf-8"))
@@ -806,7 +808,21 @@ def _operation_for_template(
     return "text_to_image"
 
 
+def _is_link(path: Path) -> bool:
+    return is_link_or_reparse(path, missing="assume_link", unreadable="assume_link")
+
+
+def _template_bytes(path: Path) -> bytes:
+    """Return the template bytes, and refuse a filesystem link."""
+
+    if _is_link(path):
+        raise ValueError("ComfyUI template is a filesystem link")
+    return path.read_bytes()
+
+
 def _read_json(path: Path) -> dict[str, Any]:
+    if _is_link(path):
+        raise ValueError("ComfyUI template is a filesystem link")
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
         raise ValueError(f"ComfyUI template must contain an object: {path.name}")
