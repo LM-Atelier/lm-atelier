@@ -11,6 +11,7 @@ from starlette.concurrency import run_in_threadpool
 
 from .api_errors import api_error
 from .db import SessionLocal
+from .models import Run
 from .output_recipe import OutputRecipe, OutputRecipeUnavailable, build_output_recipe
 from .output_recipe_bundle import OutputRecipeBundle, build_output_recipe_bundle
 from .output_recipe_check import (
@@ -20,7 +21,7 @@ from .output_recipe_check import (
     most_read_for,
     read_record_file,
 )
-from .output_recipe_replay import plan_output_recipe_replay
+from .output_recipe_replay import plan_output_recipe_replay, replay_outcome
 
 if TYPE_CHECKING:
     from .artifacts import ArtifactStore
@@ -174,6 +175,24 @@ async def plan_an_exact_replay(request: Request) -> JSONResponse:
     except OutputRecipeCheckRefused as exc:
         raise api_error(exc.status, exc.code, exc.message) from exc
     return JSONResponse(plan, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/runs/{run_id}/replay-result")
+async def replay_result(run_id: str) -> JSONResponse:
+    """Whether a run generated again from a record came out as the record's output did."""
+
+    outcome = await run_in_threadpool(_replay_result, run_id)
+    if outcome is None:
+        raise api_error(
+            404, "replay-result-not-found", "This generation was not generated again from a record."
+        )
+    return JSONResponse(outcome, headers={"Cache-Control": "no-store"})
+
+
+def _replay_result(run_id: str) -> dict[str, Any] | None:
+    with SessionLocal() as session:
+        run = session.get(Run, run_id)
+        return replay_outcome(run) if run is not None else None
 
 
 def _plan(content: bytes, media_engine: str) -> dict[str, Any]:

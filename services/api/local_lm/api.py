@@ -298,6 +298,7 @@ from .output_recipe_replay import (
     ReplayDiffers,
     chat_is_clean_for_replay,
     exact_replay_check,
+    mark_replay,
     plan_output_recipe_replay,
     replay_turn_request,
     without_edit_check,
@@ -4456,6 +4457,7 @@ async def replay_a_generation_record(
 
     def check_then_restore(transaction: Session, first: Run) -> None:
         check(transaction, first)
+        mark_replay(first, record)
         if restore_edit_check is not None:
             restore_edit_check()
 

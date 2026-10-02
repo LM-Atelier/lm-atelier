@@ -12,7 +12,9 @@ import {
   omissionText,
   operationText,
   readGenerationRecord,
+  readReplayOutcome,
   removedText,
+  replayOutcomeText,
 } from "./generationRecord";
 
 /** What the person is told when the picture could not be saved with its record. */
@@ -56,6 +58,21 @@ function GenerationRecordBody({
       return null;
     }
   }, [record.data]);
+  // Only a run generated again from a record has an answer; any other is simply not shown.
+  const replayed = useQuery({
+    queryKey: ["replay-result", runId],
+    queryFn: ({ signal }) => api.replayResult(runId, signal),
+    retry: false,
+    staleTime: 0,
+    gcTime: 0,
+  });
+  const outcome = useMemo(() => {
+    try {
+      return replayed.data ? readReplayOutcome(replayed.data) : null;
+    } catch {
+      return null;
+    }
+  }, [replayed.data]);
   const ready = Boolean(record.data && summary);
   const download = () => {
     if (!record.data || !summary) return;
@@ -120,6 +137,7 @@ function GenerationRecordBody({
             a color profile is applied to the pixels rather than kept.
           </p>
         )}
+        {outcome && <p>{replayOutcomeText(outcome)}</p>}
         {record.isPending && <p role="status">Reading the record…</p>}
         {(record.isError || (record.data && !summary)) && (
           <p role="alert">The record could not be made for this output.</p>

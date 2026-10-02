@@ -11,7 +11,9 @@ import { GenerationRecordButton } from "./GenerationRecordButton";
 import { recordBytes } from "./generationRecordFixtures";
 import type { MessagePart } from "./types";
 
-vi.mock("./api", () => ({ api: { generationRecord: vi.fn(), generationRecordBundle: vi.fn() } }));
+vi.mock("./api", () => ({
+  api: { generationRecord: vi.fn(), generationRecordBundle: vi.fn(), replayResult: vi.fn() },
+}));
 vi.mock("./format", async (original) => ({
   ...(await original<typeof import("./format")>()),
   downloadBytes: vi.fn(),
@@ -20,6 +22,7 @@ vi.mock("./format", async (original) => ({
 const SHA = "a".repeat(64);
 const generationRecord = vi.mocked(api.generationRecord);
 const generationRecordBundle = vi.mocked(api.generationRecordBundle);
+const replayResult = vi.mocked(api.replayResult);
 const saved = vi.mocked(downloadBytes);
 
 function withQueries(children: ReactNode) {
@@ -34,6 +37,8 @@ function openRecord() {
 beforeEach(() => {
   generationRecord.mockReset();
   generationRecordBundle.mockReset();
+  replayResult.mockReset();
+  replayResult.mockRejectedValue(Object.assign(new Error("not found"), { code: "replay-result-not-found" }));
   saved.mockReset();
 });
 afterEach(cleanup);
@@ -241,6 +246,27 @@ describe("the generation record dialog", () => {
     expect(await screen.findByRole("button", { name: "Download record" })).toBeInTheDocument();
     await screen.findByText("Left out, as you chose.");
     expect(screen.queryByRole("button", { name: "Download with picture" })).toBeNull();
+  });
+
+  it("says whether a run generated again from a record came out the same", async () => {
+    generationRecord.mockResolvedValue(recordBytes());
+    replayResult.mockResolvedValue({ state: "different", record_digest: `sha256:${"d".repeat(64)}` });
+    render(withQueries(<GenerationRecordButton runId="run_1" artifactId={`sha256:${SHA}`} kind="image" />));
+
+    openRecord();
+
+    expect(await screen.findByText(/it came out differently/)).toBeInTheDocument();
+    expect(replayResult).toHaveBeenCalledWith("run_1", expect.any(AbortSignal));
+  });
+
+  it("says nothing about replays for a run that was not one", async () => {
+    generationRecord.mockResolvedValue(recordBytes());
+    render(withQueries(<GenerationRecordButton runId="run_1" artifactId={`sha256:${SHA}`} kind="image" />));
+
+    openRecord();
+    await screen.findByText("Left out, as you chose.");
+
+    expect(screen.queryByText(/Generated again from a record/)).toBeNull();
   });
 
   it("offers nothing to save when the record cannot be made", async () => {

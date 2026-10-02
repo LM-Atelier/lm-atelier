@@ -22,6 +22,7 @@ already requires.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from typing import Any, Final, Literal
 
@@ -33,7 +34,7 @@ from .auxiliary_assets import (
     resolve_lora_stack,
     revision_accepts_added_loras,
 )
-from .domain import Operation, operation_model_role
+from .domain import Operation, RunStatus, operation_model_role
 from .engines import EngineRegistry
 from .lora_constraints import MAX_LORA_STRENGTH
 from .model_planner import (
@@ -54,6 +55,7 @@ from .models import (
     WorkflowRevision,
 )
 from .orchestrator import ConversationOrchestrator
+from .output_origin import names_a_preview
 from .output_recipe import describe_run
 from .output_recipe_v1 import canonical_bytes
 from .schemas import TurnRequest
@@ -80,6 +82,11 @@ REPLAYED_SECTIONS: Final = (
     "model",
     "loras",
 )
+#: Where a replayed run keeps what it was generated again from.
+REPLAY_RECEIPT_KEY: Final = "replay"
+ReplayOutcome = Literal["pending", "identical", "different", "output_missing"]
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 #: Removals that would hide from the comparison something that ran.
 _UNCOMPARED_REMOVALS: Final = frozenset({"settings.mask", "settings.workflow_lora_overrides"})
 
@@ -580,3 +587,57 @@ def _compared(name: str, value: Any) -> Any:
         # The files are the model; where they came from is not compared.
         return value["files"]
     return value
+
+
+def mark_replay(run: Run, record: dict[str, Any]) -> None:
+    """Keep on a replayed run which record it is, and which output it should come out as."""
+
+    run.provenance_json = {
+        **run.provenance_json,
+        REPLAY_RECEIPT_KEY: {
+            "record_digest": record["digest"],
+            "output_index": record["output"]["index"],
+            "output_sha256": record["output"]["sha256"],
+        },
+    }
+
+
+def replay_outcome(run: Run) -> dict[str, Any] | None:
+    """Whether a replayed run's output came out as the record's did, or None for another run.
+
+    Different bytes are reported, never refused: the record does not hold the
+    executed graph or the runtime's version, so a matching run can still draw
+    differently, and saying so is the point.
+    """
+
+    receipt = run.provenance_json.get(REPLAY_RECEIPT_KEY)
+    if (
+        not isinstance(receipt, dict)
+        or not isinstance(receipt.get("record_digest"), str)
+        or not _DIGEST.fullmatch(receipt["record_digest"])
+        or not isinstance(receipt.get("output_sha256"), str)
+        or not _HEX64.fullmatch(receipt["output_sha256"])
+        or type(receipt.get("output_index")) is not int
+        or receipt["output_index"] < 0
+    ):
+        return None
+    state: ReplayOutcome
+    if run.status in {RunStatus.FAILED.value, RunStatus.CANCELLED.value}:
+        state = "output_missing"
+    elif run.status != RunStatus.COMPLETE.value:
+        state = "pending"
+    else:
+        outputs = run.provenance_json.get("outputs")
+        kept = [
+            item
+            for item in (outputs if isinstance(outputs, list) else [])
+            if isinstance(item, dict) and not names_a_preview(item.get("output_origin"))
+        ]
+        index = receipt["output_index"]
+        if index >= len(kept):
+            state = "output_missing"
+        elif kept[index].get("artifact_id") == f"sha256:{receipt['output_sha256']}":
+            state = "identical"
+        else:
+            state = "different"
+    return {"state": state, "record_digest": receipt["record_digest"]}

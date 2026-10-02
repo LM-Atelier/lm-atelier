@@ -518,3 +518,34 @@ async def test_an_edit_worded_by_another_version_is_not_replayed(client: AsyncCl
         item for item in response.json()["refusals"] if item["code"] == "replay-record-unsupported"
     ]
     assert unsupported[0]["reasons"] == ["edit_prompt_wording"]
+
+
+async def test_a_replay_says_whether_it_came_out_as_the_record_did(client: AsyncClient) -> None:
+    profile_id = _profile()
+    original, content = await _recorded(client, profile_id)
+    again = await _replays_exactly(client, content)
+
+    same = await client.get(f"/api/runs/{again['id']}/replay-result")
+    not_a_replay = await client.get(f"/api/runs/{original['id']}/replay-result")
+
+    assert same.status_code == 200, same.text
+    assert same.json() == {
+        "state": "identical",
+        "record_digest": open_output_recipe(content)["digest"],
+    }
+    assert not_a_replay.status_code == 404
+    assert not_a_replay.json()["code"] == "replay-result-not-found"
+
+    # As a runtime that drew differently, or kept nothing, would leave it.
+    other = await _picture(client)
+    for outputs, state in (
+        ([{**again["provenance_json"]["outputs"][0], "artifact_id": other}], "different"),
+        ([], "output_missing"),
+    ):
+        with SessionLocal() as session:
+            run = session.get(Run, again["id"])
+            assert run is not None
+            run.provenance_json = {**run.provenance_json, "outputs": outputs}
+            session.commit()
+        response = await client.get(f"/api/runs/{again['id']}/replay-result")
+        assert response.json()["state"] == state
