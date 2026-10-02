@@ -275,7 +275,11 @@ def verify_comfy_registry_wheel_environment(
     manifest_path = destination / "environment-manifest.json"
     site_packages = destination / "site-packages"
     children = {path.name for path in destination.iterdir()}
-    if children != {manifest_path.name, site_packages.name} or _is_link_or_reparse(site_packages):
+    if (
+        children != {manifest_path.name, site_packages.name}
+        or _is_link_or_reparse(site_packages)
+        or _is_link_or_reparse(manifest_path)
+    ):
         raise ComfyRegistryWheelEnvironmentError(
             "invalid_environment", "Wheel environment layout is invalid"
         )

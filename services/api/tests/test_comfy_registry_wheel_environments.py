@@ -563,6 +563,37 @@ async def test_legacy_path_and_manifest_are_fixed_refusals(tmp_path: Path) -> No
     assert raised.value.code == "legacy_environment_manifest"
 
 
+async def test_verification_refuses_a_linked_environment_manifest(tmp_path: Path) -> None:
+    closure = _empty_closure()
+    destination = _destination(tmp_path, closure)
+    report = await assemble_comfy_registry_wheel_environment(
+        closure,
+        {},
+        python_executable=Path(sys.executable),
+        destination=destination,
+        media_worker_stopped=True,
+    )
+    manifest_path = destination / "environment-manifest.json"
+    outside = tmp_path / "outside-manifest.json"
+    payload = manifest_path.read_bytes()
+    outside.write_bytes(payload)
+    manifest_path.unlink()
+    try:
+        manifest_path.symlink_to(outside)
+    except OSError:
+        pytest.skip("file symlinks are unavailable")
+
+    with pytest.raises(ComfyRegistryWheelEnvironmentError) as raised:
+        verify_comfy_registry_wheel_environment(
+            destination,
+            expected_closure_sha256=closure.closure_sha256,
+            expected_environment_sha256=report.environment_sha256,
+        )
+
+    assert raised.value.code == "invalid_environment"
+    assert outside.read_bytes() == payload
+
+
 async def test_worker_must_be_stopped_before_any_other_validation(tmp_path: Path) -> None:
     closure = _closure(_wheel_content())
 
