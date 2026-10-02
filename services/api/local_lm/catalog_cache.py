@@ -3,7 +3,6 @@ from __future__ import annotations
 import contextlib
 import errno
 import os
-import stat
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -19,6 +18,7 @@ from .filesystem_links import (
     is_link_or_reparse,
     list_entries,
     open_child_directory,
+    open_entry,
     remove_entry,
     rename_entry,
 )
@@ -107,20 +107,16 @@ class CatalogCacheStore:
         return self.root / f"{key}{suffix}"
 
     def read_text(self, path: Path, *, max_age_seconds: float | None = None) -> str | None:
-        if self._usable_entry(path, max_age_seconds=max_age_seconds) is None:
+        payload = self._read_cached(path, max_age_seconds=max_age_seconds)
+        if payload is None:
             return None
         try:
-            return path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
+            return payload.decode("utf-8")
+        except UnicodeError:
             return None
 
     def read_bytes(self, path: Path, *, max_age_seconds: float | None = None) -> bytes | None:
-        if self._usable_entry(path, max_age_seconds=max_age_seconds) is None:
-            return None
-        try:
-            return path.read_bytes()
-        except OSError:
-            return None
+        return self._read_cached(path, max_age_seconds=max_age_seconds)
 
     def write_text(self, path: Path, content: str) -> None:
         try:
@@ -286,30 +282,38 @@ class CatalogCacheStore:
             return
         self.prune(protected=path)
 
-    def _usable_entry(
-        self,
-        path: Path,
-        *,
-        max_age_seconds: float | None,
-    ) -> os.stat_result | None:
+    def _read_cached(self, path: Path, *, max_age_seconds: float | None) -> bytes | None:
+        """Read one cache file through the held root, or return nothing.
+
+        A path-based read follows a link planted at the cache directory and
+        returns the file that link points at. Holding the root refuses that
+        link before any byte is read. A link at the cache name is not an
+        entry. A root that cannot be held is the same outcome as a missing
+        file.
+        """
+
         self._require_cache_path(path)
         try:
-            if is_link_or_reparse(
-                path,
-                missing="assume_regular",
-                unreadable="assume_link",
-            ):
-                return None
-            metadata = path.stat()
-        except OSError:
+            with AnchoredDirectory(self.root) as anchor:
+                if is_link_or_reparse(
+                    path,
+                    missing="assume_regular",
+                    unreadable="assume_link",
+                ):
+                    return None
+                descriptor = open_entry(anchor, path.name)
+                if descriptor is None:
+                    return None
+                try:
+                    if max_age_seconds is not None:
+                        age = max(0.0, self._now() - os.fstat(descriptor).st_mtime)
+                        if age > max_age_seconds:
+                            return None
+                    return _read_all(descriptor)
+                finally:
+                    os.close(descriptor)
+        except (AnchoredDirectoryError, OSError):
             return None
-        if not stat.S_ISREG(metadata.st_mode):
-            return None
-        if max_age_seconds is not None:
-            age = max(0.0, self._now() - metadata.st_mtime)
-            if age > max_age_seconds:
-                return None
-        return metadata
 
     def _require_cache_path(self, path: Path) -> None:
         if path.parent != self.root or path.suffix not in {".json", ".bin"}:
@@ -394,6 +398,15 @@ def _held_kind(anchor: AnchoredDirectory, name: str) -> AnchoredEntryKind | None
         if entry.name == name:
             return entry.kind
     return None
+
+
+def _read_all(descriptor: int) -> bytes:
+    chunks: list[bytes] = []
+    while True:
+        chunk = os.read(descriptor, 1024 * 1024)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
 
 
 def _write_all(descriptor: int, content: bytes) -> None:
