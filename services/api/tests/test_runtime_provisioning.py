@@ -1309,6 +1309,101 @@ async def test_runtime_contract_rejects_inventory_and_probe_drift(
         await provisioner.close()
 
 
+def _plant_directory_link(link: Path, target: Path) -> None:
+    """Point ``link`` at ``target``. The link must not already exist.
+
+    A Windows directory junction is not a symlink, so the replacement has to
+    be created that way or the test never reaches the check it exists to pin.
+    """
+
+    if os.name == "nt":
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True,
+        )
+        if completed.returncode != 0:
+            pytest.skip("this host refuses to create a directory link")
+        return
+    try:
+        os.symlink(target, link, target_is_directory=True)
+    except OSError:
+        pytest.skip("this host refuses to create a directory link")
+
+
+async def test_runtime_contract_does_not_count_a_linked_distribution(
+    settings: Settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    content = _zip_bytes({"llama-server.exe": b"llama"})
+    manifest = tmp_path / "engines.json"
+    _write_manifest(manifest, llama_content=content)
+    settings.prepare()
+    install_root = tmp_path / "staged"
+    executable = install_root / "python" / "python.exe"
+    site_packages = executable.parent / "Lib" / "site-packages"
+    site_packages.mkdir(parents=True)
+    executable.write_bytes(b"python")
+    identity = "example-1.0.dist-info"
+    outside = tmp_path / "outside-distribution"
+    outside.mkdir()
+    marker = outside / "METADATA"
+    marker.write_text("outside\n", encoding="utf-8")
+    _plant_directory_link(site_packages / identity, outside)
+    comfy_directory = install_root / "ComfyUI"
+    comfy_directory.mkdir()
+    (comfy_directory / "main.py").write_text("", encoding="utf-8")
+    probe = {
+        "python": "3.13.14",
+        "comfyui": "0.28.0",
+        "imports": ["example"],
+        "packages": {"example": "1.0"},
+    }
+    asset = {
+        "dependency_inventory_count": 1,
+        "dependency_inventory_sha256": _inventory_sha256([identity]),
+        "runtime_probe": probe,
+    }
+    installed = {
+        "executable": executable,
+        "directory": comfy_directory,
+    }
+    expected_result = {
+        "python": probe["python"],
+        "comfyui": probe["comfyui"],
+        "packages": probe["packages"],
+    }
+
+    def _matching_probe(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        command = args[0] if args else []
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=(
+                f"{runtime_provisioning._RUNTIME_PROBE_SENTINEL}{json.dumps(expected_result)}\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", _matching_probe)
+
+    async with httpx.AsyncClient() as client:
+        provisioner = RuntimeProvisioner(
+            settings,
+            manifest_path=manifest,
+            client=client,
+            environment={},
+            platform_key="test-platform",
+            allowed_download_hosts={"runtime.test"},
+        )
+        with pytest.raises(RuntimeProvisioningError, match="inventory"):
+            provisioner._verify_runtime_contract(install_root, asset, installed)
+        await provisioner.close()
+
+    assert marker.read_text(encoding="utf-8") == "outside\n"
+
+
 def test_comfy_manifest_fails_closed_when_audit_contract_is_omitted(
     tmp_path: Path,
 ) -> None:
