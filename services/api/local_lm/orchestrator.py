@@ -12000,33 +12000,6 @@ class ConversationOrchestrator:
                 revision_ids.append(revision.id)
         return revision_ids
 
-    def installed_reference_edit_workflow_ids(self, session: Session) -> list[str]:
-        """Edit workflows that read a second picture, in name order.
-
-        What a subject is replaced with arrives as that second picture, so a
-        workflow that reads only the first would redraw from the words alone.
-        In name order, so which one the studio is given is stable.
-        """
-
-        definitions = session.scalars(
-            select(WorkflowDefinition)
-            .where(WorkflowDefinition.operation == Operation.IMAGE_TO_IMAGE.value)
-            .order_by(WorkflowDefinition.name, WorkflowDefinition.id)
-        ).all()
-        revision_ids: list[str] = []
-        for definition in definitions:
-            if not definition.current_revision_id:
-                continue
-            revision = session.get(WorkflowRevision, definition.current_revision_id)
-            if (
-                revision is not None
-                and self._studio_revision_runs(session, revision)
-                and not workflow_declares_matting(revision.input_schema_json)
-                and exceeds_capacity(revision.api_graph_json, 2) is None
-            ):
-                revision_ids.append(revision.id)
-        return revision_ids
-
     def installed_matting_workflow_ids(self, session: Session) -> list[str]:
         """Edit workflows that declare they return the subject on a transparent background.
 
