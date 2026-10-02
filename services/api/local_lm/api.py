@@ -209,6 +209,7 @@ from .install_plan_contract_v1 import (
     stored_install_plan_identity_matches,
 )
 from .lora_suggestions import lora_suggestion_scope, suggested_loras
+from .media_organization_api import router as media_organization_router
 from .message_window_v1 import DEFAULT_WINDOW, MAX_WINDOW
 from .model_library_reads import catalog_install_matches, read_library_matches, read_library_page
 from .model_manifests import (
@@ -937,6 +938,7 @@ router = APIRouter(prefix="/api")
 router.include_router(workflow_use_case_preset_router)
 router.include_router(use_case_summary_router)
 router.include_router(generation_experiment_router)
+router.include_router(media_organization_router)
 router.include_router(output_recipe_router)
 logger = logging.getLogger(__name__)
 
