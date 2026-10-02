@@ -484,6 +484,54 @@ class _PromptBatchExecutionContext:
     use_case_receipt: dict[str, Any] | None
 
 
+@dataclass(frozen=True, slots=True)
+class _TurnOutputs:
+    """What every output of one turn reads, gathered once before the outputs are written."""
+
+    chat: Chat
+    user_message: Message
+    request: TurnRequest
+    plan: RoutingPlan
+    work_plan: WorkPlan
+    queue_class: str
+    transcript_sequence: int
+    output_count: int
+    output_type: str
+    per_output_prompts: tuple[str, ...]
+    input_bindings: list[dict[str, Any]]
+    resolved_input_ids: list[str]
+    references_pending_output: bool
+    pending_dependency_step_id: str | None
+    replacement_message: Message | None
+    visual_prompt: dict[str, Any] | None
+    prompt_source_witness: dict[str, Any] | None
+    profile_id: str | None
+    vision_profile_id: str | None
+    workflow_revision: WorkflowRevision | None
+    model_selection: dict[str, Any]
+    model_provenance: dict[str, Any] | None
+    workflow_provenance: dict[str, Any] | None
+    use_case_receipt: dict[str, Any] | None
+    default_size: DefaultOutputSize | None
+    preset_layers: tuple[tuple[str, GenerationPreset, dict[str, Any]], ...]
+    effective_settings: dict[str, Any]
+    base_seed: Any
+    lora_selection: AutomaticLoraSelection | None
+    lora_resolution: ResolvedLoraStack | None
+    workflow_lora_outcome: _WorkflowLoraOutcome | None
+    generation_estimate: dict[str, int | float] | None
+    video_length_resolution: dict[str, int | float] | None
+    media_plan_estimate: dict[str, int] | None
+    image_edit_strength: ImageEditStrengthResolution | None
+    prompt_batch_selection: PromptBatchQueueSelection | None
+    prompt_batch_seeds: tuple[int, ...]
+    prompt_batch_witnesses: tuple[dict[str, Any], ...]
+    prompt_batch_execution_contexts: tuple[_PromptBatchExecutionContext, ...]
+    prompt_batch_lora_selections: tuple[AutomaticLoraSelection | None, ...]
+    prompt_batch_lora_resolutions: tuple[ResolvedLoraStack | None, ...]
+    prompt_batch_workflow_lora_outcomes: tuple[_WorkflowLoraOutcome | None, ...]
+
+
 # The layers a person or a recipe saves below the turn itself, each of which
 # can name a size that outranks a default shape.
 _SIZE_LAYER_ORIGINS = (
@@ -2644,328 +2692,54 @@ class ConversationOrchestrator:
                 if candidate not in sampled:
                     sampled.append(candidate)
             prompt_batch_seeds = tuple(sampled)
+        turn_outputs = _TurnOutputs(
+            chat=chat,
+            user_message=user_message,
+            request=request,
+            plan=plan,
+            work_plan=work_plan,
+            queue_class=queue_class,
+            transcript_sequence=transcript_sequence,
+            output_count=output_count,
+            output_type=output_type,
+            per_output_prompts=per_output_prompts,
+            input_bindings=input_bindings,
+            resolved_input_ids=resolved_input_ids,
+            references_pending_output=references_pending_output,
+            pending_dependency_step_id=pending_dependency_step_id,
+            replacement_message=replacement_message,
+            visual_prompt=visual_prompt,
+            prompt_source_witness=prompt_source_witness,
+            profile_id=profile_id,
+            vision_profile_id=vision_profile_id,
+            workflow_revision=workflow_revision,
+            model_selection=model_selection,
+            model_provenance=model_provenance,
+            workflow_provenance=workflow_provenance,
+            use_case_receipt=use_case_receipt,
+            default_size=default_size,
+            preset_layers=preset_layers,
+            effective_settings=effective_settings,
+            base_seed=base_seed,
+            lora_selection=lora_selection,
+            lora_resolution=lora_resolution,
+            workflow_lora_outcome=workflow_lora_outcome,
+            generation_estimate=generation_estimate,
+            video_length_resolution=video_length_resolution,
+            media_plan_estimate=media_plan_estimate,
+            image_edit_strength=image_edit_strength,
+            prompt_batch_selection=prompt_batch_selection,
+            prompt_batch_seeds=prompt_batch_seeds,
+            prompt_batch_witnesses=prompt_batch_witnesses,
+            prompt_batch_execution_contexts=prompt_batch_execution_contexts,
+            prompt_batch_lora_selections=prompt_batch_lora_selections,
+            prompt_batch_lora_resolutions=prompt_batch_lora_resolutions,
+            prompt_batch_workflow_lora_outcomes=prompt_batch_workflow_lora_outcomes,
+        )
         for ordinal, output_message in enumerate(assistant_messages, start=1):
-            per_output_prompt = per_output_prompts[ordinal - 1]
-            output_context = (
-                prompt_batch_execution_contexts[ordinal - 1]
-                if prompt_batch_execution_contexts
-                else None
+            work_step, run, job = self._materialize_turn_output(
+                session, turn_outputs, ordinal, output_message
             )
-            output_profile_id = (
-                output_context.profile.id
-                if output_context is not None and output_context.profile is not None
-                else (None if output_context is not None else profile_id)
-            )
-            output_workflow_revision = (
-                output_context.workflow_revision
-                if output_context is not None
-                else workflow_revision
-            )
-            output_model_selection = (
-                output_context.model_selection if output_context is not None else model_selection
-            )
-            output_model_provenance = (
-                output_context.model_provenance if output_context is not None else model_provenance
-            )
-            output_workflow_provenance = (
-                output_context.workflow_provenance
-                if output_context is not None
-                else workflow_provenance
-            )
-            output_use_case_receipt = (
-                output_context.use_case_receipt if output_context is not None else use_case_receipt
-            )
-            # A prompt batch is queued from its own endpoint and carries no default shape.
-            output_shape = default_size if output_context is None else None
-            output_preset_layers = (
-                output_context.preset_layers if output_context is not None else tuple(preset_layers)
-            )
-            output_effective_preset = output_preset_layers[-1] if output_preset_layers else None
-            output_settings = copy.deepcopy(
-                output_context.effective_settings
-                if output_context is not None
-                else effective_settings
-            )
-            output_lora_selection = (
-                output_context.lora_selection
-                if output_context is not None
-                else (
-                    prompt_batch_lora_selections[ordinal - 1]
-                    if prompt_batch_lora_selections
-                    else lora_selection
-                )
-            )
-            output_lora_resolution = (
-                output_context.lora_resolution
-                if output_context is not None
-                else (
-                    prompt_batch_lora_resolutions[ordinal - 1]
-                    if prompt_batch_lora_resolutions
-                    else lora_resolution
-                )
-            )
-            output_workflow_lora_outcome = (
-                output_context.workflow_lora_outcome
-                if output_context is not None
-                else (
-                    prompt_batch_workflow_lora_outcomes[ordinal - 1]
-                    if prompt_batch_workflow_lora_outcomes
-                    else workflow_lora_outcome
-                )
-            )
-            if output_lora_resolution is not None:
-                output_settings["loras"] = output_lora_resolution.settings
-            output_settings.pop(WORKFLOW_LORA_OVERRIDES_SETTING_KEY, None)
-            if output_workflow_lora_outcome is not None:
-                output_settings[WORKFLOW_LORA_OVERRIDES_SETTING_KEY] = copy.deepcopy(
-                    output_workflow_lora_outcome.setting
-                )
-            if prompt_batch_selection is not None:
-                output_settings["seed"] = prompt_batch_seeds[ordinal - 1]
-            elif (
-                output_count > 1
-                and isinstance(base_seed, int)
-                and not isinstance(base_seed, bool)
-                and base_seed >= 0
-            ):
-                output_settings["seed"] = (base_seed + ordinal - 1) % 2_147_483_648
-            output_slot = "response" if output_count == 1 else f"output-{ordinal}"
-            work_step = WorkStep(
-                plan=work_plan,
-                ordinal=ordinal,
-                display_group="media_outputs" if output_count > 1 else None,
-                operation=plan.operation.value,
-                status=JobStatus.QUEUED.value,
-                prompt=per_output_prompt,
-                profile_id=output_profile_id,
-                workflow_revision_id=(
-                    output_workflow_revision.id if output_workflow_revision else None
-                ),
-                settings_json=output_settings,
-                input_bindings_json=copy.deepcopy(input_bindings),
-                output_contract_json=[
-                    {
-                        "slot": output_slot,
-                        "type": output_type,
-                        "index": ordinal,
-                        "count": output_count,
-                    }
-                ],
-                queue_class=queue_class,
-            )
-            session.add(work_step)
-            session.flush()
-            if references_pending_output and pending_dependency_step_id:
-                session.add(
-                    WorkStepDependency(
-                        step_id=work_step.id,
-                        depends_on_step_id=pending_dependency_step_id,
-                    )
-                )
-            trigger_word_provenance = prompt_trigger_word_provenance(
-                model_provenance if plan.operation != Operation.TEXT else None,
-                output_lora_resolution.provenance if output_lora_resolution else [],
-                per_output_prompt,
-            )
-            provenance: dict[str, Any] = {
-                "routing": {
-                    **plan.model_dump(mode="json"),
-                    "standalone_prompt": per_output_prompt,
-                },
-                **(
-                    {
-                        "prompt_source": (
-                            prompt_batch_witnesses[ordinal - 1]
-                            if prompt_batch_selection is not None
-                            else prompt_source_witness
-                        )
-                    }
-                    if (prompt_source_witness is not None or prompt_batch_selection is not None)
-                    else {}
-                ),
-                **({"visual_prompt": visual_prompt} if visual_prompt else {}),
-                "model_selection": output_model_selection,
-                "input_artifact_ids": resolved_input_ids,
-                "model": output_model_provenance,
-                "preset": (
-                    {
-                        "id": output_effective_preset[1].id,
-                        "name": output_effective_preset[1].name,
-                        "role": output_effective_preset[1].role,
-                        "settings": output_effective_preset[2],
-                    }
-                    if output_effective_preset
-                    else None
-                ),
-                "preset_layers": [
-                    {
-                        "scope": scope,
-                        "id": preset.id,
-                        "name": preset.name,
-                        "role": preset.role,
-                        "settings": settings,
-                    }
-                    for scope, preset, settings in output_preset_layers
-                ],
-                "workflow": output_workflow_provenance,
-                **(
-                    {"workflow_use_case_preset": copy.deepcopy(output_use_case_receipt)}
-                    if output_use_case_receipt is not None
-                    else {}
-                ),
-                **({"output_shape": output_shape.provenance()} if output_shape is not None else {}),
-                **(
-                    {"workflow_lora": copy.deepcopy(output_workflow_lora_outcome.receipt)}
-                    if output_workflow_lora_outcome is not None
-                    else {}
-                ),
-                "resolved_settings": output_settings,
-                "generation_estimate": generation_estimate,
-                "video_length": video_length_resolution,
-                "source_fit_request": (
-                    request.source_fit.model_dump(mode="json") if request.source_fit else None
-                ),
-                "upscale": request.upscale,
-                "media_plan_estimate": (
-                    self._media_plan_estimate(plan.operation, output_settings, 1)
-                    if output_context is not None
-                    else media_plan_estimate
-                ),
-                "media_output": {
-                    "index": ordinal,
-                    "count": output_count,
-                    "slot": output_slot,
-                },
-                "image_edit": self._image_edit_provenance(
-                    plan.operation,
-                    image_edit_strength,
-                ),
-                "auxiliary_assets": (
-                    {
-                        **(
-                            {
-                                "lora_stack": output_lora_resolution.provenance,
-                                "selection": (
-                                    output_lora_selection.provenance
-                                    if output_lora_selection
-                                    else {"mode": "explicit"}
-                                ),
-                                "graph_transform_version": LORA_GRAPH_TRANSFORM_VERSION,
-                                "effective_graph_sha256": (output_lora_resolution.graph_sha256),
-                            }
-                            if output_lora_resolution
-                            else {}
-                        ),
-                        **(
-                            {"selection": output_lora_selection.provenance}
-                            if output_lora_selection
-                            and output_lora_selection.provenance.get("skipped_reason")
-                            and not output_lora_resolution
-                            else {}
-                        ),
-                        **trigger_word_provenance,
-                    }
-                    if output_lora_resolution
-                    or (
-                        output_lora_selection
-                        and output_lora_selection.provenance.get("skipped_reason")
-                    )
-                    or trigger_word_provenance["trigger_words_applied"]
-                    else None
-                ),
-                **(
-                    {
-                        "response_replacement": {
-                            "message_id": replacement_message.id,
-                            "source_user_message_id": replacement_message.parent_id,
-                        }
-                    }
-                    if replacement_message
-                    else {}
-                ),
-            }
-            run = Run(
-                idempotency_key=request.idempotency_key if ordinal == 1 else None,
-                chat_id=chat.id,
-                user_message_id=user_message.id,
-                assistant_message_id=output_message.id,
-                work_plan_id=work_plan.id,
-                work_step_id=work_step.id,
-                operation=plan.operation.value,
-                status=RunStatus.QUEUED.value,
-                standalone_prompt=per_output_prompt,
-                profile_id=output_profile_id,
-                vision_profile_id=vision_profile_id,
-                workflow_revision_id=(
-                    output_workflow_revision.id if output_workflow_revision else None
-                ),
-                settings_json=output_settings,
-                provenance_json=provenance,
-            )
-            _require_consistent_workflow_witness(work_step, run)
-            run.provenance_json = {
-                **run.provenance_json,
-                "failure_retries": capture_retry_budget(session, run.operation),
-            }
-            session.add(run)
-            session.flush()
-            work_step.run_id = run.id
-            if replacement_message:
-                latest_sequence = session.scalar(
-                    select(ResponseRevision.sequence)
-                    .where(ResponseRevision.message_id == replacement_message.id)
-                    .order_by(ResponseRevision.sequence.desc())
-                    .limit(1)
-                )
-                revision = ResponseRevision(
-                    message_id=replacement_message.id,
-                    run_id=run.id,
-                    sequence=(latest_sequence or 0) + 1,
-                    status=MessageStatus.PENDING.value,
-                )
-                session.add(revision)
-                try:
-                    session.flush()
-                except IntegrityError as exc:
-                    session.rollback()
-                    raise ResponseRevisionConflict(
-                        "this response is already being regenerated"
-                    ) from exc
-                run.provenance_json = {
-                    **run.provenance_json,
-                    "response_replacement": {
-                        **run.provenance_json["response_replacement"],
-                        "revision_id": revision.id,
-                    },
-                }
-            job = Job(
-                kind=self._job_kind(plan.operation).value,
-                status=JobStatus.QUEUED.value,
-                run_id=run.id,
-                work_plan_id=work_plan.id,
-                work_step_id=work_step.id,
-                progress=0,
-                phase="queued",
-                queue_resource=queue_class,
-                queue_group="primary",
-                queue_priority=work_plan.priority,
-                queue_ticket=f"{transcript_sequence:020d}:{ordinal:04d}:{run.id}",
-                enqueued_at=utcnow(),
-                payload_json={
-                    "operation": plan.operation.value,
-                    "output_index": ordinal,
-                    "output_count": output_count,
-                },
-            )
-            update_job_progress(
-                job,
-                stage="queued",
-                queue_resource=queue_class,
-                queue_position=ordinal - 1,
-                queue_length=output_count,
-                indeterminate=True,
-            )
-            session.add(job)
             work_steps.append(work_step)
             runs.append(run)
             jobs.append(job)
@@ -3018,6 +2792,347 @@ class ConversationOrchestrator:
         for queued_job, queued_run in zip(jobs, runs, strict=True):
             self.start(queued_job.id, queued_run.id)
         return accepted
+
+    def _materialize_turn_output(
+        self,
+        session: Session,
+        turn: _TurnOutputs,
+        ordinal: int,
+        output_message: Message,
+    ) -> tuple[WorkStep, Run, Job]:
+        """Write one output of a turn: its step, its run and its queued job.
+
+        Each output takes the turn's settings, or its own prompt batch entry's,
+        with its own seed and slot, and is written in the order the outputs are
+        numbered.
+        """
+
+        per_output_prompt = turn.per_output_prompts[ordinal - 1]
+        output_context = (
+            turn.prompt_batch_execution_contexts[ordinal - 1]
+            if turn.prompt_batch_execution_contexts
+            else None
+        )
+        output_profile_id = (
+            output_context.profile.id
+            if output_context is not None and output_context.profile is not None
+            else (None if output_context is not None else turn.profile_id)
+        )
+        output_workflow_revision = (
+            output_context.workflow_revision
+            if output_context is not None
+            else turn.workflow_revision
+        )
+        output_model_selection = (
+            output_context.model_selection if output_context is not None else turn.model_selection
+        )
+        output_model_provenance = (
+            output_context.model_provenance if output_context is not None else turn.model_provenance
+        )
+        output_workflow_provenance = (
+            output_context.workflow_provenance
+            if output_context is not None
+            else turn.workflow_provenance
+        )
+        output_use_case_receipt = (
+            output_context.use_case_receipt if output_context is not None else turn.use_case_receipt
+        )
+        # A prompt batch is queued from its own endpoint and carries no default shape.
+        output_shape = turn.default_size if output_context is None else None
+        output_preset_layers = (
+            output_context.preset_layers
+            if output_context is not None
+            else tuple(turn.preset_layers)
+        )
+        output_effective_preset = output_preset_layers[-1] if output_preset_layers else None
+        output_settings = copy.deepcopy(
+            output_context.effective_settings
+            if output_context is not None
+            else turn.effective_settings
+        )
+        output_lora_selection = (
+            output_context.lora_selection
+            if output_context is not None
+            else (
+                turn.prompt_batch_lora_selections[ordinal - 1]
+                if turn.prompt_batch_lora_selections
+                else turn.lora_selection
+            )
+        )
+        output_lora_resolution = (
+            output_context.lora_resolution
+            if output_context is not None
+            else (
+                turn.prompt_batch_lora_resolutions[ordinal - 1]
+                if turn.prompt_batch_lora_resolutions
+                else turn.lora_resolution
+            )
+        )
+        output_workflow_lora_outcome = (
+            output_context.workflow_lora_outcome
+            if output_context is not None
+            else (
+                turn.prompt_batch_workflow_lora_outcomes[ordinal - 1]
+                if turn.prompt_batch_workflow_lora_outcomes
+                else turn.workflow_lora_outcome
+            )
+        )
+        if output_lora_resolution is not None:
+            output_settings["loras"] = output_lora_resolution.settings
+        output_settings.pop(WORKFLOW_LORA_OVERRIDES_SETTING_KEY, None)
+        if output_workflow_lora_outcome is not None:
+            output_settings[WORKFLOW_LORA_OVERRIDES_SETTING_KEY] = copy.deepcopy(
+                output_workflow_lora_outcome.setting
+            )
+        if turn.prompt_batch_selection is not None:
+            output_settings["seed"] = turn.prompt_batch_seeds[ordinal - 1]
+        elif (
+            turn.output_count > 1
+            and isinstance(turn.base_seed, int)
+            and not isinstance(turn.base_seed, bool)
+            and turn.base_seed >= 0
+        ):
+            output_settings["seed"] = (turn.base_seed + ordinal - 1) % 2_147_483_648
+        output_slot = "response" if turn.output_count == 1 else f"output-{ordinal}"
+        work_step = WorkStep(
+            plan=turn.work_plan,
+            ordinal=ordinal,
+            display_group="media_outputs" if turn.output_count > 1 else None,
+            operation=turn.plan.operation.value,
+            status=JobStatus.QUEUED.value,
+            prompt=per_output_prompt,
+            profile_id=output_profile_id,
+            workflow_revision_id=(
+                output_workflow_revision.id if output_workflow_revision else None
+            ),
+            settings_json=output_settings,
+            input_bindings_json=copy.deepcopy(turn.input_bindings),
+            output_contract_json=[
+                {
+                    "slot": output_slot,
+                    "type": turn.output_type,
+                    "index": ordinal,
+                    "count": turn.output_count,
+                }
+            ],
+            queue_class=turn.queue_class,
+        )
+        session.add(work_step)
+        session.flush()
+        if turn.references_pending_output and turn.pending_dependency_step_id:
+            session.add(
+                WorkStepDependency(
+                    step_id=work_step.id,
+                    depends_on_step_id=turn.pending_dependency_step_id,
+                )
+            )
+        trigger_word_provenance = prompt_trigger_word_provenance(
+            turn.model_provenance if turn.plan.operation != Operation.TEXT else None,
+            output_lora_resolution.provenance if output_lora_resolution else [],
+            per_output_prompt,
+        )
+        provenance: dict[str, Any] = {
+            "routing": {
+                **turn.plan.model_dump(mode="json"),
+                "standalone_prompt": per_output_prompt,
+            },
+            **(
+                {
+                    "prompt_source": (
+                        turn.prompt_batch_witnesses[ordinal - 1]
+                        if turn.prompt_batch_selection is not None
+                        else turn.prompt_source_witness
+                    )
+                }
+                if (
+                    turn.prompt_source_witness is not None
+                    or turn.prompt_batch_selection is not None
+                )
+                else {}
+            ),
+            **({"visual_prompt": turn.visual_prompt} if turn.visual_prompt else {}),
+            "model_selection": output_model_selection,
+            "input_artifact_ids": turn.resolved_input_ids,
+            "model": output_model_provenance,
+            "preset": (
+                {
+                    "id": output_effective_preset[1].id,
+                    "name": output_effective_preset[1].name,
+                    "role": output_effective_preset[1].role,
+                    "settings": output_effective_preset[2],
+                }
+                if output_effective_preset
+                else None
+            ),
+            "preset_layers": [
+                {
+                    "scope": scope,
+                    "id": preset.id,
+                    "name": preset.name,
+                    "role": preset.role,
+                    "settings": settings,
+                }
+                for scope, preset, settings in output_preset_layers
+            ],
+            "workflow": output_workflow_provenance,
+            **(
+                {"workflow_use_case_preset": copy.deepcopy(output_use_case_receipt)}
+                if output_use_case_receipt is not None
+                else {}
+            ),
+            **({"output_shape": output_shape.provenance()} if output_shape is not None else {}),
+            **(
+                {"workflow_lora": copy.deepcopy(output_workflow_lora_outcome.receipt)}
+                if output_workflow_lora_outcome is not None
+                else {}
+            ),
+            "resolved_settings": output_settings,
+            "generation_estimate": turn.generation_estimate,
+            "video_length": turn.video_length_resolution,
+            "source_fit_request": (
+                turn.request.source_fit.model_dump(mode="json") if turn.request.source_fit else None
+            ),
+            "upscale": turn.request.upscale,
+            "media_plan_estimate": (
+                self._media_plan_estimate(turn.plan.operation, output_settings, 1)
+                if output_context is not None
+                else turn.media_plan_estimate
+            ),
+            "media_output": {
+                "index": ordinal,
+                "count": turn.output_count,
+                "slot": output_slot,
+            },
+            "image_edit": self._image_edit_provenance(
+                turn.plan.operation,
+                turn.image_edit_strength,
+            ),
+            "auxiliary_assets": (
+                {
+                    **(
+                        {
+                            "lora_stack": output_lora_resolution.provenance,
+                            "selection": (
+                                output_lora_selection.provenance
+                                if output_lora_selection
+                                else {"mode": "explicit"}
+                            ),
+                            "graph_transform_version": LORA_GRAPH_TRANSFORM_VERSION,
+                            "effective_graph_sha256": (output_lora_resolution.graph_sha256),
+                        }
+                        if output_lora_resolution
+                        else {}
+                    ),
+                    **(
+                        {"selection": output_lora_selection.provenance}
+                        if output_lora_selection
+                        and output_lora_selection.provenance.get("skipped_reason")
+                        and not output_lora_resolution
+                        else {}
+                    ),
+                    **trigger_word_provenance,
+                }
+                if output_lora_resolution
+                or (
+                    output_lora_selection and output_lora_selection.provenance.get("skipped_reason")
+                )
+                or trigger_word_provenance["trigger_words_applied"]
+                else None
+            ),
+            **(
+                {
+                    "response_replacement": {
+                        "message_id": turn.replacement_message.id,
+                        "source_user_message_id": turn.replacement_message.parent_id,
+                    }
+                }
+                if turn.replacement_message
+                else {}
+            ),
+        }
+        run = Run(
+            idempotency_key=turn.request.idempotency_key if ordinal == 1 else None,
+            chat_id=turn.chat.id,
+            user_message_id=turn.user_message.id,
+            assistant_message_id=output_message.id,
+            work_plan_id=turn.work_plan.id,
+            work_step_id=work_step.id,
+            operation=turn.plan.operation.value,
+            status=RunStatus.QUEUED.value,
+            standalone_prompt=per_output_prompt,
+            profile_id=output_profile_id,
+            vision_profile_id=turn.vision_profile_id,
+            workflow_revision_id=(
+                output_workflow_revision.id if output_workflow_revision else None
+            ),
+            settings_json=output_settings,
+            provenance_json=provenance,
+        )
+        _require_consistent_workflow_witness(work_step, run)
+        run.provenance_json = {
+            **run.provenance_json,
+            "failure_retries": capture_retry_budget(session, run.operation),
+        }
+        session.add(run)
+        session.flush()
+        work_step.run_id = run.id
+        if turn.replacement_message:
+            latest_sequence = session.scalar(
+                select(ResponseRevision.sequence)
+                .where(ResponseRevision.message_id == turn.replacement_message.id)
+                .order_by(ResponseRevision.sequence.desc())
+                .limit(1)
+            )
+            revision = ResponseRevision(
+                message_id=turn.replacement_message.id,
+                run_id=run.id,
+                sequence=(latest_sequence or 0) + 1,
+                status=MessageStatus.PENDING.value,
+            )
+            session.add(revision)
+            try:
+                session.flush()
+            except IntegrityError as exc:
+                session.rollback()
+                raise ResponseRevisionConflict(
+                    "this response is already being regenerated"
+                ) from exc
+            run.provenance_json = {
+                **run.provenance_json,
+                "response_replacement": {
+                    **run.provenance_json["response_replacement"],
+                    "revision_id": revision.id,
+                },
+            }
+        job = Job(
+            kind=self._job_kind(turn.plan.operation).value,
+            status=JobStatus.QUEUED.value,
+            run_id=run.id,
+            work_plan_id=turn.work_plan.id,
+            work_step_id=work_step.id,
+            progress=0,
+            phase="queued",
+            queue_resource=turn.queue_class,
+            queue_group="primary",
+            queue_priority=turn.work_plan.priority,
+            queue_ticket=f"{turn.transcript_sequence:020d}:{ordinal:04d}:{run.id}",
+            enqueued_at=utcnow(),
+            payload_json={
+                "operation": turn.plan.operation.value,
+                "output_index": ordinal,
+                "output_count": turn.output_count,
+            },
+        )
+        update_job_progress(
+            job,
+            stage="queued",
+            queue_resource=turn.queue_class,
+            queue_position=ordinal - 1,
+            queue_length=turn.output_count,
+            indeterminate=True,
+        )
+        session.add(job)
+        return work_step, run, job
 
     async def _create_ordered_turn(
         self,
