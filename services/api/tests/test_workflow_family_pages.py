@@ -115,6 +115,50 @@ async def test_family_offer_capabilities_include_variants_outside_the_page(
     assert row["supported_selector_capabilities"] == ["image", "video"]
 
 
+@pytest.mark.parametrize("detail", [False, True])
+async def test_text_family_offer_metadata_matches_the_vision_preference_mapping(
+    client: AsyncClient, detail: bool
+) -> None:
+    identifier = _seed(["Paging text offers"])[0]
+    with SessionLocal() as session:
+        definition = session.scalar(
+            select(WorkflowDefinition).where(WorkflowDefinition.family_id == identifier)
+        )
+        assert definition is not None
+        definition.operation = "text"
+        session.commit()
+    response = await client.get(
+        f"/api/workflow-families/{identifier}" if detail else "/api/workflow-families",
+        params={"family_ids": identifier, "limit": 1, "variant_limit": 1},
+    )
+    assert response.status_code == 200
+    row = response.json() if detail else response.json()[0]
+    assert row["supported_selector_capabilities"] == ["chat", "vision"]
+    for declared in (False, True):
+        with SessionLocal() as session:
+            definition = session.scalar(
+                select(WorkflowDefinition).where(WorkflowDefinition.family_id == identifier)
+            )
+            assert definition is not None
+            revision = session.get(WorkflowRevision, definition.current_revision_id)
+            assert revision is not None
+            revision.capabilities_json = ["vision"] if declared else []
+            session.commit()
+        response = await client.get(
+            f"/api/workflow-families/{identifier}" if detail else "/api/workflow-families",
+            params={
+                "family_ids": identifier,
+                "limit": 1,
+                "variant_limit": 1,
+                "variant_capability": "vision",
+            },
+        )
+        assert response.status_code == 200
+        row = response.json() if detail else response.json()[0]
+        assert row["variant_count"] == int(declared)
+        assert len(row["variants"]) == int(declared)
+
+
 @pytest.mark.parametrize("declared", [False, True])
 async def test_family_capability_filter_precedes_family_limits(
     client: AsyncClient,

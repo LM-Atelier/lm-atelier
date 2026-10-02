@@ -40,7 +40,7 @@ SELECTOR_OPERATIONS: dict[WorkflowSelectorCapability, tuple[str, ...]] = {
     "chat": ("text",),
     "image": ("text_to_image", "image_to_image"),
     "video": ("text_to_video", "image_to_video"),
-    "vision": (),
+    "vision": ("text",),
 }
 
 
@@ -66,6 +66,7 @@ class VariantPage:
     count: int
     ready_count: int
     best_readiness: WorkflowVariantReadiness
+    operations: frozenset[str]
 
 
 def read_family_variants(
@@ -92,8 +93,10 @@ def read_family_variants(
     )
     variants: list[WorkflowFamilyVariantOut] = []
     count = ready_count = 0
+    operations: set[str] = set()
     best = len(READINESS_ORDER) - 1
     for definition in session.scalars(query.execution_options(yield_per=50)):
+        operations.add(definition.operation)
         value = project(definition)
         if capability is not None and not _serves_capability(value, capability):
             continue
@@ -104,7 +107,7 @@ def read_family_variants(
         best = min(best, READINESS_ORDER.index(value.readiness))
         if count > offset and (limit is None or len(variants) < limit):
             variants.append(value)
-    return VariantPage(variants, count, ready_count, READINESS_ORDER[best])
+    return VariantPage(variants, count, ready_count, READINESS_ORDER[best], frozenset(operations))
 
 
 def _serves_capability(
@@ -112,7 +115,18 @@ def _serves_capability(
 ) -> bool:
     if capability in variant.capabilities:
         return True
-    return variant.operation in SELECTOR_OPERATIONS[capability]
+    return capability != "vision" and variant.operation in SELECTOR_OPERATIONS[capability]
+
+
+def selector_capabilities_for_operations(
+    operations: set[str] | frozenset[str],
+) -> list[WorkflowSelectorCapability]:
+    """Match family offer metadata to the preference API's operation mapping."""
+    return [
+        capability
+        for capability, supported in SELECTOR_OPERATIONS.items()
+        if operations.intersection(supported)
+    ]
 
 
 def family_supported_selector_capabilities(
@@ -127,11 +141,7 @@ def family_supported_selector_capabilities(
             .distinct()
         )
     )
-    return [
-        capability
-        for capability, supported in SELECTOR_OPERATIONS.items()
-        if operations.intersection(supported)
-    ]
+    return selector_capabilities_for_operations(operations)
 
 
 def read_family_page(

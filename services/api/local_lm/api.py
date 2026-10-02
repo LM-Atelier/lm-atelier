@@ -786,6 +786,7 @@ from .workflow_family_reads import (
     read_family_page,
     read_family_variants,
     read_ready_revision_page,
+    selector_capabilities_for_operations,
 )
 from .workflow_graph_settings import (
     bind_compiled_workflow_settings,
@@ -10291,7 +10292,11 @@ def _workflow_family_out(
         enabled=family.enabled,
         archived=family.archived,
         compatibility=compatibility is not None,
-        supported_selector_capabilities=family_supported_selector_capabilities(session, family.id),
+        supported_selector_capabilities=(
+            selector_capabilities_for_operations(page.operations)
+            if page is not None and operation is None and not workflow_ids
+            else family_supported_selector_capabilities(session, family.id)
+        ),
         variants=page.variants
         if page is not None
         else [

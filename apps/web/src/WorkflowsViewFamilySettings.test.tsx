@@ -86,6 +86,8 @@ it("saves family details while paged and selected-family caches are mounted", as
   expect(client.getQueryData(["workflow-families", "operations", false])).toEqual(operations);
   await waitFor(() => expect(within(screen.getByRole("region", { name: "Family details" }))
     .getByRole("heading", { name: "Renamed family" })).toBeInTheDocument());
+  await waitFor(() => expect(within(screen.getByRole("region", { name: "Renamed family" }))
+    .getByRole("heading", { name: "Renamed family" })).toBeInTheDocument());
 });
 
 it("offers and updates every family capability when one variant is selected", async () => {
@@ -103,4 +105,9 @@ it("offers and updates every family capability when one variant is selected", as
   await waitFor(() => expect(api.workflow).toHaveBeenCalledWith("video-variant", expect.any(AbortSignal)));
   await waitFor(() => expect(screen.getByRole("checkbox", { name: "Images" })).toBeChecked());
   await waitFor(() => expect(screen.getByRole("checkbox", { name: "Video" })).not.toBeChecked());
+  fireEvent.click(screen.getByRole("button", { name: "Make this the default" }));
+  await waitFor(() => expect(api.setWorkflowFamilyPreference).toHaveBeenCalledWith("mixed-family", "image",
+    { enabled: true, is_default: true, sort_order: 0 }));
+  await waitFor(() => expect(screen.getByRole("checkbox", { name: "Images Used when nobody chooses" })).toBeChecked());
+  expect(screen.getByRole("checkbox", { name: "Video" })).not.toBeChecked();
 });
