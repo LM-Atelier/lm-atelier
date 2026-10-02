@@ -240,6 +240,13 @@ async def test_a_changed_record_is_refused_without_echoing_it(client: AsyncClien
     assert _PROMPT not in response.text
 
 
+async def test_a_number_too_long_to_read_is_refused_as_unreadable(client: AsyncClient) -> None:
+    response = await _check(client, b'{"version":' + b"7" * 5000 + b"}")
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "output-recipe-unreadable"
+
+
 async def test_a_file_too_large_to_be_a_record_is_refused(client: AsyncClient) -> None:
     response = await _check(client, b" " * (256 * 1024 + 1))
 

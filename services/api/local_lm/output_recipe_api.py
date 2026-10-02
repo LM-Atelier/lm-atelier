@@ -12,6 +12,7 @@ from starlette.concurrency import run_in_threadpool
 from .api_errors import api_error
 from .db import SessionLocal
 from .output_recipe import OutputRecipe, OutputRecipeUnavailable, build_output_recipe
+from .output_recipe_bundle import OutputRecipeBundle, build_output_recipe_bundle
 from .output_recipe_check import OutputRecipeCheckRefused, check_output_recipe
 
 if TYPE_CHECKING:
@@ -72,6 +73,58 @@ def _build(
             run_id=run_id,
             artifact_id=artifact_id,
             include_prompts=include_prompts,
+        )
+
+
+@router.get("/runs/{run_id}/outputs/{artifact_id}/recipe-bundle")
+async def download_output_recipe_bundle(
+    run_id: str,
+    artifact_id: str,
+    request: Request,
+    prompts: Annotated[Literal["include", "omit"], Query()],
+    digest: Annotated[str, Query(pattern=r"^sha256:[0-9a-f]{64}$")],
+) -> Response:
+    """One picture's record and a copy of the picture, together in one ZIP file.
+
+    The record must be the one the caller was shown, named by its digest, so
+    the file never holds a record nobody looked at. The picture is a copy
+    without the text an engine embeds in its file, never the stored bytes.
+    """
+
+    artifacts = cast("Services", request.app.state.services).artifacts
+    try:
+        bundle = await run_in_threadpool(
+            _build_bundle, artifacts, run_id, artifact_id, prompts == "include", digest
+        )
+    except OutputRecipeUnavailable as exc:
+        raise api_error(exc.status, exc.code, exc.message) from exc
+    name = quote(bundle.file_name, safe="")
+    return Response(
+        bundle.content,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f"attachment; filename*=utf-8''{name}",
+            "Cache-Control": "private, no-store",
+            "Content-Security-Policy": "sandbox; default-src 'none'",
+            "Cross-Origin-Resource-Policy": "same-origin",
+            "X-Content-Type-Options": "nosniff",
+            "X-Output-Recipe-Digest": bundle.record_digest,
+        },
+    )
+
+
+def _build_bundle(
+    artifacts: ArtifactStore, run_id: str, artifact_id: str, include_prompts: bool, digest: str
+) -> OutputRecipeBundle:
+    # Copying the picture decodes and re-encodes it, which is slow for a large one.
+    with SessionLocal() as session:
+        return build_output_recipe_bundle(
+            session,
+            artifacts,
+            run_id=run_id,
+            artifact_id=artifact_id,
+            include_prompts=include_prompts,
+            expected_record_digest=digest,
         )
 
 

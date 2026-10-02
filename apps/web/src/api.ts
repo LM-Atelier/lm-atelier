@@ -498,6 +498,18 @@ export const api = {
       `/api/runs/${encodeURIComponent(runId)}/outputs/${encodeURIComponent(artifactId)}/recipe?prompts=${includePrompt ? "include" : "omit"}`,
       { signal },
     ),
+  /** A picture's record, byte for byte as shown and named by its digest, zipped with a clean copy. */
+  generationRecordBundle: (
+    runId: string,
+    artifactId: string,
+    includePrompt: boolean,
+    digest: string,
+    signal?: AbortSignal,
+  ) =>
+    requestBytes(
+      `/api/runs/${encodeURIComponent(runId)}/outputs/${encodeURIComponent(artifactId)}/recipe-bundle?prompts=${includePrompt ? "include" : "omit"}&digest=${encodeURIComponent(digest)}`,
+      { signal },
+    ),
   preflightGenerationExperiment: (payload: GenerationExperimentRequest) =>
     request<GenerationExperimentPreflight>("/api/generation-experiments/preflight", { method: "POST", body: JSON.stringify(payload) }),
   createGenerationExperiment: (payload: GenerationExperimentCreate) =>

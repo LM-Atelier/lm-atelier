@@ -195,6 +195,22 @@ def test_a_record_is_sealed_once() -> None:
         seal_output_recipe(payload)
 
 
+def test_a_number_too_long_to_read_is_refused_as_a_malformed_record() -> None:
+    with pytest.raises(OutputRecipeFormatError, match="canonical JSON"):
+        open_output_recipe(b'{"version":' + b"7" * 5000 + b"}")
+
+
+@pytest.mark.parametrize("version", [True, 1.0])
+def test_a_version_that_only_compares_equal_to_one_is_refused(version: object) -> None:
+    """True and 1.0 equal 1 in Python, and each has a canonical form of its own."""
+
+    unsigned = {**_payload(), "version": version}
+    content = _encode({**unsigned, "digest": record_digest(unsigned)})
+
+    with pytest.raises(OutputRecipeFormatError, match="version 1"):
+        open_output_recipe(content)
+
+
 def _encode(value: dict[str, Any]) -> bytes:
     return json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False

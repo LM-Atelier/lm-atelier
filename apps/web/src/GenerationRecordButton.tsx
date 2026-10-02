@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 import { FileJson } from "lucide-react";
@@ -6,6 +6,7 @@ import { AccessibleDialog } from "./AccessibleDialog";
 import { api } from "./api";
 import { downloadBytes } from "./format";
 import {
+  generationRecordBundleFileName,
   generationRecordFileName,
   missingText,
   omissionText,
@@ -14,9 +15,32 @@ import {
   removedText,
 } from "./generationRecord";
 
+/** What the person is told when the picture could not be saved with its record. */
+const PICTURE_PROBLEMS: Record<string, string> = {
+  "output-recipe-changed": "The record changed since it was shown. Check it again, then save.",
+  "output-recipe-bundle-too-large":
+    "This picture is too large to save with its record. The record can still be saved on its own.",
+};
+
 /** Read one output's record as the server wrote it, and show what it holds. */
-function GenerationRecordBody({ runId, artifactId }: { runId: string; artifactId: string }) {
+function GenerationRecordBody({
+  runId,
+  artifactId,
+  kind,
+}: {
+  runId: string;
+  artifactId: string;
+  kind: "image" | "video";
+}) {
   const [includePrompt, setIncludePrompt] = useState(false);
+  const [savingPicture, setSavingPicture] = useState(false);
+  const [pictureProblem, setPictureProblem] = useState<string | null>(null);
+  // A copy still being made when the dialog closes is stopped, so nothing is
+  // saved after the person has left.
+  const [pictureRequests] = useState(() => new Set<AbortController>());
+  useEffect(() => () => {
+    for (const request of pictureRequests) request.abort();
+  }, [pictureRequests]);
   const record = useQuery({
     queryKey: ["generation-record", runId, artifactId, includePrompt],
     queryFn: ({ signal }) => api.generationRecord(runId, artifactId, includePrompt, signal),
@@ -38,6 +62,35 @@ function GenerationRecordBody({ runId, artifactId }: { runId: string; artifactId
     // The bytes previewed are the bytes saved, so the file matches its digest.
     downloadBytes(record.data, generationRecordFileName(summary), "application/json");
   };
+  const downloadWithPicture = async () => {
+    if (!summary || savingPicture) return;
+    const request = new AbortController();
+    pictureRequests.add(request);
+    setSavingPicture(true);
+    setPictureProblem(null);
+    try {
+      // The digest names the record on screen, so the file never holds another.
+      const bytes = await api.generationRecordBundle(
+        runId,
+        artifactId,
+        includePrompt,
+        summary.digest,
+        request.signal,
+      );
+      if (!request.signal.aborted) {
+        downloadBytes(bytes, generationRecordBundleFileName(summary), "application/zip");
+      }
+    } catch (error) {
+      if (request.signal.aborted) return;
+      const code = (error as { code?: unknown } | null)?.code;
+      const known = typeof code === "string" ? PICTURE_PROBLEMS[code] : undefined;
+      setPictureProblem(known ?? "The picture could not be saved with its record.");
+      if (code === "output-recipe-changed") void record.refetch();
+    } finally {
+      pictureRequests.delete(request);
+      if (!request.signal.aborted) setSavingPicture(false);
+    }
+  };
 
   return (
     <>
@@ -51,14 +104,28 @@ function GenerationRecordBody({ runId, artifactId }: { runId: string; artifactId
           <input
             type="checkbox"
             checked={includePrompt}
-            onChange={(event) => setIncludePrompt(event.target.checked)}
+            // The choice is part of the file being made; it waits until that is saved.
+            disabled={savingPicture}
+            onChange={(event) => {
+              setIncludePrompt(event.target.checked);
+              setPictureProblem(null);
+            }}
           />
           <span>Include the prompt, and any text the workflow takes as a setting</span>
         </label>
+        {kind === "image" && (
+          <p>
+            Saved with the picture, the file also holds a copy of it with only its pixels. Nothing
+            else written inside the picture file, such as the workflow that made it, is copied, and
+            a color profile is applied to the pixels rather than kept.
+          </p>
+        )}
         {record.isPending && <p role="status">Reading the record…</p>}
         {(record.isError || (record.data && !summary)) && (
           <p role="alert">The record could not be made for this output.</p>
         )}
+        {savingPicture && <p role="status">Copying the picture…</p>}
+        {pictureProblem && <p role="alert">{pictureProblem}</p>}
         {summary && (
           <>
             <dl className="generation-record-facts">
@@ -99,6 +166,18 @@ function GenerationRecordBody({ runId, artifactId }: { runId: string; artifactId
         )}
       </div>
       <footer>
+        {kind === "image" && (
+          <button
+            type="button"
+            className="secondary"
+            aria-disabled={!ready || savingPicture}
+            onClick={() => {
+              if (ready && !savingPicture) void downloadWithPicture();
+            }}
+          >
+            Download with picture
+          </button>
+        )}
         <button
           type="button"
           className="primary"
@@ -146,7 +225,7 @@ export function GenerationRecordButton({
           onClose={() => setOpen(false)}
           className="generation-record-dialog"
         >
-          <GenerationRecordBody runId={runId} artifactId={artifactId} />
+          <GenerationRecordBody runId={runId} artifactId={artifactId} kind={kind} />
         </AccessibleDialog>,
         document.body,
       )}

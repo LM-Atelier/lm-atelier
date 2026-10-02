@@ -175,7 +175,10 @@ def open_output_recipe(content: bytes) -> dict[str, Any]:
     try:
         text = content.decode("ascii")
         value = json.loads(text, object_pairs_hook=_refuse_duplicate_keys)
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+    except OutputRecipeFormatError:
+        raise
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+        # ValueError covers malformed JSON and a number too long to read.
         raise OutputRecipeFormatError("The record is not valid canonical JSON.") from exc
     if not isinstance(value, dict):
         raise OutputRecipeFormatError("The record is not an object.")
@@ -199,7 +202,11 @@ def _refuse_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 def _check_record(value: dict[str, Any]) -> None:
     _keys(value, _TOP_LEVEL, "record")
     _depth(value, 0)
-    if value["schema"] != SCHEMA_ID or value["version"] != SCHEMA_VERSION:
+    if (
+        value["schema"] != SCHEMA_ID
+        or type(value["version"]) is not int
+        or value["version"] != SCHEMA_VERSION
+    ):
         raise OutputRecipeFormatError("The record is not a version 1 output record.")
     if not isinstance(value["digest"], str) or not _DIGEST.fullmatch(value["digest"]):
         raise OutputRecipeFormatError("The record's digest is malformed.")
