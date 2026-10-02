@@ -54,8 +54,12 @@ for (const width of [1280, 375]) {
       await workspace.getByRole("button", { name: `Manage ${projects[7].name}`, exact: true }).click();
       await page.getByRole("dialog", { name: "Manage project", exact: true })
         .getByRole("button", { name: "Delete project", exact: true }).click();
-      const unfiledMetadata = page.waitForResponse((result) =>
-        new URL(result.url()).pathname === `/api/chats/${chatId}/metadata` && result.ok());
+      // The open chat re-reads its metadata once the project is gone. Other
+      // reads of it can land first, from a poll or a live update, so wait for
+      // the one that shows the chat unfiled rather than whichever comes next.
+      const unfiledMetadata = page.waitForResponse(async (result) =>
+        new URL(result.url()).pathname === `/api/chats/${chatId}/metadata` && result.ok()
+          && (await result.json() as { project_id: string | null }).project_id === null);
       const deleted = page.waitForResponse((result) =>
         new URL(result.url()).pathname === `/api/projects/${projects[7].id}`
           && result.request().method() === "DELETE" && result.ok());
