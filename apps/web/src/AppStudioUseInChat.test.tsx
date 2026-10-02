@@ -164,7 +164,7 @@ function harbourAttached() {
 
 async function openChat(chat: Chat) {
   fireEvent.click(screen.getByText(chat.title));
-  expect(await screen.findByRole("heading", { name: chat.title })).toBeInTheDocument();
+  expect(await screen.findByRole("region", { name: chat.title })).toBeInTheDocument();
 }
 
 it("attaches the studio's picture to the chat it came from, once", async () => {
@@ -175,7 +175,7 @@ it("attaches the studio's picture to the chat it came from, once", async () => {
   await waitFor(() => expect(useInChat).toHaveAttribute("aria-disabled", "false"));
   fireEvent.click(useInChat);
 
-  expect(await screen.findByRole("heading", { name: first.title })).toBeInTheDocument();
+  expect(await screen.findByRole("region", { name: first.title })).toBeInTheDocument();
   expect(await screen.findByRole("button", { name: /Remove .*harbour\.png/ })).toBeVisible();
   // A reference leaves the chat's mode as it was.
   expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");

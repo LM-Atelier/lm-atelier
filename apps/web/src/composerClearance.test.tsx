@@ -3,11 +3,12 @@ import { useRef } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { COMPOSER_CLEARANCE, useComposerClearance } from "./composerClearance";
 
-function Composer({ active }: { active: boolean }) {
+function Composer({ active, workflows = false }: { active: boolean; workflows?: boolean }) {
   const wrap = useRef<HTMLDivElement>(null);
   useComposerClearance(wrap, active);
   return (
     <div ref={wrap} data-testid="wrap">
+      {workflows && <div className="chat-workflow-choices" data-testid="workflows" />}
       <div className="composer" data-testid="box" />
     </div>
   );
@@ -30,6 +31,22 @@ afterEach(() => {
 });
 
 describe("the composer's clearance", () => {
+  it("keeps workflow choices clear of jobs as their controls collapse", () => {
+    let resized: () => void = () => {};
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(callback: () => void) { resized = callback; }
+      observe() {}
+      disconnect() {}
+    });
+    layout({ wrap: { top: 594, bottom: 800 }, workflows: { top: 594, bottom: 650 }, box: { top: 663, bottom: 782 } });
+    render(<Composer active workflows />);
+    expect(published()).toBe("206px");
+
+    layout({ wrap: { top: 650, bottom: 800 }, workflows: { top: 650, bottom: 660 }, box: { top: 663, bottom: 782 } });
+    resized();
+    expect(published()).toBe("150px");
+  });
+
   it("says how far the composer reaches up from the foot of its area", () => {
     layout({ wrap: { top: 594, bottom: 800 }, box: { top: 663, bottom: 782 } });
 

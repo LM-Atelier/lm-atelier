@@ -6,8 +6,8 @@ export const COMPOSER_CLEARANCE = "--composer-clearance";
 /** Publish how far the composer reaches up from the bottom of its area.
  *
  * The jobs panel floats over the page and must stay clear of the composer, or
- * it covers the text box, the attach button and the send button while work
- * runs. The composer grows as it is typed into, so its height is measured, not
+ * it covers workflow choices, the text box, the attach button and the send
+ * button while work runs. The composer grows as it is typed into, so its height is measured, not
  * assumed. Only one composer sits at the foot of a view; an editor opened
  * inside the transcript passes `active` false and publishes nothing.
  */
@@ -17,7 +17,7 @@ export function useComposerClearance(wrap: RefObject<HTMLElement | null>, active
     if (!active || !element) return;
     const root = document.documentElement;
     const publish = () => {
-      const box = element.querySelector(".composer") ?? element;
+      const box = element.querySelector(".chat-workflow-choices, .composer") ?? element;
       const clearance = element.getBoundingClientRect().bottom - box.getBoundingClientRect().top;
       root.style.setProperty(COMPOSER_CLEARANCE, `${Math.max(0, Math.round(clearance))}px`);
     };

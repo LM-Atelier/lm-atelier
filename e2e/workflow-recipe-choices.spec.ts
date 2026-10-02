@@ -20,7 +20,15 @@ for (const width of [1280, 375]) {
     const setup = page.getByRole("dialog", { name: "Set up LM Atelier" });
     await expect(setup).toBeVisible();
     await setup.getByRole("button", { name: "Not now" }).click();
-    const summary = page.locator("summary").filter({ hasText: "Recipes for this chat" });
+    await expect(page.getByText("Recipes for this chat", { exact: true })).toHaveCount(0);
+    const openSettings = async () => {
+      if (width === 375) await page.getByRole("button", { name: "Toggle navigation" }).click();
+      await page.locator(".sidebar-chat-row").filter({ has: page.locator('[aria-current="page"]') })
+        .getByRole("button", { name: "Manage Recipe choices", exact: true }).click();
+      await expect(page.getByRole("dialog", { name: "Chat settings" })).toBeVisible();
+    };
+    await openSettings();
+    const summary = page.getByRole("dialog", { name: "Chat settings" }).locator("summary").filter({ hasText: "Recipes for this chat" });
     await summary.focus();
     await page.keyboard.press("Enter");
     const choices = page.getByRole("group", { name: "Use-case recipes" });
@@ -29,6 +37,7 @@ for (const width of [1280, 375]) {
     await expect(choices.getByRole("combobox")).toHaveCount(8);
     for (const select of await choices.getByRole("combobox").all()) {
       await expect(select).toBeEnabled();
+      await select.scrollIntoViewIfNeeded();
       await select.focus();
       await expect(select).toBeFocused();
       const bounds = await select.boundingBox();
@@ -52,21 +61,15 @@ for (const width of [1280, 375]) {
     await expect.poll(async () => (await request.get(endpoint)).json()).toEqual({ mode: "automatic" });
     await expect(image).toBeFocused();
     await page.reload();
+    await openSettings();
     await summary.focus();
     await page.keyboard.press("Enter");
     await expect(image).toHaveValue("automatic");
     await expect(choices.getByRole("combobox", { name: "Whole-image edit recipe" })).toHaveValue("inherit");
-    await expect(page.getByRole("combobox", { name: "Generation mode" })).toHaveValue("auto");
-    await image.focus();
-    for (const control of [summary, page.getByRole("textbox", { name: "Message" }), page.getByRole("combobox", { name: "Generation mode" })]) {
-      const bounds = await control.boundingBox();
-      expect(bounds).not.toBeNull();
-      expect(bounds!.y).toBeGreaterThanOrEqual(0);
-      expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(812);
-    }
     await page.screenshot({ path: `test-results/recipe-choices-${width}.png` });
-    await summary.focus();
-    await page.keyboard.press("Enter");
+    await page.getByRole("button", { name: "Close chat manager" }).click();
+    if (width === 375) await page.getByRole("button", { name: "Toggle navigation" }).click();
+    await expect(page.getByRole("combobox", { name: "Generation mode" })).toHaveValue("auto");
     const message = page.getByRole("textbox", { name: "Message" });
     await message.focus();
     await expect(message).toBeFocused();

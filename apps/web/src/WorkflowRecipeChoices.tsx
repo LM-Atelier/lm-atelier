@@ -88,7 +88,7 @@ export function ChatWorkflowRecipes({ chatId }: { chatId: string }) {
     <summary>Recipes for this chat</summary>
     {open && <div className="chat-workflow-recipe-body">
       <p>Recipes supply settings for each request type. Inherit uses project, then workspace choices.
-        Automatic skips recipes. Workflow choices above still apply, and explicit turn settings take priority.</p>
+        Automatic skips recipes. Chat workflow choices still apply, and explicit turn settings take priority.</p>
       <WorkflowRecipeChoices scope={{ kind: "chat", id: chatId }} />
     </div>}
   </details>;

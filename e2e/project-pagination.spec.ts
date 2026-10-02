@@ -34,7 +34,7 @@ for (const width of [1280, 375]) {
         if (url.pathname === "/api/projects" && message.method() === "GET") reads.push(url);
       });
       await page.goto("/");
-      await expect(page.getByRole("heading", { name: `Distant study ${width}`, exact: true })).toBeVisible();
+      await expect(page.getByRole("region", { name: `Distant study ${width}`, exact: true })).toBeVisible();
       if (width === 375) await page.getByRole("button", { name: "Toggle navigation" }).click();
       const workspace = page.getByRole("region", { name: "Projects and chats" });
       await page.getByLabel("Search projects and chats").fill(prefix);
@@ -43,7 +43,7 @@ for (const width of [1280, 375]) {
       await workspace.getByRole("button", { name: "Load more projects" }).click();
       await expect(workspace.locator(".project-group")).toHaveCount(56);
       await workspace.getByRole("button", { name: `Manage Distant study ${width}` }).click();
-      const manager = page.getByRole("dialog", { name: "Manage chat" });
+      const manager = page.getByRole("dialog", { name: "Chat settings" });
       await expect(manager.getByRole("combobox", { name: "Project", exact: true })).toHaveValue(projects[0].id);
       await manager.getByRole("searchbox", { name: "Search projects", exact: true }).fill(`${prefix} 7`);
       await manager.getByRole("combobox", { name: "Project", exact: true }).selectOption(projects[7].id);
@@ -65,7 +65,7 @@ for (const width of [1280, 375]) {
       deletedProjects.add(projects[7].id);
       expect((await (await unfiledMetadata).json() as { project_id: string | null }).project_id).toBeNull();
       if (width === 375) await page.getByRole("button", { name: "Toggle navigation" }).click();
-      await expect(page.getByRole("heading", { name: `Distant study ${width}`, exact: true })).toBeVisible();
+      await expect(page.getByRole("region", { name: `Distant study ${width}`, exact: true })).toBeVisible();
       await expect(page.getByText("Could not load project settings.", { exact: false })).toHaveCount(0);
       expect(reads.length).toBeGreaterThan(2);
       expect(reads.every((url) => ["50", "200"].includes(url.searchParams.get("limit") ?? ""))).toBe(true);

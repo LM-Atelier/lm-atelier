@@ -109,17 +109,21 @@ for (const width of [1280, 375]) {
     const query = page.getByLabel("Exact query");
     await expect(query).toHaveValue("Compare copper and steel");
     await expect(page.getByText("Provider: CRW at https://search.example.test", { exact: true })).toBeVisible();
-    await expect(page.getByText("Web access", { exact: true })).toBeVisible();
+    await expect(page.getByText("Web access", { exact: true })).toHaveCount(0);
     if (process.env.LM_ATELIER_E2E_SCREENSHOT_DIR) {
       await page.screenshot({ path: path.join(process.env.LM_ATELIER_E2E_SCREENSHOT_DIR, "search-consent-" + width + ".png"), fullPage: true });
     }
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-    expect(await page.locator(".chat-web-access").evaluate((element) => element.getBoundingClientRect().height)).toBeLessThan(80);
     const mainFits = () => page.locator("#main-content").evaluate(
       (element) => element.scrollWidth <= element.clientWidth,
     );
     expect(await mainFits()).toBe(true);
-    const permissions = page.locator(".chat-web-access");
+    if (width === 375) await page.getByRole("button", { name: "Toggle navigation" }).click();
+    await page.locator(".sidebar-chat-row").filter({ has: page.locator('[aria-current="page"]') })
+      .getByRole("button", { name: `Manage ${chat.title}`, exact: true }).click();
+    const settings = page.getByRole("dialog", { name: "Chat settings" });
+    await expect(settings).toBeVisible();
+    const permissions = settings.locator(".chat-web-access");
     await permissions.locator("summary").click();
     await expect(permissions.getByRole("checkbox", { name: "Read links I include in messages" })).toBeVisible();
     const allowSearch = permissions.getByRole("checkbox", { name: "Allow web searches", exact: true });
@@ -138,7 +142,7 @@ for (const width of [1280, 375]) {
     if (process.env.LM_ATELIER_E2E_SCREENSHOT_DIR) {
       await page.screenshot({ path: path.join(process.env.LM_ATELIER_E2E_SCREENSHOT_DIR, "search-permissions-" + width + ".png"), fullPage: true });
     }
-    await permissions.locator("summary").click();
+    await page.getByRole("button", { name: "Close chat manager" }).click();
 
     activeHead = "question-search";
     await page.reload();

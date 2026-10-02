@@ -1,12 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 import { api } from "./api";
 import type { Chat, WebSettings } from "./types";
 import "./ChatWebAccess.css";
 
 export function ChatWebAccess({ chat }: { chat: Chat }) {
   const client = useQueryClient();
+  const [open, setOpen] = useState(false);
   const configuration = useQuery({
-    queryKey: ["web-search", "configuration"], queryFn: api.searchConfiguration,
+    queryKey: ["web-search", "configuration"], queryFn: api.searchConfiguration, enabled: open,
   });
   const settings: WebSettings = {
     allow_url_fetch: false, allow_search: false, allow_search_without_asking: false,
@@ -14,7 +16,8 @@ export function ChatWebAccess({ chat }: { chat: Chat }) {
   };
   const save = useMutation({
     mutationFn: (value: WebSettings) => api.updateChat(chat.id, { web_settings_json: value }),
-    onSuccess: () => {
+    onSuccess: (updated) => {
+      client.setQueryData(["chat-management", chat.id], updated);
       void client.invalidateQueries({ queryKey: ["chat"] });
       void client.invalidateQueries({ queryKey: ["chats"] });
     },
@@ -29,7 +32,7 @@ export function ChatWebAccess({ chat }: { chat: Chat }) {
     });
   };
   return (
-    <details className="chat-web-access">
+    <details className="chat-web-access" onToggle={event => setOpen(event.currentTarget.open)}>
       <summary>Web access</summary>
       <fieldset aria-disabled={save.isPending} aria-busy={save.isPending}>
         <legend>Permissions for this chat</legend>

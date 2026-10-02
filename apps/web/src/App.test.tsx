@@ -1049,12 +1049,12 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
     const selector = await screen.findByRole("combobox", {
       name: "Text workflow",
     });
-    await waitFor(() => expect(selector).toHaveValue("default"));
+    await waitFor(() => expect(selector).toHaveValue("Default"));
     expect(screen.queryByRole("combobox", { name: "vision" })).not.toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "Visual observer" })).not.toBeInTheDocument();
     expect(api.updateChat).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Manage Vision selector" }));
-    expect(screen.getByRole("dialog", { name: "Manage chat" })).toBeVisible();
+    expect(screen.getByRole("dialog", { name: "Chat settings" })).toBeVisible();
     expect(screen.queryByText("Workflows for this chat")).not.toBeInTheDocument();
   });
 
@@ -1478,7 +1478,7 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
     opener.focus();
     fireEvent.click(opener);
     const save = await screen.findByRole("button", { name: "Save chat" });
-    const dialog = screen.getByRole("dialog", { name: "Manage chat" });
+    const dialog = screen.getByRole("dialog", { name: "Chat settings" });
     const close = screen.getByRole("button", { name: "Close chat manager" });
     expect(dialog).toHaveAttribute("aria-modal", "true");
     expect(close).toHaveFocus();
@@ -1490,7 +1490,7 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
     expect(save).toHaveFocus();
 
     fireEvent.keyDown(dialog, { key: "Escape" });
-    expect(screen.queryByRole("dialog", { name: "Manage chat" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Chat settings" })).not.toBeInTheDocument();
     expect(opener).toHaveFocus();
   });
 
@@ -5227,7 +5227,7 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
 
     const composer = await screen.findByRole("textbox", { name: "Message" });
     expect(screen.getByRole("combobox", { name: "Generation mode" })).toHaveValue("auto");
-    expect(screen.getByText("Auto chooses the request type at send.")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Hide workflows" })).toBeVisible();
     for (const label of ["Text workflow", "Image workflow", "Video workflow"]) {
       expect(screen.getByRole("combobox", { name: label })).toBeVisible();
     }
@@ -5611,7 +5611,7 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
     expect(await screen.findByText("Stay with the first chat")).toBeVisible();
 
     fireEvent.click(screen.getByText(second.title));
-    expect(await screen.findByRole("heading", { name: second.title })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: second.title })).toBeInTheDocument();
     expect(screen.queryByText("Stay with the first chat")).not.toBeInTheDocument();
     const secondComposer = screen.getByRole("textbox", { name: "Message" });
     expect(secondComposer).toBeEnabled();
@@ -5629,7 +5629,7 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
       ]);
     });
     expect(client.getQueryData<InfiniteData<ChatMessageWindow>>(["chat", second.id, "messages", null])?.pages.flatMap((page) => page.messages)).toEqual([]);
-    expect(screen.getByRole("heading", { name: second.title })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: second.title })).toBeInTheDocument();
   });
 
   it("applies the pinned workflow schema to per-turn controls", async () => {
@@ -5892,12 +5892,12 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
     expect(await screen.findByRole("button", { name: /Remove Generated image: sha256:synthetic/ })).toBeVisible();
 
     fireEvent.click(screen.getByText(second.title));
-    expect(await screen.findByRole("heading", { name: second.title })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: second.title })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
     expect(screen.queryByRole("button", { name: /Remove Generated image: sha256:synthetic/ })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByText(first.title));
-    expect(await screen.findByRole("heading", { name: first.title })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: first.title })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("Unsent first-chat draft");
     expect(screen.getByRole("button", { name: /Remove Generated image: sha256:synthetic/ })).toBeVisible();
   });
@@ -6260,14 +6260,14 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
 
     fireEvent.click(screen.getByText(secondChat.title));
-    await screen.findByRole("heading", { name: secondChat.title });
+    await screen.findByRole("region", { name: secondChat.title });
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
     expect(await screen.findByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(1024);
     fireEvent.change(await screen.findByRole("spinbutton", { name: /Maximum output/ }), { target: { value: "2048" } });
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
 
     fireEvent.click(screen.getByText(firstChat.title));
-    await screen.findByRole("heading", { name: firstChat.title });
+    await screen.findByRole("region", { name: firstChat.title });
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
     expect(await screen.findByRole("spinbutton", { name: /Maximum output/ })).toHaveValue(4096);
   });
@@ -6352,14 +6352,14 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
 
     fireEvent.click(screen.getByText(secondChat.title));
-    await screen.findByRole("heading", { name: secondChat.title });
+    await screen.findByRole("region", { name: secondChat.title });
     expect(screen.getByDisplayValue("Video")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
     expect(await screen.findByRole("spinbutton", { name: /Frames/ })).toHaveValue(81);
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
 
     fireEvent.click(screen.getByText(firstChat.title));
-    await screen.findByRole("heading", { name: firstChat.title });
+    await screen.findByRole("region", { name: firstChat.title });
     expect(screen.getByDisplayValue("Image")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Turn settings" }));
     expect(screen.getByRole("combobox", { name: "image preset" })).toHaveValue(imagePreset.id);
@@ -6554,7 +6554,7 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
     });
     renderApp();
     expect(await screen.findByLabelText("Exact query")).toHaveValue("Compare copper and steel");
-    expect(screen.getByText("Web access")).toBeVisible();
+    expect(screen.queryByText("Web access")).not.toBeInTheDocument();
     expect(api.decideSearch).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Search" }));
     await waitFor(() => expect(api.decideSearch).toHaveBeenCalledWith("job-one", 3, "approve"));

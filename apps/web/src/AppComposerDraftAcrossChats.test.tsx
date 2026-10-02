@@ -153,7 +153,7 @@ async function attachSketch() {
 
 async function openChat(chat: Chat) {
   fireEvent.click(screen.getByText(chat.title));
-  expect(await screen.findByRole("heading", { name: chat.title })).toBeInTheDocument();
+  expect(await screen.findByRole("region", { name: chat.title })).toBeInTheDocument();
 }
 
 function sketchAttached() {

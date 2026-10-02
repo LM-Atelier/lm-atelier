@@ -4,10 +4,11 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "./App";
 import { api, connectEvents } from "./api";
 import type { Chat, ChatDetail, Message, WebSearch } from "./types";
+import { asChatSummary } from "./chatSummaryFixtures";
 
 vi.mock("./api", () => ({
   api: {
-    searchConfiguration: vi.fn(), setupReadiness: vi.fn(), projects: vi.fn(), chats: vi.fn(),
+    searchConfiguration: vi.fn(), setupReadiness: vi.fn(), projects: vi.fn(), chats: vi.fn(), chatSummaries: vi.fn(),
     chat: vi.fn(), chatMetadata: vi.fn(), chatMessages: vi.fn(), chatContext: vi.fn(), chatSearches: vi.fn(), chatEditLineage: vi.fn(),
     workPlans: vi.fn(), engines: vi.fn(), profiles: vi.fn(), profilesPage: vi.fn(), presets: vi.fn(), presetsPage: vi.fn(), workflows: vi.fn(),
     workflowFamilies: vi.fn(), chatWorkflowSelections: vi.fn(), projectWorkflowSelections: vi.fn(),
@@ -48,6 +49,7 @@ beforeEach(() => {
     api.workflowFamilies, api.chatWorkflowSelections, api.projectWorkflowSelections,
     api.jobs, api.workers, api.runtimes, api.backups]) vi.mocked(list).mockResolvedValue([]);
   vi.mocked(api.chats).mockResolvedValue([chat]);
+  vi.mocked(api.chatSummaries).mockResolvedValue([asChatSummary(chat)]);
   vi.mocked(api.chat).mockResolvedValue(chat);
   const metadata: Partial<ChatDetail> = { ...chat };
   delete metadata.messages;
@@ -173,4 +175,25 @@ it("keeps off-page stop controls and exposes older pending search decisions", as
   expect(api.chatSearches).toHaveBeenCalledTimes(calls);
   await waitFor(() => expect(api.chatSearches).toHaveBeenCalledWith(chat.id,
     expect.objectContaining({ pendingOnly: true, before: "newer", limit: 40 })));
+});
+
+it("uses the sidebar for the chat name and keeps only history controls above its transcript", async () => {
+  const client = open();
+  const conversation = await screen.findByRole("region", { name: chat.title });
+  expect(screen.queryByRole("heading", { name: chat.title })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: chat.title })).toBeVisible();
+  expect(conversation.querySelector(".chat-header")).toBeNull();
+  expect(screen.queryByText("Unfiled chat")).not.toBeInTheDocument();
+  expect(screen.queryByText("Web access")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Load older messages" })).toHaveClass("secondary");
+  client.clear();
+});
+
+it("keeps history controls out of an empty conversation", async () => {
+  vi.mocked(api.chatMessages).mockResolvedValue({ chat_id: chat.id, messages: [], has_older: false, has_newer: false });
+  const client = open();
+  await screen.findByRole("heading", { name: "What should we make?" });
+  expect(screen.queryByRole("button", { name: "All messages loaded" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Load older messages" })).not.toBeInTheDocument();
+  client.clear();
 });

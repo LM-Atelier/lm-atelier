@@ -87,6 +87,11 @@ for (const width of [1280, 390]) {
         sessionStorage.setItem("lm-atelier-setup-dismissed", "1");
       }, id);
       await page.emulateMedia({ reducedMotion: "reduce" });
+      await page.route("**/api/jobs/activity?*", route => route.fulfill({ json: {
+        active: [], active_count: 0, recent_issues: [{ id: "transcript-fixture-issue",
+          kind: "generation", status: "failed", phase: "Temporary fixture failure", error: null,
+          updated_at: "2026-09-01T00:00:00Z", cancellable: false }],
+      } }));
       const reads: URL[] = [];
       const errors: string[] = [];
       page.on("pageerror", (error) => errors.push(error.message));
@@ -95,6 +100,7 @@ for (const width of [1280, 390]) {
         if (request.method() === "GET" && url.pathname.startsWith(`/api/chats/${id}`)) reads.push(url);
       });
       await page.goto("/");
+      await expect(page.getByRole("complementary", { name: "Jobs", exact: true })).toBeVisible();
       const messages = page.locator(".messages > article.message");
       await expect(messages).toHaveCount(40);
       await expect(page.locator(".message.user").filter({ hasText: "Notebook entry 0." })).toHaveCount(0);
@@ -102,7 +108,6 @@ for (const width of [1280, 390]) {
       await viewport.evaluate((element) => { element.scrollTop = 0; });
       const anchor = page.locator(".message.user").filter({ hasText: "Notebook entry 23." });
       await expect(anchor).toBeVisible();
-      const anchorTop = (await anchor.boundingBox())!.y;
       let refuseOlder = true;
       await page.route(`**/api/chats/${id}/messages?**`, async (route) => {
         if (refuseOlder && new URL(route.request().url()).searchParams.has("before")) {
@@ -116,6 +121,7 @@ for (const width of [1280, 390]) {
       await expect(page.getByText("Older messages temporarily unavailable", { exact: true })).toBeVisible();
       await expect(messages).toHaveCount(40);
       await expect(older).toBeFocused();
+      const anchorTop = (await anchor.boundingBox())!.y;
       refuseOlder = false;
       await older.press("Enter");
       await expect(messages).toHaveCount(80);

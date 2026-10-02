@@ -1,0 +1,4 @@
+.transcript-history-control { display: flex; align-items: center; justify-content: center; gap: calc(12px * var(--spacing-scale, 1)); margin-bottom: calc(16px * var(--spacing-scale, 1)); }
+.transcript-history-control::before, .transcript-history-control::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+.transcript-history-button { display: inline-flex; align-items: center; justify-content: center; gap: calc(6px * var(--spacing-scale, 1)); flex-shrink: 0; }
+.transcript-history-button[aria-disabled="true"] { color: var(--ink-muted); cursor: default; }
