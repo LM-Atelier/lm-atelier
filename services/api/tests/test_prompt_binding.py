@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -197,6 +198,20 @@ def _comfy_family(
     return family.id, revision.id
 
 
+async def _follow_the_project_workflow(client: AsyncClient, chat_id: str) -> None:
+    """Put a chat's image choice on Default, the choice that follows its project's pin.
+
+    A new chat starts on Auto, a choice of its own that outranks the project's.
+    Auto falls back to the pin only when it finds no ready workflow, and the one
+    it tries for the default model is whichever was created last, so a pinned
+    turn left on Auto reaches the pin or not by an accident of creation order.
+    """
+    chosen = await client.put(
+        f"/api/chats/{chat_id}/workflow-selections/image", json={"mode": "default"}
+    )
+    assert chosen.status_code == 200, chosen.text
+
+
 async def test_the_catalog_reports_a_workflow_that_ignores_the_description_unavailable(
     client: AsyncClient, settings: Settings
 ) -> None:
@@ -297,6 +312,7 @@ async def test_a_project_pin_on_such_a_workflow_is_refused_too(
             "/api/chats", json={"title": "Pinned description", "project_id": project["id"]}
         )
     ).json()
+    await _follow_the_project_workflow(client, chat["id"])
 
     response = await client.post(
         f"/api/chats/{chat['id']}/turns",
@@ -611,6 +627,10 @@ async def test_a_pinned_workflow_that_declares_its_own_prompt_setting_still_runs
     A pin is resolved when a turn uses it rather than when it is set, so the
     refusal shows up there. Both revisions below are pinned successfully; only
     the turn tells them apart.
+
+    The declared workflow is made the newest, so a turn that went past the pin
+    to automatic selection would run it and be accepted. Only the pin can refuse
+    the second turn.
     """
     settings.media_engine = "comfyui"
     with SessionLocal() as session:
@@ -622,6 +642,10 @@ async def test_a_pinned_workflow_that_declares_its_own_prompt_setting_still_runs
             input_schema=_DECLARES_ITS_OWN,
         )
         _, undeclared = _comfy_family(session, name="Undeclared pin", prompt_value="${house_style}")
+        newest = session.get(WorkflowRevision, declared)
+        older = session.get(WorkflowRevision, undeclared)
+        assert newest is not None and older is not None
+        newest.definition.created_at = older.definition.created_at + timedelta(seconds=1)
         session.commit()
 
     project = (await client.post("/api/projects", json={"name": "Pinned style"})).json()
@@ -635,6 +659,7 @@ async def test_a_pinned_workflow_that_declares_its_own_prompt_setting_still_runs
         chat = (
             await client.post("/api/chats", json={"title": title, "project_id": project["id"]})
         ).json()
+        await _follow_the_project_workflow(client, chat["id"])
         response = await client.post(
             f"/api/chats/{chat['id']}/turns",
             json={"text": "a harbour at first light", "mode": "image"},
