@@ -79,6 +79,16 @@ def create_manual_collection(
     return collection
 
 
+def list_manual_collections(session: Session) -> list[MediaCollection]:
+    return list(
+        session.scalars(
+            select(MediaCollection)
+            .where(MediaCollection.kind == "manual")
+            .order_by(MediaCollection.name, MediaCollection.id)
+        )
+    )
+
+
 def create_media_tag(session: Session, *, label: object, color: object = None) -> MediaTag:
     exact_label = _text(label, maximum=200)
     tag = MediaTag(
