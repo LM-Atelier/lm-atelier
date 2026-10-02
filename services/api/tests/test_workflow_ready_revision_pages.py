@@ -44,7 +44,7 @@ def _seed() -> list[str]:
 
 async def test_ready_revision_pages_bound_variants_across_families(client: AsyncClient) -> None:
     expected = _seed()
-    found = []
+    found: list[str] = []
     for offset in (0, 3, 6):
         response = await client.get(
             "/api/workflow-ready-revisions",
@@ -190,7 +190,7 @@ async def test_ready_revision_pages_resolve_and_deduplicate_legacy_profile_choic
     ],
 )
 async def test_ready_revision_pages_reject_invalid_bounds(
-    client: AsyncClient, params: dict
+    client: AsyncClient, params: dict[str, str | list[str]]
 ) -> None:
     response = await client.get("/api/workflow-ready-revisions", params=params)
     assert response.status_code == 422

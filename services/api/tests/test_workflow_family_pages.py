@@ -36,7 +36,8 @@ async def _page(client: AsyncClient, **params: str | int) -> list[dict[str, obje
         params={"search": "Paging", "limit": 2, "variant_limit": 2, **params},
     )
     assert response.status_code == 200, response.json()
-    return response.json()
+    rows: list[dict[str, object]] = response.json()
+    return rows
 
 
 async def test_family_capability_counts_exclude_unrelated_ready_variants(
@@ -58,10 +59,11 @@ async def test_family_capability_counts_exclude_unrelated_ready_variants(
             )
         )
         session.commit()
-    for url, params in [
+    cases: list[tuple[str, dict[str, str | int]]] = [
         ("/api/workflow-families", {"family_ids": identifier, "limit": 1}),
         (f"/api/workflow-families/{identifier}", {}),
-    ]:
+    ]
+    for url, params in cases:
         response = await client.get(
             url,
             params={
@@ -246,7 +248,9 @@ async def test_family_search_matches_variants_beyond_the_variant_page(client: As
         session.commit()
     rows = await _page(client, search="Searchable late", variant_limit=1)
     assert [row["id"] for row in rows] == [identifier]
-    assert len(rows[0]["variants"]) == 1
+    variants = rows[0]["variants"]
+    assert isinstance(variants, list)
+    assert len(variants) == 1
 
 
 async def test_family_pages_filter_variants_and_readiness_before_limiting(
@@ -394,7 +398,9 @@ async def test_family_pages_search_dependency_names_without_exposing_graphs(
         session.commit()
     rows = await _page(client, search="dependency checkpoint", include_dependencies="true", limit=1)
     assert [row["id"] for row in rows] == [identifier]
-    assert rows[0]["dependency_summary"]["dependency_count"] == 1
+    dependencies = rows[0]["dependency_summary"]
+    assert isinstance(dependencies, dict)
+    assert dependencies["dependency_count"] == 1
     assert "api_graph_json" not in str(rows)
 
 

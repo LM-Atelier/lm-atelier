@@ -107,6 +107,7 @@ async def test_library_default_reads_filter_before_the_limit(
     with SessionLocal() as session:
         row = session.get(ModelProfile if kind == "profiles" else GenerationPreset, ids[-1])
         assert row is not None
+        assert isinstance(row, ModelProfile | GenerationPreset)
         row.is_default = True
         session.commit()
     response = await client.get(
