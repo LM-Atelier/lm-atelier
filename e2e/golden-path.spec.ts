@@ -72,7 +72,7 @@ async function registerSafeFixtureModel(request: APIRequestContext, modelPath: s
 }
 
 async function expectPersistedConversation(page: Page) {
-  await expect(page.getByRole("heading", { name: STORY_PROMPT })).toBeVisible();
+  await expect(page.getByRole("region", { name: STORY_PROMPT })).toBeVisible();
   const messages = page.locator(".messages > article.message");
   await expect(messages).toHaveCount(4);
 
@@ -173,7 +173,7 @@ test("persists a streamed text and contextual image golden path", async ({
   await expect(newChat).toHaveAccessibleName(`New chat in ${PROJECT_NAME}`);
   await newChat.focus();
   await page.keyboard.press("Enter");
-  await expect(page.getByRole("heading", { name: "New chat" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "New chat" })).toBeVisible();
 
   const composer = page.getByRole("textbox", { name: "Message" });
   const mode = page.getByRole("combobox", { name: "Generation mode" });

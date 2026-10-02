@@ -43,7 +43,13 @@ for (const width of [1280, 390]) {
         sessionStorage.setItem("lm-atelier-setup-dismissed", "1");
       }, id);
       await page.emulateMedia({ reducedMotion: "reduce" });
+      await page.route("**/api/jobs/activity?*", route => route.fulfill({ json: {
+        active: [], active_count: 0, recent_issues: [{ id: "branch-fixture-issue",
+          kind: "generation", status: "failed", phase: "Temporary fixture failure", error: null,
+          updated_at: "2026-09-01T00:00:00Z", cancellable: false }],
+      } }));
       await page.goto("/");
+      await expect(page.getByRole("complementary", { name: "Jobs", exact: true })).toBeVisible();
       const active = page.locator(".messages > article.message");
       await expect(active).toHaveCount(40);
       await page.locator(".messages .message.user").last().getByRole("button", { name: "Edit message" }).click();

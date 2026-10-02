@@ -1,29 +1,39 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import { api } from "./api";
 import { ChatWorkflowChoices } from "./ChatWorkflowChoices";
 
 vi.mock("./ActiveChatWorkflowSelector", () => ({
   ActiveChatWorkflowSelector: ({ label }: { label: string }) => <span>{label}</span>,
 }));
-vi.mock("./api", () => ({ api: {
-  workflowUseCasePresets: vi.fn(async () => []),
-  workflowUseCaseChoice: vi.fn(async () => ({ mode: "inherit" })),
-} }));
-afterEach(cleanup);
+afterEach(() => { cleanup(); localStorage.clear(); });
 
-it("offers recipe choices in Auto while leaving every workflow type visible", async () => {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
-  render(<QueryClientProvider client={client}><ChatWorkflowChoices chatId="new-chat" routingMode="auto" /></QueryClientProvider>);
-  const summary = screen.getByText("Recipes for this chat");
-  expect(api.workflowUseCasePresets).not.toHaveBeenCalled();
+it("keeps recipes out of the composer while offering each workflow type", () => {
+  render(<ChatWorkflowChoices chatId="new-chat" routingMode="auto" />);
+  expect(screen.queryByText("Recipes for this chat")).not.toBeInTheDocument();
+  for (const label of ["Text workflow", "Image workflow", "Video workflow"]) expect(screen.getByText(label)).toBeVisible();
+});
+
+it("remembers hidden workflow controls for this chat without hiding another chat's controls", () => {
+  const { rerender } = render(<ChatWorkflowChoices chatId="first-chat" routingMode="auto" />);
+  fireEvent.click(screen.getByRole("button", { name: "Hide workflows" }));
+  expect(screen.queryByText("Text workflow")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Show workflows" })).toHaveAttribute("aria-expanded", "false");
+  rerender(<ChatWorkflowChoices chatId="second-chat" routingMode="image" />);
   expect(screen.getByText("Text workflow")).toBeVisible();
-  expect(screen.getByText("Image workflow")).toBeVisible();
-  expect(screen.getByText("Video workflow")).toBeVisible();
-  fireEvent.click(summary);
-  fireEvent(summary.parentElement!, new Event("toggle"));
-  await waitFor(() => expect(screen.getAllByRole("combobox")).toHaveLength(8));
-  expect(screen.getByText("Auto chooses the request type at send.")).toBeVisible();
-  client.clear();
+  rerender(<ChatWorkflowChoices chatId="first-chat" routingMode="video" />);
+  expect(screen.queryByText("Text workflow")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Show workflows" }));
+  expect(screen.getByText("Text workflow")).toBeVisible();
+});
+
+it("can hide and show controls when browser storage is unavailable", () => {
+  const read = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw new Error("Unavailable"); });
+  const write = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("Unavailable"); });
+  try {
+    render(<ChatWorkflowChoices chatId="new-chat" routingMode="auto" />);
+    fireEvent.click(screen.getByRole("button", { name: "Hide workflows" }));
+    expect(screen.queryByText("Image workflow")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show workflows" }));
+    expect(screen.getByText("Image workflow")).toBeVisible();
+  } finally { read.mockRestore(); write.mockRestore(); }
 });

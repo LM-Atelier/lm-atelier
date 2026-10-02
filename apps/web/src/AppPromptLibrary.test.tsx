@@ -205,7 +205,7 @@ it("queues template prompts from chat without changing the composer or generatio
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<QueryClientProvider client={client}><App /></QueryClientProvider>);
 
-  expect(await screen.findByRole("heading", { name: chat.title })).toBeVisible();
+  expect(await screen.findByRole("region", { name: chat.title })).toBeVisible();
   const composer = screen.getByRole("textbox", { name: "Message" });
   fireEvent.change(composer, { target: { value: "Keep this composer draft" } });
   const mode = screen.getByRole("combobox", { name: "Generation mode" });

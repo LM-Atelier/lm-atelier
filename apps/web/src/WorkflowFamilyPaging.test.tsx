@@ -53,15 +53,23 @@ it.each(["chat", "project", "composer", "studio"] as const)(
       return Array.from({ length: 50 }, (_, i) => family(`Page ${i}`));
     });
     const { availability } = mount(kind);
+    if (kind === "composer") {
+      await waitFor(() => expect(screen.getByRole("combobox")).toHaveValue("Chosen elsewhere"));
+      fireEvent.click(screen.getByRole("combobox"));
+    }
     const chosen = await screen.findByRole("option", { name: "Chosen elsewhere" });
     expect(chosen).toBeEnabled();
-    expect(screen.getByRole("combobox")).toHaveValue("Chosen elsewhere");
+    expect(screen.getByRole("combobox")).toHaveValue(kind === "composer" ? "" : "Chosen elsewhere");
     expect(screen.queryByText("Needs installation")).not.toBeInTheDocument();
     if (kind === "studio") await waitFor(() => expect(availability).toHaveBeenLastCalledWith(null));
-    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "Found" } });
+    fireEvent.change(screen.getByRole(kind === "composer" ? "combobox" : "searchbox"), { target: { value: "Found" } });
     await screen.findByRole("option", { name: "Found by search" });
-    expect(screen.getByRole("combobox")).toHaveValue("Chosen elsewhere");
-    expect(screen.getByRole("option", { name: "Chosen elsewhere" })).toBeEnabled();
+    expect(screen.getByRole("combobox")).toHaveValue(kind === "composer" ? "Found" : "Chosen elsewhere");
+    if (kind !== "composer") expect(screen.getByRole("option", { name: "Chosen elsewhere" })).toBeEnabled();
+    else {
+      fireEvent.keyDown(screen.getByRole("combobox"), { key: "Escape" });
+      expect(screen.getByRole("combobox")).toHaveValue("Chosen elsewhere");
+    }
     expect(api.workflowFamilies).toHaveBeenCalledWith("image", false, false,
       expect.objectContaining({ limit: 50, variantLimit: 1, variantCapability: "image", search: "Found",
         ...(kind === "studio" ? { operation: "image_to_image" } : {}) }), expect.any(AbortSignal));
@@ -81,13 +89,17 @@ it("keeps the chosen family when another page fails and retries that page", asyn
     return Array.from({ length: 50 }, (_, i) => family(`Page ${i}`));
   });
   mount("composer");
+  await waitFor(() => expect(screen.getByRole("combobox")).toHaveValue("Chosen elsewhere"));
+  fireEvent.click(screen.getByRole("combobox"));
   await screen.findByRole("option", { name: "Chosen elsewhere" });
   fireEvent.click(screen.getByRole("button", { name: "Load more image workflows" }));
   await screen.findByText("Another page failed");
-  expect(screen.getByRole("combobox")).toHaveValue("Chosen elsewhere");
+  expect(screen.getByRole("combobox")).toHaveValue("");
+  expect(screen.getByRole("option", { name: "Chosen elsewhere" })).toHaveAttribute("aria-selected", "true");
   fail = false;
   fireEvent.click(screen.getByRole("button", { name: "Retry image workflows" }));
   await screen.findByRole("option", { name: "Later choice" });
+  fireEvent.keyDown(screen.getByRole("combobox"), { key: "Escape" });
   expect(screen.getByRole("combobox")).toHaveValue("Chosen elsewhere");
 });
 
@@ -107,7 +119,7 @@ it("keeps a failed exact selected-family read distinct from a removed family", a
   });
   mount("composer");
   await screen.findByText("Selected family read failed");
-  expect(screen.getByRole("combobox")).toBeDisabled();
+  expect(screen.getByRole("combobox")).toHaveAttribute("aria-disabled", "true");
   expect(screen.queryByRole("option", { name: "Selected workflow (unavailable)" })).not.toBeInTheDocument();
 });
 

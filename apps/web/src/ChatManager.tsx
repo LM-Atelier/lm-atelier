@@ -3,8 +3,10 @@ import { AccessibleDialog } from "./AccessibleDialog";
 import { useConfirm } from "./useConfirm";
 import type { Chat } from "./types";
 import { ProjectPicker } from "./ProjectPicker";
+import { ChatWebAccess } from "./ChatWebAccess";
+import { ChatWorkflowRecipes } from "./WorkflowRecipeChoices";
 
-/** Rename, refile, archive, or delete one conversation. */
+/** Manage a conversation's settings and organization. */
 export function ChatManager({
   chat,
   onClose,
@@ -33,7 +35,7 @@ export function ChatManager({
     : `Delete ${chat.title} and its history?`;
   return (
     <AccessibleDialog
-      title="Manage chat"
+      title="Chat settings"
       eyebrow="Conversation"
       closeLabel="Close chat manager"
       onClose={onClose}
@@ -45,6 +47,9 @@ export function ChatManager({
       <label className="toggle-row"><span className="toggle-copy"><strong>Review image edits</strong><small>Check the result locally and retry once when the requested change is missing.</small></span><input type="checkbox" checked={verifyImageEdits} onChange={(event) => setVerifyImageEdits(event.target.checked)} /></label>
       <label className="toggle-row"><span className="toggle-copy"><strong>Compose visual prompts</strong><small>When a request asks to picture something written earlier, rewrite that passage as one scene description before generating.</small></span><input type="checkbox" checked={compileVisualPrompts} onChange={(event) => setCompileVisualPrompts(event.target.checked)} /></label>
       <label className="toggle-row"><span className="toggle-copy"><strong>Archived</strong><small>Hide this chat from the active workspace without deleting its history.</small></span><input type="checkbox" checked={archived} onChange={(event) => setArchived(event.target.checked)} /></label>
+      <ChatWorkflowRecipes chatId={chat.id} />
+      <ChatWebAccess chat={chat} />
+      <small>Recipes and Web access save as you change them.</small>
       <label className="toggle-row delete-media-option"><span className="toggle-copy"><strong>Delete generated media with chat</strong><small>Permanently delete image and video outputs used only by this chat. Shared media is kept.</small></span><input type="checkbox" checked={deleteGeneratedMedia} onChange={(event) => setDeleteGeneratedMedia(event.target.checked)} /></label>
       <footer className="editor-actions"><button className="secondary danger" onClick={() => void confirm({ title: "Delete this chat?", question: deletePrompt, confirmLabel: "Delete chat and history" }).then((ok) => ok && onDelete(deleteGeneratedMedia))}>Delete chat</button><button className="secondary" onClick={onClose}>Cancel</button><button className="primary" disabled={!title.trim()} onClick={() => onSave({ title: title.trim(), project_id: projectId || null, archived, confirm_uncertain_media: confirmUncertainMedia, vision_settings_json: { ...(chat.vision_settings_json ?? {}), verify_image_edits: verifyImageEdits, compile_visual_prompts: compileVisualPrompts } })}>Save chat</button></footer>
       {confirmDialog}

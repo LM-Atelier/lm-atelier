@@ -38,7 +38,7 @@ test("pages the workspace while preserving saved selection and searching unloade
     });
     await page.goto("/");
     const workspace = page.getByRole("region", { name: "Projects and chats" });
-    await expect(page.getByRole("heading", { name: "Old sketch", exact: true })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Old sketch", exact: true })).toBeVisible();
     await expect(workspace.locator(".sidebar-chat-row")).toHaveCount(50);
     await expect(workspace.getByRole("button", { name: "Old sketch", exact: true })).toHaveCount(0);
 
@@ -49,7 +49,7 @@ test("pages the workspace while preserving saved selection and searching unloade
     await workspace.getByRole("button", { name: "Load more chats" }).click();
     await expect(workspace.locator(".sidebar-chat-row")).toHaveCount(56);
     await workspace.getByRole("button", { name: "Notebook 0", exact: true }).click();
-    await expect(page.getByRole("heading", { name: "Notebook 0", exact: true })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Notebook 0", exact: true })).toBeVisible();
 
     await page.getByLabel("Search projects and chats").fill("Archived sketch");
     await expect(workspace.locator(".sidebar-chat-row")).toHaveCount(0);

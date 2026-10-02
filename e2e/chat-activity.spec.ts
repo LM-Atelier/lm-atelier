@@ -48,7 +48,7 @@ for (const width of [1280, 390]) {
         sessionStorage.setItem("lm-atelier-setup-dismissed", "1");
       }, readingId);
       await page.goto("/");
-      await expect(page.getByRole("heading", { name: "Reading notebook", exact: true })).toBeVisible();
+      await expect(page.getByRole("region", { name: "Reading notebook", exact: true })).toBeVisible();
       if (width < 600) await page.getByRole("button", { name: "Toggle navigation" }).click();
       const row = page.locator(".sidebar-chat-row").filter({ hasText: completed!.title });
       await expect(row.getByRole("img", { name: "Unread output" })).toBeVisible();
@@ -67,7 +67,7 @@ for (const width of [1280, 390]) {
         .toEqual([[completedId, activity.id, activity.sequence, expect.any(Number)]]);
       await expect(row.getByRole("img", { name: "Unread output", includeHidden: true })).toHaveCount(0);
       await page.reload();
-      await expect(page.getByRole("heading", { name: "Reading notebook", exact: true })).toBeVisible();
+      await expect(page.getByRole("region", { name: "Reading notebook", exact: true })).toBeVisible();
       await expect(row.getByRole("img", { name: "Unread output", includeHidden: true })).toHaveCount(0);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
       expect(errors).toEqual([]);

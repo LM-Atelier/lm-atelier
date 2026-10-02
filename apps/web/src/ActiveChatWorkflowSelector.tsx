@@ -1,4 +1,4 @@
-import { WorkflowFamilyBrowseControls } from "./WorkflowFamilyBrowseControls";
+import { WorkflowChoiceDropdown, type WorkflowDropdownOption } from "./WorkflowChoiceDropdown";
 import { useId } from "react";
 import { variantServesComposerCapability } from "./activeWorkflowCapability";
 import { useActiveChatWorkflowSelection } from "./useActiveChatWorkflowSelection";
@@ -7,6 +7,9 @@ import type { RoutingMode } from "./types";
 
 const LEGACY_VALUE = "compatibility:legacy";
 const REVISION_VALUE = "compatibility:revision";
+const idleBrowse = { search: "", setSearch: () => {}, pages: { error: null, isPending: false,
+  isFetchingNextPage: false, isFetchNextPageError: false, hasNextPage: false,
+  fetchNextPage: () => Promise.resolve(), refetch: () => Promise.resolve() } };
 
 
 export function ActiveChatWorkflowSelector({
@@ -32,9 +35,8 @@ export function ActiveChatWorkflowSelector({
     return (
       <div className="workflow-selector">
         <label htmlFor={selectorId}>{label}</label>
-        <select id={selectorId} disabled value="">
-          <option value="">Loading current choice…</option>
-        </select>
+        <WorkflowChoiceDropdown id={selectorId} label={label} browseLabel={`${state.capability} workflows`}
+          value="" options={[]} browse={idleBrowse} saving={false} unavailableText="Loading current choice…" onChange={() => {}} />
       </div>
     );
   }
@@ -42,9 +44,8 @@ export function ActiveChatWorkflowSelector({
     return (
       <div className="workflow-selector">
         <label htmlFor={selectorId}>{label}</label>
-        <select id={selectorId} disabled value="">
-          <option value="">Cannot read the current choice</option>
-        </select>
+        <WorkflowChoiceDropdown id={selectorId} label={label} browseLabel={`${state.capability} workflows`}
+          value="" options={[]} browse={idleBrowse} saving={false} unavailableText="Cannot read the current choice" onChange={() => {}} />
         <small role="alert">
           {state.error.message}
           <button className="secondary compact-button" type="button" onClick={state.retry}>
@@ -78,46 +79,34 @@ export function ActiveChatWorkflowSelector({
     applicableVariants.length > 0
     && (chosenFamily?.ready_variant_count ?? applicableVariants.length - blockedVariants.length) === 0,
   );
+  const options: WorkflowDropdownOption[] = [
+    { value: "default", label: "Default" }, { value: "automatic", label: "Auto" },
+    ...(state.current?.mode === "revision" ? [{ value: REVISION_VALUE, label: "Existing exact workflow", disabled: true }] : []),
+    ...(state.current?.mode === "legacy" ? [{ value: LEGACY_VALUE, label: "Existing model setup", disabled: true }] : []),
+    ...(state.selectedFamilyMissing && state.currentFamilyId
+      ? [{ value: state.currentFamilyId, label: "Selected workflow (unavailable)", disabled: true }] : []),
+    ...state.families.map(family => ({ value: family.id,
+      label: family.name + (family.compatibility ? " (existing setup)" : ""),
+      searchResult: family.id !== state.currentFamilyId })),
+  ];
 
   return (
     <div className="workflow-selector">
       <label htmlFor={selectorId}>{label}</label>
-      <select
-        id={selectorId}
-        value={currentValue}
-        disabled={state.saving}
-        onChange={(event) => {
-          const next = event.target.value;
+      <WorkflowChoiceDropdown id={selectorId} label={label} value={currentValue} options={options}
+        browse={state.browse} browseLabel={`${state.capability} workflows`} saving={state.saving}
+        onChange={(next) => {
           if (next === LEGACY_VALUE || next === REVISION_VALUE) return;
           if (next === "default") state.choose({ mode: "default" });
           else if (next === "automatic") state.choose({ mode: "automatic" });
           else state.choose({ mode: "family", workflow_family_id: next });
-        }}
-      >
-        <option value="default">Default</option>
-        <option value="automatic">Auto</option>
-        {state.current?.mode === "revision" && (
-          <option value={REVISION_VALUE} disabled>Existing exact workflow</option>
-        )}
-        {state.current?.mode === "legacy" && (
-          <option value={LEGACY_VALUE} disabled>Existing model setup</option>
-        )}
-        {state.selectedFamilyMissing && state.currentFamilyId && (
-          <option value={state.currentFamilyId} disabled>Selected workflow (unavailable)</option>
-        )}
-        {state.families.map((family) => (
-          <option key={family.id} value={family.id}>
-            {family.name}{family.compatibility ? " (existing setup)" : ""}
-          </option>
-        ))}
-      </select>
+        }} />
       {state.current?.mode === "revision" && (
         <small>Choosing a workflow replaces the existing exact revision.</small>
       )}
       {state.current?.mode === "legacy" && (
         <small>Choosing a workflow replaces the existing model setup.</small>
       )}
-      <WorkflowFamilyBrowseControls browse={state.browse} label={`${state.capability} workflows`} />
       {state.saveError && <small role="alert">{state.saveError.message}</small>}
       {noApplicableVariant && (
         <small role="status">This workflow has no {state.capability} variant.</small>

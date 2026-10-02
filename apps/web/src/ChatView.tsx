@@ -1,4 +1,3 @@
-import { ChatWebAccess } from "./ChatWebAccess";
 import { ChatSearchConsent } from "./ChatSearchConsent";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Bot, LoaderCircle, MessageSquare, Sparkles } from "lucide-react";
@@ -183,19 +182,14 @@ export function ChatView({
     }),
   );
   return (
-    <div className="chat-view">
-      <div className="chat-heading">
-        <div className="chat-header">
-          <div><small>{chat.project_id ? "Project chat" : "Unfiled chat"}</small><h1>{chat.title}</h1></div>
-        </div>
-        <ChatWebAccess chat={chat} />
-      </div>
+    <section className="chat-view" aria-label={chat.title}>
       {/* Reported here because the global list belongs to a component the
           transcript cannot reach. */}
       <FirstFailure of={[feedback, toggleFavorite]} />
       <TranscriptReadFailure reads={transcript?.error ? transcript : undefined} />
       <div className="messages" ref={messagesRef} onScroll={trackMessageScroll}>
-        {transcript && <TranscriptReadControls reads={transcript} onOlder={loadOlder} />}
+        {transcript && <TranscriptReadControls reads={transcript} onOlder={loadOlder}
+          showHistory={messages.length > 0 || transcript.hasOlder} />}
         {hiddenSearches.length > 0 && (
           <section aria-label="Pending searches in other branches">
             <p>Another branch is waiting for your search decision.</p>
@@ -344,6 +338,6 @@ export function ChatView({
         onAccepted={onEditAccepted} onClose={() => setEditMessageId(null)} />}
       <WorkspaceComposerDraft chatId={chat.id} draft={composerDraft} onDraft={onComposerDraft} />
       <TurnEditor transcriptContext={transcript?.context} PromptHelper={PromptHelperDialog} chat={chat} engines={engines} stoppable={stoppable} settings={settings} onSettings={onSettings} settingsRole={settingsRole} onSettingsRole={onSettingsRole} presetId={presetId} onPreset={onPreset} onMode={onMode} onSend={onSend} onStop={onStop} onStopAndSend={onStopAndSend} maxMediaOutputsPerPlan={maxMediaOutputsPerPlan} project={project} visualTarget={visualTarget} quoteTarget={quoteTarget} draft={composerDraft} onDraftChange={onComposerDraft} />
-    </div>
+    </section>
   );
 }

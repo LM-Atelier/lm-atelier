@@ -54,6 +54,12 @@ for (const viewport of VIEWPORTS) {
       expect(composerBox).not.toBeNull();
       // Above the composer's top edge, so no part of it is under the panel.
       expect(panelBox!.y + panelBox!.height).toBeLessThanOrEqual(composerBox!.y);
+      if (viewport.width <= 680) {
+        const transcriptBox = await page.locator(".messages").boundingBox();
+        expect(transcriptBox).not.toBeNull();
+        expect(panelBox!.y + panelBox!.height).toBeLessThanOrEqual(transcriptBox!.y);
+        expect(panelBox!.height).toBeLessThanOrEqual(viewport.height * 0.2);
+      }
 
       // A real click on Attach reaches it: the file chooser opens.
       const chooser = page.waitForEvent("filechooser");
