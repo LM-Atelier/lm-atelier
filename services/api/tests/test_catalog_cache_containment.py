@@ -14,6 +14,7 @@ defaulted.
 
 from __future__ import annotations
 
+import errno
 import os
 import subprocess
 import time
@@ -119,6 +120,89 @@ def test_a_redirected_cache_root_is_refused_and_its_target_untouched(
 
     assert victim.read_text(encoding="utf-8") == "theirs"
     assert sorted(entry.name for entry in target.iterdir()) == [f"{KEY_A}.json"]
+
+
+def test_a_redirected_cache_root_is_not_written(tmp_path: Path) -> None:
+    """Writing the cache used to follow a link planted at the cache root.
+
+    Prune already holds that directory and leaves the target alone. The write
+    still created its temporary by the linked path, so the bytes landed in the
+    directory the link points at.
+    """
+
+    target = tmp_path / "not-the-cache"
+    target.mkdir()
+    victim = target / f"{KEY_A}.json"
+    victim.write_text("theirs", encoding="utf-8")
+    link = tmp_path / "cache"
+    if not _make_link_dir(link, target):
+        pytest.skip("this host does not permit directory links")
+
+    _store(link).write_text(link / f"{KEY_A}.json", "cache")
+
+    assert victim.read_text(encoding="utf-8") == "theirs"
+    assert sorted(entry.name for entry in target.iterdir()) == [f"{KEY_A}.json"]
+
+
+def test_a_missing_cache_directory_is_created_for_the_write(tmp_path: Path) -> None:
+    root = tmp_path / "cache"
+    store = _store(root)
+    destination = store.path(KEY_A)
+
+    store.write_text(destination, "fresh")
+
+    assert destination.read_text(encoding="utf-8") == "fresh"
+    assert destination.is_file()
+
+
+def test_a_cache_under_a_missing_parent_is_created(tmp_path: Path) -> None:
+    """A source cache sits one directory under the shared catalog cache.
+
+    Callers that have not prepared that parent still store an entry. The
+    parent and the source directory are both absent until the write.
+    """
+
+    root = tmp_path / "catalog-cache" / "source"
+    store = _store(root)
+    destination = store.path(KEY_A)
+
+    store.write_text(destination, "fresh")
+
+    assert destination.read_text(encoding="utf-8") == "fresh"
+    assert destination.is_file()
+
+
+def test_a_missing_cache_is_not_created_through_a_linked_parent(tmp_path: Path) -> None:
+    """Creating the missing source directory must not follow a parent link."""
+
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    link = tmp_path / "linked-parent"
+    if not _make_link_dir(link, target):
+        pytest.skip("this host does not permit directory links")
+
+    root = link / "cache"
+    _store(root).write_text(root / f"{KEY_A}.json", "cache")
+
+    assert list(target.iterdir()) == []
+
+
+def test_a_failed_write_leaves_no_partial(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A full disk used to leave one staged file behind on every attempt."""
+
+    root = tmp_path / "cache"
+    store = _store(root)
+    destination = store.path(KEY_A)
+
+    def fail_fsync(_descriptor: int) -> None:
+        raise OSError(errno.ENOSPC, "no space")
+
+    monkeypatch.setattr("local_lm.catalog_cache.os.fsync", fail_fsync)
+
+    store.write_text(destination, "fresh")
+
+    assert not destination.exists()
+    assert list(root.iterdir()) == []
 
 
 def test_a_link_inside_the_cache_is_neither_followed_nor_deleted(
