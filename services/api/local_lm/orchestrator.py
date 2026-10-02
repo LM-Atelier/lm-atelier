@@ -2201,70 +2201,16 @@ class ConversationOrchestrator:
                     f"The saved {scope} setting {key} is not compatible with every "
                     "workflow selected for this prompt batch."
                 )
-        source_preview: SourceFitPreviewOut | None = None
-        if request.source_fit is not None:
-            if (
-                plan.operation != Operation.IMAGE_TO_IMAGE
-                or not resolved_input_ids
-                or workflow_revision is None
-                or workflow_revision.engine != "comfyui"
-                or self.engines.settings.media_engine != "comfyui"
-            ):
-                raise ValueError(
-                    "Source fitting requires an image and a ComfyUI image-edit workflow."
-                )
-            if (
-                effective_settings.get(MASK_SETTING_KEY)
-                or OUTPAINT_SETTING_KEY in effective_settings
-                or any(key in request.settings for key in ("width", "height"))
-            ):
-                raise ValueError(
-                    "Choose the source canvas without a separate mask, margins or size."
-                )
-            # Validate selected bytes before even transient admission writes.
-            # A replay uses its retained normalized pixels; the upload may change.
-            if (
-                inherited_workflow is not None
-                and inherited_source_fit is not None
-                and inherited_source_fit.image.source_artifact_id == resolved_input_ids[0]
-            ):
-                replay_source_fit_image(
-                    session,
-                    self.artifacts,
-                    inherited_source_fit.image,
-                    selected_source_id=resolved_input_ids[0],
-                )
-                if request.source_fit.mode == "crop":
-                    source_preview = source_crop_preview_for_image(
-                        workflow_revision,
-                        inherited_source_fit.image,
-                        request.source_fit.width,
-                        request.source_fit.height,
-                        inherited_source_fit.save_node_id,
-                    )
-                else:
-                    preview_recipe = plan_source_extension(
-                        inherited_source_fit.image,
-                        canvas_width=request.source_fit.width,
-                        canvas_height=request.source_fit.height,
-                        api_graph=workflow_revision.api_graph_json,
-                        save_node_id=inherited_source_fit.save_node_id,
-                    )
-                    source_preview = source_fit_preview_for_recipe(
-                        workflow_revision, preview_recipe
-                    )
-            else:
-                fit_definition = session.get(WorkflowDefinition, workflow_revision.workflow_id)
-                fit_source = session.get(Artifact, resolved_input_ids[0])
-                if fit_definition is None or fit_source is None:
-                    raise ValueError("Source image or workflow is unavailable.")
-                source_preview = preview_source_fit(
-                    fit_definition,
-                    workflow_revision,
-                    self.artifacts,
-                    fit_source,
-                    request.source_fit,
-                )
+        source_preview = self._source_fit_preview_for_turn(
+            session,
+            request,
+            plan,
+            effective_settings,
+            workflow_revision,
+            resolved_input_ids,
+            inherited_workflow,
+            inherited_source_fit,
+        )
         if preview_only:
             if source_preview is None:
                 raise ValueError("The selected turn does not provide a source canvas.")
@@ -2717,6 +2663,89 @@ class ConversationOrchestrator:
         for queued_job, queued_run in zip(jobs, runs, strict=True):
             self.start(queued_job.id, queued_run.id)
         return accepted
+
+    def _source_fit_preview_for_turn(
+        self,
+        session: Session,
+        request: TurnRequest,
+        plan: RoutingPlan,
+        effective_settings: dict[str, Any],
+        workflow_revision: WorkflowRevision | None,
+        resolved_input_ids: list[str],
+        inherited_workflow: AcceptedWorkflow | None,
+        inherited_source_fit: SourceFitRecipe | None,
+    ) -> SourceFitPreviewOut | None:
+        """The canvas a turn that fits its source would produce, or None without one.
+
+        Fitting needs an image and a ComfyUI image-edit workflow, and refuses a
+        separate mask, margins or size. A replay of an accepted fit reuses its
+        retained pixels; a new fit is previewed from the uploaded source.
+        """
+        source_preview: SourceFitPreviewOut | None = None
+        if request.source_fit is not None:
+            if (
+                plan.operation != Operation.IMAGE_TO_IMAGE
+                or not resolved_input_ids
+                or workflow_revision is None
+                or workflow_revision.engine != "comfyui"
+                or self.engines.settings.media_engine != "comfyui"
+            ):
+                raise ValueError(
+                    "Source fitting requires an image and a ComfyUI image-edit workflow."
+                )
+            if (
+                effective_settings.get(MASK_SETTING_KEY)
+                or OUTPAINT_SETTING_KEY in effective_settings
+                or any(key in request.settings for key in ("width", "height"))
+            ):
+                raise ValueError(
+                    "Choose the source canvas without a separate mask, margins or size."
+                )
+            # Validate selected bytes before even transient admission writes.
+            # A replay uses its retained normalized pixels; the upload may change.
+            if (
+                inherited_workflow is not None
+                and inherited_source_fit is not None
+                and inherited_source_fit.image.source_artifact_id == resolved_input_ids[0]
+            ):
+                replay_source_fit_image(
+                    session,
+                    self.artifacts,
+                    inherited_source_fit.image,
+                    selected_source_id=resolved_input_ids[0],
+                )
+                if request.source_fit.mode == "crop":
+                    source_preview = source_crop_preview_for_image(
+                        workflow_revision,
+                        inherited_source_fit.image,
+                        request.source_fit.width,
+                        request.source_fit.height,
+                        inherited_source_fit.save_node_id,
+                    )
+                else:
+                    preview_recipe = plan_source_extension(
+                        inherited_source_fit.image,
+                        canvas_width=request.source_fit.width,
+                        canvas_height=request.source_fit.height,
+                        api_graph=workflow_revision.api_graph_json,
+                        save_node_id=inherited_source_fit.save_node_id,
+                    )
+                    source_preview = source_fit_preview_for_recipe(
+                        workflow_revision, preview_recipe
+                    )
+            else:
+                fit_definition = session.get(WorkflowDefinition, workflow_revision.workflow_id)
+                fit_source = session.get(Artifact, resolved_input_ids[0])
+                if fit_definition is None or fit_source is None:
+                    raise ValueError("Source image or workflow is unavailable.")
+                source_preview = preview_source_fit(
+                    fit_definition,
+                    workflow_revision,
+                    self.artifacts,
+                    fit_source,
+                    request.source_fit,
+                )
+        return source_preview
 
     def _refuse_settings_the_workflow_cannot_take(
         self,
