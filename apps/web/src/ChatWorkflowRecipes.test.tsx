@@ -15,9 +15,11 @@ it("keeps recipes out of the composer while offering each workflow type", () => 
 
 it("remembers hidden workflow controls for this chat without hiding another chat's controls", () => {
   const { rerender } = render(<ChatWorkflowChoices chatId="first-chat" routingMode="auto" />);
+  expect(screen.getByRole("button", { name: "Hide workflows" }).querySelector(".lucide-chevron-down")).not.toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Hide workflows" }));
   expect(screen.queryByText("Text workflow")).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Show workflows" })).toHaveAttribute("aria-expanded", "false");
+  expect(screen.getByRole("button", { name: "Show workflows" }).querySelector(".lucide-chevron-up")).not.toBeNull();
   rerender(<ChatWorkflowChoices chatId="second-chat" routingMode="image" />);
   expect(screen.getByText("Text workflow")).toBeVisible();
   rerender(<ChatWorkflowChoices chatId="first-chat" routingMode="video" />);

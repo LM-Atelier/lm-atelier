@@ -21,7 +21,7 @@ function ChatWorkflowPanel({ chatId }: { chatId: string }) {
         setVisible(next);
         try { localStorage.setItem(storageKey, next ? "shown" : "hidden"); } catch { /* The control remains usable without persistence. */ }
       }}>
-      {visible ? <ChevronUp size={14} aria-hidden="true" /> : <ChevronDown size={14} aria-hidden="true" />}
+      {visible ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronUp size={14} aria-hidden="true" />}
       {visible ? "Hide workflows" : "Show workflows"}
     </button>
     {visible && <div id={id} className="chat-workflow-choice-fields">
