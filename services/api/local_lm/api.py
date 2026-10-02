@@ -184,6 +184,7 @@ from .engines import (
     EngineRegistry,
     EngineSchemaUnavailableError,
 )
+from .filesystem_links import is_link_or_reparse
 from .generation_experiment_api import router as generation_experiment_router
 from .generation_experiments_v1 import EXPERIMENT_CHAT_SCOPE
 from .generation_queue import (
@@ -2069,6 +2070,15 @@ def worker_log_tail(name: str, request: Request) -> WorkerLogTail:
     if name not in {"chat", "media"}:
         raise api_error(422, "worker-unknown", "worker must be chat or media")
     path = _services(request).settings.log_dir / f"{name}-worker.log"
+    # stat and open follow a link, so a worker log name that points somewhere
+    # else would be returned as the log. Skip that name before either call.
+    if is_link_or_reparse(path, missing="assume_regular", unreadable="assume_link"):
+        return WorkerLogTail(
+            name=cast(Literal["chat", "media"], name),
+            text="",
+            truncated=False,
+            log_bytes=0,
+        )
     try:
         size = path.stat().st_size
         with path.open("rb") as handle:
