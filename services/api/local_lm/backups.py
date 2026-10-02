@@ -290,11 +290,16 @@ class BackupManager:
 
         Fails closed. A receipt that is missing, unreadable, malformed, or
         disagrees about size is treated as no receipt at all, so the answer is
-        a re-verification rather than a wrong reuse.
+        a re-verification rather than a wrong reuse. A link at the receipt
+        directory, or at the receipt file, is not a receipt either: reading it
+        would follow that link.
         """
 
+        path = self._receipt_path(info.sha256)
+        if self._is_link(path) or self._is_link(path.parent):
+            return False
         try:
-            raw = self._receipt_path(info.sha256).read_text(encoding="utf-8")
+            raw = path.read_text(encoding="utf-8")
             record = json.loads(raw)
         except (OSError, ValueError):
             return False
@@ -318,7 +323,9 @@ class BackupManager:
         A failure to record is not a failure to verify. The backup was checked
         and is sound; losing the receipt costs one repeated check on the next
         start, which is the cost this exists to avoid rather than an error to
-        propagate.
+        propagate. A link in place of the receipt directory is left untouched,
+        because creating the receipt there would write into the directory that
+        link names.
         """
 
         record = {
@@ -329,7 +336,11 @@ class BackupManager:
         }
         try:
             directory = self._receipt_dir()
+            if self._is_link(directory):
+                return
             directory.mkdir(parents=True, exist_ok=True)
+            if self._is_link(directory) or not directory.is_dir():
+                return
             handle, temporary_name = tempfile.mkstemp(
                 prefix="receipt-", suffix=".partial", dir=directory
             )
@@ -356,13 +367,14 @@ class BackupManager:
         A receipt is written when its backup is verified, so a receipt older
         than the oldest retained backup cannot belong to one, and dropping it
         is safe. Erring towards keeping is free: a stale receipt is never
-        matched, because no file digests to it.
+        matched, because no file digests to it. A link in place of the receipt
+        directory is left untouched. The files it names are outside this store.
         """
 
         if oldest_kept is None:
             return
         directory = self._receipt_dir()
-        if not directory.is_dir():
+        if self._is_link(directory) or not directory.is_dir():
             return
         cutoff = oldest_kept.timestamp()
         for path in directory.glob("*.json"):
