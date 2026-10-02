@@ -54,5 +54,13 @@ fails if a required file is missing or changed. Use **Verify** to check the
 backup before relying on it, and keep its database snapshot and media archive
 together when copying it elsewhere.
 
+The **Generation record** control beside a generated picture or video saves a
+small JSON file describing how it was made: the output's file hash, the
+operation, the seed and settings, the workflow, model and LoRA files by hash,
+and the inputs by hash. The prompt is left out unless you choose to include it,
+and text a workflow takes as a setting follows the same choice. The record never
+names your chats, messages or files on this computer, and it lists what it left
+out. It does not contain the picture or video itself.
+
 Before sharing issue details, inspect them and remove tokens, private prompts,
 chats, media, model inputs, and identifying file paths.

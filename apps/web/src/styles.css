@@ -1334,6 +1334,15 @@ html[data-motion="reduced"] .progress-track > div.indeterminate { width: 100% !i
 .lineage-steps { display: grid; gap: calc(6px * var(--spacing-scale, 1)); list-style: none; margin: 0; padding: 0; }
 .lineage-steps li { border-left: 2px solid var(--border); padding: calc(2px * var(--spacing-scale, 1)) 0 calc(2px * var(--spacing-scale, 1)) calc(11px * var(--spacing-scale, 1)); }
 .lineage-steps small { color: var(--muted); }
+.generation-record-dialog { width: min(560px, 96vw); }
+.generation-record-body { display: grid; gap: calc(12px * var(--spacing-scale, 1)); }
+.generation-record-body p, .generation-record-body h3 { margin: 0; }
+.generation-record-body ul { margin: 0; padding-left: calc(16px * var(--spacing-scale, 1)); }
+.modal .generation-record-choice { grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: calc(8px * var(--spacing-scale, 1)); margin: 0; }
+.modal .generation-record-choice input { width: auto; margin: 0; }
+.generation-record-facts { display: grid; grid-template-columns: auto 1fr; gap: calc(4px * var(--spacing-scale, 1)) calc(12px * var(--spacing-scale, 1)); margin: 0; }
+.generation-record-facts dt { color: var(--muted); }
+.generation-record-facts dd { margin: 0; }
 .markdown-image-reference { color: var(--muted); font-style: italic; }
 /* A destructive confirmation whose two buttons look identical is not a
    confirmation. These inherit .message-meta button, which is transparent
