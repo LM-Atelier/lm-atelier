@@ -1629,10 +1629,16 @@ class RuntimeProvisioner:
             self._ensure_inside(root, site_packages.resolve())
             if not site_packages.is_dir():
                 raise RuntimeProvisioningError("The runtime dependency inventory is missing.")
+            # is_dir follows a directory link, so a junction named like a
+            # distribution would count as installed. Skip the link first.
             identities = sorted(
                 candidate.name
                 for candidate in site_packages.iterdir()
-                if candidate.is_dir() and candidate.name.endswith(".dist-info")
+                if candidate.name.endswith(".dist-info")
+                and not is_link_or_reparse(
+                    candidate, missing="assume_link", unreadable="assume_link"
+                )
+                and candidate.is_dir()
             )
             canonical = ("\n".join(identities) + "\n").encode("utf-8")
             if (
