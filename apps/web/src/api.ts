@@ -295,11 +295,12 @@ async function isCsrfFailure(response: Response): Promise<boolean> {
   }
 }
 
-async function request<T>(
+/** Send one request and return its successful response, or throw its refusal. */
+async function send(
   path: string,
   init: RequestInit = {},
   retrySession = true,
-): Promise<T> {
+): Promise<Response> {
   if (path !== "/api/session") await ensureSession();
   const headers = new Headers(init.headers);
   if (init.body && !(init.body instanceof FormData)) headers.set("content-type", "application/json");
@@ -318,7 +319,7 @@ async function request<T>(
     if (staleSession) {
       resetSession();
       await ensureSession();
-      return request<T>(path, init, false);
+      return send(path, init, false);
     }
   }
   if (!response.ok) {
@@ -338,8 +339,18 @@ async function request<T>(
     }
     throw new ApiError(response.status, detail, message, code, body);
   }
+  return response;
+}
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const response = await send(path, init);
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
+}
+
+/** A response's exact bytes, for a body whose digest covers them as sent. */
+async function requestBytes(path: string, init: RequestInit = {}): Promise<ArrayBuffer> {
+  return (await send(path, init)).arrayBuffer();
 }
 
 type WorkflowRevisionInput = Pick<
@@ -473,6 +484,17 @@ export const api = {
     request<ChatDetail>(`/api/studio/sessions/${encodeURIComponent(sessionId)}`),
   /** One run, with what it resolved and recorded: how a Studio result's edit is made again. */
   run: (runId: string) => request<Run>(`/api/runs/${encodeURIComponent(runId)}`),
+  /** One output's portable generation record, as the exact bytes its digest covers. */
+  generationRecord: (
+    runId: string,
+    artifactId: string,
+    includePrompt: boolean,
+    signal?: AbortSignal,
+  ) =>
+    requestBytes(
+      `/api/runs/${encodeURIComponent(runId)}/outputs/${encodeURIComponent(artifactId)}/recipe?prompts=${includePrompt ? "include" : "omit"}`,
+      { signal },
+    ),
   preflightGenerationExperiment: (payload: GenerationExperimentRequest) =>
     request<GenerationExperimentPreflight>("/api/generation-experiments/preflight", { method: "POST", body: JSON.stringify(payload) }),
   createGenerationExperiment: (payload: GenerationExperimentCreate) =>

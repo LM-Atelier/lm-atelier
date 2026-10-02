@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { CompareButton } from "./CompareButton";
 import { GenerationDetails } from "./GenerationDetails";
+import { GenerationRecordButton } from "./GenerationRecordButton";
 import { ImageStudioIcon } from "./ImageStudioIcon";
 import { LineageButton } from "./LineageButton";
 import { PagedImageHistory, type ImageHistoryTarget } from "./PagedImageHistory";
@@ -35,6 +36,7 @@ export function ArtifactPart({
   lineage,
   editHistory,
   generationProvenance,
+  generationRunId,
 }: {
   part: MessagePart;
   origin: MediaOrigin | null;
@@ -47,6 +49,8 @@ export function ArtifactPart({
   lineage?: EditLineageStep[];
   editHistory?: ImageHistoryTarget;
   generationProvenance?: unknown;
+  /** The run that made this output, which names it in its generation record. */
+  generationRunId?: string;
 }) {
   const proxyId = typeof part.metadata_json.browser_proxy_artifact_id === "string" ? part.metadata_json.browser_proxy_artifact_id : null;
   const posterId = typeof part.metadata_json.poster_artifact_id === "string"
@@ -65,6 +69,9 @@ export function ArtifactPart({
     return <a className="message-attachment" href={source} download><Paperclip size={14} />{name}</a>;
   }
   const kind = part.type === "video" ? "video" : "image";
+  const recordRunId = !preview && !inputReference && origin !== null && origin !== "uploaded"
+    ? generationRunId
+    : undefined;
   // A preview node's throwaway was never the picture that was asked for, so a
   // size note beside it would be about the wrong file. The record already
   // refuses those, and this is the second half of the same refusal for the
@@ -156,6 +163,7 @@ export function ArtifactPart({
               <Download size={14} aria-hidden="true" />
             </a>
           )}
+          {recordRunId && <GenerationRecordButton runId={recordRunId} artifactId={part.artifact_id} kind="image" />}
         </figcaption>
         {!preview && !inputReference && origin !== null && origin !== "uploaded" && <GenerationDetails provenance={generationProvenance} />}
         {/* Beside the picture rather than in place of it: the run succeeded and
@@ -183,6 +191,7 @@ export function ArtifactPart({
       <figcaption>
         <Film size={14} /> {label}
         <a href={source} download>Download</a>
+        {recordRunId && <GenerationRecordButton runId={recordRunId} artifactId={part.artifact_id} kind="video" />}
       </figcaption>
       {!preview && !inputReference && origin !== null && origin !== "uploaded" && <GenerationDetails provenance={generationProvenance} />}
     </figure>

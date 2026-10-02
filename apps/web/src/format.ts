@@ -45,6 +45,16 @@ export function formatDate(value?: string | null): string {
   }).format(new Date(value))}`;
 }
 
+/** Save bytes exactly as they arrived, for a file whose digest covers them. */
+export function downloadBytes(bytes: ArrayBuffer, filename: string, type: string): void {
+  const url = URL.createObjectURL(new Blob([bytes], { type }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
 export function downloadJson(value: unknown, filename: string): void {
   const url = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], { type: "application/json" }));
   const anchor = document.createElement("a");
