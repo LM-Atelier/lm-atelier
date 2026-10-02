@@ -106,6 +106,10 @@ def create_media_tag(session: Session, *, label: object, color: object = None) -
     return tag
 
 
+def list_media_tags(session: Session) -> list[MediaTag]:
+    return list(session.scalars(select(MediaTag).order_by(MediaTag.label, MediaTag.id)))
+
+
 def _visible_entry(session: Session, entry_id: object) -> ArtifactLibraryEntry:
     if type(entry_id) is not str or re.fullmatch(r"libentry:sha256:[0-9a-f]{64}", entry_id) is None:
         _invalid()
