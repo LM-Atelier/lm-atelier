@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import io
+import struct
+import zlib
 from typing import Any
 from urllib.parse import unquote
 
 import pytest
+from fastapi import FastAPI
 from httpx2 import AsyncClient
 from PIL import Image, ImageCms, PngImagePlugin
 
+from local_lm.db import SessionLocal
+from local_lm.domain import ArtifactKind
 from local_lm.picture_export import (
     ExportFormat,
     PictureExportError,
@@ -130,6 +135,50 @@ def test_bytes_that_are_not_a_picture_are_refused() -> None:
     assert refused.value.code == "picture-export-unreadable"
 
 
+def _chunk(kind: bytes, data: bytes) -> bytes:
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+
+def _malformed_pictures() -> list[bytes]:
+    """Files Pillow recognises and then fails on in ways other than an OSError."""
+
+    short_header = (
+        b"\x89PNG\r\n\x1a\n"
+        + _chunk(b"IHDR", b"\x00\x00\x00\x04\x00\x00\x00\x04\x08")
+        + _chunk(b"IEND", b"")
+    )
+    orientation = Image.Exif()
+    orientation[0x0112] = 6
+    with_exif = _encoded(Image.new("RGB", (4, 4)), "WEBP", exif=orientation.tobytes())
+    at = with_exif.find(b"MM\x00*")
+    assert at > 0
+    broken_orientation = with_exif[:at] + b"$" + with_exif[at + 1 :]
+    return [short_header, broken_orientation]
+
+
+@pytest.mark.parametrize("file_format", ["png", "jpeg", "webp"])
+def test_a_malformed_picture_is_refused_rather_than_failing(file_format: ExportFormat) -> None:
+    for payload in _malformed_pictures():
+        with pytest.raises(PictureExportError) as refused:
+            export_picture(payload, file_format)
+        assert refused.value.code == "picture-export-unreadable"
+
+
+def test_sixteen_bit_grey_stays_whole_in_png_and_is_scaled_in_eight_bit_formats() -> None:
+    ramp = Image.new("I;16", (4, 1))
+    ramp.putdata([0, 1000, 32896, 65535])
+    mid_grey = Image.new("I;16", (8, 8), 32896)
+
+    png = _open(export_picture(_encoded(ramp), "png"))
+
+    assert png.mode == "I;16"
+    assert png.tobytes() == ramp.tobytes()
+    for file_format in ("jpeg", "webp"):
+        flat = _open(export_picture(_encoded(mid_grey), file_format)).convert("L")
+        # Clipped to eight bits this would be white; scaled it is the middle.
+        assert abs(flat.getpixel((4, 4)) - 128) <= 3, file_format
+
+
 def test_the_file_is_named_after_the_picture() -> None:
     assert export_file_name("holiday (cropped).png", "jpeg") == "holiday (cropped).jpg"
     assert export_file_name(None, "webp") == "picture.webp"
@@ -180,3 +229,23 @@ async def test_the_export_route_refuses_what_it_cannot_export(client: AsyncClien
     assert not_a_picture.status_code == 422
     assert not_a_picture.json()["code"] == "artifact-not-a-picture"
     assert missing.status_code == 404
+
+
+async def test_the_export_route_refuses_a_malformed_picture_with_a_code(
+    app: FastAPI, client: AsyncClient
+) -> None:
+    """An engine's output is stored as it arrived, so a malformed one can reach here."""
+
+    with SessionLocal() as session:
+        stored = [
+            app.state.services.artifacts.ingest_bytes(
+                session, payload, kind=ArtifactKind.IMAGE, media_type="image/png"
+            ).id
+            for payload in _malformed_pictures()
+        ]
+        session.commit()
+
+    for picture_id in stored:
+        response = await client.get(f"/api/artifacts/{picture_id}/export", params={"format": "png"})
+        assert response.status_code == 422, response.text
+        assert response.json()["code"] == "picture-export-unreadable"
