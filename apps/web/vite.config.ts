@@ -32,5 +32,10 @@ export default defineConfig({
     // assert that a function was never called, so without this a call made by an
     // earlier test is still on the record when the next one reads it.
     clearMocks: true,
+    // The 5-second default measured the runner, not the code: on a loaded hosted
+    // Windows runner, tests that finish in about a second locally have crossed it
+    // one at a time, each in a change that never touched them. A test that hangs
+    // still fails, only later.
+    testTimeout: 15_000,
   },
 });
