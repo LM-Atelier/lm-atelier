@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import subprocess
 import threading
 import zipfile
 from collections.abc import Callable
@@ -831,6 +832,105 @@ def test_receipts_older_than_every_retained_backup_are_pruned(tmp_path: Path) ->
 
     assert not stale.exists(), "a receipt predating every retained backup survived"
     assert list(manager._receipt_dir().glob("*.json")), "the live receipt was pruned too"
+
+
+def _plant_directory_link(link: Path, target: Path) -> None:
+    """Point ``link`` at ``target`` without following an existing directory.
+
+    The link must not already exist. A Windows directory junction is not a
+    symlink, so the replacement has to be created that way or the test never
+    reaches the check it exists to pin.
+    """
+
+    if os.name == "nt":
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True,
+        )
+        if completed.returncode != 0:
+            pytest.skip("this host refuses to create a directory link")
+        return
+    try:
+        os.symlink(target, link, target_is_directory=True)
+    except OSError:
+        pytest.skip("this host refuses to create a directory link")
+
+
+def test_pruning_receipts_does_not_delete_through_a_linked_directory(tmp_path: Path) -> None:
+    """A linked receipt directory is not the receipt store.
+
+    Pruning lists that directory and deletes old JSON files in it. When the
+    directory is a link, those files belong somewhere else and must stay.
+    """
+
+    settings = Settings(data_dir=tmp_path / "data")
+    settings.prepare()
+    _write_test_database(settings.state_dir / "local-lm.sqlite3", "current")
+    manager = BackupManager(settings)
+    manager.ensure_daily_backup(now=datetime(2026, 7, 25, 1, 0, 0, tzinfo=UTC))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "notes.json"
+    victim.write_text("{}\n", encoding="utf-8")
+    ancient = datetime(2000, 1, 1, tzinfo=UTC).timestamp()
+    os.utime(victim, (ancient, ancient))
+    receipt_dir = manager._receipt_dir()
+    os.replace(receipt_dir, tmp_path / "real-receipts")
+    _plant_directory_link(receipt_dir, outside)
+
+    manager.prune()
+
+    assert victim.is_file()
+    assert victim.read_text(encoding="utf-8") == "{}\n"
+
+
+def test_a_new_receipt_is_not_written_through_a_linked_directory(tmp_path: Path) -> None:
+    """Recording a passing check must not create a file in the link's target.
+
+    Verification itself still succeeds. Losing the receipt only means the next
+    start checks the backup again.
+    """
+
+    settings = Settings(data_dir=tmp_path / "data")
+    settings.prepare()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep", encoding="utf-8")
+    _plant_directory_link(settings.state_dir / "backup-verifications", outside)
+    _write_test_database(settings.state_dir / "local-lm.sqlite3", "current")
+    manager = BackupManager(settings)
+
+    info = manager.ensure_daily_backup(now=datetime(2026, 7, 25, 1, 0, 0, tzinfo=UTC))
+
+    assert info.verified is True
+    assert sorted(path.name for path in outside.iterdir()) == ["keep.txt"]
+
+
+def test_a_receipt_behind_a_directory_link_is_not_reused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A matching receipt reached through a link does not skip the check.
+
+    The file can contain a real passing record. It is still not this store's
+    receipt, so the backup is verified again.
+    """
+
+    settings = Settings(data_dir=tmp_path / "data")
+    settings.prepare()
+    _write_test_database(settings.state_dir / "local-lm.sqlite3", "current")
+    manager = BackupManager(settings)
+    today = datetime(2026, 7, 25, 1, 0, 0, tzinfo=UTC)
+    manager.ensure_daily_backup(now=today)
+    receipt_dir = manager._receipt_dir()
+    outside = tmp_path / "outside"
+    os.replace(receipt_dir, outside)
+    _plant_directory_link(receipt_dir, outside)
+    seen = _verify_spy(monkeypatch)
+
+    repeated = manager.ensure_daily_backup(now=today + timedelta(hours=1))
+
+    assert repeated.verified is True
+    assert seen, "a receipt behind a directory link skipped verification"
 
 
 def test_a_receipt_filed_under_one_digest_but_naming_another_is_rejected(
