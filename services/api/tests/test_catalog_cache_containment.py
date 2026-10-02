@@ -144,6 +144,26 @@ def test_a_redirected_cache_root_is_not_written(tmp_path: Path) -> None:
     assert sorted(entry.name for entry in target.iterdir()) == [f"{KEY_A}.json"]
 
 
+def test_a_redirected_cache_root_is_not_read(tmp_path: Path) -> None:
+    """Reading the cache used to follow a link planted at the cache root.
+
+    Prune and write already hold that directory and leave the target alone.
+    The read still opened the cache file by the linked path, so the bytes
+    came from the directory the link points at.
+    """
+
+    target = tmp_path / "not-the-cache"
+    target.mkdir()
+    victim = target / f"{KEY_A}.json"
+    victim.write_text("theirs", encoding="utf-8")
+    link = tmp_path / "cache"
+    if not _make_link_dir(link, target):
+        pytest.skip("this host does not permit directory links")
+
+    assert _store(link).read_text(link / f"{KEY_A}.json") is None
+    assert victim.read_text(encoding="utf-8") == "theirs"
+
+
 def test_a_missing_cache_directory_is_created_for_the_write(tmp_path: Path) -> None:
     root = tmp_path / "cache"
     store = _store(root)
