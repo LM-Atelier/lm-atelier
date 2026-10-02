@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -56,6 +58,69 @@ def test_an_inventory_past_the_size_limit_is_not_shown(tmp_path: Path) -> None:
     root = _bundle(tmp_path / "bundle", notices="x" * (MAX_NOTICES_BYTES + 1))
 
     assert read_third_party_notices(root).text is None
+
+
+def _make_link_dir(link: Path, target: Path) -> bool:
+    """Create a directory-shaped redirection, or False without privileges."""
+
+    if os.name == "nt":
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True,
+            check=False,
+        )
+        return completed.returncode == 0
+    try:
+        os.symlink(target, link, target_is_directory=True)
+    except OSError:
+        return False
+    return True
+
+
+def test_a_linked_notices_file_is_not_read(tmp_path: Path) -> None:
+    outside = tmp_path / "outside-notices.md"
+    outside.write_text("A neutral fixture.", encoding="utf-8")
+    root = tmp_path / "bundle"
+    root.mkdir()
+    link = root / NOTICES_FILE
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("file symlinks are unavailable")
+
+    notices = read_third_party_notices(root)
+
+    assert notices.text is None
+    assert outside.read_text(encoding="utf-8") == "A neutral fixture."
+    assert link.is_symlink()
+
+
+def test_a_linked_license_folder_is_not_reported(tmp_path: Path) -> None:
+    outside = tmp_path / "outside-licenses"
+    outside.mkdir()
+    (outside / "license.txt").write_text("A neutral fixture.", encoding="utf-8")
+    root = tmp_path / "bundle"
+    root.mkdir()
+    link = root / LICENSES_FOLDER
+    if not _make_link_dir(link, outside):
+        pytest.skip("directory links are unavailable")
+
+    notices = read_third_party_notices(root)
+
+    assert notices.license_folder is None
+    assert (outside / "license.txt").read_text(encoding="utf-8") == "A neutral fixture."
+
+
+def test_a_linked_release_root_is_not_read(tmp_path: Path) -> None:
+    real = _bundle(tmp_path / "real")
+    link = tmp_path / "linked-root"
+    if not _make_link_dir(link, real):
+        pytest.skip("directory links are unavailable")
+
+    notices = read_third_party_notices(link)
+
+    assert (notices.text, notices.license_folder) == (None, None)
+    assert (real / NOTICES_FILE).read_text(encoding="utf-8") == INVENTORY
 
 
 def test_the_bundle_is_the_frozen_release_folder(
