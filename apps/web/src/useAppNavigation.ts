@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateA
 import type { View } from "./rooms";
 import { DEFAULT_SETTINGS_DESTINATION, settingsDestinationFor } from "./settingsDestinations";
 
-const VIEWS: readonly View[] = ["chat", "media", "models", "references", "prompts", "workflows", "studio", "settings"];
+const VIEWS: readonly View[] = ["chat", "media", "models", "references", "prompts", "workflows", "studio", "compare", "settings"];
 const SETTINGS_KEY = "lm-atelier.settings-destination";
 
 interface Navigation {

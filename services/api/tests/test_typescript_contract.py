@@ -29,6 +29,7 @@ type JsonSchema = dict[str, Any]
 REPOSITORY = Path(__file__).resolve().parents[3]
 TYPES_FILE = REPOSITORY / "apps" / "web" / "src" / "types.ts"
 INSTALLATION_TYPES_FILE = TYPES_FILE.with_name("installationQueueTypes.ts")
+GENERATION_EXPERIMENT_TYPES_FILE = TYPES_FILE.with_name("generationExperimentTypes.ts")
 # types.ts re-exports some modules whole; their interfaces are the same surface.
 _RE_EXPORTED = re.compile(r'^export type \* from "\./([A-Za-z0-9_]+)";$', re.M)
 
@@ -173,6 +174,14 @@ CHECKED_CONTRACTS = {
     "WorkflowSourceCandidate": "WorkflowSourceCandidateOut",
     "WorkPlan": "WorkPlanOut",
     "WorkStep": "WorkStepOut",
+    "ArmPreflight": "ArmPreflightOut",
+    "ExperimentArm": "ExperimentArmOut",
+    "ExperimentRefusal": "ExperimentRefusalOut",
+    "ExperimentTrial": "ExperimentTrialOut",
+    "GenerationExperiment": "GenerationExperimentOut",
+    "GenerationExperimentPreflight": "GenerationExperimentPreflightOut",
+    "RefusalAlternative": "RefusalAlternativeOut",
+    "ResourceEvidence": "ResourceEvidenceOut",
 }
 
 # Fields the browser deliberately does not mirror, with the reason. Anything
@@ -270,6 +279,7 @@ def types_source() -> str:
     source = TYPES_FILE.read_text(encoding="utf-8")
     modules = [
         INSTALLATION_TYPES_FILE,
+        GENERATION_EXPERIMENT_TYPES_FILE,
         *(TYPES_FILE.with_name(f"{name}.ts") for name in _RE_EXPORTED.findall(source)),
     ]
     return "\n".join([source, *(path.read_text(encoding="utf-8") for path in modules)])

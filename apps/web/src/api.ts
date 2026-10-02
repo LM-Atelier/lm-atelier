@@ -1,4 +1,5 @@
 import type { QueueLane, QueueOrderCommand, QueueOrderPage, QueueOrderResult } from "./queueOrderTypes";
+import type { GenerationExperiment, GenerationExperimentCreate, GenerationExperimentPreflight, GenerationExperimentRequest, GenerationExperimentStart } from "./generationExperimentTypes";
 import { workflowFamilyQuery, workflowReadQuery, type WorkflowFamilyReadOptions, type WorkflowReadPageOptions } from "./workflowReadQuery";
 import type { WorkflowRecipeTarget, WorkflowUseCase, WorkflowUseCaseChoice, WorkflowUseCaseDefault, WorkflowUseCasePreset, WorkflowUseCasePresetCreate } from "./workflowUseCaseTypes";
 import type { EnlargementPreview } from "./studioEnlargement";
@@ -238,6 +239,8 @@ export class ApiError extends Error {
     public readonly detail: unknown,
     message: string,
     public readonly code?: string,
+    /** The whole error body, for routes whose refusal carries more than a message. */
+    public readonly payload?: Record<string, unknown>,
   ) {
     super(message);
     this.name = "ApiError";
@@ -322,8 +325,10 @@ async function request<T>(
     let message = `${response.status} ${response.statusText}`;
     let detail: unknown;
     let code: string | undefined;
+    let body: Record<string, unknown> | undefined;
     try {
       const payload = (await response.json()) as { detail?: unknown; code?: unknown };
+      if (payload && typeof payload === "object" && !Array.isArray(payload)) body = payload as Record<string, unknown>;
       detail = payload.detail;
       if (typeof payload.code === "string") code = payload.code;
       if (typeof detail === "string") message = detail;
@@ -331,7 +336,7 @@ async function request<T>(
     } catch {
       // Preserve the HTTP status text.
     }
-    throw new ApiError(response.status, detail, message, code);
+    throw new ApiError(response.status, detail, message, code, body);
   }
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
@@ -468,6 +473,14 @@ export const api = {
     request<ChatDetail>(`/api/studio/sessions/${encodeURIComponent(sessionId)}`),
   /** One run, with what it resolved and recorded: how a Studio result's edit is made again. */
   run: (runId: string) => request<Run>(`/api/runs/${encodeURIComponent(runId)}`),
+  preflightGenerationExperiment: (payload: GenerationExperimentRequest) =>
+    request<GenerationExperimentPreflight>("/api/generation-experiments/preflight", { method: "POST", body: JSON.stringify(payload) }),
+  createGenerationExperiment: (payload: GenerationExperimentCreate) =>
+    request<GenerationExperiment>("/api/generation-experiments", { method: "POST", body: JSON.stringify(payload) }),
+  generationExperiment: (experimentId: string, signal?: AbortSignal) =>
+    request<GenerationExperiment>(`/api/generation-experiments/${encodeURIComponent(experimentId)}`, { signal }),
+  startGenerationExperiment: (experimentId: string, payload: GenerationExperimentStart) =>
+    request<GenerationExperiment>(`/api/generation-experiments/${encodeURIComponent(experimentId)}/start`, { method: "POST", body: JSON.stringify(payload) }),
   studioLocalEdit: (sessionId: string, edit: StudioLocalEditRequest) =>
     request<ChatDetail>(`/api/studio/sessions/${encodeURIComponent(sessionId)}/local-edits`, {
       method: "POST",
