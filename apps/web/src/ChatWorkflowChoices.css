@@ -7,6 +7,8 @@
 @media (max-width: 600px) { .chat-workflow-choice-fields { grid-template-columns: 1fr; } }
 
 .turn-editor-with-workflow-choices .composer-wrap { position: relative; padding-top: calc(12px * var(--spacing-scale, 1)); }
+/* This composer follows the transcript, so it needs no backdrop over it. */
+.turn-editor-with-workflow-choices .composer-wrap::before { content: none; }
 .chat-view:has(> .turn-editor-with-workflow-choices) > .messages { padding-bottom: calc(24px * var(--spacing-scale, 1)); }
 
 .turn-editor-with-workflow-choices .composer-wrap:has(.workflow-choice-popup) { z-index: 20; }

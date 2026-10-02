@@ -67,6 +67,7 @@ for (const width of [1280, 375]) {
     await expect(page.getByRole("complementary", { name: "Jobs", exact: true })).toBeVisible();
     const select = page.getByRole("combobox", { name: "Image workflow", exact: true });
     await expect(select).toHaveValue("Choice 51");
+    await expect(page.getByRole("button", { name: "Hide workflows" }).locator(".lucide-chevron-down")).toBeVisible();
     await select.click();
     await expect(page.getByRole("option", { name: "Choice 51", exact: true })).toBeVisible();
     await expect(page.getByRole("option", { name: "Choice 50", exact: true })).toHaveCount(0);
@@ -106,8 +107,15 @@ for (const width of [1280, 375]) {
     await select.click();
     await page.screenshot({ path: `test-results/workflow-dropdown-${width}.png` });
     await select.press("Escape");
+    const expandedHeight = await page.locator(".chat-workflow-choices").evaluate(element => element.getBoundingClientRect().height);
+    const transcriptHeight = await page.locator(".chat-view > .messages").evaluate(element => element.clientHeight);
     await page.getByRole("button", { name: "Hide workflows" }).click();
     await expect(select).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Show workflows" }).locator(".lucide-chevron-up")).toBeVisible();
+    expect(await page.locator(".chat-workflow-choices").evaluate(element => element.getBoundingClientRect().height)).toBeLessThan(expandedHeight);
+    expect(await page.locator(".chat-view > .messages").evaluate(element => element.clientHeight)).toBeGreaterThan(transcriptHeight);
+    expect(await page.locator(".turn-editor-with-workflow-choices .composer-wrap").evaluate(element => getComputedStyle(element, "::before").content)).toBe("none");
+    await page.screenshot({ path: `test-results/hidden-workflow-controls-${width}.png`, fullPage: true });
     await page.reload();
     await page.getByRole("button", { name: "Show workflows" }).click();
     await expect(select).toHaveValue("Choice 10");
