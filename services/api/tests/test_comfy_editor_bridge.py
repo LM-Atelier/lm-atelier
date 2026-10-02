@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -328,6 +330,105 @@ def test_failed_atomic_stage_leaves_no_partial_bridge(
 
     assert refused.value.code == "workflow-editor-bridge-staging-failed"
     assert list(custom_nodes.iterdir()) == []
+
+
+def _rename_refused(times: int, calls: list[str]) -> Callable[[Path, Path], None]:
+    """A rename that is refused access `times` times and then goes ahead."""
+
+    real_rename = os.rename
+
+    def rename(source: Path, destination: Path) -> None:
+        calls.append("rename")
+        if len(calls) <= times:
+            raise PermissionError(13, "held by another process")
+        real_rename(source, destination)
+
+    return rename
+
+
+def test_a_briefly_held_staging_directory_is_renamed_once_it_is_released(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    custom_nodes = tmp_path / "custom_nodes"
+    calls: list[str] = []
+    waits: list[float] = []
+    monkeypatch.setattr(os, "rename", _rename_refused(2, calls))
+    monkeypatch.setattr(editor_bridge.time, "sleep", waits.append)
+
+    staged = _stage(custom_nodes)
+
+    assert calls == ["rename"] * 3
+    assert waits == [0.05, 0.1]
+    assert [entry.name for entry in custom_nodes.iterdir()] == [staged.name]
+    assert (staged / BRIDGE_COORDINATOR_CONFIG).is_file()
+
+
+def test_a_staging_directory_held_too_long_fails_and_leaves_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    custom_nodes = tmp_path / "custom_nodes"
+    calls: list[str] = []
+    waits: list[float] = []
+    monkeypatch.setattr(os, "rename", _rename_refused(99, calls))
+    monkeypatch.setattr(editor_bridge.time, "sleep", waits.append)
+
+    with pytest.raises(ComfyEditorBridgeError) as refused:
+        _stage(custom_nodes)
+
+    assert refused.value.code == "workflow-editor-bridge-staging-failed"
+    assert len(calls) == 5
+    assert waits == [0.05, 0.1, 0.2, 0.4]
+    assert list(custom_nodes.iterdir()) == []
+
+
+def test_only_a_refusal_of_access_is_tried_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    custom_nodes = tmp_path / "custom_nodes"
+    calls: list[str] = []
+
+    def fail_rename(_source: Path, _destination: Path) -> None:
+        calls.append("rename")
+        raise OSError(5, "input/output error")
+
+    monkeypatch.setattr(os, "rename", fail_rename)
+    monkeypatch.setattr(editor_bridge.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(ComfyEditorBridgeError) as refused:
+        _stage(custom_nodes)
+
+    assert refused.value.code == "workflow-editor-bridge-staging-failed"
+    assert calls == ["rename"]
+    assert list(custom_nodes.iterdir()) == []
+
+
+def test_a_destination_that_appears_while_held_is_checked_not_waited_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another start staged the same bridge meanwhile; its copy is verified and used."""
+
+    custom_nodes = tmp_path / "custom_nodes"
+    finished = _stage(tmp_path / "elsewhere")
+    calls: list[str] = []
+    waits: list[float] = []
+
+    def rename(_source: Path, destination: Path) -> None:
+        calls.append("rename")
+        shutil.copytree(finished, destination)
+        raise PermissionError(13, "held by another process")
+
+    monkeypatch.setattr(os, "rename", rename)
+    monkeypatch.setattr(editor_bridge.time, "sleep", waits.append)
+
+    staged = _stage(custom_nodes)
+
+    assert calls == ["rename"]
+    assert waits == []
+    assert [entry.name for entry in custom_nodes.iterdir()] == [staged.name]
 
 
 def test_bridge_script_uses_only_the_explicit_message_channel_save_path() -> None:
