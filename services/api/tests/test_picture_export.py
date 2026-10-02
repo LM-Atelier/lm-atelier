@@ -72,7 +72,9 @@ def test_an_export_leaves_behind_the_text_and_camera_details_the_file_carried(
     details[0x010F] = "Neutral Camera"  # the maker
     details[0x0131] = "Neutral Editor"  # the software
     stored = _encoded(_wide(), pnginfo=words, exif=details.tobytes())
-    assert _open(stored).text == {"parameters": "neutral words kept with the file"}
+    original = _open(stored)
+    assert isinstance(original, PngImagePlugin.PngImageFile)
+    assert original.text == {"parameters": "neutral words kept with the file"}
 
     exported = _open(export_picture(stored, file_format))
 

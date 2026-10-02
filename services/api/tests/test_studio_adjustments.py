@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from itertools import pairwise
-from typing import Any
+from typing import TypedDict
 
 import pytest
 from PIL import Image, ImageStat
@@ -20,6 +20,31 @@ from local_lm.studio_adjustments import (
     tone_curve,
     vignette_mask,
 )
+
+
+class SliderValues(TypedDict, total=False):
+    brightness: int
+    contrast: int
+    highlights: int
+    shadows: int
+    whites: int
+    blacks: int
+    saturation: int
+    warmth: int
+    tint: int
+    sharpness: int
+    vibrance: int
+    vignette: int
+    grain: int
+
+
+class CurvePointValues(TypedDict):
+    x: int
+    y: int
+
+
+class AdjustmentValues(SliderValues, total=False):
+    curve: list[CurvePointValues]
 
 
 def _pixel(picture: Image.Image, xy: tuple[int, int]) -> tuple[int, ...]:
@@ -43,7 +68,7 @@ PIXELS = _pixels(
     "200,100,50 10,240,128 128,128,128 255,0,255 0,0,0 "
     "255,255,255 37,91,203 0,170,0 210,253,126 169,45,156"
 )
-CASES: list[tuple[str, dict[str, int], str]] = [
+CASES: list[tuple[str, AdjustmentValues, str]] = [
     (
         "brighter",
         {"brightness": 40},
@@ -227,7 +252,7 @@ SHARP_ALPHAS = [
     *(255, 255, 255, 255, 128, 0),
     *(255, 255, 0, 255, 255, 255),
 ]
-SHARP_CASES: list[tuple[str, dict[str, int], bool, str]] = [
+SHARP_CASES: list[tuple[str, SliderValues, bool, str]] = [
     (
         "crisper",
         {"sharpness": 60},
@@ -281,7 +306,7 @@ SHARP_CASES: list[tuple[str, dict[str, int], bool, str]] = [
 ]
 
 # The same picture again, for the vignette, which reads where each pixel is.
-VIGNETTE_CASES: list[tuple[str, dict[str, int], bool, str]] = [
+VIGNETTE_CASES: list[tuple[str, SliderValues, bool, str]] = [
     (
         "darker edges",
         {"vignette": 60},
@@ -325,7 +350,7 @@ VIGNETTE_CASES: list[tuple[str, dict[str, int], bool, str]] = [
 ]
 
 # The same picture again, for grain, which reads where each pixel is too.
-GRAIN_CASES: list[tuple[str, dict[str, int], bool, str]] = [
+GRAIN_CASES: list[tuple[str, SliderValues, bool, str]] = [
     (
         "grain",
         {"grain": 60},
@@ -392,7 +417,9 @@ def _reds(picture: Image.Image) -> list[list[int]]:
 
 
 @pytest.mark.parametrize(("name", "sliders", "expected"), CASES, ids=[case[0] for case in CASES])
-def test_the_pixels_the_preview_promises(name: str, sliders: dict[str, Any], expected: str) -> None:
+def test_the_pixels_the_preview_promises(
+    name: str, sliders: AdjustmentValues, expected: str
+) -> None:
     result = adjust_colors(_row(PIXELS), ColorAdjustments.from_request(sliders))
 
     assert [result.getpixel((x, 0)) for x in range(len(PIXELS))] == _pixels(expected)
@@ -573,7 +600,7 @@ def test_tint_moves_green_against_magenta_and_not_the_light() -> None:
     ("name", "sliders", "cutout", "expected"), SHARP_CASES, ids=[case[0] for case in SHARP_CASES]
 )
 def test_the_sharpened_pixels_the_preview_promises(
-    name: str, sliders: dict[str, int], cutout: bool, expected: str
+    name: str, sliders: SliderValues, cutout: bool, expected: str
 ) -> None:
     result = adjust_colors(_sharpness_picture(cutout), ColorAdjustments(**sliders))
 
@@ -645,7 +672,7 @@ def test_vibrance_moves_a_muted_color_about_as_far_as_saturation_and_a_vivid_one
     ids=[case[0] for case in VIGNETTE_CASES],
 )
 def test_the_vignetted_pixels_the_preview_promises(
-    name: str, sliders: dict[str, int], cutout: bool, expected: str
+    name: str, sliders: SliderValues, cutout: bool, expected: str
 ) -> None:
     result = adjust_colors(_sharpness_picture(cutout), ColorAdjustments(**sliders))
 
@@ -692,7 +719,7 @@ def test_a_picture_one_pixel_wide_or_tall_takes_the_vignette_too() -> None:
     ids=[case[0] for case in GRAIN_CASES],
 )
 def test_the_grained_pixels_the_preview_promises(
-    name: str, sliders: dict[str, int], cutout: bool, expected: str
+    name: str, sliders: SliderValues, cutout: bool, expected: str
 ) -> None:
     result = adjust_colors(_sharpness_picture(cutout), ColorAdjustments(**sliders))
 
