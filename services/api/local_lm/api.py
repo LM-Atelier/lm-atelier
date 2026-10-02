@@ -842,7 +842,6 @@ from .workflow_package_activation import (
 from .workflow_package_drafts import (
     WorkflowPackageDraftError,
     canonical_package_graph,
-    is_workflow_package_draft,
     stage_workflow_package_draft,
     workflow_package_draft_dependencies,
 )
@@ -893,6 +892,7 @@ from .workflow_runtime_nodes import preflight_workflow_runtime_nodes
 from .workflow_runtime_targets import preflight_workflow_runtime_plan
 from .workflow_source_candidates import collect_source_candidates
 from .workflow_summary_reads import (
+    list_workflow_definitions,
     list_workflow_revision_choices,
     list_workflow_summaries,
     load_workflow_detail,
@@ -11096,31 +11096,12 @@ async def workflow_detail(workflow_id: str, session: SessionDep) -> WorkflowDefi
 
 
 @router.get("/workflows", response_model=list[WorkflowOut])
-async def list_workflows(session: SessionDep) -> list[WorkflowDefinition]:
-    definitions = list(
-        session.scalars(
-            select(WorkflowDefinition)
-            .options(selectinload(WorkflowDefinition.revisions))
-            .order_by(WorkflowDefinition.name)
-        ).all()
-    )
-    # Package drafts exist only to give dependency preparation a saved subject.
-    # Until compilation creates the executable revision, presenting one as an
-    # ordinary selectable workflow makes the library look broken.
-    return [
-        definition
-        for definition in definitions
-        if not is_workflow_package_draft(
-            next(
-                (
-                    revision
-                    for revision in definition.revisions
-                    if revision.id == definition.current_revision_id
-                ),
-                None,
-            )
-        )
-    ]
+async def list_workflows(
+    session: SessionDep,
+    limit: int | None = Query(None, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=2**63 - 1),
+) -> list[WorkflowDefinition]:
+    return list_workflow_definitions(session, limit=limit, offset=offset)
 
 
 @router.post("/workflows", response_model=WorkflowOut, status_code=201)

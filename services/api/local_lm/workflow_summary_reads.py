@@ -109,6 +109,22 @@ def load_workflow_detail(session: Session, workflow_id: str) -> WorkflowDefiniti
     return None if is_workflow_package_draft(current) else definition
 
 
+def list_workflow_definitions(
+    session: Session, *, limit: int | None = None, offset: int = 0
+) -> list[WorkflowDefinition]:
+    """Page visible definitions before loading their revision graphs."""
+    statement = (
+        select(WorkflowDefinition)
+        .where(WorkflowDefinition.id.in_(_visible_workflow_ids()))
+        .options(selectinload(WorkflowDefinition.revisions))
+        .order_by(WorkflowDefinition.name, WorkflowDefinition.id)
+        .offset(offset)
+    )
+    if limit is not None:
+        statement = statement.limit(limit)
+    return list(session.scalars(statement).all())
+
+
 def _visible_workflow_ids() -> Select[tuple[str]]:
     current = aliased(WorkflowRevision)
     draft_type = func.json_type(current.dependencies_json, "$." + WORKFLOW_PACKAGE_DRAFT_MARKER)
