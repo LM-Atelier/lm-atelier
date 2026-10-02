@@ -13111,8 +13111,35 @@ class ConversationOrchestrator:
         )
         if not user_message or not assistant_message:
             raise LookupError("run messages not found")
+        outputs = [assistant_message]
+        if refreshed.work_plan_id is not None:
+            outputs = (
+                list(
+                    session.scalars(
+                        select(Message)
+                        .join(Run, Run.assistant_message_id == Message.id)
+                        .join(WorkStep, WorkStep.id == Run.work_step_id)
+                        .options(
+                            selectinload(Message.parts).selectinload(MessagePart.artifact),
+                            selectinload(Message.response_revisions)
+                            .selectinload(ResponseRevision.parts)
+                            .selectinload(ResponseRevisionPart.artifact),
+                        )
+                        .where(
+                            Run.work_plan_id == refreshed.work_plan_id,
+                            WorkStep.plan_id == refreshed.work_plan_id,
+                            Run.user_message_id == refreshed.user_message_id,
+                            Run.chat_id == refreshed.chat_id,
+                            Message.chat_id == refreshed.chat_id,
+                        )
+                        .order_by(WorkStep.ordinal)
+                    )
+                )
+                or outputs
+            )
         return TurnAccepted(
             run=RunOut.model_validate(refreshed),
             user_message=MessageOut.model_validate(user_message),
             assistant_message=MessageOut.model_validate(assistant_message),
+            assistant_messages=[MessageOut.model_validate(message) for message in outputs],
         )

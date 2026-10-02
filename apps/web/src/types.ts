@@ -1,6 +1,8 @@
 export type * from "./queueOrderTypes";
 export type * from "./workflowReadTypes";
 export type * from "./chatEditLineageTypes";
+export type * from "./acceptedTurnTypes";
+import type { TurnAccepted } from "./acceptedTurnTypes";
 import type { HardwareFitAdvice } from "./hardwareFitTypes";
 export type * from "./hardwareFitTypes";
 export type * from "./priorTurnEditTypes";
@@ -326,12 +328,6 @@ export interface Run {
   started_at: string | null;
   completed_at: string | null;
   duration_ms: number | null;
-}
-
-export interface TurnAccepted {
-  run: Run;
-  user_message: Message;
-  assistant_message: Message;
 }
 
 export interface TurnReferenceInput {

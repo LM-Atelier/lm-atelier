@@ -11363,7 +11363,7 @@ async def test_retry_convergence_keeps_a_durable_binding_when_materialization_fa
     reads = {"n": 0}
 
     def failing_first_materialization(self, statement, *args, **kwargs):  # type: ignore[no-untyped-def]
-        if reads["n"] == 0:
+        if reads["n"] == 0 and statement.column_descriptions[0]["entity"] is WorkStep:
             reads["n"] += 1
             raise OperationalError("database is locked", {}, Exception("database is locked"))
         return real_scalars(self, statement, *args, **kwargs)

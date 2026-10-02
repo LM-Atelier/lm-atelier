@@ -1499,6 +1499,7 @@ class TurnAccepted(ApiModel):
     run: RunOut
     user_message: MessageOut
     assistant_message: MessageOut
+    assistant_messages: list[MessageOut] = Field(default_factory=list)
 
 
 class PriorTurnEditAccepted(TurnAccepted):
