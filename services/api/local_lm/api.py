@@ -381,7 +381,7 @@ from .queue_control import QueueControlConflict, QueueControlMissing, change_pla
 from .queue_lane_policy import QueueLaneConflict, change_lane_policy, read_lane_policy
 from .queue_order import QueueOrderConflict, QueueOrderLimit, change_queue_order, read_queue_order
 from .queue_order_v1 import QueueOrderCommand, QueueOrderPageOut, QueueOrderResultOut
-from .recipes import get_reference_recipe, list_reference_recipes
+from .recipes import get_reference_recipe, list_reference_recipes, recipe_workflow_template
 from .reference_library import (
     DEFAULT_PAGE,
     attach_asset,
@@ -7912,6 +7912,7 @@ async def install_recipe(recipe_id: str, request: Request, session: SessionDep) 
             "reference-recipe-repository-invalid",
             "this recipe does not name a valid repository",
         )
+    template = recipe_workflow_template(recipe)
     try:
         preflight = await resolve_catalog_preflight(
             _services(request),
@@ -7922,6 +7923,7 @@ async def install_recipe(recipe_id: str, request: Request, session: SessionDep) 
                 role=recipe.role,
                 engine=recipe.engine,
                 selected_files=[file.path for file in recipe.files],
+                workflow_template_id=template[0] if template else None,
             ),
             validate_resolved=lambda resolved: _assert_recipe_pins_hold(recipe, resolved),
         )
@@ -7979,6 +7981,13 @@ def _assert_recipe_pins_hold(recipe: ReferenceRecipe, plan: ResolvedInstallPlan 
     unverified = [path for path, digest in resolved.items() if not digest]
     if unverified:
         raise ValueError("this recipe resolved files without a verifiable checksum")
+    template = recipe_workflow_template(recipe)
+    contract = plan.runtime_contract
+    if template and (
+        contract.get("workflow_template_id") != template[0]
+        or contract.get("workflow_template_sha256") != template[1]
+    ):
+        raise ValueError("this recipe resolved to a different workflow template")
 
 
 @router.get("/models", response_model=list[ModelInstallOut])
