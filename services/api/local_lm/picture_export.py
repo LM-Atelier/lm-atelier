@@ -6,6 +6,8 @@ camera's orientation tag does not open sideways in a program that ignores the
 tag. It keeps the color profile where the pixels are still in that profile's
 space. JPEG has no transparency, so a transparent picture is laid on white
 first, rather than coming out on black, which is what dropping it would leave.
+Sixteen-bit grey stays sixteen-bit in a PNG; JPEG and WebP hold eight bits, so
+there it is scaled down rather than clipped to white.
 """
 
 from __future__ import annotations
@@ -29,6 +31,8 @@ EXPORT_FORMATS: Final[dict[str, tuple[str, str, str]]] = {
 }
 #: The quality a lossy format is written at when none is asked for.
 DEFAULT_EXPORT_QUALITY = 90
+#: Modes Pillow opens a sixteen-bit grey picture in.
+_SIXTEEN_BIT_GREY: Final = frozenset({"I", "I;16", "I;16B", "I;16L", "I;16N"})
 
 
 class PictureExportError(ValueError):
@@ -43,7 +47,9 @@ def export_picture(
     """The picture in `file_format`, upright, with its profile where it still applies."""
 
     try:
-        decoded = decode_picture(payload, "picture")
+        return _export(payload, file_format, quality)
+    except PictureExportError:
+        raise
     except RegionEditError as exc:
         if exc.code == "region-image-too-large":
             raise PictureExportError(
@@ -52,7 +58,26 @@ def export_picture(
         raise PictureExportError(
             "picture-export-unreadable", "This picture could not be read."
         ) from exc
+    except Exception as exc:
+        # A malformed file can make Pillow raise almost anything while it
+        # decodes, turns or converts the picture: a short header is a
+        # ValueError, a broken orientation block a SyntaxError.
+        raise PictureExportError(
+            "picture-export-unreadable", "This picture could not be read."
+        ) from exc
+
+
+def _export(payload: bytes, file_format: ExportFormat, quality: int) -> bytes:
+    decoded = decode_picture(payload, "picture")
     upright = ImageOps.exif_transpose(decoded) or decoded
+    if upright.mode in _SIXTEEN_BIT_GREY:
+        if file_format == "png":
+            grey = upright.convert("I;16")
+            # Conversion carries the source's text and tags along, as below.
+            grey.info = {}
+            return _encoded(grey, {"format": "PNG"})
+        # Converting straight to eight bits clips every value above 255.
+        upright = upright.convert("I").point(lambda value: value / 257).convert("L")
     # A grey or print profile would misdescribe the RGB the picture becomes.
     profile = upright.info.get("icc_profile") if upright.mode in {"RGB", "RGBA"} else None
     has_alpha = upright.mode in {"RGBA", "LA", "PA"} or "transparency" in upright.info
@@ -69,6 +94,10 @@ def export_picture(
         options["icc_profile"] = profile
     if file_format != "png":
         options["quality"] = quality
+    return _encoded(picture, options)
+
+
+def _encoded(picture: Image.Image, options: dict[str, Any]) -> bytes:
     buffer = io.BytesIO()
     picture.save(buffer, **options)
     return buffer.getvalue()
