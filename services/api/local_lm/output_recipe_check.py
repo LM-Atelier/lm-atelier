@@ -9,10 +9,16 @@ files called the same thing are not the same file.
 The answer names each requirement by the hash the record gave and says whether
 it is here and ready, here but not ready, or absent. It repeats nothing else from
 the record, so a prompt inside it is never echoed back.
+
+The file may also be a bundle saved with its picture. Then the bundle is read
+whole and strictly first - a bundle that is not exactly as written is refused -
+and the answer also gives the copy's size and its hash beside the hash of the
+output it was copied from.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Final, Literal
 
 from sqlalchemy import select
@@ -25,12 +31,31 @@ from .models import (
     ModelInstall,
     WorkflowRevision,
 )
+from .output_recipe_bundle import (
+    MAX_BUNDLE_BYTES,
+    OutputRecipeBundleFormatError,
+    open_output_recipe_bundle,
+)
 from .output_recipe_v1 import MAX_RECORD_BYTES, OutputRecipeFormatError, open_output_recipe
 
 RequirementState = Literal["present", "inactive", "missing"]
 
 #: What a requirement is, in the order a person would set one up.
 REQUIREMENT_KINDS: Final = ("workflow", "model_file", "lora", "input")
+#: The largest file the check reads: a bundle at its largest. A bare record is
+#: held to its own, far smaller, bound.
+MAX_CHECK_BYTES: Final = MAX_BUNDLE_BYTES
+BUNDLE_SIGNATURE: Final = b"PK\x03\x04"
+
+
+def most_read_for(prefix: bytes) -> int:
+    """The most of a file the check reads, judged by how the file begins.
+
+    A file that does not begin as a bundle can only be a record, so it is held
+    to a record's bound rather than read on to a bundle's.
+    """
+
+    return MAX_CHECK_BYTES if prefix.startswith(BUNDLE_SIGNATURE) else MAX_RECORD_BYTES
 
 
 class OutputRecipeCheckRefused(Exception):
@@ -43,22 +68,74 @@ class OutputRecipeCheckRefused(Exception):
         self.message = message
 
 
-def check_output_recipe(session: Session, content: bytes) -> dict[str, Any]:
-    """Say which of a record's requirements this installation holds, by exact identity."""
+@dataclass(frozen=True)
+class RecordFile:
+    """A record read strictly, and the bundle it came in when it came in one."""
 
-    if len(content) > MAX_RECORD_BYTES:
-        raise OutputRecipeCheckRefused(
-            413, "output-recipe-too-large", "This file is larger than a generation record can be."
-        )
+    record: dict[str, Any]
+    bundle: dict[str, Any] | None
+
+
+def read_record_file(content: bytes) -> RecordFile:
+    """Read a bare record, or the record inside a bundle saved with its picture."""
+
+    if not content.startswith(BUNDLE_SIGNATURE):
+        if len(content) > MAX_RECORD_BYTES:
+            raise _too_large()
+        try:
+            return RecordFile(open_output_recipe(content), None)
+        except OutputRecipeFormatError as exc:
+            raise OutputRecipeCheckRefused(
+                422,
+                "output-recipe-unreadable",
+                "This file is not a generation record this version can read.",
+            ) from exc
+    if len(content) > MAX_CHECK_BYTES:
+        raise _too_large()
     try:
-        record = open_output_recipe(content)
-    except OutputRecipeFormatError as exc:
+        bundle = open_output_recipe_bundle(content)
+    except OutputRecipeBundleFormatError as exc:
         raise OutputRecipeCheckRefused(
             422,
-            "output-recipe-unreadable",
-            "This file is not a generation record this version can read.",
+            "output-recipe-bundle-unreadable",
+            "This file is not a generation record bundle this version can read.",
         ) from exc
+    return RecordFile(bundle["record"], bundle)
 
+
+def check_output_recipe_file(session: Session, content: bytes) -> dict[str, Any]:
+    """Check a bare record, or the record inside a bundle saved with its picture."""
+
+    read = read_record_file(content)
+    if read.bundle is None:
+        return {**_report(session, read.record), "picture": None}
+    picture = read.bundle["manifest"]["picture"]
+    return {
+        **_report(session, read.record),
+        "picture": {
+            "sha256": picture["sha256"],
+            "copy_of": picture["copy_of"],
+            "width": read.bundle["width"],
+            "height": read.bundle["height"],
+        },
+    }
+
+
+def check_output_recipe(session: Session, content: bytes) -> dict[str, Any]:
+    """Say which of a bare record's requirements this installation holds, by exact identity."""
+
+    if content.startswith(BUNDLE_SIGNATURE):
+        return check_output_recipe_file(session, content)
+    return _report(session, read_record_file(content).record)
+
+
+def _too_large() -> OutputRecipeCheckRefused:
+    return OutputRecipeCheckRefused(
+        413, "output-recipe-too-large", "This file is larger than a generation record can be."
+    )
+
+
+def _report(session: Session, record: dict[str, Any]) -> dict[str, Any]:
     requirements: list[dict[str, Any]] = []
     workflow = record["workflow"]
     if workflow is not None:

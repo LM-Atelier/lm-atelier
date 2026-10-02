@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, cast
 
 import pytest
@@ -16,7 +17,7 @@ from local_lm.models import (
     WorkflowDefinition,
     WorkflowRevision,
 )
-from local_lm.output_recipe_v1 import seal_output_recipe
+from local_lm.output_recipe_v1 import canonical_bytes, record_digest, seal_output_recipe
 
 pytestmark = pytest.mark.asyncio
 
@@ -245,6 +246,20 @@ async def test_a_number_too_long_to_read_is_refused_as_unreadable(client: AsyncC
 
     assert response.status_code == 422
     assert response.json()["code"] == "output-recipe-unreadable"
+
+
+async def test_a_record_with_an_integer_too_large_for_a_float_is_checked(
+    client: AsyncClient,
+) -> None:
+    payload = json.loads(_record())
+    del payload["digest"]
+    payload["settings"]["bound"]["steps"] = 10**400
+    # Sealed by hand: the reader is what this checks, so it is not used to write.
+    content = canonical_bytes({**payload, "digest": record_digest(payload)})
+
+    response = await _check(client, content)
+
+    assert response.status_code == 200, response.text
 
 
 async def test_a_file_too_large_to_be_a_record_is_refused(client: AsyncClient) -> None:

@@ -4,11 +4,13 @@ import { useMutation } from "@tanstack/react-query";
 import { FileJson } from "lucide-react";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { api } from "./api";
+import { GenerationRecordReplay } from "./GenerationRecordReplay";
 import {
   missingText,
   operationText,
   readFileBytes,
   readGenerationRecordCheck,
+  readReplayPlan,
   requirementKindText,
   requirementStateText,
   type GenerationRecordCheck as CheckAnswer,
@@ -26,6 +28,12 @@ function CheckAnswerView({ answer }: { answer: CheckAnswer }) {
             ? "Everything this record names is here and ready."
             : "Some of what this record names is not here or not ready. Nothing was installed or changed."}
       </p>
+      {answer.picture && (
+        <p>
+          The file also holds a copy of the picture, {answer.picture.width} × {answer.picture.height}{" "}
+          pixels.
+        </p>
+      )}
       {answer.requirements.length > 0 && (
         <ul className="generation-record-requirements">
           {answer.requirements.map((item) => (
@@ -48,17 +56,25 @@ function CheckAnswerView({ answer }: { answer: CheckAnswer }) {
 }
 
 /** Choose a generation record file and see what of it this installation holds. */
-export function GenerationRecordCheck() {
+export function GenerationRecordCheck({ onOpenChat }: { onOpenChat?: (chatId: string) => void }) {
   const chooser = useRef<HTMLInputElement>(null);
   const [open, setOpen] = useState(false);
   const check = useMutation({
-    mutationFn: async (file: File) =>
-      readGenerationRecordCheck(await api.checkGenerationRecord(await readFileBytes(file))),
+    mutationFn: async (file: File) => {
+      const content = await readFileBytes(file);
+      const [answer, plan] = await Promise.all([
+        api.checkGenerationRecord(content),
+        api.planGenerationReplay(content),
+      ]);
+      return { answer: readGenerationRecordCheck(answer), plan: readReplayPlan(plan), content };
+    },
   });
   const failure = check.error as { code?: unknown } | null;
   const failureText = failure?.code === "output-recipe-too-large"
     ? "This file is larger than a generation record can be."
-    : "This file is not a generation record this version can read.";
+    : failure?.code === "output-recipe-bundle-unreadable"
+      ? "This file is not a generation record bundle this version can read."
+      : "This file is not a generation record this version can read.";
 
   return (
     <>
@@ -72,7 +88,7 @@ export function GenerationRecordCheck() {
       <input
         ref={chooser}
         type="file"
-        accept="application/json,.json"
+        accept="application/json,.json,application/zip,.zip"
         hidden
         aria-label="Generation record file"
         onChange={(event) => {
@@ -96,7 +112,18 @@ export function GenerationRecordCheck() {
         >
           {check.isPending && <p role="status">Checking the record…</p>}
           {check.isError && <p role="alert">{failureText}</p>}
-          {check.data && <CheckAnswerView answer={check.data} />}
+          {check.data && <CheckAnswerView answer={check.data.answer} />}
+          {check.data && onOpenChat && (
+            <GenerationRecordReplay
+              plan={check.data.plan}
+              content={check.data.content}
+              onStarted={(chatId) => {
+                setOpen(false);
+                check.reset();
+                onOpenChat(chatId);
+              }}
+            />
+          )}
         </AccessibleDialog>,
         document.body,
       )}

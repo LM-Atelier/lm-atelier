@@ -159,6 +159,8 @@ export type GenerationRecordCheck = {
   requirements: GenerationRecordRequirement[];
   allPresent: boolean;
   missing: string[];
+  /** The copy of the picture a bundle holds beside its record; null for a bare record. */
+  picture: { width: number; height: number } | null;
 };
 
 const KIND_TEXT: Record<RequirementKind, string> = {
@@ -216,7 +218,22 @@ export function readGenerationRecordCheck(value: unknown): GenerationRecordCheck
     requirements,
     allPresent: report.all_present === true && requirements.every((item) => item.state === "present"),
     missing: names(reproducibility.missing),
+    picture: checkedPicture(report.picture),
   };
+}
+
+function checkedPicture(value: unknown): GenerationRecordCheck["picture"] {
+  if (value === null || value === undefined) return null;
+  const picture = object(value);
+  const whole = (side: unknown): side is number => Number.isInteger(side) && (side as number) > 0;
+  if (
+    typeof picture.sha256 !== "string" || !HEX64.test(picture.sha256)
+    || typeof picture.copy_of !== "string" || !HEX64.test(picture.copy_of)
+    || !whole(picture.width) || !whole(picture.height)
+  ) {
+    throw new Error("The check's answer is malformed.");
+  }
+  return { width: picture.width, height: picture.height };
 }
 
 /** A chosen file's exact bytes, read the way every browser and test DOM supports. */
@@ -230,4 +247,97 @@ export function readFileBytes(file: Blob): Promise<ArrayBuffer> {
     reader.onerror = () => reject(new Error("The file could not be read."));
     reader.readAsArrayBuffer(file);
   });
+}
+
+/** What a replay starts: generation from words, a video from a picture, and an edit of a picture. */
+export const REPLAYABLE_OPERATIONS = new Set(["text_to_image", "text_to_video", "image_to_video", "image_to_image"]);
+
+export type ReplayRefusal = { code: string; sha256: string | null; reasons: string[] };
+
+export type ReplayPlan = {
+  digest: string;
+  operation: string;
+  ready: boolean;
+  refusals: ReplayRefusal[];
+};
+
+const REPLAY_REFUSAL_TEXT: Record<string, string> = {
+  "replay-record-incomplete": "The record leaves out something a replay needs",
+  "replay-record-unsupported": "The record asks for something a replay cannot do yet",
+  "replay-engine-differs": "It was made with a different generation engine",
+  "replay-workflow-missing": "Its workflow is not here exactly",
+  "replay-workflow-ambiguous": "More than one workflow here matches it exactly",
+  "replay-workflow-not-ready": "Its workflow is here but not ready to run",
+  "replay-workflow-binding-differs": "Its workflow is set up with different files here",
+  "replay-workflow-unscoped": "Its workflow does not say which files it used",
+  "replay-model-missing": "No model here holds exactly its files",
+  "replay-model-ambiguous": "More than one model here holds exactly its files",
+  "replay-lora-missing": "One of its LoRAs is not here",
+  "replay-lora-ambiguous": "One of its LoRAs is here more than once",
+  "replay-lora-unusable": "Its LoRAs cannot be added to its workflow here",
+  "replay-input-missing": "One of its input pictures is not here",
+};
+
+const REPLAY_REASON_TEXT: Record<string, string> = {
+  workflow_contract_version: "Its workflow is described in another version's terms.",
+  too_many_inputs: "It has more input pictures than one turn takes.",
+  too_many_loras: "It has more LoRAs than one turn takes.",
+  lora_strength: "A LoRA strength is out of range.",
+  lora_positions: "Its LoRAs are out of order.",
+  inputs_for_operation: "Its inputs do not fit how it was made.",
+  mask_input: "It uses a selection, which cannot be replayed yet.",
+  repeated_inputs: "It lists the same input picture twice.",
+  edit_prompt_wording: "Its edit was worded by another version, so the request cannot be read back out.",
+};
+
+const SECTION_TEXT: Record<string, string> = {
+  output_count: "how many results it makes",
+  completeness: "what could be recorded",
+};
+
+export function replayRefusalText(code: string): string {
+  return REPLAY_REFUSAL_TEXT[code] ?? "Something it names does not match here";
+}
+
+export function replayReasonText(reason: string): string {
+  return REPLAY_REASON_TEXT[reason] ?? missingText(reason);
+}
+
+/** Why starting a replay was refused, in fixed words; never the server's own text. */
+export function replayFailureText(error: unknown): string {
+  const failure = error as { code?: unknown; payload?: Record<string, unknown> } | null;
+  if (failure?.code === "replay-differs") {
+    const sections = Array.isArray(failure.payload?.sections)
+      ? failure.payload.sections.filter((item): item is string => typeof item === "string")
+      : [];
+    const named = sections.map((section) => SECTION_TEXT[section] ?? section).join(", ");
+    return `Generating it here would not match the record exactly${named ? ` (it would differ in ${named})` : ""}. Nothing was started.`;
+  }
+  return "It could not be started here. Nothing was started.";
+}
+
+/** What the replay plan says, read strictly; anything unexpected is refused whole. */
+export function readReplayPlan(value: unknown): ReplayPlan {
+  const plan = object(value);
+  if (
+    typeof plan.digest !== "string"
+    || typeof plan.operation !== "string"
+    || typeof plan.ready !== "boolean"
+    || !Array.isArray(plan.refusals)
+  ) {
+    throw new Error("The replay plan is malformed.");
+  }
+  const refusals = plan.refusals.map((item): ReplayRefusal => {
+    const refusal = object(item);
+    if (
+      typeof refusal.code !== "string"
+      || (refusal.sha256 !== null && (typeof refusal.sha256 !== "string" || !HEX64.test(refusal.sha256)))
+      || !Array.isArray(refusal.reasons)
+    ) {
+      throw new Error("The replay plan is malformed.");
+    }
+    return { code: refusal.code, sha256: refusal.sha256 as string | null, reasons: names(refusal.reasons) };
+  });
+  if (plan.ready === (refusals.length > 0)) throw new Error("The replay plan contradicts itself.");
+  return { digest: plan.digest, operation: plan.operation, ready: plan.ready, refusals };
 }

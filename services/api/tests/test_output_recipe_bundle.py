@@ -16,6 +16,7 @@ from httpx2 import AsyncClient
 from PIL import Image, ImageCms, PngImagePlugin
 from run_waits import wait_for_terminal_status
 
+from local_lm import output_recipe_bundle
 from local_lm.db import SessionLocal
 from local_lm.domain import ArtifactKind
 from local_lm.models import Run
@@ -121,6 +122,17 @@ def _chunk_types(png: bytes) -> list[str]:
 
 def _chunk(kind: bytes, data: bytes) -> bytes:
     return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+
+def _png_with_header(header: bytes) -> bytes:
+    """A PNG of a given header, one row of pixel data and an end."""
+
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _chunk(b"IHDR", header)
+        + _chunk(b"IDAT", zlib.compress(b"\x00" * 8))
+        + _chunk(b"IEND", b"")
+    )
 
 
 def _entries(content: bytes) -> dict[str, bytes]:
@@ -348,6 +360,17 @@ async def test_a_bundle_that_is_not_exactly_as_written_is_refused(
             unsigned[section] = {**unsigned[section], **values}
         return seal_bundle_manifest(unsigned)
 
+    def with_picture(picture: bytes) -> bytes:
+        """The bundle around another picture, its manifest resealed to match it."""
+
+        return _rezip(
+            {
+                **entries,
+                PICTURE_FILE: picture,
+                MANIFEST_FILE: resealed(picture={"sha256": hashlib.sha256(picture).hexdigest()}),
+            }
+        )
+
     words = PngImagePlugin.PngInfo()
     words.add_text("Comment", _EMBEDDED_MARKER)
     with_words = _png(_gradient(), pnginfo=words)
@@ -403,6 +426,18 @@ async def test_a_bundle_that_is_not_exactly_as_written_is_refused(
                 MANIFEST_FILE: resealed(picture={"sha256": hashlib.sha256(with_words).hexdigest()}),
             }
         ),
+        "a picture header claiming no width": with_picture(
+            _png_with_header(struct.pack(">IIBBBBB", 0, 6, 8, 2, 0, 0, 0))
+        ),
+        "a picture header of the wrong length": with_picture(
+            _png_with_header(struct.pack(">IIB", 8, 6, 8))
+        ),
+        "a picture header past the decode limit": with_picture(
+            _png_with_header(struct.pack(">IIBBBBB", 0xFFFFFFFF, 0xFFFFFFFF, 8, 2, 0, 0, 0))
+        ),
+        "a picture in a layout the copy never uses": with_picture(
+            _png_with_header(struct.pack(">IIBBBBB", 8, 6, 8, 3, 0, 0, 0))
+        ),
         "a record that does not open": _rezip({**entries, RECORD_FILE: b"{}"}),
         "a record with a number too long to read": _rezip(
             {**entries, RECORD_FILE: b'{"version":' + b"7" * 5000 + b"}"}
@@ -420,3 +455,109 @@ async def test_a_bundle_that_is_not_exactly_as_written_is_refused(
         except OutputRecipeBundleFormatError:
             refused.append(name)
     assert refused == list(altered)
+
+
+async def _check(client: AsyncClient, content: Any) -> Any:
+    return await client.post(
+        "/api/output-recipes/check",
+        content=content,
+        headers={"content-type": "application/octet-stream"},
+    )
+
+
+async def test_a_bundle_checks_as_its_record_does_and_names_its_picture(
+    app: FastAPI, client: AsyncClient
+) -> None:
+    run_id = await _generated(client)
+    stored = _engine_png()
+    artifact_id = _make_output(app, run_id, stored)
+    shown = await _record(client, run_id, artifact_id, "omit")
+    digest = shown.headers["x-output-recipe-digest"]
+    bundle = await _bundle(client, run_id, artifact_id, "omit", digest)
+
+    as_record = await _check(client, shown.content)
+    as_bundle = await _check(client, bundle.content)
+
+    assert as_record.status_code == 200, as_record.text
+    assert as_bundle.status_code == 200, as_bundle.text
+    record_report = as_record.json()
+    bundle_report = as_bundle.json()
+    assert record_report.pop("picture") is None
+    assert bundle_report.pop("picture") == {
+        "sha256": json.loads(_entries(bundle.content)[MANIFEST_FILE])["picture"]["sha256"],
+        "copy_of": hashlib.sha256(stored).hexdigest(),
+        "width": 8,
+        "height": 6,
+    }
+    assert bundle_report == record_report
+    assert bundle_report["digest"] == digest
+
+
+async def test_a_bundle_that_is_not_as_written_is_refused_by_the_check(
+    app: FastAPI, client: AsyncClient
+) -> None:
+    written = (await _bundled(app, client, _engine_png())).content
+
+    for content in (written + b"trailing", _rezip(_entries(written), comment=b"note")):
+        response = await _check(client, content)
+        assert response.status_code == 422, response.text
+        assert response.json()["code"] == "output-recipe-bundle-unreadable"
+        assert "note" not in response.text
+
+
+async def test_the_check_reads_no_more_than_the_kind_of_file_allows(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bundle is read to a bundle's bound; anything else only to a record's."""
+
+    monkeypatch.setattr("local_lm.output_recipe_check.MAX_CHECK_BYTES", 4096)
+    monkeypatch.setattr("local_lm.output_recipe_check.MAX_RECORD_BYTES", 1024)
+    sent = {"declared": 0, "bundle": 0, "record": 0}
+
+    def streamed(kind: str, start: bytes) -> Any:
+        async def parts() -> Any:
+            for index in range(64):
+                sent[kind] += 1
+                yield (start if index == 0 else b"") + b"x" * 512
+
+        return parts()
+
+    declared = await client.post(
+        "/api/output-recipes/check",
+        content=streamed("declared", b"PK\x03\x04"),
+        headers={"content-type": "application/octet-stream", "content-length": str(64 * 512 + 4)},
+    )
+    bundle = await _check(client, streamed("bundle", b"PK\x03\x04"))
+    record = await _check(client, streamed("record", b"{"))
+
+    for response in (declared, bundle, record):
+        assert response.status_code == 413, response.text
+        assert response.json()["code"] == "output-recipe-too-large"
+    # Refused on what it declared, before a part was read.
+    assert sent["declared"] == 0
+    # Stopped once past each bound: 4096 bytes for a bundle, 1024 for anything else.
+    assert sent["bundle"] == 8
+    assert sent["record"] == 2
+
+
+def test_a_directory_listing_many_entries_is_refused_before_it_is_parsed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Parsing every listed entry would cost far more than the file's own size."""
+
+    record = b"PK\x01\x02" + b"\x00" * 42
+    count = 2000
+    crafted = (
+        b"PK\x03\x04"
+        + b"\x00" * 26
+        + record * count
+        + struct.pack("<4sHHHHIIH", b"PK\x05\x06", 0, 0, count, count, len(record) * count, 30, 0)
+    )
+
+    def parsed(*_arguments: object, **_options: object) -> None:
+        raise AssertionError("the archive was parsed")
+
+    monkeypatch.setattr(output_recipe_bundle.zipfile, "ZipFile", parsed)
+
+    with pytest.raises(OutputRecipeBundleFormatError):
+        open_output_recipe_bundle(crafted)
