@@ -21,6 +21,7 @@ from .models import (
     WorkflowProfileCompatibility,
     WorkflowRevision,
 )
+from .outpaint_workflows import workflow_declares_outpaint
 from .prompt_binding import ignores_the_description
 from .workflow_revision_reviews import review_is_current
 
@@ -208,6 +209,7 @@ def resolve_workflow_family(
     legacy_revision_resolver: LegacyRevisionResolver | None = None,
     preferred_revision: RevisionPreference | None = None,
     revision_eligibility: RevisionEligibility | None = None,
+    skip_outpaint: bool = False,
 ) -> ResolvedWorkflowFamily:
     """Resolve one broad selector to an exact operation variant without guessing.
 
@@ -218,6 +220,11 @@ def resolve_workflow_family(
     `revision_eligibility` can refuse a ready revision before variant ambiguity
     and ranking. Explicit and default choices stay within their chosen family.
     Graphless compatibility profiles are presented as None to this check.
+
+    `skip_outpaint` leaves a workflow that paints past the edge out of an
+    automatic choice, for a turn that names no margins: run without them it pads
+    by whatever its graph was saved with. Explicit and default choices are not
+    affected.
     """
 
     if operation not in _CAPABILITY_OPERATIONS[capability]:
@@ -311,6 +318,15 @@ def resolve_workflow_family(
         # edit it would return a cutout instead of the edit.
         if candidate.revision is not None and workflow_declares_matting(
             candidate.revision.input_schema_json
+        ):
+            continue
+        # The same for one that paints past the edge, when the turn names no
+        # margins: it would return a larger picture, or with nothing to pad, the
+        # source unchanged.
+        if (
+            skip_outpaint
+            and candidate.revision is not None
+            and workflow_declares_outpaint(candidate.revision.input_schema_json)
         ):
             continue
         candidates.append(candidate)

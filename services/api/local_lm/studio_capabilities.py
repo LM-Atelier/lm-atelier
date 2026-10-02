@@ -53,7 +53,8 @@ StudioToolKind = Literal[
 #: The tool kinds the surface offers, paired with what each needs installed.
 #: Selection tools share one class: they are six ways to draw one mask. Text
 #: and Remove mark a selection too, but it is placed back after a whole-picture
-#: edit rather than given to the workflow, so any edit workflow can run them.
+#: edit rather than given to the workflow, so any edit workflow but one that
+#: only paints past the edge can run them.
 TOOL_WORKFLOW_CLASSES: dict[StudioToolKind, str] = {
     "instruct": "image_to_image",
     "brush": "inpaint",
@@ -148,11 +149,18 @@ def tool_capabilities(
     no tool ready, but a tool one of them would serve says so, rather than
     asking for an install that has already happened.
     """
+    # Only Extend names margins. Every other tool's turn names none and is never
+    # given a workflow that paints past the edge, so one does not make those
+    # tools ready.
+    ordinary = [schema for schema in edit_input_schemas if not workflow_declares_outpaint(schema)]
+    ordinary_waiting = [
+        schema for schema in waiting_input_schemas if not workflow_declares_outpaint(schema)
+    ]
     # A workflow that only cuts a subject out cannot carry out an instruction,
     # so on its own it does not make the instructed tools usable.
-    can_edit = any(not workflow_declares_matting(schema) for schema in edit_input_schemas)
-    can_mask = any(workflow_accepts_mask(schema) for schema in edit_input_schemas)
-    can_upscale = any(workflow_declares_upscale(schema) for schema in edit_input_schemas)
+    can_edit = any(not workflow_declares_matting(schema) for schema in ordinary)
+    can_mask = any(workflow_accepts_mask(schema) for schema in ordinary)
+    can_upscale = any(workflow_declares_upscale(schema) for schema in ordinary)
     can_outpaint = any(workflow_declares_outpaint(schema) for schema in edit_input_schemas)
     can_matte = any(workflow_declares_matting(schema) for schema in edit_input_schemas)
     available = {
@@ -169,11 +177,9 @@ def tool_capabilities(
         "local": True,
     }
     waiting = {
-        "image_to_image": any(
-            not workflow_declares_matting(schema) for schema in waiting_input_schemas
-        ),
-        "inpaint": any(workflow_accepts_mask(schema) for schema in waiting_input_schemas),
-        "upscale": any(workflow_declares_upscale(schema) for schema in waiting_input_schemas),
+        "image_to_image": any(not workflow_declares_matting(schema) for schema in ordinary_waiting),
+        "inpaint": any(workflow_accepts_mask(schema) for schema in ordinary_waiting),
+        "upscale": any(workflow_declares_upscale(schema) for schema in ordinary_waiting),
         "outpaint": any(workflow_declares_outpaint(schema) for schema in waiting_input_schemas),
         "matting": any(workflow_declares_matting(schema) for schema in waiting_input_schemas),
     }

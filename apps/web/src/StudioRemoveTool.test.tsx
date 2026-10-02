@@ -106,6 +106,24 @@ it("removes what is named from the part brushed over, through a softened copy of
   expect(encoded[0].some((value) => value > 0 && value < 255)).toBe(true);
 });
 
+it("grows the marked part before softening it, so the edge of what is removed is redrawn too", async () => {
+  fireEvent.click(screen.getByRole("button", { name: "Remove something from the picture" }));
+  fireEvent.change(screen.getByRole("textbox", { name: /What to remove/ }), { target: { value: "the blue square" } });
+  // One dab at the picture's middle, (200, 100), with the brush's 24 px radius:
+  // on that row the marking ends at x = 223.
+  brushOnce();
+  fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+
+  await waitFor(() => expect(apply).toHaveBeenCalledTimes(1));
+  // Grown by the reach a replaced subject is given (8 px on a picture 200 high)
+  // before the 4 px softening, so 5 px past the dab is still mostly removed...
+  expect(encoded[0][100 * 400 + 228]).toBeGreaterThanOrEqual(128);
+  // ...and the growth stops there.
+  expect(encoded[0][100 * 400 + 240]).toBe(0);
+  // What is sent says the softening the person chose; the growth is not theirs.
+  expect(apply.mock.calls[0][2]).toEqual({ blob: expect.any(Blob), featherPx: 4, invert: false, apply: "blend" });
+});
+
 it("asks what to remove before it will, however much is marked", () => {
   fireEvent.click(screen.getByRole("button", { name: "Remove something from the picture" }));
   brushOnce();
