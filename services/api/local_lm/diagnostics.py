@@ -39,17 +39,10 @@ class DiagnosticBundleBuilder:
         # The windows retention actually uses, which Settings may have changed.
         retention = windows_for(session, self.settings)
         # is_file follows a link, so a name in the log directory would be
-        # measured as a local log when it points somewhere else. Skip it first.
-        log_files = [
-            path
-            for path in self.settings.log_dir.iterdir()
-            if not is_link_or_reparse(
-                path,
-                missing="assume_link",
-                unreadable="assume_link",
-            )
-            and path.is_file()
-        ]
+        # measured as a local log when it points somewhere else. Skip it
+        # first. Listing the directory itself does the same when that
+        # directory is the link.
+        log_files = _measurable_log_files(self.settings.log_dir)
         payload = {
             "format": "lm-atelier-diagnostics",
             "version": 1,
@@ -150,6 +143,23 @@ class DiagnosticBundleBuilder:
             )
         finally:
             temporary.unlink(missing_ok=True)
+
+
+def _measurable_log_files(log_dir: Path) -> list[Path]:
+    """Ordinary files in the log directory, or none when that directory is a link."""
+
+    if is_link_or_reparse(log_dir, missing="raise", unreadable="assume_link"):
+        return []
+    return [
+        path
+        for path in log_dir.iterdir()
+        if not is_link_or_reparse(
+            path,
+            missing="assume_link",
+            unreadable="assume_link",
+        )
+        and path.is_file()
+    ]
 
 
 _STAGE_SUMMARY_JOB_LIMIT = 200
