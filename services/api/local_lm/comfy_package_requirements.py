@@ -22,6 +22,7 @@ from .filesystem_links import (
     AnchoredDirectory,
     AnchoredDirectoryError,
     AnchoredEntryKind,
+    is_link_or_reparse,
     walk_entries,
 )
 
@@ -83,9 +84,9 @@ def staged_requirements_manifests(root: Path) -> tuple[str, ...]:
     read - refuses, because a package that declares nothing and a package that
     could not be read are different answers.
 
-    Bounded: a staged tree that is somehow enormous stops the scan rather than
-    walking it forever, and the caller sees only what was found before the
-    stop instead of hanging. The walk is breadth first, so what falls inside
+    Bounded: an enormous staged tree stops the scan at its bound. The caller
+    sees only what was found before the stop. The walk is breadth first, so
+    what falls inside
     the bound is the shallowest part of the tree, where the package's own file
     is; a large folder cannot use up the bound before the root is read. A
     single folder holding more entries than the scan reads refuses instead,
@@ -162,21 +163,37 @@ def read_staged_requirements(root: Path, manifest: str) -> tuple[str, ...]:
     return tuple(lines)
 
 
+def _is_link(path: Path) -> bool:
+    return is_link_or_reparse(path, missing="assume_link", unreadable="assume_link")
+
+
 def _inside(root: Path, manifest: str) -> Path:
     """Resolve a staged path, refusing anything that leaves the staged tree.
 
-    Staging validated these entries already. This checks again because the
-    path is being used to read from disk, and a check that costs nothing is
-    worth repeating at the boundary that acts on it.
+    A filesystem link is not read, and its target is left unchanged. Staging
+    validated these entries already. This checks again because the path is
+    being used to read from disk, and a check that costs nothing is worth
+    repeating at the boundary that acts on it.
     """
     relative = PurePosixPath(manifest)
     if relative.is_absolute() or any(part in {"..", ""} for part in relative.parts):
         raise StagedRequirementsError(
             "invalid_requirements_path", "The staged requirements path is not inside the package"
         )
+    cursor = root
+    if _is_link(cursor):
+        raise StagedRequirementsError(
+            "unreadable_requirements", "The staged requirements file could not be read"
+        )
+    for part in relative.parts:
+        cursor = cursor / part
+        if _is_link(cursor):
+            raise StagedRequirementsError(
+                "unreadable_requirements", "The staged requirements file could not be read"
+            )
     try:
         staged_root = root.resolve(strict=True)
-        target = root.joinpath(*relative.parts).resolve(strict=True)
+        target = cursor.resolve(strict=True)
     except OSError as exc:
         raise StagedRequirementsError(
             "unreadable_requirements", "The staged requirements file could not be read"

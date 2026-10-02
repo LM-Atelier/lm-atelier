@@ -14,6 +14,7 @@ from local_lm import comfy_package_requirements
 from local_lm import workflow_package_preparation as composition
 from local_lm.comfy_package_requirements import (
     StagedRequirementsError,
+    read_staged_requirements,
     staged_requirements_manifests,
 )
 from local_lm.comfy_registry import ComfyNodeResolution, ComfyRegistryResolution
@@ -68,6 +69,41 @@ def test_a_package_folder_that_is_itself_a_link_is_refused_rather_than_read_thro
         staged_requirements_manifests(package)
 
     assert refused.value.code == "unreadable_requirements"
+
+
+def test_a_linked_requirements_file_is_not_read(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    package.mkdir()
+    real = package / "other.txt"
+    real.write_text("A neutral fixture.\n", encoding="utf-8")
+    linked = package / "requirements.txt"
+    try:
+        linked.symlink_to(real)
+    except OSError:
+        pytest.skip("file symlinks are unavailable")
+
+    with pytest.raises(StagedRequirementsError) as refused:
+        read_staged_requirements(package, "requirements.txt")
+
+    assert refused.value.code == "unreadable_requirements"
+    assert real.read_text(encoding="utf-8") == "A neutral fixture.\n"
+    assert linked.is_symlink()
+
+
+def test_a_linked_package_root_is_not_read_for_its_requirements(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    declared = real / "requirements.txt"
+    declared.write_text("A neutral fixture.\n", encoding="utf-8")
+    package = tmp_path / "package"
+    if not _make_link_dir(package, real):
+        pytest.skip("directory links are unavailable")
+
+    with pytest.raises(StagedRequirementsError) as refused:
+        read_staged_requirements(package, "requirements.txt")
+
+    assert refused.value.code == "unreadable_requirements"
+    assert declared.read_text(encoding="utf-8") == "A neutral fixture.\n"
 
 
 def test_a_folder_wider_than_one_listing_still_yields_its_manifest(tmp_path: Path) -> None:
