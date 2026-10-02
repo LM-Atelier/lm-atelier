@@ -1,4 +1,4 @@
-/** Replacing a background or a subject: a cutout that is stopped, or that fails. */
+/** Replacing a background: a cutout that is stopped, or that fails. */
 
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";

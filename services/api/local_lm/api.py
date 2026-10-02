@@ -2880,7 +2880,6 @@ async def studio_capabilities(
         relight_workflow_ids=orchestrator.installed_relight_workflow_ids(session),
         lighting_adapter_ids=orchestrator.installed_lighting_adapter_ids(session),
         matting_workflow_ids=orchestrator.installed_matting_workflow_ids(session),
-        reference_workflow_ids=orchestrator.installed_reference_edit_workflow_ids(session),
         waiting_input_schemas=orchestrator.waiting_edit_input_schemas(session),
     )
     return StudioCapabilityReport(
@@ -3003,9 +3002,18 @@ async def apply_studio_local_edit(
         pixelate = None
         paint = None
         caption = None
-        if payload.caption is not None:
-            drawn = session.get(Artifact, payload.caption.overlay_artifact_id)
+        # Drawn words and a placed subject are both pictures the browser made
+        # at the picture's size, so they are found and read the same way.
+        overlaid = payload.caption or payload.subject
+        if overlaid is not None:
+            drawn = session.get(Artifact, overlaid.overlay_artifact_id)
             if drawn is None or not _is_editable_image(drawn):
+                if payload.subject is not None:
+                    raise api_error(
+                        422,
+                        "studio-subject-missing",
+                        "The placed subject could not be found. Replace it again.",
+                    )
                 raise api_error(
                     422,
                     "studio-caption-missing",

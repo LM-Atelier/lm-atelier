@@ -182,15 +182,14 @@ browse for it.
 - **Replace the background** cuts the subject out first, then redraws
   everything around it from the words you give, such as "a quiet beach at
   sunset". The subject keeps its own pixels; only its surroundings change.
-- **Replace the subject** cuts the subject out first, then redraws its place
-  from a second picture you choose from your computer or from the library,
-  taking the new subject you name from it, such as "the dog". The name is
-  asked for before it runs, because without one the redraw takes the second
-  picture's backdrop along with its subject. The place is grown a little so
-  the new subject has room,
-  and its edge is softened so it meets the rest gradually. Everything around it
-  keeps its own pixels. It needs an image editing workflow that reads a second
-  picture.
+- **Replace the subject** takes the subject of a second picture, chosen from
+  your computer or from the library, and puts it where the picture's own
+  subject stood. Both subjects are cut out first. The old one is then removed,
+  its place grown a little and filled to match what surrounds it, and the new
+  one is placed there, as large as fits the old one's place, centred across it
+  and standing on its lower edge. Everything around it keeps its own pixels.
+  If no subject is found in either picture, nothing is changed. It needs a
+  background removal workflow and an image editing workflow.
 - **Select the subject**, among the selection controls, finds the subject and
   makes it the selection, which the selection tools can then adjust before an
   edit uses it.

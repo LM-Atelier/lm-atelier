@@ -623,6 +623,7 @@ StudioLocalEditOperation = Literal[
     "paint",
     "caption",
     "canvas",
+    "subject",
 ]
 
 
@@ -768,6 +769,9 @@ class StudioLocalEditCreate(ApiModel):
     pixelate: StudioSelectionPixelate | None = None
     paint: StudioSelectionPaint | None = None
     caption: StudioCaptionOverlay | None = None
+    #: The new subject the browser placed at the picture's size; given with a
+    #: replaced subject only. It has the same shape as drawn words.
+    subject: StudioCaptionOverlay | None = None
     canvas: StudioCanvasChange | None = None
 
     @model_validator(mode="after")
@@ -792,6 +796,8 @@ class StudioLocalEditCreate(ApiModel):
             raise ValueError("A paint names the marked area and its color, and no other edit does.")
         if (self.operation == "caption") != (self.caption is not None):
             raise ValueError("A caption names its drawn words, and no other edit does.")
+        if (self.operation == "subject") != (self.subject is not None):
+            raise ValueError("A replaced subject names its placed subject, and no other edit does.")
         if (self.operation == "canvas") != (self.canvas is not None):
             raise ValueError("A canvas change names the new canvas, and no other edit does.")
         return self

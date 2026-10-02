@@ -28,14 +28,14 @@ export type StudioApplyPlan = {
     workflowRevisionId?: string;
     /** Everything around the subject, or the subject itself. */
     redraw: "surroundings" | "subject";
-    /** The picture a new subject is taken from, sent after the source: its
-     * bytes, or the artifact when the library already holds it. */
+    /** The picture a new subject is cut out of: its bytes, or the artifact
+     * when the library already holds it. */
     reference?: Blob | string;
   };
 };
 
-/** What goes with the edit for a new subject's picture: a chosen file's bytes,
- * or the artifact of one the library already holds, which is not sent again. */
+/** Where a new subject is cut out from: a chosen file's bytes, or the artifact
+ * of one the library already holds, which is not sent again. */
 function subjectReference(picture: StudioSubjectPicture | null): Blob | string | undefined {
   if (!picture) return undefined;
   return picture instanceof File ? picture : picture.artifactId;
@@ -119,16 +119,15 @@ export function studioApplyPlan(
     };
   }
   if (tools.kind === "subject") {
-    const note = instruction.trim();
     return {
-      // The model sees both pictures and redraws the first; only the
-      // subject's place is kept from what it draws.
-      words: `Replace the subject with ${note ? `${note} from` : "the one in"} the second picture. Keep everything around it exactly as it is.`,
-      // The report names the first workflow that reads a second picture. The
-      // studio's chosen one may read only one, so it is never used here.
-      workflowRevisionId: activeTool?.workflow_revision_id ?? undefined,
+      // The old subject is removed as Remove removes a marked part: the model
+      // redraws the picture without it, on the studio's own workflow, and only
+      // its grown outline is kept. The new one is then placed where it stood,
+      // so where it goes is never the model's choice.
+      words: "Remove the subject. Fill the space it leaves to match what surrounds it, and leave everything else unchanged.",
       blendSelection: true,
       sendsLightMap: false,
+      // Both cutouts run the workflow the report names for Isolate.
       cutout: {
         words: defaultInstruction({ ...tools, kind: "isolate" }),
         workflowRevisionId: isolateTool?.workflow_revision_id ?? undefined,
@@ -181,7 +180,7 @@ export function studioOffersResults(kind: string): boolean {
 /** Tools that ask for no words of their own. */
 const WORDLESS_TOOLS: readonly string[] = ["enhance", "extend", "text", "relight", "isolate", "subject"];
 /** Tools that run on the workflow the report names for them, whatever the chat has chosen. */
-const OWN_WORKFLOW_TOOLS: readonly string[] = ["relight", "isolate", "subject"];
+const OWN_WORKFLOW_TOOLS: readonly string[] = ["relight", "isolate"];
 
 /** Whether the tool in hand has everything its edit needs.
  *
@@ -189,10 +188,10 @@ const OWN_WORKFLOW_TOOLS: readonly string[] = ["relight", "isolate", "subject"];
  * the whole instruction. Text takes its words from its own fields, and without
  * a box it would change the whole picture; Remove, too, needs a marked part as
  * well as its words. Isolate asks for nothing and runs only the workflow the
- * report names. Replacing a subject needs the picture it comes from and a name
- * for what to take from it: unnamed, the redraw takes that picture's backdrop
- * along with its subject. It runs only the workflows the report names, so the
- * studio's own choice never matters.
+ * report names. Replacing a subject needs only the picture it comes from: both
+ * subjects are cut out on the workflow the report names, and the old one is
+ * removed on the studio's own, as a replaced background's surroundings are
+ * redrawn on it.
  */
 export function studioToolReady(
   tools: StudioToolState,
@@ -215,7 +214,7 @@ export function studioToolReady(
   if ((tools.kind === "isolate" || tools.kind === "background") && !ownWorkflow) return false;
   if (
     tools.kind === "subject"
-    && (!ownWorkflow || !isolateTool?.workflow_revision_id || !tools.subjectPicture || !instruction.trim())
+    && (!ownWorkflow || !isolateTool?.workflow_revision_id || !tools.subjectPicture)
   ) {
     return false;
   }

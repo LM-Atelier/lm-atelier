@@ -13,6 +13,7 @@ import { toolUsesMask, type StudioToolState } from "./studioToolState";
 import type { EditTemplate, StudioToolCapability, TurnAccepted } from "./types";
 import type { useStudioBackground } from "./useStudioBackground";
 import type { StudioStep, useStudioSession } from "./useStudioSession";
+import type { useStudioSubjectPlace } from "./useStudioSubjectPlace";
 
 export const SELECTION_NOT_PREPARED =
   "The selection could not be prepared, so nothing was sent. Try again, or clear the selection to edit the whole picture.";
@@ -33,10 +34,12 @@ export type StudioApplyEdit = {
   results: number;
   apply: ReturnType<typeof useStudioSession>["apply"];
   cutout: Pick<ReturnType<typeof useStudioBackground>, "start">;
+  /** Replacing a subject, which takes steps of its own. */
+  subject: Pick<ReturnType<typeof useStudioSubjectPlace>, "start">;
   /** Says why nothing was sent, or with null that nothing is wrong any longer. */
   setError: (message: string | null) => void;
   /** Runs once the edit is taken, with its turn when it was sent as one: a replaced
-   * background or subject is two turns, and says only that both were taken. */
+   * background or subject takes several steps, and says only that all were taken. */
   onAccepted: (accepted?: TurnAccepted) => void;
   /** Which workflow an Enhance runs and what it takes, as the server previewed it. */
   enlargement?: EnlargementPreview | null;
@@ -54,7 +57,8 @@ export function applyStudioEdit(edit: StudioApplyEdit): void {
     // Drawn at the picture's own size, so the subject lines up with it.
     if (!bitmap) return;
     edit.setError(null);
-    edit.cutout.start(plan, current.artifactId, { width: bitmap.width, height: bitmap.height }, edit.onAccepted);
+    const replaces = plan.cutout.redraw === "subject" ? edit.subject : edit.cutout;
+    replaces.start(plan, current.artifactId, { width: bitmap.width, height: bitmap.height }, edit.onAccepted);
     return;
   }
   const send = (mask: Blob | null, secondPicture?: Blob) => {

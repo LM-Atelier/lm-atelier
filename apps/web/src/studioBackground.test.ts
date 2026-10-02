@@ -52,7 +52,7 @@ describe("subjectMask", () => {
 });
 
 describe("subjectReach", () => {
-  it("gives a new subject room in proportion to the picture, and a little at least", () => {
+  it("reaches past a removed subject in proportion to the picture, and a little at least", () => {
     expect(subjectReach(1000, 800)).toBe(32);
     expect(subjectReach(800, 1000)).toBe(32);
     expect(subjectReach(100, 100)).toBe(8);

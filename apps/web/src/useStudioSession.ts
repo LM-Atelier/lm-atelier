@@ -43,9 +43,8 @@ type StudioApply = {
   /** The workflow a recipe recorded, so applying one reproduces its run
    * rather than running its words against whatever is current. */
   workflowRevisionId?: string;
-  /** A picture sent after the source: the light map the relight tool draws,
-   * or the picture a replaced subject is taken from, as bytes or as the
-   * artifact of one the library already holds. */
+  /** A picture sent after the source, such as the light map the relight tool
+   * draws: as bytes, or as the artifact of one the library already holds. */
   secondPicture?: Blob | string;
   /** Pictures already in the library sent after the source, as an edit made
    * again sends the ones it was given the first time. */
@@ -208,7 +207,7 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
         throw new Error("This picture is still opening. Try that again in a moment.");
       }
       // A marked area uploads first, as a selection, and the edit names it.
-      const { blur, pixelate, paint, caption, ...rest } = details ?? {};
+      const { blur, pixelate, paint, caption, subject, ...rest } = details ?? {};
       const selection = blur?.selection ?? pixelate?.selection ?? paint?.selection;
       const marked = selection
         ? await api.upload(new File([selection], "studio-selection.png", { type: "image/png" }))
@@ -233,6 +232,15 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
               },
             }
           : {}),
+        ...(subject
+          ? {
+              subject: {
+                overlay_artifact_id: (
+                  await api.upload(new File([subject.placed], "studio-subject.png", { type: "image/png" }))
+                ).id,
+              },
+            }
+          : {}),
       });
     },
     // Filed under the session that answered, which is not necessarily the one
@@ -252,9 +260,15 @@ export function useStudioSession(sourceArtifactId: string | null, sourceChatId: 
       if (sessionId) stop.mutate(sessionId);
     },
     stopping: stop.isPending,
-    /** Rotate, flip, crop or resize a picture in this session; `onDone` runs once the step exists. */
-    localEdit: (operation: StudioLocalEditOperation, artifactId: string, onDone?: () => void, details?: StudioLocalEditDetails) =>
-      localEdit.mutate({ operation, artifactId, details }, { onSuccess: () => onDone?.() }),
+    /** Rotate, flip, crop or resize a picture in this session; `onDone` runs once the step exists,
+     * and `onFailed` when it was refused, so a caller waiting on it can stop. */
+    localEdit: (
+      operation: StudioLocalEditOperation,
+      artifactId: string,
+      onDone?: () => void,
+      details?: StudioLocalEditDetails,
+      onFailed?: () => void,
+    ) => localEdit.mutate({ operation, artifactId, details }, { onSuccess: () => onDone?.(), onError: () => onFailed?.() }),
     /** `onAccepted` runs only once the turn has been taken.
      *
      * The surface clears the instruction and the selection there rather than

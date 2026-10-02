@@ -7,7 +7,8 @@
 /** An edit the studio makes itself, without a model. */
 export type StudioLocalEditOperation =
   | "rotate_clockwise" | "rotate_counterclockwise" | "flip_horizontal" | "flip_vertical" | "straighten"
-  | "perspective" | "crop" | "resize" | "adjust" | "blur" | "pixelate" | "paint" | "caption" | "canvas";
+  | "perspective" | "crop" | "resize" | "adjust" | "blur" | "pixelate" | "paint" | "caption" | "canvas"
+  | "subject";
 
 export interface StudioLocalEditRequest {
   source_artifact_id: string;
@@ -30,6 +31,8 @@ export interface StudioLocalEditRequest {
   paint?: StudioSelectionPaint | null;
   /** The uploaded drawing of the words; given with a caption only. */
   caption?: StudioCaptionOverlay | null;
+  /** The uploaded picture of the new subject, placed at the picture's size; given with a replaced subject only. */
+  subject?: StudioCaptionOverlay | null;
   /** The new canvas, where the picture sits on it, and the fill; given with a canvas change only. */
   canvas?: StudioCanvasChange | null;
 }
@@ -82,6 +85,8 @@ export type StudioLocalEditDetails = Pick<
   pixelate?: { selection: Blob; block: number };
   paint?: { selection: Blob; color: string; opacity: number };
   caption?: { words: Blob };
+  /** The new subject drawn alone where the old one stood, transparent everywhere else. */
+  subject?: { placed: Blob };
 };
 
 /** A point a tone curve passes through: a level, and the level it becomes. */
