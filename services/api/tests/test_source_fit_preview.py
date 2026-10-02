@@ -22,6 +22,7 @@ from local_lm.models import (
     WorkflowRevision,
     WorkPlan,
 )
+from local_lm.source_fit_recipe import SourceExtensionRecipe
 
 
 def counts() -> tuple[int, ...]:
@@ -68,6 +69,7 @@ async def test_preview_is_read_only_and_matches_the_accepted_canvas(
             snapshot = accepted_context(session, run)
             assert snapshot is not None and snapshot.source_fit is not None
             recipe = snapshot.source_fit
+            assert isinstance(recipe, SourceExtensionRecipe)
             assert recipe.canvas_width == preview["canvas"]["width"]
             assert recipe.canvas_height == preview["canvas"]["height"]
             assert recipe.image.width == preview["source"]["width"]
