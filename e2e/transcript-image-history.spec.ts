@@ -117,6 +117,81 @@ for (const width of [1280, 390]) {
       expect(historyReads.some((url) => url.searchParams.get("limit") === "2")).toBe(true);
       expect(historyReads.some((url) => url.searchParams.get("before") === second.user_message.id
         && url.searchParams.get("limit") === "40")).toBe(true);
+
+      let policySequence = 0;
+      const policy = async (action: "pause-after-current" | "resume") => {
+        const current = await request.get("/api/queue/lanes/generation");
+        const { revision, dispatch_state } = await current.json() as { revision: number; dispatch_state: string };
+        if (action === "resume" && dispatch_state === "open") return;
+        const response = await request.post(`/api/queue/lanes/generation/${action}`, { headers, data: {
+          expected_revision: revision, idempotency_key: `image-history-${width}-${action}-${++policySequence}`,
+        } });
+        expect(response.ok()).toBeTruthy();
+      };
+      await policy("pause-after-current");
+      try {
+        await page.getByRole("button", { name: "Load older messages", exact: true }).click();
+        await expect(transcript.locator(":scope > article.message")).toHaveCount(52);
+        for (const picture of await transcript.locator(".media-frame > img:not(.media-backdrop)").all()) {
+          await picture.scrollIntoViewIfNeeded();
+          await expect.poll(() => picture.evaluate((node) => (node as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
+        }
+        await page.getByRole("combobox", { name: "Generation mode", exact: true }).selectOption("image");
+        await page.getByRole("combobox", { name: "Number of outputs", exact: true }).selectOption("3");
+        const composer = page.getByRole("textbox", { name: "Message", exact: true });
+        await composer.fill("Three blue paper boats.");
+        const earlier = transcript.locator(".message.user").filter({ hasText: "Increase contrast on the paper boat." });
+        await earlier.scrollIntoViewIfNeeded();
+        const readerOffset = async () => (await earlier.boundingBox())!.y - (await transcript.boundingBox())!.y;
+        const beforeOffset = await readerOffset();
+        const viewportHandle = await transcript.elementHandle();
+        const acceptance = page.waitForResponse((response) =>
+          response.request().method() === "POST" && new URL(response.url()).pathname === `/api/chats/${id}/turns`);
+        await composer.press("Enter");
+        const acceptedResponse = await acceptance;
+        expect(acceptedResponse.status()).toBe(202);
+        const accepted = await acceptedResponse.json() as TurnAccepted;
+        expect(accepted.assistant_messages).toHaveLength(3);
+        await expect(transcript.locator(":scope > article.message")).toHaveCount(56);
+        expect(await transcript.evaluate((node, retained) => node === retained, viewportHandle)).toBe(true);
+        await expect.poll(async () => Math.abs(await readerOffset() - beforeOffset)).toBeLessThan(3);
+        await expect(transcript.getByText("Create an image of a blue paper boat.", { exact: true })).toHaveCount(1);
+
+        const keptCompare = transcript.getByRole("button", { name: "Compare with the source", exact: true }).first();
+        await keptCompare.click();
+        const keptDialog = page.getByRole("dialog", { name: "Compare with the source", exact: true });
+        const dialogHandle = await keptDialog.elementHandle();
+        const position = keptDialog.getByRole("slider", { name: "Comparison position" });
+        await position.focus();
+        await position.press("ArrowRight");
+        await expect(position).toHaveValue("51");
+        const keptTop = await transcript.evaluate((node) => node.scrollTop);
+        await policy("resume");
+        const planId = accepted.run.work_plan_id;
+        await expect.poll(async () => {
+          const response = await request.get(`/api/work-plans/${planId}`);
+          return (await response.json() as { status: string }).status;
+        }, { timeout: 30_000 }).toBe("complete");
+        const outputIds = accepted.assistant_messages!.map((message) => message.id);
+        const assistants = transcript.locator(":scope > article.message.assistant");
+        await expect(assistants).toHaveCount(29);
+        for (const [index, outputId] of outputIds.entries()) {
+          const response = await request.get(`/api/messages/${outputId}`);
+          const output = await response.json() as TurnAccepted["assistant_message"];
+          const artifact = output.parts.find((part) => part.type === "image" && part.artifact_id)?.artifact_id;
+          expect(artifact).toBeTruthy();
+          await expect(assistants.nth(26 + index).locator(".media-frame > img:not(.media-backdrop)"))
+            .toHaveAttribute("src", `/api/artifacts/${encodeURIComponent(artifact!)}/content`);
+        }
+        expect(await keptDialog.evaluate((node, retained) => node === retained, dialogHandle)).toBe(true);
+        await expect(position).toHaveValue("51");
+        await expect.poll(() => transcript.evaluate((node) => node.scrollTop)).toBe(keptTop);
+        await expect(transcript.locator(":scope > article.message")).toHaveCount(56);
+        await keptDialog.getByRole("button", { name: "Close comparison" }).click();
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      } finally {
+        await policy("resume");
+      }
       expect(errors).toEqual([]);
     } finally {
       await page.goto("about:blank");

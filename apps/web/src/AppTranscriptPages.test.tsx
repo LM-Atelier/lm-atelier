@@ -1,9 +1,10 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "./App";
 import { api, connectEvents } from "./api";
-import type { Chat, ChatDetail, Message, WebSearch } from "./types";
+import type { Chat, ChatDetail, Message, TurnAccepted, WebSearch } from "./types";
+import { applyAcceptedChatPages } from "./acceptedChatPages";
 import { asChatSummary } from "./chatSummaryFixtures";
 
 vi.mock("./api", () => ({
@@ -197,3 +198,59 @@ it("keeps history controls out of an empty conversation", async () => {
   expect(screen.queryByRole("button", { name: "Load older messages" })).not.toBeInTheDocument();
   client.clear();
 });
+
+it("keeps loaded pages, reader position and the image comparison as multiple outputs arrive", async () => {
+  const image = { ...messages[79], parts: [{ id: "viewed-image", position: 0, type: "image" as const,
+    text: null, artifact_id: "viewed-result", metadata_json: {} }] };
+  const user = { ...messages[0], id: "batch-user", parent_id: image.id, role: "user" as const,
+    parts: [{ ...messages[0].parts[0], text: "Draw three blue circles" }] };
+  const outputs = [0, 1, 2].map((index): Message => ({ ...image, id: `batch-output-${index}`,
+    parent_id: index ? `batch-output-${index - 1}` : user.id, status: "pending", parts: [] }));
+  let all = [...messages.slice(0, 79), image];
+  vi.mocked(api.chatMessages).mockImplementation(async (_id, options) => {
+    const end = options?.before ? all.findIndex((item) => item.id === options.before) : all.length;
+    const start = Math.max(0, end - (options?.limit ?? 40));
+    return { chat_id: chat.id, messages: all.slice(start, end), has_older: start > 0, has_newer: end < all.length };
+  });
+  vi.mocked(api.chatEditLineage).mockResolvedValue({ chat_id: chat.id, result_message_id: image.id,
+    steps: [{ message_id: "image-source", artifact_id: "viewed-source", instruction: "Add contrast" }], next_before: null });
+  const client = open();
+  const compare = await screen.findByRole("button", { name: "Compare with the source" });
+  const viewport = compare.closest(".messages") as HTMLElement;
+  Object.defineProperties(viewport, {
+    scrollHeight: { configurable: true, value: 2000 }, clientHeight: { configurable: true, value: 400 },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Load older messages" }));
+  await screen.findByText("Transcript row 0");
+  viewport.scrollTop = 500;
+  fireEvent.scroll(viewport);
+  fireEvent.click(compare);
+  const dialog = screen.getByRole("dialog", { name: "Compare with the source" });
+  fireEvent.change(screen.getByRole("slider", { name: "Comparison position" }), { target: { value: "63" } });
+  const head = outputs.at(-1)!.id;
+  all = [...all, user, ...outputs];
+  vi.mocked(api.chatMetadata).mockResolvedValue({ ...chat, active_head_message_id: head });
+  vi.mocked(api.chatContext).mockResolvedValue({ chat_id: chat.id, head_id: head,
+    has_prior_image: true, has_prior_visual: true, has_pending_response: true });
+  act(() => applyAcceptedChatPages(client, chat.id, {
+    user_message: user, assistant_message: outputs[0], assistant_messages: outputs, run: {},
+  } as TurnAccepted, true));
+  await act(async () => { await client.invalidateQueries({ queryKey: ["chat", chat.id] }); });
+  expect(screen.getByText("Transcript row 0").closest(".messages") === viewport).toBe(true);
+  expect(viewport.scrollTop).toBe(500);
+  expect(screen.getByRole("dialog", { name: "Compare with the source" })).toBe(dialog);
+  expect(screen.getByRole("slider", { name: "Comparison position" })).toHaveValue("63");
+  expect(viewport.querySelectorAll(":scope > article.message")).toHaveLength(84);
+
+  all = all.map((item) => item.id.startsWith("batch-output-") ? { ...item, status: "complete", parts: [
+    { id: `${item.id}-image`, position: 0, type: "image", text: null, artifact_id: `${item.id}-artifact`, metadata_json: {} },
+  ] } : item);
+  await act(async () => { await client.invalidateQueries({ queryKey: ["chat", chat.id] }); });
+  await waitFor(() => expect(viewport.querySelectorAll("img[src*='batch-output-']:not(.media-backdrop)")).toHaveLength(3));
+  expect(screen.getByText("Transcript row 0").closest(".messages") === viewport).toBe(true);
+  expect(viewport.scrollTop).toBe(500);
+  expect(screen.getByRole("dialog", { name: "Compare with the source" })).toBe(dialog);
+  expect(api.chat).not.toHaveBeenCalled();
+  expect(vi.mocked(api.chatMessages).mock.calls.every((call) => (call[1]?.limit ?? 40) <= 40)).toBe(true);
+  client.clear();
+}, 15_000);
