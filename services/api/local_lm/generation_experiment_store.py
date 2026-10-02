@@ -13,7 +13,7 @@ import secrets
 from dataclasses import dataclass
 from typing import Any, cast, get_args
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -28,8 +28,11 @@ from .generation_experiment_preflight import (
 from .generation_experiments_v1 import (
     CONTRACT_VERSION,
     ExperimentArmOut,
+    ExperimentEvaluationOut,
     ExperimentTrialOut,
     GenerationExperimentCreate,
+    GenerationExperimentEvaluationCreate,
+    GenerationExperimentEvaluationMode,
     GenerationExperimentOut,
     GenerationExperimentStart,
     GenerationExperimentState,
@@ -42,6 +45,7 @@ from .generation_experiments_v1 import (
 from .models import (
     GenerationExperiment,
     GenerationExperimentArm,
+    GenerationExperimentEvaluation,
     GenerationExperimentTrial,
     Job,
     Run,
@@ -146,6 +150,19 @@ def read_trial_progress(
                 step.id, run.id, job.id if job is not None else None, status
             )
     return progress
+
+
+def choices_with_a_picture(session: Session, experiment: GenerationExperiment) -> set[int]:
+    """The ordinals of the choices whose picture is made, for saying which is preferred."""
+
+    progress = read_trial_progress(session, experiment)
+    return {
+        arm.ordinal
+        for arm in experiment.arms
+        if any(
+            trial.id in progress and progress[trial.id].status == "complete" for trial in arm.trials
+        )
+    }
 
 
 def request_digest(payload: GenerationExperimentCreate) -> str:
@@ -374,7 +391,64 @@ def out(
                 "work_plan_id": experiment.work_plan_id,
                 "started_at": experiment.started_at,
                 "arms": arms,
+                "evaluation": _latest_evaluation(experiment),
             }
         )
     except (KeyError, TypeError, ValueError):
         raise GenerationExperimentRecordError from None
+
+
+def _latest_evaluation(experiment: GenerationExperiment) -> ExperimentEvaluationOut | None:
+    if not experiment.evaluations:
+        return None
+    latest = experiment.evaluations[-1]
+    ordinals = {arm.id: arm.ordinal for arm in experiment.arms}
+    return ExperimentEvaluationOut.model_validate(
+        {
+            "preference": latest.preference,
+            "mode": latest.mode,
+            "arm_ordinal": (
+                ordinals[latest.preferred_arm_id] if latest.preferred_arm_id is not None else None
+            ),
+            "note": latest.note,
+            "created_at": latest.created_at,
+        }
+    )
+
+
+def evaluate(
+    session: Session,
+    experiment_id: str,
+    payload: GenerationExperimentEvaluationCreate,
+    mode: GenerationExperimentEvaluationMode,
+) -> GenerationExperiment | None:
+    """Keep one more thing said of a comparison's pictures, after everything said before.
+
+    The write lock is taken before the next place in order is read, so two
+    sayings at once are kept one after the other rather than refused. None when
+    there is no such comparison.
+    """
+
+    session.execute(text("BEGIN IMMEDIATE"))
+    experiment = session.get(GenerationExperiment, experiment_id, populate_existing=True)
+    if experiment is None:
+        session.rollback()
+        return None
+    preferred = next(
+        (arm.id for arm in experiment.arms if arm.ordinal == payload.arm_ordinal), None
+    )
+    if payload.arm_ordinal is not None and preferred is None:
+        session.rollback()
+        raise ValueError("A preference names one of the comparison's own choices.")
+    sequence = max((said.sequence for said in experiment.evaluations), default=0) + 1
+    experiment.evaluations.append(
+        GenerationExperimentEvaluation(
+            sequence=sequence,
+            mode=mode.value,
+            preference=payload.preference.value,
+            preferred_arm_id=preferred,
+            note=payload.note or None,
+        )
+    )
+    session.commit()
+    return experiment

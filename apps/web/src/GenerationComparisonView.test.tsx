@@ -67,6 +67,7 @@ function experiment(state: "ready" | "started", statuses: ("queued" | "complete"
     geometry: { mode: "size", width: 1024, height: 1024 }, seed_policy: { kind: "same_recorded_number", seed: 41 },
     seed_equivalence: "none", preflight_sha256: "a".repeat(64), snapshot_sha256: "b".repeat(64), estimate: compatible().estimate,
     created_at: "2026-10-01T00:00:00Z", work_plan_id: state === "started" ? "plan-1" : null, started_at: null,
+    evaluation: null,
     arms: [1, 2].map((ordinal) => {
       const preflight = arm(ordinal, ordinal === 1 ? "Choice A" : "Choice B");
       return {
@@ -203,6 +204,8 @@ describe("accepting and starting", () => {
       snapshot_sha256: "b".repeat(64), confirm_expensive: false,
     })]);
     expect(await screen.findByText("0 of 2 pictures ready")).toBeInTheDocument();
+    // Nothing to prefer until a picture is there.
+    expect(screen.queryByRole("group", { name: "Which do you prefer?" })).toBeNull();
   });
 
   it("shows the reasons a refused accept carries", async () => {
@@ -252,6 +255,7 @@ describe("a remembered comparison", () => {
     const kept = screen.getAllByRole("button", { name: "Keep as a recipe" });
     expect(kept).toHaveLength(1);
     expect(kept[0].closest("section")).toHaveAccessibleName("Choice A");
+    expect(screen.getByRole("group", { name: "Which do you prefer?" })).toBeInTheDocument();
   });
 
   it("goes back to a new comparison when the remembered one is gone", async () => {

@@ -347,6 +347,57 @@ class ExperimentArmOut(BaseModel):
     trials: list[ExperimentTrialOut]
 
 
+class GenerationExperimentPreference(StrEnum):
+    """What the person said of the two pictures.
+
+    Their own judgement, kept as said: nothing ranks a choice by it.
+    """
+
+    PREFERRED = "preferred"
+    TIED = "tied"
+    UNSUITABLE = "unsuitable"
+
+
+class GenerationExperimentEvaluationMode(StrEnum):
+    """Whether the pictures were shown with their choices named when it was said."""
+
+    UNBLINDED = "unblinded"
+    BLIND = "blind"
+
+
+class GenerationExperimentEvaluationCreate(_Contract):
+    """One choice preferred, or a tie, or neither suiting, with an optional short note."""
+
+    preference: GenerationExperimentPreference = Field(strict=False)
+    # The choice preferred, by its ordinal; given with a preference and only then.
+    arm_ordinal: int | None = Field(default=None, ge=1, le=2)
+    note: Annotated[str, StringConstraints(strip_whitespace=True, max_length=500)] | None = None
+
+    @model_validator(mode="after")
+    def require_a_choice_only_when_preferred(self) -> Self:
+        preferred = self.preference == GenerationExperimentPreference.PREFERRED
+        if preferred != (self.arm_ordinal is not None):
+            raise ValueError(
+                "A preference names the choice preferred, and a tie or neither does not."
+            )
+        return self
+
+
+class ExperimentEvaluationOut(BaseModel):
+    preference: GenerationExperimentPreference
+    mode: GenerationExperimentEvaluationMode
+    arm_ordinal: int | None = None
+    note: str | None = None
+    created_at: datetime
+
+    @field_serializer("created_at", when_used="json")
+    def serialize_time_as_utc(self, value: datetime) -> str:
+        """The database keeps it without a zone and it is UTC; say so."""
+
+        normalized = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        return normalized.isoformat().replace("+00:00", "Z")
+
+
 class GenerationExperimentOut(BaseModel):
     id: str
     name: str
@@ -364,6 +415,8 @@ class GenerationExperimentOut(BaseModel):
     work_plan_id: str | None = None
     started_at: datetime | None = None
     arms: list[ExperimentArmOut]
+    # The latest thing said of the pictures; none until something is.
+    evaluation: ExperimentEvaluationOut | None = None
 
     @field_serializer("created_at", "started_at", when_used="json")
     def serialize_times_as_utc(self, value: datetime | None) -> str | None:

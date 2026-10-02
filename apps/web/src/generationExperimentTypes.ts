@@ -136,6 +136,22 @@ export interface ExperimentArm {
   trials: ExperimentTrial[];
 }
 
+/** What the person said of the two pictures: their own judgement, kept as said. */
+export type GenerationExperimentPreference = "preferred" | "tied" | "unsuitable";
+
+export interface ExperimentEvaluation {
+  preference: GenerationExperimentPreference;
+  mode: "unblinded" | "blind";
+  arm_ordinal: number | null;
+  note: string | null;
+  created_at: string;
+}
+
+/** One saying: a choice preferred by its ordinal, or a tie, or neither suiting. */
+export type GenerationExperimentEvaluationCreate =
+  | { preference: "preferred"; arm_ordinal: number; note?: string }
+  | { preference: "tied" | "unsuitable"; note?: string };
+
 export interface GenerationExperiment {
   id: string;
   name: string;
@@ -153,6 +169,8 @@ export interface GenerationExperiment {
   work_plan_id: string | null;
   started_at: string | null;
   arms: ExperimentArm[];
+  /** The latest thing said of the pictures; null until something is. */
+  evaluation: ExperimentEvaluation | null;
 }
 
 /** A setting a choice ran with that the recipe drafted from it does not hold, and why. */

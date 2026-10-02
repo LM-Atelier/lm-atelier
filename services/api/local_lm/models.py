@@ -2965,6 +2965,11 @@ class GenerationExperiment(TimestampMixin, Base):
         passive_deletes=True,
         order_by="GenerationExperimentArm.ordinal",
     )
+    evaluations: Mapped[list[GenerationExperimentEvaluation]] = relationship(
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="GenerationExperimentEvaluation.sequence",
+    )
 
 
 class GenerationExperimentArm(Base):
@@ -3027,3 +3032,33 @@ class GenerationExperimentTrial(Base):
     run_id: Mapped[str | None] = mapped_column(
         ForeignKey("runs.id", ondelete="SET NULL"), nullable=True, unique=True
     )
+
+
+class GenerationExperimentEvaluation(Base):
+    """Which of a comparison's pictures the person preferred, as they said it, kept as said.
+
+    Each saying is kept in order, and the latest is the comparison's answer.
+    The preference is the person's own judgement; nothing reads it as a score.
+    """
+
+    __tablename__ = "generation_experiment_evaluations"
+    __table_args__ = (
+        UniqueConstraint(
+            "experiment_id", "sequence", name="uq_generation_experiment_evaluation_sequence"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("geval"))
+    experiment_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_experiments.id", ondelete="CASCADE"), index=True
+    )
+    sequence: Mapped[int] = mapped_column(Integer)
+    # How the pictures were shown when this was said: with their choices named, or not.
+    mode: Mapped[str] = mapped_column(String(16))
+    preference: Mapped[str] = mapped_column(String(16))
+    # The choice preferred; none for a tie or when neither suits.
+    preferred_arm_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generation_experiment_arms.id", ondelete="CASCADE"), nullable=True
+    )
+    note: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
