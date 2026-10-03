@@ -80,6 +80,7 @@ from .domain import (
     RoutingMode,
     RunStatus,
     elapsed_milliseconds,
+    new_id,
     operation_model_role,
     utcnow,
 )
@@ -3933,10 +3934,12 @@ class ConversationOrchestrator:
         """Add the job that runs one step, queued after the turn's earlier steps.
 
         It is added and not flushed: the next step's flush, or the commit,
-        writes it.
+        writes it. Its id is given here rather than at that flush, so the
+        plan's summary can name the last job of a turn too.
         """
 
         job = Job(
+            id=new_id("job"),
             kind=self._job_kind(operation).value,
             status=JobStatus.QUEUED.value,
             run_id=run.id,
