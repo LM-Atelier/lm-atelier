@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, NamedTuple
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -85,9 +85,11 @@ REPLAYED_SECTIONS: Final = (
 )
 #: Where a replayed run keeps what it was generated again from.
 REPLAY_RECEIPT_KEY: Final = "replay"
-ReplayOutcome = Literal["pending", "identical", "different", "output_missing"]
+ReplayOutcome = Literal["pending", "identical", "different", "output_missing", "adapted"]
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+#: Where an adapted run keeps the record it came from and what was chosen in its place.
+ADAPTATION_KEY: Final = "adaptation"
 #: Removals that would hide from the comparison something that ran.
 _UNCOMPARED_REMOVALS: Final = frozenset({"settings.mask", "settings.workflow_lora_overrides"})
 
@@ -114,18 +116,167 @@ def plan_output_recipe_replay(
     refusals: list[dict[str, Any]] = []
     operation = Operation(record["operation"])
     _check_record(record, operation, refusals)
-    workflow = record["workflow"]
-    output_engine = record["output"]["engine"]
-    if (workflow is not None and workflow["engine"] != media_engine) or (
-        output_engine is not None and output_engine != media_engine
-    ):
-        refusals.append(_refusal("replay-engine-differs", "engine"))
+    _check_engine(record, media_engine, refusals)
 
     revision, bound_profile = _workflow(session, record, operation, media_engine, refusals)
     profile = _model(session, record, operation, media_engine, revision, bound_profile, refusals)
-    lora_asset_ids = _loras(session, record, revision, refusals)
-    input_artifact_ids, mask_artifact_id = _inputs(session, record, refusals)
+    lora_asset_ids: list[str | None] = list(_loras(session, record, revision, refusals))
+    return _plan(session, record, operation, revision, profile, lora_asset_ids, refusals)
 
+
+class AdaptationChoices(NamedTuple):
+    """What the person chose to stand in for a record's requirements; None keeps the exact one."""
+
+    workflow_revision_id: str | None
+    profile_id: str | None
+    #: By recorded position: an asset to use in its place, or None to leave it out.
+    loras: dict[int, str | None]
+    #: By recorded position among the inputs: a picture here to use in its place.
+    inputs: dict[int, str]
+
+
+class AdaptationChoiceInvalid(ValueError):
+    """A choice that names no requirement of the record, or is not a local identifier."""
+
+
+def adaptation_choices(
+    *,
+    workflow_revision_ids: list[str],
+    profile_ids: list[str],
+    loras: list[str],
+    lora_count: int,
+    inputs: list[str],
+    input_count: int,
+) -> AdaptationChoices:
+    """Read the person's choices: each `lora` as `<position>:<asset id>` or `<position>:omit`,
+    and each `input` as `<position>:sha256:<hex>`, a picture here in place of that input."""
+
+    if len(workflow_revision_ids) > 1 or len(profile_ids) > 1:
+        raise AdaptationChoiceInvalid
+    if not all(_local_id(value) for value in (*workflow_revision_ids, *profile_ids)):
+        raise AdaptationChoiceInvalid
+    chosen: dict[int, str | None] = {}
+    for value in loras:
+        position_text, separator, asset = value.partition(":")
+        if not separator or not (asset == "omit" or _local_id(asset)):
+            raise AdaptationChoiceInvalid
+        position = _position(position_text)
+        if position >= lora_count or position in chosen:
+            raise AdaptationChoiceInvalid
+        chosen[position] = None if asset == "omit" else asset
+    pictures: dict[int, str] = {}
+    for value in inputs:
+        position_text, separator, artifact = value.partition(":")
+        if not separator or not _DIGEST.fullmatch(artifact):
+            raise AdaptationChoiceInvalid
+        position = _position(position_text)
+        if position >= input_count or position in pictures:
+            raise AdaptationChoiceInvalid
+        pictures[position] = artifact
+    return AdaptationChoices(
+        workflow_revision_ids[0] if workflow_revision_ids else None,
+        profile_ids[0] if profile_ids else None,
+        chosen,
+        pictures,
+    )
+
+
+def _position(text: str) -> int:
+    """A recorded position written plainly, without signs or leading zeros."""
+
+    if (
+        not text.isascii()
+        or not text.isdecimal()
+        or len(text) > 3
+        or (len(text) > 1 and text.startswith("0"))
+    ):
+        raise AdaptationChoiceInvalid
+    return int(text)
+
+
+def plan_output_recipe_adaptation(
+    session: Session, record: dict[str, Any], choices: AdaptationChoices, *, media_engine: str
+) -> dict[str, Any]:
+    """Resolve each requirement to the person's choice where there is one, else exactly, or refuse.
+
+    The record itself must still hold what a turn sends - its prompt, seed and
+    inputs - and name this engine; only the workflow, the model and each LoRA
+    can be chosen.
+    """
+
+    refusals: list[dict[str, Any]] = []
+    operation = Operation(record["operation"])
+    _check_record(
+        record,
+        operation,
+        refusals,
+        workflow_chosen=choices.workflow_revision_id is not None,
+        model_chosen=choices.profile_id is not None,
+    )
+    _check_engine(record, media_engine, refusals)
+    if record["workflow"] is None and record["output"]["engine"] is None:
+        # Nothing then names the engine it was made with, so it cannot be this one.
+        refusals.append(_refusal("replay-engine-differs", "engine"))
+    if choices.workflow_revision_id is None:
+        revision, bound_profile = _workflow(session, record, operation, media_engine, refusals)
+    else:
+        revision, bound_profile = _chosen_workflow(
+            session, choices.workflow_revision_id, operation, media_engine, refusals
+        )
+    if choices.profile_id is None:
+        profile = _model(
+            session, record, operation, media_engine, revision, bound_profile, refusals
+        )
+    else:
+        profile = _chosen_model(
+            session, choices.profile_id, operation, media_engine, revision, bound_profile, refusals
+        )
+    lora_asset_ids = _adapted_loras(session, record, revision, choices.loras, refusals)
+    return _plan(
+        session,
+        record,
+        operation,
+        revision,
+        profile,
+        lora_asset_ids,
+        refusals,
+        chosen_inputs=choices.inputs,
+    )
+
+
+def adaptation_choice_list(choices: AdaptationChoices) -> list[dict[str, Any]]:
+    """The choices as an adapted run keeps them, in a fixed order."""
+
+    listed: list[dict[str, Any]] = []
+    if choices.workflow_revision_id is not None:
+        listed.append(
+            {"requirement": "workflow", "position": None, "chosen": choices.workflow_revision_id}
+        )
+    if choices.profile_id is not None:
+        listed.append({"requirement": "model", "position": None, "chosen": choices.profile_id})
+    listed.extend(
+        {"requirement": "lora", "position": position, "chosen": asset}
+        for position, asset in sorted(choices.loras.items())
+    )
+    listed.extend(
+        {"requirement": "input", "position": position, "chosen": artifact}
+        for position, artifact in sorted(choices.inputs.items())
+    )
+    return listed
+
+
+def _plan(
+    session: Session,
+    record: dict[str, Any],
+    operation: Operation,
+    revision: WorkflowRevision | None,
+    profile: ModelProfile | None,
+    lora_asset_ids: list[str | None],
+    refusals: list[dict[str, Any]],
+    *,
+    chosen_inputs: dict[int, str] | None = None,
+) -> dict[str, Any]:
+    input_artifact_ids, mask_artifact_id = _inputs(session, record, refusals, chosen_inputs or {})
     resolved = None
     if not refusals and revision is not None:
         resolved = {
@@ -151,10 +302,172 @@ def _refusal(
     return {"code": code, "kind": kind, "sha256": sha256, "reasons": reasons or []}
 
 
-def _check_record(
-    record: dict[str, Any], operation: Operation, refusals: list[dict[str, Any]]
+def _check_engine(
+    record: dict[str, Any], media_engine: str, refusals: list[dict[str, Any]]
 ) -> None:
-    """Refuse what the record itself says it lacks, and shapes a turn cannot carry."""
+    """Refuse a record made by another engine; the engine names the runtime, not a choice."""
+
+    workflow = record["workflow"]
+    output_engine = record["output"]["engine"]
+    if (workflow is not None and workflow["engine"] != media_engine) or (
+        output_engine is not None and output_engine != media_engine
+    ):
+        refusals.append(_refusal("replay-engine-differs", "engine"))
+
+
+def _local_id(value: str) -> bool:
+    return (
+        0 < len(value) <= 64
+        and value.isascii()
+        and all(char.isalnum() or char in "_-" for char in value)
+    )
+
+
+def _chosen_workflow(
+    session: Session,
+    revision_id: str,
+    operation: Operation,
+    media_engine: str,
+    refusals: list[dict[str, Any]],
+) -> tuple[WorkflowRevision | None, ModelProfile | None]:
+    """The chosen revision, when admission would run it for this operation."""
+
+    role = operation_model_role(operation)
+    try:
+        revision, _activation, bound = resolve_exact_workflow_revision(
+            session,
+            revision_id,
+            capability="video" if role == "video" else "image",
+            operation=operation,
+            engine=media_engine,
+        )
+    except WorkflowFamilySelectionError:
+        refusals.append(_refusal("adaptation-workflow-unusable", "workflow"))
+        return None, None
+    return revision, bound
+
+
+def _chosen_model(
+    session: Session,
+    profile_id: str,
+    operation: Operation,
+    media_engine: str,
+    revision: WorkflowRevision | None,
+    bound_profile: ModelProfile | None,
+    refusals: list[dict[str, Any]],
+) -> ModelProfile | None:
+    """The chosen profile, when admission would run it for this operation in this workflow."""
+
+    profile = session.get(ModelProfile, profile_id)
+    install = (
+        session.get(ModelInstall, profile.model_install_id)
+        if profile is not None and profile.model_install_id
+        else None
+    )
+    if (
+        profile is None
+        or profile.role != operation_model_role(operation)
+        or profile.engine != media_engine
+        or (
+            profile.model_install_id is not None
+            and (install is None or not install.active or install.engine != profile.engine)
+        )
+        # A workflow bound to its own model runs only that one, and one that
+        # declares the models it takes runs no other.
+        or (bound_profile is not None and profile.id != bound_profile.id)
+        or (
+            revision is not None
+            and not revision_accepts_install(
+                session,
+                revision.dependencies_json if isinstance(revision.dependencies_json, dict) else {},
+                profile.model_install_id,
+            )
+        )
+    ):
+        refusals.append(_refusal("adaptation-model-unusable", "model"))
+        return None
+    return profile
+
+
+def _adapted_loras(
+    session: Session,
+    record: dict[str, Any],
+    revision: WorkflowRevision | None,
+    chosen: dict[int, str | None],
+    refusals: list[dict[str, Any]],
+) -> list[str | None]:
+    """An asset for each recorded LoRA, in recorded order: the chosen one, None where left out,
+    else the one that holds exactly its file."""
+
+    loras = sorted(record["loras"], key=lambda item: item["position"])
+    assets = _active_lora_assets(session)
+    asset_ids: list[str | None] = []
+    resolved = True
+    for position, lora in enumerate(loras):
+        if position in chosen:
+            choice = chosen[position]
+            asset = (
+                next((item for item in assets if item.id == choice), None)
+                if choice is not None
+                else None
+            )
+            if choice is not None and asset is None:
+                refusals.append(_refusal("adaptation-lora-unusable", "lora", lora["sha256"]))
+                resolved = False
+            asset_ids.append(choice)
+            continue
+        holders = [
+            item for item in assets if (item.manifest_json or {}).get("sha256") == lora["sha256"]
+        ]
+        if len(holders) != 1:
+            code = "replay-lora-missing" if not holders else "replay-lora-ambiguous"
+            refusals.append(_refusal(code, "lora", lora["sha256"]))
+            resolved = False
+            asset_ids.append(None)
+        else:
+            asset_ids.append(holders[0].id)
+    stack = [
+        {
+            "asset_id": asset_id,
+            "model_strength": lora["model_strength"],
+            "clip_strength": lora["clip_strength"],
+            "enabled": lora["enabled"],
+        }
+        for asset_id, lora in zip(asset_ids, loras, strict=True)
+        if asset_id is not None
+    ]
+    if not resolved or revision is None or not stack:
+        return asset_ids
+    try:
+        resolve_lora_stack(session, revision, stack)
+    except ValueError:
+        refusals.append(_refusal("replay-lora-unusable", "lora"))
+    return asset_ids
+
+
+def _active_lora_assets(session: Session) -> list[ModelAssetInstall]:
+    return list(
+        session.scalars(
+            select(ModelAssetInstall)
+            .where(ModelAssetInstall.kind == "lora", ModelAssetInstall.active.is_(True))
+            .order_by(ModelAssetInstall.id)
+        ).all()
+    )
+
+
+def _check_record(
+    record: dict[str, Any],
+    operation: Operation,
+    refusals: list[dict[str, Any]],
+    *,
+    workflow_chosen: bool = False,
+    model_chosen: bool = False,
+) -> None:
+    """Refuse what the record itself says it lacks, and shapes a turn cannot carry.
+
+    A workflow or model chosen to stand in for the record's own makes up for
+    the record lacking it.
+    """
 
     missing = set(record["reproducibility"]["missing"])
     # The format does not tie an empty section to the reason that names it, so a
@@ -172,11 +485,19 @@ def _check_record(
     if record["seed"]["value"] is None:
         missing.add("seed_not_recorded")
     missing -= TOLERATED_MISSING
+    if workflow_chosen:
+        missing -= {"workflow_unavailable", "workflow_unverified"}
+    if model_chosen:
+        missing.discard("model_files_not_recorded")
     if missing:
         # Each name comes from the format's own closed list, so none echoes input.
         refusals.append(_refusal("replay-record-incomplete", "record", reasons=sorted(missing)))
     reasons: list[str] = []
-    if workflow is not None and workflow["contract_version"] != WORKFLOW_ARTIFACT_CONTRACT_VERSION:
+    if (
+        not workflow_chosen
+        and workflow is not None
+        and workflow["contract_version"] != WORKFLOW_ARTIFACT_CONTRACT_VERSION
+    ):
         reasons.append("workflow_contract_version")
     inputs = record["inputs"]
     # A selection travels as a setting, not as one of the turn's pictures.
@@ -388,14 +709,7 @@ def _loras(
     loras = sorted(record["loras"], key=lambda item: item["position"])
     if not loras:
         return []
-    assets = [
-        asset
-        for asset in session.scalars(
-            select(ModelAssetInstall)
-            .where(ModelAssetInstall.kind == "lora", ModelAssetInstall.active.is_(True))
-            .order_by(ModelAssetInstall.id)
-        ).all()
-    ]
+    assets = _active_lora_assets(session)
     asset_ids: list[str] = []
     for lora in loras:
         holders = [
@@ -428,23 +742,39 @@ def _loras(
 
 
 def _inputs(
-    session: Session, record: dict[str, Any], refusals: list[dict[str, Any]]
+    session: Session,
+    record: dict[str, Any],
+    refusals: list[dict[str, Any]],
+    chosen: dict[int, str],
 ) -> tuple[list[str], str | None]:
     """Each recorded picture by its content identity, in recorded order, and the selection apart.
 
     A turn takes its selection as a setting rather than as one of its pictures.
+    A picture chosen to stand in for one stands at its position; it must be a
+    picture here, and no picture may then stand at two positions.
     """
 
     identifiers: list[str] = []
     mask: str | None = None
-    for item in record["inputs"]:
-        identifier = f"sha256:{item['sha256']}"
-        if session.get(Artifact, identifier) is None:
-            refusals.append(_refusal("replay-input-missing", "input", item["sha256"]))
-        elif item["role"] == "mask":
+    for position, item in enumerate(record["inputs"]):
+        if position in chosen:
+            identifier = chosen[position]
+            artifact = session.get(Artifact, identifier)
+            if artifact is None or not str(artifact.media_type or "").startswith("image/"):
+                refusals.append(_refusal("adaptation-input-unusable", "input", item["sha256"]))
+                continue
+        else:
+            identifier = f"sha256:{item['sha256']}"
+            if session.get(Artifact, identifier) is None:
+                refusals.append(_refusal("replay-input-missing", "input", item["sha256"]))
+                continue
+        if item["role"] == "mask":
             mask = identifier
         else:
             identifiers.append(identifier)
+    if chosen and len({*identifiers, *([mask] if mask else [])}) != len(identifiers) + bool(mask):
+        # A turn takes each picture once, so one given twice would run as one.
+        refusals.append(_refusal("adaptation-input-unusable", "input"))
     return identifiers, mask
 
 
@@ -514,6 +844,25 @@ async def replay_turn_request(
     and the comparison afterwards holds it to the recorded value.
     """
 
+    turn, _left_out = await _record_turn_request(session, engines, record, resolved)
+    return turn
+
+
+async def adapted_turn_request(
+    session: Session, engines: EngineRegistry, record: dict[str, Any], resolved: dict[str, Any]
+) -> tuple[TurnRequest, list[str]]:
+    """The record's turn against the chosen workflow and model, and the settings it could not send.
+
+    A recorded setting the chosen workflow does not take - a seed or negative
+    prompt among them - is left out of the turn and named.
+    """
+
+    return await _record_turn_request(session, engines, record, resolved)
+
+
+async def _record_turn_request(
+    session: Session, engines: EngineRegistry, record: dict[str, Any], resolved: dict[str, Any]
+) -> tuple[TurnRequest, list[str]]:
     revision = session.get(WorkflowRevision, resolved["workflow_revision_id"])
     profile = session.get(ModelProfile, resolved["profile_id"]) if resolved["profile_id"] else None
     if revision is None:
@@ -529,18 +878,25 @@ async def replay_turn_request(
             effective_upscale_schema(revision.api_graph_json, revision.input_schema_json),
             accepts_added_loras=revision_accepts_added_loras(revision),
         )
-        if field.scope != "load"
+        # A setting the workflow marks unavailable would be refused, not filled.
+        if field.scope != "load" and field.available
     }
     recorded = {**record["settings"]["unbound"], **record["settings"]["bound"]}
     settings: dict[str, Any] = {key: value for key, value in recorded.items() if key in offered}
+    left_out = sorted(key for key in recorded if key not in offered)
     if "seed" in offered:
         settings["seed"] = record["seed"]["value"]
+    elif record["seed"]["value"] is not None:
+        left_out.append("seed")
     if "negative_prompt" in offered:
         # Sent even when empty, so a default, profile or preset negative prompt
         # cannot step in where the record had none.
         settings["negative_prompt"] = record["prompt"]["negative"] or ""
+    elif record["prompt"]["negative"]:
+        left_out.append("negative_prompt")
     if "loras" in offered:
-        # Sent even when empty, which also keeps automatic LoRAs out.
+        # Sent even when empty, which also keeps automatic LoRAs out. One left
+        # out by choice is not sent.
         loras = sorted(record["loras"], key=lambda item: item["position"])
         settings["loras"] = [
             {
@@ -550,6 +906,7 @@ async def replay_turn_request(
                 "enabled": lora["enabled"],
             }
             for asset_id, lora in zip(resolved["lora_asset_ids"], loras, strict=True)
+            if asset_id is not None
         ]
     if resolved["mask_artifact_id"] is not None:
         # The selection alone, as the record has it: nothing to feather or turn round.
@@ -558,7 +915,7 @@ async def replay_turn_request(
     if record["operation"] == Operation.IMAGE_TO_IMAGE.value:
         # A run adds this wording to every edit; the turn carries only the request.
         text = text.removeprefix(edit_prompt_preamble())
-    return TurnRequest(
+    turn = TurnRequest(
         text=text,
         mode=resolved["mode"],
         profile_id=resolved["profile_id"],
@@ -569,6 +926,7 @@ async def replay_turn_request(
         input_artifact_ids=resolved["input_artifact_ids"],
         settings=settings,
     )
+    return turn, left_out
 
 
 def exact_replay_check(record: dict[str, Any]) -> Callable[[Session, Run], None]:
@@ -597,6 +955,54 @@ def exact_replay_check(record: dict[str, Any]) -> Callable[[Session, Run], None]
             raise ReplayDiffers(differing)
 
     return check
+
+
+def mark_adaptation(
+    session: Session,
+    run: Run,
+    record: dict[str, Any],
+    choices: list[dict[str, Any]],
+    left_out: list[str],
+) -> None:
+    """Keep on an adapted run which record it came from, what stood in for what, and what differs.
+
+    Inside the acceptance transaction, like the exact check; but a difference is
+    the point of an adaptation, so it is recorded rather than refused.
+    """
+
+    session.flush()
+    runs = session.scalars(select(Run).where(Run.work_plan_id == run.work_plan_id)).all()
+    if len(runs) != 1:
+        # A record is of one result, and so is a new version of it.
+        raise ReplayDiffers(["output_count"])
+    description = describe_run(session, run)
+    differs = [
+        name
+        for name in REPLAYED_SECTIONS
+        if canonical_bytes(_compared(name, description.sections[name]))
+        != canonical_bytes(_compared(name, record[name]))
+    ]
+    # A setting the turn could not send but admission worked out to the
+    # recorded value anyway - a video's frames from its length - was not lost.
+    recorded = {
+        **record["settings"]["unbound"],
+        **record["settings"]["bound"],
+        "seed": record["seed"]["value"],
+        "negative_prompt": record["prompt"]["negative"] or "",
+    }
+    resolved = run.settings_json if isinstance(run.settings_json, dict) else {}
+    lost = sorted(
+        key for key in left_out if key not in resolved or resolved[key] != recorded.get(key)
+    )
+    run.provenance_json = {
+        **run.provenance_json,
+        ADAPTATION_KEY: {
+            "record_digest": record["digest"],
+            "choices": choices,
+            "left_out_settings": lost,
+            "differs": differs,
+        },
+    }
 
 
 def _compared(name: str, value: Any) -> Any:
@@ -629,9 +1035,12 @@ def replay_outcome(run: Run) -> dict[str, Any] | None:
 
     Different bytes are reported, never refused: the record does not hold the
     executed graph or the runtime's version, so a matching run can still draw
-    differently, and saying so is the point.
+    differently, and saying so is the point. A run made as a new version of a
+    record answers that instead, with the parts of it that differ from the record.
     """
 
+    if REPLAY_RECEIPT_KEY not in run.provenance_json:
+        return _adapted(run.provenance_json.get(ADAPTATION_KEY))
     receipt = run.provenance_json.get(REPLAY_RECEIPT_KEY)
     if (
         not isinstance(receipt, dict)
@@ -663,3 +1072,22 @@ def replay_outcome(run: Run) -> dict[str, Any] | None:
         else:
             state = "different"
     return {"state": state, "record_digest": receipt["record_digest"]}
+
+
+def _adapted(receipt: object) -> dict[str, Any] | None:
+    """What a run made as a new version of a record keeps about it, read strictly."""
+
+    if (
+        not isinstance(receipt, dict)
+        or not isinstance(receipt.get("record_digest"), str)
+        or not _DIGEST.fullmatch(receipt["record_digest"])
+        or not isinstance(receipt.get("differs"), list)
+        or not all(section in REPLAYED_SECTIONS for section in receipt["differs"])
+    ):
+        return None
+    state: ReplayOutcome = "adapted"
+    return {
+        "state": state,
+        "record_digest": receipt["record_digest"],
+        "differs": list(receipt["differs"]),
+    }

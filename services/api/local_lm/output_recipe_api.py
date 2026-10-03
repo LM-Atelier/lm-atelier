@@ -179,7 +179,10 @@ async def plan_an_exact_replay(request: Request) -> JSONResponse:
 
 @router.get("/runs/{run_id}/replay-result")
 async def replay_result(run_id: str) -> JSONResponse:
-    """Whether a run generated again from a record came out as the record's output did."""
+    """Whether a run generated again from a record came out as the record's output did.
+
+    A run made as a new version of a record answers which parts of it differ.
+    """
 
     outcome = await run_in_threadpool(_replay_result, run_id)
     if outcome is None:

@@ -67,7 +67,13 @@ such as the workflow that made it, is copied; a picture with its own color
 profile is converted to sRGB first, so the profile stays behind too.
 **Check a record** in the Model library reads such a record, or such a ZIP
 file, and says which of the files it names are on this computer and ready. It
-keeps no copy of the file and installs, downloads or changes nothing.
+keeps no copy of the file and installs, downloads or changes nothing. When
+everything it names is here exactly, **Generate again** starts it in a new chat
+from the record's prompt, seed and settings. When only its workflow, model,
+LoRAs or input pictures are not here, **Make a new version** starts it with the
+ones you choose in their place, a picture from your library for a picture; that
+generation keeps which record it came from, what you chose and what differs from
+the record, and the record file is not changed.
 
 Before sharing issue details, inspect them and remove tokens, private prompts,
 chats, media, model inputs, and identifying file paths.

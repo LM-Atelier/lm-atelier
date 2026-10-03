@@ -259,6 +259,22 @@ describe("the generation record dialog", () => {
     expect(replayResult).toHaveBeenCalledWith("run_1", expect.any(AbortSignal));
   });
 
+  it("says a run made as a new version of a record is one, and what differs from it", async () => {
+    generationRecord.mockResolvedValue(recordBytes());
+    replayResult.mockResolvedValue({
+      state: "adapted", record_digest: `sha256:${"d".repeat(64)}`, differs: ["workflow", "model"],
+    });
+    render(withQueries(<GenerationRecordButton runId="run_1" artifactId={`sha256:${SHA}`} kind="image" />));
+
+    openRecord();
+
+    expect(await screen.findByText(
+      "Made as a new version of a record, not that generation again. "
+      + "It differs from the record in the workflow and the model.",
+    )).toBeInTheDocument();
+    expect(screen.queryByText(/came out/)).toBeNull();
+  });
+
   it("says nothing about replays for a run that was not one", async () => {
     generationRecord.mockResolvedValue(recordBytes());
     render(withQueries(<GenerationRecordButton runId="run_1" artifactId={`sha256:${SHA}`} kind="image" />));

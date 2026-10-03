@@ -4,6 +4,7 @@ import { useMutation } from "@tanstack/react-query";
 import { FileJson } from "lucide-react";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { api } from "./api";
+import { GenerationRecordAdapt } from "./GenerationRecordAdapt";
 import { GenerationRecordReplay } from "./GenerationRecordReplay";
 import {
   missingText,
@@ -116,6 +117,18 @@ export function GenerationRecordCheck({ onOpenChat }: { onOpenChat?: (chatId: st
           {check.data && onOpenChat && (
             <GenerationRecordReplay
               plan={check.data.plan}
+              content={check.data.content}
+              onStarted={(chatId) => {
+                setOpen(false);
+                check.reset();
+                onOpenChat(chatId);
+              }}
+            />
+          )}
+          {check.data && onOpenChat && (
+            <GenerationRecordAdapt
+              plan={check.data.plan}
+              requirements={check.data.answer.requirements}
               content={check.data.content}
               onStarted={(chatId) => {
                 setOpen(false);

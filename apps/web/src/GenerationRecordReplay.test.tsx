@@ -108,7 +108,7 @@ describe("generating a record again", () => {
     fireEvent.click(screen.getByRole("button", { name: "Generate again" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "would not match the record exactly (it would differ in settings, how many results it makes)",
+      "would not match the record exactly (it would differ in the settings and how many results it makes)",
     );
     expect(deleteChat).toHaveBeenCalledWith("chat_again");
     expect(onStarted).not.toHaveBeenCalled();

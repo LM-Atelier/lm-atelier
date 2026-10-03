@@ -276,7 +276,55 @@ const REPLAY_REFUSAL_TEXT: Record<string, string> = {
   "replay-lora-ambiguous": "One of its LoRAs is here more than once",
   "replay-lora-unusable": "Its LoRAs cannot be added to its workflow here",
   "replay-input-missing": "One of its input pictures is not here",
+  "adaptation-workflow-unusable": "The chosen workflow cannot make this here",
+  "adaptation-model-unusable": "The chosen model cannot be used for this here",
+  "adaptation-lora-unusable": "A chosen LoRA is not here",
+  "adaptation-input-unusable": "A chosen picture is not here, or stands in for two of its pictures",
 };
+
+/** What can be chosen in place of each requirement a new version may stand in for. */
+const ADAPTABLE_REFUSALS: Record<string, "workflow" | "model" | "loras" | "inputs"> = {
+  "replay-workflow-missing": "workflow",
+  "replay-workflow-ambiguous": "workflow",
+  "replay-workflow-not-ready": "workflow",
+  "replay-workflow-binding-differs": "workflow",
+  "replay-workflow-unscoped": "workflow",
+  "replay-model-missing": "model",
+  "replay-model-ambiguous": "model",
+  "replay-lora-missing": "loras",
+  "replay-lora-ambiguous": "loras",
+  "replay-lora-unusable": "loras",
+  "replay-input-missing": "inputs",
+};
+
+export type AdaptationNeeds = { workflow: boolean; model: boolean; loras: boolean; inputs: boolean };
+
+/** What a new version needs chosen, or null when it cannot stand in for everything that refused. */
+export function adaptationNeeds(plan: ReplayPlan): AdaptationNeeds | null {
+  if (plan.ready || !REPLAYABLE_OPERATIONS.has(plan.operation)) return null;
+  const needs = plan.refusals.map((refusal) => ADAPTABLE_REFUSALS[refusal.code]);
+  if (needs.some((need) => need === undefined)) return null;
+  return {
+    workflow: needs.includes("workflow"),
+    model: needs.includes("model"),
+    loras: needs.includes("loras"),
+    inputs: needs.includes("inputs"),
+  };
+}
+
+/** Why a new version was not started, in fixed words; never the server's own text. */
+export function adaptationFailureText(error: unknown): string {
+  const failure = error as { code?: unknown; payload?: Record<string, unknown> } | null;
+  const refusals = failure?.code === "adaptation-unavailable" && Array.isArray(failure.payload?.refusals)
+    ? failure.payload.refusals.flatMap((item) => {
+      const code = object(item).code;
+      return typeof code === "string" ? [replayRefusalText(code)] : [];
+    })
+    : [];
+  return refusals.length > 0
+    ? `It cannot be made with these choices: ${refusals.join("; ")}. Nothing was started.`
+    : "It could not be started here. Nothing was started.";
+}
 
 const REPLAY_REASON_TEXT: Record<string, string> = {
   workflow_contract_version: "Its workflow is described in another version's terms.",
@@ -291,9 +339,23 @@ const REPLAY_REASON_TEXT: Record<string, string> = {
 };
 
 const SECTION_TEXT: Record<string, string> = {
+  operation: "how it was made",
+  prompt: "the prompt",
+  seed: "the seed",
+  settings: "the settings",
+  inputs: "the input pictures",
+  workflow: "the workflow",
+  model: "the model",
+  loras: "the LoRAs",
   output_count: "how many results it makes",
   completeness: "what could be recorded",
 };
+
+/** Sections named as a reader says them: "the model and the workflow". */
+function sectionList(sections: string[]): string {
+  const named = sections.map((section) => SECTION_TEXT[section] ?? section);
+  return named.length > 1 ? `${named.slice(0, -1).join(", ")} and ${named[named.length - 1]}` : named.join("");
+}
 
 export function replayRefusalText(code: string): string {
   return REPLAY_REFUSAL_TEXT[code] ?? "Something it names does not match here";
@@ -310,7 +372,7 @@ export function replayFailureText(error: unknown): string {
     const sections = Array.isArray(failure.payload?.sections)
       ? failure.payload.sections.filter((item): item is string => typeof item === "string")
       : [];
-    const named = sections.map((section) => SECTION_TEXT[section] ?? section).join(", ");
+    const named = sectionList(sections);
     return `Generating it here would not match the record exactly${named ? ` (it would differ in ${named})` : ""}. Nothing was started.`;
   }
   return "It could not be started here. Nothing was started.";
@@ -342,9 +404,11 @@ export function readReplayPlan(value: unknown): ReplayPlan {
   return { digest: plan.digest, operation: plan.operation, ready: plan.ready, refusals };
 }
 
-export type ReplayOutcome = "pending" | "identical" | "different" | "output_missing";
+type ReplayState = "pending" | "identical" | "different" | "output_missing";
+/** How a run made from a record turned out; a new version also says what differs from the record. */
+export type ReplayOutcome = { state: ReplayState | "adapted"; differs: string[] };
 
-const REPLAY_OUTCOME_TEXT: Record<ReplayOutcome, string> = {
+const REPLAY_OUTCOME_TEXT: Record<ReplayState, string> = {
   pending: "Generated again from a record. It has not finished yet.",
   identical: "Generated again from a record, and it came out exactly as the recorded one did.",
   different:
@@ -353,14 +417,18 @@ const REPLAY_OUTCOME_TEXT: Record<ReplayOutcome, string> = {
   output_missing: "Generated again from a record, but it left no result to compare.",
 };
 
-/** What a replayed run's result says, or null for a run that was not generated again. */
+/** What a run made from a record says about it, or null for a run that was not made from one. */
 export function readReplayOutcome(value: unknown): ReplayOutcome | null {
   const outcome = object(value);
+  if (outcome.state === "adapted") return { state: "adapted", differs: names(outcome.differs) };
   return typeof outcome.state === "string" && outcome.state in REPLAY_OUTCOME_TEXT
-    ? (outcome.state as ReplayOutcome)
+    ? { state: outcome.state as ReplayState, differs: [] }
     : null;
 }
 
 export function replayOutcomeText(outcome: ReplayOutcome): string {
-  return REPLAY_OUTCOME_TEXT[outcome];
+  if (outcome.state !== "adapted") return REPLAY_OUTCOME_TEXT[outcome.state];
+  return outcome.differs.length > 0
+    ? `Made as a new version of a record, not that generation again. It differs from the record in ${sectionList(outcome.differs)}.`
+    : "Made as a new version of a record, not that generation again, though nothing the record holds differs.";
 }
