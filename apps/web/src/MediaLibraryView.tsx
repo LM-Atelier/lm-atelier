@@ -13,6 +13,7 @@ import { clockOptions, useClockChoice } from "./clockPreference";
 import { EmptyState } from "./EmptyState";
 import { ErrorCallout } from "./ErrorCallout";
 import { formatBytes } from "./format";
+import { PictureFileSettings } from "./PictureFileSettings";
 
 const PAGE_LIMIT = 20;
 const LIBRARY_UNAVAILABLE = "The Media Library could not be loaded safely. Refresh and try again.";
@@ -163,6 +164,7 @@ export function MediaLibraryView({
                     <strong>{entry.display_name}</strong>
                     <small>{formatBytes(entry.size_bytes)} · Added {new Date(Math.floor(entry.created_at_epoch_micros / 1000)).toLocaleString(undefined, clockOptions(clock))}</small>
                     <ArtifactGenerationDetails key={entry.artifact_id} artifactId={entry.artifact_id} />
+                    {entry.kind === "image" && <PictureFileSettings artifactId={entry.artifact_id} />}
                     <span>
                       <button
                         className={`icon-button ${entry.favorite ? "favorite-active" : ""}`}
