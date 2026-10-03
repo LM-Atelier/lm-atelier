@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from local_lm.db import SessionLocal
-from local_lm.models import Run, WorkStep
+from local_lm.models import Job, Run, WorkStep
 from local_lm.orchestrator import ConversationOrchestrator
 
 ORDERED = {
@@ -76,7 +76,7 @@ async def test_a_turn_names_a_new_chat_after_its_words_and_keeps_a_chosen_name(
     [{"text": "Describe a paper boat", "mode": "text"}, ORDERED],
     ids=["one-step", "ordered"],
 )
-async def test_a_turn_s_plan_names_its_steps_and_runs_in_order(
+async def test_a_turn_s_plan_names_its_steps_runs_and_jobs_in_order(
     client: AsyncClient, payload: dict[str, Any]
 ) -> None:
     plan = await _turn(client, await _chat(client, "Plan rows"), payload)
@@ -85,8 +85,14 @@ async def test_a_turn_s_plan_names_its_steps_and_runs_in_order(
         steps = session.scalars(
             select(WorkStep).where(WorkStep.plan_id == plan["id"]).order_by(WorkStep.ordinal)
         ).all()
+        jobs = [
+            session.scalars(select(Job.id).where(Job.work_step_id == step.id)).one()
+            for step in steps
+        ]
     assert plan["summary_json"]["step_ids"] == [step.id for step in steps]
     assert plan["summary_json"]["run_ids"] == [step.run_id for step in steps]
+    # The last job too, which nothing has flushed when the summary is written.
+    assert plan["summary_json"]["job_ids"] == jobs
 
 
 def test_a_run_whose_workflow_is_not_its_step_s_is_never_queued() -> None:
