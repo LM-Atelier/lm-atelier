@@ -53,6 +53,7 @@ from .filesystem_links import (
     open_entry,
     remove_directory_entry,
     remove_entry,
+    remove_link_entry,
     rename_entry,
     sync_directory,
 )
@@ -861,7 +862,7 @@ class ArtifactStore:
             raise TypeError("give both retention windows, or windows_from")
         if not dry_run:
             phase("recover-staged-deletions")
-            self._recover_staged_deletions(session)
+            self._recover_staged_deletions(session, should_stop=should_stop)
         phase("reference-snapshot")
         referenced = self.referenced_artifact_ids(session, for_deletion=not dry_run)
         examined_count = 0
@@ -1208,31 +1209,75 @@ class ArtifactStore:
             os.replace(staged, original)
             self._remember_verified(original)
 
-    def _recover_staged_deletions(self, session: Session) -> None:
-        trash = self.root / ".delete-pending"
-        if not trash.is_dir() or self._is_link(trash):
-            return
+    def _recover_staged_deletions(
+        self,
+        session: Session,
+        *,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> None:
+        """Restore interrupted deletions, and drop links left in that directory.
+
+        The staging directory is held and listed. A directory junction is a
+        directory to the path checks, so those checks skip it and leave the
+        entry in the store. The listing reports that junction as a link. The
+        link entry is removed. The directory it names stays where it is.
+
+        The same stop that bounds the orphan walk bounds this listing. A stop
+        after one native record must not fetch the next one.
+        """
+
         artifacts_by_sha = {
             artifact.sha256: artifact for artifact in session.scalars(select(Artifact)).all()
         }
-        for staged in trash.iterdir():
-            match = _STAGED_DELETION.fullmatch(staged.name)
-            if not match or (not staged.is_file() and not staged.is_symlink()):
-                continue
-            if self._is_link(staged):
-                staged.unlink(missing_ok=True)
-                continue
-            artifact = artifacts_by_sha.get(match.group("digest"))
-            if artifact is None:
-                staged.unlink(missing_ok=True)
-                continue
-            try:
-                original = self.resolve(artifact)
-            except ValueError:
-                continue
-            self._restore_staged_file(staged, original)
-        with suppress(OSError):
-            trash.rmdir()
+        try:
+            with AnchoredDirectory(self.root) as root:
+                trash = next(
+                    (
+                        entry
+                        for entry in list_entries(
+                            root, include_metadata=False, should_stop=should_stop
+                        )
+                        if entry.name == ".delete-pending"
+                    ),
+                    None,
+                )
+                if trash is None or trash.kind is not AnchoredEntryKind.DIRECTORY:
+                    return
+                with open_child_directory(root, ".delete-pending") as held:
+                    for entry in list_entries(
+                        held, include_metadata=False, should_stop=should_stop
+                    ):
+                        self._recover_one_staged_entry(held, entry, artifacts_by_sha)
+                with suppress(AnchoredDirectoryError):
+                    remove_directory_entry(root, ".delete-pending")
+        except AnchoredDirectoryError:
+            return
+
+    def _recover_one_staged_entry(
+        self,
+        held: AnchoredDirectory,
+        entry: AnchoredEntry,
+        artifacts_by_sha: dict[str, Artifact],
+    ) -> None:
+        match = _STAGED_DELETION.fullmatch(entry.name)
+        if match is None:
+            return
+        if entry.kind is AnchoredEntryKind.LINK:
+            with suppress(AnchoredDirectoryError, OSError):
+                remove_link_entry(held, entry.name)
+            return
+        if entry.kind is not AnchoredEntryKind.FILE:
+            return
+        artifact = artifacts_by_sha.get(match.group("digest"))
+        if artifact is None:
+            with suppress(AnchoredDirectoryError, OSError):
+                remove_entry(held, entry.name)
+            return
+        try:
+            original = self.resolve(artifact)
+        except ValueError:
+            return
+        self._restore_staged_file(self.root / ".delete-pending" / entry.name, original)
 
     def _cleanup_orphan_files(
         self,

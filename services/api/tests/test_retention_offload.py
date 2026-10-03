@@ -660,6 +660,85 @@ async def test_a_slow_snapshot_keeps_the_default_batch_and_deletion_budget(
     assert "continuing without the clock" not in caplog.text
 
 
+async def test_slow_staging_recovery_keeps_the_deletion_budget(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = ArtifactStore(settings)
+    with SessionLocal() as session:
+        for index in range(25):
+            _aged_temporary(store, session, index)
+        session.commit()
+    clock = 0.0
+    delays = 0
+    removed: list[int] = []
+    real_listing = artifacts_module.list_entries
+    real_cleanup = ArtifactStore.cleanup_retention
+
+    def slow_listing(*args: Any, **kwargs: Any) -> Any:
+        nonlocal clock, delays
+        first = True
+        for entry in real_listing(*args, **kwargs):
+            if first:
+                clock += 10.0
+                delays += 1
+                first = False
+            yield entry
+
+    def counted_cleanup(self: ArtifactStore, session: Session, **kwargs: Any) -> Any:
+        result = real_cleanup(self, session, **kwargs)
+        removed.append(result.removed_count)
+        return result
+
+    monkeypatch.setattr(main_module, "time", SimpleNamespace(monotonic=lambda: clock))
+    monkeypatch.setattr(artifacts_module, "list_entries", slow_listing)
+    monkeypatch.setattr(ArtifactStore, "cleanup_retention", counted_cleanup)
+    caplog.set_level(logging.INFO)
+
+    await main_module.sweep_artifact_retention(store, settings, pause_seconds=0)
+
+    assert delays >= 2
+    assert removed == [25, 0]
+    assert "continuing without the clock" not in caplog.text
+
+
+async def test_cancelling_during_staging_recovery_still_reaches_its_stop(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = ArtifactStore(settings)
+    entered = threading.Event()
+    release = threading.Event()
+    stopped = threading.Event()
+    real_recovery = ArtifactStore._recover_staged_deletions
+
+    def paused_recovery(self: ArtifactStore, session: Session, **kwargs: Any) -> None:
+        should_stop = kwargs["should_stop"]
+        assert not should_stop()
+        entered.set()
+        assert release.wait(timeout=5), "the constructed staging recovery was not released"
+        assert should_stop()
+        stopped.set()
+        real_recovery(self, session, **kwargs)
+
+    monkeypatch.setattr(ArtifactStore, "_recover_staged_deletions", paused_recovery)
+    operation = asyncio.create_task(
+        main_module.sweep_artifact_retention(store, settings, pause_seconds=0)
+    )
+    try:
+        assert await asyncio.to_thread(entered.wait, 5), "staging recovery never started"
+        operation.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await operation
+    finally:
+        release.set()
+        if not operation.done():
+            operation.cancel()
+        with suppress(asyncio.CancelledError):
+            await operation
+    assert stopped.is_set()
+
+
 async def test_retention_progress_counts_rows_and_excludes_writer_wait(
     settings: Settings, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

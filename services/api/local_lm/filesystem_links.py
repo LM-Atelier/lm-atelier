@@ -1162,6 +1162,48 @@ def remove_directory_entry(anchor: AnchoredDirectory, name: str) -> None:
         _close_windows_handle(opened)
 
 
+def remove_link_entry(anchor: AnchoredDirectory, name: str) -> None:
+    """Remove one link inside the held directory.
+
+    The directory or file it names stays where it is. ``remove_entry`` opens
+    with ``FILE_NON_DIRECTORY_FILE``, so a directory junction never gets that
+    far, and ``remove_directory_entry`` refuses a reparse point. Absence is
+    success. A file or a plain directory refuses, and stays.
+    """
+
+    _require_entry_name(name)
+    if anchor.descriptor is not None:
+        try:
+            info = os.lstat(name, dir_fd=anchor.descriptor)
+        except FileNotFoundError:
+            return
+        except OSError:
+            _refuse()
+        if not stat.S_ISLNK(info.st_mode):
+            _refuse()
+        try:
+            os.unlink(name, dir_fd=anchor.descriptor)
+        except FileNotFoundError:
+            return
+        except OSError:
+            _refuse()
+        return
+    handle = anchor.handle
+    if handle is None:
+        _refuse()
+    opened, status = _nt_try_open_relative(handle, name, intent="delete_link")
+    if status in (_STATUS_OBJECT_NAME_NOT_FOUND, _STATUS_OBJECT_PATH_NOT_FOUND):
+        return
+    if status != _STATUS_SUCCESS or not opened:
+        _refuse()
+    try:
+        if not _nt_reparse_attribute_is_set(opened):
+            _refuse()
+        _nt_mark_deleted(opened)
+    finally:
+        _close_windows_handle(opened)
+
+
 def discard_entry(anchor: AnchoredDirectory, name: str) -> None:
     """Best-effort removal, for use while a refusal is already propagating.
 
@@ -2283,7 +2325,7 @@ def _nt_try_open_relative(parent: int | None, name: str, *, intent: str) -> tupl
 
     `intent` is one of open_dir, create_dir, open_security_dir, create_security_dir,
     open_file, open_publishable_file, create_file, create_publishable_file,
-    delete_directory, delete_source or rename_source. It is spelled out rather
+    delete_directory, delete_source, delete_link or rename_source. It is spelled out rather
     than inferred from a flag because
     the access mask and the disposition have to agree, and getting that pair
     wrong fails in ways that look like a filesystem problem rather than a
@@ -2349,6 +2391,12 @@ def _nt_try_open_relative(parent: int | None, name: str, *, intent: str) -> tupl
         access |= _DELETE
         options |= _FILE_NON_DIRECTORY_FILE
         disposition = _FILE_OPEN
+    elif intent == "delete_link":
+        # A junction carries the directory attribute. FILE_NON_DIRECTORY_FILE
+        # refuses it, and FILE_DIRECTORY_FILE refuses a symlink to a file.
+        # FILE_OPEN_REPARSE_POINT, already set above, opens the link itself.
+        access |= _DELETE
+        disposition = _FILE_OPEN
     else:  # pragma: no cover - the caller set is closed
         _refuse()
 
@@ -2373,6 +2421,29 @@ def _nt_try_open_relative(parent: int | None, name: str, *, intent: str) -> tupl
     if not handle.value:
         return 0, _STATUS_UNEXPECTED
     return int(handle.value), _STATUS_SUCCESS
+
+
+def _nt_reparse_attribute_is_set(handle: int) -> bool:
+    """True only when the reparse attribute was read and is set.
+
+    A failed query answers False. Deleting on a failed read would remove an
+    entry this function could not classify.
+    """
+
+    api = _windows_api()
+    information = api.FileBasicInformation()
+    status_block = api.IoStatusBlock()
+    status = api.ntdll.NtQueryInformationFile(
+        api.ctypes.c_void_p(handle),
+        api.ctypes.byref(status_block),
+        api.ctypes.byref(information),
+        api.ctypes.c_ulong(api.ctypes.sizeof(api.FileBasicInformation)),
+        api.ctypes.c_ulong(_FILE_BASIC_INFORMATION_CLASS),
+    )
+    if status & 0xFFFFFFFF != _STATUS_SUCCESS:
+        return False
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(information.FileAttributes & reparse_flag)
 
 
 def _nt_is_reparse(handle: int) -> bool:

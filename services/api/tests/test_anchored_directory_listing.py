@@ -24,6 +24,7 @@ from local_lm.filesystem_links import (
     list_entries,
     open_child_directory,
     remove_entry,
+    remove_link_entry,
     rename_entry,
 )
 
@@ -563,3 +564,29 @@ def test_a_surrogate_path_component_never_reaches_the_native_open(
         AnchoredDirectory(tmp_path / component / "child")
 
     assert component not in seen, "the unencodable name reached the native open"
+
+
+def test_remove_link_entry_drops_a_junction_and_leaves_its_target(tmp_path: Path) -> None:
+    """The link entry goes. The directory it names, and a real file beside it, stay."""
+
+    root = tmp_path / "store"
+    root.mkdir()
+    (root / "ordinary.bin").write_bytes(b"keep")
+    (root / "plain").mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "victim.bin").write_bytes(b"not ours")
+    if not _make_link_dir(root / "redirect", outside):
+        pytest.skip("this host does not permit directory links")
+
+    with AnchoredDirectory(root) as anchor:
+        remove_link_entry(anchor, "redirect")
+        with pytest.raises(AnchoredDirectoryError):
+            remove_link_entry(anchor, "ordinary.bin")
+        with pytest.raises(AnchoredDirectoryError):
+            remove_link_entry(anchor, "plain")
+
+    assert not (root / "redirect").exists()
+    assert (outside / "victim.bin").read_bytes() == b"not ours"
+    assert (root / "ordinary.bin").read_bytes() == b"keep"
+    assert (root / "plain").is_dir()

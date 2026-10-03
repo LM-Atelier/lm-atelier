@@ -490,12 +490,13 @@ async def sweep_artifact_retention(
 
     def run_batch(*, deletions: int, seconds: float | None) -> RetentionCleanupSummary:
         deadline: float | None = None
+        deletion_phase = False
 
         def should_stop() -> bool:
             nonlocal deadline
             if stop.is_set():
                 return True
-            if seconds is None:
+            if not deletion_phase or seconds is None:
                 return False
             if deadline is None:
                 # The complete graph and validity scan are fixed work. Charge
@@ -504,6 +505,13 @@ async def sweep_artifact_retention(
             return time.monotonic() >= deadline
 
         with _retention_batch_progress() as progress, SessionLocal(bind=bind) as session:
+
+            def report_phase(name: str) -> None:
+                nonlocal deletion_phase
+                if name == "examine-artifacts":
+                    deletion_phase = True
+                progress.phase(name)
+
             try:
                 summary = artifacts.cleanup_retention(
                     session,
@@ -511,7 +519,7 @@ async def sweep_artifact_retention(
                     dry_run=False,
                     max_deletions=deletions,
                     should_stop=should_stop,
-                    report_phase=progress.phase,
+                    report_phase=report_phase,
                     # The walk of the store's files keeps a clock even when the
                     # rows' comes off, and goes on next batch from where it
                     # stopped: walking every shard of a large store at once
