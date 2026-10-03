@@ -315,9 +315,11 @@ from .visual_prompt_compiler import (
 from .web_access import may_fetch_urls, may_search
 from .web_lookup import choose_from_conversation, source_message
 from .web_retrieval import (
+    PAGE_DEADLINE_SECONDS,
     REQUEST_HEADERS,
     REQUEST_TIMEOUT_SECONDS,
     WebRetrievalError,
+    bounded_request,
     fetch_source,
 )
 from .web_search import SearchResults, WebSearchError, search_crw
@@ -5180,9 +5182,10 @@ class ConversationOrchestrator:
             ) as client:
                 # Each hop's host is asked of the lease before it is looked up,
                 # by the check below and again by the client that requests it.
-                source = await fetch_source(
-                    chosen.url, request=client.get, resolve=lease.resolver()
-                )
+                async with asyncio.timeout(PAGE_DEADLINE_SECONDS):
+                    source = await fetch_source(
+                        chosen.url, request=bounded_request(client), resolve=lease.resolver()
+                    )
         except OutboundRefused as refused:
             return {"url": chosen.url, "reason": chosen.reason, "refused": refused.code}
         except WebRetrievalError as refused:
