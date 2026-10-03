@@ -3890,7 +3890,7 @@ async def _create_prompt_batch_locked(
     session: Session,
 ) -> PromptExpansionBatchOut:
     chat = session.get(Chat, chat_id)
-    if chat is None or chat.scope != STANDARD_CHAT_SCOPE:
+    if chat is None or chat.scope != STANDARD_CHAT_SCOPE or chat_is_deleted(session, chat_id):
         raise api_error(404, "chat-not-found", "chat not found")
     revision = session.get(PromptTemplateRevision, payload.template_revision_id)
     if revision is None:
@@ -5113,6 +5113,7 @@ async def _regenerate_message_locked(
         not source_assistant
         or not source_assistant.transcript_visible
         or source_assistant.status != MessageStatus.COMPLETE.value
+        or chat_is_deleted(session, source_assistant.chat_id)
     ):
         raise api_error(
             409, "response-not-regenerable", "only a completed visible response can be regenerated"
@@ -5368,17 +5369,23 @@ async def select_response_revision(
     revision_id: str,
     request: Request,
     session: ConversationSessionDep,
-) -> Message:
-    try:
-        return _services(request).orchestrator.select_response_revision(
-            session,
-            message_id,
-            revision_id,
-        )
-    except LookupError as exc:
-        raise api_error(404, "response-revision-not-found", str(exc)) from exc
-    except ValueError as exc:
-        raise api_error(409, "response-revision-not-selectable", str(exc)) from exc
+) -> MessageOut:
+    message = session.get(Message, message_id)
+    if message is None:
+        raise api_error(404, "response-revision-not-found", "assistant message not found")
+    orchestrator = _services(request).orchestrator
+    async with orchestrator.chat_guard(message.chat_id):
+        session.expire_all()
+        message = session.get(Message, message_id)
+        if message is None or chat_is_deleted(session, message.chat_id):
+            raise api_error(404, "response-revision-not-found", "assistant message not found")
+        try:
+            selected = orchestrator.select_response_revision(session, message_id, revision_id)
+        except LookupError as exc:
+            raise api_error(404, "response-revision-not-found", str(exc)) from exc
+        except ValueError as exc:
+            raise api_error(409, "response-revision-not-selectable", str(exc)) from exc
+        return MessageOut.model_validate(selected)
 
 
 @router.get("/messages/{message_id}/edit-source", response_model=PriorTurnEditSource)
@@ -8272,7 +8279,7 @@ async def create_edit_template(payload: EditTemplateCreate, session: SessionDep)
     settings = payload.settings_json
     if payload.from_run_id:
         run = session.get(Run, payload.from_run_id)
-        if not run:
+        if not run or chat_is_deleted(session, run.chat_id):
             raise api_error(404, "run-not-found", "That run no longer exists.")
         capture = capture_recipe(run.provenance_json)
         settings = kept_edit_settings(
