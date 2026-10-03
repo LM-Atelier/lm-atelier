@@ -385,4 +385,6 @@ async def test_a_bundle_with_its_inputs_checks_as_its_record_does(
     record_report = as_record.json()
     assert bundle_report.pop("picture")["width"] == 8
     assert record_report.pop("picture") is None
+    assert bundle_report.pop("bundled_inputs") == [0, 1]
+    assert record_report.pop("bundled_inputs") == []
     assert bundle_report == record_report
