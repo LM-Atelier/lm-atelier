@@ -98,8 +98,10 @@ names is fetched, installed or run: models, LoRAs, other files and workflows it
 names are listed as left out. Other kinds of picture are not read.
 **Remix these settings** checks those settings against a workflow and a model
 you choose here, never by a name or file the text gives, and shows what a new
-picture would be made with before anything is made. Making it starts one picture
-in a new chat with the settings you chose to use; no saved preset or settings
+picture would be made with before anything is made. When the workflow cannot make
+the picture's own size, it can offer the same shape at a size it makes instead.
+Making it starts one picture in a new chat with the settings you chose to use; no
+saved preset or settings
 recipe enters it. The new picture keeps which picture, workflow and model it
 came from and which settings were used, but no prompt or value from the file
 beyond those its own generation records. The picture and its file are not

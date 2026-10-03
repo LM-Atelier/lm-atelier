@@ -26,6 +26,13 @@ const SHOWN_SETTINGS: [string, string][] = [
   ["height", "Height"],
 ];
 
+/** What one choice is called where it is offered. */
+function choiceLabel(choice: string, shape: RemixPreview["shape"]): string {
+  if (choice === "size") return "Size";
+  if (choice === "shape" && shape) return `This picture's shape, at ${shape.width} × ${shape.height}`;
+  return settingLabel(choice);
+}
+
 function shownValue(value: unknown): string {
   if (value === "") return "none";
   return typeof value === "string" || typeof value === "number" ? String(value) : "set";
@@ -124,7 +131,7 @@ export function PictureRemixDialog({
   };
   const data = preview.data;
   const checking = preview.isFetching;
-  const applicable = data ? applicableClaims(data.claims) : [];
+  const applicable = data ? applicableClaims(data.claims, data.shape) : [];
   // Only an answer just checked for exactly these choices can be made; a failed
   // check leaves the earlier answer on screen, which is no longer current.
   const digest = data?.ready && !preview.isPlaceholderData && !preview.isError
@@ -206,7 +213,7 @@ export function PictureRemixDialog({
                       : current.filter((key) => key !== choice));
                   }}
                 />
-                <span>{choice === "size" ? "Size" : settingLabel(choice)}</span>
+                <span>{choiceLabel(choice, data?.shape ?? null)}</span>
               </label>
             ))}
           </fieldset>

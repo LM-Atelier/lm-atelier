@@ -16,6 +16,8 @@ export interface RemixPreview {
   workflow_revision_id: string;
   profile_id: string;
   claims: RemixPreviewClaim[];
+  /** The picture's shape at a size this workflow makes, offered when its own size cannot be used. */
+  shape: { width: number; height: number } | null;
   ready: boolean;
   refusals: { code: string; message: string }[];
   resolved: {
@@ -89,6 +91,11 @@ function claim(value: unknown): RemixPreviewClaim {
   };
 }
 
+function size(value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) fail();
+  return value;
+}
+
 /** Read the server's answer, refusing one of another shape rather than showing part of it. */
 export function readRemixPreview(value: unknown): RemixPreview {
   const answer = record(value);
@@ -99,6 +106,10 @@ export function readRemixPreview(value: unknown): RemixPreview {
     workflow_revision_id: text(answer.workflow_revision_id),
     profile_id: text(answer.profile_id),
     claims: list(answer.claims).map(claim),
+    shape: answer.shape === null ? null : (() => {
+      const shape = record(answer.shape);
+      return { width: size(shape.width), height: size(shape.height) };
+    })(),
     ready: answer.ready,
     refusals: list(answer.refusals).map((item) => {
       const refusal = record(item);
@@ -123,14 +134,24 @@ export function remixClaimText(item: RemixPreviewClaim): string {
   return `is not used: ${reason}`;
 }
 
-/** The claims a person can choose to apply, with width and height as one size. */
-export function applicableClaims(claims: RemixPreviewClaim[]): string[] {
+/**
+ * The claims a person can choose to apply, with width and height as one size,
+ * and the picture's shape when a size this workflow makes is offered for it.
+ */
+export function applicableClaims(
+  claims: RemixPreviewClaim[],
+  shape: RemixPreview["shape"] = null,
+): string[] {
   const keys = claims
     .filter((item) => item.state === "supported" && item.key !== "prompt")
     .map((item) => item.key);
   // Half a size cannot be applied, so a lone width or height is not offered.
-  const size = keys.includes("width") && keys.includes("height");
-  return [...keys.filter((key) => key !== "width" && key !== "height"), ...(size ? ["size"] : [])];
+  const whole = keys.includes("width") && keys.includes("height");
+  return [
+    ...keys.filter((key) => key !== "width" && key !== "height"),
+    ...(whole ? ["size"] : []),
+    ...(shape ? ["shape"] : []),
+  ];
 }
 
 /** What the person is told when a remix could not be started. */
