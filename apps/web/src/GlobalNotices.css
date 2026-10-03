@@ -1,0 +1,47 @@
+.global-notices {
+  position: fixed;
+  bottom: 18px;
+  right: 18px;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: calc(8px * var(--spacing-scale, 1));
+  width: min(420px, calc(100vw - 36px));
+  max-height: 35dvh;
+  overflow-y: auto;
+  pointer-events: none;
+}
+
+.global-notices .toast {
+  position: static;
+  flex-shrink: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  pointer-events: auto;
+}
+
+.app-shell {
+  padding-bottom: var(--notice-space, 0px);
+}
+
+.modal-backdrop.dialog-viewport {
+  bottom: var(--notice-space, 0px);
+}
+
+.notification-stack > .global-notices {
+  position: static;
+  width: 100%;
+  max-height: none;
+  overflow: visible;
+}
+
+.app-shell > .notification-stack {
+  top: auto;
+  bottom: 18px;
+  max-height: 35dvh;
+  pointer-events: none;
+}
+
+.notification-stack > .toast {
+  pointer-events: auto;
+}
