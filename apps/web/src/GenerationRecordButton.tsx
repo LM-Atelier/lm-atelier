@@ -4,7 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { FileJson } from "lucide-react";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { api } from "./api";
-import { downloadBytes } from "./format";
+import { downloadBytes, formatBytes } from "./format";
 import {
   generationRecordBundleFileName,
   generationRecordFileName,
@@ -25,7 +25,19 @@ const PICTURE_PROBLEMS: Record<string, string> = {
   "output-recipe-changed": "The record changed since it was shown. Check it again, then save.",
   "output-recipe-bundle-too-large":
     "This picture is too large to save with its record. The record can still be saved on its own.",
+  "output-recipe-bundle-input-missing":
+    "One of its input pictures is no longer here, so they cannot be saved with it. Save it without them.",
+  "output-recipe-bundle-input-unreadable":
+    "One of its input pictures is missing or changed, so they cannot be saved with it. Save it without them.",
+  "output-recipe-bundle-input-uncopyable":
+    "One of its input pictures cannot be copied into the file. Save it without them.",
+  "output-recipe-bundle-too-many-inputs":
+    "It has more input pictures than can be saved with it. Save it without them.",
 };
+
+/** Said instead when inputs were asked for: the inputs, or the picture alone, may be what does not fit. */
+const TOO_LARGE_WITH_INPUTS =
+  "The pictures are too large to save together with the record. Try again without its inputs; if this picture alone is too large, save the record on its own.";
 
 /** Read one output's record as the server wrote it, and show what it holds. */
 function GenerationRecordBody({
@@ -41,6 +53,7 @@ function GenerationRecordBody({
   onKeepRecipe: (kind: "generation" | "edit") => void;
 }) {
   const [includePrompt, setIncludePrompt] = useState(false);
+  const [includeInputs, setIncludeInputs] = useState(false);
   const [savingPicture, setSavingPicture] = useState(false);
   const [pictureProblem, setPictureProblem] = useState<string | null>(null);
   // A copy still being made when the dialog closes is stopped, so nothing is
@@ -98,6 +111,8 @@ function GenerationRecordBody({
         artifactId,
         includePrompt,
         summary.digest,
+        // Only offered, and only sent, when the record names some.
+        includeInputs && summary.inputCount > 0,
         request.signal,
       );
       if (!request.signal.aborted) {
@@ -106,7 +121,9 @@ function GenerationRecordBody({
     } catch (error) {
       if (request.signal.aborted) return;
       const code = (error as { code?: unknown } | null)?.code;
-      const known = typeof code === "string" ? PICTURE_PROBLEMS[code] : undefined;
+      const known = code === "output-recipe-bundle-too-large" && includeInputs
+        ? TOO_LARGE_WITH_INPUTS
+        : typeof code === "string" ? PICTURE_PROBLEMS[code] : undefined;
       setPictureProblem(known ?? "The picture could not be saved with its record.");
       if (code === "output-recipe-changed") void record.refetch();
     } finally {
@@ -142,6 +159,21 @@ function GenerationRecordBody({
             else written inside the picture file, such as the workflow that made it, is copied, and
             a color profile is applied to the pixels rather than kept.
           </p>
+        )}
+        {/* Not offered when the record already says one of them is gone, since saving them would fail. */}
+        {kind === "image" && summary && summary.inputCount > 0 && !summary.missing.includes("input_unavailable") && (
+          <label className="generation-record-choice">
+            <input
+              type="checkbox"
+              checked={includeInputs}
+              disabled={savingPicture}
+              onChange={(event) => {
+                setIncludeInputs(event.target.checked);
+                setPictureProblem(null);
+              }}
+            />
+            <span>{inputChoiceText(summary.inputCount, summary.inputBytes)}</span>
+          </label>
         )}
         {outcome && <p>{replayOutcomeText(outcome)}</p>}
         {record.isPending && <p role="status">Reading the record…</p>}
@@ -222,6 +254,13 @@ function GenerationRecordBody({
       </footer>
     </>
   );
+}
+
+/** The inputs choice, saying how many pictures it adds and about how much they hold as stored. */
+function inputChoiceText(count: number, bytes: number | null): string {
+  const pictures = count === 1 ? "its input picture" : `its ${count} input pictures`;
+  const size = bytes === null ? "" : `, about ${formatBytes(bytes)} as stored`;
+  return `Also save ${pictures} with it, copied the same way${size}`;
 }
 
 /** Keep the settings one generation ran with as a recipe, reviewed before it is saved. */

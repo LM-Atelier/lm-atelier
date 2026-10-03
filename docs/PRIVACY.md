@@ -64,7 +64,10 @@ out. It does not contain the picture or video itself. For a picture, **Download
 with picture** saves a ZIP file holding that same record beside a PNG copy of
 the picture with only its pixels. Nothing else written inside the picture file,
 such as the workflow that made it, is copied; a picture with its own color
-profile is converted to sRGB first, so the profile stays behind too.
+profile is converted to sRGB first, so the profile stays behind too. The
+pictures it was made from, such as the picture an edit changed or its
+selection, go into that ZIP file only when you choose to save them with it, and
+then all of them are copied the same way.
 **Keep as a recipe**, offered in the record of a picture or video made from
 words or a video made from a picture, drafts a recipe from the settings it ran
 with for you to review before saving. The prompt, the seed, how many results to

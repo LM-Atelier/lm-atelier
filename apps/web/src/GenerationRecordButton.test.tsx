@@ -122,7 +122,7 @@ describe("the generation record dialog", () => {
 
     await waitFor(() => expect(saved).toHaveBeenCalledTimes(1));
     expect(generationRecordBundle).toHaveBeenCalledWith(
-      "run_1", `sha256:${SHA}`, false, `sha256:${"d".repeat(64)}`, expect.any(AbortSignal),
+      "run_1", `sha256:${SHA}`, false, `sha256:${"d".repeat(64)}`, false, expect.any(AbortSignal),
     );
     expect(saved.mock.calls[0][0]).toBe(zipped);
     expect(saved.mock.calls[0][1]).toBe(`generation-record-${SHA.slice(0, 12)}.zip`);
@@ -148,7 +148,7 @@ describe("the generation record dialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Download with picture" }));
 
     await waitFor(() => expect(saved).toHaveBeenCalledTimes(1));
-    expect(generationRecordBundle).toHaveBeenCalledWith("run_1", `sha256:${SHA}`, true, included, expect.any(AbortSignal));
+    expect(generationRecordBundle).toHaveBeenCalledWith("run_1", `sha256:${SHA}`, true, included, false, expect.any(AbortSignal));
   });
 
   it("holds the prompt choice still while the picture is copied", async () => {
@@ -179,7 +179,7 @@ describe("the generation record dialog", () => {
     await screen.findByText("Left out, as you chose.");
     fireEvent.click(screen.getByRole("button", { name: "Download with picture" }));
     await screen.findByText("Copying the picture…");
-    const signal = generationRecordBundle.mock.calls[0][4] as AbortSignal;
+    const signal = generationRecordBundle.mock.calls[0][5] as AbortSignal;
 
     fireEvent.click(screen.getByRole("button", { name: "Close generation record" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
@@ -387,5 +387,80 @@ describe("where the control appears", () => {
 
     rerender(withQueries(<ArtifactPart part={part("image")} origin="generated" />));
     expect(screen.queryByRole("button", { name: /Generation record/ })).toBeNull();
+  });
+});
+
+describe("saving a record's input pictures with it", () => {
+  async function opened(record = recordBytes()) {
+    generationRecord.mockResolvedValue(record);
+    render(withQueries(<GenerationRecordButton runId="run_1" artifactId={`sha256:${SHA}`} kind="image" />));
+    openRecord();
+    await screen.findByText("Left out, as you chose.");
+  }
+
+  it("offers them by count and stored size and sends them only when chosen", async () => {
+    generationRecordBundle.mockResolvedValue(new ArrayBuffer(4));
+    await opened();
+    const choice = screen.getByRole("checkbox", { name: /Also save its input picture with it/ });
+    expect(choice).not.toBeChecked();
+    expect(choice.closest("label")).toHaveTextContent(
+      "Also save its input picture with it, copied the same way, about 10 B as stored",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Download with picture" }));
+    await waitFor(() => expect(saved).toHaveBeenCalledTimes(1));
+    fireEvent.click(choice);
+    fireEvent.click(screen.getByRole("button", { name: "Download with picture" }));
+    await waitFor(() => expect(saved).toHaveBeenCalledTimes(2));
+
+    expect(generationRecordBundle.mock.calls.map((call) => call[4])).toEqual([false, true]);
+  });
+
+  it("counts several and leaves the size out when the record does not give every one", async () => {
+    await opened(recordBytes({
+      inputs: [
+        { media_type: "image/png", role: "source", sha256: "b".repeat(64), size_bytes: 10 },
+        { media_type: "image/png", role: "input", sha256: "c".repeat(64), size_bytes: null },
+      ],
+    }));
+
+    expect(screen.getByRole("checkbox", { name: /Also save its 2 input pictures with it/ }).closest("label"))
+      .toHaveTextContent(/copied the same way$/);
+  });
+
+  it("does not offer them when the record says one is no longer here", async () => {
+    await opened(recordBytes({
+      inputs: [{ media_type: null, role: "source", sha256: "b".repeat(64), size_bytes: null }],
+      reproducibility: { missing: ["input_unavailable"], status: "incomplete" },
+    }));
+
+    expect(screen.queryByRole("checkbox", { name: /input picture/ })).toBeNull();
+  });
+
+  it("offers nothing for a record that names no inputs", async () => {
+    generationRecordBundle.mockResolvedValue(new ArrayBuffer(4));
+    await opened(recordBytes({ inputs: [] }));
+
+    expect(screen.queryByRole("checkbox", { name: /input picture/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Download with picture" }));
+    await waitFor(() => expect(saved).toHaveBeenCalledTimes(1));
+    expect(generationRecordBundle.mock.calls[0][4]).toBe(false);
+  });
+
+  it("says which input stopped the save, and when the pictures together are too large", async () => {
+    await opened();
+    fireEvent.click(screen.getByRole("checkbox", { name: /Also save its input picture with it/ }));
+
+    generationRecordBundle.mockRejectedValueOnce(Object.assign(new Error("gone"), { code: "output-recipe-bundle-input-missing" }));
+    fireEvent.click(screen.getByRole("button", { name: "Download with picture" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("One of its input pictures is no longer here");
+
+    generationRecordBundle.mockRejectedValueOnce(Object.assign(new Error("large"), { code: "output-recipe-bundle-too-large" }));
+    fireEvent.click(screen.getByRole("button", { name: "Download with picture" }));
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(
+      "The pictures are too large to save together with the record. Try again without its inputs; "
+        + "if this picture alone is too large, save the record on its own.",
+    ));
+    expect(saved).not.toHaveBeenCalled();
   });
 });

@@ -19,6 +19,8 @@ export type GenerationRecordSummary = {
   seedBinding: string;
   settingCount: number;
   inputCount: number;
+  /** The inputs' stored sizes together, or null when the record does not give every one. */
+  inputBytes: number | null;
   workflowVerified: boolean | null;
   modelFileCount: number | null;
   loraCount: number;
@@ -108,6 +110,17 @@ function names(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
+function inputBytes(value: unknown): number | null {
+  if (!Array.isArray(value)) return 0;
+  let total = 0;
+  for (const item of value) {
+    const size = item && typeof item === "object" ? (item as { size_bytes?: unknown }).size_bytes : null;
+    if (typeof size !== "number" || !Number.isFinite(size) || size < 0) return null;
+    total += size;
+  }
+  return total;
+}
+
 /** What a downloaded record says, read without altering a byte of it. */
 export function readGenerationRecord(bytes: ArrayBuffer): GenerationRecordSummary {
   const record = object(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)));
@@ -135,6 +148,7 @@ export function readGenerationRecord(bytes: ArrayBuffer): GenerationRecordSummar
     seedBinding: typeof seed.binding === "string" ? seed.binding : "not_recorded",
     settingCount: Object.keys(object(settings.bound)).length + Object.keys(object(settings.unbound)).length,
     inputCount: Array.isArray(record.inputs) ? record.inputs.length : 0,
+    inputBytes: inputBytes(record.inputs),
     workflowVerified: workflow === null ? null : workflow.verified === true,
     modelFileCount: model === null ? null : Object.keys(object(model.files)).length,
     loraCount: Array.isArray(record.loras) ? record.loras.length : 0,

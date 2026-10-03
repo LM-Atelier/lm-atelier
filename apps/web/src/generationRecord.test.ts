@@ -30,6 +30,7 @@ describe("reading a record", () => {
       seedBinding: "bound",
       settingCount: 2,
       inputCount: 1,
+      inputBytes: 10,
       workflowVerified: true,
       modelFileCount: 1,
       loraCount: 0,
