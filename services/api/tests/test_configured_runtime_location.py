@@ -126,7 +126,10 @@ async def test_a_configured_runtime_is_judged_by_its_installer_not_its_folder(
         # which is how a pinned update reaches anyone at all.
         assert status.state == "missing"
         for role in ("image", "video"):
-            assert [check["code"] for check in by_role[role]["checks"]] == [expected]
+            assert [check["code"] for check in by_role[role]["checks"]] == [
+                "custom_node_containment_unavailable",
+                expected,
+            ]
             assert by_role[role]["next_action"] == "install_runtime"
     if expected == "runtime_other_version":
         # Still asked to install, but told the truth about what is running.
@@ -135,7 +138,12 @@ async def test_a_configured_runtime_is_judged_by_its_installer_not_its_folder(
             "ComfyUI v-earlier, installed by another version of LM Atelier, is still in use."
             " This version uses v-test. Install it to switch."
         )
-        assert "not installed" not in by_role["image"]["checks"][0]["message"]
+        runtime_message = next(
+            check["message"]
+            for check in by_role["image"]["checks"]
+            if check["code"] == "runtime_other_version"
+        )
+        assert "not installed" not in runtime_message
     else:
         assert status.installed_release is None
         if location == "damaged-pinned-release":

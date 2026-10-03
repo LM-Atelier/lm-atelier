@@ -3,6 +3,9 @@ export type * from "./workflowReadTypes";
 export type * from "./chatEditLineageTypes";
 import type { HardwareFitAdvice } from "./hardwareFitTypes";
 export type * from "./hardwareFitTypes";
+export type * from "./customNodeContainmentTypes";
+import type { WorkerStatus } from "./workerStatusTypes";
+export type * from "./workerStatusTypes";
 export type * from "./priorTurnEditTypes";
 export type * from "./studioLocalEditTypes";
 export type * from "./enlargementTypes";
@@ -713,38 +716,6 @@ export interface GenerationPresetBundle {
   settings: Record<string, unknown>;
 }
 
-export interface WorkerStatus {
-  name: "chat" | "media";
-  state: "stopped" | "starting" | "ready" | "exited";
-  managed: boolean;
-  running: boolean;
-  pid: number | null;
-  profile_id: string | null;
-  command: string[];
-  exit_code: number | null;
-  estimated_memory_bytes: number | null;
-  startup_duration_ms?: number | null;
-  current_memory_bytes: number | null;
-  peak_memory_bytes: number | null;
-  active_jobs: number;
-  queued_jobs: number;
-  progress_age_seconds?: number | null;
-  failure_detail?: string | null;
-  failure_code?:
-    | "oom_vram"
-    | "oom_host"
-    | "port_in_use"
-    | "model_incompatible"
-    | "executable_missing"
-    | "startup_timeout"
-    | "crashed"
-    | "unknown"
-    | null;
-  failure_remedy?: string | null;
-  stderr_tail?: string | null;
-  log_path?: string | null;
-}
-
 export interface WorkerSettings {
   worker_startup_seconds: number;
 }
@@ -787,6 +758,7 @@ export type SetupReadinessCode =
   | "activation_ready"
   | "activation_required"
   | "activation_stale"
+  | "custom_node_containment_unavailable"
   | "generation_verification_failed"
   | "generation_verification_required"
   | "generation_verification_paused"

@@ -3563,6 +3563,32 @@ class ThirdPartyNoticesOut(ApiModel):
     license_folder: str | None
 
 
+class CustomNodeContainmentStatus(ApiModel):
+    """Whether custom-node code on a media worker is confined.
+
+    This is separate from the worker being ready. `unavailable` means no
+    installed backend has proved confinement. The record does not authorize
+    a launch and does not grant an Offline badge.
+    """
+
+    level: Literal[
+        "unavailable",
+        "process_tree_only",
+        "filesystem_restricted",
+        "filesystem_no_egress",
+        "verified",
+    ]
+    platform: str
+    profile_version: int = Field(ge=1)
+    backend: str
+    backend_version: str
+    profile_sha256: str | None = None
+    file_denial_provable: bool
+    connect_denial_provable: bool
+    authorizes_execution: bool
+    offline_badge: bool
+
+
 class WorkerStatus(ApiModel):
     name: Literal["chat", "media"]
     state: Literal["stopped", "starting", "ready", "exited"] = "stopped"
@@ -3605,6 +3631,10 @@ class WorkerStatus(ApiModel):
     failure_remedy: str | None = None
     stderr_tail: str | None = None
     log_path: str | None = None
+    # Null on the chat worker, where custom-node confinement does not apply.
+    # On the media worker this is the host capability. It is not a canary run,
+    # and a ready worker does not make it stronger.
+    custom_node_containment: CustomNodeContainmentStatus | None = None
 
 
 class WorkerSettings(ApiModel):
@@ -3653,6 +3683,7 @@ SetupReadinessCode = Literal[
     "activation_ready",
     "activation_required",
     "activation_stale",
+    "custom_node_containment_unavailable",
     "generation_verification_failed",
     "generation_verification_paused",
     "generation_verification_pausing",

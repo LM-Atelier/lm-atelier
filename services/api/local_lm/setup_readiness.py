@@ -121,6 +121,8 @@ def _role_readiness(
         for install in installs
     }
     worker = worker_by_name.get("chat" if role == "chat" else "media")
+    if role != "chat":
+        checks.append(_custom_node_containment_check(worker))
     install = _select_install(installs, profiles, current_evidence, worker)
 
     if not install:
@@ -526,6 +528,20 @@ def _workflow_activation_is_ready(
         and activation.dependency_contract_sha256 == revision.dependency_contract_sha256
         and isinstance(launch_sha256, str)
         and _SHA256.fullmatch(launch_sha256) is not None
+    )
+
+
+def _custom_node_containment_check(_worker: WorkerStatus | None) -> SetupReadinessCheck:
+    """Report confinement without changing whether the role is ready.
+
+    A pass leaves setup state to the other checks. Ready, stopped, absent,
+    and a record that claims authorization all stay on the unavailable message.
+    """
+
+    return _check(
+        "custom_node_containment_unavailable",
+        "pass",
+        "Custom nodes are not confined. A ready media worker does not change that.",
     )
 
 
