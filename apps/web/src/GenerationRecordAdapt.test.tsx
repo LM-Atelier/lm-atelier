@@ -2,10 +2,12 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ApiError, api } from "./api";
+import { discardBlankChat } from "./discardBlankChat";
 import { GenerationRecordAdapt } from "./GenerationRecordAdapt";
 import type { GenerationRecordRequirement, ReplayPlan } from "./generationRecord";
 import type { ArtifactLibraryItem, Chat, ModelProfile, WorkflowSummary } from "./types";
 
+vi.mock("./discardBlankChat", () => ({ discardBlankChat: vi.fn() }));
 vi.mock("./api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./api")>();
   return {
@@ -15,7 +17,6 @@ vi.mock("./api", async (importOriginal) => {
       workflowSummaries: vi.fn(),
       profiles: vi.fn(),
       createChat: vi.fn(),
-      deleteChat: vi.fn(),
       adaptGenerationRecord: vi.fn(),
       artifacts: vi.fn(),
     },
@@ -55,7 +56,7 @@ beforeEach(() => {
     { id: "profile_video", name: "Motion model", role: "video" },
   ] as ModelProfile[]);
   vi.mocked(api.createChat).mockResolvedValue({ id: "chat_new" } as Chat);
-  vi.mocked(api.deleteChat).mockResolvedValue(undefined as never);
+  vi.mocked(discardBlankChat).mockResolvedValue(undefined);
   vi.mocked(api.adaptGenerationRecord).mockResolvedValue({});
 });
 
@@ -121,7 +122,7 @@ it("says why the choices were refused, and removes the empty chat it made", asyn
 
   expect(await screen.findByRole("alert")).toHaveTextContent(
     "It cannot be made with these choices: The chosen model cannot be used for this here. Nothing was started.");
-  expect(api.deleteChat).toHaveBeenCalledExactlyOnceWith("chat_new");
+  expect(discardBlankChat).toHaveBeenCalledExactlyOnceWith("chat_new");
   expect(onStarted).not.toHaveBeenCalled();
 });
 

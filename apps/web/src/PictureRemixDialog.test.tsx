@@ -4,8 +4,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { PictureRemixDialog } from "./PictureRemixDialog";
 import { PictureFileSettings } from "./PictureFileSettings";
 import { api } from "./api";
+import { discardBlankChat } from "./discardBlankChat";
 import { applicableClaims, readRemixPreview } from "./pictureRemix";
 
+vi.mock("./discardBlankChat", () => ({ discardBlankChat: vi.fn() }));
 vi.mock("./api", () => ({
   api: {
     workflowReadyRevisions: vi.fn(),
@@ -13,7 +15,6 @@ vi.mock("./api", () => ({
     remixPreview: vi.fn(),
     pictureSettings: vi.fn(),
     createChat: vi.fn(),
-    deleteChat: vi.fn(),
     remixPicture: vi.fn(),
   },
 }));
@@ -215,13 +216,13 @@ describe("making a remix", () => {
       review_digest: "sha256:2",
     });
     expect(closed).toHaveBeenCalled();
-    expect(api.deleteChat).not.toHaveBeenCalled();
+    expect(discardBlankChat).not.toHaveBeenCalled();
   });
 
   it("removes the new chat and says why when the remix is refused", async () => {
     vi.mocked(api.remixPreview).mockResolvedValue(preview);
     vi.mocked(api.createChat).mockResolvedValue({ id: "chat_new" } as never);
-    vi.mocked(api.deleteChat).mockResolvedValue(undefined as never);
+    vi.mocked(discardBlankChat).mockResolvedValue(undefined);
     vi.mocked(api.remixPicture).mockRejectedValue(
       Object.assign(new Error("changed"), { code: "remix-review-changed" }),
     );
@@ -236,7 +237,7 @@ describe("making a remix", () => {
     expect(await screen.findByText(
       "What this remix would run changed since it was shown. It has been checked again.",
     )).toBeTruthy();
-    expect(api.deleteChat).toHaveBeenCalledWith("chat_new");
+    expect(discardBlankChat).toHaveBeenCalledWith("chat_new");
     expect(opened).not.toHaveBeenCalled();
   });
 
@@ -312,7 +313,7 @@ describe("what a remix shows and keeps current", () => {
       .mockResolvedValueOnce(preview)
       .mockRejectedValue(Object.assign(new Error("gone"), { code: "artifact-not-found" }));
     vi.mocked(api.createChat).mockResolvedValue({ id: "chat_new" } as never);
-    vi.mocked(api.deleteChat).mockResolvedValue(undefined as never);
+    vi.mocked(discardBlankChat).mockResolvedValue(undefined);
     vi.mocked(api.remixPicture).mockRejectedValue(
       Object.assign(new Error("gone"), { code: "artifact-not-found" }),
     );

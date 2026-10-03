@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
+import { discardBlankChat } from "./discardBlankChat";
 import {
   adaptationFailureText,
   adaptationNeeds,
@@ -93,7 +94,7 @@ function AdaptChooser({
         });
       } catch (error) {
         // The new chat holds nothing yet, so it goes rather than stays behind empty.
-        await api.deleteChat(chat.id).catch(() => undefined);
+        await discardBlankChat(chat.id);
         throw error;
       }
       return chat.id;
