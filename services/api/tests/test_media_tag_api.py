@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 from httpx import AsyncClient
 
 
@@ -48,6 +50,17 @@ async def test_an_unreadable_tag_body_is_refused(client: AsyncClient) -> None:
     response = await client.post(
         "/api/media-tags",
         content=b"\xff",
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 422
+    assert response.json()["code"] == "media-tag-invalid"
+
+
+async def test_a_tag_body_nested_too_deeply_is_refused(client: AsyncClient) -> None:
+    depth = max(sys.getrecursionlimit() + 100, 10_000)
+    response = await client.post(
+        "/api/media-tags",
+        content=b"[" * depth + b"]" * depth,
         headers={"content-type": "application/json"},
     )
     assert response.status_code == 422

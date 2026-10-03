@@ -24,6 +24,8 @@ from .models import MediaCollection, MediaTag
 
 router = APIRouter()
 
+_UNREADABLE_JSON = (UnicodeDecodeError, json.JSONDecodeError, RecursionError)
+
 
 def _collection_body(collection: MediaCollection) -> dict[str, object]:
     return {
@@ -62,7 +64,7 @@ def _list_collections() -> dict[str, Any]:
 async def create_media_collection(request: Request) -> JSONResponse:
     try:
         payload = await request.json()
-    except json.JSONDecodeError as exc:
+    except _UNREADABLE_JSON as exc:
         raise api_error(422, "media-collection-invalid", MEDIA_ORGANIZATION_INVALID) from exc
     try:
         body = await run_in_threadpool(_create_collection, payload)
@@ -105,7 +107,7 @@ def _list_tags() -> dict[str, Any]:
 async def create_media_tag(request: Request) -> JSONResponse:
     try:
         payload = await request.json()
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+    except _UNREADABLE_JSON as exc:
         raise api_error(422, "media-tag-invalid", MEDIA_ORGANIZATION_INVALID) from exc
     try:
         body = await run_in_threadpool(_create_tag, payload)
