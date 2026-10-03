@@ -30,6 +30,7 @@ from .comfy_editor_bridge import (
 )
 from .comfy_registry_paths import registry_wheel_environment_root
 from .config import Settings
+from .custom_node_containment import host_containment_capability
 from .events import EventBroker
 from .filesystem_links import (
     AnchoredDirectory,
@@ -46,7 +47,7 @@ from .gguf import GGUFSelectionError, automatic_mmproj_selection, validate_gguf_
 from .model_manifests import COMFY_MODEL_FOLDERS, comfy_folder_for_kind
 from .models import ModelAssetInstall, ModelInstall, ModelProfile
 from .network import shared_tls_context
-from .schemas import WorkerStatus
+from .schemas import CustomNodeContainmentStatus, WorkerStatus
 from .security import trusted_browser_origins
 from .subprocess_env import python_subprocess_environment
 from .worker_failures import (
@@ -387,6 +388,31 @@ class WorkerRecord:
     editor_bridge_support: ComfyEditorBridgeSupport | None = None
 
 
+def _media_containment_status(name: str) -> CustomNodeContainmentStatus | None:
+    """Report the installed capability for the media worker, and nothing for chat.
+
+    This is not a canary. The level stays unavailable and neither grant is
+    set, including when a later capability claims its denials are provable:
+    a status read has no witness for those denials.
+    """
+
+    if name != "media":
+        return None
+    capability = host_containment_capability()
+    return CustomNodeContainmentStatus(
+        level="unavailable",
+        platform=capability.platform,
+        profile_version=capability.version,
+        backend=capability.backend,
+        backend_version=capability.backend_version,
+        profile_sha256=None,
+        file_denial_provable=capability.file_denial_provable,
+        connect_denial_provable=capability.connect_denial_provable,
+        authorizes_execution=False,
+        offline_badge=False,
+    )
+
+
 class ProcessSupervisor:
     """Owns engine subprocesses without ever invoking a shell."""
 
@@ -477,6 +503,7 @@ class ProcessSupervisor:
                     failure_remedy=failure.remedy,
                     stderr_tail=stderr_tail,
                     log_path=self._public_log_path(name),
+                    custom_node_containment=_media_containment_status(name),
                 )
             )
         return result

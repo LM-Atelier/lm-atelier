@@ -54,6 +54,7 @@ from local_lm.processes import (
     _with_comfy_registry_overlays,
 )
 from local_lm.runtime_provisioning import RuntimeProvisioner
+from local_lm.schemas import CustomNodeContainmentStatus
 from local_lm.security import trusted_browser_origins
 from local_lm.worker_failures import WorkerFailureCode
 from local_lm.workflow_activations import (
@@ -1529,6 +1530,117 @@ def test_an_ordinary_stopped_worker_reports_no_fault(settings: Settings) -> None
         assert worker.failure_code is None
         assert worker.failure_detail is None
         assert worker.failure_remedy is None
+
+
+def test_stopped_status_reports_media_containment_without_running_a_canary(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stopped media worker reports the host capability and does not launch the canary.
+
+    Chat has no custom-node host. The stopped media record stays unavailable,
+    with neither grant.
+    """
+
+    def refuse_canary(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a status read must not run the containment canary")
+
+    monkeypatch.setattr("local_lm.custom_node_containment.subprocess.run", refuse_canary)
+    by_name = {item.name: item for item in ProcessSupervisor(settings).statuses()}
+
+    chat = by_name["chat"]
+    assert chat.custom_node_containment is None
+    assert chat.state == "stopped"
+    assert chat.active_jobs == 0
+    assert chat.queued_jobs == 0
+    media = by_name["media"]
+    assert media.state == "stopped"
+    assert media.managed is False
+    assert media.running is False
+    assert media.active_jobs == 0
+    assert media.queued_jobs == 0
+    report = media.custom_node_containment
+    assert report is not None
+    assert report.level == "unavailable"
+    assert report.platform == sys.platform
+    assert report.profile_version == 1
+    assert report.backend == "none"
+    assert report.backend_version == "0"
+    assert report.profile_sha256 is None
+    assert report.file_denial_provable is False
+    assert report.connect_denial_provable is False
+    assert report.authorizes_execution is False
+    assert report.offline_badge is False
+
+
+def _unavailable_containment(report: CustomNodeContainmentStatus | None) -> None:
+    assert report is not None
+    assert report.level == "unavailable"
+    assert report.platform == sys.platform
+    assert report.profile_version == 1
+    assert report.backend == "none"
+    assert report.backend_version == "0"
+    assert report.profile_sha256 is None
+    assert report.file_denial_provable is False
+    assert report.connect_denial_provable is False
+    assert report.authorizes_execution is False
+    assert report.offline_badge is False
+
+
+def test_ready_and_external_media_workers_stay_unavailable(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ready worker and an external one report the same unavailable record.
+
+    Ready means the worker can take work. It does not confine custom-node
+    code. An external process left from an earlier session is not confined
+    either. Neither read runs the canary, and chat stays unset.
+    """
+
+    def refuse_canary(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a status read must not run the containment canary")
+
+    monkeypatch.setattr("local_lm.custom_node_containment.subprocess.run", refuse_canary)
+    settings.prepare()
+    ready_supervisor = ProcessSupervisor(settings)
+    ready_supervisor._workers["media"] = WorkerRecord(
+        name="media",
+        process=FakeRunningProcess(987_654_320, terminate_code=-15),
+        command=["worker"],
+        log=_RotatingWorkerLog(settings.log_dir / "ready-media.log"),
+        state="ready",
+        profile_id="profile_media",
+    )
+    ready = {item.name: item for item in ready_supervisor.statuses()}
+    assert ready["chat"].custom_node_containment is None
+    assert ready["media"].state == "ready"
+    assert ready["media"].managed is True
+    assert ready["media"].running is True
+    assert ready["media"].profile_id == "profile_media"
+    assert ready["media"].active_jobs == 0
+    assert ready["media"].queued_jobs == 0
+    _unavailable_containment(ready["media"].custom_node_containment)
+
+    external_supervisor = ProcessSupervisor(settings)
+    _pretend_orphan(
+        external_supervisor,
+        monkeypatch,
+        name="media",
+        listening=True,
+        process_name="python.exe",
+        pid=4243,
+    )
+    external = {item.name: item for item in external_supervisor.statuses()}
+    assert external["chat"].custom_node_containment is None
+    assert external["chat"].failure_code is None
+    assert external["media"].state == "stopped"
+    assert external["media"].managed is False
+    assert external["media"].running is False
+    assert external["media"].failure_code == "port_in_use"
+    assert external["media"].active_jobs == 0
+    assert external["media"].queued_jobs == 0
+    _unavailable_containment(external["media"].custom_node_containment)
 
 
 def test_the_report_and_the_start_read_one_endpoint(settings: Settings) -> None:

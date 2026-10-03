@@ -5,6 +5,7 @@ import base64
 import io
 import json
 import shutil
+import sys
 import threading
 import zipfile
 from collections.abc import AsyncGenerator, AsyncIterator
@@ -1555,6 +1556,20 @@ async def test_worker_management_reports_missing_local_binaries(client: AsyncCli
     assert {item["log_path"] for item in workers.json()} == {
         "logs/chat-worker.log",
         "logs/media-worker.log",
+    }
+    by_name = {item["name"]: item for item in workers.json()}
+    assert by_name["chat"]["custom_node_containment"] is None
+    assert by_name["media"]["custom_node_containment"] == {
+        "level": "unavailable",
+        "platform": sys.platform,
+        "profile_version": 1,
+        "backend": "none",
+        "backend_version": "0",
+        "profile_sha256": None,
+        "file_denial_provable": False,
+        "connect_denial_provable": False,
+        "authorizes_execution": False,
+        "offline_badge": False,
     }
     media = await client.post("/api/workers/media/start")
     assert media.status_code == 422

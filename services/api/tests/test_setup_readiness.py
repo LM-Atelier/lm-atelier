@@ -27,8 +27,8 @@ from local_lm.models import (
     WorkflowDefinition,
     WorkflowRevision,
 )
-from local_lm.schemas import RuntimeStatus, WorkerStatus
-from local_lm.setup_readiness import _workflow_check
+from local_lm.schemas import CustomNodeContainmentStatus, RuntimeStatus, WorkerStatus
+from local_lm.setup_readiness import _custom_node_containment_check, _workflow_check
 from local_lm.setup_verification import verification_evidence_key
 from local_lm.workflow_package_drafts import workflow_package_draft_dependencies
 
@@ -43,6 +43,21 @@ def _runtime(engine: str, state: str = "ready") -> RuntimeStatus:
         supported=state != "unsupported",
         distribution="test",
         license="test",
+    )
+
+
+def _authorizing_containment() -> CustomNodeContainmentStatus:
+    return CustomNodeContainmentStatus(
+        level="verified",
+        platform="test",
+        profile_version=1,
+        backend="constructed",
+        backend_version="0",
+        profile_sha256=None,
+        file_denial_provable=True,
+        connect_denial_provable=True,
+        authorizes_execution=True,
+        offline_badge=True,
     )
 
 
@@ -62,6 +77,42 @@ def _workers(*, chat_state: str = "ready") -> list[WorkerStatus]:
             running=True,
         ),
     ]
+
+
+async def test_a_constructed_containment_grant_stays_unavailable() -> None:
+    """A record that claims a grant is still the unavailable check.
+
+    Setup reads the worker it was given. Neither grant, alone or together,
+    selects a stronger code, a failing status, or an action.
+    """
+
+    granted = _authorizing_containment()
+    reports = (
+        granted,
+        granted.model_copy(update={"offline_badge": False}),
+        granted.model_copy(update={"authorizes_execution": False}),
+    )
+    for report in reports:
+        check = _custom_node_containment_check(
+            WorkerStatus(
+                name="media",
+                state="ready",
+                managed=True,
+                running=True,
+                custom_node_containment=report,
+            )
+        )
+        assert check.code == "custom_node_containment_unavailable"
+        assert check.status == "pass"
+        assert check.action is None
+        assert check.message == (
+            "Custom nodes are not confined. A ready media worker does not change that."
+        )
+
+    absent = _custom_node_containment_check(None)
+    assert absent.code == "custom_node_containment_unavailable"
+    assert absent.status == "pass"
+    assert absent.action is None
 
 
 def _set_runtime_and_worker_state(
@@ -335,7 +386,17 @@ async def test_fresh_setup_reports_one_stable_model_action_per_role(
     for role in payload["roles"]:
         assert role["state"] == "action_required"
         assert role["next_action"] == "select_model"
-        assert [check["code"] for check in role["checks"]] == ["model_missing"]
+        codes = [check["code"] for check in role["checks"]]
+        if role["role"] == "chat":
+            assert codes == ["model_missing"]
+            assert "custom_node_containment_unavailable" not in codes
+        else:
+            assert codes == ["custom_node_containment_unavailable", "model_missing"]
+            assert role["checks"][0]["status"] == "pass"
+            assert role["checks"][0]["action"] is None
+            assert role["checks"][0]["message"] == (
+                "Custom nodes are not confined. A ready media worker does not change that."
+            )
         assert role["verification_level"] == "generation_probe"
 
 
@@ -360,8 +421,11 @@ async def test_unsupported_runtime_is_reported_before_any_model_download(
     by_role = {role["role"]: role for role in payload["roles"]}
 
     for role in ("image", "video"):
-        assert [check["code"] for check in by_role[role]["checks"]] == ["runtime_unsupported"]
-        assert "no supported accelerator" in by_role[role]["checks"][0]["message"]
+        assert [check["code"] for check in by_role[role]["checks"]] == [
+            "custom_node_containment_unavailable",
+            "runtime_unsupported",
+        ]
+        assert "no supported accelerator" in by_role[role]["checks"][1]["message"]
         # Terminal: offering an action here is what produced the endless
         # "choose a model" loop on machines that can never run the engine.
         assert by_role[role]["next_action"] is None
@@ -385,7 +449,10 @@ async def test_missing_runtime_is_reported_before_any_model_download(
     payload = (await client.get("/api/setup/readiness")).json()
     by_role = {role["role"]: role for role in payload["roles"]}
 
-    assert [check["code"] for check in by_role["image"]["checks"]] == ["runtime_missing"]
+    assert [check["code"] for check in by_role["image"]["checks"]] == [
+        "custom_node_containment_unavailable",
+        "runtime_missing",
+    ]
     assert by_role["image"]["next_action"] == "install_runtime"
     assert by_role["image"]["engine"] == "comfyui"
 
@@ -402,7 +469,10 @@ async def test_ready_runtime_without_a_model_still_asks_for_a_model(
     payload = (await client.get("/api/setup/readiness")).json()
     by_role = {role["role"]: role for role in payload["roles"]}
 
-    assert [check["code"] for check in by_role["image"]["checks"]] == ["model_missing"]
+    assert [check["code"] for check in by_role["image"]["checks"]] == [
+        "custom_node_containment_unavailable",
+        "model_missing",
+    ]
     assert by_role["image"]["next_action"] == "select_model"
 
 
@@ -425,9 +495,11 @@ async def test_partial_setup_reports_role_specific_install_progress(
 
     assert by_role["image"]["state"] == "in_progress"
     assert by_role["image"]["next_action"] == "wait_for_install"
-    assert by_role["image"]["checks"][0]["code"] == "install_in_progress"
+    assert by_role["image"]["checks"][0]["code"] == "custom_node_containment_unavailable"
+    assert by_role["image"]["checks"][1]["code"] == "install_in_progress"
     assert by_role["chat"]["checks"][0]["code"] == "model_missing"
-    assert by_role["video"]["checks"][0]["code"] == "model_missing"
+    assert by_role["video"]["checks"][0]["code"] == "custom_node_containment_unavailable"
+    assert by_role["video"]["checks"][1]["code"] == "model_missing"
 
 
 async def test_never_probed_and_stale_activation_are_distinct_and_bounded(
