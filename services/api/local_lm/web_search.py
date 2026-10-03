@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from .network import shared_tls_context
+from .network import OutboundLease, outbound_client
 
 MAX_QUERY_CHARACTERS = 2_000
 MAX_RESPONSE_BYTES = 256 * 1024
@@ -223,9 +223,14 @@ async def search_crw(
     provider: CrwSearchProvider,
     query: str,
     *,
+    lease: OutboundLease,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> SearchResults:
-    """Discover results after the caller has authorized this exact operation."""
+    """Discover results after the caller has authorized this exact operation.
+
+    The request is asked of ``lease`` before the provider's host is looked up;
+    a refusal there raises ``OutboundRefused`` rather than a search error.
+    """
     validate_search_query(query)
     headers = {"accept": "application/json", "accept-encoding": "identity"}
     if provider.token is not None:
@@ -233,10 +238,8 @@ async def search_crw(
     try:
         async with (
             asyncio.timeout(REQUEST_TIMEOUT_SECONDS),
-            httpx.AsyncClient(
-                follow_redirects=False,
-                trust_env=False,
-                verify=shared_tls_context(trust_environment=False),
+            outbound_client(
+                lease,
                 timeout=httpx.Timeout(REQUEST_TIMEOUT_SECONDS),
                 transport=transport,
             ) as client,

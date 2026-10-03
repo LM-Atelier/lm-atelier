@@ -19,6 +19,7 @@ from local_lm import orchestrator as orchestrator_module
 from local_lm.adapters.base import ChatEvent, ChatRequest
 from local_lm.db import SessionLocal
 from local_lm.models import Job, Run, WebSearchProposal
+from local_lm.network import OutboundLease
 from local_lm.web_search import CrwSearchProvider, SearchResults, search_crw
 
 QUERY = "Compare copper and steel"
@@ -101,8 +102,11 @@ async def execution(
             },
         )
 
-    async def search(provider: CrwSearchProvider, query: str) -> SearchResults:
-        return await search_crw(provider, query, transport=httpx.MockTransport(send))
+    async def search(
+        provider: CrwSearchProvider, query: str, *, lease: OutboundLease
+    ) -> SearchResults:
+        # The lease the orchestrator takes for the provider, used as it is.
+        return await search_crw(provider, query, lease=lease, transport=httpx.MockTransport(send))
 
     monkeypatch.setattr(type(orch.engines.chat), "stream", stream)
     monkeypatch.setattr(type(orch), "start", lambda self, *args: None)
