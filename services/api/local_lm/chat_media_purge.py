@@ -21,6 +21,7 @@ from .models import (
     RecoveryItem,
     RecoveryPreviewRecord,
 )
+from .recovery_operations import forget_recovery_labels
 from .recovery_previews import RecoveryPreviewConflict
 
 
@@ -129,6 +130,7 @@ def release_generated_membership(
         session.delete(entry)
         session.flush()
         item.state = "purged"
+        forget_recovery_labels(session, item)
         item.revision += 1
         session.execute(
             delete(RecoveryPreviewRecord).where(
