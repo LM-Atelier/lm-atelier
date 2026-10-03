@@ -12,6 +12,7 @@ from sqlalchemy import delete, exists, or_, select, text, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
+from .chat_recovery_visibility import visible_chat
 from .models import (
     Chat,
     ChatWorkflowUseCaseSelection,
@@ -19,6 +20,7 @@ from .models import (
     ProjectWorkflowUseCaseSelection,
     WorkflowUseCasePreset,
 )
+from .project_recovery_visibility import visible_project
 from .workflow_use_case_presets_v1 import WorkflowUseCaseChoice, WorkflowUseCasePresetCreate
 from .workflow_use_cases_v1 import WorkflowUseCase
 
@@ -264,7 +266,8 @@ def delete_preset(session: Session, preset_id: str) -> None:
 
 def _scope(session: Session, scope: SelectionScope, scope_id: str) -> None:
     model = Chat if scope == "chat" else Project
-    if session.scalar(select(model.id).where(model.id == scope_id)) is None:
+    visibility = visible_chat(Chat.id) if scope == "chat" else visible_project(Project.id)
+    if session.scalar(select(model.id).where(model.id == scope_id, visibility)) is None:
         raise WorkflowUseCasePresetServiceError("workflow-use-case-scope-not-found")
 
 

@@ -1,4 +1,6 @@
 import { expect, test } from "@playwright/test";
+import type { RecoveryItem } from "../apps/web/src/recoveryTypes";
+import { permanentlyDeleteFixture } from "./recovery-fixtures";
 
 for (const width of [1280, 375]) {
   test(`page projects and refile a chat outside the first page at ${width}px`, async ({ page, request }) => {
@@ -8,7 +10,7 @@ for (const width of [1280, 375]) {
     const headers = { "x-local-lm-csrf": csrf_token };
     const projects: Array<{ id: string; name: string }> = [];
     let chatId: string | null = null;
-    const deletedProjects = new Set<string>();
+    const deletedProjects = new Map<string, string>();
     const prefix = `Paged ${width} notebook`;
     try {
       for (let number = 0; number < 56; number++) {
@@ -61,12 +63,13 @@ for (const width of [1280, 375]) {
         new URL(result.url()).pathname === `/api/chats/${chatId}/metadata` && result.ok()
           && (await result.json() as { project_id: string | null }).project_id === null);
       const deleted = page.waitForResponse((result) =>
-        new URL(result.url()).pathname === `/api/projects/${projects[7].id}`
-          && result.request().method() === "DELETE" && result.ok());
-      await page.getByRole("dialog", { name: `Delete ${projects[7].name}?`, exact: true })
-        .getByRole("button", { name: "Delete project", exact: true }).click();
-      await deleted;
-      deletedProjects.add(projects[7].id);
+        new URL(result.url()).pathname === `/api/projects/${projects[7].id}/trash`
+          && result.request().method() === "POST" && result.ok());
+      const move = page.getByRole("dialog", { name: "Move this project to Recently Deleted?", exact: true })
+        .getByRole("button", { name: "Move to Recently Deleted", exact: true });
+      await expect(move).toBeEnabled();
+      await move.click();
+      deletedProjects.set(projects[7].id, (await (await deleted).json() as RecoveryItem).deletion_id);
       expect((await (await unfiledMetadata).json() as { project_id: string | null }).project_id).toBeNull();
       if (width === 375) await page.getByRole("button", { name: "Toggle navigation" }).click();
       await expect(page.getByRole("region", { name: `Distant study ${width}`, exact: true })).toBeVisible();
@@ -77,9 +80,9 @@ for (const width of [1280, 375]) {
       expect(reads.some((url) => url.searchParams.getAll("project_id").includes(projects[0].id))).toBe(true);
     } finally {
       await page.goto("about:blank");
-      if (chatId) expect.soft((await request.delete(`/api/chats/${chatId}`, { headers })).ok()).toBe(true);
-      for (const project of projects.filter((item) => !deletedProjects.has(item.id))) {
-        expect.soft((await request.delete(`/api/projects/${project.id}`, { headers })).ok()).toBe(true);
+      if (chatId) await permanentlyDeleteFixture(request, headers, "chat", chatId);
+      for (const project of projects) {
+        await permanentlyDeleteFixture(request, headers, "project", project.id, deletedProjects.get(project.id));
       }
     }
   });

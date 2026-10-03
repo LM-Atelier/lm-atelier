@@ -30,6 +30,7 @@ from .settings_registry import (
 )
 from .workflow_edit_calibration import validate_workflow_edit_calibration
 from .workflow_ownership import ensure_workflow_family_ownership
+from .workflow_recovery_visibility import visible_workflow_family
 
 ModelRoleName = Literal["chat", "image", "video"]
 OperationName = Literal[
@@ -573,6 +574,7 @@ def _matching_workflow(
             WorkflowDefinition.name == source.name,
             WorkflowDefinition.operation == source.operation,
             WorkflowDefinition.description == source.description,
+            visible_workflow_family(WorkflowDefinition.family_id),
         )
     ).all()
     source_by_version = {revision.source_version: revision for revision in source.revisions}

@@ -21,8 +21,11 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from .chat_recovery_visibility import visible_chat
 from .message_references import carry_message_references_if_absent
 from .models import Chat, Message, MessagePart
+from .project_recovery_visibility import live_project
+from .recovery_previews import reserve_recovery_write
 from .workflow_compatibility import copy_chat_workflow_selections
 
 MAX_FORK_TITLE = 240
@@ -48,16 +51,18 @@ class ChatFork:
 def fork_chat_from_message(session: Session, message_id: str) -> ChatFork:
     """Create a new chat carrying the history up to `message_id`."""
 
+    reserve_recovery_write(session)
     source = session.get(Message, message_id)
     if not source:
         raise ForkSourceNotFound
-    origin = session.get(Chat, source.chat_id)
+    origin = session.scalar(select(Chat).where(Chat.id == source.chat_id, visible_chat(Chat.id)))
     if not origin:
         raise ForkSourceNotFound
 
     lineage = _lineage_to(session, source)
+    project = live_project(session, origin.project_id)
     fork = Chat(
-        project_id=origin.project_id,
+        project_id=project.id if project is not None else None,
         title=_fork_title(origin.title),
         routing_mode=origin.routing_mode,
         confirm_uncertain_media=origin.confirm_uncertain_media,

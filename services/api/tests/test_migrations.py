@@ -399,16 +399,30 @@ def test_artifact_library_entry_migration_backfills_once_and_seals_membership(
             "recovery_id = 'recover-image', version = 2 WHERE artifact_id = 'legacy-image'",
             (stamp,),
         )
+        with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
+            connection.execute(
+                "UPDATE artifact_library_entries SET state = 'trashed', deleted_at = ?, "
+                "recovery_id = 'recover-image', version = 2 WHERE artifact_id = 'legacy-video'",
+                (stamp,),
+            )
+        assert connection.execute(
+            "SELECT state, recovery_id, version FROM artifact_library_entries "
+            "WHERE artifact_id = 'legacy-video'"
+        ).fetchone() == ("visible", None, 1)
         connection.execute(
             "UPDATE artifact_library_entries SET state = 'trashed', deleted_at = ?, "
             "recovery_id = 'recover-video', version = 2 WHERE artifact_id = 'legacy-video'",
             (stamp,),
         )
-        with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
+        with pytest.raises(sqlite3.IntegrityError, match="media-recovery-write-refused"):
             connection.execute(
                 "UPDATE artifact_library_entries SET recovery_id = 'recover-image', version = 3 "
                 "WHERE artifact_id = 'legacy-video'"
             )
+        assert connection.execute(
+            "SELECT state, recovery_id, version FROM artifact_library_entries "
+            "WHERE artifact_id = 'legacy-video'"
+        ).fetchone() == ("trashed", "recover-video", 2)
         assert connection.execute(
             "SELECT kind, original_name, favorite FROM artifacts ORDER BY id"
         ).fetchall() == [

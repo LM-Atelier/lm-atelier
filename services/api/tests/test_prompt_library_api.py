@@ -9,6 +9,7 @@ from typing import Any, cast
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
+from recovery_requests import permanently_delete_chat
 from run_waits import wait_for_terminal_status
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
@@ -305,8 +306,18 @@ async def test_selected_prompt_batch_queues_one_atomic_exact_media_plan(
                 session.execute(statement)
                 session.commit()
 
-        deleted = await client.delete(f"/api/chats/{chat['id']}")
-        assert deleted.status_code == 204, deleted.text
+        stopped = await client.post(f"/api/work-plans/{plan_id}/cancel")
+        assert stopped.status_code == 200, stopped.text
+
+        async def read_stopped_plan() -> dict[str, Any]:
+            response = await client.get(f"/api/work-plans/{plan_id}")
+            assert response.status_code == 200, response.text
+            return cast(dict[str, Any], response.json())
+
+        await wait_for_terminal_status(
+            read_stopped_plan, what="the stopped prompt batch", expected="cancelled"
+        )
+        await permanently_delete_chat(client, chat["id"])
         with SessionLocal() as session:
             assert session.get(PromptExpansionBatch, batch["id"]) is None
             assert (

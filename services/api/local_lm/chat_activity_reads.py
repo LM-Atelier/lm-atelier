@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from sqlalchemy import case, exists, func, literal, or_, select, union, union_all
 from sqlalchemy.orm import Session, aliased
 
+from .chat_recovery_visibility import visible_chat
 from .models import Chat, Job, Message, ResponseRevision, Run, WorkPlan, WorkStep
 from .prompt_helpers import STANDARD_CHAT_SCOPE
 
@@ -57,6 +58,7 @@ def chat_work_counts(session: Session, chat_ids: Sequence[str]) -> dict[str, Cha
             WorkPlan.chat_id.in_(identities),
             WorkPlan.persistence_scope == "durable",
             Chat.scope == STANDARD_CHAT_SCOPE,
+            visible_chat(Chat.id),
         )
         .group_by(WorkPlan.chat_id)
     )
@@ -95,6 +97,7 @@ def chat_work_counts(session: Session, chat_ids: Sequence[str]) -> dict[str, Cha
         .where(
             Run.chat_id.in_(identities),
             Chat.scope == STANDARD_CHAT_SCOPE,
+            visible_chat(Chat.id),
             target.chat_id == Run.chat_id,
             target.role == "assistant",
             target.transcript_visible.is_(True),
@@ -123,6 +126,7 @@ def chat_work_counts(session: Session, chat_ids: Sequence[str]) -> dict[str, Cha
                 WorkPlan.chat_id.in_(identities),
                 WorkPlan.persistence_scope == "durable",
                 Chat.scope == STANDARD_CHAT_SCOPE,
+                visible_chat(Chat.id),
                 or_(
                     unbound_failed_step,
                     WorkPlan.status.in_(_FAILED)

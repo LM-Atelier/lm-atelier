@@ -41,6 +41,7 @@ from sqlalchemy.orm import InstrumentedAttribute, Session
 
 from .artifact_library import begin_artifact_write_fence
 from .chat_composer_drafts import has_content as composer_draft_has_content
+from .chat_recovery_visibility import visible_chat
 from .domain import JobKind, RoutingMode
 from .models import (
     Chat,
@@ -244,7 +245,9 @@ def empty_chat_page(
         raise ValueError("A minimum age cannot be negative.")
     bounded = min(limit, MAX_PAGE_SIZE)
 
-    query = select(Chat).where(and_(Chat.scope == STANDARD_CHAT_SCOPE, ~_has_work(Chat.id)))
+    query = select(Chat).where(
+        and_(Chat.scope == STANDARD_CHAT_SCOPE, visible_chat(Chat.id), ~_has_work(Chat.id))
+    )
     # Age is a filter on the row rather than on the page, so a young chat is
     # never counted against the limit and then dropped.
     if minimum_age_hours > 0:
@@ -599,7 +602,10 @@ def preview_selection(
     moment = now or datetime.now(UTC)
     cutoff = moment - timedelta(hours=filters.minimum_age_hours)
     wanted = sorted(set(chat_ids))
-    rows = {row.id: row for row in session.scalars(select(Chat).where(Chat.id.in_(wanted)))}
+    rows = {
+        row.id: row
+        for row in session.scalars(select(Chat).where(Chat.id.in_(wanted), visible_chat(Chat.id)))
+    }
     empty = set(
         session.scalars(select(Chat.id).where(and_(Chat.id.in_(wanted), ~_has_work(Chat.id))))
     )

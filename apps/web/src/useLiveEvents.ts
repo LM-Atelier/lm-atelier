@@ -8,6 +8,7 @@ import { notifyRunFinished } from "./completionNotifications";
 const AUTHORITATIVE_QUERY_ROOTS = new Set([
   "about",
   "artifact-storage",
+  "artifact-library-v1",
   "artifacts",
   "backups",
   "catalog",
@@ -25,6 +26,7 @@ const AUTHORITATIVE_QUERY_ROOTS = new Set([
   "profiles",
   "projects",
   "recipes",
+  "recovery-items",
   "runtimes",
   "setup-readiness",
   "system",
@@ -133,6 +135,11 @@ export function useLiveEvents(
       (event: AppEvent) => {
         if (event.type === "events.replay_gap") {
           scheduleAuthoritativeRefresh();
+          return;
+        }
+        if (event.type === "recovery.updated") {
+          for (const key of ["recovery-items", "artifact-library-v1", "artifacts", "artifact-storage"])
+            void client.invalidateQueries({ queryKey: [key] });
           return;
         }
         if (event.type === "text.delta") {
@@ -257,6 +264,10 @@ export function useLiveEvents(
         if (event.type === "message.updated") {
           void client.invalidateQueries({ queryKey: ["chat"] });
           void client.invalidateQueries({ queryKey: ["artifacts"] });
+        }
+        if (event.type === "workflow.updated") {
+          for (const key of ["workflow-families", "workflow-family", "workflows", "workflow-revision", "workflow-ready-revisions", "studio-capabilities"])
+            void client.invalidateQueries({ queryKey: [key] });
         }
         if (event.type.startsWith("workflow.install.")
             || ["download.completed", "download.failed", "download.cancelled", "download.paused", "download.retrying"].includes(event.type)) {

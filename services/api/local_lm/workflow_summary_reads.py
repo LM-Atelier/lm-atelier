@@ -24,6 +24,7 @@ from .workflow_package_drafts import (
     WORKFLOW_PACKAGE_DRAFT_MARKER,
     is_workflow_package_draft,
 )
+from .workflow_recovery_visibility import visible_workflow_family
 
 
 def list_workflow_summaries(
@@ -67,6 +68,7 @@ def list_workflow_summaries(
             ),
         )
         .where(or_(draft_type.is_(None), draft_type != "object"))
+        .where(visible_workflow_family(WorkflowDefinition.family_id))
         .order_by(WorkflowDefinition.name, WorkflowDefinition.id)
         .execution_options(autoflush=False)
     )
@@ -98,6 +100,7 @@ def load_workflow_detail(session: Session, workflow_id: str) -> WorkflowDefiniti
     definition = session.scalar(
         select(WorkflowDefinition)
         .where(WorkflowDefinition.id == workflow_id)
+        .where(visible_workflow_family(WorkflowDefinition.family_id))
         .options(selectinload(WorkflowDefinition.revisions))
         .execution_options(autoflush=False)
     )
@@ -143,6 +146,7 @@ def _visible_workflow_ids() -> Select[tuple[str]]:
             ),
         )
         .where(or_(draft_type.is_(None), draft_type != "object"))
+        .where(visible_workflow_family(WorkflowDefinition.family_id))
     )
 
 

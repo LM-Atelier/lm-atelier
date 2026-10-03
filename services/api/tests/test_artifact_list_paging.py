@@ -4,10 +4,11 @@ from datetime import UTC, datetime
 
 import pytest
 from httpx2 import AsyncClient
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session
 
 from local_lm.api import list_artifacts
+from local_lm.artifact_library import ensure_library_entry
 from local_lm.db import Base
 from local_lm.models import Artifact, Chat, Message, MessagePart
 
@@ -45,6 +46,9 @@ async def test_paging_precedes_hydration_and_keeps_full_reference_counts(
                             artifact_id=f"image-{index}",
                         )
                     )
+            session.flush()
+            for artifact in session.scalars(select(Artifact)):
+                ensure_library_entry(session, artifact)
             session.commit()
             session.expunge_all()
             loaded: list[str] = []

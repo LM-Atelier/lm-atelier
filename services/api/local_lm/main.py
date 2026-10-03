@@ -58,6 +58,7 @@ from .model_quarantine import recover_model_delete_quarantines
 from .orchestrator import ConversationOrchestrator
 from .processes import ProcessSupervisor
 from .queue_lane_policy import recover_queue_lanes
+from .recovery_maintenance import maintain_recovery_expiry
 from .retention_policy import windows_for
 from .runtime_provisioning import RuntimeProvisioner
 from .scheduler import ResourceScheduler
@@ -70,6 +71,7 @@ from .security import (
 from .seed import seed_defaults
 from .worker_startup import restore_configured_workers
 from .workflow_editor_sessions import WorkflowEditorSessions
+from .workflow_selection_errors import register_workflow_selection_error_handler
 
 logger = logging.getLogger("local_lm")
 AUTOMATIC_BACKUP_CHECK_INTERVAL_SECONDS = 60 * 60
@@ -735,7 +737,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # Exposed so a caller that needs the sweep's result - a test, or a
             # later readiness view - can await it instead of polling the store.
             app.state.retention_sweep = retention_sweep
-            background = (worker_restore, backup_maintenance, retention_sweep)
+            recovery_maintenance = asyncio.create_task(
+                maintain_recovery_expiry(services), name="recovery-expiry-maintenance"
+            )
+            app.state.recovery_maintenance = recovery_maintenance
+            background = (worker_restore, backup_maintenance, retention_sweep, recovery_maintenance)
             try:
                 yield
             finally:
@@ -819,6 +825,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Register this last so it wraps host, session, and body-limit rejections too.
     app.add_middleware(SecurityHeadersMiddleware)
     register_api_error_handler(app)
+    register_workflow_selection_error_handler(app)
     app.include_router(router)
 
     @app.websocket("/api/events")

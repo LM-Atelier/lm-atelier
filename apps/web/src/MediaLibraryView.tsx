@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useInfiniteQuery, useMutation } from "@tanstack/react-query";
-import { Image as ImageIcon, Pencil, RefreshCw, Search, Star } from "lucide-react";
+import { Image as ImageIcon, Pencil, RefreshCw, Search, Star, Trash2 } from "lucide-react";
 import { api } from "./api";
 import { ArtifactGenerationDetails } from "./ArtifactGenerationDetails";
 import {
@@ -13,7 +13,9 @@ import { clockOptions, useClockChoice } from "./clockPreference";
 import { EmptyState } from "./EmptyState";
 import { ErrorCallout } from "./ErrorCallout";
 import { formatBytes } from "./format";
+import { MediaLibraryRecovery } from "./MediaLibraryRecovery";
 import { PictureFileSettings } from "./PictureFileSettings";
+import { useMediaLibraryRecovery } from "./useMediaLibraryRecovery";
 
 const PAGE_LIMIT = 20;
 const LIBRARY_UNAVAILABLE = "The Media Library could not be loaded safely. Refresh and try again.";
@@ -49,6 +51,7 @@ export function MediaLibraryView({
   const [epoch, setEpoch] = useState(0);
   const clock = useClockChoice();
   const [favoriteFailed, setFavoriteFailed] = useState(false);
+  const recovery = useMediaLibraryRecovery();
 
   const replaceFilters = (next: ArtifactLibraryFilters) => {
     setFavoriteFailed(false);
@@ -191,6 +194,9 @@ export function MediaLibraryView({
                           <Pencil size={14} />
                         </button>
                       )}
+                      <button className="icon-button" aria-label={`Move ${entry.display_name} to Recently Deleted`}
+                        title="Move to Recently Deleted" aria-disabled={recovery.busy}
+                        onClick={() => recovery.choose(entry)}><Trash2 size={14} /></button>
                     </span>
                   </div>
                 </article>
@@ -218,6 +224,7 @@ export function MediaLibraryView({
           body="Published images and videos appear here."
         />
       )}
+      <MediaLibraryRecovery recovery={recovery} />
     </div>
   );
 }

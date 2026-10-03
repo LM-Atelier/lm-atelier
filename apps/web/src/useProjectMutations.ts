@@ -1,5 +1,6 @@
 import { useMutation, type QueryClient } from "@tanstack/react-query";
 import { api } from "./api";
+import { useProjectDeletion } from "./useProjectDeletion";
 import type { Project } from "./types";
 
 /** The four project mutations, exactly as the workspace root wires them. */
@@ -14,14 +15,7 @@ export function useProjectMutations({
     mutationFn: ({ id, values }: { id: string; values: Partial<Project> }) => api.updateProject(id, values),
     onSuccess: () => void client.invalidateQueries({ queryKey: ["projects"] }),
   });
-  const deleteProject = useMutation({
-    mutationFn: api.deleteProject,
-    onSuccess: () => {
-      void client.invalidateQueries({ queryKey: ["projects"] });
-      void client.invalidateQueries({ queryKey: ["chats"] });
-      void client.invalidateQueries({ queryKey: ["chat"] });
-    },
-  });
+  const deleteProject = useProjectDeletion(client);
   const exportProject = useMutation({
     mutationFn: ({ id, includeMedia = true }: { id: string; includeMedia?: boolean }) => api.exportProject(id, includeMedia),
     onSuccess: (artifact) => {

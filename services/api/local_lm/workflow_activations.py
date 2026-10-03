@@ -24,6 +24,7 @@ from .models import (
     ModelInstall,
     ModelProfile,
     WorkflowActivation,
+    WorkflowDefinition,
     WorkflowDependencyBinding,
     WorkflowDependencySlot,
     WorkflowRevision,
@@ -51,6 +52,7 @@ from .workflow_dependencies import (
     workflow_dependency_contract_sha256,
     workflow_dependency_slot_sha256,
 )
+from .workflow_recovery_visibility import workflow_family_deleted, workflow_family_ready
 
 if TYPE_CHECKING:
     from .runtime_provisioning import RuntimeProvisioner
@@ -389,9 +391,14 @@ def revalidate_workflow_activation(
 def _revision_row(session: Session, revision: WorkflowRevision | str) -> WorkflowRevision:
     revision_id = revision if isinstance(revision, str) else revision.id
     row = session.get(WorkflowRevision, revision_id)
-    if row is None:
+    definition = session.get(WorkflowDefinition, row.workflow_id) if row is not None else None
+    if row is None or definition is None or workflow_family_deleted(session, definition.family_id):
         raise WorkflowActivationError(
             "workflow_revision_unavailable", "Workflow revision is unavailable"
+        )
+    if not workflow_family_ready(session, definition.family_id):
+        raise WorkflowActivationError(
+            "workflow_family_unavailable", "Workflow family is unavailable"
         )
     return row
 
@@ -403,6 +410,8 @@ def _activation_row(session: Session, activation: WorkflowActivation | str) -> W
         raise WorkflowActivationError(
             "workflow_activation_unavailable", "Workflow activation is unavailable"
         )
+    _revision_row(session, row.workflow_revision_id)
+    session.refresh(row)
     return row
 
 

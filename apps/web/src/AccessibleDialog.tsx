@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef } from "react";
 import type { ReactNode } from "react";
 import { X } from "lucide-react";
+import "./AccessibleDialog.css";
 
 const DIALOG_FOCUSABLE = [
   "a[href]",
@@ -86,7 +87,7 @@ export function AccessibleDialog({
   };
 
   return (
-    <div className={`modal-backdrop ${backdropClassName}`.trim()}>
+    <div className={`modal-backdrop dialog-viewport ${backdropClassName}`.trim()}>
       {/* A modal owns Escape, and this is the element that holds focus while it
           is open, so the listener belongs here rather than on a control inside. */}
       {/* eslint-disable-next-line jsx-a11y-x/no-noninteractive-element-interactions */}

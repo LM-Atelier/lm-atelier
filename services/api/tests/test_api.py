@@ -20,6 +20,7 @@ import pytest
 from fastapi import FastAPI
 from httpx2 import ASGITransport, AsyncClient
 from PIL import Image
+from recovery_requests import permanently_delete_chat
 from run_waits import wait_for_terminal_status, wait_until
 from sqlalchemy import func, select
 from sqlalchemy.exc import OperationalError
@@ -313,6 +314,8 @@ def test_new_chats_enable_edit_review_without_changing_legacy_defaults() -> None
 
 
 async def test_project_and_chat_management_contract(client: AsyncClient) -> None:
+    from recovery_requests import permanently_delete_chat, permanently_delete_project
+
     project = (await client.post("/api/projects", json={"name": "Research Lab"})).json()
     chat = (
         await client.post("/api/chats", json={"title": "Model notes", "project_id": project["id"]})
@@ -335,9 +338,9 @@ async def test_project_and_chat_management_contract(client: AsyncClient) -> None
 
     restored = await client.patch(f"/api/chats/{chat['id']}", json={"archived": False})
     assert restored.status_code == 200
-    assert (await client.delete(f"/api/projects/{project['id']}")).status_code == 204
+    await permanently_delete_project(client, project["id"])
     assert (await client.get(f"/api/chats/{chat['id']}")).json()["project_id"] is None
-    assert (await client.delete(f"/api/chats/{chat['id']}")).status_code == 204
+    await permanently_delete_chat(client, chat["id"])
     assert (await client.get(f"/api/chats/{chat['id']}")).status_code == 404
 
 
@@ -1934,7 +1937,7 @@ async def test_turn_idempotency_never_bypasses_chat_existence(
     assert missing.json()["detail"] == "chat not found"
 
     deleted = (await client.post("/api/chats", json={"title": "Deleted"})).json()
-    assert (await client.delete(f"/api/chats/{deleted['id']}")).status_code == 204
+    await permanently_delete_chat(client, deleted["id"])
     replay_to_deleted = await client.post(
         f"/api/chats/{deleted['id']}/turns",
         json=payload,
@@ -2184,7 +2187,7 @@ async def test_media_variations_create_ordered_independent_output_slots(
     completed = (await client.get(f"/api/work-plans/{plan['id']}")).json()
     assert completed["status"] == "complete"
     assert completed["summary_json"]["status_counts"] == {"complete": 4}
-    assert (await client.delete(f"/api/chats/{chat['id']}")).status_code == 204
+    await permanently_delete_chat(client, chat["id"])
     with SessionLocal() as session:
         assert session.get(WorkPlan, plan["id"]) is None
         assert not session.scalar(select(Job.id).where(Job.work_plan_id == plan["id"]))
@@ -4303,7 +4306,7 @@ async def test_chat_delete_can_remove_exclusive_generated_media(client: AsyncCli
         part["artifact_id"] for part in keep_message["parts"] if part["type"] == "image"
     )
 
-    assert (await client.delete(f"/api/chats/{keep_chat['id']}")).status_code == 204
+    await permanently_delete_chat(client, keep_chat["id"])
     assert (await client.get(f"/api/artifacts/{keep_artifact_id}")).status_code == 200
 
     delete_chat = (await client.post("/api/chats", json={"title": "Delete media"})).json()
@@ -4316,11 +4319,7 @@ async def test_chat_delete_can_remove_exclusive_generated_media(client: AsyncCli
         part["artifact_id"] for part in delete_message["parts"] if part["type"] == "image"
     )
 
-    deleted = await client.delete(
-        f"/api/chats/{delete_chat['id']}",
-        params={"delete_generated_media": True},
-    )
-    assert deleted.status_code == 204
+    await permanently_delete_chat(client, delete_chat["id"], delete_generated_media=True)
     assert (await client.get(f"/api/artifacts/{delete_artifact_id}")).status_code == 200
 
 
@@ -4348,15 +4347,11 @@ async def test_chat_delete_keeps_generated_media_referenced_by_another_chat(
     )
     assert attached.status_code == 202
 
-    deleted = await client.delete(
-        f"/api/chats/{source_chat['id']}",
-        params={"delete_generated_media": True},
-    )
-    assert deleted.status_code == 204
+    await permanently_delete_chat(client, source_chat["id"], delete_generated_media=True)
     assert (await client.get(f"/api/artifacts/{artifact_id}")).status_code == 200
 
 
-async def test_chat_delete_cancels_all_queued_runs_and_cleans_up_tasks(
+async def test_chat_purge_follows_explicit_cancellation_of_all_queued_runs(
     client: AsyncClient,
     app: FastAPI,
     monkeypatch: pytest.MonkeyPatch,
@@ -4405,9 +4400,9 @@ async def test_chat_delete_cancels_all_queued_runs_and_cleans_up_tasks(
     assert started == job_ids
     assert job_ids <= orchestrator._tasks.keys()
 
-    deleted = await client.delete(f"/api/chats/{chat['id']}")
-
-    assert deleted.status_code == 204
+    for job_id in sorted(job_ids):
+        stopped = await client.post(f"/api/jobs/{job_id}/cancel")
+        assert stopped.status_code == 200, stopped.text
     await asyncio.sleep(0)
     assert finished == job_ids
     assert not (job_ids & orchestrator._tasks.keys())
@@ -4415,11 +4410,16 @@ async def test_chat_delete_cancels_all_queued_runs_and_cleans_up_tasks(
         jobs = list(session.scalars(select(Job).where(Job.id.in_(job_ids))).all())
         assert len(jobs) == 2
         assert all(job.status == JobStatus.CANCELLED.value for job in jobs)
-        assert all(job.run_id is None for job in jobs)
+        assert {job.run_id for job in jobs} == run_ids
+        assert session.get(Chat, chat["id"]) is not None
+    await permanently_delete_chat(client, chat["id"])
+    with SessionLocal() as session:
+        assert not session.scalars(select(Job).where(Job.id.in_(job_ids))).all()
         assert not session.scalars(select(Run).where(Run.chat_id == chat["id"])).all()
+        assert session.get(Chat, chat["id"]) is None
 
 
-async def test_chat_delete_awaits_active_run_cleanup_before_database_deletion(
+async def test_chat_purge_waits_for_explicit_stop_to_finish_active_run_cleanup(
     client: AsyncClient,
     app: FastAPI,
     monkeypatch: pytest.MonkeyPatch,
@@ -4460,18 +4460,18 @@ async def test_chat_delete_awaits_active_run_cleanup_before_database_deletion(
     job = next(item for item in jobs if item["run_id"] == turn.json()["run"]["id"])
     assert job["status"] == JobStatus.RUNNING.value
 
-    deletion = asyncio.create_task(client.delete(f"/api/chats/{chat['id']}"))
+    stopping = asyncio.create_task(client.post(f"/api/chats/{chat['id']}/cancel"))
     await asyncio.wait_for(cancellation_started.wait(), timeout=5)
     await asyncio.sleep(0)
-    assert not deletion.done()
+    assert not stopping.done()
     with SessionLocal() as session:
         assert session.get(Chat, chat["id"]) is not None
         assert session.get(Run, turn.json()["run"]["id"]) is not None
 
     allow_cleanup.set()
-    deleted = await asyncio.wait_for(deletion, timeout=5)
+    stopped = await asyncio.wait_for(stopping, timeout=5)
 
-    assert deleted.status_code == 204
+    assert stopped.status_code == 200, stopped.text
     assert cleanup_finished.is_set()
     orchestrator: ConversationOrchestrator = app.state.services.orchestrator
     await asyncio.sleep(0)
@@ -4480,7 +4480,12 @@ async def test_chat_delete_awaits_active_run_cleanup_before_database_deletion(
         remaining_job = session.get(Job, job["id"])
         assert remaining_job is not None
         assert remaining_job.status == JobStatus.CANCELLED.value
-        assert remaining_job.run_id is None
+        assert remaining_job.run_id == turn.json()["run"]["id"]
+        assert session.get(Run, turn.json()["run"]["id"]) is not None
+        assert session.get(Chat, chat["id"]) is not None
+    await permanently_delete_chat(client, chat["id"])
+    with SessionLocal() as session:
+        assert session.get(Job, job["id"]) is None
         assert session.get(Run, turn.json()["run"]["id"]) is None
         assert session.get(Chat, chat["id"]) is None
 

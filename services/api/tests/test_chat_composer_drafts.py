@@ -275,6 +275,8 @@ async def test_the_database_itself_refuses_to_delete_a_file_a_draft_holds(
 async def test_a_file_is_released_when_the_draft_lets_go(
     client: AsyncClient, settings: Settings, release: str
 ) -> None:
+    from recovery_requests import permanently_delete_chat
+
     chat_id = await _chat(client)
     held = _aged_preview(settings, release)
     assert (
@@ -294,7 +296,7 @@ async def test_a_file_is_released_when_the_draft_lets_go(
         )
         assert response.status_code == 204
     else:
-        assert (await client.delete(f"/api/chats/{chat_id}")).status_code == 204
+        await permanently_delete_chat(client, chat_id)
     await _clear_now(client)
 
     assert not _exists(held)

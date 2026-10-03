@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from .model_planner import workflow_artifact_contract
 from .models import WorkflowDefinition, WorkflowRevision
+from .workflow_recovery_visibility import visible_workflow_family
 
 
 def reconcile_missing_artifact_identity(session: Session) -> int:
@@ -34,7 +35,10 @@ def reconcile_missing_artifact_identity(session: Session) -> int:
     rows = session.execute(
         select(WorkflowRevision, WorkflowDefinition.operation)
         .join(WorkflowDefinition, WorkflowDefinition.id == WorkflowRevision.workflow_id)
-        .where(WorkflowRevision.artifact_sha256.is_(None))
+        .where(
+            WorkflowRevision.artifact_sha256.is_(None),
+            visible_workflow_family(WorkflowDefinition.family_id),
+        )
         .order_by(WorkflowRevision.id)
     ).all()
     written = 0

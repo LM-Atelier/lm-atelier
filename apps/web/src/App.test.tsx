@@ -1,4 +1,5 @@
 import { installChatReadFixtures } from "./chatReadFixtures";
+import { recoveryItem, recoveryImpact } from "./test/recoveryFixtures";
 import { exerciseWorkspaceHistory } from "./workspaceHistoryAppCase.test-support";
 import { mockWorkflowFamilyPages, mockWorkflowReadsFromFixture, mockWorkflowConsumerReadsFromFixture } from "./workflowReadFixtures";
 import { exerciseEditedBranchNavigation } from "./editedBranchAppCase.test-support";
@@ -125,10 +126,10 @@ vi.mock("./api", async (importOriginal) => ({
     classifyDraft: vi.fn(),
     createProject: vi.fn(),
     updateProject: vi.fn(),
-    deleteProject: vi.fn(),
+    deleteProject: vi.fn(), trashProject: vi.fn(), projectDeletionImpact: vi.fn(),
     createChat: vi.fn(),
     updateChat: vi.fn(),
-    deleteChat: vi.fn(),
+    deleteChat: vi.fn(), trashChat: vi.fn(), deletionImpact: vi.fn(), recoveryImpact: vi.fn(), restoreRecovery: vi.fn(),
     createPromptHelper: vi.fn(),
     promptHelper: vi.fn(),
     updatePromptHelper: vi.fn(),
@@ -1080,8 +1081,9 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
       messages: [],
     }));
     let finishDelete: (() => void) | undefined;
-    vi.mocked(api.deleteChat).mockImplementation(
-      () => new Promise<void>((resolve) => { finishDelete = resolve; }),
+    vi.mocked(api.deletionImpact).mockResolvedValue({ ...recoveryImpact("chat-1"), delete_generated_media: true });
+    vi.mocked(api.trashChat).mockImplementation(
+      () => new Promise<ReturnType<typeof recoveryItem>>((resolve) => { finishDelete = () => resolve(recoveryItem("chat-1")); }),
     );
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
@@ -1094,17 +1096,16 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
     expect(await screen.findByText("Ask before Auto mode starts an image or video when the planner is unsure.")).toBeVisible();
     fireEvent.click(screen.getByRole("checkbox", { name: /Delete generated media with chat/ }));
     fireEvent.click(screen.getByRole("button", { name: "Delete chat" }));
-    // The question names the media that goes with the chat, which is the
-    // part the checkbox above just changed.
-    expect(screen.getByText(/generated media used only by this chat/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Delete chat and history" }));
+    expect(screen.getByText(/At permanent deletion, exclusive generated media also leaves the Media Library/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Move to Recently Deleted" })).toHaveAttribute("aria-disabled", "false"));
+    fireEvent.click(screen.getByRole("button", { name: "Move to Recently Deleted" }));
 
     await waitFor(() => {
       expect(screen.queryByRole("button", { name: "Manage First chat" })).not.toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Manage Second chat" })).toBeInTheDocument();
       expect(localStorage.getItem("local-lm-chat")).toBe("chat-2");
     });
-    expect(vi.mocked(api.deleteChat)).toHaveBeenCalledWith("chat-1", true);
+    expect(api.trashChat).toHaveBeenCalledWith("chat-1", expect.objectContaining({ delete_generated_media: true, expected_revision: "b".repeat(64), impact_sha256: "c".repeat(64) }));
     finishDelete?.();
   });
 
@@ -4167,7 +4168,7 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
     expect(screen.queryByRole("dialog", { name: "Review workflow package" })).not.toBeInTheDocument();
   });
 
-  it("browses durable EntryV1 media without delete or cleanup authority", async () => {
+  it("browses durable library media with recoverable membership deletion", async () => {
     const stamp = "2026-07-22T00:00:00Z";
     const entrySha = "a".repeat(64);
     vi.mocked(api.artifactLibrary).mockResolvedValue({
@@ -4229,7 +4230,7 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
     expect(await screen.findByText("observatory.png")).toBeInTheDocument();
     expect(screen.getByText(/2\.0 KB/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /cleanup/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /delete/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Move observatory.png to Recently Deleted" })).toBeInTheDocument();
     expect(api.artifacts).not.toHaveBeenCalled();
   });
 

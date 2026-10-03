@@ -21,7 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Final, Literal
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from .models import (
@@ -29,6 +29,8 @@ from .models import (
     ModelAssetInstall,
     ModelComponentManifest,
     ModelInstall,
+    WorkflowDefinition,
+    WorkflowFamily,
     WorkflowRevision,
 )
 from .output_recipe_bundle import (
@@ -37,6 +39,7 @@ from .output_recipe_bundle import (
     open_output_recipe_bundle,
 )
 from .output_recipe_v1 import MAX_RECORD_BYTES, OutputRecipeFormatError, open_output_recipe
+from .workflow_recovery_visibility import visible_workflow_family
 
 RequirementState = Literal["present", "inactive", "missing"]
 
@@ -194,7 +197,21 @@ def _workflow_state(session: Session, identity: str) -> RequirementState:
     """A workflow is ready when a trusted revision executes exactly this graph."""
 
     trusted = session.scalars(
-        select(WorkflowRevision.trusted).where(WorkflowRevision.artifact_sha256 == identity)
+        select(
+            and_(
+                WorkflowRevision.trusted,
+                or_(
+                    WorkflowDefinition.family_id.is_(None),
+                    and_(WorkflowFamily.enabled.is_(True), WorkflowFamily.archived.is_(False)),
+                ),
+            )
+        )
+        .join(WorkflowDefinition, WorkflowRevision.workflow_id == WorkflowDefinition.id)
+        .outerjoin(WorkflowFamily, WorkflowDefinition.family_id == WorkflowFamily.id)
+        .where(
+            WorkflowRevision.artifact_sha256 == identity,
+            visible_workflow_family(WorkflowDefinition.family_id),
+        )
     ).all()
     if not trusted:
         return "missing"

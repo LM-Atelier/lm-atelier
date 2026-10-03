@@ -80,6 +80,10 @@ from .chat_item_removal_schema import (
     CREATE_CHAT_ITEM_REMOVAL_TRIGGER_SQL,
     DROP_CHAT_ITEM_REMOVAL_TRIGGER_SQL,
 )
+from .chat_recovery_schema import (
+    CREATE_CHAT_RECOVERY_TRIGGER_SQL,
+    DROP_CHAT_RECOVERY_TRIGGER_SQL,
+)
 from .db import Base
 from .domain import (
     ArtifactKind,
@@ -102,6 +106,14 @@ from .media_organization_schema import (
     CREATE_MEDIA_ORGANIZATION_TRIGGER_SQL,
     DROP_MEDIA_ORGANIZATION_TRIGGER_SQL,
 )
+from .media_recovery_schema import (
+    CREATE_MEDIA_RECOVERY_TRIGGER_SQL,
+    DROP_MEDIA_RECOVERY_TRIGGER_SQL,
+)
+from .project_recovery_schema import (
+    CREATE_PROJECT_RECOVERY_TRIGGER_SQL,
+    DROP_PROJECT_RECOVERY_TRIGGER_SQL,
+)
 from .prompt_expansion_schema import (
     CREATE_PROMPT_EXPANSION_TRIGGER_SQL,
     DROP_PROMPT_EXPANSION_TRIGGER_SQL,
@@ -113,6 +125,10 @@ from .prompt_template_schema import (
 from .reference_review_schema import (
     CREATE_REFERENCE_REVIEW_TRIGGER_SQL,
     DROP_REFERENCE_REVIEW_TRIGGER_SQL,
+)
+from .workflow_recovery_schema import (
+    CREATE_WORKFLOW_RECOVERY_TRIGGER_SQL,
+    DROP_WORKFLOW_RECOVERY_TRIGGER_SQL,
 )
 
 
@@ -253,6 +269,77 @@ class Chat(TimestampMixin, Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+
+
+class RecoveryItem(Base):
+    """A deletion membership whose subject keeps its own canonical history."""
+
+    __tablename__ = "recovery_items"
+    __table_args__ = (
+        UniqueConstraint("kind", "subject_id", name="uq_recovery_item_subject"),
+        Index("ix_recovery_item_expiry", "state", "purge_after", "deletion_id"),
+    )
+
+    deletion_id: Mapped[str] = mapped_column(
+        String(40), primary_key=True, default=lambda: new_id("recover")
+    )
+    kind: Mapped[str] = mapped_column(String(32), index=True)
+    # This identity survives permanent deletion, so it is not a cascading foreign key.
+    subject_id: Mapped[str] = mapped_column(String(128), index=True)
+    display_label: Mapped[str] = mapped_column(String(240))
+    original_project_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    original_project_label: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    deleted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    purge_after: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    state: Mapped[str] = mapped_column(String(16), default="recoverable", index=True)
+    subject_revision: Mapped[str] = mapped_column(String(64))
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    delete_generated_media: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class RecoveryOperation(Base):
+    """Keep a bounded command result so retries never repeat a resource transition."""
+
+    __tablename__ = "recovery_operations"
+
+    kind: Mapped[str] = mapped_column(String(32), primary_key=True)
+    subject_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    operation_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    action: Mapped[str] = mapped_column(String(16))
+    deletion_id: Mapped[str] = mapped_column(String(40), index=True)
+    request_sha256: Mapped[str] = mapped_column(String(64))
+    # Only the recovery DTO is kept, never a copy of the chat graph or its payloads.
+    response_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class RecoveryPreviewRecord(Base):
+    """A short-lived opaque revision bound to state that never leaves the server."""
+
+    __tablename__ = "recovery_previews"
+    __table_args__ = (Index("ix_recovery_preview_expiry", "expires_at"),)
+
+    revision: Mapped[str] = mapped_column(String(64), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32))
+    subject_id: Mapped[str] = mapped_column(String(128), index=True)
+    deletion_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    subject_fingerprint: Mapped[str] = mapped_column(String(64))
+    impact_sha256: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class RecoveryBatchRecord(Base):
+    """Materialize bounded recovery identities and keep their committed replay result."""
+
+    __tablename__ = "recovery_batches"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    preview_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    fingerprints_json: Mapped[dict[str, str]] = mapped_column(JSON)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    operation_key: Mapped[str | None] = mapped_column(String(128), unique=True, nullable=True)
+    request_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    response_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
 
 class Message(TimestampMixin, Base):
@@ -1175,6 +1262,8 @@ class PromptTemplateImportWinner(Base):
 
 
 for _statement in CREATE_TRIGGER_SQL:
+    if _statement.split()[2] == "artifact_library_entry_delete_guard":
+        continue
     event.listen(
         Base.metadata,
         "after_create",
@@ -1246,6 +1335,33 @@ for _statement in DROP_CHAT_ITEM_REMOVAL_TRIGGER_SQL:
         "before_drop",
         DDL(_statement).execute_if(dialect="sqlite"),  # type: ignore[no-untyped-call]
     )
+
+
+for _statement in CREATE_CHAT_RECOVERY_TRIGGER_SQL:
+    event.listen(Base.metadata, "after_create", _install_sqlite_trigger(_statement))
+for _statement in CREATE_MEDIA_RECOVERY_TRIGGER_SQL[1:]:
+    event.listen(Base.metadata, "after_create", _install_sqlite_trigger(_statement))
+for _statement in CREATE_PROJECT_RECOVERY_TRIGGER_SQL:
+    event.listen(Base.metadata, "after_create", _install_sqlite_trigger(_statement))
+for _statement in CREATE_WORKFLOW_RECOVERY_TRIGGER_SQL:
+    event.listen(Base.metadata, "after_create", _install_sqlite_trigger(_statement))
+
+
+def _drop_chat_recovery_triggers(
+    _target: object, connection: Connection, **_kwargs: object
+) -> None:
+    if connection.dialect.name == "sqlite":
+        for statement in DROP_WORKFLOW_RECOVERY_TRIGGER_SQL:
+            connection.exec_driver_sql(statement)
+        for statement in DROP_PROJECT_RECOVERY_TRIGGER_SQL:
+            connection.exec_driver_sql(statement)
+        for statement in DROP_MEDIA_RECOVERY_TRIGGER_SQL:
+            connection.exec_driver_sql(statement)
+        for statement in DROP_CHAT_RECOVERY_TRIGGER_SQL:
+            connection.exec_driver_sql(statement)
+
+
+event.listen(Base.metadata, "before_drop", _drop_chat_recovery_triggers)
 
 
 class ModelSource(TimestampMixin, Base):

@@ -49,7 +49,6 @@ from .artifact_library import (
     ArtifactLibraryConflict,
     ArtifactLibraryCursorError,
     ArtifactLibraryDataError,
-    ensure_library_entry,
     list_library_entries,
     set_library_favorite,
 )
@@ -98,6 +97,7 @@ from .chat_item_removal import (
     preview_chat_item_removal,
 )
 from .chat_message_queries import message_ancestry_positions
+from .chat_recovery_visibility import chat_is_deleted, job_is_deleted, visible_chat, visible_job
 from .chat_search_pages import read_search_page
 from .chat_summary_reads import list_chat_summary_rows
 from .chat_transcript_context import read_transcript_context
@@ -210,6 +210,7 @@ from .install_plan_contract_v1 import (
 )
 from .lora_suggestions import lora_suggestion_scope, suggested_loras
 from .media_organization_api import router as media_organization_router
+from .media_reimport import recover_imported_membership
 from .message_window_v1 import DEFAULT_WINDOW, MAX_WINDOW
 from .model_library_reads import catalog_install_matches, read_library_matches, read_library_page
 from .model_manifests import (
@@ -245,6 +246,7 @@ from .models import (
     AdapterPromptGrammar,
     AppSetting,
     Artifact,
+    ArtifactLibraryEntry,
     Chat,
     ChatWorkflowSelection,
     ComfyRegistryInstall,
@@ -353,10 +355,17 @@ from .profile_service import (
     AUTO_PROFILE_ID,
     LAST_CHAT_PROFILE_KEY,
     ensure_profile_for_install,
+    profiles_have_recovery_dependents,
     validate_profile_binding,
     validate_profile_install,
 )
 from .progress import update_job_progress
+from .project_recovery_visibility import (
+    effective_project_id,
+    live_project,
+    live_project_ids,
+    visible_project,
+)
 from .prompt_binding import ignores_the_description
 from .prompt_expansion import (
     PromptExpansionDistinctCapacityError,
@@ -417,6 +426,8 @@ from .queue_lane_policy import QueueLaneConflict, change_lane_policy, read_lane_
 from .queue_order import QueueOrderConflict, QueueOrderLimit, change_queue_order, read_queue_order
 from .queue_order_v1 import QueueOrderCommand, QueueOrderPageOut, QueueOrderResultOut
 from .recipes import get_reference_recipe, list_reference_recipes, recipe_workflow_template
+from .recovery_api import router as recovery_router
+from .recovery_previews import RecoveryPreviewConflict, reserve_recovery_write
 from .reference_library import (
     DEFAULT_PAGE,
     attach_asset,
@@ -971,6 +982,7 @@ router.include_router(workflow_use_case_preset_router)
 router.include_router(use_case_summary_router)
 router.include_router(generation_experiment_router)
 router.include_router(media_organization_router)
+router.include_router(recovery_router)
 router.include_router(output_recipe_router)
 router.include_router(picture_remix_router)
 logger = logging.getLogger(__name__)
@@ -2143,8 +2155,10 @@ async def list_projects(
     project_id: Annotated[list[str] | None, Query(max_length=200)] = None,
     literal_search: bool = False,
 ) -> list[Project]:
-    statement = select(Project).order_by(
-        Project.pinned.desc(), Project.updated_at.desc(), Project.id.desc()
+    statement = (
+        select(Project)
+        .where(visible_project(Project.id))
+        .order_by(Project.pinned.desc(), Project.updated_at.desc(), Project.id.desc())
     )
     if not include_archived:
         statement = statement.where(Project.archived.is_(False))
@@ -2185,7 +2199,7 @@ async def list_projects(
 
 @router.get("/projects/{project_id}", response_model=ProjectOut)
 async def get_project(project_id: str, session: SessionDep) -> Project:
-    project = session.get(Project, project_id)
+    project = live_project(session, project_id)
     if project is None:
         raise api_error(404, "project-not-found", "Project not found")
     return project
@@ -2405,12 +2419,15 @@ async def update_project(
     request: Request,
     session: SessionDep,
 ) -> Project:
-    project = session.get(Project, project_id)
+    project = live_project(session, project_id)
     if not project:
         raise api_error(404, "project-not-found", "project not found")
     values = payload.model_dump(exclude_unset=True)
     _validate_project_workflow_pins(session, values)
     await _validate_generation_defaults(request, session, values)
+    project = live_project(session, project_id)
+    if project is None:
+        raise api_error(404, "project-not-found", "project not found")
     for key, value in values.items():
         setattr(project, key, value)
     changed_capabilities = [
@@ -2434,14 +2451,14 @@ async def update_project(
 
 @router.delete("/projects/{project_id}", status_code=204)
 async def delete_project(project_id: str, session: SessionDep) -> Response:
-    project = session.get(Project, project_id)
+    project = live_project(session, project_id)
     if not project:
         raise api_error(404, "project-not-found", "project not found")
-    for chat in project.chats:
-        chat.project_id = None
-    session.delete(project)
-    session.commit()
-    return Response(status_code=204)
+    raise api_error(
+        409,
+        "recovery-preview-required",
+        "Check this project's deletion details before moving it to Recently Deleted.",
+    )
 
 
 @router.post("/projects/{project_id}/export", response_model=ArtifactOut, status_code=201)
@@ -2463,6 +2480,17 @@ async def export_project(
     return result
 
 
+def _chat_outputs(session: Session, chats: list[Chat]) -> list[ChatOut]:
+    """Return unfiled projections without rewriting canonical chat foreign keys."""
+    projects = live_project_ids(session, {chat.project_id for chat in chats if chat.project_id})
+    return [
+        ChatOut.model_validate(chat).model_copy(
+            update={"project_id": chat.project_id if chat.project_id in projects else None}
+        )
+        for chat in chats
+    ]
+
+
 @router.get("/chats", response_model=list[ChatOut])
 async def list_chats(
     session: ConversationSessionDep,
@@ -2472,14 +2500,14 @@ async def list_chats(
     search_projects: bool = False,
     limit: int | None = Query(default=None, ge=1, le=200),
     offset: int = Query(default=0, ge=0, le=9_223_372_036_854_775_807),
-) -> list[Chat]:
+) -> list[ChatOut]:
     statement = (
         select(Chat)
-        .where(Chat.scope == STANDARD_CHAT_SCOPE)
+        .where(Chat.scope == STANDARD_CHAT_SCOPE, visible_chat(Chat.id))
         .order_by(Chat.pinned.desc(), Chat.updated_at.desc(), Chat.id.desc())
     )
     if project_id:
-        statement = statement.where(Chat.project_id == project_id)
+        statement = statement.where(effective_project_id(Chat.project_id) == project_id)
     if not include_archived:
         statement = statement.where(Chat.archived.is_(False))
     if query.strip():
@@ -2487,7 +2515,7 @@ async def list_chats(
             # SQLite's lowercase function only folds ASCII. Match the browser's
             # Unicode search over streamed names, then hydrate only this page.
             names = statement.with_only_columns(Chat.id, Chat.title, Project.name).outerjoin(
-                Project, Chat.project_id == Project.id
+                Project, (Chat.project_id == Project.id) & visible_project(Project.id)
             )
             normalized = query.strip().lower()
             with session.execute(names.execution_options(yield_per=200)) as candidates:
@@ -2497,13 +2525,15 @@ async def list_chats(
                     if normalized in title.lower() or normalized in (project_name or "").lower()
                 )
                 identities = list(islice(islice(matches, offset, None), limit))
-            return list(session.scalars(statement.where(Chat.id.in_(identities))).all())
+            return _chat_outputs(
+                session, list(session.scalars(statement.where(Chat.id.in_(identities))).all())
+            )
         else:
             statement = statement.where(Chat.title.ilike(f"%{query.strip()}%"))
     if limit is not None:
         statement = statement.limit(limit)
     statement = statement.offset(offset)
-    return list(session.scalars(statement).all())
+    return _chat_outputs(session, list(session.scalars(statement).all()))
 
 
 @router.get("/chats/summaries", response_model=list[ChatSummaryOut])
@@ -2555,11 +2585,13 @@ async def create_chat(
     payload: ChatCreate,
     request: Request,
     session: ConversationSessionDep,
-) -> Chat:
-    if payload.project_id and not session.get(Project, payload.project_id):
+) -> ChatOut:
+    if payload.project_id and live_project(session, payload.project_id) is None:
         raise api_error(404, "project-not-found", "project not found")
     values = payload.model_dump(mode="json")
     await _validate_generation_defaults(request, session, values)
+    if payload.project_id and live_project(session, payload.project_id) is None:
+        raise api_error(404, "project-not-found", "project not found")
     chat = Chat(
         title=payload.title,
         project_id=payload.project_id,
@@ -2577,7 +2609,7 @@ async def create_chat(
     mirror_legacy_chat_workflow_selections(session, chat)
     session.commit()
     session.refresh(chat)
-    return chat
+    return _chat_outputs(session, [chat])[0]
 
 
 @router.get("/chats/{chat_id}", response_model=ChatDetail)
@@ -2602,22 +2634,29 @@ async def get_chat(chat_id: str, session: ConversationSessionDep) -> ChatDetail:
             .selectinload(Message.response_revisions)
             .selectinload(ResponseRevision.feedback_rows),
         )
-        .where(Chat.id == chat_id, Chat.scope == STANDARD_CHAT_SCOPE)
+        .where(Chat.id == chat_id, Chat.scope == STANDARD_CHAT_SCOPE, visible_chat(Chat.id))
     )
     if not chat:
         raise api_error(404, "chat-not-found", "chat not found")
     return ChatDetail.model_validate(chat).model_copy(
-        update={"web_searches": chat_searches(session, chat_id)}
+        update={
+            "web_searches": chat_searches(session, chat_id),
+            "project_id": _chat_outputs(session, [chat])[0].project_id,
+        }
     )
 
 
 @router.get("/chats/{chat_id}/metadata", response_model=ChatOut)
 async def get_chat_metadata(chat_id: str, session: ConversationSessionDep) -> ChatOut:
     """Read conversation settings without loading messages or search history."""
-    chat = session.scalar(select(Chat).where(Chat.id == chat_id, Chat.scope == STANDARD_CHAT_SCOPE))
+    chat = session.scalar(
+        select(Chat).where(
+            Chat.id == chat_id, Chat.scope == STANDARD_CHAT_SCOPE, visible_chat(Chat.id)
+        )
+    )
     if not chat:
         raise api_error(404, "chat-not-found", "chat not found")
-    return ChatOut.model_validate(chat)
+    return _chat_outputs(session, [chat])[0]
 
 
 @router.get("/chats/{chat_id}/context", response_model=ChatTranscriptContext)
@@ -2625,7 +2664,11 @@ async def get_chat_transcript_context(
     chat_id: str, session: ConversationSessionDep, head_id: str | None = None
 ) -> ChatTranscriptContext:
     if (
-        session.scalar(select(Chat.id).where(Chat.id == chat_id, Chat.scope == STANDARD_CHAT_SCOPE))
+        session.scalar(
+            select(Chat.id).where(
+                Chat.id == chat_id, Chat.scope == STANDARD_CHAT_SCOPE, visible_chat(Chat.id)
+            )
+        )
         is None
     ):
         raise api_error(404, "chat-not-found", "chat not found")
@@ -2726,7 +2769,11 @@ async def get_chat_messages(
         raise api_error(
             400, "chat-window-invalid", f"A page holds between 1 and {MAX_WINDOW} messages."
         )
-    chat = session.scalar(select(Chat).where(Chat.id == chat_id, Chat.scope == STANDARD_CHAT_SCOPE))
+    chat = session.scalar(
+        select(Chat).where(
+            Chat.id == chat_id, Chat.scope == STANDARD_CHAT_SCOPE, visible_chat(Chat.id)
+        )
+    )
     if not chat:
         raise api_error(404, "chat-not-found", "chat not found")
     lineage = None
@@ -2954,17 +3001,33 @@ async def open_studio_session(
     the filmstrip is durable edit history rather than view state.
     """
 
+    try:
+        reserve_recovery_write(session)
+    except RecoveryPreviewConflict:
+        raise api_error(
+            409, "studio-session-busy", "The studio session could not be opened safely. Try again."
+        ) from None
     artifact = session.get(Artifact, payload.source_artifact_id)
     if not artifact:
         raise api_error(404, "artifact-not-found", "This media item no longer exists")
     if not _is_editable_image(artifact):
         raise api_error(422, "studio-image-only", "The studio edits images")
+    source = (
+        session.scalar(
+            select(Chat).where(
+                Chat.id == payload.source_chat_id,
+                Chat.scope == STANDARD_CHAT_SCOPE,
+                visible_chat(Chat.id),
+            )
+        )
+        if payload.source_chat_id
+        else None
+    )
+    if payload.source_chat_id and source is None:
+        raise api_error(404, "chat-not-found", "The source chat no longer exists")
     existing = find_studio_session(session, artifact.id)
     if existing:
         return session.scalar(_studio_session_query(existing.id)) or existing
-    source = session.get(Chat, payload.source_chat_id) if payload.source_chat_id else None
-    if payload.source_chat_id and (not source or source.scope != STANDARD_CHAT_SCOPE):
-        raise api_error(404, "chat-not-found", "The source chat no longer exists")
     studio = Chat(
         title=studio_session_title(artifact),
         archived=True,
@@ -4025,7 +4088,7 @@ async def get_prompt_batch(
     if batch is None:
         raise api_error(404, "prompt-batch-not-found", "Prompt batch does not exist.")
     chat = session.get(Chat, batch.chat_id)
-    if chat is None or chat.scope != STANDARD_CHAT_SCOPE:
+    if chat is None or chat.scope != STANDARD_CHAT_SCOPE or chat_is_deleted(session, batch.chat_id):
         raise api_error(404, "prompt-batch-not-found", "Prompt batch does not exist.")
     try:
         stored = read_expansion(session, batch.chat_id, batch.id)
@@ -4048,7 +4111,7 @@ async def patch_prompt_batch_item(
     if batch is None:
         raise api_error(404, "prompt-batch-not-found", "Prompt batch does not exist.")
     chat = session.get(Chat, batch.chat_id)
-    if chat is None or chat.scope != STANDARD_CHAT_SCOPE:
+    if chat is None or chat.scope != STANDARD_CHAT_SCOPE or chat_is_deleted(session, batch.chat_id):
         raise api_error(404, "prompt-batch-not-found", "Prompt batch does not exist.")
     try:
         current = read_expansion(session, batch.chat_id, batch.id)
@@ -4088,7 +4151,7 @@ async def queue_prompt_batch(
     if batch is None:
         raise api_error(404, "prompt-batch-not-found", "Prompt batch does not exist.")
     chat = session.get(Chat, batch.chat_id)
-    if chat is None or chat.scope != STANDARD_CHAT_SCOPE:
+    if chat is None or chat.scope != STANDARD_CHAT_SCOPE or chat_is_deleted(session, batch.chat_id):
         raise api_error(404, "prompt-batch-not-found", "Prompt batch does not exist.")
     try:
         _, replayed = await _services(request).orchestrator.create_prompt_batch_turn(
@@ -4128,7 +4191,7 @@ async def create_prompt_helper(
     session: ConversationSessionDep,
 ) -> Chat:
     source = session.get(Chat, payload.source_chat_id)
-    if not source or source.scope != STANDARD_CHAT_SCOPE:
+    if not source or source.scope != STANDARD_CHAT_SCOPE or chat_is_deleted(session, source.id):
         raise api_error(404, "chat-not-found", "source chat not found")
     generation_settings = copy.deepcopy(source.generation_settings_json)
     for role in (ModelRole.IMAGE.value, ModelRole.VIDEO.value):
@@ -4225,18 +4288,25 @@ async def update_chat(
     payload: ChatUpdate,
     request: Request,
     session: ConversationSessionDep,
-) -> Chat:
+) -> ChatOut:
     chat = session.get(Chat, chat_id)
-    if not chat or chat.scope != STANDARD_CHAT_SCOPE:
+    if not chat or chat.scope != STANDARD_CHAT_SCOPE or chat_is_deleted(session, chat_id):
         raise api_error(404, "chat-not-found", "chat not found")
     values = payload.model_dump(exclude_unset=True, mode="json")
+    if (
+        "project_id" in values
+        and values["project_id"] is None
+        and chat.project_id is not None
+        and live_project(session, chat.project_id) is None
+    ):
+        values.pop("project_id")
     if "web_settings_json" in values and values["web_settings_json"] is None:
         raise api_error(422, "web-settings-invalid", "Web permissions must be an object.")
     await _validate_generation_defaults(request, session, values)
     if (
         "project_id" in values
         and values["project_id"]
-        and not session.get(Project, values["project_id"])
+        and live_project(session, values["project_id"]) is None
     ):
         raise api_error(404, "project-not-found", "project not found")
     profile_fields = {
@@ -4292,7 +4362,7 @@ async def update_chat(
         mirror_legacy_chat_workflow_selections(session, chat, changed_capabilities)
     session.commit()
     session.refresh(chat)
-    return chat
+    return _chat_outputs(session, [chat])[0]
 
 
 @router.delete("/chats/{chat_id}", status_code=204)
@@ -4303,29 +4373,18 @@ async def delete_chat(
     delete_generated_media: bool = Query(False),
 ) -> Response:
     chat = session.get(Chat, chat_id)
-    if not chat or chat.scope != STANDARD_CHAT_SCOPE:
+    if not chat or chat.scope != STANDARD_CHAT_SCOPE or chat_is_deleted(session, chat_id):
         raise api_error(404, "chat-not-found", "chat not found")
-    services = _services(request)
-    async with services.orchestrator.prepare_chat_deletion(chat_id):
-        session.expire_all()
-        chat = session.get(Chat, chat_id)
-        if not chat or chat.scope != STANDARD_CHAT_SCOPE:
-            raise api_error(404, "chat-not-found", "chat not found")
-        artifact_ids = (
-            services.artifacts.generated_media_artifact_ids_for_chat(session, chat_id)
-            if delete_generated_media
-            else ()
-        )
-        session.delete(chat)
-        session.flush()
-        services.artifacts.delete_generated_media_artifacts(session, artifact_ids)
-        session.commit()
-    return Response(status_code=204)
+    raise api_error(
+        409,
+        "recovery-preview-required",
+        "Check this chat's deletion details before moving it to Recently Deleted.",
+    )
 
 
 def _standard_chat_or_404(session: Session, chat_id: str) -> Chat:
     chat = session.get(Chat, chat_id)
-    if not chat or chat.scope != STANDARD_CHAT_SCOPE:
+    if not chat or chat.scope != STANDARD_CHAT_SCOPE or chat_is_deleted(session, chat_id):
         raise api_error(404, "chat-not-found", "chat not found")
     return chat
 
@@ -4333,14 +4392,16 @@ def _standard_chat_or_404(session: Session, chat_id: str) -> Chat:
 def _refuse_comparison_chat(
     session: Session, chat_id: str, code: str = "chat-not-found", detail: str = "chat not found"
 ) -> None:
-    """A started comparison's hidden chat is reached through its comparison, never as a chat.
+    """Keep hidden comparison and deleted conversations out of ordinary chat routes.
 
     It takes no turns, edits, stop, selections or reads by chat id; the
     caller's own not-found answer is given, so the chat's existence is not shown.
     """
 
     chat = session.get(Chat, chat_id)
-    if chat is not None and chat.scope == EXPERIMENT_CHAT_SCOPE:
+    if (chat is not None and chat.scope == EXPERIMENT_CHAT_SCOPE) or chat_is_deleted(
+        session, chat_id
+    ):
         raise api_error(404, code, detail)
 
 
@@ -4841,7 +4902,7 @@ async def get_message(message_id: str, session: ConversationSessionDep) -> Messa
 
 
 @router.post("/messages/{message_id}/fork", response_model=ChatOut, status_code=201)
-async def fork_thread_from_message(message_id: str, session: ConversationSessionDep) -> Chat:
+async def fork_thread_from_message(message_id: str, session: ConversationSessionDep) -> ChatOut:
     """Start a new chat carrying the history up to this message."""
 
     _refuse_comparison_message(
@@ -4849,13 +4910,20 @@ async def fork_thread_from_message(message_id: str, session: ConversationSession
     )
     try:
         fork = fork_chat_from_message(session, message_id)
+    except RecoveryPreviewConflict:
+        session.rollback()
+        raise api_error(
+            409,
+            "fork-source-busy",
+            "The conversation could not be forked safely. Try again.",
+        ) from None
     except ForkSourceNotFound as exc:
         raise api_error(404, "fork-source-not-found", str(exc)) from exc
     session.commit()
     created = session.get(Chat, fork.chat_id)
     if not created:  # pragma: no cover - the row was just committed
         raise api_error(500, "fork-unavailable", "the forked chat could not be read back")
-    return created
+    return _chat_outputs(session, [created])[0]
 
 
 @router.get(
@@ -5456,7 +5524,7 @@ def _mode_for_operation(operation: Operation) -> RoutingMode:
 @router.get("/runs/{run_id}", response_model=RunOut)
 async def get_run(run_id: str, session: ConversationSessionDep) -> Run:
     run = session.get(Run, run_id)
-    if not run:
+    if not run or chat_is_deleted(session, run.chat_id):
         raise api_error(404, "run-not-found", "run not found")
     return run
 
@@ -5511,6 +5579,7 @@ async def list_work_plans(
 ) -> list[WorkPlan]:
     statement = (
         select(WorkPlan)
+        .where(visible_chat(WorkPlan.chat_id))
         .options(selectinload(WorkPlan.steps))
         .order_by(WorkPlan.created_at.desc(), WorkPlan.id.desc())
         .limit(limit)
@@ -5525,7 +5594,7 @@ async def get_work_plan(plan_id: str, session: ConversationSessionDep) -> WorkPl
     plan = session.scalar(
         select(WorkPlan).options(selectinload(WorkPlan.steps)).where(WorkPlan.id == plan_id)
     )
-    if not plan:
+    if not plan or chat_is_deleted(session, plan.chat_id):
         raise api_error(404, "work-plan-not-found", "work plan not found")
     return plan
 
@@ -5534,6 +5603,9 @@ async def get_work_plan(plan_id: str, session: ConversationSessionDep) -> WorkPl
 async def get_work_step(step_id: str, session: ConversationSessionDep) -> WorkStep:
     step = session.get(WorkStep, step_id)
     if not step:
+        raise api_error(404, "work-step-not-found", "work step not found")
+    plan = session.get(WorkPlan, step.plan_id)
+    if plan is None or chat_is_deleted(session, plan.chat_id):
         raise api_error(404, "work-step-not-found", "work step not found")
     return step
 
@@ -5547,7 +5619,7 @@ async def cancel_work_plan(
     plan = session.scalar(
         select(WorkPlan).options(selectinload(WorkPlan.steps)).where(WorkPlan.id == plan_id)
     )
-    if not plan:
+    if not plan or chat_is_deleted(session, plan.chat_id):
         raise api_error(404, "work-plan-not-found", "work plan not found")
     jobs = list(
         session.scalars(
@@ -5593,7 +5665,7 @@ async def retry_work_plan(
     plan = session.scalar(
         select(WorkPlan).options(selectinload(WorkPlan.steps)).where(WorkPlan.id == plan_id)
     )
-    if not plan:
+    if not plan or chat_is_deleted(session, plan.chat_id):
         raise api_error(404, "work-plan-not-found", "work plan not found")
     jobs = list(
         session.scalars(
@@ -5657,7 +5729,7 @@ async def list_jobs(
 ) -> list[Job]:
     statement = (
         select(Job)
-        .where(Job.kind != JobKind.EDIT_VERIFY.value)
+        .where(Job.kind != JobKind.EDIT_VERIFY.value, visible_job())
         .order_by(Job.created_at.desc())
         .limit(limit)
     )
@@ -5930,6 +6002,7 @@ async def job_activity(
         select(Job, func.count(Job.id).over())
         .where(
             Job.kind != JobKind.EDIT_VERIFY.value,
+            visible_job(),
             Job.status.in_(
                 (JobStatus.QUEUED.value, JobStatus.RUNNING.value, JobStatus.PAUSED.value)
             ),
@@ -5941,6 +6014,7 @@ async def job_activity(
         select(Job)
         .where(
             Job.kind != JobKind.EDIT_VERIFY.value,
+            visible_job(),
             Job.status.in_(
                 (JobStatus.FAILED.value, JobStatus.CANCELLED.value, JobStatus.INTERRUPTED.value)
             ),
@@ -5962,7 +6036,7 @@ async def cancel_job(
     session: ConversationSessionDep,
 ) -> Job | JobOut:
     job = session.get(Job, job_id)
-    if not job:
+    if not job or job_is_deleted(session, job_id):
         raise api_error(404, "job-not-found", "job not found")
     verification_snapshot = (
         JobOut.model_validate(job)
@@ -6205,7 +6279,7 @@ async def retry_job(
     session: ConversationSessionDep,
 ) -> Job:
     job = session.get(Job, job_id)
-    if not job:
+    if not job or job_is_deleted(session, job_id):
         raise api_error(404, "job-not-found", "job not found")
     if job.status not in {"failed", "cancelled", "interrupted"}:
         raise api_error(
@@ -6334,10 +6408,23 @@ async def upload_artifact(
         original_name=file.filename,
         metadata={"uploaded": True},
     )
-    ensure_library_entry(session, artifact)
+    try:
+        recovered_id = recover_imported_membership(session, artifact, utcnow())
+    except RecoveryPreviewConflict as error:
+        session.rollback()
+        raise api_error(
+            409,
+            error.code,
+            "This file's Media Library recovery state could not be restored. "
+            "Check Recently Deleted in Settings > Data & backups.",
+        ) from None
+    if artifact.metadata_json.get("uploaded") is not True:
+        artifact.metadata_json = {**artifact.metadata_json, "uploaded": True}
     session.commit()
     result = ArtifactOut.model_validate(artifact)
     result.url = f"/api/artifacts/{artifact.id}/content"
+    if recovered_id is not None:
+        await services.events.publish("recovery.updated", recovered_id, {})
     return result
 
 
@@ -6463,8 +6550,13 @@ async def list_artifacts(
     limit: Annotated[int | None, Query(ge=1, le=200)] = None,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[ArtifactLibraryItem]:
-    statement = select(Artifact).where(
-        Artifact.kind.in_([ArtifactKind.IMAGE.value, ArtifactKind.VIDEO.value])
+    statement = (
+        select(Artifact)
+        .join(ArtifactLibraryEntry, ArtifactLibraryEntry.artifact_id == Artifact.id)
+        .where(
+            ArtifactLibraryEntry.state == "visible",
+            Artifact.kind.in_([ArtifactKind.IMAGE.value, ArtifactKind.VIDEO.value]),
+        )
     )
     if kind:
         statement = statement.where(Artifact.kind == kind)
@@ -6481,13 +6573,15 @@ async def list_artifacts(
         select(MessagePart.id)
         .join(Message, Message.id == MessagePart.message_id)
         .join(Chat, Chat.id == Message.chat_id)
-        .where(MessagePart.artifact_id == Artifact.id)
+        .where(MessagePart.artifact_id == Artifact.id, visible_chat(Chat.id))
     )
     # Each filter describes membership of the artifact, not necessarily one reference.
     if chat_id:
         statement = statement.where(membership.where(Message.chat_id == chat_id).exists())
     if project_id:
-        statement = statement.where(membership.where(Chat.project_id == project_id).exists())
+        statement = statement.where(
+            membership.where(effective_project_id(Chat.project_id) == project_id).exists()
+        )
     if limit is not None or offset:
         statement = statement.order_by(Artifact.created_at.desc(), Artifact.id.desc()).offset(
             offset
@@ -6502,10 +6596,14 @@ async def list_artifacts(
     for batch_offset in range(0, len(artifact_ids), 400):
         batch = artifact_ids[batch_offset : batch_offset + 400]
         reference_rows = session.execute(
-            select(MessagePart.artifact_id, Message.chat_id, Chat.project_id)
+            select(
+                MessagePart.artifact_id,
+                Message.chat_id,
+                effective_project_id(Chat.project_id).label("project_id"),
+            )
             .join(Message, Message.id == MessagePart.message_id)
             .join(Chat, Chat.id == Message.chat_id)
-            .where(MessagePart.artifact_id.in_(batch))
+            .where(MessagePart.artifact_id.in_(batch), visible_chat(Chat.id))
         ).all()
         for artifact_id, referenced_chat_id, referenced_project_id in reference_rows:
             references.setdefault(artifact_id, []).append(
@@ -6521,7 +6619,10 @@ async def list_artifacts(
     for offset in range(0, len(ordered_run_ids), 400):
         batch = ordered_run_ids[offset : offset + 400]
         runs_by_id.update(
-            (run.id, run) for run in session.scalars(select(Run).where(Run.id.in_(batch))).all()
+            (run.id, run)
+            for run in session.scalars(
+                select(Run).where(Run.id.in_(batch), visible_chat(Run.chat_id))
+            ).all()
         )
     results: list[ArtifactLibraryItem] = []
     for artifact in artifacts:
@@ -9411,6 +9512,17 @@ async def delete_model(
         return Response(status_code=204)
 
 
+def _reserve_recovery_dependency_write(session: Session) -> None:
+    try:
+        reserve_recovery_write(session)
+    except RecoveryPreviewConflict:
+        raise api_error(
+            409,
+            "recovery-dependency-busy",
+            "Recently Deleted is changing. Try again after it finishes.",
+        ) from None
+
+
 def _delete_model_locked(
     model_id: str,
     request: Request,
@@ -9418,6 +9530,7 @@ def _delete_model_locked(
     *,
     delete_profiles: bool,
 ) -> Path | None:
+    _reserve_recovery_dependency_write(session)
     install = session.get(ModelInstall, model_id)
     if not install:
         raise api_error(404, "model-not-found", "model not found")
@@ -9438,6 +9551,12 @@ def _delete_model_locked(
             409, "model-in-use-by-profile", "delete profiles that use this model before deleting it"
         )
     profile_ids = {profile.id for profile in profiles}
+    if profiles_have_recovery_dependents(session, profile_ids):
+        raise api_error(
+            409,
+            "model-used-in-recently-deleted",
+            "Restore or permanently delete items in Recently Deleted before deleting this model.",
+        )
     if profile_ids and any(
         worker.running and worker.profile_id in profile_ids
         for worker in _services(request).processes.statuses()
@@ -9805,9 +9924,17 @@ async def update_profile(
 async def delete_profile(profile_id: str, request: Request, session: SessionDep) -> Response:
     services = _services(request)
     async with services.scheduler.lease("primary"):
+        _reserve_recovery_dependency_write(session)
         profile = session.get(ModelProfile, profile_id)
         if not profile:
             raise api_error(404, "profile-not-found", "profile not found")
+        if profiles_have_recovery_dependents(session, {profile.id}):
+            raise api_error(
+                409,
+                "profile-used-in-recently-deleted",
+                "Restore or permanently delete items in Recently Deleted "
+                "before deleting this profile.",
+            )
         worker_name = "chat" if profile.role == ModelRole.CHAT.value else "media"
         _ensure_worker_idle(session, worker_name)
         if any(
@@ -10030,6 +10157,7 @@ async def update_preset(
 
 @router.delete("/presets/{preset_id}", status_code=204)
 async def delete_preset(preset_id: str, session: SessionDep) -> Response:
+    _reserve_recovery_dependency_write(session)
     preset = session.get(GenerationPreset, preset_id)
     if not preset:
         raise api_error(404, "preset-not-found", "preset not found")
@@ -10044,6 +10172,15 @@ async def delete_preset(preset_id: str, session: SessionDep) -> Response:
         )
         if bindings.get(preset.role) != preset.id:
             continue
+        if (isinstance(owner, Chat) and chat_is_deleted(session, owner.id)) or (
+            isinstance(owner, Project) and live_project(session, owner.id) is None
+        ):
+            raise api_error(
+                409,
+                "preset-used-in-recently-deleted",
+                "Restore or permanently delete items in Recently Deleted "
+                "before deleting this preset.",
+            )
         bindings.pop(preset.role, None)
         scoped = (
             dict(owner.generation_settings_json)
@@ -10674,13 +10811,15 @@ def _workflow_family_out(
 
 
 def _workflow_family_row(session: Session, family_id: str) -> WorkflowFamily:
+    from .workflow_recovery_visibility import visible_workflow_family
+
     family = session.scalar(
         select(WorkflowFamily)
         .options(
             selectinload(WorkflowFamily.definitions),
             selectinload(WorkflowFamily.preferences),
         )
-        .where(WorkflowFamily.id == family_id)
+        .where(WorkflowFamily.id == family_id, visible_workflow_family(WorkflowFamily.id))
     )
     if family is None:
         raise api_error(404, "workflow-family-not-found", "workflow family not found")
@@ -10754,6 +10893,8 @@ async def list_workflow_families(
     family_ids: Annotated[list[str] | None, Query(max_length=200)] = None,
     workflow_ids: Annotated[list[str] | None, Query(max_length=200)] = None,
 ) -> list[WorkflowFamilyOut]:
+    from .workflow_recovery_visibility import visible_workflow_family
+
     if (
         limit is not None
         or offset
@@ -10804,9 +10945,13 @@ async def list_workflow_families(
                 or variant_capability is not None
             ),
         )
-    query = select(WorkflowFamily).options(
-        selectinload(WorkflowFamily.definitions),
-        selectinload(WorkflowFamily.preferences),
+    query = (
+        select(WorkflowFamily)
+        .where(visible_workflow_family(WorkflowFamily.id))
+        .options(
+            selectinload(WorkflowFamily.definitions),
+            selectinload(WorkflowFamily.preferences),
+        )
     )
     if not include_archived:
         query = query.where(WorkflowFamily.archived.is_(False))
@@ -11214,7 +11359,7 @@ async def list_project_workflow_selections(
     project_id: str,
     session: SessionDep,
 ) -> list[WorkflowSelectionOut]:
-    project = session.get(Project, project_id)
+    project = live_project(session, project_id)
     if project is None:
         raise api_error(404, "project-not-found", "project not found")
     return [
@@ -11233,7 +11378,15 @@ async def set_project_workflow_selection(
     payload: ProjectWorkflowSelectionIn,
     session: SessionDep,
 ) -> WorkflowSelectionOut:
-    project = session.get(Project, project_id)
+    try:
+        reserve_recovery_write(session)
+    except RecoveryPreviewConflict:
+        raise api_error(
+            409,
+            "workflow-selection-busy",
+            "The workflow selection could not be changed safely. Try again.",
+        ) from None
+    project = live_project(session, project_id)
     if project is None:
         raise api_error(404, "project-not-found", "project not found")
     selection = session.scalar(
@@ -11260,10 +11413,16 @@ async def set_project_workflow_selection(
         elif payload.mode == "revision":
             revision = session.get(WorkflowRevision, payload.workflow_revision_id)
             definition = session.get(WorkflowDefinition, revision.workflow_id) if revision else None
+            from .workflow_recovery_visibility import workflow_family_deleted
+
             operations = {
                 operation.value for operation in _SELECTOR_OPERATIONS[selector_capability]
             }
-            if revision is None or definition is None:
+            if (
+                revision is None
+                or definition is None
+                or workflow_family_deleted(session, definition.family_id)
+            ):
                 raise api_error(404, "workflow-revision-not-found", "workflow revision not found")
             if definition.operation not in operations:
                 raise api_error(
@@ -11602,7 +11761,9 @@ async def update_workflow(
     workflow_id: str, payload: WorkflowUpdate, session: SessionDep
 ) -> WorkflowDefinition:
     definition = session.get(WorkflowDefinition, workflow_id)
-    if not definition:
+    from .workflow_recovery_visibility import workflow_family_deleted
+
+    if not definition or workflow_family_deleted(session, definition.family_id):
         raise api_error(404, "workflow-not-found", "workflow not found")
     for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(definition, key, value)
@@ -14688,7 +14849,9 @@ def _persist_workflow_revision_sync(
     session.execute(text("UPDATE workflow_revisions SET version = version WHERE 0"))
     session.expire_all()
     definition = session.get(WorkflowDefinition, workflow_id)
-    if not definition:
+    from .workflow_recovery_visibility import workflow_family_deleted
+
+    if not definition or workflow_family_deleted(session, definition.family_id):
         raise api_error(404, "workflow-not-found", "workflow not found")
     try:
         revision = stage_workflow_revision(session, definition, payload, trusted=trusted)
@@ -14706,7 +14869,9 @@ def _stored_source_fit_revision(
     if revision is None:
         raise api_error(404, "workflow-revision-not-found", "workflow revision not found")
     definition = session.get(WorkflowDefinition, revision.workflow_id)
-    if definition is None:
+    from .workflow_recovery_visibility import workflow_family_deleted
+
+    if definition is None or workflow_family_deleted(session, definition.family_id):
         raise api_error(404, "workflow-not-found", "workflow not found")
     return definition, revision
 
@@ -14843,12 +15008,7 @@ def _prove_stored_revision_geometry(
 ) -> WorkflowOutputGeometryResult:
     """Re-load and re-prove one stored revision, from the stored bytes only."""
 
-    revision = session.get(WorkflowRevision, revision_id)
-    if revision is None:
-        raise api_error(404, "workflow-revision-not-found", "workflow revision not found")
-    definition = session.get(WorkflowDefinition, revision.workflow_id)
-    if definition is None:
-        raise api_error(404, "workflow-not-found", "workflow not found")
+    definition, revision = _stored_source_fit_revision(revision_id, session)
     return prove_workflow_output_geometry(
         workflow_id=definition.id,
         revision_id=revision.id,
@@ -14976,12 +15136,7 @@ async def restore_workflow_revision(
 async def validate_workflow(
     workflow_id: str, request: Request, session: SessionDep
 ) -> dict[str, Any]:
-    definition = session.get(WorkflowDefinition, workflow_id)
-    if not definition or not definition.current_revision_id:
-        raise api_error(404, "workflow-not-found", "workflow not found")
-    revision = session.get(WorkflowRevision, definition.current_revision_id)
-    if not revision:
-        raise api_error(404, "workflow-revision-not-found", "workflow revision not found")
+    definition, revision = _workflow_and_revision(session, workflow_id)
     errors = await _services(request).engines.media.validate_workflow(revision.api_graph_json)
     warnings: list[str] = []
     if revision.engine == "comfyui" and not workflow_review_is_current(
@@ -15072,7 +15227,13 @@ def _workflow_and_revision(
     session: Session, workflow_id: str
 ) -> tuple[WorkflowDefinition, WorkflowRevision]:
     definition = session.get(WorkflowDefinition, workflow_id)
-    if not definition or not definition.current_revision_id:
+    from .workflow_recovery_visibility import workflow_family_deleted
+
+    if (
+        not definition
+        or not definition.current_revision_id
+        or workflow_family_deleted(session, definition.family_id)
+    ):
         raise api_error(404, "workflow-not-found", "workflow not found")
     revision = session.get(WorkflowRevision, definition.current_revision_id)
     if not revision:

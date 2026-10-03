@@ -9,6 +9,7 @@ from typing import Literal, assert_never
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .chat_recovery_visibility import visible_chat
 from .domain import Operation
 from .models import (
     Chat,
@@ -20,6 +21,13 @@ from .models import (
     WorkflowFamily,
     WorkflowPreference,
     WorkflowProfileCompatibility,
+    WorkflowRevision,
+)
+from .project_recovery_visibility import visible_project
+from .workflow_recovery_visibility import (
+    visible_workflow_family,
+    workflow_family_deleted,
+    workflow_family_ready,
 )
 
 AUTO_PROFILE_ID = "__auto__"
@@ -292,7 +300,19 @@ def _ensure_profile_preferences(
 
 
 def _reconcile_compatibility_defaults(session: Session, profiles: list[ModelProfile]) -> None:
-    mappings = list(session.scalars(select(WorkflowProfileCompatibility)).all())
+    mappings = list(
+        session.scalars(
+            select(WorkflowProfileCompatibility)
+            .join(
+                WorkflowFamily, WorkflowFamily.id == WorkflowProfileCompatibility.workflow_family_id
+            )
+            .where(
+                visible_workflow_family(WorkflowFamily.id),
+                WorkflowFamily.enabled.is_(True),
+                WorkflowFamily.archived.is_(False),
+            )
+        ).all()
+    )
     compatibility_family_ids = {mapping.workflow_family_id for mapping in mappings}
     generated_preferences = (
         list(
@@ -347,10 +367,22 @@ def _backfill_chat_selections(session: Session) -> int:
     created = 0
     mappings = {
         mapping.model_profile_id: mapping.workflow_family_id
-        for mapping in session.scalars(select(WorkflowProfileCompatibility)).all()
+        for mapping in session.scalars(
+            select(WorkflowProfileCompatibility)
+            .join(
+                WorkflowFamily, WorkflowFamily.id == WorkflowProfileCompatibility.workflow_family_id
+            )
+            .where(
+                visible_workflow_family(WorkflowFamily.id),
+                WorkflowFamily.enabled.is_(True),
+                WorkflowFamily.archived.is_(False),
+            )
+        ).all()
     }
     profiles = {profile.id: profile for profile in session.scalars(select(ModelProfile)).all()}
-    for chat in session.scalars(select(Chat).order_by(Chat.created_at, Chat.id)).all():
+    for chat in session.scalars(
+        select(Chat).where(visible_chat(Chat.id)).order_by(Chat.created_at, Chat.id)
+    ).all():
         for capability, field in _CHAT_PROFILE_FIELDS.items():
             existing = session.scalar(
                 select(ChatWorkflowSelection).where(
@@ -391,7 +423,9 @@ def _backfill_chat_selections(session: Session) -> int:
 
 def _backfill_project_selections(session: Session) -> int:
     created = 0
-    for project in session.scalars(select(Project).order_by(Project.created_at, Project.id)).all():
+    for project in session.scalars(
+        select(Project).where(visible_project(Project.id)).order_by(Project.created_at, Project.id)
+    ).all():
         for capability, field in _PROJECT_REVISION_FIELDS.items():
             existing = session.scalar(
                 select(ProjectWorkflowSelection).where(
@@ -403,6 +437,16 @@ def _backfill_project_selections(session: Session) -> int:
                 continue
             revision_id = getattr(project, field)
             if revision_id is None:
+                continue
+            visible_revision = session.scalar(
+                select(WorkflowRevision.id)
+                .join(WorkflowDefinition, WorkflowRevision.workflow_id == WorkflowDefinition.id)
+                .where(
+                    WorkflowRevision.id == revision_id,
+                    visible_workflow_family(WorkflowDefinition.family_id),
+                )
+            )
+            if visible_revision is None:
                 continue
             session.add(
                 ProjectWorkflowSelection(
@@ -420,9 +464,11 @@ def _backfill_project_selections(session: Session) -> int:
 def ensure_legacy_profile_workflow(
     session: Session,
     profile: ModelProfile,
-) -> WorkflowFamily:
+) -> WorkflowFamily | None:
     """Ensure one profile's stable family, variants, and selector preferences."""
 
+    if workflow_family_deleted(session, compatibility_family_id(profile.id)):
+        return None
     family, _, _ = _family_for_profile(session, profile)
     _ensure_profile_variants(session, profile, family)
     _ensure_profile_preferences(session, profile, family)
@@ -451,6 +497,8 @@ def reconcile_legacy_workflow_compatibility(
     definitions_created = 0
     preferences_created = 0
     for profile in profiles:
+        if workflow_family_deleted(session, compatibility_family_id(profile.id)):
+            continue
         family, _, family_created = _family_for_profile(session, profile)
         families_created += int(family_created)
         definitions_created += _ensure_profile_variants(session, profile, family)
@@ -483,6 +531,14 @@ def resolve_chat_workflow_selection(
     )
     legacy_profile_id = getattr(chat, _CHAT_PROFILE_FIELDS[capability])
     if selection is None:
+        if legacy_profile_id is not None and legacy_profile_id != AUTO_PROFILE_ID:
+            family_id = compatibility_family_id(legacy_profile_id)
+            if workflow_family_deleted(session, family_id):
+                raise WorkflowSelectionInvalid(capability=capability, reason="family_unavailable")
+            if session.get(WorkflowFamily, family_id) is not None and not workflow_family_ready(
+                session, family_id
+            ):
+                raise WorkflowSelectionInvalid(capability=capability, reason="family_unavailable")
         return ResolvedChatWorkflowSelection(
             capability=capability,
             mode="legacy",
@@ -498,6 +554,10 @@ def resolve_chat_workflow_selection(
         )
     if not selection.workflow_family_id:
         raise WorkflowSelectionInvalid(capability=capability, reason="family_missing")
+    if workflow_family_deleted(session, selection.workflow_family_id) or not workflow_family_ready(
+        session, selection.workflow_family_id
+    ):
+        raise WorkflowSelectionInvalid(capability=capability, reason="family_unavailable")
     mapping = session.scalar(
         select(WorkflowProfileCompatibility).where(
             WorkflowProfileCompatibility.workflow_family_id == selection.workflow_family_id
@@ -584,6 +644,8 @@ def mirror_legacy_chat_workflow_selections(
             if profile is None or profile.role != _CAPABILITY_ROLE[capability]:
                 raise WorkflowSelectionInvalid(capability=capability, reason="profile_incompatible")
             family = ensure_legacy_profile_workflow(session, profile)
+            if family is None or not workflow_family_ready(session, family.id):
+                raise WorkflowSelectionInvalid(capability=capability, reason="family_unavailable")
             family_id = family.id
             mode = "family"
         if selection is None:

@@ -1614,7 +1614,6 @@ def test_partial_migration_preserves_populated_complete_batch_roundtrip(tmp_path
             before_batches = connection.execute("SELECT * FROM prompt_expansion_batches").fetchall()
             before_triggers = connection.execute(_PARTIAL_TRIGGERS_SQL).fetchall()
         command.upgrade(config, _PARTIAL_MIGRATION_HEAD)
-        Base.metadata.create_all(engine)
         with Session(engine, expire_on_commit=False) as session:
             reread = read_expansion(session, chat_id, batch_id)
             assert [item.id for item in reread.items] == item_ids
@@ -1651,7 +1650,6 @@ def test_partial_migration_accepts_partial_and_refuses_lossy_downgrade(tmp_path:
     database = settings.state_dir / "local-lm.sqlite3"
     engine = create_engine(f"sqlite+pysqlite:///{database}")
     try:
-        Base.metadata.create_all(engine)
         with Session(engine, expire_on_commit=False) as session:
             chat, request, plan, snapshot, _contract = _seed_partial_model(session)
             stored = create_or_replay_expansion(

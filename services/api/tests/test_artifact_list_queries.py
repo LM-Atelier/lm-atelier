@@ -5,10 +5,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 import pytest
-from sqlalchemy import Result, create_engine, event
+from sqlalchemy import Result, create_engine, event, select
 from sqlalchemy.orm import ORMExecuteState, Session
 
 from local_lm.api import list_artifacts
+from local_lm.artifact_library import ensure_library_entry
 from local_lm.db import Base
 from local_lm.models import Artifact, Chat, Message, MessagePart, Project
 
@@ -48,6 +49,9 @@ def library_session() -> Iterator[Session]:
                 for i in range(2)
             ]
         )
+        session.flush()
+        for artifact in session.scalars(select(Artifact)):
+            ensure_library_entry(session, artifact)
         session.commit()
         session.expunge_all()
         yield session

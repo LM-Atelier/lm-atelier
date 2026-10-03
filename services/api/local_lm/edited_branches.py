@@ -5,6 +5,7 @@ from __future__ import annotations
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session, selectinload
 
+from .chat_recovery_visibility import chat_is_deleted
 from .models import Chat, Job, Message, Run, WorkPlan, WorkStep
 from .prior_turn_edits import EditRequestConflict
 from .schemas import EditedBranchOut, EditedBranchPage, JobOut, WorkPlanOut
@@ -98,7 +99,7 @@ def _entries(session: Session, plans: list[WorkPlan]) -> list[EditedBranchOut]:
 def list_edited_branches(
     session: Session, chat_id: str, *, limit: int, cursor: str | None
 ) -> EditedBranchPage:
-    if session.get(Chat, chat_id) is None:
+    if session.get(Chat, chat_id) is None or chat_is_deleted(session, chat_id):
         raise LookupError("Chat not found.")
     query = select(WorkPlan).where(
         WorkPlan.chat_id == chat_id,
@@ -143,7 +144,7 @@ def activate_edited_branch(
             WorkPlan.summary_json["edit_source"]["source_message_id"].as_string().is_not(None),
         )
     )
-    if chat is None or plan is None:
+    if chat is None or plan is None or chat_is_deleted(session, chat_id):
         raise LookupError("Edited branch not found in this chat.")
     branch = _entries(session, [plan])[0]
     if not branch.can_continue:

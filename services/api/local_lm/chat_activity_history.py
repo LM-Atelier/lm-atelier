@@ -9,6 +9,7 @@ from datetime import datetime
 from sqlalchemy import exists, func, select
 from sqlalchemy.orm import Session
 
+from .chat_recovery_visibility import visible_chat
 from .models import Chat, ChatActivityEvent, Message, ResponseRevision, ResponseRevisionPart
 from .prompt_helpers import STANDARD_CHAT_SCOPE
 
@@ -69,6 +70,7 @@ def chat_activity_history(
             ChatActivityEvent.chat_id.in_(identities),
             ChatActivityEvent.kind.in_(("output", "failure")),
             Chat.scope == STANDARD_CHAT_SCOPE,
+            visible_chat(Chat.id),
             Message.chat_id == Chat.id,
             Message.role == "assistant",
             Message.transcript_visible.is_(True),

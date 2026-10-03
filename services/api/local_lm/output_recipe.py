@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 from . import __version__
 from .accepted_turn_context import AcceptedContext, accepted_context
 from .artifacts import ArtifactStore
+from .chat_recovery_visibility import chat_is_deleted
 from .model_planner import WORKFLOW_ARTIFACT_CONTRACT_VERSION, workflow_artifact_contract
 from .models import Artifact, Message, Run, WorkflowDefinition, WorkflowRevision
 from .orchestrator import ConversationOrchestrator
@@ -131,7 +132,11 @@ def build_output_recipe(
     """Write the record of one output of one run, or say why there is none."""
 
     run = session.get(Run, run_id)
-    if run is None or not isinstance(run.provenance_json, dict):
+    if (
+        run is None
+        or chat_is_deleted(session, run.chat_id)
+        or not isinstance(run.provenance_json, dict)
+    ):
         raise OutputRecipeUnavailable(
             404, "output-recipe-run-not-found", "This generation no longer exists."
         )

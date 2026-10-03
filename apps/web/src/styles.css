@@ -323,7 +323,7 @@ body.resizing-sidebar { user-select: none; cursor: col-resize; }
 [data-sidebar="collapsed"] .sidebar { padding-left: 0; padding-right: 0; border-right: 0; }
 /* Collapsed, the edge is the only way back, so it is easier to hit. */
 [data-sidebar="collapsed"] .sidebar-resizer { width: 9px; background: var(--surface-2); }
-.sidebar { background: var(--surface-1); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-width: 0; padding: calc(18px * var(--spacing-scale, 1)) calc(14px * var(--spacing-scale, 1)) calc(14px * var(--spacing-scale, 1)); overflow: hidden; }
+.sidebar { background: var(--surface-1); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-width: 0; padding: calc(18px * var(--spacing-scale, 1)) calc(14px * var(--spacing-scale, 1)) calc(14px * var(--spacing-scale, 1)); overflow-x: hidden; overflow-y: auto; }
 .brand { display: flex; align-items: center; gap: calc(12px * var(--spacing-scale, 1)); padding: 0 calc(7px * var(--spacing-scale, 1)) calc(20px * var(--spacing-scale, 1)); font-size: calc(20px * var(--text-scale, 1)); font-weight: 700; letter-spacing: -.02em; }
 .brand > span { display: grid; line-height: 1.05; font-family: "Source Serif 4", "Iowan Old Style", "Palatino Linotype", Charter, Georgia, "Times New Roman", serif; }
 .brand > span small { margin-top: 4px; color: var(--ink-secondary); font: 600 calc(8px * var(--text-scale, 1))/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: .13em; text-transform: uppercase; }
@@ -346,7 +346,7 @@ body.resizing-sidebar { user-select: none; cursor: col-resize; }
 .workspace-search input { min-width: 0; border: 0; outline: 0; background: transparent; color: var(--ink-primary); font-size: calc(11px * var(--text-scale, 1)); }
 .workspace-search button { border: 0; border-radius: 6px; background: transparent; color: var(--muted); padding: calc(4px * var(--spacing-scale, 1)) calc(6px * var(--spacing-scale, 1)); font-size: calc(11px * var(--text-scale, 1)); cursor: pointer; }
 .workspace-search button.active { background: var(--info-surface); color: var(--info-ink); }
-.workspace-tree { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-right: calc(2px * var(--spacing-scale, 1)); scrollbar-color: #3c4350 transparent; scrollbar-width: thin; }
+.workspace-tree { flex: 1; min-height: 80px; overflow-y: auto; overscroll-behavior: contain; padding-right: calc(2px * var(--spacing-scale, 1)); scrollbar-color: #3c4350 transparent; scrollbar-width: thin; }
 .workspace-tree::-webkit-scrollbar { width: 8px; }
 .workspace-tree::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 10px; background: var(--surface-3); background-clip: padding-box; }
 .sidebar-section { min-height: 0; }
@@ -1099,6 +1099,9 @@ html[data-text-size="larger"] { --text-scale: 1.25; font-size: 125%; }
 .jobs-error { color: var(--danger-ink-on-surface); font-size: calc(11px * var(--text-scale, 1)); line-height: 1.4; padding: calc(8px * var(--spacing-scale, 1)) calc(3px * var(--spacing-scale, 1)) calc(1px * var(--spacing-scale, 1)); }
 .toast { position: fixed; top: 18px; right: 18px; z-index: 40; display: flex; align-items: center; gap: calc(8px * var(--spacing-scale, 1)); max-width: 420px; border-radius: 10px; padding: calc(11px * var(--spacing-scale, 1)) calc(14px * var(--spacing-scale, 1)); box-shadow: 0 16px 40px var(--shadow); }
 .toast.error { background: var(--danger-surface); border: 1px solid var(--state-danger); color: var(--danger-ink-on-surface); }
+.recovery-notice { width: min(420px, calc(100vw - 36px)); align-items: flex-start; }
+.notification-stack { position: fixed; top: 18px; right: 18px; z-index: 40; display: grid; gap: calc(8px * var(--spacing-scale, 1)); width: min(420px, calc(100vw - 36px)); max-height: calc(100dvh - 36px); overflow-y: auto; }
+.notification-stack > .toast { position: static; }
 .muted { color: var(--muted); }
 
 /* Less motion. The document says "reduced" when the computer asks for it or

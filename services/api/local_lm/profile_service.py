@@ -5,8 +5,17 @@ from collections.abc import Iterable
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
+from .chat_recovery_visibility import visible_chat
 from .domain import new_id
-from .models import AppSetting, Chat, ModelInstall, ModelProfile, ModelSource
+from .models import (
+    AppSetting,
+    Chat,
+    ChatWorkflowSelection,
+    ModelInstall,
+    ModelProfile,
+    ModelSource,
+    WorkflowProfileCompatibility,
+)
 from .profile_use_cases import derive_profile_use_case
 from .schemas import SettingField
 from .settings_registry import (
@@ -20,9 +29,73 @@ from .workflow_compatibility import (
     ensure_legacy_profile_workflow,
     mirror_legacy_chat_workflow_selections,
 )
+from .workflow_recovery_visibility import visible_workflow_family
 
 AUTO_PROFILE_ID = "__auto__"
 LAST_CHAT_PROFILE_KEY = "workers.last_chat_profile_id"
+
+
+def profiles_have_recovery_dependents(session: Session, profile_ids: set[str]) -> bool:
+    """Retain profiles needed to restore a conversation or compatibility family."""
+    if not profile_ids:
+        return False
+    families = select(WorkflowProfileCompatibility.workflow_family_id).where(
+        WorkflowProfileCompatibility.model_profile_id.in_(profile_ids)
+    )
+    if (
+        session.scalar(
+            select(Chat.id)
+            .where(
+                ~visible_chat(Chat.id),
+                or_(
+                    Chat.active_chat_profile_id.in_(profile_ids),
+                    Chat.active_vision_profile_id.in_(profile_ids),
+                    Chat.active_image_profile_id.in_(profile_ids),
+                    Chat.active_video_profile_id.in_(profile_ids),
+                    Chat.id.in_(
+                        select(ChatWorkflowSelection.chat_id).where(
+                            ChatWorkflowSelection.workflow_family_id.in_(families)
+                        )
+                    ),
+                ),
+            )
+            .limit(1)
+        )
+        is not None
+    ):
+        return True
+    return (
+        session.scalar(
+            select(WorkflowProfileCompatibility.model_profile_id)
+            .where(
+                WorkflowProfileCompatibility.model_profile_id.in_(profile_ids),
+                ~visible_workflow_family(WorkflowProfileCompatibility.workflow_family_id),
+            )
+            .limit(1)
+        )
+        is not None
+    )
+
+
+def reset_unavailable_chat_profiles(session: Session, chat: Chat) -> None:
+    """Resolve retired model defaults only after the conversation becomes visible."""
+    changed: list[ChatSelectorCapability] = []
+    capabilities: tuple[ChatSelectorCapability, ...] = ("chat", "vision", "image", "video")
+    for capability in capabilities:
+        field = f"active_{capability}_profile_id"
+        profile_id = getattr(chat, field)
+        if profile_id in (None, AUTO_PROFILE_ID):
+            continue
+        profile = session.get(ModelProfile, profile_id)
+        try:
+            if profile is None:
+                raise LookupError("profile not found")
+            validate_profile_binding(session, profile)
+        except (LookupError, ValueError):
+            setattr(chat, field, AUTO_PROFILE_ID)
+            changed.append(capability)
+    if changed:
+        mirror_legacy_chat_workflow_selections(session, chat, changed)
 
 
 def validate_profile_install(
@@ -97,12 +170,13 @@ def _reset_profile_selections(session: Session, profile_ids: set[str]) -> None:
         return
     chats = session.scalars(
         select(Chat).where(
+            visible_chat(Chat.id),
             or_(
                 Chat.active_chat_profile_id.in_(profile_ids),
                 Chat.active_vision_profile_id.in_(profile_ids),
                 Chat.active_image_profile_id.in_(profile_ids),
                 Chat.active_video_profile_id.in_(profile_ids),
-            )
+            ),
         )
     ).all()
     for chat in chats:

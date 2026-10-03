@@ -7,7 +7,10 @@ import { api } from "./api";
 import { parseArtifactLibraryPage } from "./artifactLibraryPage";
 import type { Message, Run, Artifact } from "./types";
 
-vi.mock("./api", () => ({ api: { artifactLibrary: vi.fn(), artifact: vi.fn(), run: vi.fn() } }));
+vi.mock("./api", async (original) => {
+  const actual = await original<typeof import("./api")>();
+  return { ApiError: actual.ApiError, api: { artifactLibrary: vi.fn(), artifact: vi.fn(), run: vi.fn() } };
+});
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
 const artifactId = `sha256:${"a".repeat(64)}`;
 const stamp = "2026-09-30T12:00:00Z";

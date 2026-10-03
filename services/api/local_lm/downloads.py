@@ -34,6 +34,7 @@ from .auxiliary_assets import (
     validate_lora_workflow_contract,
 )
 from .capability_evidence import ACTIVATION_ARTIFACT_KEY, record_capability_evidence
+from .chat_recovery_visibility import visible_chat
 from .civitai_delivery import ALLOWED_DOWNLOAD_HOSTS
 from .comfy_registry_paths import registry_wheel_environment_root
 from .comfy_templates import (
@@ -140,6 +141,7 @@ from .workflow_completion_jobs import (
 from .workflow_edit_calibration import validate_workflow_edit_calibration
 from .workflow_install_progress import completion_attention_code
 from .workflow_ownership import ensure_workflow_family_ownership
+from .workflow_recovery_visibility import visible_workflow_family
 
 if TYPE_CHECKING:
     from .adapters.comfyui import ComfyUIAdapter
@@ -2968,6 +2970,7 @@ class DownloadManager:
                             WorkflowDefinition.name
                             == _template_workflow_name(compiled.template.id),
                             WorkflowDefinition.operation == compiled.template.operation,
+                            visible_workflow_family(WorkflowDefinition.family_id),
                         )
                     )
                     revision = self._ensure_template_workflow(session, compiled, install)
@@ -2980,6 +2983,7 @@ class DownloadManager:
                                 WorkflowDefinition.name
                                 == _template_workflow_name(image_edit.template.id),
                                 WorkflowDefinition.operation == image_edit.template.operation,
+                                visible_workflow_family(WorkflowDefinition.family_id),
                             )
                         )
                         edit_revision = self._ensure_template_workflow(
@@ -3027,6 +3031,7 @@ class DownloadManager:
             select(WorkflowDefinition.current_revision_id).where(
                 WorkflowDefinition.name == _matting_workflow_name(model_file),
                 WorkflowDefinition.operation == "image_to_image",
+                visible_workflow_family(WorkflowDefinition.family_id),
             )
         )
 
@@ -3103,12 +3108,12 @@ class DownloadManager:
         if profile_ids:
             session.execute(
                 update(Chat)
-                .where(Chat.active_chat_profile_id.in_(profile_ids))
+                .where(Chat.active_chat_profile_id.in_(profile_ids), visible_chat(Chat.id))
                 .values(active_chat_profile_id=current_profile.id)
             )
             session.execute(
                 update(Chat)
-                .where(Chat.active_vision_profile_id.in_(profile_ids))
+                .where(Chat.active_vision_profile_id.in_(profile_ids), visible_chat(Chat.id))
                 .values(active_vision_profile_id=current_profile.id)
             )
         return sorted(superseded_ids)
@@ -3168,6 +3173,7 @@ class DownloadManager:
             select(WorkflowDefinition).where(
                 WorkflowDefinition.name == name,
                 WorkflowDefinition.operation == compiled.template.operation,
+                visible_workflow_family(WorkflowDefinition.family_id),
             )
         )
         if not definition:
@@ -3311,6 +3317,7 @@ class DownloadManager:
             select(WorkflowDefinition).where(
                 WorkflowDefinition.name == name,
                 WorkflowDefinition.operation == operation,
+                visible_workflow_family(WorkflowDefinition.family_id),
             )
         )
         current = (

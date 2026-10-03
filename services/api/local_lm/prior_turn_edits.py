@@ -19,6 +19,7 @@ from .accepted_turn_context import (
     settings_workflow,
 )
 from .auxiliary_assets import revision_accepts_added_loras
+from .chat_recovery_visibility import chat_is_deleted
 from .domain import MessageRole, Operation, RoutingMode
 from .models import (
     Artifact,
@@ -62,7 +63,12 @@ def _source(session: Session, message_id: str, run_id: str | None) -> tuple[Mess
     message = session.scalar(
         select(Message).options(selectinload(Message.parts)).where(Message.id == message_id)
     )
-    if message is None or message.role != MessageRole.USER.value or not message.transcript_visible:
+    if (
+        message is None
+        or message.role != MessageRole.USER.value
+        or not message.transcript_visible
+        or chat_is_deleted(session, message.chat_id)
+    ):
         raise LookupError("Source user message not found.")
     if message.content_removed_at is not None:
         raise EditRequestConflict("Source content was removed and cannot be edited.")

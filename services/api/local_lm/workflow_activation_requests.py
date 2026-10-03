@@ -10,7 +10,7 @@ from pydantic import Field
 from sqlalchemy.orm import Session
 
 from .model_planner import workflow_artifact_contract
-from .models import WorkflowDefinition, WorkflowFamily, WorkflowRevision
+from .models import WorkflowDefinition, WorkflowRevision
 from .schemas import ApiModel
 from .workflow_activations import (
     WorkflowActivationError,
@@ -24,6 +24,7 @@ from .workflow_dependencies import (
     workflow_dependency_contract_payload,
     workflow_dependency_contract_sha256,
 )
+from .workflow_recovery_visibility import workflow_family_deleted, workflow_family_ready
 from .workflow_revision_reviews import review_is_current
 
 if TYPE_CHECKING:
@@ -75,7 +76,12 @@ class WorkflowActivationOut(ApiModel):
 def _eligible_revision(session: Session, workflow_id: str, revision_id: str) -> WorkflowRevision:
     definition = session.get(WorkflowDefinition, workflow_id)
     revision = session.get(WorkflowRevision, revision_id)
-    if definition is None or revision is None or revision.workflow_id != workflow_id:
+    if (
+        definition is None
+        or revision is None
+        or revision.workflow_id != workflow_id
+        or workflow_family_deleted(session, definition.family_id)
+    ):
         raise WorkflowActivationError(
             "workflow_revision_unavailable", "Workflow revision is unavailable"
         )
@@ -83,12 +89,10 @@ def _eligible_revision(session: Session, workflow_id: str, revision_id: str) -> 
         raise WorkflowActivationError(
             "workflow_revision_not_current", "Workflow revision is not current"
         )
-    if definition.family_id is not None:
-        family = session.get(WorkflowFamily, definition.family_id)
-        if family is None or family.archived or not family.enabled:
-            raise WorkflowActivationError(
-                "workflow_family_unavailable", "Workflow family is unavailable"
-            )
+    if not workflow_family_ready(session, definition.family_id):
+        raise WorkflowActivationError(
+            "workflow_family_unavailable", "Workflow family is unavailable"
+        )
     artifact = revision.artifact_sha256
     contract = revision.dependency_contract_sha256
     if (
