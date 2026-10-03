@@ -1235,6 +1235,9 @@ export const api = {
     }),
   artifact: (artifactId: string) =>
     request<Artifact>(`/api/artifacts/${encodeURIComponent(artifactId)}`),
+  /** The ComfyUI workflow a stored picture's own file carries, for the workflow review; imports nothing. */
+  pictureWorkflow: (artifactId: string) =>
+    request<unknown>(`/api/artifacts/${encodeURIComponent(artifactId)}/embedded-workflow`),
   /** What a stored picture's own file says about how it was made; read by pictureSettings.ts. */
   pictureSettings: (artifactId: string, signal?: AbortSignal) =>
     request<unknown>(`/api/artifacts/${encodeURIComponent(artifactId)}/generation-settings`, { signal }),

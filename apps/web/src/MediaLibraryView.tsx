@@ -169,7 +169,7 @@ export function MediaLibraryView({
                     <strong>{entry.display_name}</strong>
                     <small>{formatBytes(entry.size_bytes)} · Added {new Date(Math.floor(entry.created_at_epoch_micros / 1000)).toLocaleString(undefined, clockOptions(clock))}</small>
                     <ArtifactGenerationDetails key={entry.artifact_id} artifactId={entry.artifact_id} />
-                    {entry.kind === "image" && <PictureFileSettings artifactId={entry.artifact_id} onOpenChat={onOpenChat} />}
+                    {entry.kind === "image" && <PictureFileSettings artifactId={entry.artifact_id} pictureName={entry.display_name} onOpenChat={onOpenChat} />}
                     <span>
                       <button
                         className={`icon-button ${entry.favorite ? "favorite-active" : ""}`}

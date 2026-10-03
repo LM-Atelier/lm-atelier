@@ -97,7 +97,10 @@ From a PNG, only text the file stores uncompressed is read; from a JPEG or WebP,
 only its EXIF text, never the picture itself or any XMP text. Nothing read is
 kept, and nothing the text names is fetched, installed or run: models, LoRAs,
 other files and workflows it names are listed as left out. Other kinds of
-picture are not read.
+picture are not read. When the file carries a ComfyUI workflow, **Review this
+picture's workflow** reads it and opens the same review as importing a workflow
+file: nothing is added to Workflows until you import it there, and what is
+added cannot run until you review it.
 **Remix these settings** checks those settings against a workflow and a model
 you choose here, never by a name or file the text gives, and shows what a new
 picture would be made with before anything is made. Making it starts one picture

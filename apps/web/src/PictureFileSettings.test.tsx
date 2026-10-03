@@ -37,7 +37,7 @@ const answer = {
 
 function renderSettings() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(<QueryClientProvider client={client}><PictureFileSettings artifactId={artifactId} /></QueryClientProvider>);
+  render(<QueryClientProvider client={client}><PictureFileSettings artifactId={artifactId} pictureName="Ceramic cup" /></QueryClientProvider>);
 }
 
 function open() {
@@ -64,7 +64,7 @@ describe("settings stored in a picture's file", () => {
     const leftOut = screen.getAllByRole("listitem").map((item) => item.textContent);
     expect(leftOut).toEqual([
       "Model: names a file on the computer that made it",
-      "workflow: a workflow, which is never imported or run",
+      "workflow: a workflow, which is never run from here",
       "Version: left out",
       "KSampler.negative: empty",
     ]);

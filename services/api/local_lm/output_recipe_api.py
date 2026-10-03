@@ -35,6 +35,7 @@ from .output_recipe_promotion import (
     output_recipe_draft,
 )
 from .output_recipe_replay import plan_output_recipe_replay, replay_outcome
+from .picture_workflow import read_picture_workflow
 from .studio_region_edit import MAX_BLEND_READ_BYTES
 
 if TYPE_CHECKING:
@@ -171,30 +172,78 @@ def read_picture_generation_settings(
 ) -> ExternalGenerationMetadata:
     """Read the settings a stored picture's own file carries, or refuse with a coded reason."""
 
+    content = _stored_picture(artifacts, artifact_id)
+    if isinstance(content, str):
+        return metadata_not_read(content)
+    try:
+        return read_external_generation_metadata(content)
+    except ValueError as exc:
+        raise _settings_unreadable() from exc
+
+
+@router.get("/artifacts/{artifact_id}/embedded-workflow")
+async def read_embedded_workflow(artifact_id: str, request: Request) -> JSONResponse:
+    """The ComfyUI workflow a picture's own file carries, for the person to review.
+
+    This imports, keeps, runs and trusts nothing. The client hands the graph to
+    the same review a workflow file gets, which imports only what the person
+    then confirms. A picture whose file carries no workflow that review can read
+    answers ``picture-workflow-missing``.
+    """
+
+    artifacts = cast("Services", request.app.state.services).artifacts
+    try:
+        graph = await run_in_threadpool(read_stored_picture_workflow, artifacts, artifact_id)
+    except OutputRecipeUnavailable as exc:
+        raise api_error(exc.status, exc.code, exc.message) from exc
+    # Its nodes hold the person's own prompt, so like the settings it is never cached.
+    return JSONResponse({"ui_graph": graph}, headers={"Cache-Control": "no-store"})
+
+
+def read_stored_picture_workflow(artifacts: ArtifactStore, artifact_id: str) -> dict[str, Any]:
+    """Read the workflow a stored picture's own file carries, or refuse with a coded reason."""
+
+    content = _stored_picture(artifacts, artifact_id)
+    try:
+        graph = None if isinstance(content, str) else read_picture_workflow(content)
+    except ValueError as exc:
+        raise _settings_unreadable() from exc
+    if graph is None:
+        raise OutputRecipeUnavailable(
+            404,
+            "picture-workflow-missing",
+            "This picture's file carries no workflow that can be reviewed.",
+        )
+    return graph
+
+
+def _stored_picture(artifacts: ArtifactStore, artifact_id: str) -> bytes | str:
+    """A stored picture's bytes, or the reason they are not read."""
+
     with SessionLocal() as session:
         artifact = session.get(Artifact, artifact_id)
         if artifact is None:
             raise OutputRecipeUnavailable(404, "artifact-not-found", "artifact not found")
         media_type = (artifact.media_type or "").lower()
         if media_type.startswith(("video/", "audio/")):
-            # Settings are read only from a picture's own text; nothing else is opened.
-            return metadata_not_read("format_not_read")
+            # Only a picture's own text is read; nothing else is opened.
+            return "format_not_read"
         if artifact.size_bytes > MAX_BLEND_READ_BYTES:
-            return metadata_not_read("too_large")
+            return "too_large"
         try:
-            content = artifacts.verified_bytes(artifact, maximum_bytes=MAX_BLEND_READ_BYTES)
+            return artifacts.verified_bytes(artifact, maximum_bytes=MAX_BLEND_READ_BYTES)
         except (ValueError, OSError) as exc:
             raise OutputRecipeUnavailable(
                 410, "artifact-file-unreadable", "artifact file is missing or corrupt"
             ) from exc
-    try:
-        return read_external_generation_metadata(content)
-    except ValueError as exc:
-        raise OutputRecipeUnavailable(
-            422,
-            "generation-settings-unreadable",
-            "The settings text stored in this picture could not be read.",
-        ) from exc
+
+
+def _settings_unreadable() -> OutputRecipeUnavailable:
+    return OutputRecipeUnavailable(
+        422,
+        "generation-settings-unreadable",
+        "The settings text stored in this picture could not be read.",
+    )
 
 
 def _generation_settings_answer(metadata: ExternalGenerationMetadata) -> dict[str, Any]:
