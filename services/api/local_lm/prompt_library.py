@@ -31,6 +31,7 @@ from .prompt_templates import (
     prompt_template_contract_sha256,
 )
 from .workflow_bindings import WorkflowBindingError, materialize_model_asset
+from .workflow_recovery_visibility import workflow_family_deleted, workflow_family_ready
 
 PROMPT_LIBRARY_INVALID = "Prompt template request is invalid."
 PROMPT_LIBRARY_NOT_FOUND = "Prompt template does not exist."
@@ -187,6 +188,8 @@ def prompt_template_workflow_revision_is_ready(
     if (
         definition is None
         or definition.operation != Operation.TEXT_TO_IMAGE.value
+        or workflow_family_deleted(session, definition.family_id)
+        or not workflow_family_ready(session, definition.family_id)
         or revision.engine != expected_engine
         or (expected_engine != "mock" and not revision.api_graph_json)
         or not revision.trusted

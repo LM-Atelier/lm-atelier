@@ -8,6 +8,8 @@ import { EmptyState } from "./EmptyState";
 import { ErrorCallout } from "./ErrorCallout";
 import { RegistryInstallsPanel } from "./RegistryInstallsPanel";
 import { WorkflowFamilyArchive } from "./WorkflowFamilyArchive";
+import { WorkflowFamilyRecovery } from "./WorkflowFamilyRecovery";
+import "./WorkflowsView.css";
 import { WorkflowFamilyList } from "./WorkflowFamilyList";
 import { useSelectedWorkflowFamily } from "./useWorkflowLibraryReads";
 import { WorkflowFamilyUsage } from "./WorkflowFamilyUsage";
@@ -339,11 +341,12 @@ export function WorkflowsView() {
     && !retrySubmission.isPending
     && !retryDraft.isPending;
   return (
-    <div className="page-view">
+    <div className="page-view workflow-page">
       <header className="page-header"><div><h1>Workflows</h1></div>
         <WorkflowDestinations current={destination} onChoose={showDestination} />
         {/* Library actions show the library first: a dialog under a hidden region would lock the page invisibly. */}
         <div className="storage-actions"><WorkflowRecipeManagerAction /><input ref={importInput} hidden type="file" accept="application/json,.json" onChange={(event) => { void importBundle(event.target.files?.[0]); event.target.value = ""; }} /><button className="secondary" onClick={() => { showDestination("library"); importInput.current?.click(); }}>Import bundle</button><button className="primary" onClick={() => { showDestination("library"); openCreate(); }}><Plus size={17} />New workflow</button></div></header>
+      <WorkflowFamilyRecovery family={destination === "library" ? selectedFamily : undefined} selectedId={selectedId} onSelectionChange={setSelectedId} />
       <div hidden={destination !== "library"}>
       {selectedFamilyRead.error && <div>
         <ErrorCallout message={selectedFamilyRead.error.message} />

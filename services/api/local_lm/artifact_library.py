@@ -419,6 +419,7 @@ def set_library_favorite(
             .where(
                 ArtifactLibraryEntry.id == entry.id,
                 ArtifactLibraryEntry.version == observed_version,
+                ArtifactLibraryEntry.state == "visible",
                 ArtifactLibraryEntry.favorite != desired,
             )
             .values(favorite=desired, version=observed_version + 1, updated_at=utcnow())
@@ -426,6 +427,10 @@ def set_library_favorite(
     )
     session.expire(entry)
     session.refresh(entry)
+    if entry.state != "visible":
+        raise ArtifactLibraryConflict(
+            "Restore this Media Library item before changing its favorite."
+        )
     if changed.rowcount != 1 and entry.favorite != desired:
         raise ArtifactLibraryConflict("Media Library entry changed; refresh and try again.")
     session.execute(update(Artifact).where(Artifact.id == artifact.id).values(favorite=desired))
@@ -681,6 +686,7 @@ def referenced_artifact_ids(
     session: Session,
     *,
     exclude_message_payload_for: str | None = None,
+    exclude_library_membership_for: AbstractSet[str] = frozenset(),
     for_deletion: bool = False,
 ) -> AbstractSet[str]:
     """Return the complete strong-reference graph or fail closed on corrupt JSON.
@@ -690,9 +696,10 @@ def referenced_artifact_ids(
     references while leaving every independently retained edge in the graph.
     Only for_deletion validates all stored JSON and binds deletion authority
     to the current writer reservation. Ordinary publication needs reachability.
+    Library exclusions preview released membership without authorizing byte deletion.
     """
 
-    if for_deletion and exclude_message_payload_for is not None:
+    if for_deletion and (exclude_message_payload_for is not None or exclude_library_membership_for):
         raise ValueError("a selective reference preview cannot authorize deletion")
     found: set[str] = set()
     counted_tables = (
@@ -734,7 +741,18 @@ def referenced_artifact_ids(
         ChatComposerDraftAttachment.artifact_id,
     )
     for column in direct_columns:
-        retain({value for value in session.scalars(select(column)) if value})
+        statement = select(column)
+        if column is ArtifactLibraryEntry.artifact_id and exclude_library_membership_for:
+            # Filtering here avoids a large SQL parameter list for a long conversation.
+            retain(
+                {
+                    value
+                    for value in session.scalars(statement)
+                    if value and value not in exclude_library_membership_for
+                }
+            )
+        else:
+            retain({value for value in session.scalars(statement) if value})
 
     part_query = select(MessagePart.artifact_id)
     revision_part_query = select(ResponseRevisionPart.artifact_id).join(

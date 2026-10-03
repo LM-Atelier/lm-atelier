@@ -1,3 +1,4 @@
+import { permanentlyDeleteChat } from "./recovery-cleanup";
 import { expect, test } from "@playwright/test";
 import type { QueueOrderPage } from "../apps/web/src/queueOrderTypes";
 
@@ -81,7 +82,7 @@ test("keyboard ordering persists through the real API and a page reload", async 
           .map((job) => job.status);
       }, { timeout: 30_000 }).toEqual(runs.map(() => "complete"));
     } finally {
-      for (const id of chats) expect.soft((await request.delete(`/api/chats/${id}`, { headers })).ok()).toBeTruthy();
+      for (const id of chats) await permanentlyDeleteChat(request, id, headers);
     }
   }
 });

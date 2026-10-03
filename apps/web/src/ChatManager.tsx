@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { AccessibleDialog } from "./AccessibleDialog";
-import { useConfirm } from "./useConfirm";
+import { ChatTrashConfirmation } from "./ChatTrashConfirmation";
+import type { RecoveryCommand } from "./recoveryTypes";
 import type { Chat } from "./types";
 import { ProjectPicker } from "./ProjectPicker";
 import { ChatWebAccess } from "./ChatWebAccess";
@@ -16,9 +17,9 @@ export function ChatManager({
   chat: Chat;
   onClose: () => void;
   onSave: (values: Partial<Chat>) => void;
-  onDelete: (deleteGeneratedMedia: boolean) => void;
+  onDelete: (deleteGeneratedMedia: boolean, command: RecoveryCommand) => void | Promise<void>;
 }) {
-  const [confirmDialog, confirm] = useConfirm();
+  const [deleting, setDeleting] = useState(false);
   const [title, setTitle] = useState(chat.title);
   const [projectId, setProjectId] = useState(chat.project_id ?? "");
   const [archived, setArchived] = useState(chat.archived);
@@ -30,9 +31,6 @@ export function ChatManager({
     chat.vision_settings_json?.compile_visual_prompts !== false,
   );
   const [deleteGeneratedMedia, setDeleteGeneratedMedia] = useState(false);
-  const deletePrompt = deleteGeneratedMedia
-    ? `Delete ${chat.title}, its history, and generated media used only by this chat?`
-    : `Delete ${chat.title} and its history?`;
   return (
     <AccessibleDialog
       title="Chat settings"
@@ -50,9 +48,9 @@ export function ChatManager({
       <ChatWorkflowRecipes chatId={chat.id} />
       <ChatWebAccess chat={chat} />
       <small>Recipes and Web access save as you change them.</small>
-      <label className="toggle-row delete-media-option"><span className="toggle-copy"><strong>Delete generated media with chat</strong><small>Permanently delete image and video outputs used only by this chat. Shared media is kept.</small></span><input type="checkbox" checked={deleteGeneratedMedia} onChange={(event) => setDeleteGeneratedMedia(event.target.checked)} /></label>
-      <footer className="editor-actions"><button className="secondary danger" onClick={() => void confirm({ title: "Delete this chat?", question: deletePrompt, confirmLabel: "Delete chat and history" }).then((ok) => ok && onDelete(deleteGeneratedMedia))}>Delete chat</button><button className="secondary" onClick={onClose}>Cancel</button><button className="primary" disabled={!title.trim()} onClick={() => onSave({ title: title.trim(), project_id: projectId || null, archived, confirm_uncertain_media: confirmUncertainMedia, vision_settings_json: { ...(chat.vision_settings_json ?? {}), verify_image_edits: verifyImageEdits, compile_visual_prompts: compileVisualPrompts } })}>Save chat</button></footer>
-      {confirmDialog}
+      <label className="toggle-row delete-media-option"><span className="toggle-copy"><strong>Delete generated media with chat</strong><small>After permanent deletion, remove eligible image and video outputs used only by this chat. Shared media is kept.</small></span><input type="checkbox" checked={deleteGeneratedMedia} onChange={(event) => setDeleteGeneratedMedia(event.target.checked)} /></label>
+      <footer className="editor-actions"><button className="secondary danger" onClick={() => setDeleting(true)}>Delete chat</button><button className="secondary" onClick={onClose}>Cancel</button><button className="primary" disabled={!title.trim()} onClick={() => onSave({ title: title.trim(), ...(projectId !== (chat.project_id ?? "") ? { project_id: projectId || null } : {}), archived, confirm_uncertain_media: confirmUncertainMedia, vision_settings_json: { ...(chat.vision_settings_json ?? {}), verify_image_edits: verifyImageEdits, compile_visual_prompts: compileVisualPrompts } })}>Save chat</button></footer>
+      {deleting && <ChatTrashConfirmation chatId={chat.id} title={chat.title} deleteGeneratedMedia={deleteGeneratedMedia} onCancel={() => setDeleting(false)} onConfirm={(command) => onDelete(deleteGeneratedMedia, command)} />}
     </AccessibleDialog>
   );
 }

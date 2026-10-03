@@ -58,6 +58,8 @@ from .capability_evidence import (
     record_capability_evidence,
 )
 from .chat_activity_writes import record_response_activity
+from .chat_recovery_graph import MAX_GRAPH_ROWS
+from .chat_recovery_visibility import visible_chat
 from .comfy_registry_paths import registry_wheel_environment_root
 from .comfy_templates import COMFY_TEMPLATE_COMPILER_VERSION
 from .context_compaction import (
@@ -197,6 +199,7 @@ from .output_size_agreement import size_agreement
 from .processes import ProcessSupervisor, WorkerStartRefused
 from .profile_service import AUTO_PROFILE_ID
 from .progress import apply_engine_progress, completed_progress, update_job_progress
+from .project_recovery_visibility import live_project
 from .prompt_binding import ignores_the_description
 from .prompt_expansion_use import (
     PROMPT_SOURCE_INVALID,
@@ -213,6 +216,7 @@ from .prompt_expansion_use import (
     read_prompt_batch_queue_selection,
 )
 from .prompt_helpers import PROMPT_HELPER_SCOPE, prompt_helper_system_message
+from .recovery_previews import RecoveryPreviewConflict
 from .references import parse_reference_requests
 from .routing import ModalityRouter, RouteConfirmationRequired
 from .scheduler import JobClaim, ResourceScheduler
@@ -388,6 +392,7 @@ from .workflow_output_geometry import (
     executed_graph_carries_the_proof,
     prove_workflow_output_geometry,
 )
+from .workflow_recovery_visibility import visible_workflow_family
 from .workflow_review_runtime import (
     refresh_workflow_review_packages,
     revalidate_workflow_review_runtime,
@@ -1269,6 +1274,7 @@ class ConversationOrchestrator:
             )
         async with self.chat_guard(chat_id):
             session.expire_all()
+            self._admission_chat(session, chat_id)
             batch = session.get(PromptExpansionBatch, batch_id)
             if batch is None or batch.chat_id != chat_id:
                 raise LookupError("prompt batch not found")
@@ -1341,9 +1347,7 @@ class ConversationOrchestrator:
         # Never resolve an idempotency key until its URL-scoped chat has been
         # validated. Otherwise a key from one chat could disclose another
         # chat's run, including when the requested chat never existed.
-        chat = session.get(Chat, chat_id)
-        if not chat:
-            raise LookupError("chat not found")
+        self._admission_chat(session, chat_id)
         # An accepted retry consumes no additional queue capacity.
         key = request.idempotency_key
         if key is not None:
@@ -1404,8 +1408,7 @@ class ConversationOrchestrator:
             # Revalidate after the claim commit. This also refreshes state that
             # may have changed while a competing request held the claim.
             session.expire_all()
-            if not session.get(Chat, chat_id):
-                raise LookupError("chat not found")
+            self._admission_chat(session, chat_id)
             existing = self._idempotent_run(session, chat_id, key)
             if existing:
                 return self._accepted_for_run(session, existing)
@@ -1439,8 +1442,7 @@ class ConversationOrchestrator:
         deadline = asyncio.get_running_loop().time() + IDEMPOTENCY_CLAIM_WAIT_SECONDS
         while True:
             session.expire_all()
-            if not session.get(Chat, chat_id):
-                raise LookupError("chat not found")
+            self._admission_chat(session, chat_id)
             existing = self._idempotent_run(session, chat_id, idempotency_key)
             if existing:
                 return None, self._accepted_for_run(session, existing)
@@ -1459,14 +1461,22 @@ class ConversationOrchestrator:
                 session.rollback()
                 # A chat may be deleted between the ownership check and claim
                 # insertion. Distinguish that from a legitimate duplicate.
-                if not session.get(Chat, chat_id):
-                    raise LookupError("chat not found") from None
+                self._admission_chat(session, chat_id)
 
             if asyncio.get_running_loop().time() >= deadline:
                 raise TimeoutError(
                     "another request is still creating this turn; retry with the same key"
                 )
             await asyncio.sleep(0.01)
+
+    @staticmethod
+    def _admission_chat(session: Session, chat_id: str) -> Chat:
+        """Recheck workspace membership before planning or replaying any turn."""
+        with session.no_autoflush:
+            chat = session.scalar(select(Chat).where(Chat.id == chat_id, visible_chat(Chat.id)))
+        if chat is None:
+            raise LookupError("chat not found") from None
+        return chat
 
     @staticmethod
     def _idempotent_run(
@@ -1613,9 +1623,9 @@ class ConversationOrchestrator:
         if self.engines.settings.media_engine not in {"comfyui", "mock"}:
             raise ValueError("This engine does not provide offline enlargement controls.")
         with session.no_autoflush:
-            chat = session.get(Chat, chat_id)
+            chat = self._admission_chat(session, chat_id)
             source = session.get(Artifact, request.input_artifact_ids[0])
-            if chat is None or source is None:
+            if source is None:
                 raise LookupError("The conversation or source image is unavailable.")
             if not source.media_type.startswith("image/"):
                 raise ValueError("Choose an image to enlarge.")
@@ -1723,9 +1733,7 @@ class ConversationOrchestrator:
     ) -> TurnAccepted | SourceFitPreviewOut:
         if preview_only and request.source_fit is None:
             raise ValueError("Choose a source canvas to preview.")
-        chat = session.get(Chat, chat_id)
-        if not chat:
-            raise LookupError("chat not found")
+        chat = self._admission_chat(session, chat_id)
         has_prompt_source = self._turn_uses_prompt_source(
             request, inherited_prompt_source, prompt_batch_selection
         )
@@ -10590,7 +10598,7 @@ class ConversationOrchestrator:
                 {"role": "system", "content": prompt_helper_system_message(chat.draft_prompt)}
             )
         if chat.project_id:
-            project = session.get(Project, chat.project_id)
+            project = live_project(session, chat.project_id)
             if project and project.instructions:
                 messages.append({"role": "system", "content": project.instructions})
         rows = ConversationOrchestrator._ancestor_messages(
@@ -11086,7 +11094,7 @@ class ConversationOrchestrator:
         use_case_receipt = turn_workflow.use_case_receipt
         fields = turn_workflow.fields
         request_fields = [field for field in fields if field.scope != "load"]
-        project = session.get(Project, chat.project_id) if chat.project_id else None
+        project = live_project(session, chat.project_id) if chat.project_id else None
         default_preset, project_preset, chat_preset, turn_preset = self._presets_for_turn(
             session, project, chat, Operation.TEXT_TO_IMAGE, request
         )
@@ -11277,7 +11285,7 @@ class ConversationOrchestrator:
             return None
         else:
             project = (
-                session.get(Project, chat.project_id)
+                live_project(session, chat.project_id)
                 if chat.project_id and operation != Operation.TEXT
                 else None
             )
@@ -11507,7 +11515,7 @@ class ConversationOrchestrator:
         project_id: str | None,
         operation: Operation,
     ) -> str | None:
-        project = session.get(Project, project_id) if project_id else None
+        project = live_project(session, project_id) if project_id else None
         if not project or operation == Operation.TEXT:
             return None
         capability: ProjectSelectorCapability = "video" if "video" in operation.value else "image"
@@ -11762,7 +11770,7 @@ class ConversationOrchestrator:
         """
         role = self._role_for_operation(operation)
         request_fields = [field for field in fields if field.scope != "load"]
-        project = session.get(Project, chat.project_id) if chat.project_id else None
+        project = live_project(session, chat.project_id) if chat.project_id else None
         default_preset, project_preset, chat_preset, turn_preset = self._presets_for_turn(
             session, project, chat, operation, request, ordered=ordered
         )
@@ -12176,7 +12184,7 @@ class ConversationOrchestrator:
                 return revision
             return None
         if project_id:
-            project = session.get(Project, project_id)
+            project = live_project(session, project_id)
             is_video = "video" in operation.value
             capability: ProjectSelectorCapability = "video" if is_video else "image"
             revision_id = None
@@ -12204,7 +12212,10 @@ class ConversationOrchestrator:
         generic: WorkflowRevision | None = None
         with session.scalars(
             select(WorkflowDefinition)
-            .where(WorkflowDefinition.operation == operation.value)
+            .where(
+                WorkflowDefinition.operation == operation.value,
+                visible_workflow_family(WorkflowDefinition.family_id),
+            )
             .order_by(WorkflowDefinition.created_at.desc())
             .execution_options(yield_per=50)
         ) as definitions:
@@ -12690,6 +12701,43 @@ class ConversationOrchestrator:
             if (artifact := session.get(Artifact, artifact_id)) is not None
         ]
 
+    def freeze_project_pending_context(self, session: Session, project_id: str) -> None:
+        """Preserve accepted work before project configuration becomes unavailable."""
+        runs = list(
+            session.scalars(
+                select(Run)
+                .join(Chat, Chat.id == Run.chat_id)
+                .where(
+                    Chat.project_id == project_id,
+                    visible_chat(Chat.id),
+                    Run.status.not_in(
+                        (
+                            RunStatus.COMPLETE.value,
+                            RunStatus.FAILED.value,
+                            RunStatus.CANCELLED.value,
+                        )
+                    ),
+                )
+                .order_by(Run.id)
+                .limit(MAX_GRAPH_ROWS + 1)
+            )
+        )
+        if len(runs) > MAX_GRAPH_ROWS:
+            raise RecoveryPreviewConflict("project-recovery-accepted-work-invalid")
+        try:
+            for run in runs:
+                if run.status not in (
+                    RunStatus.PENDING.value,
+                    RunStatus.ROUTING.value,
+                    RunStatus.QUEUED.value,
+                    RunStatus.RUNNING.value,
+                ):
+                    raise RecoveryPreviewConflict("project-recovery-accepted-work-invalid")
+                if accepted_context(session, run) is None:
+                    self._freeze_turn_context(session, run)
+        except (ValueError, LookupError):
+            raise RecoveryPreviewConflict("project-recovery-accepted-work-invalid") from None
+
     def _freeze_turn_context(
         self,
         session: Session,
@@ -12942,7 +12990,7 @@ class ConversationOrchestrator:
             )
             source_message_ids.append(None)
         if chat.project_id:
-            project = session.get(Project, chat.project_id)
+            project = live_project(session, chat.project_id)
             if project and project.instructions:
                 messages.append({"role": "system", "content": project.instructions})
                 source_message_ids.append(None)

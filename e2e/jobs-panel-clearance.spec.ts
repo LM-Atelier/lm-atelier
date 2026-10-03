@@ -1,3 +1,4 @@
+import { permanentlyDeleteChat } from "./recovery-cleanup";
 import { expect, test, type APIRequestContext } from "@playwright/test";
 
 /** The jobs panel beside the composer, measured in a real browser.
@@ -86,7 +87,7 @@ for (const viewport of VIEWPORTS) {
           return jobs.filter((job) => job.run_id === run.id).map((job) => job.status);
         }, { timeout: 30_000 }).toEqual(["complete"]);
       } finally {
-        expect.soft((await request.delete(`/api/chats/${id}`, { headers })).ok()).toBeTruthy();
+        await permanentlyDeleteChat(request, id, headers);
       }
     }
   });

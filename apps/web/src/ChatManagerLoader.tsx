@@ -3,12 +3,13 @@ import { AccessibleDialog } from "./AccessibleDialog";
 import { ChatManager } from "./ChatManager";
 import { api } from "./api";
 import type { Chat } from "./types";
+import type { RecoveryCommand } from "./recoveryTypes";
 
 export function ChatManagerLoader({ chatId, onClose, onSave, onDelete }: {
   chatId: string;
   onClose: () => void;
   onSave: (values: Partial<Chat>) => void;
-  onDelete: (deleteGeneratedMedia: boolean) => void;
+  onDelete: (deleteGeneratedMedia: boolean, command: RecoveryCommand) => void | Promise<void>;
 }) {
   const detail = useQuery({ queryKey: ["chat-management", chatId], queryFn: ({ signal }) => api.chatMetadata(chatId, signal), staleTime: 0, refetchOnWindowFocus: false, refetchOnReconnect: false });
   if (detail.isSuccess && !detail.isFetching) return <ChatManager key={chatId} chat={detail.data} onClose={onClose} onSave={onSave} onDelete={onDelete} />;

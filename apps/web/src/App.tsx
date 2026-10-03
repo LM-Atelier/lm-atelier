@@ -4,6 +4,8 @@ import { useChatPages } from "./useChatPages";
 import { useProject } from "./useProjectPages";
 import { useChatTranscript } from "./useChatTranscript";
 import { useChatDeletion } from "./useChatDeletion";
+import { ChatDeletionNotice } from "./ChatDeletionNotice";
+import { ProjectDeletionNotice } from "./ProjectDeletionNotice";
 import { useStudioPictureForChat } from "./useStudioPictureForChat";
 import { CURRENT_CHAT_KEY, rememberCurrentChat } from "./currentChat";
 import { useChatFieldUpdate } from "./useChatFieldUpdate";
@@ -156,7 +158,7 @@ export default function App() {
     },
   });
   const deleteChat = useChatDeletion({
-    client, chats: chats.data, currentChatId, activeChatId, setCurrentChatId, setChatDrafts, setComposerDrafts,
+    client, chats: chats.data, currentChatId, activeChatId, setCurrentChatId,
   });
   const { updateProject, deleteProject, exportProject, importProject } = useProjectMutations({
     client,
@@ -275,7 +277,7 @@ export default function App() {
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content">Skip to main content</a>
-      <ChatSidebar engines={engines.data ?? []} currentChatId={activeChatId} view={view} setupState={setupReadiness.data?.state} onSetup={() => setSetupOpen(true)} onChat={openChat} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={(name) => createProject.mutate(name)} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={(id, deleteGeneratedMedia) => deleteChat.mutate({ id, deleteGeneratedMedia })} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={(id) => deleteProject.mutate(id)} sidebar={sidebar} />
+      <ChatSidebar engines={engines.data ?? []} currentChatId={activeChatId} view={view} setupState={setupReadiness.data?.state} onSetup={() => setSetupOpen(true)} onChat={openChat} onView={(nextView) => { setView(nextView); focusMainContent(); }} onNewChat={(projectId) => createChat.mutate(projectId)} onNewProject={(name) => createProject.mutate(name)} onExportProject={(id, includeMedia) => exportProject.mutate({ id, includeMedia })} onImportProject={(file) => importProject.mutate(file)} onUpdateChat={(id, values) => manageChat.mutate({ id, values })} onDeleteChat={async (id, deleteGeneratedMedia, command) => { await deleteChat.mutateAsync({ id, deleteGeneratedMedia, command }); }} onUpdateProject={(id, values) => updateProject.mutate({ id, values })} onDeleteProject={async (id, command) => { await deleteProject.mutateAsync({ id, command }); }} sidebar={sidebar} />
       <main id="main-content" tabIndex={-1}>{activeContent}</main>
       <SetupSurface
         open={setupOpen}
@@ -298,7 +300,11 @@ export default function App() {
       />
       <JobsPanel />
       {turnConfirmDialog}
-      <GlobalNotices connected={eventsConnected} mutations={[send, regenerate, selectResponseRevision, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, createChat, createProject, exportProject, importProject, manageChat, deleteChat, updateProject, deleteProject, deleteExchange, removeItem, forkThread]} />
+      <div className="notification-stack">
+        <ChatDeletionNotice deletion={deleteChat} />
+        <ProjectDeletionNotice deletion={deleteProject} />
+        <GlobalNotices connected={eventsConnected} mutations={[send, regenerate, selectResponseRevision, stop, cancelWorkPlan, retryWorkPlan, cancelWorkStep, retryWorkStep, updateChat, createChat, createProject, exportProject, importProject, manageChat, deleteChat, updateProject, deleteProject, deleteExchange, removeItem, forkThread]} />
+      </div>
     </div>
   );
 }

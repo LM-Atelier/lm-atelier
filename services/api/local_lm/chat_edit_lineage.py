@@ -8,6 +8,7 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from .api_errors import api_error
 from .chat_message_queries import message_ancestry
+from .chat_recovery_visibility import visible_chat
 from .models import Chat, Message, MessagePart
 from .prompt_helpers import STANDARD_CHAT_SCOPE
 from .schemas import ChatEditLineagePage, ChatEditLineageStep
@@ -37,7 +38,11 @@ def read_edit_lineage(
     if not 1 <= limit <= 100:
         raise api_error(400, "chat-lineage-window-invalid", "A page holds between 1 and 100 edits.")
     if (
-        session.scalar(select(Chat.id).where(Chat.id == chat_id, Chat.scope == STANDARD_CHAT_SCOPE))
+        session.scalar(
+            select(Chat.id).where(
+                Chat.id == chat_id, Chat.scope == STANDARD_CHAT_SCOPE, visible_chat(Chat.id)
+            )
+        )
         is None
     ):
         raise api_error(404, "chat-not-found", "chat not found")

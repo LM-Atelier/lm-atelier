@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from .api_errors import api_error
 from .chat_message_queries import message_ancestry
+from .chat_recovery_visibility import visible_chat
 from .models import Chat, Job, Message, Run, WebSearchProposal
 from .prompt_helpers import STANDARD_CHAT_SCOPE
 from .schemas import ChatSearchPage
@@ -34,7 +35,11 @@ def read_search_page(
             "Pending decisions include every conversation branch.",
         )
     if (
-        session.scalar(select(Chat.id).where(Chat.id == chat_id, Chat.scope == STANDARD_CHAT_SCOPE))
+        session.scalar(
+            select(Chat.id).where(
+                Chat.id == chat_id, Chat.scope == STANDARD_CHAT_SCOPE, visible_chat(Chat.id)
+            )
+        )
         is None
     ):
         raise api_error(404, "chat-not-found", "chat not found")

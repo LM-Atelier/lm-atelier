@@ -7,6 +7,7 @@ from typing import Any, Literal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .chat_recovery_visibility import visible_chat
 from .models import (
     Chat,
     ChatWorkflowUseCaseSelection,
@@ -14,6 +15,7 @@ from .models import (
     ProjectWorkflowUseCaseSelection,
     WorkflowUseCasePreset,
 )
+from .project_recovery_visibility import effective_project_id, visible_project
 from .workflow_use_cases_v1 import WorkflowUseCase
 
 PresetScope = Literal["chat", "project", "workspace"]
@@ -91,12 +93,25 @@ def resolve_workflow_use_case_preset(
             connection.exec_driver_sql("BEGIN")
     with session.no_autoflush:
         if chat_id is not None:
-            chat = session.execute(select(Chat.project_id).where(Chat.id == chat_id)).one_or_none()
+            chat = session.execute(
+                select(
+                    Chat.project_id,
+                    effective_project_id(Chat.project_id).label("effective_project_id"),
+                ).where(Chat.id == chat_id, visible_chat(Chat.id))
+            ).one_or_none()
             if chat is None:
                 raise WorkflowUseCasePresetResolutionError("workflow-use-case-chat-not-found")
             if project_id is not None and project_id != chat.project_id:
                 raise WorkflowUseCasePresetResolutionError("workflow-use-case-project-mismatch")
-            project_id = chat.project_id
+            if (
+                project_id is not None
+                and session.scalar(
+                    select(Project.id).where(Project.id == project_id, visible_project(Project.id))
+                )
+                is None
+            ):
+                raise WorkflowUseCasePresetResolutionError("workflow-use-case-project-not-found")
+            project_id = chat.effective_project_id
             choice = session.execute(
                 select(ChatWorkflowUseCaseSelection.preset_id).where(
                     ChatWorkflowUseCaseSelection.chat_id == chat_id,
@@ -108,7 +123,12 @@ def resolve_workflow_use_case_preset(
                     return ResolvedWorkflowUseCasePreset(use_case, "automatic", "chat")
                 return _recipe(session, use_case, choice.preset_id, "chat")
         if project_id is not None:
-            if session.scalar(select(Project.id).where(Project.id == project_id)) is None:
+            if (
+                session.scalar(
+                    select(Project.id).where(Project.id == project_id, visible_project(Project.id))
+                )
+                is None
+            ):
                 raise WorkflowUseCasePresetResolutionError("workflow-use-case-project-not-found")
             choice = session.execute(
                 select(ProjectWorkflowUseCaseSelection.preset_id).where(

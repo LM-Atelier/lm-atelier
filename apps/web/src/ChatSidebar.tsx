@@ -2,6 +2,7 @@ import { ChevronDown, Download, Folder, Image as ImageIcon, Library, Menu, MoreH
 import { useRef, useState } from "react";
 import { AtelierMark } from "./AtelierMark";
 import { ChatManagerLoader } from "./ChatManagerLoader";
+import type { RecoveryCommand } from "./recoveryTypes";
 import { ChatActivityIndicators } from "./ChatActivityIndicators";
 import { PromptDialog } from "./ConfirmDialog";
 import { ImageStudioIcon } from "./ImageStudioIcon";
@@ -45,9 +46,9 @@ export function ChatSidebar({
   onExportProject: (id: string, includeMedia?: boolean) => void;
   onImportProject: (file: File) => void;
   onUpdateChat: (id: string, values: Partial<Chat>) => void;
-  onDeleteChat: (id: string, deleteGeneratedMedia: boolean) => void;
+  onDeleteChat: (id: string, deleteGeneratedMedia: boolean, command: RecoveryCommand) => void | Promise<void>;
   onUpdateProject: (id: string, values: Partial<Project>) => void;
-  onDeleteProject: (id: string) => void;
+  onDeleteProject: (id: string, command: RecoveryCommand) => void | Promise<void>;
   sidebar: SidebarLayout;
 }) {
   const [naming, setNaming] = useState(false);
@@ -120,8 +121,8 @@ export function ChatSidebar({
       </div>
       {naming && <PromptDialog title="New project" label="Project name" confirmLabel="Create project" placeholder="Portrait studies" onCancel={() => setNaming(false)} onConfirm={(name) => { setNaming(false); onNewProject(name); }} />}
       <SidebarFooter setupState={setupState} view={view} onSetup={onSetup} onView={onView} onNavigate={() => setMobileOpen(false)} />
-      {managedChat && <ChatManagerLoader chatId={managedChat.id} onClose={() => setManagedChat(null)} onSave={(values) => { onUpdateChat(managedChat.id, values); setManagedChat(null); }} onDelete={(deleteGeneratedMedia) => { onDeleteChat(managedChat.id, deleteGeneratedMedia); setManagedChat(null); }} />}
-      {managedProject && <ProjectManager project={managedProject} engines={engines} onClose={() => setManagedProject(null)} onSave={(values) => { onUpdateProject(managedProject.id, values); setManagedProject(null); }} onDelete={() => { onDeleteProject(managedProject.id); setManagedProject(null); }} onExport={(includeMedia) => onExportProject(managedProject.id, includeMedia)} />}
+      {managedChat && <ChatManagerLoader chatId={managedChat.id} onClose={() => setManagedChat(null)} onSave={(values) => { onUpdateChat(managedChat.id, values); setManagedChat(null); }} onDelete={async (deleteGeneratedMedia, command) => { await onDeleteChat(managedChat.id, deleteGeneratedMedia, command); setManagedChat(null); }} />}
+      {managedProject && <ProjectManager project={managedProject} engines={engines} onClose={() => setManagedProject(null)} onSave={(values) => { onUpdateProject(managedProject.id, values); setManagedProject(null); }} onDelete={async (command) => { await onDeleteProject(managedProject.id, command); setManagedProject(null); }} onExport={(includeMedia) => onExportProject(managedProject.id, includeMedia)} />}
     </aside>
       <SidebarResizer layout={sidebar} />
     </>

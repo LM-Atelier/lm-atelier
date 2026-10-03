@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { permanentlyDeleteFixture } from "./recovery-fixtures";
 
 test("pages the workspace while preserving saved selection and searching unloaded chats", async ({ page, request }) => {
   const session = await request.post("/api/session");
@@ -61,12 +62,10 @@ test("pages the workspace while preserving saved selection and searching unloade
   } finally {
     await page.goto("about:blank");
     for (const id of chatIds) {
-      const response = await request.delete(`/api/chats/${id}`, { headers });
-      expect.soft(response.ok(), `remove fixture chat ${id}`).toBeTruthy();
+      await permanentlyDeleteFixture(request, headers, "chat", id);
     }
     if (projectId !== null) {
-      const response = await request.delete(`/api/projects/${projectId}`, { headers });
-      expect.soft(response.ok(), "remove fixture project").toBeTruthy();
+      await permanentlyDeleteFixture(request, headers, "project", projectId);
     }
   }
 });

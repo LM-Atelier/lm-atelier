@@ -6,7 +6,10 @@ import { MediaLibraryView } from "./MediaLibraryView";
 import { api } from "./api";
 import { parseArtifactLibraryPage } from "./artifactLibraryPage";
 
-vi.mock("./api", () => ({ api: { artifactLibrary: vi.fn(), pictureSettings: vi.fn() } }));
+vi.mock("./api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./api")>()),
+  api: { artifactLibrary: vi.fn(), pictureSettings: vi.fn() },
+}));
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
 
 const artifactId = `sha256:${"b".repeat(64)}`;

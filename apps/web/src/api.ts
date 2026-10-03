@@ -1,4 +1,5 @@
 import type { QueueLane, QueueOrderCommand, QueueOrderPage, QueueOrderResult } from "./queueOrderTypes";
+import { recoveryApi } from "./recoveryApi";
 import type { GenerationExperiment, GenerationExperimentBlindEvaluationCreate, GenerationExperimentBlindView, GenerationExperimentCreate, GenerationExperimentEvaluationCreate, GenerationExperimentPreflight, GenerationExperimentRecipeDraft, GenerationExperimentRequest, GenerationExperimentStart } from "./generationExperimentTypes";
 import { workflowFamilyQuery, workflowReadQuery, type WorkflowFamilyReadOptions, type WorkflowReadPageOptions } from "./workflowReadQuery";
 import type { WorkflowRecipeTarget, WorkflowUseCase, WorkflowUseCaseChoice, WorkflowUseCaseDefault, WorkflowUseCasePreset, WorkflowUseCasePresetCreate } from "./workflowUseCaseTypes";
@@ -367,6 +368,7 @@ type WorkflowCreateInput = WorkflowRevisionInput & Pick<
 >;
 
 export const api = {
+  ...recoveryApi(request),
   searchConfiguration: () => request<WebSearchConfiguration>("/api/web-search/configuration"),
   decideSearch: (jobId: string, revision: number, action: "approve" | "decline" | "cancel") =>
     request<WebSearch>("/api/jobs/" + encodeURIComponent(jobId) + "/search/decision",

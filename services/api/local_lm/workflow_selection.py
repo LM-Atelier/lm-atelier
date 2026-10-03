@@ -23,6 +23,7 @@ from .models import (
 )
 from .outpaint_workflows import workflow_declares_outpaint
 from .prompt_binding import ignores_the_description
+from .workflow_recovery_visibility import workflow_family_deleted
 from .workflow_revision_reviews import review_is_current
 
 WorkflowSelectorCapability = Literal["chat", "vision", "image", "video"]
@@ -385,13 +386,31 @@ def _candidate(
     legacy_revision_resolver: LegacyRevisionResolver | None,
     revision_eligibility: RevisionEligibility | None,
 ) -> _Candidate:
-    if family.archived:
+    if workflow_family_deleted(session, family.id):
+        raise _error(capability, operation, "family_not_found", family.id)
+    family_state = session.execute(
+        select(WorkflowFamily.enabled, WorkflowFamily.archived).where(
+            WorkflowFamily.id == family.id
+        )
+    ).one_or_none()
+    if family_state is None:
+        raise _error(capability, operation, "family_not_found", family.id)
+    if family_state.archived:
         raise _error(capability, operation, "family_archived", family.id)
-    if not family.enabled:
+    if not family_state.enabled:
         raise _error(capability, operation, "family_disabled", family.id)
     if preference is None:
         raise _error(capability, operation, "selector_not_enabled", family.id)
-    if not preference.enabled:
+    preference_enabled = session.scalar(
+        select(WorkflowPreference.enabled).where(
+            WorkflowPreference.id == preference.id,
+            WorkflowPreference.workflow_family_id == family.id,
+            WorkflowPreference.selector_capability == capability,
+        )
+    )
+    if preference_enabled is None:
+        raise _error(capability, operation, "selector_not_enabled", family.id)
+    if not preference_enabled:
         raise _error(capability, operation, "selector_disabled", family.id)
 
     mapping = session.scalar(
@@ -549,6 +568,20 @@ def _validate_revision(
     if revision is None:
         return None
     definition = session.get(WorkflowDefinition, revision.workflow_id)
+    if definition is not None and workflow_family_deleted(session, definition.family_id):
+        raise _error(capability, operation, "revision_missing", workflow_family_id)
+    if definition is not None and definition.family_id is not None:
+        family_state = session.execute(
+            select(WorkflowFamily.enabled, WorkflowFamily.archived).where(
+                WorkflowFamily.id == definition.family_id
+            )
+        ).one_or_none()
+        if family_state is None:
+            raise _error(capability, operation, "family_not_found", definition.family_id)
+        if family_state.archived:
+            raise _error(capability, operation, "family_archived", definition.family_id)
+        if not family_state.enabled:
+            raise _error(capability, operation, "family_disabled", definition.family_id)
     if definition is None or definition.operation != operation.value:
         raise _error(capability, operation, "operation_mismatch", workflow_family_id)
     if engine is not None and revision.engine != engine:

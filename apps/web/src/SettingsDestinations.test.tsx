@@ -6,7 +6,8 @@ import { SettingsView } from "./SettingsView";
 import { SETTINGS_DESTINATIONS, settingsDestinationFor } from "./settingsDestinations";
 import { useAppearance } from "./theme";
 
-vi.mock("./api", () => ({ api: {
+vi.mock("./api", async (original) => ({ ApiError: (await original<typeof import("./api")>()).ApiError, api: {
+  recoveryItems: vi.fn().mockResolvedValue({ items: [], next_cursor: null }),
   system: vi.fn().mockResolvedValue(null),
   about: vi.fn().mockResolvedValue(null),
   profilesPage: vi.fn().mockResolvedValue([]),

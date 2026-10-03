@@ -9,7 +9,9 @@ from itertools import islice
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .chat_recovery_visibility import visible_chat
 from .models import Chat, Project
+from .project_recovery_visibility import effective_project_id, visible_project
 from .prompt_helpers import STANDARD_CHAT_SCOPE
 
 
@@ -42,25 +44,25 @@ def list_chat_summary_rows(
     statement = (
         select(
             Chat.id,
-            Chat.project_id,
+            effective_project_id(Chat.project_id).label("project_id"),
             Chat.title,
             Chat.archived,
             Chat.pinned,
             Chat.created_at,
             Chat.updated_at,
         )
-        .where(Chat.scope == STANDARD_CHAT_SCOPE)
+        .where(Chat.scope == STANDARD_CHAT_SCOPE, visible_chat(Chat.id))
         .order_by(Chat.pinned.desc(), Chat.updated_at.desc(), Chat.id.desc())
     )
     if project_id:
-        statement = statement.where(Chat.project_id == project_id)
+        statement = statement.where(effective_project_id(Chat.project_id) == project_id)
     if not include_archived:
         statement = statement.where(Chat.archived.is_(False))
     normalized = query.strip().lower()
     with session.no_autoflush:
         if normalized and search_projects:
             names = statement.add_columns(Project.name).outerjoin(
-                Project, Project.id == Chat.project_id
+                Project, (Project.id == Chat.project_id) & visible_project(Project.id)
             )
             with session.execute(names.execution_options(yield_per=200)) as candidates:
                 matching = (

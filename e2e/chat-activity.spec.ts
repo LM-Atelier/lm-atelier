@@ -1,3 +1,4 @@
+import { permanentlyDeleteChat } from "./recovery-cleanup";
 import { expect, test } from "@playwright/test";
 import type { ChatSummary } from "../apps/web/src/types";
 
@@ -73,7 +74,7 @@ for (const width of [1280, 390]) {
       expect(errors).toEqual([]);
     } finally {
       await page.goto("about:blank");
-      for (const id of chatIds) expect.soft((await request.delete(`/api/chats/${id}`, { headers })).ok()).toBeTruthy();
+      for (const id of chatIds) await permanentlyDeleteChat(request, id, headers);
     }
   });
 }

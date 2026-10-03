@@ -27,6 +27,7 @@ import { SettingsNavigation } from "./SettingsNavigation";
 import { SettingsLibraryPages } from "./SettingsLibraryPages";
 import { AppearanceSettings } from "./AppearanceSettings";
 import { StorageSummary } from "./StorageSummary";
+import { RecentlyDeleted } from "./RecentlyDeleted";
 import { ThirdPartyNotices } from "./ThirdPartyNotices";
 import { OutputShapeSettings } from "./OutputShapeSettings";
 import { SettingDetailSetting } from "./SettingDetailSetting";
@@ -442,6 +443,7 @@ export function SettingsView({ engines, appearance, destinationId, onDestination
       </>)}
       {on("data-and-backups") && (<>
       <StorageSummary />
+      <RecentlyDeleted />
       <section>
         <div className="detail-title storage-actions">
           <div><h2>Recovery backups</h2></div>

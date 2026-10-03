@@ -19,6 +19,7 @@ from .artifact_library import ensure_library_entry
 from .artifact_library_schema import ARTIFACT_METADATA_REFERENCE_KEYS
 from .artifacts import ArtifactStore
 from .auxiliary_assets import AUXILIARY_ASSET_KINDS
+from .chat_recovery_visibility import visible_chat
 from .config import Settings
 from .domain import (
     ArtifactKind,
@@ -62,7 +63,9 @@ from .project_dependencies import (
     strip_workflow_lora_overrides,
 )
 from .project_portability import has_local_path, redact_local_paths
+from .project_recovery_visibility import live_project
 from .project_work_plans import export_work_plans, import_work_plans, validate_work_plans
+from .project_workflow_provenance import remap_workflow_provenance
 from .prompt_helpers import STANDARD_CHAT_SCOPE
 from .saved_settings import normalize_saved_settings
 from .schemas import ChatDetail, ProjectOut, RunOut, SettingField, VisionSettings
@@ -125,7 +128,7 @@ class ProjectExporter:
         self._known_fields: dict[str, list[SettingField]] = {}
 
     def export(self, session: Session, project_id: str, *, include_media: bool = True) -> Artifact:
-        project = session.get(Project, project_id)
+        project = live_project(session, project_id)
         if not project:
             raise LookupError("project not found")
         chats = session.scalars(
@@ -139,7 +142,11 @@ class ProjectExporter:
                 .selectinload(ResponseRevision.parts)
                 .selectinload(ResponseRevisionPart.artifact),
             )
-            .where(Chat.project_id == project_id, Chat.scope == STANDARD_CHAT_SCOPE)
+            .where(
+                Chat.project_id == project_id,
+                Chat.scope == STANDARD_CHAT_SCOPE,
+                visible_chat(Chat.id),
+            )
             .order_by(Chat.created_at)
         ).all()
         runs = session.scalars(
@@ -793,6 +800,17 @@ class ProjectExporter:
                 role,
                 allow_auto=False,
             )
+
+            selection["workflow_family_id"] = None
+            for field, identifiers in (
+                ("workflow_definition_id", dependencies.workflow_ids if dependencies else {}),
+                ("workflow_revision_id", dependencies.revision_ids if dependencies else {}),
+            ):
+                source_id = selection.get(field)
+                if field in selection:
+                    selection[field] = (
+                        identifiers.get(source_id) if isinstance(source_id, str) else None
+                    )
 
         self._import_vision_provenance(provenance, dependencies)
 
@@ -2100,6 +2118,7 @@ class ProjectExporter:
                 provenance.get("workflow_use_case_preset"),
                 workflow_revision_id=run_data.get("workflow_revision_id"),
             )
+            remap_workflow_provenance(session, provenance, dependencies)
             imported_run = Run(
                 chat_id=imported_chat.id,
                 user_message_id=user_message.id,

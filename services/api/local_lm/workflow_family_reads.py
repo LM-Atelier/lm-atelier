@@ -28,6 +28,7 @@ from .schemas import (
 )
 from .workflow_family_dependencies import workflow_family_dependency_summaries
 from .workflow_package_drafts import WORKFLOW_PACKAGE_DRAFT_MARKER
+from .workflow_recovery_visibility import visible_workflow_family
 
 READINESS_ORDER: tuple[WorkflowVariantReadiness, ...] = (
     "ready",
@@ -56,7 +57,10 @@ def _visible_definitions() -> Select[tuple[WorkflowDefinition]]:
                 current.workflow_id == WorkflowDefinition.id,
             ),
         )
-        .where(or_(draft_type.is_(None), draft_type != "object"))
+        .where(
+            or_(draft_type.is_(None), draft_type != "object"),
+            visible_workflow_family(WorkflowDefinition.family_id),
+        )
     )
 
 
@@ -162,7 +166,11 @@ def read_family_page(
     order: Literal["name", "readiness", "preference"] = "name",
     require_variants: bool = False,
 ) -> list[WorkflowFamilyOut]:
-    query = select(WorkflowFamily).options(selectinload(WorkflowFamily.preferences))
+    query = (
+        select(WorkflowFamily)
+        .options(selectinload(WorkflowFamily.preferences))
+        .where(visible_workflow_family(WorkflowFamily.id))
+    )
     if not include_archived:
         query = query.where(WorkflowFamily.archived.is_(False))
     if family_ids:

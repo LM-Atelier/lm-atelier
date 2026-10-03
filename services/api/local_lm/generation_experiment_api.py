@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Annotated, cast
 
 from fastapi import APIRouter, Depends, Request, Response
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
@@ -170,6 +171,11 @@ async def create_generation_experiment(
         experiment, created = store.create(session, payload, resolution, seeds)
     except store.GenerationExperimentKeyConflict:
         raise _refuse("generation-experiment-idempotency-conflict") from None
+    except IntegrityError as error:
+        if str(error.orig) != "workflow-recovery-write-refused":
+            raise
+        session.rollback()
+        raise _refuse("generation-experiment-preflight-changed") from None
     if not created:
         response.status_code = 200
     return _out(session, experiment)

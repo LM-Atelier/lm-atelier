@@ -2,7 +2,8 @@ import { useState } from "react";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { PagedGenerationSettingsPanel } from "./PagedGenerationSettingsPanel";
 import { WorkflowSelector } from "./WorkflowSelector";
-import { useConfirm } from "./useConfirm";
+import { ProjectTrashConfirmation } from "./ProjectTrashConfirmation";
+import type { RecoveryCommand } from "./recoveryTypes";
 import type { EngineCapabilities, EngineRole, Project } from "./types";
 
 /** Everything a project can be told about itself.
@@ -23,10 +24,10 @@ export function ProjectManager({
   engines: EngineCapabilities[];
   onClose: () => void;
   onSave: (values: Partial<Project>) => void;
-  onDelete: () => void;
+  onDelete: (command: RecoveryCommand) => void | Promise<void>;
   onExport: (includeMedia: boolean) => void;
 }) {
-  const [confirmDialog, confirm] = useConfirm();
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [name, setName] = useState(project.name);
   const [description, setDescription] = useState(project.description);
   const [instructions, setInstructions] = useState(project.instructions);
@@ -125,7 +126,7 @@ export function ProjectManager({
       <label className="toggle-row"><span><strong>Archived</strong><small>Hide this project while preserving its chats and media.</small></span><input type="checkbox" checked={archived} onChange={(event) => setArchived(event.target.checked)} /></label>
       <div className="project-export-actions"><button className="secondary" onClick={() => onExport(false)}>Export metadata only</button><button className="secondary" onClick={() => onExport(true)}>Export with media</button></div>
       <footer className="editor-actions">
-        <button className="secondary danger" onClick={() => void confirm({ title: `Delete ${project.name}?`, question: "The chats inside it are kept, but become unfiled.", confirmLabel: "Delete project" }).then((ok) => ok && onDelete())}>Delete project</button>
+        <button className="secondary danger" onClick={() => setConfirmDelete(true)}>Delete project</button>
         <button className="secondary" onClick={onClose}>Cancel</button>
         <button
           className="primary"
@@ -142,7 +143,8 @@ export function ProjectManager({
           Save project
         </button>
       </footer>
-      {confirmDialog}
+      {confirmDelete && <ProjectTrashConfirmation projectId={project.id} name={project.name}
+        onCancel={() => setConfirmDelete(false)} onConfirm={onDelete} />}
     </AccessibleDialog>
   );
 }

@@ -6,9 +6,10 @@ import { api } from "./api";
 import { parseArtifactLibraryPage, type ArtifactLibraryFilters } from "./artifactLibraryPage";
 import { CLOCK_KEY } from "./clockPreference";
 
-vi.mock("./api", () => ({
-  api: { artifactLibrary: vi.fn(), favoriteArtifact: vi.fn() },
-}));
+vi.mock("./api", async (original) => {
+  const actual = await original<typeof import("./api")>();
+  return { ApiError: actual.ApiError, api: { artifactLibrary: vi.fn(), favoriteArtifact: vi.fn() } };
+});
 
 const digest = (character: string) => /^[a-f]$/.test(character)
   ? character.repeat(64)

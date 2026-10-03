@@ -1,3 +1,4 @@
+import { permanentlyDeleteChat } from "./recovery-cleanup";
 import { expect, test } from "@playwright/test";
 import type { EditedBranch, PriorTurnEditAccepted, TurnAccepted } from "../apps/web/src/types";
 
@@ -129,7 +130,7 @@ for (const width of [1280, 390]) {
     } finally {
       release?.();
       await page.goto("about:blank");
-      expect.soft((await request.delete(`/api/chats/${id}`, { headers })).ok()).toBeTruthy();
+      await permanentlyDeleteChat(request, id, headers);
     }
   });
 }
