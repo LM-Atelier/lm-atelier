@@ -404,7 +404,9 @@ def _whole(value: object, *, minimum: int) -> bool:
 def _number(value: object) -> bool:
     if isinstance(value, bool) or not isinstance(value, int | float):
         return False
-    return math.isfinite(value)
+    # Every integer is finite, and one too large for a float would make
+    # isfinite raise rather than answer.
+    return isinstance(value, int) or math.isfinite(value)
 
 
 def _scalar(value: object) -> bool:

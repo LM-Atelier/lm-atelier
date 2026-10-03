@@ -195,6 +195,13 @@ def test_a_record_is_sealed_once() -> None:
         seal_output_recipe(payload)
 
 
+def test_an_integer_too_large_for_a_float_is_still_read_as_a_number() -> None:
+    payload = _payload()
+    payload["settings"]["bound"]["steps"] = 10**400
+
+    assert open_output_recipe(seal_output_recipe(payload))["settings"]["bound"]["steps"] == 10**400
+
+
 def test_a_number_too_long_to_read_is_refused_as_a_malformed_record() -> None:
     with pytest.raises(OutputRecipeFormatError, match="canonical JSON"):
         open_output_recipe(b'{"version":' + b"7" * 5000 + b"}")

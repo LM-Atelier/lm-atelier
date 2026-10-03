@@ -188,7 +188,7 @@ export default function App() {
           onUseInChat={(picture) => sendStudioPicture(picture, studioSource?.chatId ?? activeChatId)}/>
       );
     }
-    const topLevelView = view === "media" ? <MediaLibraryView onEditImage={openLibraryImage} /> : view === "models" ? <ModelsView key={modelLibraryRole} initialRole={modelLibraryRole} /> : view === "references" ? <ReferencesLibrary /> : view === "prompts" ? <PromptLibraryView /> : view === "workflows" ? <WorkflowsView /> : view === "compare" ? <GenerationComparisonView onOpenChat={openChat} /> : null;
+    const topLevelView = view === "media" ? <MediaLibraryView onEditImage={openLibraryImage} /> : view === "models" ? <ModelsView key={modelLibraryRole} initialRole={modelLibraryRole} onOpenChat={openChat} /> : view === "references" ? <ReferencesLibrary /> : view === "prompts" ? <PromptLibraryView /> : view === "workflows" ? <WorkflowsView /> : view === "compare" ? <GenerationComparisonView onOpenChat={openChat} /> : null;
     if (topLevelView) return topLevelView;
     if (view === "settings") return <SettingsView engines={engines.data ?? []} appearance={appearance} destinationId={settingsDestination} onDestinationChange={setSettingsDestination} focusRequest={settingsFocusRequest} />;
     const displayedChat = chat.data

@@ -303,7 +303,9 @@ async function send(
 ): Promise<Response> {
   if (path !== "/api/session") await ensureSession();
   const headers = new Headers(init.headers);
-  if (init.body && !(init.body instanceof FormData)) headers.set("content-type", "application/json");
+  if (init.body && !(init.body instanceof FormData) && !headers.has("content-type")) {
+    headers.set("content-type", "application/json");
+  }
   if (init.method && !["GET", "HEAD"].includes(init.method.toUpperCase())) {
     headers.set("x-local-lm-csrf", csrfToken);
   }
@@ -485,8 +487,28 @@ export const api = {
   /** One run, with what it resolved and recorded: how a Studio result's edit is made again. */
   run: (runId: string) => request<Run>(`/api/runs/${encodeURIComponent(runId)}`),
   /** Which of a record's requirements this installation holds; nothing is installed or kept. */
+  /** Whether a record could be generated again exactly here; nothing is started or kept. */
+  planGenerationReplay: (content: ArrayBuffer) =>
+    request<unknown>("/api/output-recipes/replay-plan", {
+      method: "POST",
+      body: content,
+      headers: { "content-type": "application/octet-stream" },
+    }),
+  /** Generate a record again exactly, as the first turn of a chat with nothing in it. */
+  replayGenerationRecord: (chatId: string, content: ArrayBuffer) =>
+    request<unknown>(`/api/chats/${encodeURIComponent(chatId)}/replays`, {
+      method: "POST",
+      body: content,
+      headers: { "content-type": "application/octet-stream" },
+    }),
   checkGenerationRecord: (content: ArrayBuffer) =>
-    request<unknown>("/api/output-recipes/check", { method: "POST", body: content }),
+    // A file's own bytes, not JSON: a bundle with its picture can be far larger
+    // than a JSON body may be, and the route bounds what it reads itself.
+    request<unknown>("/api/output-recipes/check", {
+      method: "POST",
+      body: content,
+      headers: { "content-type": "application/octet-stream" },
+    }),
   /** One output's portable generation record, as the exact bytes its digest covers. */
   generationRecord: (
     runId: string,

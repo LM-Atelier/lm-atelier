@@ -65,6 +65,9 @@ with picture** saves a ZIP file holding that same record beside a PNG copy of
 the picture with only its pixels. Nothing else written inside the picture file,
 such as the workflow that made it, is copied; a picture with its own color
 profile is converted to sRGB first, so the profile stays behind too.
+**Check a record** in the Model library reads such a record, or such a ZIP
+file, and says which of the files it names are on this computer and ready. It
+keeps no copy of the file and installs, downloads or changes nothing.
 
 Before sharing issue details, inspect them and remove tokens, private prompts,
 chats, media, model inputs, and identifying file paths.

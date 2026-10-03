@@ -7,9 +7,19 @@ import { api } from "./api";
 import { GenerationRecordCheck } from "./GenerationRecordCheck";
 import { readGenerationRecordCheck } from "./generationRecord";
 
-vi.mock("./api", () => ({ api: { checkGenerationRecord: vi.fn() } }));
+vi.mock("./api", () => ({
+  api: {
+    checkGenerationRecord: vi.fn(),
+    planGenerationReplay: vi.fn(),
+    createChat: vi.fn(),
+    deleteChat: vi.fn(),
+    replayGenerationRecord: vi.fn(),
+  },
+}));
 
 const checkRecord = vi.mocked(api.checkGenerationRecord);
+const planReplay = vi.mocked(api.planGenerationReplay);
+const replay = vi.mocked(api.replayGenerationRecord);
 
 function answer(overrides: Record<string, unknown> = {}) {
   return {
@@ -39,6 +49,14 @@ function choose(content: string) {
 
 beforeEach(() => {
   checkRecord.mockReset();
+  planReplay.mockReset();
+  replay.mockReset();
+  planReplay.mockResolvedValue({
+    digest: `sha256:${"d".repeat(64)}`,
+    operation: "text_to_image",
+    ready: true,
+    refusals: [],
+  });
 });
 afterEach(cleanup);
 
@@ -95,6 +113,58 @@ describe("checking a record", () => {
     expect(screen.queryByText("Here and ready")).toBeNull();
   });
 
+  it("takes a bundle as well, and says it holds a copy of the picture", async () => {
+    checkRecord.mockResolvedValue(answer({
+      picture: { sha256: "4".repeat(64), copy_of: "5".repeat(64), width: 1024, height: 768 },
+    }));
+    renderCheck();
+
+    expect(screen.getByLabelText("Generation record file")).toHaveAttribute(
+      "accept", "application/json,.json,application/zip,.zip",
+    );
+    choose("PK");
+
+    expect(await screen.findByText(/a copy of the picture, 1024 × 768 pixels/)).toBeInTheDocument();
+    expect(screen.getByText("Here and ready")).toBeInTheDocument();
+  });
+
+  it("names a bundle it cannot read as a bundle", async () => {
+    checkRecord.mockRejectedValue(Object.assign(new Error("server words"), { code: "output-recipe-bundle-unreadable" }));
+    renderCheck();
+
+    choose("PK");
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "This file is not a generation record bundle this version can read.",
+    );
+  });
+
+  it("starts a ready record in a new chat and opens that chat", async () => {
+    checkRecord.mockResolvedValue(answer());
+    vi.mocked(api.createChat).mockResolvedValue({ id: "chat_again" } as Awaited<ReturnType<typeof api.createChat>>);
+    replay.mockResolvedValue({});
+    const onOpenChat = vi.fn();
+    const client = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    render(<QueryClientProvider client={client}><GenerationRecordCheck onOpenChat={onOpenChat} /></QueryClientProvider>);
+
+    choose("{}");
+    fireEvent.click(await screen.findByRole("button", { name: "Generate again" }));
+
+    await waitFor(() => expect(onOpenChat).toHaveBeenCalledWith("chat_again"));
+    expect(planReplay.mock.calls[0][0]).toBe(checkRecord.mock.calls[0][0]);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("offers no replay where nothing could open the chat", async () => {
+    checkRecord.mockResolvedValue(answer());
+    renderCheck();
+
+    choose("{}");
+
+    await screen.findByText("Here and ready");
+    expect(screen.queryByRole("button", { name: "Generate again" })).toBeNull();
+  });
+
   it("closes and is ready for another file", async () => {
     checkRecord.mockResolvedValue(answer());
     renderCheck();
@@ -116,5 +186,23 @@ describe("reading the answer", () => {
 
     expect(read.allPresent).toBe(false);
     expect(read.requirements.map((item) => item.state)).toEqual(["present", "inactive", "missing"]);
+  });
+
+  it("reads a bare record's answer as holding no picture", () => {
+    expect(readGenerationRecordCheck(answer()).picture).toBeNull();
+    expect(readGenerationRecordCheck(answer({ picture: null })).picture).toBeNull();
+  });
+
+  it("refuses a picture it cannot vouch for", () => {
+    for (const picture of [
+      { sha256: "4".repeat(64), copy_of: "5".repeat(64), width: 0, height: 768 },
+      { sha256: "4".repeat(64), copy_of: "5".repeat(64), width: 10.5, height: 768 },
+      { sha256: "4".repeat(64), copy_of: "5".repeat(64), width: 10, height: 0 },
+      { sha256: "not-a-hash", copy_of: "5".repeat(64), width: 10, height: 10 },
+      { sha256: "4".repeat(64), copy_of: "not-a-hash", width: 10, height: 10 },
+      "a picture",
+    ]) {
+      expect(() => readGenerationRecordCheck(answer({ picture }))).toThrow("malformed");
+    }
   });
 });

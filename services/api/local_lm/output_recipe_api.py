@@ -13,7 +13,14 @@ from .api_errors import api_error
 from .db import SessionLocal
 from .output_recipe import OutputRecipe, OutputRecipeUnavailable, build_output_recipe
 from .output_recipe_bundle import OutputRecipeBundle, build_output_recipe_bundle
-from .output_recipe_check import OutputRecipeCheckRefused, check_output_recipe
+from .output_recipe_check import (
+    BUNDLE_SIGNATURE,
+    OutputRecipeCheckRefused,
+    check_output_recipe_file,
+    most_read_for,
+    read_record_file,
+)
+from .output_recipe_replay import plan_output_recipe_replay
 
 if TYPE_CHECKING:
     from .artifacts import ArtifactStore
@@ -132,11 +139,13 @@ def _build_bundle(
 async def check_output_recipe_against_this_install(request: Request) -> JSONResponse:
     """Which of a record's requirements this installation holds, by exact identity.
 
-    The record arrives as the file's own bytes, because only those can be checked
-    against its digest. Nothing is installed, trusted or kept.
+    The record, or a bundle holding it and a copy of its picture, arrives as the
+    file's own bytes, because only those can be checked against their digests.
+    The body is read only up to the largest file the check accepts. Nothing is
+    installed, trusted or kept.
     """
 
-    content = await request.body()
+    content = await read_record_body(request)
     try:
         report = await run_in_threadpool(_check, content)
     except OutputRecipeCheckRefused as exc:
@@ -146,4 +155,57 @@ async def check_output_recipe_against_this_install(request: Request) -> JSONResp
 
 def _check(content: bytes) -> dict[str, Any]:
     with SessionLocal() as session:
-        return check_output_recipe(session, content)
+        return check_output_recipe_file(session, content)
+
+
+@router.post("/output-recipes/replay-plan")
+async def plan_an_exact_replay(request: Request) -> JSONResponse:
+    """Whether a record could be generated again exactly here, and from what.
+
+    Takes the same file the check takes. Each requirement is resolved to exactly
+    one local workflow revision, model profile, LoRA asset or input, or refused;
+    every refusal is listed. Nothing is started, installed, trusted or kept.
+    """
+
+    content = await read_record_body(request)
+    media_engine = cast("Services", request.app.state.services).settings.media_engine
+    try:
+        plan = await run_in_threadpool(_plan, content, media_engine)
+    except OutputRecipeCheckRefused as exc:
+        raise api_error(exc.status, exc.code, exc.message) from exc
+    return JSONResponse(plan, headers={"Cache-Control": "no-store"})
+
+
+def _plan(content: bytes, media_engine: str) -> dict[str, Any]:
+    record = read_record_file(content).record
+    with SessionLocal() as session:
+        return plan_output_recipe_replay(session, record, media_engine=media_engine)
+
+
+async def read_record_body(request: Request) -> bytes:
+    """A record file sent as the request body, refused once longer than a record file can be."""
+
+    content = await _bounded_body(request)
+    if content is None:
+        raise api_error(
+            413, "output-recipe-too-large", "This file is larger than a generation record can be."
+        )
+    return content
+
+
+async def _bounded_body(request: Request) -> bytes | None:
+    """The request body, or None once it is longer than the check reads, without reading on."""
+
+    declared = request.headers.get("content-length")
+    if (
+        declared is not None
+        and declared.isdigit()
+        and int(declared) > most_read_for(BUNDLE_SIGNATURE)
+    ):
+        return None
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > most_read_for(bytes(body[: len(BUNDLE_SIGNATURE)])):
+            return None
+    return bytes(body)

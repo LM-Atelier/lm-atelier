@@ -165,11 +165,7 @@ def build_output_recipe(
             410, "output-recipe-output-unreadable", "This output's file is missing or changed."
         ) from exc
 
-    snapshot = _snapshot(session, run, draft)
-    settings = _execution_settings(run, snapshot)
-    graph, schema, workflow = _workflow(session, run, snapshot, draft)
-    placeholders = set(_placeholders(graph)) if graph is not None else None
-    choices = _setting_choices(run.operation, schema)
+    sections, snapshot = _describe(session, run, include_prompts, draft)
     origin = entry.get("output_origin")
     origin = origin if isinstance(origin, dict) else {}
     engine = _plain_string(origin.get("engine"))
@@ -194,14 +190,7 @@ def build_output_recipe(
             "collection": _plain_string(origin.get("collection")),
             "raster": _raster(artifact),
         },
-        "operation": run.operation,
-        "prompt": _prompt(session, run, snapshot, settings, include_prompts, draft),
-        "seed": _seed(settings, placeholders, draft),
-        "settings": _settings(settings, placeholders, choices, include_prompts, draft),
-        "inputs": _inputs(session, run, snapshot, settings, draft),
-        "workflow": workflow,
-        "model": _model(run, draft),
-        "loras": _loras(run, snapshot, draft),
+        **sections,
         "not_recorded": sorted(NOT_RECORDED),
     }
     payload["removed"] = sorted(draft.removed)
@@ -222,6 +211,54 @@ def build_output_recipe(
         digest=record_digest(payload),
         file_name=f"generation-record-{artifact.sha256[:12]}.json",
     )
+
+
+@dataclass(frozen=True)
+class RunDescription:
+    """What a run executes, in the record's own terms, apart from any one output.
+
+    The sections are the record's operation, prompt, seed, settings, inputs,
+    workflow, model and loras, built by the same functions, so a run described
+    here and a record written from it agree field for field.
+    """
+
+    sections: dict[str, Any]
+    removed: frozenset[str]
+    missing: frozenset[str]
+
+
+def describe_run(session: Session, run: Run) -> RunDescription:
+    """Describe what a run executes, with its prompt, as its record would."""
+
+    draft = _Draft()
+    sections, _snapshot_used = _describe(session, run, True, draft)
+    removed = frozenset(draft.removed)
+    return RunDescription(
+        sections=sections,
+        removed=removed,
+        missing=frozenset(draft.missing | _missing_for_removed(set(removed))),
+    )
+
+
+def _describe(
+    session: Session, run: Run, include_prompts: bool, draft: _Draft
+) -> tuple[dict[str, Any], AcceptedContext | None]:
+    snapshot = _snapshot(session, run, draft)
+    settings = _execution_settings(run, snapshot)
+    graph, schema, workflow = _workflow(session, run, snapshot, draft)
+    placeholders = set(_placeholders(graph)) if graph is not None else None
+    choices = _setting_choices(run.operation, schema)
+    sections = {
+        "operation": run.operation,
+        "prompt": _prompt(session, run, snapshot, settings, include_prompts, draft),
+        "seed": _seed(settings, placeholders, draft),
+        "settings": _settings(settings, placeholders, choices, include_prompts, draft),
+        "inputs": _inputs(session, run, snapshot, settings, draft),
+        "workflow": workflow,
+        "model": _model(run, draft),
+        "loras": _loras(run, snapshot, draft),
+    }
+    return sections, snapshot
 
 
 def _selected_output(run: Run, artifact_id: str) -> tuple[dict[str, Any], int, int]:

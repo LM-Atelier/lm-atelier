@@ -290,7 +290,18 @@ from .orchestrator import (
     ResponseRevisionConflict,
 )
 from .ordered_planning import OrderedPlanConfirmationRequired
+from .output_recipe_api import read_record_body
 from .output_recipe_api import router as output_recipe_router
+from .output_recipe_check import OutputRecipeCheckRefused, read_record_file
+from .output_recipe_replay import (
+    REPLAYABLE_OPERATIONS,
+    ReplayDiffers,
+    chat_is_clean_for_replay,
+    exact_replay_check,
+    plan_output_recipe_replay,
+    replay_turn_request,
+    without_edit_check,
+)
 from .picture_export import (
     DEFAULT_EXPORT_QUALITY,
     EXPORT_FORMATS,
@@ -4395,6 +4406,79 @@ async def create_turn(
     return await _accept_turn(orchestrator, session, chat_id, payload)
 
 
+@router.post("/chats/{chat_id}/replays", response_model=TurnAccepted, status_code=202)
+async def replay_a_generation_record(
+    chat_id: str, request: Request, session: ConversationSessionDep
+) -> TurnAccepted:
+    """Generate a record again exactly, as one turn in a chat with nothing in it yet.
+
+    The record arrives as its own file, or as a bundle saved with its picture.
+    Each requirement must resolve to exactly one thing here, and the run
+    admission accepts is described and compared with the record before it is
+    committed; any difference refuses the whole turn and writes nothing. No
+    default, preset, recipe or Auto choice is applied or changed.
+    """
+
+    content = await read_record_body(request)
+    try:
+        record = read_record_file(content).record
+    except OutputRecipeCheckRefused as exc:
+        raise api_error(exc.status, exc.code, exc.message) from exc
+    _refuse_comparison_chat(session, chat_id)
+    chat = session.get(Chat, chat_id)
+    if chat is None:
+        raise api_error(404, "chat-not-found", "chat not found")
+    services = _services(request)
+    plan = plan_output_recipe_replay(session, record, media_engine=services.settings.media_engine)
+    if not plan["ready"]:
+        raise api_error(
+            409,
+            "replay-unavailable",
+            "This record cannot be generated again exactly here.",
+            refusals=plan["refusals"],
+        )
+    if record["operation"] not in REPLAYABLE_OPERATIONS:
+        raise api_error(
+            422,
+            "replay-operation-unsupported",
+            "This kind of generation cannot be generated again yet.",
+        )
+    if not chat_is_clean_for_replay(session, chat):
+        raise api_error(
+            409,
+            "replay-chat-not-clean",
+            "A record is generated again only in a new chat with nothing in it.",
+        )
+    check = exact_replay_check(record)
+    restore_edit_check = (
+        without_edit_check(chat) if record["operation"] == "image_to_image" else None
+    )
+
+    def check_then_restore(transaction: Session, first: Run) -> None:
+        check(transaction, first)
+        if restore_edit_check is not None:
+            restore_edit_check()
+
+    try:
+        return await _accept_turn(
+            services.orchestrator,
+            session,
+            chat_id,
+            await replay_turn_request(session, services.engines, record, plan["resolved"]),
+            freeze_context=True,
+            # No use-case recipe for this turn, without writing anything.
+            inherited_use_case_preset=InheritedWorkflowUseCasePreset(None),
+            before_commit=check_then_restore,
+        )
+    except ReplayDiffers as exc:
+        raise api_error(
+            409,
+            "replay-differs",
+            "Generating this here would not match the record exactly.",
+            sections=exc.sections,
+        ) from exc
+
+
 async def _accept_turn(
     orchestrator: ConversationOrchestrator,
     session: Session,
@@ -4412,6 +4496,7 @@ async def _accept_turn(
     before_commit: Callable[[Session, Run], None] | None = None,
     resolve_source: TurnSourceResolver | None = None,
     inherited_use_case_preset: InheritedWorkflowUseCasePreset | None = None,
+    freeze_context: bool = False,
 ) -> TurnAccepted:
     _refuse_comparison_chat(session, chat_id)
     try:
@@ -4437,6 +4522,7 @@ async def _accept_turn(
             before_commit=before_commit,
             resolve_source=resolve_source,
             inherited_use_case_preset=inherited_use_case_preset,
+            freeze_context=freeze_context,
         )
     except EditRequestConflict as exc:
         raise api_error(409, "edit-request-conflict", str(exc)) from exc

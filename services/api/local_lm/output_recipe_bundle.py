@@ -15,9 +15,10 @@ digested like the record, under its own domain tag. The digest shows that the
 bundle is intact, not who made it.
 
 A bundle has one exact form, and reading one refuses every other: the reader
-rebuilds the archive from the three files it read and compares it with the
-bytes it was given, and checks that the picture is a PNG holding nothing but
-its pixels.
+checks the archive's closing record before parsing anything else, rebuilds the
+archive from the three files it read and compares it with the bytes it was
+given, and checks that the picture is a PNG of only a header, pixel data and
+an end, with a header the copy could have been written with.
 """
 
 from __future__ import annotations
@@ -76,6 +77,15 @@ _ENTRY_TIME: Final = (1980, 1, 1, 0, 0, 0)
 _UNIX: Final = 3
 _REGULAR_FILE: Final = 0o100644 << 16
 _PNG_SIGNATURE: Final = b"\x89PNG\r\n\x1a\n"
+#: The bit depth and color type of each mode the copy is written in: one-bit,
+#: eight-bit and sixteen-bit grey, grey with alpha, RGB and RGBA.
+_PNG_LAYOUTS: Final = frozenset({(1, 0), (8, 0), (16, 0), (8, 4), (8, 2), (8, 6)})
+#: The archive's closing record: its signature, two disk numbers, the entry
+#: counts on this disk and in all, the directory's size and offset, and the
+#: length of the archive comment.
+_END_RECORD: Final = struct.Struct("<4sHHHHIIH")
+#: Three directory records with names far longer than these, with room to spare.
+_MAX_DIRECTORY_BYTES: Final = 512
 #: The modes a PNG holds exactly; a picture in any other becomes RGB or RGBA.
 _EXACT_MODES: Final = frozenset({"1", "L", "LA", "I;16", "RGB", "RGBA"})
 _SIXTEEN_BIT_MODES: Final = frozenset({"I", "I;16B", "I;16L", "I;16N"})
@@ -264,7 +274,7 @@ def seal_bundle_manifest(payload: dict[str, Any]) -> bytes:
 def open_output_recipe_bundle(content: bytes) -> dict[str, Any]:
     """Read a bundle, refusing anything this module would not have written.
 
-    Returns the manifest, the record and the picture's bytes.
+    Returns the manifest, the record, the picture's bytes and its size.
     """
 
     if len(content) > MAX_BUNDLE_BYTES:
@@ -288,11 +298,36 @@ def open_output_recipe_bundle(content: bytes) -> dict[str, Any]:
         raise OutputRecipeBundleFormatError("The bundle's picture does not match its manifest.")
     if manifest["picture"]["copy_of"] != record["output"]["sha256"]:
         raise OutputRecipeBundleFormatError("The bundle's picture is not of the recorded output.")
-    _check_pixels_only(files[PICTURE_FILE])
-    return {"manifest": manifest, "record": record, "picture": files[PICTURE_FILE]}
+    width, height = _check_pixels_only(files[PICTURE_FILE])
+    return {
+        "manifest": manifest,
+        "record": record,
+        "picture": files[PICTURE_FILE],
+        "width": width,
+        "height": height,
+    }
 
 
 def _read_entries(content: bytes) -> dict[str, bytes]:
+    # Read before zipfile sees the archive: it builds a record for every entry
+    # the directory lists, so a file listing millions of empty entries would
+    # cost far more than its own size to refuse.
+    if len(content) < _END_RECORD.size:
+        raise OutputRecipeBundleFormatError("The file is not a generation record bundle.")
+    signature, disk, directory_disk, here, listed, size, offset, comment = _END_RECORD.unpack(
+        content[-_END_RECORD.size :]
+    )
+    if (
+        signature != b"PK\x05\x06"
+        or disk
+        or directory_disk
+        or here != len(_ENTRIES)
+        or listed != len(_ENTRIES)
+        or size > _MAX_DIRECTORY_BYTES
+        or offset + size != len(content) - _END_RECORD.size
+        or comment
+    ):
+        raise OutputRecipeBundleFormatError("The file is not a generation record bundle.")
     try:
         archive = zipfile.ZipFile(io.BytesIO(content))
     except (zipfile.BadZipFile, ValueError, NotImplementedError, RuntimeError, EOFError) as exc:
@@ -379,8 +414,13 @@ def _open_manifest(content: bytes) -> dict[str, Any]:
     return value
 
 
-def _check_pixels_only(png: bytes) -> None:
-    """Refuse a picture that is not a PNG of a header, pixel data and an end, intact."""
+def _check_pixels_only(png: bytes) -> tuple[int, int]:
+    """Refuse a picture that is not a PNG of a header, pixel data and an end, intact.
+
+    The header must describe a picture the copy could have been: a size inside
+    the decode limit and a layout one of the copy's modes is written in.
+    Returns the width and the height.
+    """
 
     if not png.startswith(_PNG_SIGNATURE):
         raise OutputRecipeBundleFormatError("The bundle's picture is not a PNG.")
@@ -405,6 +445,21 @@ def _check_pixels_only(png: bytes) -> None:
         or any(kind != b"IDAT" for kind in kinds[1:-1])
     ):
         raise OutputRecipeBundleFormatError("The bundle's picture holds more than its pixels.")
+    header = png[len(_PNG_SIGNATURE) : len(_PNG_SIGNATURE) + 8 + 13]
+    if struct.unpack(">I", header[:4])[0] != 13:
+        raise OutputRecipeBundleFormatError("The bundle's picture has a malformed header.")
+    width, height, depth, color, compression, filtering, interlace = struct.unpack(
+        ">IIBBBBB", header[8:]
+    )
+    if (
+        not 0 < width * height <= MAX_BLEND_PIXELS
+        or (depth, color) not in _PNG_LAYOUTS
+        or compression
+        or filtering
+        or interlace
+    ):
+        raise OutputRecipeBundleFormatError("The bundle's picture has a malformed header.")
+    return width, height
 
 
 def _zip(files: dict[str, bytes]) -> bytes:

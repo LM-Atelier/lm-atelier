@@ -1725,3 +1725,20 @@ it("keeps a comparison refusal's reasons with the error and escapes its id in ev
   expect(fetchMock.mock.calls[2][1]?.method).toBe("POST");
   expect(JSON.parse(fetchMock.mock.calls[2][1]?.body as string)).toEqual(start);
 });
+
+it("sends a record file as its own bytes and every other body as JSON", async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ csrf_token: "csrf" }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 200 }));
+  vi.stubGlobal("fetch", fetchMock);
+
+  const { api } = await import("./api");
+  const content = new Uint8Array([80, 75, 3, 4]).buffer;
+  await api.checkGenerationRecord(content);
+  await api.editSearch("job_1", 1, "words");
+
+  expect(fetchMock.mock.calls[1][1]?.body).toBe(content);
+  expect(new Headers(fetchMock.mock.calls[1][1]?.headers).get("content-type")).toBe("application/octet-stream");
+  expect(new Headers(fetchMock.mock.calls[2][1]?.headers).get("content-type")).toBe("application/json");
+});
