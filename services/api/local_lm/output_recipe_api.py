@@ -147,9 +147,10 @@ async def download_output_recipe_bundle(
 async def read_generation_settings(artifact_id: str, request: Request) -> JSONResponse:
     """What a picture's own file says about how it was made, as plain claims.
 
-    Only the text a PNG stores uncompressed is read. Nothing is kept, fetched,
-    run or trusted: models, LoRAs and graphs named in the text are listed as
-    ignored, and another kind of file answers that it was not read. A whole
+    Only the text a PNG stores uncompressed, and the EXIF text of a JPEG or
+    WebP, is read. Nothing is kept, fetched, run or trusted: models, LoRAs and
+    graphs named in the text are listed as ignored, and another kind of file
+    answers that it was not read. A whole
     number too large for a browser to read exactly, such as a large seed, is
     sent as decimal text.
     """

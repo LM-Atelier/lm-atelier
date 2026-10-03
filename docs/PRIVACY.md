@@ -91,11 +91,13 @@ computer with the new version, as a picture attached to a message is, and not
 added to your Media Library.
 
 **Settings in the file**, under a picture in the Media Library, reads the
-generation settings some image tools write into a PNG: the prompt and negative
-prompt, seed, steps, guidance, sampler, scheduler, denoise and size. Only text
-the file stores uncompressed is read. Nothing read is kept, and nothing the text
-names is fetched, installed or run: models, LoRAs, other files and workflows it
-names are listed as left out. Other kinds of picture are not read.
+generation settings some image tools write into a picture's file: the prompt
+and negative prompt, seed, steps, guidance, sampler, scheduler, denoise and size.
+From a PNG, only text the file stores uncompressed is read; from a JPEG or WebP,
+only its EXIF text, never the picture itself or any XMP text. Nothing read is
+kept, and nothing the text names is fetched, installed or run: models, LoRAs,
+other files and workflows it names are listed as left out. Other kinds of
+picture are not read.
 **Remix these settings** checks those settings against a workflow and a model
 you choose here, never by a name or file the text gives, and shows what a new
 picture would be made with before anything is made. Making it starts one picture

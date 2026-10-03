@@ -1,10 +1,13 @@
 """The generation settings a picture made elsewhere carries in its own file, read as plain claims.
 
-Only text a PNG stores uncompressed is read (png_text_metadata). Two ways of
-writing settings are recognized:
+The text a PNG stores uncompressed (png_text_metadata) and the EXIF text of a
+JPEG or WebP (exif_text_metadata) are read. Two ways of writing settings are
+recognized:
 
 - ``parameters``: the text most image tools write: the prompt, then a line that
-  starts ``Negative prompt:``, then one line of ``Key: value`` pairs.
+  starts ``Negative prompt:``, then one line of ``Key: value`` pairs. A JPEG or
+  WebP carries it as its EXIF ``UserComment``, read as settings only when it
+  has that line, since a camera writes its own notes there.
 - ``prompt``: a ComfyUI API graph, read for its one sampler and the nodes that
   sampler names for its prompts and its empty picture.
 
@@ -25,9 +28,17 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Any, Final
 
-from .png_text_metadata import MAX_STRING_BYTES, PngTextClaim, read_png_text
+from .exif_text_metadata import (
+    ExifText,
+    ExifTextClaim,
+    is_jpeg,
+    is_webp,
+    read_jpeg_text,
+    read_webp_text,
+)
+from .png_text_metadata import MAX_STRING_BYTES, PngText, PngTextClaim, read_png_text
 
-PARSER_VERSION: Final = 1
+PARSER_VERSION: Final = 2
 
 
 @dataclass(frozen=True)
@@ -144,24 +155,37 @@ class ExternalGenerationMetadata:
 
 
 def read_external_generation_metadata(payload: bytes) -> ExternalGenerationMetadata:
-    """Read a PNG's settings text as claims; a file that is not a PNG yields none.
+    """Read the settings text of a PNG, JPEG or WebP as claims; another kind of file yields none.
 
-    Raises ValueError for a PNG whose text chunks are damaged or past the
-    reader's ceilings; nothing is returned from such a file.
+    Raises ValueError for a file whose text chunks, segments or EXIF block are
+    damaged or past the reader's ceilings; nothing is returned from such a file.
     """
 
-    if not payload.startswith(b"\x89PNG\r\n\x1a\n"):
+    text: PngText | ExifText
+    if payload.startswith(b"\x89PNG\r\n\x1a\n"):
+        text = read_png_text(payload)
+    elif is_jpeg(payload):
+        text = read_jpeg_text(payload)
+    elif is_webp(payload):
+        text = read_webp_text(payload)
+    else:
         return metadata_not_read("format_not_read")
-    text = read_png_text(payload)
     reader = _Reader()
     for skipped in text.skipped:
         reader.ignore(skipped.keyword or "text", skipped.reason)
-    by_keyword: dict[str, PngTextClaim] = {}
+    by_keyword: dict[str, PngTextClaim | ExifTextClaim] = {}
     for claim in text.claims:
         if claim.keyword in by_keyword:
             reader.ignore(claim.keyword, "repeated")
             continue
         by_keyword[claim.keyword] = claim
+    comment = by_keyword.pop("UserComment", None)
+    if comment is not None:
+        lines = comment.text.replace("\r\n", "\n").replace("\r", "\n")
+        if "parameters" not in by_keyword and _SETTINGS_LINE.search(lines):
+            by_keyword["parameters"] = comment
+        else:
+            reader.ignore("UserComment", "not_settings")
     dialect = "none"
     if "parameters" in by_keyword:
         dialect = "parameters"

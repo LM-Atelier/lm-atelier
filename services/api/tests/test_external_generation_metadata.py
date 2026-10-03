@@ -13,6 +13,7 @@ from httpx import AsyncClient
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 from sqlalchemy import func, select
+from test_exif_text_metadata import ascii_tag, comment, exif_block, jpeg_with_exif, webp
 
 from local_lm.artifacts import ArtifactStore
 from local_lm.db import SessionLocal
@@ -92,7 +93,7 @@ def test_a_settings_text_reads_as_claims_and_lists_what_it_does_not_use() -> Non
     metadata = read_external_generation_metadata(_png(("parameters", _SETTINGS_TEXT)))
 
     assert metadata.dialect == "parameters"
-    assert metadata.parser_version == 1
+    assert metadata.parser_version == 2
     assert metadata.budget_version == BUDGET.version == 1
     assert _claims(metadata) == [
         ("prompt", _PROMPT, "prompt"),
@@ -578,7 +579,7 @@ async def test_the_route_answers_with_the_claims_and_keeps_nothing(client: Async
     assert response.headers["cache-control"] == "no-store"
     body = response.json()
     assert body["dialect"] == "parameters"
-    assert body["parser_version"] == 1
+    assert body["parser_version"] == 2
     assert body["budget_version"] == 1
     assert body["digest"].startswith("sha256:")
     assert body["claims"][:2] == [
@@ -652,3 +653,87 @@ async def test_the_route_answers_not_found_for_an_unknown_picture(client: AsyncC
 
     assert response.status_code == 404
     assert response.json()["code"] == "artifact-not-found"
+
+
+@pytest.mark.parametrize("container", ["jpeg", "webp"])
+def test_a_jpeg_or_webp_reads_the_same_claims_as_a_png(container: str) -> None:
+    graph = json.dumps(_graph())
+    block = exif_block([ascii_tag(0x0110, "prompt:" + graph)])
+    text_block = exif_block([], comment(_SETTINGS_TEXT))
+
+    def wrap(found: bytes) -> bytes:
+        return jpeg_with_exif(found) if container == "jpeg" else webp((b"EXIF", found))
+
+    from_text = read_external_generation_metadata(wrap(text_block))
+    from_graph = read_external_generation_metadata(wrap(block))
+    png_text = read_external_generation_metadata(_png(("parameters", _SETTINGS_TEXT)))
+    png_graph = read_external_generation_metadata(_png(("prompt", graph)))
+
+    assert (from_text.dialect, _claims(from_text)) == ("parameters", _claims(png_text))
+    assert _ignored(from_text) == _ignored(png_text)
+    assert (from_graph.dialect, _claims(from_graph)) == ("comfyui_prompt", _claims(png_graph))
+    assert from_text.digest is not None
+
+
+def test_a_camera_comment_is_listed_and_not_read_as_settings() -> None:
+    payload = jpeg_with_exif(exif_block([], comment("Taken from the harbour wall")))
+
+    metadata = read_external_generation_metadata(payload)
+
+    assert metadata.dialect == "none"
+    assert metadata.claims == ()
+    assert _ignored(metadata) == [("UserComment", "not_settings")]
+    assert metadata.warnings == ("no_settings_found",)
+
+
+def test_a_settings_comment_beside_a_workflow_graph_reads_the_comment() -> None:
+    block = exif_block(
+        [ascii_tag(0x010F, "workflow:" + json.dumps({"nodes": []}))], comment(_SETTINGS_TEXT)
+    )
+
+    metadata = read_external_generation_metadata(jpeg_with_exif(block))
+
+    assert metadata.dialect == "parameters"
+    assert ("workflow", "workflow_graph") in _ignored(metadata)
+
+
+def test_a_damaged_jpeg_is_refused_and_nothing_is_returned() -> None:
+    with pytest.raises(ValueError):
+        read_external_generation_metadata(b"\xff\xd8\xff\xe1\xff\xf0Exif\x00\x00")
+
+
+async def test_the_route_reads_a_jpeg_s_settings(client: AsyncClient) -> None:
+    picture = BytesIO()
+    exif = Image.Exif()
+    order = "utf-16-be" if exif.tobytes()[6:8] == b"MM" else "utf-16-le"
+    exif[0x8769] = {0x9286: b"UNICODE\x00" + _SETTINGS_TEXT.encode(order)}
+    Image.new("RGB", (8, 8), (90, 120, 150)).save(picture, "JPEG", exif=exif.tobytes())
+    uploaded = await client.post(
+        "/api/artifacts", files={"file": ("picture.jpg", picture.getvalue(), "image/jpeg")}
+    )
+    assert uploaded.status_code == 201, uploaded.text
+
+    response = await client.get(_settings(uploaded.json()["id"]))
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["dialect"] == "parameters"
+    assert body["claims"][:2] == [
+        {"key": "prompt", "value": _PROMPT, "source": "prompt"},
+        {"key": "negative_prompt", "value": _NEGATIVE, "source": "Negative prompt"},
+    ]
+    assert body["warnings"] == []
+
+
+def test_a_comment_in_the_first_directory_or_a_capitalised_graph_reads_like_a_png() -> None:
+    graph = json.dumps(_graph())
+    comment_first = exif_block([ascii_tag(0x9286, _SETTINGS_TEXT)])
+    capitalised = exif_block([ascii_tag(0x010F, "Prompt:" + graph)])
+
+    from_comment = read_external_generation_metadata(jpeg_with_exif(comment_first))
+    from_graph = read_external_generation_metadata(webp((b"EXIF", capitalised)))
+
+    png_text = read_external_generation_metadata(_png(("parameters", _SETTINGS_TEXT)))
+    png_graph = read_external_generation_metadata(_png(("prompt", graph)))
+    assert (from_comment.dialect, _claims(from_comment)) == ("parameters", _claims(png_text))
+    assert (from_graph.dialect, _claims(from_graph)) == ("comfyui_prompt", _claims(png_graph))

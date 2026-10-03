@@ -70,7 +70,7 @@ describe("settings stored in a picture's file", () => {
   });
 
   it.each([
-    [["format_not_read"], "Only PNG pictures are read for settings."],
+    [["format_not_read"], "Only PNG, JPEG and WebP pictures are read for settings."],
     [["too_large"], "This picture is too large to read for settings."],
     [["no_settings_found"], "No settings were found in this picture's file."],
     [["several_samplers"], "This picture's workflow has more than one sampler, so no one set of settings is shown."],
