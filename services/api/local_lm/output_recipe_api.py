@@ -12,7 +12,12 @@ from starlette.concurrency import run_in_threadpool
 
 from .api_errors import api_error
 from .db import SessionLocal, get_session
-from .models import Run
+from .external_generation_metadata import (
+    ExternalGenerationMetadata,
+    metadata_not_read,
+    read_external_generation_metadata,
+)
+from .models import Artifact, Run
 from .output_recipe import OutputRecipe, OutputRecipeUnavailable, build_output_recipe
 from .output_recipe_bundle import OutputRecipeBundle, build_output_recipe_bundle
 from .output_recipe_check import (
@@ -30,6 +35,7 @@ from .output_recipe_promotion import (
     output_recipe_draft,
 )
 from .output_recipe_replay import plan_output_recipe_replay, replay_outcome
+from .studio_region_edit import MAX_BLEND_READ_BYTES
 
 if TYPE_CHECKING:
     from .artifacts import ArtifactStore
@@ -135,6 +141,81 @@ async def download_output_recipe_bundle(
             "X-Output-Recipe-Digest": bundle.record_digest,
         },
     )
+
+
+@router.get("/artifacts/{artifact_id}/generation-settings")
+async def read_generation_settings(artifact_id: str, request: Request) -> JSONResponse:
+    """What a picture's own file says about how it was made, as plain claims.
+
+    Only the text a PNG stores uncompressed is read. Nothing is kept, fetched,
+    run or trusted: models, LoRAs and graphs named in the text are listed as
+    ignored, and another kind of file answers that it was not read. A whole
+    number too large for a browser to read exactly, such as a large seed, is
+    sent as decimal text.
+    """
+
+    artifacts = cast("Services", request.app.state.services).artifacts
+    try:
+        answer = await run_in_threadpool(_generation_settings, artifacts, artifact_id)
+    except OutputRecipeUnavailable as exc:
+        raise api_error(exc.status, exc.code, exc.message) from exc
+    # The prompt it may hold is the person's own and is never cached.
+    return JSONResponse(answer, headers={"Cache-Control": "no-store"})
+
+
+def _generation_settings(artifacts: ArtifactStore, artifact_id: str) -> dict[str, Any]:
+    with SessionLocal() as session:
+        artifact = session.get(Artifact, artifact_id)
+        if artifact is None:
+            raise OutputRecipeUnavailable(404, "artifact-not-found", "artifact not found")
+        media_type = (artifact.media_type or "").lower()
+        if media_type.startswith(("video/", "audio/")):
+            # Settings are read only from a picture's own text; nothing else is opened.
+            return _generation_settings_answer(metadata_not_read("format_not_read"))
+        if artifact.size_bytes > MAX_BLEND_READ_BYTES:
+            return _generation_settings_answer(metadata_not_read("too_large"))
+        try:
+            content = artifacts.verified_bytes(artifact, maximum_bytes=MAX_BLEND_READ_BYTES)
+        except (ValueError, OSError) as exc:
+            raise OutputRecipeUnavailable(
+                410, "artifact-file-unreadable", "artifact file is missing or corrupt"
+            ) from exc
+    try:
+        metadata = read_external_generation_metadata(content)
+    except ValueError as exc:
+        raise OutputRecipeUnavailable(
+            422,
+            "generation-settings-unreadable",
+            "The settings text stored in this picture could not be read.",
+        ) from exc
+    return _generation_settings_answer(metadata)
+
+
+def _generation_settings_answer(metadata: ExternalGenerationMetadata) -> dict[str, Any]:
+    return {
+        "dialect": metadata.dialect,
+        "parser_version": metadata.parser_version,
+        "budget_version": metadata.budget_version,
+        "digest": metadata.digest,
+        "claims": [
+            {"key": claim.key, "value": _exact_in_json(claim.value), "source": claim.source}
+            for claim in metadata.claims
+        ],
+        "ignored": [{"name": item.name, "reason": item.reason} for item in metadata.ignored],
+        "warnings": list(metadata.warnings),
+    }
+
+
+#: The largest whole number a JavaScript number holds exactly.
+_EXACT_IN_A_DOUBLE = 2**53 - 1
+
+
+def _exact_in_json(value: str | int | float) -> str | int | float:
+    """A whole number past what a browser reads exactly goes as decimal text, so a seed survives."""
+
+    if isinstance(value, int) and abs(value) > _EXACT_IN_A_DOUBLE:
+        return str(value)
+    return value
 
 
 def _build_bundle(

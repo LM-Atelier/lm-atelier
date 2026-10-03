@@ -1233,6 +1233,9 @@ export const api = {
     }),
   artifact: (artifactId: string) =>
     request<Artifact>(`/api/artifacts/${encodeURIComponent(artifactId)}`),
+  /** What a stored picture's own file says about how it was made; read by pictureSettings.ts. */
+  pictureSettings: (artifactId: string, signal?: AbortSignal) =>
+    request<unknown>(`/api/artifacts/${encodeURIComponent(artifactId)}/generation-settings`, { signal }),
   favoriteArtifact: (artifactId: string, favorite: boolean) =>
     request<Artifact>(`/api/artifacts/${encodeURIComponent(artifactId)}`, {
       method: "PATCH",

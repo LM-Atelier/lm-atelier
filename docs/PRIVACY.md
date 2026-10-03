@@ -90,5 +90,12 @@ of a missing picture, that copy can be chosen instead; it is then kept on this
 computer with the new version, as a picture attached to a message is, and not
 added to your Media Library.
 
+**Settings in the file**, under a picture in the Media Library, reads the
+generation settings some image tools write into a PNG: the prompt and negative
+prompt, seed, steps, guidance, sampler, scheduler, denoise and size. Only text
+the file stores uncompressed is read. Nothing read is kept, and nothing the text
+names is fetched, installed or run: models, LoRAs, other files and workflows it
+names are listed as left out. Other kinds of picture are not read.
+
 Before sharing issue details, inspect them and remove tokens, private prompts,
 chats, media, model inputs, and identifying file paths.
