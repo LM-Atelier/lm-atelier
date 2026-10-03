@@ -14,7 +14,15 @@ from .api_errors import api_error
 from .db import get_session
 from .output_recipe import OutputRecipeUnavailable
 from .output_recipe_api import exact_in_json, read_picture_generation_settings
-from .picture_remix import REFUSAL_MESSAGES, RemixChoiceInvalid, RemixPreview, preview_remix
+from .picture_remix import (
+    REFUSAL_MESSAGES,
+    RemixChoiceInvalid,
+    RemixPreview,
+    RemixRole,
+    RemixSource,
+    preview_remix,
+    read_remix_source,
+)
 
 if TYPE_CHECKING:
     from .main import Services
@@ -29,6 +37,7 @@ ClaimKey = Literal[
     "guidance",
     "sampler",
     "scheduler",
+    "denoise",
     "width",
     "height",
     "shape",
@@ -43,6 +52,8 @@ class RemixPreviewRequest(BaseModel):
     workflow_revision_id: str = Field(min_length=1, max_length=64)
     profile_id: str = Field(min_length=1, max_length=64)
     apply: list[ClaimKey] = Field(default_factory=list, max_length=16)
+    #: Whether the remix is made from words, or starts from the picture itself.
+    role: RemixRole = "words"
 
 
 class RemixQueueRequest(RemixPreviewRequest):
@@ -83,6 +94,8 @@ async def preview_a_remix(
             payload.workflow_revision_id,
             payload.profile_id,
             payload.apply,
+            payload.role,
+            await remix_source(services, artifact_id, payload.role),
         )
     except RemixChoiceInvalid as exc:
         raise api_error(
@@ -92,6 +105,25 @@ async def preview_a_remix(
             "and a size only whole.",
         ) from exc
     return JSONResponse(preview_answer(artifact_id, preview), headers={"Cache-Control": "no-store"})
+
+
+async def remix_source(services: Services, artifact_id: str, role: RemixRole) -> RemixSource | None:
+    """The picture a remix starts from, read only for a remix that starts from it."""
+
+    if role != "edit":
+        return None
+    return await run_in_threadpool(read_remix_source, services.artifacts, artifact_id)
+
+
+def _claim_applied(preview: RemixPreview, key: str, setting: str | None, state: str) -> bool:
+    """Whether a claim is used: its words, its kept size, or a setting chosen here."""
+
+    if key == "prompt":
+        return True
+    if setting is None and state == "supported":
+        # A remix starting from the picture keeps its size; nothing sets it.
+        return preview.role == "edit"
+    return key in preview.applied
 
 
 def preview_answer(artifact_id: str, preview: RemixPreview) -> dict[str, Any]:
@@ -104,9 +136,16 @@ def preview_answer(artifact_id: str, preview: RemixPreview) -> dict[str, Any]:
             "budget_version": metadata.budget_version,
             "digest": metadata.digest,
         },
+        "role": preview.role,
         "workflow_revision_id": preview.workflow_revision_id,
         "profile_id": preview.profile_id,
-        "operation": "text_to_image",
+        "operation": preview.operation.value,
+        # The picture a remix starts from, at the size its stored file is.
+        "source": (
+            {"width": preview.source.width, "height": preview.source.height}
+            if preview.source is not None
+            else None
+        ),
         "claims": [
             {
                 "key": claim.key,
@@ -115,7 +154,7 @@ def preview_answer(artifact_id: str, preview: RemixPreview) -> dict[str, Any]:
                 "source": claim.source,
                 "state": claim.state,
                 "reason": claim.reason,
-                "applied": claim.key == "prompt" or claim.key in preview.applied,
+                "applied": _claim_applied(preview, claim.key, claim.setting, claim.state),
             }
             for claim in preview.claims
         ],
@@ -131,6 +170,17 @@ def preview_answer(artifact_id: str, preview: RemixPreview) -> dict[str, Any]:
                 "settings": preview.settings,
                 "seed_drawn": preview.seed_drawn,
                 "trigger_words": list(preview.trigger_words),
+                "engine_prompt": preview.engine_prompt,
+                "strength": (
+                    {
+                        "parameter": preview.strength.parameter,
+                        "mode": preview.strength.mode,
+                        "value": preview.strength.value,
+                        "from_file": preview.strength.from_file,
+                    }
+                    if preview.strength is not None
+                    else None
+                ),
             }
             if preview.ready
             else None

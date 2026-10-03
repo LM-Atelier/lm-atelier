@@ -5,25 +5,29 @@ import { uniqueWorkflowRows } from "./useWorkflowReadPages";
 
 const PAGE_SIZE = 50;
 
-export function useReadyWorkflowChoices(selectedIds: string[]) {
+/** Ready workflows to choose from: by default those that make a picture from words. */
+export function useReadyWorkflowChoices(
+  selectedIds: string[],
+  operation: "text_to_image" | "image_to_image" = "text_to_image",
+) {
   const [search, setSearch] = useState("");
   const query = search.trim();
   const ids = [...new Set(selectedIds.filter(Boolean))].sort();
   const pages = useInfiniteQuery({
-    queryKey: ["workflow-families", "ready-revisions", query],
+    queryKey: ["workflow-families", "ready-revisions", query, operation],
     initialPageParam: 0,
     queryFn: ({ pageParam, signal }) => api.workflowReadyRevisions({
-      operation: "text_to_image", limit: PAGE_SIZE, offset: pageParam, search: query,
+      operation, limit: PAGE_SIZE, offset: pageParam, search: query,
     }, signal),
     getNextPageParam: (last, loaded) => last.length === PAGE_SIZE
       ? loaded.reduce((count, page) => count + page.length, 0) : undefined,
     select: data => uniqueWorkflowRows(data.pages.flat(), row => row.revision_id),
   });
   const selected = useQuery({
-    queryKey: ["workflow-families", "selected-ready-revisions", ids],
+    queryKey: ["workflow-families", "selected-ready-revisions", ids, operation],
     enabled: ids.length > 0,
     queryFn: ({ signal }) => api.workflowReadyRevisions({
-      operation: "text_to_image", limit: 200, revisionIds: ids,
+      operation, limit: 200, revisionIds: ids,
     }, signal),
   });
   const rows = (pages.data ?? []).filter(row => !ids.includes(row.revision_id));
