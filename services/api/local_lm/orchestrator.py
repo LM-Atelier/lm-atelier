@@ -18,7 +18,6 @@ from pathlib import Path, PurePosixPath
 from typing import Any, cast
 from urllib.parse import urlparse
 
-import httpx
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
@@ -182,6 +181,7 @@ from .models import (
     WorkStep,
     WorkStepDependency,
 )
+from .network import OutboundPolicy, OutboundRefused, outbound_client
 from .ordered_planning import OrderedPlanCompiler, OrderedPlanConfirmationRequired
 from .outpaint_workflows import (
     OUTPAINT_SETTING_KEY,
@@ -5115,10 +5115,15 @@ class ConversationOrchestrator:
             result = None
             error_code = None
             try:
-                result = await search_crw(provider, proposal.query)
+                # Only the provider the person approved may be reached.
+                lease = OutboundPolicy.from_settings(self.engines.settings).lease(
+                    "web-search", hosts=frozenset({urlparse(provider.endpoint).hostname or ""})
+                )
+                result = await search_crw(provider, proposal.query, lease=lease)
             except WebSearchError as refused:
                 error_code = refused.code
             except Exception:
+                # A refusal by the outbound policy included: the provider was not reached.
                 error_code = "search_unavailable"
             with self.session_factory() as session:
                 outcome = finish_search(
@@ -5169,12 +5174,17 @@ class ConversationOrchestrator:
         host = urlparse(chosen.url).hostname or chosen.url
         await self._require_phase(job_id, run_id, f"Reading {host}", claim)
         try:
-            async with httpx.AsyncClient(
-                follow_redirects=False,
-                timeout=REQUEST_TIMEOUT_SECONDS,
-                headers=REQUEST_HEADERS,
+            lease = OutboundPolicy.from_settings(self.engines.settings).lease("web-page")
+            async with outbound_client(
+                lease, timeout=REQUEST_TIMEOUT_SECONDS, headers=REQUEST_HEADERS
             ) as client:
-                source = await fetch_source(chosen.url, request=client.get)
+                # Each hop's host is asked of the lease before it is looked up,
+                # by the check below and again by the client that requests it.
+                source = await fetch_source(
+                    chosen.url, request=client.get, resolve=lease.resolver()
+                )
+        except OutboundRefused as refused:
+            return {"url": chosen.url, "reason": chosen.reason, "refused": refused.code}
         except WebRetrievalError as refused:
             # Recorded rather than raised: the user asked a question, not for a
             # download, and they still get an answer.

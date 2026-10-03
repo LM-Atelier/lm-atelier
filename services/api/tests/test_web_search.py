@@ -9,6 +9,11 @@ from collections.abc import AsyncIterator
 import httpx
 import pytest
 
+from local_lm.network import OutboundPolicy
+
+# Any host: these tests are about the request and the response, not the policy.
+_LEASE = OutboundPolicy(lambda: True).lease("web-search")
+
 
 def _body(*, nested: bool = False) -> dict[str, object]:
     rows = [{"url": "https://example.test/article", "title": "Article", "snippet": "Evidence"}]
@@ -28,6 +33,7 @@ async def test_search_sends_the_exact_query_without_scraping(nested: bool) -> No
     result = await search_crw(
         CrwSearchProvider("https://search.example.test/prefix", token="constructed-token"),
         "  neutral query  ",
+        lease=_LEASE,
         transport=httpx.MockTransport(serve),
     )
     assert len(seen) == 1
@@ -82,7 +88,10 @@ async def test_explicit_loopback_provider_needs_no_hosted_credential(endpoint: s
         len(
             (
                 await search_crw(
-                    CrwSearchProvider(endpoint), "neutral", transport=httpx.MockTransport(serve)
+                    CrwSearchProvider(endpoint),
+                    "neutral",
+                    lease=_LEASE,
+                    transport=httpx.MockTransport(serve),
                 )
             ).results
         )
@@ -104,6 +113,7 @@ async def test_invalid_queries_never_dispatch(query: str) -> None:
         await search_crw(
             CrwSearchProvider("https://search.example.test"),
             query,
+            lease=_LEASE,
             transport=httpx.MockTransport(serve),
         )
     assert caught.value.code == "search_query_invalid"
@@ -137,6 +147,7 @@ async def test_http_refusals_do_not_echo_or_follow(status: int, code: str) -> No
         await search_crw(
             CrwSearchProvider("https://search.example.test"),
             "neutral",
+            lease=_LEASE,
             transport=httpx.MockTransport(serve),
         )
     assert str(caught.value) == code
@@ -160,6 +171,7 @@ async def test_malformed_envelopes_are_not_empty_success(body: object) -> None:
         await search_crw(
             CrwSearchProvider("https://search.example.test"),
             "neutral",
+            lease=_LEASE,
             transport=httpx.MockTransport(lambda request: httpx.Response(200, json=body)),
         )
     assert str(caught.value) == "search_response_invalid"
@@ -183,6 +195,7 @@ async def test_results_remain_bounded_and_cannot_advertise_local_or_active_urls(
     result = await search_crw(
         CrwSearchProvider("https://search.example.test"),
         "neutral",
+        lease=_LEASE,
         transport=httpx.MockTransport(
             lambda request: httpx.Response(
                 200, content=json.dumps({"success": True, "data": rows}).encode("ascii")
@@ -226,6 +239,7 @@ async def test_streaming_response_limit_closes_the_connection() -> None:
         await search_crw(
             CrwSearchProvider("https://search.example.test"),
             "neutral",
+            lease=_LEASE,
             transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=stream)),
         )
     assert caught.value.code == "search_response_too_large"
@@ -243,6 +257,7 @@ async def test_oversized_or_encoded_response_is_refused_before_body_read(
         await search_crw(
             CrwSearchProvider("https://search.example.test"),
             "neutral",
+            lease=_LEASE,
             transport=httpx.MockTransport(
                 lambda request: httpx.Response(200, headers=headers, stream=stream)
             ),
@@ -261,6 +276,7 @@ async def test_whole_request_deadline_cancels_a_stalled_body(
         await search.search_crw(
             search.CrwSearchProvider("https://search.example.test"),
             "neutral",
+            lease=_LEASE,
             transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=stream)),
         )
     assert caught.value.code == "search_timeout"
@@ -281,6 +297,7 @@ async def test_caller_cancellation_is_preserved() -> None:
         search_crw(
             CrwSearchProvider("https://search.example.test"),
             "neutral",
+            lease=_LEASE,
             transport=httpx.MockTransport(serve),
         )
     )
@@ -300,6 +317,7 @@ async def test_transport_errors_do_not_disclose_request_or_response_details() ->
         await search_crw(
             CrwSearchProvider("https://search.example.test"),
             "neutral",
+            lease=_LEASE,
             transport=httpx.MockTransport(serve),
         )
     assert str(caught.value) == "search_unavailable"
@@ -327,6 +345,7 @@ async def test_malformed_unicode_query_is_refused_before_dispatch() -> None:
         await search_crw(
             CrwSearchProvider("https://search.example.test"),
             "neutral\ud800",
+            lease=_LEASE,
             transport=httpx.MockTransport(serve),
         )
     assert str(caught.value) == "search_query_invalid"
@@ -347,6 +366,7 @@ async def test_query_controls_never_dispatch(character: str) -> None:
         await search_crw(
             CrwSearchProvider("https://search.example.test"),
             "copper" + character + "steel",
+            lease=_LEASE,
             transport=httpx.MockTransport(serve),
         )
     assert calls == []
@@ -406,6 +426,63 @@ async def test_disclosed_query_formatting_is_sent_unchanged(character: str) -> N
     await search_crw(
         CrwSearchProvider("https://search.example.test"),
         query,
+        lease=_LEASE,
         transport=httpx.MockTransport(serve),
     )
     assert calls == [query]
+
+
+async def test_a_provider_outside_the_lease_is_never_reached() -> None:
+    from local_lm.network import OutboundRefused
+    from local_lm.web_search import CrwSearchProvider, search_crw
+
+    served: list[httpx.Request] = []
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        served.append(request)
+        return httpx.Response(200, json=_body())
+
+    lease = OutboundPolicy(lambda: True).lease("web-search", hosts=frozenset({"approved.test"}))
+    with pytest.raises(OutboundRefused) as refused:
+        await search_crw(
+            CrwSearchProvider("https://search.example.test"),
+            "neutral",
+            lease=lease,
+            transport=httpx.MockTransport(serve),
+        )
+
+    assert refused.value.code == "network-host-refused"
+    assert served == []
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://xn--bcher-kva.example/search",
+        "https://bücher.example/search",
+        "https://BÜCHER.example./search",
+        "http://[0:0:0:0:0:0:0:1]:8080",
+    ],
+    ids=["punycode", "unicode", "cased-with-a-trailing-dot", "expanded-loopback"],
+)
+async def test_the_approved_provider_is_reached_however_its_host_is_written(
+    endpoint: str,
+) -> None:
+    from urllib.parse import urlparse
+
+    from local_lm.web_search import CrwSearchProvider, search_crw
+
+    served: list[httpx.Request] = []
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        served.append(request)
+        return httpx.Response(200, json=_body())
+
+    # Leased as the search dispatch leases it: for the host the endpoint names.
+    host = urlparse(endpoint).hostname or ""
+    lease = OutboundPolicy(lambda: True).lease("web-search", hosts=frozenset({host}))
+    await search_crw(
+        CrwSearchProvider(endpoint), "neutral", lease=lease, transport=httpx.MockTransport(serve)
+    )
+
+    assert len(served) == 1
