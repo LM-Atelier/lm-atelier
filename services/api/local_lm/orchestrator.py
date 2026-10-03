@@ -1709,7 +1709,7 @@ class ConversationOrchestrator:
             raise RuntimeError("Source preparation did not return a preview.")
         return result
 
-    async def _prepare_or_admit_turn(  # noqa: C901, PLR0912, PLR0915
+    async def _prepare_or_admit_turn(
         self,
         session: Session,
         chat_id: str,
@@ -2491,12 +2491,11 @@ class ConversationOrchestrator:
 
         transcript_sequence = self._next_transcript_sequence(session, chat)
         queue_class = "interactive_compute" if plan.operation == Operation.TEXT else "media_compute"
-        work_plan = WorkPlan(
-            chat_id=chat.id,
-            idempotency_key=request.idempotency_key,
+        work_plan = self._add_work_plan(
+            session,
+            chat=chat,
+            request=request,
             source_action=source_action,
-            persistence_scope=self.persistence_scope,
-            status=JobStatus.QUEUED.value,
             context_head_message_id=context_head_message_id,
             transcript_sequence=transcript_sequence,
             priority=10 if plan.operation == Operation.TEXT else 0,
@@ -2557,20 +2556,13 @@ class ConversationOrchestrator:
             if plan.operation in {Operation.TEXT_TO_VIDEO, Operation.IMAGE_TO_VIDEO}
             else "image"
         )
-        session.add(work_plan)
-        session.flush()
         work_steps: list[WorkStep] = []
         runs: list[Run] = []
         jobs: list[Job] = []
         base_seed = effective_settings.get("seed")
-        prompt_batch_seeds: tuple[int, ...] = ()
-        if prompt_batch_selection is not None:
-            sampled: list[int] = []
-            while len(sampled) < output_count:
-                candidate = _fresh_media_seed()
-                if candidate not in sampled:
-                    sampled.append(candidate)
-            prompt_batch_seeds = tuple(sampled)
+        prompt_batch_seeds = (
+            () if prompt_batch_selection is None else self._prompt_batch_seeds(output_count)
+        )
         turn_outputs = _TurnOutputs(
             chat=chat,
             user_message=user_message,
@@ -2622,12 +2614,7 @@ class ConversationOrchestrator:
             work_steps.append(work_step)
             runs.append(run)
             jobs.append(job)
-        work_plan.summary_json = {
-            **work_plan.summary_json,
-            "step_ids": [step.id for step in work_steps],
-            "run_ids": [run.id for run in runs],
-            "job_ids": [job.id for job in jobs],
-        }
+        self._record_turn_row_ids(work_plan, work_steps=work_steps, runs=runs, jobs=jobs)
         if prompt_batch_selection is not None:
             link_prompt_batch_execution(
                 session,
@@ -2638,20 +2625,15 @@ class ConversationOrchestrator:
                     for index, (step, run) in enumerate(zip(work_steps, runs, strict=True))
                 ),
             )
-        if chat.title == "New chat":
-            chat.title = request.text.strip().replace("\n", " ")[:72] or "New chat"
-        if freeze_context:
-            for accepted_run in runs:
-                self._freeze_turn_context(session, accepted_run)
-        if before_commit is not None:
-            # The caller's claim-bound assertion joins THIS transaction,
-            # after every await above: the turn becomes durable only if
-            # the claim still owns its row at the commit.
-            before_commit(session, runs[0])
-        if request.source_fit is not None or request.upscale:
-            for accepted_run in runs:
-                if accepted_context(session, accepted_run) is None:
-                    self._freeze_turn_context(session, accepted_run)
+        self._settle_turn_before_commit(
+            session,
+            chat=chat,
+            request=request,
+            runs=runs,
+            freeze_context=freeze_context,
+            before_commit=before_commit,
+            refreeze=lambda _run: request.source_fit is not None or request.upscale,
+        )
         session.commit()
         accepted = self._accepted_for_run(session, runs[0])
         await self.events.publish(
@@ -3130,14 +3112,7 @@ class ConversationOrchestrator:
             settings_json=output_settings,
             provenance_json=provenance,
         )
-        _require_consistent_workflow_witness(work_step, run)
-        run.provenance_json = {
-            **run.provenance_json,
-            "failure_retries": capture_retry_budget(session, run.operation),
-        }
-        session.add(run)
-        session.flush()
-        work_step.run_id = run.id
+        self._add_queued_run(session, work_step, run)
         if turn.replacement_message:
             latest_sequence = session.scalar(
                 select(ResponseRevision.sequence)
@@ -3166,34 +3141,23 @@ class ConversationOrchestrator:
                     "revision_id": revision.id,
                 },
             }
-        job = Job(
-            kind=self._job_kind(turn.plan.operation).value,
-            status=JobStatus.QUEUED.value,
-            run_id=run.id,
-            work_plan_id=turn.work_plan.id,
-            work_step_id=work_step.id,
-            progress=0,
-            phase="queued",
+        job = self._add_queued_job(
+            session,
+            work_plan=turn.work_plan,
+            work_step=work_step,
+            run=run,
+            operation=turn.plan.operation,
+            ordinal=ordinal,
+            transcript_sequence=turn.transcript_sequence,
             queue_resource=turn.queue_class,
-            queue_group="primary",
             queue_priority=turn.work_plan.priority,
-            queue_ticket=f"{turn.transcript_sequence:020d}:{ordinal:04d}:{run.id}",
-            enqueued_at=utcnow(),
+            queue_length=turn.output_count,
             payload_json={
                 "operation": turn.plan.operation.value,
                 "output_index": ordinal,
                 "output_count": turn.output_count,
             },
         )
-        update_job_progress(
-            job,
-            stage="queued",
-            queue_resource=turn.queue_class,
-            queue_position=ordinal - 1,
-            queue_length=turn.output_count,
-            indeterminate=True,
-        )
-        session.add(job)
         return work_step, run, job
 
     async def _create_ordered_turn(
@@ -3617,12 +3581,11 @@ class ConversationOrchestrator:
             chat.active_head_message_id = assistant_messages[-1].id
 
         transcript_sequence = self._next_transcript_sequence(session, chat)
-        work_plan = WorkPlan(
-            chat_id=chat.id,
-            idempotency_key=request.idempotency_key,
+        work_plan = self._add_work_plan(
+            session,
+            chat=chat,
+            request=request,
             source_action=source_action,
-            persistence_scope=self.persistence_scope,
-            status=JobStatus.QUEUED.value,
             context_head_message_id=context_head_message_id,
             transcript_sequence=transcript_sequence,
             priority=0,
@@ -3641,8 +3604,6 @@ class ConversationOrchestrator:
                 "status_counts": {"queued": len(intent.steps)},
             },
         )
-        session.add(work_plan)
-        session.flush()
 
         database_steps_by_intent_id: dict[str, WorkStep] = {}
         work_steps: list[WorkStep] = []
@@ -3842,70 +3803,40 @@ class ConversationOrchestrator:
                     ),
                 },
             )
-            _require_consistent_workflow_witness(work_step, run)
-            run.provenance_json = {
-                **run.provenance_json,
-                "failure_retries": capture_retry_budget(session, run.operation),
-            }
-            session.add(run)
-            session.flush()
-            work_step.run_id = run.id
-            job = Job(
-                kind=self._job_kind(operation).value,
-                status=JobStatus.QUEUED.value,
-                run_id=run.id,
-                work_plan_id=work_plan.id,
-                work_step_id=work_step.id,
-                progress=0,
-                phase="queued",
+            self._add_queued_run(session, work_step, run)
+            job = self._add_queued_job(
+                session,
+                work_plan=work_plan,
+                work_step=work_step,
+                run=run,
+                operation=operation,
+                ordinal=ordinal,
+                transcript_sequence=transcript_sequence,
                 queue_resource=work_step.queue_class,
-                queue_group="primary",
                 queue_priority=0,
-                queue_ticket=f"{transcript_sequence:020d}:{ordinal:04d}:{run.id}",
-                enqueued_at=utcnow(),
+                queue_length=len(intent.steps),
                 payload_json={
                     "operation": operation.value,
                     "ordered_step_id": step_intent.id,
                     "step_index": ordinal,
                     "step_count": len(intent.steps),
                 },
-            )
-            update_job_progress(
-                job,
-                stage="queued",
-                queue_resource=work_step.queue_class,
-                queue_position=ordinal - 1,
-                queue_length=len(intent.steps),
                 blocked_by=dependency_ids,
-                indeterminate=True,
             )
-            session.add(job)
             work_steps.append(work_step)
             runs.append(run)
             jobs.append(job)
 
-        work_plan.summary_json = {
-            **work_plan.summary_json,
-            "step_ids": [step.id for step in work_steps],
-            "run_ids": [run.id for run in runs],
-            "job_ids": [job.id for job in jobs],
-        }
-        if chat.title == "New chat":
-            chat.title = request.text.strip().replace("\n", " ")[:72] or "New chat"
-        if freeze_context:
-            for accepted_run in runs:
-                self._freeze_turn_context(session, accepted_run)
-        if before_commit is not None:
-            # The caller's claim-bound assertion joins THIS transaction,
-            # after every await above: the turn becomes durable only if
-            # the claim still owns its row at the commit.
-            before_commit(session, runs[0])
-        for accepted_run in runs:
-            if (
-                accepted_run.provenance_json.get("upscale") is True
-                and accepted_context(session, accepted_run) is None
-            ):
-                self._freeze_turn_context(session, accepted_run)
+        self._record_turn_row_ids(work_plan, work_steps=work_steps, runs=runs, jobs=jobs)
+        self._settle_turn_before_commit(
+            session,
+            chat=chat,
+            request=request,
+            runs=runs,
+            freeze_context=freeze_context,
+            before_commit=before_commit,
+            refreeze=lambda run: run.provenance_json.get("upscale") is True,
+        )
         session.commit()
         accepted = self._accepted_for_run(session, runs[0])
         await self.events.publish(
@@ -3925,6 +3856,160 @@ class ConversationOrchestrator:
         for queued_job, queued_run in zip(jobs, runs, strict=True):
             self.start(queued_job.id, queued_run.id)
         return accepted
+
+    def _add_work_plan(
+        self,
+        session: Session,
+        *,
+        chat: Chat,
+        request: TurnRequest,
+        source_action: str,
+        context_head_message_id: str | None,
+        transcript_sequence: int,
+        priority: int,
+        planner_version: str,
+        failure_policy: str,
+        summary_json: dict[str, Any],
+    ) -> WorkPlan:
+        """Add a turn's plan and flush it, so the steps written next can name it."""
+
+        work_plan = WorkPlan(
+            chat_id=chat.id,
+            idempotency_key=request.idempotency_key,
+            source_action=source_action,
+            persistence_scope=self.persistence_scope,
+            status=JobStatus.QUEUED.value,
+            context_head_message_id=context_head_message_id,
+            transcript_sequence=transcript_sequence,
+            priority=priority,
+            planner_version=planner_version,
+            failure_policy=failure_policy,
+            summary_json=summary_json,
+        )
+        session.add(work_plan)
+        session.flush()
+        return work_plan
+
+    @staticmethod
+    def _prompt_batch_seeds(count: int) -> tuple[int, ...]:
+        """One fresh seed for each output of a prompt batch, no two alike."""
+
+        sampled: list[int] = []
+        while len(sampled) < count:
+            candidate = _fresh_media_seed()
+            if candidate not in sampled:
+                sampled.append(candidate)
+        return tuple(sampled)
+
+    @staticmethod
+    def _add_queued_run(session: Session, work_step: WorkStep, run: Run) -> None:
+        """Queue a step's run once its workflow matches the step's, with its retry budget."""
+
+        _require_consistent_workflow_witness(work_step, run)
+        run.provenance_json = {
+            **run.provenance_json,
+            "failure_retries": capture_retry_budget(session, run.operation),
+        }
+        session.add(run)
+        session.flush()
+        work_step.run_id = run.id
+
+    def _add_queued_job(
+        self,
+        session: Session,
+        *,
+        work_plan: WorkPlan,
+        work_step: WorkStep,
+        run: Run,
+        operation: Operation,
+        ordinal: int,
+        transcript_sequence: int,
+        queue_resource: str,
+        queue_priority: int,
+        queue_length: int,
+        payload_json: dict[str, Any],
+        blocked_by: list[str] | None = None,
+    ) -> Job:
+        """Add the job that runs one step, queued after the turn's earlier steps.
+
+        It is added and not flushed: the next step's flush, or the commit,
+        writes it.
+        """
+
+        job = Job(
+            kind=self._job_kind(operation).value,
+            status=JobStatus.QUEUED.value,
+            run_id=run.id,
+            work_plan_id=work_plan.id,
+            work_step_id=work_step.id,
+            progress=0,
+            phase="queued",
+            queue_resource=queue_resource,
+            queue_group="primary",
+            queue_priority=queue_priority,
+            queue_ticket=f"{transcript_sequence:020d}:{ordinal:04d}:{run.id}",
+            enqueued_at=utcnow(),
+            payload_json=payload_json,
+        )
+        update_job_progress(
+            job,
+            stage="queued",
+            queue_resource=queue_resource,
+            queue_position=ordinal - 1,
+            queue_length=queue_length,
+            blocked_by=blocked_by,
+            indeterminate=True,
+        )
+        session.add(job)
+        return job
+
+    @staticmethod
+    def _record_turn_row_ids(
+        work_plan: WorkPlan,
+        *,
+        work_steps: Sequence[WorkStep],
+        runs: Sequence[Run],
+        jobs: Sequence[Job],
+    ) -> None:
+        """Add the ids of a turn's steps, runs and jobs to its plan's summary."""
+
+        work_plan.summary_json = {
+            **work_plan.summary_json,
+            "step_ids": [step.id for step in work_steps],
+            "run_ids": [run.id for run in runs],
+            "job_ids": [job.id for job in jobs],
+        }
+
+    def _settle_turn_before_commit(
+        self,
+        session: Session,
+        *,
+        chat: Chat,
+        request: TurnRequest,
+        runs: Sequence[Run],
+        freeze_context: bool,
+        before_commit: Callable[[Session, Run], None] | None,
+        refreeze: Callable[[Run], bool],
+    ) -> None:
+        """Name a new chat after the turn and freeze what its runs were accepted with.
+
+        ``refreeze`` says which runs need their accepted context written again
+        after the caller's check, when none was frozen for them before it.
+        """
+
+        if chat.title == "New chat":
+            chat.title = request.text.strip().replace("\n", " ")[:72] or "New chat"
+        if freeze_context:
+            for accepted_run in runs:
+                self._freeze_turn_context(session, accepted_run)
+        if before_commit is not None:
+            # The caller's claim-bound assertion joins THIS transaction,
+            # after every await above: the turn becomes durable only if
+            # the claim still owns its row at the commit.
+            before_commit(session, runs[0])
+        for accepted_run in runs:
+            if refreeze(accepted_run) and accepted_context(session, accepted_run) is None:
+                self._freeze_turn_context(session, accepted_run)
 
     def start(self, job_id: str, run_id: str | None) -> None:
         if job_id in self._tasks and not self._tasks[job_id].done():
