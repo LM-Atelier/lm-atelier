@@ -432,7 +432,7 @@ def _settings(
     bound: dict[str, Any] = {}
     unbound: dict[str, Any] = {}
     mask = settings.get("mask")
-    if isinstance(mask, dict) and set(mask) - {"artifact_id"}:
+    if isinstance(mask, dict) and not _plain_selection(mask):
         # How a selection is applied - inverted, feathered, blended - changes
         # what ran. The selection is listed among the inputs; how it was used is
         # not yet written, so the record says so.
@@ -463,6 +463,22 @@ def _settings(
             continue
         (bound if placeholders is not None and key in placeholders else unbound)[key] = value
     return {"bound": bound, "unbound": unbound}
+
+
+def _plain_selection(mask: dict[str, Any]) -> bool:
+    """Whether a selection is applied exactly as its picture alone would be.
+
+    Image Studio always says how far to feather and whether to turn the
+    selection round; with no feathering and no turning, that is the selection
+    as it is.
+    """
+
+    return (
+        set(mask) <= {"artifact_id", "feather_px", "invert"}
+        and mask.get("feather_px", 0) == 0
+        and type(mask.get("feather_px", 0)) is int
+        and mask.get("invert", False) is False
+    )
 
 
 def _setting_choices(operation: str, schema: object) -> dict[str, frozenset[str]]:
@@ -506,8 +522,8 @@ def _inputs(
     mask_id = mask.get("artifact_id") if isinstance(mask, dict) else None
     ordered: list[tuple[str, str]] = []
     for position, identity in enumerate(dict.fromkeys(identities)):
-        if identity == mask_id:
-            continue
+        # A selection that was also one of the pictures stays listed as that
+        # picture too, so the record never hides a picture the run was given.
         role = "source" if position == 0 and run.operation in _SOURCE_OPERATIONS else "input"
         ordered.append((identity, role))
     if isinstance(mask_id, str):

@@ -285,7 +285,7 @@ const REPLAY_REASON_TEXT: Record<string, string> = {
   lora_strength: "A LoRA strength is out of range.",
   lora_positions: "Its LoRAs are out of order.",
   inputs_for_operation: "Its inputs do not fit how it was made.",
-  mask_input: "It uses a selection, which cannot be replayed yet.",
+  mask_input: "Its selection was sent with how to feather, turn round or blend it, which a record does not keep.",
   repeated_inputs: "It lists the same input picture twice.",
   edit_prompt_wording: "Its edit was worded by another version, so the request cannot be read back out.",
 };

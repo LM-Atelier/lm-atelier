@@ -125,6 +125,7 @@ async def test_a_record_made_here_plans_back_to_what_made_it(client: AsyncClient
         "profile_id": profile_id,
         "lora_asset_ids": [],
         "input_artifact_ids": [],
+        "mask_artifact_id": None,
     }
     # Nothing was started, and the answer repeats neither the prompt nor a setting.
     assert _counts() == before
@@ -223,18 +224,19 @@ async def test_shapes_a_turn_cannot_carry_are_refused_with_their_reasons(
             {"sha256": "5" * 64, "role": "source", "size_bytes": 10, "media_type": "image/png"}
         ]
 
-    def a_mask(record: dict[str, Any]) -> None:
+    def two_masks(record: dict[str, Any]) -> None:
         record["operation"] = "image_to_image"
         record["prompt"]["positive"] = edit_prompt_preamble() + record["prompt"]["positive"]
         record["inputs"] = [
             {"sha256": "5" * 64, "role": "source", "size_bytes": 10, "media_type": "image/png"},
             {"sha256": "6" * 64, "role": "mask", "size_bytes": 10, "media_type": "image/png"},
+            {"sha256": "7" * 64, "role": "mask", "size_bytes": 10, "media_type": "image/png"},
         ]
 
     unsupported = {
         "gapped and strong": (gapped_and_strong, ["lora_strength", "lora_positions"]),
         "input": (an_input_where_none_is_taken, ["inputs_for_operation"]),
-        "mask": (a_mask, ["mask_input"]),
+        "two masks": (two_masks, ["mask_input"]),
     }
     for name, (change, reasons) in unsupported.items():
         plan = await _plan(client, _resealed(content, change))
