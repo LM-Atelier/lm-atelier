@@ -29,9 +29,11 @@ function claim(key: string, value: string | number, state: string, reason: strin
 const preview = {
   artifact_id: artifactId,
   metadata: { dialect: "parameters", parser_version: 1, budget_version: 1, digest: "sha256:1" },
+  role: "words",
   workflow_revision_id: "rev_cup",
   profile_id: "profile_cup",
   operation: "text_to_image",
+  source: null,
   claims: [
     claim("prompt", PROMPT, "supported"),
     claim("steps", 20, "supported"),
@@ -48,6 +50,8 @@ const preview = {
     settings: { negative_prompt: "", steps: 9, width: 1024, height: 1024, batch_size: 1 },
     seed_drawn: true,
     trigger_words: [],
+    engine_prompt: PROMPT,
+    strength: null,
   },
   refusals: [],
   ready: true,
@@ -92,7 +96,7 @@ describe("remix preview", () => {
     await screen.findByText("A remix would make one picture with");
     expect(api.remixPreview).toHaveBeenCalledWith(
       artifactId,
-      { workflow_revision_id: "rev_cup", profile_id: "profile_cup", apply: [] },
+      { workflow_revision_id: "rev_cup", profile_id: "profile_cup", apply: [], role: "words" },
       expect.any(AbortSignal),
     );
     const items = screen.getAllByRole("listitem").map((item) => item.textContent);
@@ -115,7 +119,7 @@ describe("remix preview", () => {
 
     await waitFor(() => expect(api.remixPreview).toHaveBeenLastCalledWith(
       artifactId,
-      { workflow_revision_id: "rev_cup", profile_id: "profile_cup", apply: ["width", "height"] },
+      { workflow_revision_id: "rev_cup", profile_id: "profile_cup", apply: ["width", "height"], role: "words" },
       expect.any(AbortSignal),
     ));
   });
@@ -155,6 +159,8 @@ describe("remix preview", () => {
     { ...preview, claims: [{ ...preview.claims[1], state: "maybe" }] },
     { ...preview, shape: { width: 0, height: 768 } },
     { ...preview, shape: undefined },
+    { ...preview, role: "other" },
+    { ...preview, resolved: { ...preview.resolved, strength: { parameter: "denoise", mode: "high", value: 1, from_file: false } } },
   ])("shows nothing from an answer of another shape", async (other) => {
     vi.mocked(api.remixPreview).mockResolvedValue(other);
     renderDialog();
@@ -212,6 +218,7 @@ describe("making a remix", () => {
       workflow_revision_id: "rev_cup",
       profile_id: "profile_cup",
       apply: ["width", "height"],
+      role: "words",
       review_digest: "sha256:2",
     });
     expect(closed).toHaveBeenCalled();
@@ -392,7 +399,7 @@ describe("a picture whose own size this workflow cannot make", () => {
     fireEvent.click(offered);
     await waitFor(() => expect(api.remixPreview).toHaveBeenLastCalledWith(
       artifactId,
-      { workflow_revision_id: "rev_cup", profile_id: "profile_cup", apply: ["shape"] },
+      { workflow_revision_id: "rev_cup", profile_id: "profile_cup", apply: ["shape"], role: "words" },
       expect.anything(),
     ));
     const make = screen.getByRole("button", { name: "Make this picture" });
@@ -404,7 +411,88 @@ describe("a picture whose own size this workflow cannot make", () => {
       workflow_revision_id: "rev_cup",
       profile_id: "profile_cup",
       apply: ["shape"],
+      role: "words",
       review_digest: "sha256:4",
     }));
+  });
+});
+
+describe("a remix that starts from the picture itself", () => {
+  const changed = {
+    ...preview,
+    role: "edit",
+    operation: "image_to_image",
+    source: { width: 512, height: 768 },
+    claims: [
+      claim("prompt", PROMPT, "supported"),
+      claim("denoise", 0.45, "supported"),
+      { ...claim("width", 512, "supported"), setting: null, applied: true },
+      { ...claim("height", 768, "supported"), setting: null, applied: true },
+    ],
+    resolved: {
+      text: PROMPT,
+      settings: { negative_prompt: "", denoise: 0.6, width: 1024, height: 1024, batch_size: 1 },
+      seed_drawn: false,
+      trigger_words: [],
+      engine_prompt: `Keep what the words do not change. Requested edit: ${PROMPT}`,
+      strength: { parameter: "denoise", mode: "auto", value: 0.6, from_file: false },
+    },
+    review_digest: "sha256:5",
+  };
+  const term = (name: string) => screen.getByText(name, { selector: "dt" }).nextElementSibling?.textContent;
+
+  it("lists workflows that change a picture, and shows what changing this one would run", async () => {
+    vi.mocked(api.remixPreview).mockResolvedValue(changed);
+    vi.mocked(api.createChat).mockResolvedValue({ id: "chat_new" } as never);
+    vi.mocked(api.remixPicture).mockResolvedValue(undefined as never);
+    renderDialog(vi.fn());
+    fireEvent.click(await screen.findByRole("radio", { name: "This picture" }));
+    await waitFor(() => expect(api.workflowReadyRevisions).toHaveBeenCalledWith(
+      expect.objectContaining({ operation: "image_to_image" }), expect.anything(),
+    ));
+    await choose();
+
+    await screen.findByText("A remix would change this picture with");
+    expect(api.remixPreview).toHaveBeenLastCalledWith(
+      artifactId, expect.objectContaining({ role: "edit", apply: [] }), expect.any(AbortSignal),
+    );
+    expect(term("Starts from")).toBe("this picture, 512 × 768");
+    expect(term("Strength of the change")).toBe("0.6, estimated from the words");
+    expect(term("Words the engine is given")).toBe(changed.resolved.engine_prompt);
+    expect(screen.queryByText("Width", { selector: "dt" })).toBeNull();
+    // The kept size is used as it is; only the strength can be chosen.
+    expect(screen.getAllByRole("checkbox").map((box) => box.closest("label")?.textContent)).toEqual(["Denoise"]);
+    const make = screen.getByRole("button", { name: "Make this picture" });
+    await waitFor(() => expect(make).toHaveAttribute("aria-disabled", "false"));
+    fireEvent.click(make);
+
+    await waitFor(() => expect(api.remixPicture).toHaveBeenCalledWith(
+      "chat_new", expect.objectContaining({ role: "edit", apply: [], review_digest: "sha256:5" }),
+    ));
+  });
+
+  it("names a strength taken from the file as the one this picture was made with", async () => {
+    vi.mocked(api.remixPreview).mockResolvedValue({
+      ...changed,
+      resolved: { ...changed.resolved, strength: { parameter: "denoise", mode: "manual", value: 0.45, from_file: true } },
+    });
+    renderDialog();
+    fireEvent.click(await screen.findByRole("radio", { name: "This picture" }));
+    await choose();
+
+    await screen.findByText("A remix would change this picture with");
+    expect(term("Strength of the change")).toBe("0.45, the strength this picture was made with");
+  });
+
+  it("starts a new choice of workflow when what the remix starts from changes", async () => {
+    vi.mocked(api.remixPreview).mockResolvedValue(preview);
+    renderDialog();
+    await choose();
+    await screen.findByText("A remix would make one picture with");
+
+    fireEvent.click(screen.getByRole("radio", { name: "This picture" }));
+
+    expect((screen.getByLabelText("Workflow") as HTMLSelectElement).value).toBe("");
+    expect((screen.getByRole("radio", { name: "This picture" }) as HTMLInputElement).checked).toBe(true);
   });
 });

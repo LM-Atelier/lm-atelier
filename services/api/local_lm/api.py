@@ -331,7 +331,7 @@ from .picture_remix import (
     preview_remix,
     remix_check,
 )
-from .picture_remix_api import RemixQueueRequest
+from .picture_remix_api import RemixQueueRequest, remix_source
 from .picture_remix_api import router as picture_remix_router
 from .picture_shape import MatchSourceRequest, shown_size
 from .platforms import list_platform_matrix
@@ -4679,7 +4679,9 @@ async def remix_a_picture(
     the digest the preview showed, and only into a new chat with nothing in it.
     No saved preset or settings recipe enters it. The run keeps which picture
     and choices it came from, never a value from the picture's file, and the
-    picture itself is never changed.
+    picture itself is never changed. A remix that starts from the picture uses
+    it as the starting image, and is not checked again after it is made: the
+    check would make a second, different picture.
     """
 
     services = _services(request)
@@ -4708,6 +4710,8 @@ async def remix_a_picture(
             payload.workflow_revision_id,
             payload.profile_id,
             payload.apply,
+            payload.role,
+            await remix_source(services, payload.artifact_id, payload.role),
         )
     except RemixChoiceInvalid as exc:
         raise api_error(
@@ -4731,6 +4735,7 @@ async def remix_a_picture(
             "remix-review-changed",
             "What this remix would run changed since it was shown. Check it again.",
         )
+    edit = preview.role == "edit"
     turn = TurnRequest(
         text=preview.text,
         mode="image",
@@ -4740,7 +4745,20 @@ async def remix_a_picture(
         preset_id=None,
         output_count=1,
         settings=preview.request_settings,
+        input_artifact_ids=[payload.artifact_id] if edit else [],
     )
+    check = remix_check(payload.artifact_id, preview)
+    # Only after the preview, which reads a clean session: the chat's own setting
+    # is put back before the commit, so later edits in it are checked as before.
+    restore_edit_check = without_edit_check(chat) if edit else None
+
+    def check_then_restore(transaction: Session, first: Run) -> None:
+        try:
+            check(transaction, first)
+        finally:
+            if restore_edit_check is not None:
+                restore_edit_check()
+
     try:
         return await _accept_turn(
             services.orchestrator,
@@ -4750,7 +4768,7 @@ async def remix_a_picture(
             freeze_context=True,
             # No settings recipe for this turn, without writing anything.
             inherited_use_case_preset=InheritedWorkflowUseCasePreset(None),
-            before_commit=remix_check(payload.artifact_id, preview),
+            before_commit=check_then_restore,
         )
     except RemixDiffers as exc:
         raise api_error(

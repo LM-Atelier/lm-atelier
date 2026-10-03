@@ -11,6 +11,7 @@ import {
   remixClaimText,
   remixFailureText,
   type RemixPreview,
+  type RemixRole,
 } from "./pictureRemix";
 import { useReadyWorkflowChoices } from "./useReadyWorkflowChoices";
 
@@ -33,6 +34,12 @@ function choiceLabel(choice: string, shape: RemixPreview["shape"]): string {
   return settingLabel(choice);
 }
 
+/** Where the strength of a change to the picture came from, in words. */
+function strengthSource(strength: NonNullable<NonNullable<RemixPreview["resolved"]>["strength"]>): string {
+  if (strength.from_file) return "the strength this picture was made with";
+  return strength.mode === "auto" ? "estimated from the words" : "the model's own";
+}
+
 function shownValue(value: unknown): string {
   if (value === "") return "none";
   return typeof value === "string" || typeof value === "number" ? String(value) : "set";
@@ -41,12 +48,25 @@ function shownValue(value: unknown): string {
 function ResolvedSettings({ preview }: { preview: RemixPreview }) {
   const resolved = preview.resolved;
   if (!resolved) return null;
+  const edit = preview.role === "edit";
+  // A change to the picture keeps its size, so no size of the workflow's is shown.
+  const shown = edit
+    ? SHOWN_SETTINGS.filter(([key]) => key !== "width" && key !== "height")
+    : SHOWN_SETTINGS;
   return (
     <>
-      <strong>A remix would make one picture with</strong>
+      <strong>{edit ? "A remix would change this picture with" : "A remix would make one picture with"}</strong>
       <dl className="generation-identity">
+        {edit && preview.source && <>
+          <dt>Starts from</dt>
+          <dd>{`this picture, ${preview.source.width} × ${preview.source.height}`}</dd>
+        </>}
         <dt>Prompt</dt><dd>{resolved.text}</dd>
-        {SHOWN_SETTINGS.map(([key, label]) => (
+        {edit && resolved.strength && <>
+          <dt>Strength of the change</dt>
+          <dd>{`${resolved.strength.value}, ${strengthSource(resolved.strength)}`}</dd>
+        </>}
+        {shown.map(([key, label]) => (
           <Fragment key={key}>
             <dt>{label}</dt>
             <dd>{key in resolved.settings
@@ -56,6 +76,9 @@ function ResolvedSettings({ preview }: { preview: RemixPreview }) {
         ))}
         {resolved.trigger_words.length > 0 && <>
           <dt>Words the model adds</dt><dd>{resolved.trigger_words.join(", ")}</dd>
+        </>}
+        {edit && <>
+          <dt>Words the engine is given</dt><dd>{resolved.engine_prompt}</dd>
         </>}
       </dl>
     </>
@@ -76,13 +99,16 @@ export function PictureRemixDialog({
   const [revisionId, setRevisionId] = useState("");
   const [profileId, setProfileId] = useState("");
   const [applied, setApplied] = useState<string[]>([]);
-  const workflows = useReadyWorkflowChoices(revisionId ? [revisionId] : []);
+  const [role, setRole] = useState<RemixRole>("words");
+  const workflows = useReadyWorkflowChoices(
+    revisionId ? [revisionId] : [], role === "edit" ? "image_to_image" : "text_to_image",
+  );
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
   const apply = applied.flatMap(claimKeys);
   const preview = useQuery({
-    queryKey: ["picture-remix-preview", artifactId, revisionId, profileId, apply],
+    queryKey: ["picture-remix-preview", artifactId, revisionId, profileId, apply, role],
     queryFn: async ({ signal }) => readRemixPreview(await api.remixPreview(
-      artifactId, { workflow_revision_id: revisionId, profile_id: profileId, apply }, signal,
+      artifactId, { workflow_revision_id: revisionId, profile_id: profileId, apply, role }, signal,
     )),
     enabled: Boolean(revisionId && profileId),
     retry: false,
@@ -93,6 +119,7 @@ export function PictureRemixDialog({
     // person is using disappears under them; never across a workflow or model.
     placeholderData: (previous, previousQuery) => previousQuery
       && previousQuery.queryKey[2] === revisionId && previousQuery.queryKey[3] === profileId
+      && previousQuery.queryKey[5] === role
       ? previous : undefined,
   });
   const make = useMutation({
@@ -104,6 +131,7 @@ export function PictureRemixDialog({
           workflow_revision_id: revisionId,
           profile_id: profileId,
           apply,
+          role,
           review_digest: digest,
         });
       } catch (error) {
@@ -129,6 +157,12 @@ export function PictureRemixDialog({
     make.reset();
     setter(value);
   };
+  const chooseRole = (value: RemixRole) => {
+    if (make.isPending || value === role) return;
+    // The workflows differ: one makes a picture from words, the other changes one.
+    choose(setRevisionId)("");
+    setRole(value);
+  };
   const data = preview.data;
   const checking = preview.isFetching;
   const applicable = data ? applicableClaims(data.claims, data.shape) : [];
@@ -151,6 +185,21 @@ export function PictureRemixDialog({
           Choose a workflow and a model here. Nothing the file names is looked up or fetched;
           each of its settings is checked against what you choose.
         </p>
+        <fieldset>
+          <legend>Start from</legend>
+          {([["words", "Words only"], ["edit", "This picture"]] as const).map(([value, label]) => (
+            <label key={value}>
+              <input
+                type="radio"
+                name="remix-start"
+                checked={role === value}
+                aria-disabled={make.isPending}
+                onChange={() => chooseRole(value)}
+              />
+              <span>{label}</span>
+            </label>
+          ))}
+        </fieldset>
         <ReadyWorkflowBrowseControls workflows={workflows} />
         <label>
           <span>Workflow</span>

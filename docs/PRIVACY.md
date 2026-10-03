@@ -107,7 +107,9 @@ saved preset or settings
 recipe enters it. The new picture keeps which picture, workflow and model it
 came from and which settings were used, but no prompt or value from the file
 beyond those its own generation records. The picture and its file are not
-changed.
+changed. A remix can also start from the picture itself: then the picture, only
+one in your Media Library, is the starting image that a workflow you choose
+changes on this computer, and it is kept for as long as the remix is.
 
 Before sharing issue details, inspect them and remove tokens, private prompts,
 chats, media, model inputs, and identifying file paths.

@@ -12,7 +12,14 @@ export interface RemixPreviewClaim {
   applied: boolean;
 }
 
+export type RemixRole = "words" | "edit";
+
 export interface RemixPreview {
+  /** Made from words, or starting from the picture itself. */
+  role: RemixRole;
+  operation: "text_to_image" | "image_to_image";
+  /** The picture a remix starts from, for a remix that starts from it. */
+  source: { width: number; height: number } | null;
   workflow_revision_id: string;
   profile_id: string;
   claims: RemixPreviewClaim[];
@@ -26,6 +33,10 @@ export interface RemixPreview {
     /** A seed is drawn when the picture is made, not one set here or the workflow's own. */
     seed_drawn: boolean;
     trigger_words: string[];
+    /** The words the engine is given. */
+    engine_prompt: string;
+    /** How much a remix starting from the picture changes it, and where that came from. */
+    strength: { parameter: string; mode: "auto" | "manual"; value: number; from_file: boolean } | null;
   } | null;
   review_digest: string | null;
 }
@@ -42,6 +53,8 @@ const REASONS: Record<string, string> = {
   value_refused: "this workflow does not take this value",
   not_a_choice: "this workflow does not know this name",
   size_not_offered: "this workflow does not make this size",
+  size_differs: "the picture is not this size",
+  replaces_picture: "it would draw the whole picture again",
   edit_only: "only for changing a picture, not making one from words",
   one_picture: "a remix makes one picture",
 };
@@ -96,13 +109,32 @@ function size(value: unknown): number {
   return value;
 }
 
+function strength(value: unknown): NonNullable<RemixPreview["resolved"]>["strength"] {
+  if (value === null) return null;
+  const item = record(value);
+  if (
+    (item.mode !== "auto" && item.mode !== "manual")
+    || typeof item.value !== "number" || !Number.isFinite(item.value)
+    || typeof item.from_file !== "boolean"
+  ) fail();
+  return { parameter: text(item.parameter), mode: item.mode, value: item.value, from_file: item.from_file };
+}
+
 /** Read the server's answer, refusing one of another shape rather than showing part of it. */
 export function readRemixPreview(value: unknown): RemixPreview {
   const answer = record(value);
   if (typeof answer.ready !== "boolean") fail();
+  if (answer.role !== "words" && answer.role !== "edit") fail();
+  if (answer.operation !== "text_to_image" && answer.operation !== "image_to_image") fail();
   const resolved = answer.resolved === null ? null : record(answer.resolved);
   if (resolved !== null && typeof resolved.seed_drawn !== "boolean") fail();
   return {
+    role: answer.role,
+    operation: answer.operation,
+    source: answer.source === null ? null : (() => {
+      const source = record(answer.source);
+      return { width: size(source.width), height: size(source.height) };
+    })(),
     workflow_revision_id: text(answer.workflow_revision_id),
     profile_id: text(answer.profile_id),
     claims: list(answer.claims).map(claim),
@@ -120,6 +152,8 @@ export function readRemixPreview(value: unknown): RemixPreview {
       settings: record(resolved.settings),
       seed_drawn: resolved.seed_drawn as boolean,
       trigger_words: list(resolved.trigger_words).map(text),
+      engine_prompt: text(resolved.engine_prompt),
+      strength: strength(resolved.strength),
     },
     review_digest: optionalText(answer.review_digest),
   };
@@ -142,8 +176,9 @@ export function applicableClaims(
   claims: RemixPreviewClaim[],
   shape: RemixPreview["shape"] = null,
 ): string[] {
+  // A claim with no setting is used as it is (the words, a kept size), never chosen.
   const keys = claims
-    .filter((item) => item.state === "supported" && item.key !== "prompt")
+    .filter((item) => item.state === "supported" && item.key !== "prompt" && item.setting !== null)
     .map((item) => item.key);
   // Half a size cannot be applied, so a lone width or height is not offered.
   const whole = keys.includes("width") && keys.includes("height");

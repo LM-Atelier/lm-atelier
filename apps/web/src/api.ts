@@ -1241,7 +1241,12 @@ export const api = {
   /** What a remix of a stored picture would run with a workflow and model chosen here; writes nothing. */
   remixPreview: (
     artifactId: string,
-    choice: { workflow_revision_id: string; profile_id: string; apply: string[] },
+    choice: {
+      workflow_revision_id: string;
+      profile_id: string;
+      apply: string[];
+      role: "words" | "edit";
+    },
     signal?: AbortSignal,
   ) =>
     request<unknown>(`/api/artifacts/${encodeURIComponent(artifactId)}/remix-preview`, {
@@ -1257,6 +1262,7 @@ export const api = {
       workflow_revision_id: string;
       profile_id: string;
       apply: string[];
+      role: "words" | "edit";
       review_digest: string;
     },
   ) =>
