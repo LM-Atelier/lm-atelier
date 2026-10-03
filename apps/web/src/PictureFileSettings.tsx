@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "./api";
 import { PictureRemixDialog } from "./PictureRemixDialog";
+import { PictureWorkflowReview } from "./PictureWorkflowReview";
 import {
   ignoredReason,
   pictureSettingsCut,
@@ -13,9 +14,11 @@ import {
 
 function PictureFileSettingsBody({
   artifactId,
+  pictureName,
   onOpenChat,
 }: {
   artifactId: string;
+  pictureName?: string;
   onOpenChat?: (chatId: string) => void;
 }) {
   const [remixing, setRemixing] = useState(false);
@@ -54,6 +57,10 @@ function PictureFileSettingsBody({
         Remix these settings
       </button>
     )}
+    {/* Only the graph an editor saves can be reviewed; one written to be run cannot. */}
+    {settings.data.ignored.some((item) => item.name === "workflow" && item.reason === "workflow_graph") && (
+      <PictureWorkflowReview artifactId={artifactId} pictureName={pictureName} />
+    )}
     {/* Outside the card it is opened from, so the card's own styles never reach the dialog. */}
     {remixing && createPortal(
       <PictureRemixDialog
@@ -69,14 +76,17 @@ function PictureFileSettingsBody({
 /** The settings a picture made elsewhere carries in its own file, read when opened. */
 export function PictureFileSettings({
   artifactId,
+  pictureName,
   onOpenChat,
 }: {
   artifactId: string;
+  /** What the picture is called, which names the workflow its file carries. */
+  pictureName?: string;
   onOpenChat?: (chatId: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   return <details className="generation-details" onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary>Settings in the file</summary>
-    {open && <PictureFileSettingsBody artifactId={artifactId} onOpenChat={onOpenChat} />}
+    {open && <PictureFileSettingsBody artifactId={artifactId} pictureName={pictureName} onOpenChat={onOpenChat} />}
   </details>;
 }

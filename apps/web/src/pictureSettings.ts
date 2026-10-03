@@ -26,7 +26,7 @@ const SETTING_LABELS: Record<string, string> = {
 /** Why something in the file was left out, in words. */
 const IGNORED_REASONS: Record<string, string> = {
   names_a_file: "names a file on the computer that made it",
-  workflow_graph: "a workflow, which is never imported or run",
+  workflow_graph: "a workflow, which is never run from here",
   not_used: "not a setting this reads",
   not_settings: "not settings",
   malformed: "not readable as that kind of value",
