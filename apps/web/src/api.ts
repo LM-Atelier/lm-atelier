@@ -1081,6 +1081,7 @@ export const api = {
   },
   previewEmptyChats: (body: {
     chat_ids: string[];
+    min_age_hours?: number;
     include_archived: boolean;
     include_configured: boolean;
   }) =>
@@ -1095,6 +1096,7 @@ export const api = {
     acknowledged_count: number;
     acknowledged_configured: boolean;
     chat_ids: string[];
+    min_age_hours?: number;
     include_archived: boolean;
     include_configured: boolean;
   }) =>

@@ -1,5 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
+import { discardBlankChat } from "./discardBlankChat";
 import {
   REPLAYABLE_OPERATIONS,
   replayFailureText,
@@ -26,7 +27,7 @@ export function GenerationRecordReplay({
         await api.replayGenerationRecord(chat.id, content);
       } catch (error) {
         // The new chat holds nothing yet, so it goes rather than stays behind empty.
-        await api.deleteChat(chat.id).catch(() => undefined);
+        await discardBlankChat(chat.id);
         throw error;
       }
       return chat.id;

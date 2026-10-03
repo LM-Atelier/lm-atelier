@@ -4,15 +4,17 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "./api";
+import { discardBlankChat } from "./discardBlankChat";
 import { readReplayPlan, type ReplayPlan } from "./generationRecord";
 import { GenerationRecordReplay } from "./GenerationRecordReplay";
 
 vi.mock("./api", () => ({
-  api: { createChat: vi.fn(), deleteChat: vi.fn(), replayGenerationRecord: vi.fn() },
+  api: { createChat: vi.fn(), replayGenerationRecord: vi.fn() },
 }));
+vi.mock("./discardBlankChat", () => ({ discardBlankChat: vi.fn() }));
 
 const createChat = vi.mocked(api.createChat);
-const deleteChat = vi.mocked(api.deleteChat);
+const discard = vi.mocked(discardBlankChat);
 const replay = vi.mocked(api.replayGenerationRecord);
 const CONTENT = new Uint8Array([123, 125]).buffer;
 
@@ -38,10 +40,10 @@ function renderReplay(value: ReplayPlan, onStarted = vi.fn()) {
 
 beforeEach(() => {
   createChat.mockReset();
-  deleteChat.mockReset();
+  discard.mockReset();
   replay.mockReset();
   createChat.mockResolvedValue({ id: "chat_again" } as Awaited<ReturnType<typeof api.createChat>>);
-  deleteChat.mockResolvedValue(undefined);
+  discard.mockResolvedValue(undefined);
 });
 afterEach(cleanup);
 
@@ -55,7 +57,7 @@ describe("generating a record again", () => {
     await waitFor(() => expect(onStarted).toHaveBeenCalledWith("chat_again"));
     expect(createChat).toHaveBeenCalledWith(null);
     expect(replay).toHaveBeenCalledWith("chat_again", CONTENT);
-    expect(deleteChat).not.toHaveBeenCalled();
+    expect(discard).not.toHaveBeenCalled();
   });
 
   it("says why it cannot, in fixed words, and offers nothing to start", () => {
@@ -110,7 +112,7 @@ describe("generating a record again", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "would not match the record exactly (it would differ in the settings and how many results it makes)",
     );
-    expect(deleteChat).toHaveBeenCalledWith("chat_again");
+    expect(discard).toHaveBeenCalledWith("chat_again");
     expect(onStarted).not.toHaveBeenCalled();
     expect(screen.queryByText("server words")).toBeNull();
   });
