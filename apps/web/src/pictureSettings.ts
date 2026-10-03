@@ -32,6 +32,9 @@ const IGNORED_REASONS: Record<string, string> = {
   malformed: "not readable as that kind of value",
   unsafe_text: "holds characters that could change how text is shown",
   compressed: "compressed text, which is not expanded",
+  xmp_not_read: "XMP text, which is not read",
+  unsupported_encoding: "text in an encoding this does not read",
+  not_text: "not readable text",
   too_long: "too long to read",
   not_utf8: "not readable text",
   from_another_node: "set by another part of the workflow",
@@ -47,7 +50,7 @@ const IGNORED_REASONS: Record<string, string> = {
 
 /** What is said about the file as a whole, by the reader's warning, first match first. */
 const WARNING_NOTES: [string, string][] = [
-  ["format_not_read", "Only PNG pictures are read for settings."],
+  ["format_not_read", "Only PNG, JPEG and WebP pictures are read for settings."],
   ["too_large", "This picture is too large to read for settings."],
   ["several_samplers", "This picture's workflow has more than one sampler, so no one set of settings is shown."],
   ["no_sampler", "This picture's workflow has no sampler to read settings from."],
