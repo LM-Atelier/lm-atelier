@@ -443,6 +443,11 @@ class GenerationExperimentOut(BaseModel):
 # fixed sentence each, so a value never reaches the answer through a reason.
 RECIPE_LEFT_OUT_MESSAGES: dict[str, str] = {
     "recipe-prompt": "A recipe never holds the words; each request brings its own.",
+    "recipe-seed": "A recipe leaves the seed to each request, so each one comes out new.",
+    "recipe-output-count": "A recipe leaves how many results to make to each request.",
+    "recipe-matched-loras": (
+        "These were chosen for this request's words; each request chooses its own."
+    ),
     "comparison-adapted": (
         "The comparison changed this for its own pictures, so the recipe leaves it to each request."
     ),

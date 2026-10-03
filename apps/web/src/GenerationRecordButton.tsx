@@ -12,10 +12,13 @@ import {
   omissionText,
   operationText,
   readGenerationRecord,
+  RECIPE_DRAFT_OPERATIONS,
   readReplayOutcome,
   removedText,
   replayOutcomeText,
 } from "./generationRecord";
+import { GenerationEditRecipeDialog } from "./GenerationEditRecipeDialog";
+import { RecipeDraftDialog } from "./RecipeDraftDialog";
 
 /** What the person is told when the picture could not be saved with its record. */
 const PICTURE_PROBLEMS: Record<string, string> = {
@@ -29,10 +32,13 @@ function GenerationRecordBody({
   runId,
   artifactId,
   kind,
+  onKeepRecipe,
 }: {
   runId: string;
   artifactId: string;
   kind: "image" | "video";
+  /** Offered for a generation whose settings a recipe can hold, and for an edit as a Studio recipe. */
+  onKeepRecipe: (kind: "generation" | "edit") => void;
 }) {
   const [includePrompt, setIncludePrompt] = useState(false);
   const [savingPicture, setSavingPicture] = useState(false);
@@ -184,6 +190,13 @@ function GenerationRecordBody({
         )}
       </div>
       <footer>
+        {summary && (RECIPE_DRAFT_OPERATIONS.has(summary.operation) || summary.operation === "image_to_image") && (
+          <button type="button" className="secondary" aria-disabled={savingPicture} onClick={() => {
+            if (!savingPicture) onKeepRecipe(summary.operation === "image_to_image" ? "edit" : "generation");
+          }}>
+            Keep as a recipe
+          </button>
+        )}
         {kind === "image" && (
           <button
             type="button"
@@ -211,6 +224,26 @@ function GenerationRecordBody({
   );
 }
 
+/** Keep the settings one generation ran with as a recipe, reviewed before it is saved. */
+function GenerationRecipeDialog({ runId, onClose }: { runId: string; onClose: () => void }) {
+  const draft = useQuery({
+    queryKey: ["output-recipe-draft", runId],
+    queryFn: ({ signal }) => api.outputRecipeDraft(runId, signal),
+    retry: false,
+    staleTime: 0,
+    gcTime: 0,
+  });
+  return (
+    <RecipeDraftDialog
+      title="Keep these settings as a recipe"
+      eyebrow="Recipe from a generation"
+      draft={draft}
+      failure={(error) => error.message || "A recipe could not be drafted from this generation."}
+      onClose={onClose}
+    />
+  );
+}
+
 /** Open the record of one generated picture or video, and save it as a file. */
 export function GenerationRecordButton({
   runId,
@@ -221,7 +254,7 @@ export function GenerationRecordButton({
   artifactId: string;
   kind: "image" | "video";
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState<"record" | "generation" | "edit" | null>(null);
   return (
     <>
       <button
@@ -229,22 +262,31 @@ export function GenerationRecordButton({
         className="icon-button"
         aria-label={`Generation record of this ${kind}`}
         title="Generation record"
-        onClick={() => setOpen(true)}
+        onClick={() => setOpen("record")}
       >
         <FileJson size={14} aria-hidden="true" />
       </button>
       {/* Outside the caption it is opened from, so the caption's own styles
           for its small controls never reach the dialog's buttons. */}
-      {open && createPortal(
+      {open === "record" && createPortal(
         <AccessibleDialog
           title="Generation record"
           eyebrow="How this was made"
           closeLabel="Close generation record"
-          onClose={() => setOpen(false)}
+          onClose={() => setOpen(null)}
           className="generation-record-dialog"
         >
-          <GenerationRecordBody runId={runId} artifactId={artifactId} kind={kind} />
+          <GenerationRecordBody runId={runId} artifactId={artifactId} kind={kind}
+            onKeepRecipe={setOpen} />
         </AccessibleDialog>,
+        document.body,
+      )}
+      {open === "generation" && createPortal(
+        <GenerationRecipeDialog runId={runId} onClose={() => setOpen(null)} />,
+        document.body,
+      )}
+      {open === "edit" && createPortal(
+        <GenerationEditRecipeDialog runId={runId} onClose={() => setOpen(null)} />,
         document.body,
       )}
     </>

@@ -3,12 +3,12 @@ import type {
   ExperimentRefusal,
   ExperimentTrial,
   GenerationExperiment,
-  GenerationExperimentRecipeDraft,
   GenerationExperimentRequest,
   ResourceEvidence,
   SeedPolicyKind,
   TrialWorkStatus,
 } from "./generationExperimentTypes";
+import type { RecipeDraft } from "./recipeDraftTypes";
 import type { OutputRatioPresetId, Run } from "./types";
 import { isRecipeSettingValue } from "./workflowRecipeFields";
 import type { RecipeSettingValue, WorkflowUseCasePresetCreate } from "./workflowUseCaseTypes";
@@ -244,7 +244,7 @@ export function comparisonFailure(error: unknown): ComparisonFailure {
 }
 
 /** A recipe draft as the recipe editor starts from it: only values a recipe can hold, never a default. */
-export function recipeDraftPayload(draft: GenerationExperimentRecipeDraft): WorkflowUseCasePresetCreate {
+export function recipeDraftPayload(draft: RecipeDraft): WorkflowUseCasePresetCreate {
   return {
     name: draft.name,
     use_case: draft.use_case,

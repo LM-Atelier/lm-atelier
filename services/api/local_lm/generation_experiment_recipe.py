@@ -106,7 +106,7 @@ async def recipe_draft(
     except WorkflowUseCasePresetAdmissionError:
         raise RecipeDraftRefused("generation-experiment-recipe-unavailable") from None
     candidate, left_out = _recipe_candidate(arm.effective_settings_json, arm.snapshot_json)
-    kept, refused = _admitted(candidate, admit)
+    kept, refused = admitted_recipe_settings(candidate, admit)
     workflow = arm.snapshot_json.get("workflow") or {}
     return GenerationExperimentRecipeDraftOut(
         experiment_id=experiment.id,
@@ -136,7 +136,7 @@ def _recipe_candidate(
     left_out: list[RecipeDraftLeftOut] = []
     for key in sorted(PROMPT_SETTING_KEYS.intersection(candidate)):
         candidate.pop(key)
-        left_out.append(_left_out(key, "recipe-prompt"))
+        left_out.append(recipe_left_out(key, "recipe-prompt"))
     # The comparison made one picture per choice whatever was asked; the count
     # the setup itself would make is left to each request.
     adapted = {
@@ -146,11 +146,11 @@ def _recipe_candidate(
     }
     for key in sorted(adapted.intersection(candidate)):
         candidate.pop(key)
-        left_out.append(_left_out(key, "comparison-adapted"))
+        left_out.append(recipe_left_out(key, "comparison-adapted"))
     return candidate, left_out
 
 
-def _admitted(
+def admitted_recipe_settings(
     candidate: dict[str, Any], admit: Callable[[dict[str, Any]], None]
 ) -> tuple[dict[str, Any], list[RecipeDraftLeftOut]]:
     """Keep every setting a recipe here can hold, each refused one named with its reason."""
@@ -167,7 +167,7 @@ def _admitted(
         try:
             admit({key: candidate[key]})
         except WorkflowUseCasePresetAdmissionError as exc:
-            refused.append(_left_out(key, exc.code))
+            refused.append(recipe_left_out(key, exc.code))
         else:
             kept[key] = candidate[key]
     try:
@@ -175,10 +175,10 @@ def _admitted(
     except WorkflowUseCasePresetAdmissionError as exc:
         # Settings that pass one by one and fail together cannot be told apart
         # here, so none of them is kept rather than a draft that cannot run.
-        return {}, refused + [_left_out(key, exc.code) for key in sorted(kept)]
+        return {}, refused + [recipe_left_out(key, exc.code) for key in sorted(kept)]
     return kept, refused
 
 
-def _left_out(setting: str, reason: str) -> RecipeDraftLeftOut:
+def recipe_left_out(setting: str, reason: str) -> RecipeDraftLeftOut:
     code = reason if reason in RECIPE_LEFT_OUT_MESSAGES else "recipe-unsupported"
     return RecipeDraftLeftOut(setting=setting, reason=code, message=RECIPE_LEFT_OUT_MESSAGES[code])

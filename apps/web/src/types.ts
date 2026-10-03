@@ -8,6 +8,7 @@ export type * from "./hardwareFitTypes";
 export type * from "./priorTurnEditTypes";
 export type * from "./studioLocalEditTypes";
 export type * from "./enlargementTypes";
+export type * from "./recipeDraftTypes";
 import type { PriorTurnEditConfiguration } from "./priorTurnEditTypes";
 
 import type { ComposerPromptSource } from "./composerPromptSource";

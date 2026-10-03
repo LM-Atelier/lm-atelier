@@ -3,6 +3,7 @@ import type { GenerationExperiment, GenerationExperimentBlindEvaluationCreate, G
 import { workflowFamilyQuery, workflowReadQuery, type WorkflowFamilyReadOptions, type WorkflowReadPageOptions } from "./workflowReadQuery";
 import type { WorkflowRecipeTarget, WorkflowUseCase, WorkflowUseCaseChoice, WorkflowUseCaseDefault, WorkflowUseCasePreset, WorkflowUseCasePresetCreate } from "./workflowUseCaseTypes";
 import type { EnlargementPreview } from "./studioEnlargement";
+import type { EditRecipeDraft, OutputRecipeDraft } from "./recipeDraftTypes";
 import { buildTurnRequest, SOURCE_FIT_BINDING_ERROR, type TurnRequestPayload } from "./turnRequest";
 import { defaultOutputShapes } from "./outputShapePreferences";
 export { buildTurnRequest } from "./turnRequest";
@@ -487,6 +488,12 @@ export const api = {
   /** One run, with what it resolved and recorded: how a Studio result's edit is made again. */
   run: (runId: string) => request<Run>(`/api/runs/${encodeURIComponent(runId)}`),
   /** Which of a record's requirements this installation holds; nothing is installed or kept. */
+  /** The words an edit was asked with, to keep it as an Image Studio recipe; nothing is saved. */
+  editRecipeDraft: (runId: string, signal?: AbortSignal) =>
+    request<EditRecipeDraft>(`/api/runs/${encodeURIComponent(runId)}/edit-recipe-draft`, { signal }),
+  /** A recipe drafted from one finished generation's settings; nothing is saved until the person saves it. */
+  outputRecipeDraft: (runId: string, signal?: AbortSignal) =>
+    request<OutputRecipeDraft>(`/api/runs/${encodeURIComponent(runId)}/recipe-draft`, { signal }),
   /** Whether a run generated again from a record came out as the record's output did. */
   replayResult: (runId: string, signal?: AbortSignal) =>
     request<unknown>(`/api/runs/${encodeURIComponent(runId)}/replay-result`, { signal }),

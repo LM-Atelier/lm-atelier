@@ -251,6 +251,8 @@ export function readFileBytes(file: Blob): Promise<ArrayBuffer> {
 
 /** What a replay starts: generation from words, a video from a picture, and an edit of a picture. */
 export const REPLAYABLE_OPERATIONS = new Set(["text_to_image", "text_to_video", "image_to_video", "image_to_image"]);
+/** The generations whose settings can be kept as a recipe; an edit's belong to its own picture. */
+export const RECIPE_DRAFT_OPERATIONS = new Set(["text_to_image", "text_to_video", "image_to_video"]);
 
 export type ReplayRefusal = { code: string; sha256: string | null; reasons: string[] };
 

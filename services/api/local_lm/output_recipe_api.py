@@ -5,12 +5,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 from urllib.parse import quote
 
-from fastapi import APIRouter, Query, Request, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from .api_errors import api_error
-from .db import SessionLocal
+from .db import SessionLocal, get_session
 from .models import Run
 from .output_recipe import OutputRecipe, OutputRecipeUnavailable, build_output_recipe
 from .output_recipe_bundle import OutputRecipeBundle, build_output_recipe_bundle
@@ -20,6 +21,13 @@ from .output_recipe_check import (
     check_output_recipe_file,
     most_read_for,
     read_record_file,
+)
+from .output_recipe_promotion import (
+    EditRecipeDraftOut,
+    OutputRecipeDraftOut,
+    OutputRecipeDraftRefused,
+    edit_recipe_draft,
+    output_recipe_draft,
 )
 from .output_recipe_replay import plan_output_recipe_replay, replay_outcome
 
@@ -175,6 +183,35 @@ async def plan_an_exact_replay(request: Request) -> JSONResponse:
     except OutputRecipeCheckRefused as exc:
         raise api_error(exc.status, exc.code, exc.message) from exc
     return JSONResponse(plan, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/runs/{run_id}/recipe-draft", response_model=OutputRecipeDraftOut)
+async def draft_output_recipe(
+    run_id: str, request: Request, session: Annotated[Session, Depends(get_session)]
+) -> OutputRecipeDraftOut:
+    """A recipe to review from one generation: the settings it ran with that a recipe can hold.
+
+    Nothing is saved. The answer names the generation's model and workflow
+    beside the settings, and says why any setting it ran with was left out.
+    """
+
+    services = cast("Services", request.app.state.services)
+    try:
+        return await output_recipe_draft(services.orchestrator, session, run_id)
+    except OutputRecipeDraftRefused as refused:
+        raise api_error(refused.status, refused.code, refused.message) from None
+
+
+@router.get("/runs/{run_id}/edit-recipe-draft", response_model=EditRecipeDraftOut)
+async def draft_edit_recipe(
+    run_id: str, session: Annotated[Session, Depends(get_session)]
+) -> EditRecipeDraftOut:
+    """The words an edit was asked with, to keep it as an Image Studio recipe; nothing is saved."""
+
+    try:
+        return edit_recipe_draft(session, run_id)
+    except OutputRecipeDraftRefused as refused:
+        raise api_error(refused.status, refused.code, refused.message) from None
 
 
 @router.get("/runs/{run_id}/replay-result")

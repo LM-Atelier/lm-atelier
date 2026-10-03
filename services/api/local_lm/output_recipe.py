@@ -368,6 +368,19 @@ def _prompt(
     return {"included": True, "positive": positive, "negative": negative, "omitted_reason": None}
 
 
+def prompt_taken_back(session: Session, run: Run) -> bool:
+    """Whether this run's prompt may hold words taken back from its chat, as its record decides."""
+
+    try:
+        snapshot = accepted_context(session, run)
+    except ValueError:
+        # Unreadable frozen inputs look the same as a removed source message.
+        return True
+    return _prompt_was_removed(session, run, snapshot) or (
+        snapshot is None and _chat_has_removed_earlier_content(session, run)
+    )
+
+
 def _prompt_was_removed(session: Session, run: Run, snapshot: AcceptedContext | None) -> bool:
     """Whether the person took back the message this prompt came from."""
 
