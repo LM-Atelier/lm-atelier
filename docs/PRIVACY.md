@@ -82,7 +82,10 @@ from the record's prompt, seed and settings. When only its workflow, model,
 LoRAs or input pictures are not here, **Make a new version** starts it with the
 ones you choose in their place, a picture from your library for a picture; that
 generation keeps which record it came from, what you chose and what differs from
-the record, and the record file is not changed.
+the record, and the record file is not changed. When the ZIP file carries a copy
+of a missing picture, that copy can be chosen instead; it is then kept on this
+computer with the new version, as a picture attached to a message is, and not
+added to your Media Library.
 
 Before sharing issue details, inspect them and remove tokens, private prompts,
 chats, media, model inputs, and identifying file paths.

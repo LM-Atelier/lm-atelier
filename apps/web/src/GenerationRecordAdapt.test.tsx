@@ -35,11 +35,12 @@ function requirement(kind: GenerationRecordRequirement["kind"], state: Generatio
   return { kind, sha256: "b".repeat(64), role, state };
 }
 
-function show(value: ReplayPlan, requirements: GenerationRecordRequirement[] = []) {
+function show(value: ReplayPlan, requirements: GenerationRecordRequirement[] = [], bundledInputs: number[] = []) {
   const onStarted = vi.fn();
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   render(<QueryClientProvider client={client}>
-    <GenerationRecordAdapt plan={value} requirements={requirements} content={CONTENT} onStarted={onStarted} />
+    <GenerationRecordAdapt plan={value} requirements={requirements} bundledInputs={bundledInputs} content={CONTENT}
+      onStarted={onStarted} />
   </QueryClientProvider>);
   return onStarted;
 }
@@ -144,4 +145,34 @@ it("stands a library picture in for each input picture that is not here", async 
   await waitFor(() => expect(onStarted).toHaveBeenCalledOnce());
   expect(api.adaptGenerationRecord).toHaveBeenCalledExactlyOnceWith("chat_new", CONTENT,
     { workflowRevisionId: undefined, profileId: undefined, loras: [], inputs: [`0:sha256:${"c".repeat(64)}`] });
+});
+
+it("offers the copy a bundle carries for a missing input, and sends that choice", async () => {
+  const onStarted = show(plan(["replay-input-missing"], "image_to_image"),
+    [requirement("input", "missing", "source"), requirement("input", "present", "mask")], [0, 1]);
+  const button = screen.getByRole("button", { name: "Make a new version" });
+  expect(button).toHaveAttribute("aria-disabled", "true");
+
+  const copy = screen.getByRole("button", { name: "Use the copy saved with the record" });
+  expect(copy).toHaveAttribute("aria-pressed", "false");
+  copy.focus();
+  fireEvent.click(copy);
+  expect(screen.getByText("The picture it started from: the copy saved with the record")).toBeInTheDocument();
+  // Still there and focused, so the keyboard stays inside the dialog.
+  expect(copy).toHaveAttribute("aria-pressed", "true");
+  expect(copy).toHaveFocus();
+  fireEvent.click(button);
+
+  await waitFor(() => expect(onStarted).toHaveBeenCalledOnce());
+  expect(api.adaptGenerationRecord).toHaveBeenCalledExactlyOnceWith("chat_new", CONTENT,
+    { workflowRevisionId: undefined, profileId: undefined, loras: [], inputs: ["0:bundle"] });
+});
+
+it("offers no copy for an input the checked file does not carry", () => {
+  show(plan(["replay-input-missing"], "image_to_image"),
+    [requirement("input", "present", "source"), requirement("input", "missing", "mask")], [0]);
+
+  expect(screen.getByText("Its selection: not here")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Use the copy saved with the record" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Choose a picture" })).toBeInTheDocument();
 });

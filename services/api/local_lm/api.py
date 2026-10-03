@@ -310,6 +310,7 @@ from .output_recipe_replay import (
     replay_turn_request,
     without_edit_check,
 )
+from .output_recipe_stand_ins import store_bundled_stand_ins
 from .picture_export import (
     DEFAULT_EXPORT_QUALITY,
     EXPORT_FORMATS,
@@ -4496,17 +4497,20 @@ async def adapt_a_generation_record(
 
     The record's prompt, seed, settings and inputs are sent as they are; the
     workflow, the model and each LoRA can be chosen, each as `workflow_revision_id`,
-    `profile_id` and `lora=<position>:<asset id>` (or `:omit`), and anything not
-    chosen must match exactly. It is never called a reproduction: the run keeps
-    which record it came from, what was chosen and which of its sections differ
-    from the record, which is never changed.
+    `profile_id` and `lora=<position>:<asset id>` (or `:omit`), and each input as
+    `input=<position>:sha256:<hex>`, a picture here, or `input=<position>:bundle`,
+    the copy the record's bundle carries, which is then kept here as an input, as
+    a picture attached to a turn is. Anything not chosen must match exactly. It is never called a
+    reproduction: the run keeps which record it came from, what was chosen and
+    which of its sections differ from the record, which is never changed.
     """
 
     content = await read_record_body(request)
     try:
-        record = read_record_file(content).record
+        read = read_record_file(content)
     except OutputRecipeCheckRefused as exc:
         raise api_error(exc.status, exc.code, exc.message) from exc
+    record = read.record
     params = request.query_params
     try:
         choices = adaptation_choices(
@@ -4528,6 +4532,17 @@ async def adapt_a_generation_record(
     if chat is None:
         raise api_error(404, "chat-not-found", "chat not found")
     services = _services(request)
+    try:
+        choices = store_bundled_stand_ins(session, services.artifacts, read.bundle, choices)
+    except AdaptationChoiceInvalid:
+        raise api_error(
+            422,
+            "adaptation-choice-invalid",
+            "A choice names nothing this record needs.",
+        ) from None
+    # Kept before the plan reads it; a copy no generation ends up using is let go
+    # like any other unreferenced input.
+    session.commit()
     plan = plan_output_recipe_adaptation(
         session, record, choices, media_engine=services.settings.media_engine
     )

@@ -131,8 +131,13 @@ class AdaptationChoices(NamedTuple):
     profile_id: str | None
     #: By recorded position: an asset to use in its place, or None to leave it out.
     loras: dict[int, str | None]
-    #: By recorded position among the inputs: a picture here to use in its place.
+    #: By recorded position among the inputs: a picture here to use in its place, or
+    #: BUNDLED_INPUT for the copy the record's bundle carries.
     inputs: dict[int, str]
+
+
+#: The input choice naming the copy a bundle carries for that position.
+BUNDLED_INPUT: Final = "bundle"
 
 
 class AdaptationChoiceInvalid(ValueError):
@@ -149,7 +154,8 @@ def adaptation_choices(
     input_count: int,
 ) -> AdaptationChoices:
     """Read the person's choices: each `lora` as `<position>:<asset id>` or `<position>:omit`,
-    and each `input` as `<position>:sha256:<hex>`, a picture here in place of that input."""
+    and each `input` as `<position>:sha256:<hex>`, a picture here in place of that input, or
+    `<position>:bundle` for the copy of it the record's bundle carries."""
 
     if len(workflow_revision_ids) > 1 or len(profile_ids) > 1:
         raise AdaptationChoiceInvalid
@@ -167,7 +173,7 @@ def adaptation_choices(
     pictures: dict[int, str] = {}
     for value in inputs:
         position_text, separator, artifact = value.partition(":")
-        if not separator or not _DIGEST.fullmatch(artifact):
+        if not separator or not (artifact == BUNDLED_INPUT or _DIGEST.fullmatch(artifact)):
             raise AdaptationChoiceInvalid
         position = _position(position_text)
         if position >= input_count or position in pictures:

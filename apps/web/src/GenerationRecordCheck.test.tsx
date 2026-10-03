@@ -206,3 +206,24 @@ describe("reading the answer", () => {
     }
   });
 });
+
+describe("the inputs a bundle carries", () => {
+  const inputs = [
+    { kind: "input", sha256: "6".repeat(64), role: "source", state: "missing" },
+    { kind: "input", sha256: "7".repeat(64), role: "mask", state: "present" },
+  ];
+
+  it("reads which recorded inputs the checked file carries a copy of", () => {
+    expect(readGenerationRecordCheck(answer({ requirements: inputs, bundled_inputs: [0, 1] })).bundledInputs)
+      .toEqual([0, 1]);
+    expect(readGenerationRecordCheck(answer({ requirements: inputs, bundled_inputs: [] })).bundledInputs).toEqual([]);
+    expect(readGenerationRecordCheck(answer()).bundledInputs).toEqual([]);
+  });
+
+  it("refuses positions the record does not have, out of order, or not whole", () => {
+    for (const bundled of [[2], [1], [0, 0], [0.5], ["0"], "0"]) {
+      expect(() => readGenerationRecordCheck(answer({ requirements: inputs, bundled_inputs: bundled })))
+        .toThrow("malformed");
+    }
+  });
+});

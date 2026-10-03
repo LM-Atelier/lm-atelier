@@ -108,7 +108,7 @@ def check_output_recipe_file(session: Session, content: bytes) -> dict[str, Any]
 
     read = read_record_file(content)
     if read.bundle is None:
-        return {**_report(session, read.record), "picture": None}
+        return {**_report(session, read.record), "picture": None, "bundled_inputs": []}
     picture = read.bundle["manifest"]["picture"]
     return {
         **_report(session, read.record),
@@ -118,6 +118,9 @@ def check_output_recipe_file(session: Session, content: bytes) -> dict[str, Any]
             "width": read.bundle["width"],
             "height": read.bundle["height"],
         },
+        # The recorded inputs the bundle carries a copy of, by position, which a
+        # new version can use in place of ones that are not here.
+        "bundled_inputs": [item["position"] for item in read.bundle["inputs"]],
     }
 
 

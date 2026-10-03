@@ -21,30 +21,39 @@ import type { ArtifactLibraryItem } from "./types";
 export function GenerationRecordAdapt({
   plan,
   requirements,
+  bundledInputs,
   content,
   onStarted,
 }: {
   plan: ReplayPlan;
   /** What the record names, in its own order, and whether each is here. */
   requirements: GenerationRecordRequirement[];
+  /** The positions of the inputs the checked file carries a copy of. */
+  bundledInputs: number[];
   content: ArrayBuffer;
   onStarted: (chatId: string) => void;
 }) {
   const needs = adaptationNeeds(plan);
   if (!needs) return null;
-  return <AdaptChooser plan={plan} needs={needs} requirements={requirements} content={content} onStarted={onStarted} />;
+  return <AdaptChooser plan={plan} needs={needs} requirements={requirements} bundledInputs={bundledInputs}
+    content={content} onStarted={onStarted} />;
 }
+
+/** What stands in for a missing input: a picture from the library, or the copy the file carries. */
+type InputChoice = { kind: "library"; item: ArtifactLibraryItem } | { kind: "bundle" };
 
 function AdaptChooser({
   plan,
   needs,
   requirements,
+  bundledInputs,
   content,
   onStarted,
 }: {
   plan: ReplayPlan;
   needs: AdaptationNeeds;
   requirements: GenerationRecordRequirement[];
+  bundledInputs: number[];
   content: ArrayBuffer;
   onStarted: (chatId: string) => void;
 }) {
@@ -64,7 +73,7 @@ function AdaptChooser({
   const [revisionId, setRevisionId] = useState("");
   const [profileId, setProfileId] = useState("");
   const [leaveOutLoras, setLeaveOutLoras] = useState(false);
-  const [pictures, setPictures] = useState<Record<number, ArtifactLibraryItem>>({});
+  const [pictures, setPictures] = useState<Record<number, InputChoice>>({});
   const [choosingFor, setChoosingFor] = useState<number | null>(null);
   const adapt = useMutation({
     mutationFn: async () => {
@@ -75,7 +84,11 @@ function AdaptChooser({
           profileId: needs.model ? profileId : undefined,
           loras: needs.loras && leaveOutLoras ? Array.from({ length: loraCount }, (_, position) => `${position}:omit`) : [],
           inputs: needs.inputs
-            ? missingInputs.flatMap(({ position }) => (pictures[position] ? [`${position}:${pictures[position].id}`] : []))
+            ? missingInputs.flatMap(({ position }) => {
+              const choice = pictures[position];
+              if (!choice) return [];
+              return [choice.kind === "bundle" ? `${position}:bundle` : `${position}:${choice.item.id}`];
+            })
             : [],
         });
       } catch (error) {
@@ -133,7 +146,15 @@ function AdaptChooser({
       )}
       {needs.inputs && missingInputs.map(({ position, role: inputRole }) => (
         <div key={position}>
-          <span>{inputText(position, inputRole)}: {pictures[position]?.original_name ?? (pictures[position] ? "a picture from the library" : "not here")}</span>
+          <span>{inputText(position, inputRole)}: {choiceText(pictures[position])}</span>
+          {/* Pressed rather than removed once chosen, so keyboard focus stays on it. */}
+          {bundledInputs.includes(position) && (
+            <button type="button" className="secondary compact-button"
+              aria-pressed={pictures[position]?.kind === "bundle"}
+              onClick={() => setPictures((current) => ({ ...current, [position]: { kind: "bundle" } }))}>
+              Use the copy saved with the record
+            </button>
+          )}
           <button type="button" className="secondary compact-button"
             onClick={() => setChoosingFor(position)}>
             {pictures[position] ? "Choose another picture" : "Choose a picture"}
@@ -147,7 +168,7 @@ function AdaptChooser({
           single
           onConfirm={(items) => {
             const [item] = items;
-            if (item) setPictures((current) => ({ ...current, [choosingFor]: item }));
+            if (item) setPictures((current) => ({ ...current, [choosingFor]: { kind: "library", item } }));
             setChoosingFor(null);
           }}
           onClose={() => setChoosingFor(null)}
@@ -165,6 +186,13 @@ function AdaptChooser({
       </div>
     </section>
   );
+}
+
+/** What has been chosen for one missing input, said plainly. */
+function choiceText(choice: InputChoice | undefined): string {
+  if (!choice) return "not here";
+  if (choice.kind === "bundle") return "the copy saved with the record";
+  return choice.item.original_name ?? "a picture from the library";
 }
 
 /** How a record's input is named to the person: the picture it changed, or one it was given. */

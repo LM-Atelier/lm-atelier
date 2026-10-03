@@ -129,6 +129,7 @@ export function GenerationRecordCheck({ onOpenChat }: { onOpenChat?: (chatId: st
             <GenerationRecordAdapt
               plan={check.data.plan}
               requirements={check.data.answer.requirements}
+              bundledInputs={check.data.answer.bundledInputs}
               content={check.data.content}
               onStarted={(chatId) => {
                 setOpen(false);

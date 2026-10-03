@@ -161,6 +161,8 @@ export type GenerationRecordCheck = {
   missing: string[];
   /** The copy of the picture a bundle holds beside its record; null for a bare record. */
   picture: { width: number; height: number } | null;
+  /** The positions of the recorded inputs a bundle carries a copy of; none for a bare record. */
+  bundledInputs: number[];
 };
 
 const KIND_TEXT: Record<RequirementKind, string> = {
@@ -219,7 +221,20 @@ export function readGenerationRecordCheck(value: unknown): GenerationRecordCheck
     allPresent: report.all_present === true && requirements.every((item) => item.state === "present"),
     missing: names(reproducibility.missing),
     picture: checkedPicture(report.picture),
+    bundledInputs: bundledPositions(report.bundled_inputs, requirements),
   };
+}
+
+function bundledPositions(value: unknown, requirements: GenerationRecordRequirement[]): number[] {
+  if (value === undefined || value === null) return [];
+  const inputs = requirements.filter((item) => item.kind === "input").length;
+  if (
+    !Array.isArray(value)
+    || value.some((position, index) => !Number.isInteger(position) || position !== index || position >= inputs)
+  ) {
+    throw new Error("The check's answer is malformed.");
+  }
+  return value as number[];
 }
 
 function checkedPicture(value: unknown): GenerationRecordCheck["picture"] {
