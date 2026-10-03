@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import os
 import socket
@@ -41,7 +42,10 @@ OutboundPurpose = Literal["web-page", "web-search"]
 class OutboundRefused(Exception):
     """An outbound request this installation does not allow, refused before any lookup."""
 
-    def __init__(self, code: Literal["network-refused", "network-host-refused"]) -> None:
+    def __init__(
+        self,
+        code: Literal["network-refused", "network-host-refused", "network-address-refused"],
+    ) -> None:
         super().__init__(code)
         self.code = code
 
@@ -104,19 +108,73 @@ class OutboundLease:
         return resolve
 
 
+Address = ipaddress.IPv4Address | ipaddress.IPv6Address
+
+
 class _LeasedTransport(httpx.AsyncBaseTransport):
     # The lease is asked before the request reaches the transport underneath,
     # which is where the host is looked up and connected to.
-    def __init__(self, lease: OutboundLease, inner: httpx.AsyncBaseTransport) -> None:
+    def __init__(
+        self,
+        lease: OutboundLease,
+        inner: httpx.AsyncBaseTransport,
+        admit: Callable[[Address], bool] | None,
+    ) -> None:
         self._lease = lease
         self._inner = inner
+        self._admit = admit
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         self._lease.check(request.url.host)
-        return await self._inner.handle_async_request(request)
+        if self._admit is None:
+            return await self._inner.handle_async_request(request)
+        *earlier, last = await asyncio.to_thread(_admitted, self._lease, self._admit, request)
+        for address in earlier:
+            try:
+                return await self._inner.handle_async_request(_sent_to(request, address))
+            except httpx.ConnectError:
+                continue
+        return await self._inner.handle_async_request(_sent_to(request, last))
 
     async def aclose(self) -> None:
         await self._inner.aclose()
+
+
+def _admitted(
+    lease: OutboundLease, admit: Callable[[Address], bool], request: httpx.Request
+) -> list[Address]:
+    """Every address the request's host has now, refused unless ``admit`` takes each one."""
+
+    try:
+        found = lease.resolver()(request.url.host, None, 0, socket.SOCK_STREAM)
+    except OSError as error:
+        raise httpx.ConnectError("That host could not be found.", request=request) from error
+    addresses: list[Address] = []
+    for entry in found:
+        try:
+            address = ipaddress.ip_address(entry[4][0])
+        except (ValueError, IndexError):
+            raise OutboundRefused("network-address-refused") from None
+        if not admit(address):
+            raise OutboundRefused("network-address-refused")
+        if address not in addresses:
+            addresses.append(address)
+    if not addresses:
+        raise httpx.ConnectError("That host could not be found.", request=request)
+    return addresses
+
+
+def _sent_to(request: httpx.Request, address: Address) -> httpx.Request:
+    # The same request for the address that was checked, so the transport
+    # looks nothing up again. The name still goes in the Host header, and the
+    # certificate is still checked against it.
+    return httpx.Request(
+        request.method,
+        request.url.copy_with(host=address.compressed),
+        headers=request.headers,
+        stream=request.stream,
+        extensions={**request.extensions, "sni_hostname": request.url.host},
+    )
 
 
 def outbound_client(
@@ -125,19 +183,35 @@ def outbound_client(
     timeout: httpx.Timeout | float,
     headers: dict[str, str] | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
+    admit: Callable[[Address], bool] | None = None,
 ) -> httpx.AsyncClient:
     """A client whose every request is asked of ``lease`` before its host is looked up.
 
     It follows no redirect, since each caller checks every hop itself, and
     takes no proxy or trust roots from the environment: a proxy would make the
     connection somewhere the caller's own checks never see.
+
+    With ``admit``, a request is connected only to an address it admits. The
+    host is looked up once, through the lease, as the request is sent, and the
+    connection goes to that answer, so a name that resolved to an admitted
+    address when the caller checked it cannot answer with another one by the
+    time it is connected to. Every address in the answer must be admitted.
     """
 
-    inner = transport or httpx.AsyncHTTPTransport(
-        verify=shared_tls_context(trust_environment=False)
-    )
+    if transport is not None:
+        inner = transport
+    elif admit is None:
+        inner = httpx.AsyncHTTPTransport(verify=shared_tls_context(trust_environment=False))
+    else:
+        # A connection to a checked address is known by that address alone, so
+        # one kept open could carry a later request under another name, whose
+        # certificate it was never checked against. None is kept open.
+        inner = httpx.AsyncHTTPTransport(
+            verify=shared_tls_context(trust_environment=False),
+            limits=httpx.Limits(max_keepalive_connections=0),
+        )
     return httpx.AsyncClient(
-        transport=_LeasedTransport(lease, inner),
+        transport=_LeasedTransport(lease, inner, admit),
         follow_redirects=False,
         trust_env=False,
         timeout=timeout,
