@@ -290,7 +290,8 @@ from .orchestrator import (
     ResponseRevisionConflict,
 )
 from .ordered_planning import OrderedPlanConfirmationRequired
-from .output_recipe_api import read_record_body
+from .output_recipe import OutputRecipeUnavailable
+from .output_recipe_api import read_picture_generation_settings, read_record_body
 from .output_recipe_api import router as output_recipe_router
 from .output_recipe_check import OutputRecipeCheckRefused, read_record_file
 from .output_recipe_promotion import kept_edit_settings
@@ -319,6 +320,17 @@ from .picture_export import (
     export_file_name,
     export_stored_picture,
 )
+from .picture_remix import (
+    REFUSAL_MESSAGES as REMIX_REFUSAL_MESSAGES,
+)
+from .picture_remix import (
+    RemixChoiceInvalid,
+    RemixDiffers,
+    preview_remix,
+    remix_check,
+)
+from .picture_remix_api import RemixQueueRequest
+from .picture_remix_api import router as picture_remix_router
 from .picture_shape import MatchSourceRequest, shown_size
 from .platforms import list_platform_matrix
 from .preflight import (
@@ -960,6 +972,7 @@ router.include_router(use_case_summary_router)
 router.include_router(generation_experiment_router)
 router.include_router(media_organization_router)
 router.include_router(output_recipe_router)
+router.include_router(picture_remix_router)
 logger = logging.getLogger(__name__)
 
 
@@ -4591,6 +4604,98 @@ async def adapt_a_generation_record(
             409,
             "adaptation-output-count",
             "A new version makes one result, as its record did; this would make several.",
+        ) from exc
+
+
+@router.post("/chats/{chat_id}/remixes", response_model=TurnAccepted, status_code=202)
+async def remix_a_picture(
+    chat_id: str, payload: RemixQueueRequest, request: Request, session: ConversationSessionDep
+) -> TurnAccepted:
+    """Make one picture from the settings a picture made elsewhere carries, as previewed.
+
+    The picture is read again and the remix resolved again with the same
+    workflow, model and applied settings; it is queued only when that comes to
+    the digest the preview showed, and only into a new chat with nothing in it.
+    No saved preset or settings recipe enters it. The run keeps which picture
+    and choices it came from, never a value from the picture's file, and the
+    picture itself is never changed.
+    """
+
+    services = _services(request)
+    try:
+        metadata = await run_in_threadpool(
+            read_picture_generation_settings, services.artifacts, payload.artifact_id
+        )
+    except OutputRecipeUnavailable as exc:
+        raise api_error(exc.status, exc.code, exc.message) from exc
+    _refuse_comparison_chat(session, chat_id)
+    chat = session.get(Chat, chat_id)
+    if chat is None:
+        raise api_error(404, "chat-not-found", "chat not found")
+    if not chat_is_clean_for_replay(session, chat):
+        raise api_error(
+            409,
+            "remix-chat-not-clean",
+            "A remix is made only in a new chat with nothing in it.",
+        )
+    try:
+        preview = await preview_remix(
+            services.orchestrator,
+            session,
+            payload.artifact_id,
+            metadata,
+            payload.workflow_revision_id,
+            payload.profile_id,
+            payload.apply,
+        )
+    except RemixChoiceInvalid as exc:
+        raise api_error(
+            422,
+            "remix-choice-invalid",
+            "Only settings the chosen workflow takes as they are can be applied, "
+            "and a size only whole.",
+        ) from exc
+    if not preview.ready or preview.text is None:
+        raise api_error(
+            409,
+            "remix-unavailable",
+            "This picture cannot be remixed with these choices.",
+            refusals=[
+                {"code": code, "message": REMIX_REFUSAL_MESSAGES[code]} for code in preview.refusals
+            ],
+        )
+    if preview.review_digest != payload.review_digest:
+        raise api_error(
+            409,
+            "remix-review-changed",
+            "What this remix would run changed since it was shown. Check it again.",
+        )
+    turn = TurnRequest(
+        text=preview.text,
+        mode="image",
+        profile_id=preview.profile_id,
+        workflow_revision_id=preview.workflow_revision_id,
+        # Null on purpose: every preset layer stays out of the remix.
+        preset_id=None,
+        output_count=1,
+        settings=preview.request_settings,
+    )
+    try:
+        return await _accept_turn(
+            services.orchestrator,
+            session,
+            chat_id,
+            turn,
+            freeze_context=True,
+            # No settings recipe for this turn, without writing anything.
+            inherited_use_case_preset=InheritedWorkflowUseCasePreset(None),
+            before_commit=remix_check(payload.artifact_id, preview),
+        )
+    except RemixDiffers as exc:
+        raise api_error(
+            409,
+            "remix-differs",
+            "This remix would not run as it was shown. Check it again.",
         ) from exc
 
 
