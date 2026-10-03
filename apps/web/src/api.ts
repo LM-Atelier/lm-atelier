@@ -487,6 +487,9 @@ export const api = {
   /** One run, with what it resolved and recorded: how a Studio result's edit is made again. */
   run: (runId: string) => request<Run>(`/api/runs/${encodeURIComponent(runId)}`),
   /** Which of a record's requirements this installation holds; nothing is installed or kept. */
+  /** Whether a run generated again from a record came out as the record's output did. */
+  replayResult: (runId: string, signal?: AbortSignal) =>
+    request<unknown>(`/api/runs/${encodeURIComponent(runId)}/replay-result`, { signal }),
   /** Whether a record could be generated again exactly here; nothing is started or kept. */
   planGenerationReplay: (content: ArrayBuffer) =>
     request<unknown>("/api/output-recipes/replay-plan", {

@@ -341,3 +341,26 @@ export function readReplayPlan(value: unknown): ReplayPlan {
   if (plan.ready === (refusals.length > 0)) throw new Error("The replay plan contradicts itself.");
   return { digest: plan.digest, operation: plan.operation, ready: plan.ready, refusals };
 }
+
+export type ReplayOutcome = "pending" | "identical" | "different" | "output_missing";
+
+const REPLAY_OUTCOME_TEXT: Record<ReplayOutcome, string> = {
+  pending: "Generated again from a record. It has not finished yet.",
+  identical: "Generated again from a record, and it came out exactly as the recorded one did.",
+  different:
+    "Generated again from a record with everything it names matched, but it came out differently. "
+    + "The record does not hold everything that can change a result, such as the runtime's version.",
+  output_missing: "Generated again from a record, but it left no result to compare.",
+};
+
+/** What a replayed run's result says, or null for a run that was not generated again. */
+export function readReplayOutcome(value: unknown): ReplayOutcome | null {
+  const outcome = object(value);
+  return typeof outcome.state === "string" && outcome.state in REPLAY_OUTCOME_TEXT
+    ? (outcome.state as ReplayOutcome)
+    : null;
+}
+
+export function replayOutcomeText(outcome: ReplayOutcome): string {
+  return REPLAY_OUTCOME_TEXT[outcome];
+}
