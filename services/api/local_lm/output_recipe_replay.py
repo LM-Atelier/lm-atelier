@@ -59,6 +59,7 @@ from .output_recipe_v1 import canonical_bytes
 from .schemas import TurnRequest
 from .settings_registry import workflow_settings
 from .setup_verification import setup_verification_for_chat
+from .studio_masks import MASK_SETTING_KEY
 from .upscale_workflows import effective_upscale_schema
 from .workflow_selection import WorkflowFamilySelectionError, resolve_exact_workflow_revision
 
@@ -116,7 +117,7 @@ def plan_output_recipe_replay(
     revision, bound_profile = _workflow(session, record, operation, media_engine, refusals)
     profile = _model(session, record, operation, media_engine, revision, bound_profile, refusals)
     lora_asset_ids = _loras(session, record, revision, refusals)
-    input_artifact_ids = _inputs(session, record, refusals)
+    input_artifact_ids, mask_artifact_id = _inputs(session, record, refusals)
 
     resolved = None
     if not refusals and revision is not None:
@@ -126,6 +127,7 @@ def plan_output_recipe_replay(
             "profile_id": profile.id if profile is not None else None,
             "lora_asset_ids": lora_asset_ids,
             "input_artifact_ids": input_artifact_ids,
+            "mask_artifact_id": mask_artifact_id,
         }
     return {
         "digest": record["digest"],
@@ -170,7 +172,8 @@ def _check_record(
     if workflow is not None and workflow["contract_version"] != WORKFLOW_ARTIFACT_CONTRACT_VERSION:
         reasons.append("workflow_contract_version")
     inputs = record["inputs"]
-    if len(inputs) > MAX_REPLAY_INPUTS:
+    # A selection travels as a setting, not as one of the turn's pictures.
+    if len([item for item in inputs if item["role"] != "mask"]) > MAX_REPLAY_INPUTS:
         reasons.append("too_many_inputs")
     loras = record["loras"]
     if len(loras) > MAX_LORA_STACK_SIZE:
@@ -193,7 +196,15 @@ def _check_record(
             reasons.append("inputs_for_operation")
     elif not roles or roles[0] != "source":
         reasons.append("inputs_for_operation")
-    if "mask" in roles:
+    masks = [position for position, role in enumerate(roles) if role == "mask"]
+    if masks and (
+        operation != Operation.IMAGE_TO_IMAGE
+        or masks != [len(roles) - 1]
+        or "settings.mask" in record["removed"]
+    ):
+        # Only a selection given as its picture alone can be sent again, and a
+        # record lists it after the pictures it was drawn over. How one was
+        # feathered, turned round or blended back is not in the record.
         reasons.append("mask_input")
     positive = record["prompt"]["positive"]
     if (
@@ -409,17 +420,25 @@ def _loras(
     return asset_ids
 
 
-def _inputs(session: Session, record: dict[str, Any], refusals: list[dict[str, Any]]) -> list[str]:
-    """Each recorded input by its content identity, in recorded order."""
+def _inputs(
+    session: Session, record: dict[str, Any], refusals: list[dict[str, Any]]
+) -> tuple[list[str], str | None]:
+    """Each recorded picture by its content identity, in recorded order, and the selection apart.
+
+    A turn takes its selection as a setting rather than as one of its pictures.
+    """
 
     identifiers: list[str] = []
+    mask: str | None = None
     for item in record["inputs"]:
         identifier = f"sha256:{item['sha256']}"
         if session.get(Artifact, identifier) is None:
             refusals.append(_refusal("replay-input-missing", "input", item["sha256"]))
+        elif item["role"] == "mask":
+            mask = identifier
         else:
             identifiers.append(identifier)
-    return identifiers
+    return identifiers, mask
 
 
 class ReplayDiffers(Exception):
@@ -525,6 +544,9 @@ async def replay_turn_request(
             }
             for asset_id, lora in zip(resolved["lora_asset_ids"], loras, strict=True)
         ]
+    if resolved["mask_artifact_id"] is not None:
+        # The selection alone, as the record has it: nothing to feather or turn round.
+        settings[MASK_SETTING_KEY] = {"artifact_id": resolved["mask_artifact_id"]}
     text = record["prompt"]["positive"]
     if record["operation"] == Operation.IMAGE_TO_IMAGE.value:
         # A run adds this wording to every edit; the turn carries only the request.
