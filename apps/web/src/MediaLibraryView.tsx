@@ -36,8 +36,10 @@ function boundedQuery(value: string): string | null {
 
 export function MediaLibraryView({
   onEditImage,
+  onOpenChat,
 }: {
   onEditImage?: (artifactId: string) => void;
+  onOpenChat?: (chatId: string) => void;
 }) {
   const [filters, setFilters] = useState<ArtifactLibraryFilters>({
     kind: "",
@@ -164,7 +166,7 @@ export function MediaLibraryView({
                     <strong>{entry.display_name}</strong>
                     <small>{formatBytes(entry.size_bytes)} · Added {new Date(Math.floor(entry.created_at_epoch_micros / 1000)).toLocaleString(undefined, clockOptions(clock))}</small>
                     <ArtifactGenerationDetails key={entry.artifact_id} artifactId={entry.artifact_id} />
-                    {entry.kind === "image" && <PictureFileSettings artifactId={entry.artifact_id} />}
+                    {entry.kind === "image" && <PictureFileSettings artifactId={entry.artifact_id} onOpenChat={onOpenChat} />}
                     <span>
                       <button
                         className={`icon-button ${entry.favorite ? "favorite-active" : ""}`}

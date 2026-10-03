@@ -1236,6 +1236,32 @@ export const api = {
   /** What a stored picture's own file says about how it was made; read by pictureSettings.ts. */
   pictureSettings: (artifactId: string, signal?: AbortSignal) =>
     request<unknown>(`/api/artifacts/${encodeURIComponent(artifactId)}/generation-settings`, { signal }),
+  /** What a remix of a stored picture would run with a workflow and model chosen here; writes nothing. */
+  remixPreview: (
+    artifactId: string,
+    choice: { workflow_revision_id: string; profile_id: string; apply: string[] },
+    signal?: AbortSignal,
+  ) =>
+    request<unknown>(`/api/artifacts/${encodeURIComponent(artifactId)}/remix-preview`, {
+      method: "POST",
+      body: JSON.stringify(choice),
+      signal,
+    }),
+  /** Make one picture in a new chat from a previewed remix, refused unless it is still what was shown. */
+  remixPicture: (
+    chatId: string,
+    remix: {
+      artifact_id: string;
+      workflow_revision_id: string;
+      profile_id: string;
+      apply: string[];
+      review_digest: string;
+    },
+  ) =>
+    request<unknown>(`/api/chats/${encodeURIComponent(chatId)}/remixes`, {
+      method: "POST",
+      body: JSON.stringify(remix),
+    }),
   favoriteArtifact: (artifactId: string, favorite: boolean) =>
     request<Artifact>(`/api/artifacts/${encodeURIComponent(artifactId)}`, {
       method: "PATCH",

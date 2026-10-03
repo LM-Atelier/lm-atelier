@@ -1,6 +1,8 @@
 import { Fragment, useState } from "react";
+import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "./api";
+import { PictureRemixDialog } from "./PictureRemixDialog";
 import {
   ignoredReason,
   pictureSettingsCut,
@@ -9,7 +11,14 @@ import {
   settingLabel,
 } from "./pictureSettings";
 
-function PictureFileSettingsBody({ artifactId }: { artifactId: string }) {
+function PictureFileSettingsBody({
+  artifactId,
+  onOpenChat,
+}: {
+  artifactId: string;
+  onOpenChat?: (chatId: string) => void;
+}) {
+  const [remixing, setRemixing] = useState(false);
   const settings = useQuery({
     queryKey: ["picture-file-settings", artifactId],
     queryFn: async ({ signal }) => readPictureSettings(await api.pictureSettings(artifactId, signal)),
@@ -40,14 +49,34 @@ function PictureFileSettingsBody({ artifactId }: { artifactId: string }) {
     </>}
     {pictureSettingsCut(settings.data) && <p>More was left out than is listed here.</p>}
     <p>Read from the picture's own file. Nothing named in it is fetched, run or kept.</p>
+    {settings.data.claims.some((claim) => claim.key === "prompt") && (
+      <button type="button" className="secondary compact-button" onClick={() => setRemixing(true)}>
+        Remix these settings
+      </button>
+    )}
+    {/* Outside the card it is opened from, so the card's own styles never reach the dialog. */}
+    {remixing && createPortal(
+      <PictureRemixDialog
+        artifactId={artifactId}
+        onClose={() => setRemixing(false)}
+        onOpenChat={onOpenChat}
+      />,
+      document.body,
+    )}
   </div>;
 }
 
 /** The settings a picture made elsewhere carries in its own file, read when opened. */
-export function PictureFileSettings({ artifactId }: { artifactId: string }) {
+export function PictureFileSettings({
+  artifactId,
+  onOpenChat,
+}: {
+  artifactId: string;
+  onOpenChat?: (chatId: string) => void;
+}) {
   const [open, setOpen] = useState(false);
   return <details className="generation-details" onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary>Settings in the file</summary>
-    {open && <PictureFileSettingsBody artifactId={artifactId} />}
+    {open && <PictureFileSettingsBody artifactId={artifactId} onOpenChat={onOpenChat} />}
   </details>;
 }
