@@ -296,10 +296,16 @@ from .output_recipe_check import OutputRecipeCheckRefused, read_record_file
 from .output_recipe_promotion import kept_edit_settings
 from .output_recipe_replay import (
     REPLAYABLE_OPERATIONS,
+    AdaptationChoiceInvalid,
     ReplayDiffers,
+    adaptation_choice_list,
+    adaptation_choices,
+    adapted_turn_request,
     chat_is_clean_for_replay,
     exact_replay_check,
+    mark_adaptation,
     mark_replay,
+    plan_output_recipe_adaptation,
     plan_output_recipe_replay,
     replay_turn_request,
     without_edit_check,
@@ -4479,6 +4485,97 @@ async def replay_a_generation_record(
             "replay-differs",
             "Generating this here would not match the record exactly.",
             sections=exc.sections,
+        ) from exc
+
+
+@router.post("/chats/{chat_id}/adaptations", response_model=TurnAccepted, status_code=202)
+async def adapt_a_generation_record(
+    chat_id: str, request: Request, session: ConversationSessionDep
+) -> TurnAccepted:
+    """Generate a new version of a record, with chosen stand-ins for what does not match here.
+
+    The record's prompt, seed, settings and inputs are sent as they are; the
+    workflow, the model and each LoRA can be chosen, each as `workflow_revision_id`,
+    `profile_id` and `lora=<position>:<asset id>` (or `:omit`), and anything not
+    chosen must match exactly. It is never called a reproduction: the run keeps
+    which record it came from, what was chosen and which of its sections differ
+    from the record, which is never changed.
+    """
+
+    content = await read_record_body(request)
+    try:
+        record = read_record_file(content).record
+    except OutputRecipeCheckRefused as exc:
+        raise api_error(exc.status, exc.code, exc.message) from exc
+    params = request.query_params
+    try:
+        choices = adaptation_choices(
+            workflow_revision_ids=params.getlist("workflow_revision_id"),
+            profile_ids=params.getlist("profile_id"),
+            loras=params.getlist("lora"),
+            lora_count=len(record["loras"]),
+            inputs=params.getlist("input"),
+            input_count=len(record["inputs"]),
+        )
+    except AdaptationChoiceInvalid:
+        raise api_error(
+            422,
+            "adaptation-choice-invalid",
+            "A choice names nothing this record needs.",
+        ) from None
+    _refuse_comparison_chat(session, chat_id)
+    chat = session.get(Chat, chat_id)
+    if chat is None:
+        raise api_error(404, "chat-not-found", "chat not found")
+    services = _services(request)
+    plan = plan_output_recipe_adaptation(
+        session, record, choices, media_engine=services.settings.media_engine
+    )
+    if not plan["ready"]:
+        raise api_error(
+            409,
+            "adaptation-unavailable",
+            "This record cannot be generated here with these choices.",
+            refusals=plan["refusals"],
+        )
+    if record["operation"] not in REPLAYABLE_OPERATIONS:
+        raise api_error(
+            422,
+            "replay-operation-unsupported",
+            "This kind of generation cannot be generated again yet.",
+        )
+    if not chat_is_clean_for_replay(session, chat):
+        raise api_error(
+            409,
+            "replay-chat-not-clean",
+            "A record is generated again only in a new chat with nothing in it.",
+        )
+    turn, left_out = await adapted_turn_request(session, services.engines, record, plan["resolved"])
+    restore_edit_check = (
+        without_edit_check(chat) if record["operation"] == "image_to_image" else None
+    )
+
+    def mark_then_restore(transaction: Session, first: Run) -> None:
+        mark_adaptation(transaction, first, record, adaptation_choice_list(choices), left_out)
+        if restore_edit_check is not None:
+            restore_edit_check()
+
+    try:
+        return await _accept_turn(
+            services.orchestrator,
+            session,
+            chat_id,
+            turn,
+            freeze_context=True,
+            # No use-case recipe for this turn, without writing anything.
+            inherited_use_case_preset=InheritedWorkflowUseCasePreset(None),
+            before_commit=mark_then_restore,
+        )
+    except ReplayDiffers as exc:
+        raise api_error(
+            409,
+            "adaptation-output-count",
+            "A new version makes one result, as its record did; this would make several.",
         ) from exc
 
 

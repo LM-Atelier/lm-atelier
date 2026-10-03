@@ -511,6 +511,25 @@ export const api = {
       body: content,
       headers: { "content-type": "application/octet-stream" },
     }),
+  /** A new version of a record, with the chosen workflow, model and LoRAs in place of what does not match. */
+  adaptGenerationRecord: (
+    chatId: string,
+    content: ArrayBuffer,
+    choices: { workflowRevisionId?: string; profileId?: string; loras?: string[]; inputs?: string[] },
+  ) => {
+    const query = new URLSearchParams();
+    if (choices.workflowRevisionId) query.append("workflow_revision_id", choices.workflowRevisionId);
+    if (choices.profileId) query.append("profile_id", choices.profileId);
+    for (const lora of choices.loras ?? []) query.append("lora", lora);
+    for (const input of choices.inputs ?? []) query.append("input", input);
+    const text = query.toString();
+    const suffix = text ? `?${text}` : "";
+    return request<unknown>(`/api/chats/${encodeURIComponent(chatId)}/adaptations${suffix}`, {
+      method: "POST",
+      body: content,
+      headers: { "content-type": "application/octet-stream" },
+    });
+  },
   checkGenerationRecord: (content: ArrayBuffer) =>
     // A file's own bytes, not JSON: a bundle with its picture can be far larger
     // than a JSON body may be, and the route bounds what it reads itself.
