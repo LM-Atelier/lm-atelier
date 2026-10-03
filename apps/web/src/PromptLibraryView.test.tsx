@@ -43,9 +43,12 @@ vi.mock("./api", async (importOriginal) => {
 // anything the test is waiting on. Run about twenty times slower than a quiet
 // machine, as a busy shared runner can be, the first render misses the
 // one-second default wait, ordinary cases take up to 4.7 s against the
-// five-second default, and the sixty-four LoRA case runs past 15 s. These
-// limits leave room for that and still fail a render that never arrives.
-configure({ asyncUtilTimeout: 5_000 });
+// five-second default, and the sixty-four LoRA case runs past 15 s. A merge
+// queue run on Windows has since spent 80 s importing modules, and the first
+// template's detail had still not rendered five seconds after its list row
+// did. These limits leave room for that, stay inside each case's own limit,
+// and still fail a render that never arrives.
+configure({ asyncUtilTimeout: 15_000 });
 const CASE_TIMEOUT_MS = 20_000;
 const SIXTY_FOUR_LORA_TIMEOUT_MS = 60_000;
 
