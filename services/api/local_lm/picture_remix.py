@@ -54,6 +54,7 @@ from .workflow_graph_settings_v1 import GRAPH_SETTING_INPUT_NAMES, workflow_grap
 from .workflow_node_dependencies import node_dependency_errors
 from .workflow_output_geometry import (
     WorkflowOutputGeometryResult,
+    match_source_output_geometry,
     prove_workflow_output_geometry,
     resolve_workflow_output_geometry,
 )
@@ -62,7 +63,7 @@ from .workflow_selection import WorkflowFamilySelectionError, resolve_exact_work
 if TYPE_CHECKING:
     from .orchestrator import ConversationOrchestrator
 
-PREVIEW_VERSION: Final = 1
+PREVIEW_VERSION: Final = 2
 OPERATION: Final = Operation.TEXT_TO_IMAGE
 
 ClaimState = Literal["supported", "unresolved", "incompatible", "ignored"]
@@ -146,6 +147,9 @@ class RemixPreview:
     workflow_revision_id: str
     profile_id: str
     claims: tuple[ClaimVerdict, ...]
+    #: The picture's shape at a size this workflow makes, offered when its exact
+    #: size cannot be used: width and height.
+    shape: tuple[int, int] | None
     applied: tuple[str, ...]
     refusals: tuple[str, ...]
     text: str | None
@@ -348,19 +352,64 @@ def _on_step(field: SettingField, value: object) -> bool:
     return value % step == 0
 
 
+def shape_at_workflow_size(
+    verdicts: Sequence[ClaimVerdict],
+    fields: Sequence[SettingField],
+    geometry: WorkflowOutputGeometryResult | None,
+) -> tuple[int, int] | None:
+    """The picture's shape at a size the workflow makes, when its exact size cannot be used.
+
+    The workflow's own proof of the sizes it makes picks the pair: the exact
+    ratio, at the legal size nearest the one it makes by default. A shape it
+    cannot make exactly gets nothing, and so does a pair its own fields would
+    refuse, so what is offered is what admission takes.
+    """
+
+    by_claim = {verdict.key: verdict for verdict in verdicts if verdict.key in _SIZE}
+    if geometry is None or set(by_claim) != set(_SIZE):
+        return None
+    if all(verdict.state == "supported" for verdict in by_claim.values()):
+        return None
+    width, height = (by_claim[key].setting_value for key in _SIZE)
+    if isinstance(width, bool) or isinstance(height, bool):
+        return None
+    if not isinstance(width, int) or not isinstance(height, int):
+        return None
+    resolution = match_source_output_geometry(geometry, width, height)
+    if resolution is None:
+        return None
+    shape = (resolution.geometry.width, resolution.geometry.height)
+    by_key = {item.key: item for item in fields}
+    if any(
+        _setting_state(key, value, by_key, frozenset())[0] != "supported"
+        for key, value in zip(_SIZE, shape, strict=True)
+    ):
+        return None
+    return shape
+
+
 def applied_settings(
-    verdicts: Sequence[ClaimVerdict], apply: Iterable[str]
+    verdicts: Sequence[ClaimVerdict],
+    apply: Iterable[str],
+    shape: tuple[int, int] | None = None,
 ) -> tuple[tuple[str, ...], dict[str, Any]]:
     """The claims to apply, checked, and the settings they set.
 
-    Only a supported claim can be applied, and a size only whole. The prompt is
-    always the words a remix is made from, so it is never named here.
+    Only a supported claim can be applied, and a size only whole. The picture's
+    shape can be applied only where one is offered, and never with its own size.
+    The prompt is always the words a remix is made from, so it is never named here.
     """
 
     chosen = tuple(sorted(set(apply)))
     by_key = {verdict.key: verdict for verdict in verdicts}
     settings: dict[str, Any] = {}
+    if "shape" in chosen:
+        if shape is None or any(key in chosen for key in _SIZE):
+            raise RemixChoiceInvalid("shape")
+        settings.update(zip(_SIZE, shape, strict=True))
     for key in chosen:
+        if key == "shape":
+            continue
         verdict = by_key.get(key)
         if verdict is None or verdict.setting is None or verdict.state != "supported":
             # The prompt has no setting: it is always the words, never applied by name.
@@ -426,6 +475,7 @@ def review_digest(
     workflow_revision_id: str,
     profile_id: str,
     claims: Sequence[ClaimVerdict],
+    shape: tuple[int, int] | None,
     applied: Sequence[str],
     text: str,
     settings: dict[str, Any],
@@ -446,6 +496,7 @@ def review_digest(
         "workflow_revision_id": workflow_revision_id,
         "profile_id": profile_id,
         "claims": [[claim.key, claim.state, claim.reason] for claim in claims],
+        "shape": list(shape) if shape is not None else None,
         "applied": list(applied),
         "text": text,
         "settings": settings,
@@ -499,6 +550,7 @@ async def preview_remix(
             workflow_revision_id=workflow_revision_id,
             profile_id=profile_id,
             claims=(),
+            shape=None,
             applied=(),
             refusals=(refused.code,),
             text=None,
@@ -567,10 +619,10 @@ async def _resolve(
         raise _Refused("remix-workflow-unusable") from None
     fields = turn_workflow.fields
     request_fields = [item for item in fields if item.scope != "load"]
-    claims = classify_claims(
-        metadata.claims, request_fields, chosen_revision, _geometry(session, chosen_revision)
-    )
-    applied, settings = applied_settings(claims, apply)
+    geometry = _geometry(session, chosen_revision)
+    claims = classify_claims(metadata.claims, request_fields, chosen_revision, geometry)
+    shape = shape_at_workflow_size(claims, request_fields, geometry)
+    applied, settings = applied_settings(claims, apply, shape)
     request_settings = settings
     offered = {item.key for item in request_fields if item.available}
     # Said outright, so no default, preset or word-matched LoRA fills them in:
@@ -642,6 +694,7 @@ async def _resolve(
         workflow_revision_id=chosen_revision.id,
         profile_id=chosen_profile.id,
         claims=claims,
+        shape=shape,
         applied=applied,
         refusals=(),
         text=prompt,
@@ -655,6 +708,7 @@ async def _resolve(
             chosen_revision.id,
             chosen_profile.id,
             claims,
+            shape,
             applied,
             prompt,
             effective,
@@ -689,6 +743,7 @@ def remix_receipt(artifact_id: str, preview: RemixPreview) -> dict[str, Any]:
             {"key": claim.key, "state": claim.state, "applied": claim.key in preview.applied}
             for claim in preview.claims
         ],
+        "shape_applied": "shape" in preview.applied,
         "review_digest": preview.review_digest,
     }
 

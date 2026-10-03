@@ -41,6 +41,7 @@ const preview = {
     claim("width", 512, "supported"),
     claim("height", 768, "supported"),
   ],
+  shape: null,
   ignored: [{ name: "Model", reason: "names_a_file" }],
   resolved: {
     text: PROMPT,
@@ -152,6 +153,8 @@ describe("remix preview", () => {
     { ...preview, ready: "yes" },
     { ...preview, claims: [{ ...preview.claims[1], value: 2 ** 60 }] },
     { ...preview, claims: [{ ...preview.claims[1], state: "maybe" }] },
+    { ...preview, shape: { width: 0, height: 768 } },
+    { ...preview, shape: undefined },
   ])("shows nothing from an answer of another shape", async (other) => {
     vi.mocked(api.remixPreview).mockResolvedValue(other);
     renderDialog();
@@ -361,5 +364,47 @@ describe("remix preview answers", () => {
   it("keeps width and height together as one size", () => {
     expect(applicableClaims(readRemixPreview(preview).claims)).toEqual(["steps", "size"]);
     expect(applicableClaims(readRemixPreview({ ...preview, claims: [preview.claims[5]] }).claims)).toEqual([]);
+  });
+});
+
+describe("a picture whose own size this workflow cannot make", () => {
+  const shaped = {
+    ...preview,
+    claims: [
+      claim("prompt", PROMPT, "supported"),
+      claim("width", 1000, "incompatible", "value_refused"),
+      claim("height", 1500, "incompatible", "value_refused"),
+    ],
+    shape: { width: 768, height: 1152 },
+    resolved: { ...preview.resolved, settings: { negative_prompt: "", width: 768, height: 1152, batch_size: 1 } },
+    review_digest: "sha256:4",
+  };
+
+  it("offers the picture's shape at a size the workflow makes, and makes it", async () => {
+    vi.mocked(api.remixPreview).mockResolvedValue(shaped);
+    vi.mocked(api.createChat).mockResolvedValue({ id: "chat_new" } as never);
+    vi.mocked(api.remixPicture).mockResolvedValue(undefined as never);
+    renderDialog(vi.fn());
+    await choose();
+
+    const offered = await screen.findByRole("checkbox", { name: "This picture's shape, at 768 × 1152" });
+    expect(screen.queryByRole("checkbox", { name: "Size" })).toBeNull();
+    fireEvent.click(offered);
+    await waitFor(() => expect(api.remixPreview).toHaveBeenLastCalledWith(
+      artifactId,
+      { workflow_revision_id: "rev_cup", profile_id: "profile_cup", apply: ["shape"] },
+      expect.anything(),
+    ));
+    const make = screen.getByRole("button", { name: "Make this picture" });
+    await waitFor(() => expect(make).toHaveAttribute("aria-disabled", "false"));
+    fireEvent.click(make);
+
+    await waitFor(() => expect(api.remixPicture).toHaveBeenCalledWith("chat_new", {
+      artifact_id: artifactId,
+      workflow_revision_id: "rev_cup",
+      profile_id: "profile_cup",
+      apply: ["shape"],
+      review_digest: "sha256:4",
+    }));
   });
 });

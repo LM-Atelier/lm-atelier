@@ -31,6 +31,7 @@ ClaimKey = Literal[
     "scheduler",
     "width",
     "height",
+    "shape",
 ]
 
 
@@ -118,6 +119,11 @@ def preview_answer(artifact_id: str, preview: RemixPreview) -> dict[str, Any]:
             }
             for claim in preview.claims
         ],
+        # The picture's shape at a size this workflow makes, when its own size cannot be used.
+        "shape": (
+            {"width": preview.shape[0], "height": preview.shape[1]} if preview.shape else None
+        ),
+        "shape_applied": "shape" in preview.applied,
         "ignored": [{"name": item.name, "reason": item.reason} for item in metadata.ignored],
         "resolved": (
             {
