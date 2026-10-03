@@ -99,18 +99,26 @@ async def download_output_recipe_bundle(
     request: Request,
     prompts: Annotated[Literal["include", "omit"], Query()],
     digest: Annotated[str, Query(pattern=r"^sha256:[0-9a-f]{64}$")],
+    inputs: Annotated[Literal["include", "omit"], Query()] = "omit",
 ) -> Response:
     """One picture's record and a copy of the picture, together in one ZIP file.
 
     The record must be the one the caller was shown, named by its digest, so
     the file never holds a record nobody looked at. The picture is a copy
     without the text an engine embeds in its file, never the stored bytes.
+    Its input pictures go in only when asked for, copied the same way.
     """
 
     artifacts = cast("Services", request.app.state.services).artifacts
     try:
         bundle = await run_in_threadpool(
-            _build_bundle, artifacts, run_id, artifact_id, prompts == "include", digest
+            _build_bundle,
+            artifacts,
+            run_id,
+            artifact_id,
+            prompts == "include",
+            digest,
+            inputs == "include",
         )
     except OutputRecipeUnavailable as exc:
         raise api_error(exc.status, exc.code, exc.message) from exc
@@ -130,7 +138,12 @@ async def download_output_recipe_bundle(
 
 
 def _build_bundle(
-    artifacts: ArtifactStore, run_id: str, artifact_id: str, include_prompts: bool, digest: str
+    artifacts: ArtifactStore,
+    run_id: str,
+    artifact_id: str,
+    include_prompts: bool,
+    digest: str,
+    include_inputs: bool,
 ) -> OutputRecipeBundle:
     # Copying the picture decodes and re-encodes it, which is slow for a large one.
     with SessionLocal() as session:
@@ -141,6 +154,7 @@ def _build_bundle(
             artifact_id=artifact_id,
             include_prompts=include_prompts,
             expected_record_digest=digest,
+            include_inputs=include_inputs,
         )
 
 

@@ -14,11 +14,19 @@ the bundle pretends they are the same bytes. The manifest is canonical and
 digested like the record, under its own domain tag. The digest shows that the
 bundle is intact, not who made it.
 
+When asked, a bundle carries the record's input pictures too, as version 2.
+Each is copied the same way and listed in the manifest with the position it
+holds among the record's inputs and the hash of the stored file it copies.
+Either every input the record names is carried or none is, so a version 2
+bundle never leaves out a picture without saying so. A copy can stand in for a
+missing picture, but never as the picture itself: its bytes are not the
+recorded ones.
+
 A bundle has one exact form, and reading one refuses every other: the reader
 checks the archive's closing record before parsing anything else, rebuilds the
-archive from the three files it read and compares it with the bytes it was
-given, and checks that the picture is a PNG of only a header, pixel data and
-an end, with a header the copy could have been written with.
+archive from the files it read and compares it with the bytes it was given,
+and checks that every picture is a PNG of only a header, pixel data and an
+end, with a header the copy could have been written with.
 """
 
 from __future__ import annotations
@@ -46,6 +54,7 @@ from .output_recipe_v1 import (
     canonical_bytes,
     open_output_recipe,
 )
+from .schemas import TurnRequest
 from .studio_region_edit import (
     MAX_BLEND_PIXELS,
     MAX_BLEND_READ_BYTES,
@@ -55,16 +64,31 @@ from .studio_region_edit import (
 
 BUNDLE_SCHEMA_ID: Final = "lm-atelier-output-recipe-bundle-v1"
 BUNDLE_SCHEMA_VERSION: Final = 1
+#: The version of a bundle that carries the record's input pictures too.
+INPUTS_SCHEMA_VERSION: Final = 2
 BUNDLE_DIGEST_DOMAIN: Final = BUNDLE_SCHEMA_ID.encode("ascii") + b"\0"
 RECORD_FILE: Final = "generation-record.json"
 PICTURE_FILE: Final = "output.png"
 MANIFEST_FILE: Final = "bundle.json"
-MAX_MANIFEST_BYTES: Final = 4 * 1024
+#: The most input pictures a bundle carries: as many as one turn takes, and a
+#: selection, which travels beside them.
+MAX_BUNDLE_INPUTS: Final[int] = (
+    next(
+        item.max_length
+        for item in TurnRequest.model_fields["input_artifact_ids"].metadata
+        if hasattr(item, "max_length")
+    )
+    + 1
+)
+#: Room for every input's line as well as the record's and the output's.
+MAX_MANIFEST_BYTES: Final = 4 * 1024 + 512 * MAX_BUNDLE_INPUTS
 #: The largest picture the copy decodes, as RGBA rows that do not compress at
 #: all, with room left for the row filters and the stream framing.
 MAX_PICTURE_BYTES: Final = 5 * MAX_BLEND_PIXELS
-#: The three entries at their largest, with room for the archive's own headers.
-MAX_BUNDLE_BYTES: Final = MAX_MANIFEST_BYTES + MAX_RECORD_BYTES + MAX_PICTURE_BYTES + 4096
+#: The whole bundle, inputs or none: the three entries at their largest, with
+#: room for the archive's own headers. Inputs share this room with the output
+#: rather than adding to it, so reading a bundle never holds more than this.
+MAX_BUNDLE_BYTES: Final = MAX_MANIFEST_BYTES + MAX_RECORD_BYTES + MAX_PICTURE_BYTES + 8192
 _ENTRIES: Final = (MANIFEST_FILE, RECORD_FILE, PICTURE_FILE)
 _BOUNDS: Final = {
     MANIFEST_FILE: MAX_MANIFEST_BYTES,
@@ -84,8 +108,9 @@ _PNG_LAYOUTS: Final = frozenset({(1, 0), (8, 0), (16, 0), (8, 4), (8, 2), (8, 6)
 #: counts on this disk and in all, the directory's size and offset, and the
 #: length of the archive comment.
 _END_RECORD: Final = struct.Struct("<4sHHHHIIH")
-#: Three directory records with names far longer than these, with room to spare.
-_MAX_DIRECTORY_BYTES: Final = 512
+#: A directory record for every entry a bundle can hold, with names far longer
+#: than these and room to spare.
+_MAX_DIRECTORY_BYTES: Final = 128 * (len(_ENTRIES) + MAX_BUNDLE_INPUTS)
 #: The modes a PNG holds exactly; a picture in any other becomes RGB or RGBA.
 _EXACT_MODES: Final = frozenset({"1", "L", "LA", "I;16", "RGB", "RGBA"})
 _SIXTEEN_BIT_MODES: Final = frozenset({"I", "I;16B", "I;16L", "I;16N"})
@@ -96,6 +121,13 @@ _DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 _MANIFEST_KEYS: Final = frozenset({"schema", "version", "record", "picture", "digest"})
 _RECORD_KEYS: Final = frozenset({"file", "sha256", "digest"})
 _PICTURE_KEYS: Final = frozenset({"file", "sha256", "media_type", "copy_of", "metadata"})
+_INPUT_KEYS: Final = _PICTURE_KEYS | {"position"}
+
+
+def input_file(position: int) -> str:
+    """The bundle entry holding the copy of the record's input at this position."""
+
+    return f"input-{position + 1}.png"
 
 
 class OutputRecipeBundleFormatError(ValueError):
@@ -119,11 +151,14 @@ def build_output_recipe_bundle(
     artifact_id: str,
     include_prompts: bool,
     expected_record_digest: str,
+    include_inputs: bool = False,
 ) -> OutputRecipeBundle:
     """Bundle one picture's record with a copy that holds only the picture's pixels.
 
     The record must be the one the caller was shown, named by its digest: a
     record rebuilt differently since then is refused rather than bundled unseen.
+    With include_inputs, every input picture the record names is copied too; a
+    record that names none makes the same bundle as without.
     """
 
     recipe = build_output_recipe(
@@ -160,31 +195,109 @@ def build_output_recipe_bundle(
             410, "output-recipe-output-unreadable", "This output's file is missing or changed."
         ) from exc
     picture = pixels_only_png(stored)
-    manifest = seal_bundle_manifest(
-        {
-            "schema": BUNDLE_SCHEMA_ID,
-            "version": BUNDLE_SCHEMA_VERSION,
-            "record": {
-                "file": RECORD_FILE,
-                "sha256": hashlib.sha256(recipe.content).hexdigest(),
-                "digest": recipe.digest,
-            },
-            "picture": {
-                "file": PICTURE_FILE,
-                "sha256": hashlib.sha256(picture).hexdigest(),
+    # The stored file is no longer needed, so it is not held while inputs are copied.
+    del stored
+    room = MAX_BUNDLE_BYTES - MAX_MANIFEST_BYTES - len(recipe.content) - len(picture) - 8192
+    inputs = _input_copies(session, artifacts, record["inputs"], room) if include_inputs else []
+    payload: dict[str, Any] = {
+        "schema": BUNDLE_SCHEMA_ID,
+        "version": INPUTS_SCHEMA_VERSION if inputs else BUNDLE_SCHEMA_VERSION,
+        "record": {
+            "file": RECORD_FILE,
+            "sha256": hashlib.sha256(recipe.content).hexdigest(),
+            "digest": recipe.digest,
+        },
+        "picture": {
+            "file": PICTURE_FILE,
+            "sha256": hashlib.sha256(picture).hexdigest(),
+            "media_type": "image/png",
+            "copy_of": record["output"]["sha256"],
+            "metadata": "none",
+        },
+    }
+    if inputs:
+        payload["inputs"] = [
+            {
+                "file": input_file(position),
+                "sha256": hashlib.sha256(copy).hexdigest(),
                 "media_type": "image/png",
-                "copy_of": record["output"]["sha256"],
+                "copy_of": record["inputs"][position]["sha256"],
                 "metadata": "none",
-            },
-        }
-    )
-    content = _zip({MANIFEST_FILE: manifest, RECORD_FILE: recipe.content, PICTURE_FILE: picture})
+                "position": position,
+            }
+            for position, copy in enumerate(inputs)
+        ]
+    files = {
+        MANIFEST_FILE: seal_bundle_manifest(payload),
+        RECORD_FILE: recipe.content,
+        PICTURE_FILE: picture,
+    }
+    files.update({input_file(position): copy for position, copy in enumerate(inputs)})
+    content = _zip(files)
+    if len(content) > MAX_BUNDLE_BYTES:
+        raise OutputRecipeUnavailable(
+            422,
+            "output-recipe-bundle-too-large",
+            "These pictures are too large to save together with their record.",
+        )
     open_output_recipe_bundle(content)
     return OutputRecipeBundle(
         content=content,
         record_digest=recipe.digest,
         file_name=f"generation-record-{record['output']['sha256'][:12]}.zip",
     )
+
+
+def _input_copies(
+    session: Session, artifacts: ArtifactStore, inputs: list[dict[str, Any]], room: int
+) -> list[bytes]:
+    """Copy every input picture the record names, in its order, or refuse the bundle.
+
+    A copy is made the way the output's is. Copies stop as soon as they would
+    not fit in the room the bundle has left, rather than after all are made.
+    """
+
+    if len(inputs) > MAX_BUNDLE_INPUTS:
+        raise OutputRecipeUnavailable(
+            422,
+            "output-recipe-bundle-too-many-inputs",
+            "This record names more input pictures than a bundle can carry.",
+        )
+    copies: list[bytes] = []
+    for item in inputs:
+        artifact = session.get(Artifact, f"sha256:{item['sha256']}")
+        if artifact is None:
+            raise OutputRecipeUnavailable(
+                409,
+                "output-recipe-bundle-input-missing",
+                "One of its input pictures is not here, so the pictures cannot be included.",
+            )
+        try:
+            stored = artifacts.verified_bytes(artifact, maximum_bytes=MAX_BLEND_READ_BYTES)
+        except (ValueError, OSError) as exc:
+            raise OutputRecipeUnavailable(
+                410,
+                "output-recipe-bundle-input-unreadable",
+                "One of its input pictures is missing or changed.",
+            ) from exc
+        try:
+            copy = pixels_only_png(stored)
+        except OutputRecipeUnavailable as exc:
+            # Said of the input, so a refusal never reads as the output's own.
+            raise OutputRecipeUnavailable(
+                422,
+                "output-recipe-bundle-input-uncopyable",
+                "One of its input pictures cannot be copied into the bundle.",
+            ) from exc
+        room -= len(copy)
+        if room < 0:
+            raise OutputRecipeUnavailable(
+                422,
+                "output-recipe-bundle-too-large",
+                "These pictures are too large to save together with their record.",
+            )
+        copies.append(copy)
+    return copies
 
 
 def pixels_only_png(payload: bytes) -> bytes:
@@ -299,12 +412,42 @@ def open_output_recipe_bundle(content: bytes) -> dict[str, Any]:
     if manifest["picture"]["copy_of"] != record["output"]["sha256"]:
         raise OutputRecipeBundleFormatError("The bundle's picture is not of the recorded output.")
     width, height = _check_pixels_only(files[PICTURE_FILE])
+    listed = manifest.get("inputs", [])
+    # Every input the record names, or none: a bundle never carries some of them.
+    if listed and len(listed) != len(record["inputs"]):
+        raise OutputRecipeBundleFormatError("The bundle does not carry every recorded input.")
+    if len(files) != len(_ENTRIES) + len(listed):
+        raise OutputRecipeBundleFormatError("The bundle holds the wrong entries.")
+    inputs: list[dict[str, Any]] = []
+    copies_of: dict[str, str] = {}
+    for entry in listed:
+        copy = files[entry["file"]]
+        recorded = record["inputs"][entry["position"]]
+        if hashlib.sha256(copy).hexdigest() != entry["sha256"]:
+            raise OutputRecipeBundleFormatError("An input copy does not match its manifest.")
+        if entry["copy_of"] != recorded["sha256"]:
+            raise OutputRecipeBundleFormatError("An input copy is not of the recorded input.")
+        # One stored picture always copies to the same bytes, wherever it is listed.
+        if copies_of.setdefault(entry["copy_of"], entry["sha256"]) != entry["sha256"]:
+            raise OutputRecipeBundleFormatError("Two copies of one input differ.")
+        input_width, input_height = _check_pixels_only(copy)
+        inputs.append(
+            {
+                "position": entry["position"],
+                "role": recorded["role"],
+                "copy_of": entry["copy_of"],
+                "picture": copy,
+                "width": input_width,
+                "height": input_height,
+            }
+        )
     return {
         "manifest": manifest,
         "record": record,
         "picture": files[PICTURE_FILE],
         "width": width,
         "height": height,
+        "inputs": inputs,
     }
 
 
@@ -321,8 +464,8 @@ def _read_entries(content: bytes) -> dict[str, bytes]:
         signature != b"PK\x05\x06"
         or disk
         or directory_disk
-        or here != len(_ENTRIES)
-        or listed != len(_ENTRIES)
+        or not len(_ENTRIES) <= here <= len(_ENTRIES) + MAX_BUNDLE_INPUTS
+        or listed != here
         or size > _MAX_DIRECTORY_BYTES
         or offset + size != len(content) - _END_RECORD.size
         or comment
@@ -334,11 +477,11 @@ def _read_entries(content: bytes) -> dict[str, bytes]:
         raise OutputRecipeBundleFormatError("The file is not a generation record bundle.") from exc
     with archive:
         entries = archive.infolist()
-        if tuple(entry.orig_filename for entry in entries) != _ENTRIES:
+        if tuple(entry.orig_filename for entry in entries) != _entry_names(len(entries)):
             raise OutputRecipeBundleFormatError("The bundle holds the wrong entries.")
         files: dict[str, bytes] = {}
         for entry in entries:
-            bound = _BOUNDS[entry.orig_filename]
+            bound = _BOUNDS.get(entry.orig_filename, MAX_PICTURE_BYTES)
             # Checked before a byte is read: an entry stored as written is read
             # as exactly the bytes it declares, never decompressed or decrypted.
             if (
@@ -380,14 +523,17 @@ def _open_manifest(content: bytes) -> dict[str, Any]:
         raise OutputRecipeBundleFormatError("The bundle's manifest is not valid.") from exc
     if not isinstance(value, dict) or canonical != content:
         raise OutputRecipeBundleFormatError("The bundle's manifest is not in canonical form.")
-    if set(value) != _MANIFEST_KEYS:
-        raise OutputRecipeBundleFormatError("The bundle's manifest has the wrong fields.")
     if (
-        value["schema"] != BUNDLE_SCHEMA_ID
-        or type(value["version"]) is not int
-        or value["version"] != BUNDLE_SCHEMA_VERSION
+        value.get("schema") != BUNDLE_SCHEMA_ID
+        or type(value.get("version")) is not int
+        or value["version"] not in (BUNDLE_SCHEMA_VERSION, INPUTS_SCHEMA_VERSION)
     ):
-        raise OutputRecipeBundleFormatError("The bundle is not a version 1 bundle.")
+        raise OutputRecipeBundleFormatError("The bundle is not a version 1 or 2 bundle.")
+    carries_inputs = value["version"] == INPUTS_SCHEMA_VERSION
+    if set(value) != (_MANIFEST_KEYS | {"inputs"} if carries_inputs else _MANIFEST_KEYS):
+        raise OutputRecipeBundleFormatError("The bundle's manifest has the wrong fields.")
+    if carries_inputs:
+        _check_input_lines(value["inputs"])
     record = value["record"]
     picture = value["picture"]
     if not isinstance(record, dict) or set(record) != _RECORD_KEYS:
@@ -412,6 +558,34 @@ def _open_manifest(content: bytes) -> dict[str, Any]:
     if not hmac.compare_digest(bundle_manifest_digest(value), value["digest"]):
         raise OutputRecipeBundleFormatError("The bundle's manifest does not match its digest.")
     return value
+
+
+def _check_input_lines(value: object) -> None:
+    """Refuse an inputs list that is not one line per position, in order, from the first."""
+
+    if not isinstance(value, list) or not 0 < len(value) <= MAX_BUNDLE_INPUTS:
+        raise OutputRecipeBundleFormatError("The bundle's manifest lists its inputs wrongly.")
+    for expected, line in enumerate(value):
+        if not isinstance(line, dict) or set(line) != _INPUT_KEYS:
+            raise OutputRecipeBundleFormatError("The bundle's manifest has the wrong fields.")
+        if (
+            type(line["position"]) is not int
+            or line["position"] != expected
+            or line["file"] != input_file(expected)
+            or line["media_type"] != "image/png"
+            or line["metadata"] != "none"
+            or not all(
+                isinstance(item, str) and _HEX64.fullmatch(item)
+                for item in (line["sha256"], line["copy_of"])
+            )
+        ):
+            raise OutputRecipeBundleFormatError("The bundle's manifest lists its inputs wrongly.")
+
+
+def _entry_names(count: int) -> tuple[str, ...]:
+    """The entries of a bundle with this many, in the one order they are written."""
+
+    return _ENTRIES + tuple(input_file(position) for position in range(count - len(_ENTRIES)))
 
 
 def _check_pixels_only(png: bytes) -> tuple[int, int]:
@@ -463,9 +637,12 @@ def _check_pixels_only(png: bytes) -> tuple[int, int]:
 
 
 def _zip(files: dict[str, bytes]) -> bytes:
+    names = _entry_names(len(files))
+    if set(names) != set(files):
+        raise OutputRecipeBundleFormatError("The bundle holds the wrong entries.")
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
-        for name in _ENTRIES:
+        for name in names:
             info = zipfile.ZipInfo(name, date_time=_ENTRY_TIME)
             info.create_system = _UNIX
             info.external_attr = _REGULAR_FILE
