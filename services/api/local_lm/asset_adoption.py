@@ -38,6 +38,7 @@ from sqlalchemy.orm import Session
 
 from .auxiliary_assets import MAX_LORA_TRIGGER_WORD_LENGTH, MAX_LORA_TRIGGER_WORDS
 from .config import Settings
+from .filesystem_links import is_link_or_reparse
 from .model_manifests import comfy_folder_for_kind
 from .models import ModelAssetInstall, ModelInstall
 
@@ -180,13 +181,27 @@ def adoptable_roots(session: Session, settings: Settings, kind: str) -> list[Pat
     return roots
 
 
+def _is_link(path: Path) -> bool:
+    """A filesystem link. A missing name is ordinary, and an unreadable one is a link."""
+
+    return is_link_or_reparse(path, missing="assume_regular", unreadable="assume_link")
+
+
+def _refuse_link(path: Path) -> None:
+    """Leave a filesystem link unread. Its target stays where it is."""
+
+    if _is_link(path):
+        raise AssetAdoptionError("asset-file-unreadable", "The file could not be read.")
+
+
 def resolve_adoptable_path(roots: Sequence[Path], comfy_name: str) -> Path:
     """The one file ``comfy_name`` names among ``roots``, or a refusal.
 
     ``comfy_name`` is what the graph will pass to the loader, so it may carry
     the forward slashes a nested folder needs. It may not climb out of a root,
     name an absolute location, or reach through a link: what the runtime loads
-    and what was measured here have to be the same file.
+    and what was measured here have to be the same file. A filesystem link is
+    not opened, and its target is left unchanged.
 
     A name that more than one root answers is refused rather than resolved. The
     runtime chooses between them by its own precedence, and guessing at that
@@ -207,13 +222,32 @@ def resolve_adoptable_path(roots: Sequence[Path], comfy_name: str) -> Path:
             "Adopt a safetensors or GGUF file; formats that execute on load are refused.",
         )
     found: list[Path] = []
+    saw_link = False
     for root in roots:
-        resolved_root = root.resolve()
-        candidate = (resolved_root / Path(*pure.parts)).resolve()
-        if resolved_root not in candidate.parents:
+        if _is_link(root):
+            saw_link = True
             continue
-        if candidate.is_file() and candidate not in found:
+        cursor = root
+        linked = False
+        for part in pure.parts:
+            cursor = cursor / part
+            if _is_link(cursor):
+                linked = True
+                break
+        if linked:
+            saw_link = True
+            continue
+        try:
+            resolved_root = root.resolve(strict=True)
+            candidate = cursor.resolve(strict=True)
+        except OSError:
+            continue
+        if resolved_root not in candidate.parents or not candidate.is_file():
+            continue
+        if candidate not in found:
             found.append(candidate)
+    if saw_link:
+        raise AssetAdoptionError("asset-file-unreadable", "The file could not be read.")
     if len(found) > 1:
         raise AssetAdoptionError(
             "asset-name-ambiguous",
@@ -239,6 +273,7 @@ def read_safetensors_metadata(path: Path) -> dict[str, Any]:
 
     if path.suffix.casefold() not in {".safetensors", ".sft"}:
         return {}
+    _refuse_link(path)
     try:
         with path.open("rb") as handle:
             prefix = handle.read(8)
@@ -275,6 +310,7 @@ def require_loadable_safetensors(path: Path, size_bytes: int) -> None:
         "This file is not a model the runtime can load. "
         "It may be an incomplete or failed download.",
     )
+    _refuse_link(path)
     try:
         with path.open("rb") as handle:
             prefix = handle.read(8)
@@ -320,6 +356,7 @@ def measure_adoptable_file(roots: Sequence[Path], comfy_name: str) -> AdoptedFil
     """Measure a file already in place: its digest, its size, what it says."""
 
     path = resolve_adoptable_path(roots, comfy_name)
+    _refuse_link(path)
     digest = hashlib.sha256()
     try:
         size_bytes = path.stat().st_size
