@@ -293,6 +293,7 @@ from .ordered_planning import OrderedPlanConfirmationRequired
 from .output_recipe_api import read_record_body
 from .output_recipe_api import router as output_recipe_router
 from .output_recipe_check import OutputRecipeCheckRefused, read_record_file
+from .output_recipe_promotion import kept_edit_settings
 from .output_recipe_replay import (
     REPLAYABLE_OPERATIONS,
     ReplayDiffers,
@@ -7950,17 +7951,21 @@ async def create_edit_template(payload: EditTemplateCreate, session: SessionDep)
     # the run's, not the machine's current state - those differ the moment a
     # profile is switched between the edit and the save.
     capture = None
+    settings = payload.settings_json
     if payload.from_run_id:
         run = session.get(Run, payload.from_run_id)
         if not run:
             raise api_error(404, "run-not-found", "That run no longer exists.")
         capture = capture_recipe(run.provenance_json)
+        settings = kept_edit_settings(
+            session, capture.settings, capture.workflow_revision_id, run.provenance_json
+        )
     template = EditTemplate(
         name=payload.name,
         description=payload.description,
         instruction=payload.instruction,
         operation="image_to_image",
-        settings_json=capture.settings if capture else payload.settings_json,
+        settings_json=settings,
         trigger_words_json=[],
         content_rating="general",
         workflow_revision_id=capture.workflow_revision_id if capture else None,

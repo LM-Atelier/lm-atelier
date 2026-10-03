@@ -65,6 +65,15 @@ with picture** saves a ZIP file holding that same record beside a PNG copy of
 the picture with only its pixels. Nothing else written inside the picture file,
 such as the workflow that made it, is copied; a picture with its own color
 profile is converted to sRGB first, so the profile stays behind too.
+**Keep as a recipe**, offered in the record of a picture or video made from
+words or a video made from a picture, drafts a recipe from the settings it ran
+with for you to review before saving. The prompt, the seed, how many results to
+make, LoRAs chosen to match the prompt and any picture it was made from stay out
+of the recipe, and the generation and its record are not changed. For an edit,
+**Keep as a recipe** saves a recipe of the kind Image Studio offers, with a name
+and the words you choose, starting from the ones you typed for the edit; it keeps
+whether the edit used a selection, but not the selection itself, the seed or LoRAs
+chosen to match the words. A recipe saved in Image Studio leaves the same out.
 **Check a record** in the Model library reads such a record, or such a ZIP
 file, and says which of the files it names are on this computer and ready. It
 keeps no copy of the file and installs, downloads or changes nothing.

@@ -186,6 +186,8 @@ CHECKED_CONTRACTS = {
     "GenerationExperimentPreflight": "GenerationExperimentPreflightOut",
     "GenerationExperimentRecipeDraft": "GenerationExperimentRecipeDraftOut",
     "RecipeDraftLeftOut": "RecipeDraftLeftOut",
+    "OutputRecipeDraft": "OutputRecipeDraftOut",
+    "EditRecipeDraft": "EditRecipeDraftOut",
     "RefusalAlternative": "RefusalAlternativeOut",
     "ResourceEvidence": "ResourceEvidenceOut",
 }

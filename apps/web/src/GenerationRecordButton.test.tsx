@@ -12,7 +12,18 @@ import { recordBytes } from "./generationRecordFixtures";
 import type { MessagePart } from "./types";
 
 vi.mock("./api", () => ({
-  api: { generationRecord: vi.fn(), generationRecordBundle: vi.fn(), replayResult: vi.fn() },
+  api: { generationRecord: vi.fn(), generationRecordBundle: vi.fn(), replayResult: vi.fn(), outputRecipeDraft: vi.fn() },
+}));
+// The recipe dialogs have their own tests; here only what they are given matters.
+vi.mock("./GenerationEditRecipeDialog", () => ({
+  GenerationEditRecipeDialog: ({ runId }: { runId: string }) => (
+    <div role="dialog" aria-label="Keep this edit as a recipe">{runId}</div>
+  ),
+}));
+vi.mock("./RecipeDraftDialog", () => ({
+  RecipeDraftDialog: ({ title, draft }: { title: string; draft: { data?: { name: string } } }) => (
+    <div role="dialog" aria-label={title}>{draft.data?.name}</div>
+  ),
 }));
 vi.mock("./format", async (original) => ({
   ...(await original<typeof import("./format")>()),
@@ -23,6 +34,7 @@ const SHA = "a".repeat(64);
 const generationRecord = vi.mocked(api.generationRecord);
 const generationRecordBundle = vi.mocked(api.generationRecordBundle);
 const replayResult = vi.mocked(api.replayResult);
+const outputRecipeDraft = vi.mocked(api.outputRecipeDraft);
 const saved = vi.mocked(downloadBytes);
 
 function withQueries(children: ReactNode) {
@@ -39,6 +51,7 @@ beforeEach(() => {
   generationRecordBundle.mockReset();
   replayResult.mockReset();
   replayResult.mockRejectedValue(Object.assign(new Error("not found"), { code: "replay-result-not-found" }));
+  outputRecipeDraft.mockReset();
   saved.mockReset();
 });
 afterEach(cleanup);
@@ -267,6 +280,34 @@ describe("the generation record dialog", () => {
     await screen.findByText("Left out, as you chose.");
 
     expect(screen.queryByText(/Generated again from a record/)).toBeNull();
+  });
+
+  it("keeps a generation's settings as a recipe, in place of the record", async () => {
+    generationRecord.mockResolvedValue(recordBytes({ operation: "text_to_image" }));
+    outputRecipeDraft.mockResolvedValue({ name: "Neutral workflow" } as never);
+    render(withQueries(<GenerationRecordButton runId="run_1" artifactId={`sha256:${SHA}`} kind="image" />));
+    openRecord();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Keep as a recipe" }));
+
+    const recipe = await screen.findByRole("dialog", { name: "Keep these settings as a recipe" });
+    expect(await screen.findByText("Neutral workflow")).toBeInTheDocument();
+    expect(outputRecipeDraft).toHaveBeenCalledWith("run_1", expect.any(AbortSignal));
+    expect(screen.getAllByRole("dialog")).toEqual([recipe]);
+  });
+
+  it("keeps an edit as a Studio recipe, since its settings belong to its own picture", async () => {
+    generationRecord.mockResolvedValue(recordBytes());
+    render(withQueries(<GenerationRecordButton runId="run_1" artifactId={`sha256:${SHA}`} kind="image" />));
+    openRecord();
+    await screen.findByText("Picture edit");
+
+    fireEvent.click(screen.getByRole("button", { name: "Keep as a recipe" }));
+
+    const recipe = await screen.findByRole("dialog", { name: "Keep this edit as a recipe" });
+    expect(recipe).toHaveTextContent("run_1");
+    expect(screen.getAllByRole("dialog")).toEqual([recipe]);
+    expect(outputRecipeDraft).not.toHaveBeenCalled();
   });
 
   it("offers nothing to save when the record cannot be made", async () => {
