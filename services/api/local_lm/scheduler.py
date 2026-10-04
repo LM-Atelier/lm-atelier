@@ -26,6 +26,7 @@ from .models import (
     WorkStep,
     WorkStepDependency,
 )
+from .power_inhibition import PowerInhibitor, SleepJobKind
 from .progress import update_job_progress
 from .queue_control import claim_control_predicate, job_controls
 from .queue_lane_policy import (
@@ -79,6 +80,15 @@ class JobClaim:
     attempt: int
 
 
+# Durable work long enough that an idle sleep would cut it off. Chat turns and
+# short disk work are not held.
+_SLEEP_KINDS: dict[str, SleepJobKind] = {
+    "media_compute": SleepJobKind.GENERATION,
+    "network_transfer": SleepJobKind.DOWNLOAD,
+    "primary_compute": SleepJobKind.RUNTIME_PREPARATION,
+}
+
+
 class ResourceScheduler:
     """Durable job tickets plus legacy leases for non-job administration."""
 
@@ -88,7 +98,12 @@ class ResourceScheduler:
         *,
         session_factory: Callable[[], Session] = SessionLocal,
         resource_pool: ResourceScheduler | None = None,
+        power: PowerInhibitor | None = None,
     ) -> None:
+        # Shared with the pool, like the slots, so one busy stretch holds one request.
+        self._power: PowerInhibitor | None = (
+            power if power is not None else (resource_pool._power if resource_pool else None)
+        )
         self._locks: dict[str, asyncio.Semaphore] = resource_pool._locks if resource_pool else {}
         self._capacities: dict[str, int] = resource_pool._capacities if resource_pool else {}
         self._queue_events: dict[str, asyncio.Event] = {}
@@ -140,12 +155,19 @@ class ResourceScheduler:
             self._heartbeat(job_id, claim.token),
             name=f"job-heartbeat-{job_id}",
         )
+        # Held only once the claim is real, never while the job waits its turn.
+        sleep_kind = _SLEEP_KINDS.get(resource)
+        if self._power is not None and sleep_kind is not None:
+            self._power.acquire(job_id, sleep_kind)
         try:
             # The claim identity is YIELDED so the execution can bind its
             # engine-provenance writes to the attempt it was claimed for; a
             # bare `async with` caller that ignores it is unchanged.
             yield claim
         finally:
+            # First, so the hold ends with the work even if releasing the claim fails.
+            if self._power is not None:
+                self._power.release(job_id)
             heartbeat.cancel()
             stopped: BaseException | None = None
             try:

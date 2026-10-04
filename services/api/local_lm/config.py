@@ -64,6 +64,8 @@ class Settings(BaseSettings):
     # a chat still has to be allowed individually. A deployment that must
     # never egress pins this off and no conversation can override it.
     web_access_enabled: bool = False
+    # While durable work runs, ask the operating system not to sleep on its idle timer.
+    keep_awake_during_work: bool = True
     vision_prior_visual_lookback: int = Field(default=4, ge=0, le=64)
     vision_max_video_frames: int = Field(default=6, ge=3, le=16)
     vision_max_video_duration_seconds: int = Field(default=3600, ge=1, le=86_400)
