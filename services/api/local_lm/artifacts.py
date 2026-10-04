@@ -599,9 +599,12 @@ class ArtifactStore:
                 try:
                     second = open_child_directory(first, sha256[2:4], create=True)
                     try:
-                        # Content-addressed, so replacing is idempotent: the
-                        # destination name can only ever hold these bytes.
-                        rename_entry(root_anchor, staging, sha256, into=second, replace=True)
+                        # A reader can keep replacement unavailable on Windows.
+                        # Reuse only bytes verified through this held directory.
+                        if self._existing_bytes_match(second, sha256, size):
+                            discard_entry(root_anchor, staging)
+                        else:
+                            rename_entry(root_anchor, staging, sha256, into=second, replace=True)
                         sync_directory(second)
                     finally:
                         second.close()
@@ -616,6 +619,34 @@ class ArtifactStore:
                     discard_entry(root_anchor, staging)
                 raise
             return sha256, size
+
+    @staticmethod
+    def _existing_bytes_match(anchor: AnchoredDirectory, digest: str, size: int) -> bool:
+        """Verify an existing regular entry before reusing its stored bytes."""
+
+        descriptor: int | None = None
+        try:
+            descriptor = open_entry(anchor, digest)
+            if descriptor is None:
+                return False
+            if os.fstat(descriptor).st_size != size:
+                return False
+            measured = hashlib.sha256()
+            count = 0
+            with os.fdopen(descriptor, "rb") as source:
+                descriptor = None
+                while chunk := source.read(min(1024 * 1024, size - count + 1)):
+                    count += len(chunk)
+                    if count > size:
+                        return False
+                    measured.update(chunk)
+            return count == size and measured.hexdigest() == digest
+        except (AnchoredDirectoryError, OSError):
+            return False
+        finally:
+            if descriptor is not None:
+                with suppress(OSError):
+                    os.close(descriptor)
 
     def export_copy(self, artifact: Artifact, destination: Path) -> Path:
         source = self.resolve(artifact)
