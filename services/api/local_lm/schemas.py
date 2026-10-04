@@ -3708,6 +3708,21 @@ class WorkerSettings(ApiModel):
     worker_startup_seconds: float = Field(ge=1, le=600)
 
 
+class KeepAwakeSetting(ApiModel):
+    enabled: bool
+
+
+class KeepAwakeStatus(ApiModel):
+    enabled: bool
+    # Whether this platform gives LM Atelier any way to keep the computer awake.
+    supported: bool
+    # Whether the computer is being kept awake right now.
+    active: bool
+    # Jobs running that want it awake. Running jobs with nothing active means
+    # the setting is off or the platform refused, and the work went on anyway.
+    running_jobs: int = Field(ge=0)
+
+
 class WorkerResetResult(ApiModel):
     worker: WorkerStatus
     cancelled_jobs: int

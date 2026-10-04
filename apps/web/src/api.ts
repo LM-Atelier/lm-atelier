@@ -148,6 +148,7 @@ import type {
   WorkerLogTail,
   WorkerResetResult,
   WorkerSettings,
+  KeepAwakeStatus,
   WorkerStatus,
   EditedBranchPage,
   EditedBranchActivation,
@@ -1115,6 +1116,9 @@ export const api = {
   workerSettings: () => request<WorkerSettings>("/api/workers/settings"),
   updateWorkerSettings: (values: WorkerSettings) =>
     request<WorkerSettings>("/api/workers/settings", { method: "PUT", body: JSON.stringify(values) }),
+  keepAwake: () => request<KeepAwakeStatus>("/api/settings/keep-awake"),
+  updateKeepAwake: (values: { enabled: boolean }) =>
+    request<KeepAwakeStatus>("/api/settings/keep-awake", { method: "PUT", body: JSON.stringify(values) }),
   runtimes: () => request<RuntimeStatus[]>("/api/runtimes"),
   installRuntime: (engine: RuntimeStatus["engine"]) =>
     request<RuntimeStatus>(`/api/runtimes/${engine}/install`, { method: "POST" }),

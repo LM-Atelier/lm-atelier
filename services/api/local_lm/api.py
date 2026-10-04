@@ -463,7 +463,7 @@ from .revision_dependency_contract import (
     persist_dependency_contract,
 )
 from .routing import RouteConfirmationRequired
-from .runtime_config import persist_runtime_values
+from .runtime_config import RuntimeConfigError, persist_runtime_values
 from .saved_settings import normalize_saved_settings
 from .scheduler import JobClaim
 from .schemas import (
@@ -541,6 +541,8 @@ from .schemas import (
     InstallQueuePolicyOut,
     JobActivityOut,
     JobOut,
+    KeepAwakeSetting,
+    KeepAwakeStatus,
     LoraSuggestionsOut,
     MessageOut,
     ModelAssetAdopt,
@@ -1639,6 +1641,47 @@ async def update_worker_settings(payload: WorkerSettings, request: Request) -> W
         {"LOCAL_LM_WORKER_STARTUP_SECONDS": f"{seconds:g}"},
     )
     return WorkerSettings(worker_startup_seconds=services.settings.worker_startup_seconds)
+
+
+def _keep_awake_status(services: Services) -> KeepAwakeStatus:
+    state = services.power.state()
+    return KeepAwakeStatus(
+        enabled=state.enabled,
+        supported=state.supported,
+        active=state.active,
+        running_jobs=state.holder_count,
+    )
+
+
+@router.get("/settings/keep-awake", response_model=KeepAwakeStatus)
+def get_keep_awake(request: Request) -> KeepAwakeStatus:
+    return _keep_awake_status(_services(request))
+
+
+@router.put("/settings/keep-awake", response_model=KeepAwakeStatus)
+def put_keep_awake(payload: KeepAwakeSetting, request: Request) -> KeepAwakeStatus:
+    """Turn keeping the computer awake on or off; running work is never cancelled either way.
+
+    Saved first, so a setting that could not be kept for the next start is not
+    applied to this one either. Synchronous: saving touches the disk and the
+    change may ask the operating system, so it runs off the event loop.
+    """
+
+    services = _services(request)
+    try:
+        persist_runtime_values(
+            services.settings.data_dir,
+            {"LOCAL_LM_KEEP_AWAKE_DURING_WORK": "true" if payload.enabled else "false"},
+        )
+    except RuntimeConfigError as exc:
+        raise api_error(
+            409,
+            "keep-awake-setting-not-saved",
+            "The setting could not be saved, so it was not changed.",
+        ) from exc
+    services.settings.keep_awake_during_work = payload.enabled
+    services.power.set_enabled(payload.enabled)
+    return _keep_awake_status(services)
 
 
 @router.get("/runtimes", response_model=list[RuntimeStatus])

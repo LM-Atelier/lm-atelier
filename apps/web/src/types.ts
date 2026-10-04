@@ -718,6 +718,13 @@ export interface WorkerSettings {
   worker_startup_seconds: number;
 }
 
+export interface KeepAwakeStatus {
+  enabled: boolean;
+  supported: boolean;
+  active: boolean;
+  running_jobs: number;
+}
+
 export interface WorkerResetResult {
   worker: WorkerStatus;
   cancelled_jobs: number;
