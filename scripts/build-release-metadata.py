@@ -362,6 +362,7 @@ def runtime_components(licenses_root: Path) -> tuple[list[dict[str, Any]], list[
             license_files=[openssl_license.name],
             purl_name="openssl",
         ),
+        *bundled_openssl(openssl_license.name, review),
         runtime_component(
             name="SQLite",
             version=sqlite3.sqlite_version,
@@ -388,6 +389,32 @@ def runtime_components(licenses_root: Path) -> tuple[list[dict[str, Any]], list[
             )
         )
     return components, review
+
+
+def bundled_openssl(license_file: str, review: list[str]) -> list[dict[str, Any]]:
+    """The OpenSSL that the cryptography package carries, when it differs from CPython's.
+
+    The cryptography wheels link their own OpenSSL, so the component taken from
+    CPython's ssl module does not describe it.
+    """
+
+    try:
+        from cryptography.hazmat.backends.openssl import backend
+    except ImportError:
+        review.append("cryptography is not installed, so its bundled OpenSSL was not recorded")
+        return []
+    version = backend.openssl_version_text().split()[1]
+    if version == ssl.OPENSSL_VERSION.split()[1]:
+        return []
+    return [
+        runtime_component(
+            name="OpenSSL (bundled with cryptography)",
+            version=version,
+            license_name="Apache-2.0",
+            license_files=[license_file],
+            purl_name="openssl",
+        )
+    ]
 
 
 def generated_time() -> datetime:
