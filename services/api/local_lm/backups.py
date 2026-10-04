@@ -125,12 +125,7 @@ class BackupManager:
         os.close(fd)
         temporary = Path(temporary_name)
         try:
-            with (
-                closing(sqlite3.connect(self._database_path())) as source,
-                closing(sqlite3.connect(temporary)) as target,
-            ):
-                source.backup(target)
-            self._verify_path(temporary)
+            self._snapshot_database(temporary)
             os.replace(temporary, destination)
             if include_media:
                 self._create_media_archive(destination)
@@ -151,6 +146,54 @@ class BackupManager:
     def verify(self, name: str) -> BackupInfo:
         with self._lock:
             return self._verify_locked(name)
+
+    def snapshot_to(self, database: Path, media: Path | None) -> str:
+        """Write a fresh, verified copy of the live state into files the caller made.
+
+        Nothing is written to the backup folder and the managed backups are not
+        touched, so a copy made this way never joins their rotation. With
+        ``media``, the pictures and videos the copy refers to are written there
+        and checked against it. Returns the copy's schema revision.
+        """
+
+        self._snapshot_database(database)
+        if media is not None:
+            self._write_media_archive(database, media)
+            self._verify_media_archive(media, database)
+        return self.schema_revision(database)
+
+    def verify_files(self, database: Path, media: Path | None) -> int:
+        """Check a database copy, and its media against it, as a backup is checked.
+
+        Returns how many pictures and videos the copy refers to. Raises
+        ValueError for anything a backup would be refused for.
+        """
+
+        self._verify_path(database)
+        if media is not None:
+            self._verify_media_archive(media, database)
+        return len(self._database_artifact_records(database))
+
+    def estimated_bytes(self, *, include_media: bool) -> int:
+        """Roughly how large a fresh copy of the live state would be."""
+
+        size = self._database_path().stat().st_size
+        if include_media:
+            size += sum(size_bytes for _sha, size_bytes, _path in self._live_artifact_records())
+        return size
+
+    @staticmethod
+    def schema_revision(database: Path) -> str:
+        """The schema revision a database copy was made at."""
+
+        try:
+            with closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as connection:
+                row = connection.execute("SELECT version_num FROM alembic_version").fetchone()
+        except sqlite3.Error as exc:
+            raise ValueError("backup failed SQLite integrity verification") from exc
+        if not row or not isinstance(row[0], str) or not row[0]:
+            raise ValueError("backup failed SQLite integrity verification")
+        return row[0]
 
     def _verify_locked(self, name: str) -> BackupInfo:
         path = self._path(name)
@@ -825,6 +868,19 @@ class BackupManager:
     def _media_path(database_backup: Path) -> Path:
         return database_backup.with_name(f"{database_backup.name}.media.zip")
 
+    def _snapshot_database(self, target: Path) -> None:
+        """Copy the live database into ``target`` with SQLite's online backup, then check it."""
+
+        with (
+            closing(sqlite3.connect(self._database_path())) as source,
+            closing(sqlite3.connect(target)) as copy,
+        ):
+            source.backup(copy)
+        self._verify_path(target)
+
+    def _live_artifact_records(self) -> set[tuple[str, int, str]]:
+        return self._database_artifact_records(self._database_path())
+
     def _create_media_archive(self, database_backup: Path) -> None:
         destination = self._media_path(database_backup)
         fd, temporary_name = tempfile.mkstemp(
@@ -834,6 +890,16 @@ class BackupManager:
         )
         os.close(fd)
         temporary = Path(temporary_name)
+        try:
+            self._write_media_archive(database_backup, temporary)
+            self._verify_media_archive(temporary, database_backup)
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _write_media_archive(self, database_backup: Path, target: Path) -> None:
+        """Write the pictures and videos ``database_backup`` refers to into the zip ``target``."""
+
         with closing(sqlite3.connect(database_backup)) as connection:
             records = connection.execute(
                 """
@@ -845,36 +911,31 @@ class BackupManager:
                 _BACKED_UP_ARTIFACT_KINDS,
             ).fetchall()
         manifest: list[dict[str, object]] = []
-        try:
-            with zipfile.ZipFile(temporary, "w", allowZip64=True) as archive:
-                for sha256, size_bytes, relative_path in records:
-                    source = self._safe_artifact_path(str(relative_path).replace("\\", "/"))
-                    if not source.is_file() or source.stat().st_size != int(size_bytes):
-                        raise ValueError("artifact file is missing or changed during backup")
-                    portable_relative_path = PurePosixPath(
-                        str(relative_path).replace("\\", "/")
-                    ).as_posix()
-                    archive_path = f"artifacts/{portable_relative_path}"
-                    archive.write(source, archive_path, compress_type=zipfile.ZIP_STORED)
-                    manifest.append(
-                        {
-                            "sha256": sha256,
-                            "size_bytes": size_bytes,
-                            "relative_path": portable_relative_path,
-                            "archive_path": archive_path,
-                        }
-                    )
-                archive.writestr(
-                    "manifest.json",
-                    json.dumps(
-                        {"format": "lm-atelier-backup-media", "version": 1, "artifacts": manifest}
-                    ),
-                    compress_type=zipfile.ZIP_DEFLATED,
+        with zipfile.ZipFile(target, "w", allowZip64=True) as archive:
+            for sha256, size_bytes, relative_path in records:
+                source = self._safe_artifact_path(str(relative_path).replace("\\", "/"))
+                if not source.is_file() or source.stat().st_size != int(size_bytes):
+                    raise ValueError("artifact file is missing or changed during backup")
+                portable_relative_path = PurePosixPath(
+                    str(relative_path).replace("\\", "/")
+                ).as_posix()
+                archive_path = f"artifacts/{portable_relative_path}"
+                archive.write(source, archive_path, compress_type=zipfile.ZIP_STORED)
+                manifest.append(
+                    {
+                        "sha256": sha256,
+                        "size_bytes": size_bytes,
+                        "relative_path": portable_relative_path,
+                        "archive_path": archive_path,
+                    }
                 )
-            self._verify_media_archive(temporary, database_backup)
-            os.replace(temporary, destination)
-        finally:
-            temporary.unlink(missing_ok=True)
+            archive.writestr(
+                "manifest.json",
+                json.dumps(
+                    {"format": "lm-atelier-backup-media", "version": 1, "artifacts": manifest}
+                ),
+                compress_type=zipfile.ZIP_DEFLATED,
+            )
 
     def _verify_media_archive(self, path: Path, database_backup: Path | None = None) -> None:
         if self._is_link(path) or not path.is_file():

@@ -65,6 +65,16 @@ from .auxiliary_assets import (
     revision_accepts_added_loras,
     validate_lora_workflow_contract,
 )
+from .backup_archives import (
+    PAYLOAD_FORMAT,
+    PAYLOAD_VERSION,
+    BackupInvalid,
+    BackupStorageInsufficient,
+    BackupTooLarge,
+    EncryptedBackupBusy,
+    check_uploaded_backup,
+    create_encrypted_backup,
+)
 from .capability_evidence import current_capability_evidence, evidence_input_modalities
 from .capability_probe import probe_structured_tools
 from .catalog_file_identity import hash_selected_catalog_files
@@ -368,6 +378,7 @@ from .project_archive_encryption import (
     archive_api_error,
     decrypt_import_owned,
     is_encrypted,
+    passphrase_from_header,
     staging_api_error,
 )
 from .project_recovery_visibility import (
@@ -532,6 +543,8 @@ from .schemas import (
     EmptyChatPageOut,
     EmptyChatPreviewIn,
     EmptyChatPreviewOut,
+    EncryptedBackupCheck,
+    EncryptedBackupRequest,
     EngineCapabilities,
     ExchangeDeletionOut,
     GenerationIdentityOut,
@@ -1326,6 +1339,130 @@ async def backup_restore_state(request: Request) -> BackupRestoreStateOut:
 async def dismiss_failed_restore(request: Request) -> Response:
     await asyncio.to_thread(_services(request).backups.dismiss_failed_restore)
     return Response(status_code=204)
+
+
+def _encrypted_backup_error(
+    exc: ArchiveRefused
+    | StagingNotPrivate
+    | EncryptedBackupBusy
+    | BackupStorageInsufficient
+    | ExportUnverified,
+) -> ApiError:
+    if isinstance(exc, ArchiveRefused):
+        if exc.code == "archive-kind-mismatch":
+            return api_error(
+                422, "archive-kind-mismatch", "This file is not an encrypted LM Atelier backup."
+            )
+        return archive_api_error(exc)
+    if isinstance(exc, StagingNotPrivate):
+        return staging_api_error()
+    if isinstance(exc, EncryptedBackupBusy):
+        return api_error(
+            409,
+            "encrypted-backup-busy",
+            "An encrypted backup is already being made or checked. Try again when it finishes.",
+        )
+    if isinstance(exc, BackupStorageInsufficient):
+        return api_error(
+            507,
+            "backup-storage-insufficient",
+            "There is not enough free disk space for this backup. Nothing was written.",
+        )
+    return api_error(
+        500,
+        "backup-export-unverified",
+        "The encrypted backup could not be checked after it was written, so it was not kept.",
+    )
+
+
+@router.post("/backups/encrypted", response_model=ArtifactOut, status_code=201)
+def create_encrypted_backup_file(
+    payload: EncryptedBackupRequest, request: Request, session: SessionDep
+) -> ArtifactOut:
+    # Synchronous: copying the data is disk work, and sealing and checking the
+    # copy derives a memory-hard key twice, so it runs off the event loop.
+    services = _services(request)
+    try:
+        sealed = create_encrypted_backup(
+            services.backups,
+            services.settings,
+            payload.passphrase.encode("utf-8"),
+            include_media=payload.include_media,
+        )
+    except BackupTooLarge as exc:
+        raise api_error(
+            422, "backup-too-large", "This data is larger than an encrypted backup can hold."
+        ) from exc
+    except ValueError as exc:
+        raise api_error(422, "backup-invalid", str(exc)) from exc
+    except (
+        ArchiveRefused,
+        StagingNotPrivate,
+        EncryptedBackupBusy,
+        BackupStorageInsufficient,
+        ExportUnverified,
+    ) as exc:
+        raise _encrypted_backup_error(exc) from exc
+    try:
+        artifact = services.artifacts.ingest_path(
+            session,
+            sealed,
+            kind=ArtifactKind.EXPORT,
+            media_type="application/octet-stream",
+            original_name=(
+                f"lm-atelier-backup-{datetime.now(UTC):%Y%m%d-%H%M%S}.lm-atelier.encrypted"
+            ),
+            metadata={
+                "format": PAYLOAD_FORMAT,
+                "version": PAYLOAD_VERSION,
+                "media_included": payload.include_media,
+                "encrypted": True,
+            },
+        )
+    finally:
+        sealed.unlink(missing_ok=True)
+    session.commit()
+    result = ArtifactOut.model_validate(artifact)
+    result.url = f"/api/artifacts/{artifact.id}/content"
+    return result
+
+
+@router.post("/backups/encrypted/check", response_model=EncryptedBackupCheck)
+async def check_encrypted_backup_file(request: Request, response: Response) -> EncryptedBackupCheck:
+    # The body is the encrypted file itself, streamed to disk, so its passphrase
+    # travels in a header and is read before any of the body is.
+    passphrase = passphrase_from_header(request)
+    declared = request.headers.get("content-length")
+    services = _services(request)
+    try:
+        report = await check_uploaded_backup(
+            services.backups,
+            services.settings,
+            request.stream(),
+            passphrase,
+            declared_bytes=(
+                int(declared) if declared and declared.isascii() and declared.isdigit() else None
+            ),
+        )
+    except BackupTooLarge as exc:
+        raise api_error(
+            413, "backup-file-too-large", "This file is larger than an encrypted backup can be."
+        ) from exc
+    except BackupInvalid as exc:
+        raise api_error(
+            422,
+            "backup-invalid",
+            "This file opened, but it does not hold a complete LM Atelier backup.",
+        ) from exc
+    except (
+        ArchiveRefused,
+        StagingNotPrivate,
+        EncryptedBackupBusy,
+        BackupStorageInsufficient,
+    ) as exc:
+        raise _encrypted_backup_error(exc) from exc
+    response.headers["Cache-Control"] = "no-store"
+    return EncryptedBackupCheck.model_validate(dataclasses.asdict(report))
 
 
 @router.post("/backups/{name}/verify", response_model=BackupInfo)
@@ -7088,7 +7225,11 @@ async def artifact_content(
     if not artifact:
         raise api_error(404, "artifact-not-found", "artifact not found")
     try:
-        path, media_type, disposition = _services(request).artifacts.delivery_metadata(artifact)
+        # Off the event loop: the first delivery of a stored file hashes all of
+        # it, and an encrypted backup can be gigabytes.
+        path, media_type, disposition = await asyncio.to_thread(
+            _services(request).artifacts.delivery_metadata, artifact
+        )
     except (FileNotFoundError, ValueError) as exc:
         raise api_error(
             410, "artifact-file-unreadable", "artifact file is missing or corrupt"

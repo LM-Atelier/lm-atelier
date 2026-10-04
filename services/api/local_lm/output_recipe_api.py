@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import base64
-import binascii
 import hmac
 import io
 from typing import TYPE_CHECKING, Annotated, Any, BinaryIO, Literal, cast
@@ -42,7 +40,12 @@ from .output_recipe_promotion import (
 from .output_recipe_replay import plan_output_recipe_replay, replay_outcome
 from .picture_workflow import read_picture_workflow
 from .portable_archive_v1 import ArchiveKind, ArchiveRefused, open_archive
-from .project_archive_encryption import ExportUnverified, archive_api_error, encrypt_bytes
+from .project_archive_encryption import (
+    ExportUnverified,
+    archive_api_error,
+    encrypt_bytes,
+    passphrase_from_header,
+)
 from .schemas import EncryptedOutputRecipeBundleRequest, EncryptedOutputRecipeRequest
 from .studio_region_edit import MAX_BLEND_READ_BYTES
 
@@ -438,7 +441,6 @@ async def check_output_recipe_against_this_install(request: Request) -> JSONResp
 
 # An encrypted file adds a tag of 16 bytes to every 16 KiB and a short header.
 _MAX_ENCRYPTED_BYTES = MAX_CHECK_BYTES + MAX_CHECK_BYTES // 1024 + 64 * 1024
-PASSPHRASE_HEADER = "x-archive-passphrase"
 
 
 class _OpenedTooLarge(Exception):
@@ -471,7 +473,7 @@ async def open_encrypted_output_recipe(request: Request) -> Response:
     nothing is kept.
     """
 
-    passphrase = _passphrase(request)
+    passphrase = passphrase_from_header(request)
     declared = request.headers.get("content-length")
     if declared is not None and declared.isdigit() and int(declared) > _MAX_ENCRYPTED_BYTES:
         raise _too_large()
@@ -498,20 +500,6 @@ async def open_encrypted_output_recipe(request: Request) -> Response:
         media_type="application/octet-stream",
         headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
     )
-
-
-def _passphrase(request: Request) -> bytes:
-    value = request.headers.get(PASSPHRASE_HEADER)
-    if not value:
-        raise api_error(
-            422,
-            "archive-passphrase-required",
-            "This file is encrypted. Enter its passphrase to open it.",
-        )
-    try:
-        return base64.b64decode(value, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        raise archive_api_error(ArchiveRefused("archive-passphrase-invalid")) from exc
 
 
 def _open_encrypted(content: bytes, passphrase: bytes) -> bytes:

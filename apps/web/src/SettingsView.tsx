@@ -7,6 +7,7 @@ import { CopyTextButton } from "./CopyTextButton";
 import { SettingControl } from "./SettingControl";
 import { WebSearchSettings } from "./WebSearchSettings";
 import { ProjectArchives } from "./ProjectArchives";
+import { EncryptedBackups } from "./EncryptedBackups";
 import { CredentialSettingsCard } from "./CredentialSettingsCard";
 import { DownloadDiagnosticsButton } from "./DownloadDiagnosticsButton";
 import { EmptyChatMaintenance } from "./EmptyChatMaintenance";
@@ -540,6 +541,7 @@ export function SettingsView({ engines, appearance, destinationId, onDestination
         {backups.error && <ErrorCallout message={backups.error.message} />}
       </section>
       <ProjectArchives />
+      <EncryptedBackups />
       </>)}
       {on("about-and-support") && (<>
       <section>
