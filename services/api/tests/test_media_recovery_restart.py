@@ -3,11 +3,14 @@
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
+from typing import Self
 
 import pytest
 from fastapi import FastAPI
 from httpx2 import ASGITransport, AsyncClient
+from pydantic import GetCoreSchemaHandler
+from pydantic_core import CoreSchema
 from sqlalchemy import func, select
 from test_chat_recovery import _command, _impact
 from test_media_recovery import CONTENT, _seed
@@ -46,10 +49,12 @@ async def test_restart_keeps_the_original_membership_deadline_and_exact_operatio
 ) -> None:
     async with _open(settings) as (app, client):
         with SessionLocal() as session:
-            artifact, entry, collection, tag = _seed(app.state.services.artifacts, session)
+            seeded_artifact, seeded_entry, collection, tag = _seed(
+                app.state.services.artifacts, session
+            )
             artifact_id, entry_id, collection_id, tag_id = (
-                artifact.id,
-                entry.id,
+                seeded_artifact.id,
+                seeded_entry.id,
                 collection.id,
                 tag.id,
             )
@@ -65,12 +70,25 @@ async def test_restart_keeps_the_original_membership_deadline_and_exact_operatio
 
         class DeadlineClock(datetime):
             @classmethod
-            def __get_pydantic_core_schema__(cls, _source, handler):
+            def __get_pydantic_core_schema__(
+                cls, _source: object, handler: GetCoreSchemaHandler
+            ) -> CoreSchema:
                 return handler(datetime)
 
             @classmethod
-            def now(cls, tz=None):
-                return deadline.astimezone(tz) if tz else deadline.replace(tzinfo=None)
+            def now(cls, tz: tzinfo | None = None) -> Self:
+                current = deadline.astimezone(tz) if tz else deadline.replace(tzinfo=None)
+                return cls(
+                    current.year,
+                    current.month,
+                    current.day,
+                    current.hour,
+                    current.minute,
+                    current.second,
+                    current.microsecond,
+                    tzinfo=current.tzinfo,
+                    fold=current.fold,
+                )
 
         monkeypatch.setattr(recovery_api, "datetime", DeadlineClock)
 
@@ -86,10 +104,9 @@ async def test_restart_keeps_the_original_membership_deadline_and_exact_operatio
             assert entry is not None and artifact is not None
             assert entry.state == "trashed" and entry.favorite and artifact.favorite
             assert app.state.services.artifacts.resolve(artifact).read_bytes() == CONTENT
-            assert (
-                session.get(MediaCollectionMembership, (collection_id, entry_id)).note
-                == "Keep original spacing"
-            )
+            membership = session.get(MediaCollectionMembership, (collection_id, entry_id))
+            assert membership is not None
+            assert membership.note == "Keep original spacing"
             assert session.get(MediaTagAssignment, (tag_id, entry_id)) is not None
         impact = await _impact(client, f"/api/recovery-items/{deletion_id}/impact")
         command = _command(impact, "restart-restore-garden")
@@ -127,10 +144,9 @@ async def test_restart_keeps_the_original_membership_deadline_and_exact_operatio
                 assert entry is not None and entry.state == "visible" and entry.favorite
                 assert entry.id == entry_id and entry.artifact_id == artifact_id
                 assert session.get(RecoveryItem, deletion_id) is None
-                assert (
-                    session.get(MediaCollectionMembership, (collection_id, entry_id)).note
-                    == "Keep original spacing"
-                )
+                membership = session.get(MediaCollectionMembership, (collection_id, entry_id))
+                assert membership is not None
+                assert membership.note == "Keep original spacing"
                 assert session.get(MediaTagAssignment, (tag_id, entry_id)) is not None
             else:
                 assert entry is None and not artifact.favorite

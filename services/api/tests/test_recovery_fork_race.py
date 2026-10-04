@@ -33,10 +33,12 @@ async def test_fork_does_not_copy_deleted_history_or_stale_project_filing(
     with SessionLocal() as session:
         artifact, _entry, _collection, _tag = _seed(app.state.services.artifacts, session)
         artifact_id = artifact.id
+        leaf = session.get(Message, leaf_id)
+        assert leaf is not None
         session.add(
             MessagePart(
                 message_id=leaf_id,
-                position=len(session.get(Message, leaf_id).parts),
+                position=len(leaf.parts),
                 type="image",
                 artifact_id=artifact_id,
             )
@@ -93,7 +95,9 @@ async def test_fork_does_not_copy_deleted_history_or_stale_project_filing(
         fork_id = response.json()["id"]
         expected_project = None if outcomes == ["trashed"] else project_id
         with SessionLocal() as session:
-            assert session.get(Chat, fork_id).project_id == expected_project
+            fork = session.get(Chat, fork_id)
+            assert fork is not None
+            assert fork.project_id == expected_project
             copied = session.scalars(select(Message.id).where(Message.chat_id == fork_id)).all()
             assert len(copied) == 2
             assert (
