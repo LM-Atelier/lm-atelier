@@ -17,6 +17,7 @@ from local_lm.db import SessionLocal
 from local_lm.models import Chat, Job
 from local_lm.recovery_previews import RecoveryPreviewConflict, reserve_recovery_write
 from local_lm.recovery_v1 import TrashChatV1
+from local_lm.studio_sessions import find_studio_session
 
 
 @pytest.mark.parametrize("existing", [False, True])
@@ -44,7 +45,9 @@ async def test_studio_and_source_trash_cannot_both_admit_from_a_stale_read(
         chat_count = session.scalar(select(func.count()).select_from(Chat))
         job_count = session.scalar(select(func.count()).select_from(Job))
 
-    original = api_module.find_studio_session
+    collaborator: object = getattr(api_module, "find_studio_session", None)
+    assert collaborator is find_studio_session
+    original = find_studio_session
     outcomes: list[str] = []
 
     def trash_from_another_connection(session: Session, artifact_id: str) -> Chat | None:

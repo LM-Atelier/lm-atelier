@@ -16,6 +16,7 @@ from test_output_recipe_replay import (
 )
 
 from local_lm import api as api_module
+from local_lm.output_recipe_replay import replay_turn_request
 from local_lm.output_recipe_v1 import open_output_recipe
 from local_lm.schemas import TurnRequest
 
@@ -46,7 +47,9 @@ async def test_a_deleted_destination_refuses_replay_until_the_same_chat_is_resto
     target = await _new_chat(client)
     preparation_count = 0
     deletion: dict[str, Any] = {}
-    prepare = api_module.replay_turn_request
+    collaborator: object = getattr(api_module, "replay_turn_request", None)
+    assert collaborator is replay_turn_request
+    prepare = replay_turn_request
 
     async def trash() -> dict[str, Any]:
         return await _change(
