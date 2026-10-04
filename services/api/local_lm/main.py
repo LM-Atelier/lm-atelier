@@ -54,6 +54,7 @@ from .events import EventBroker
 from .exports import ProjectExporter
 from .instance_identity import INSTANCE_ID_HEADER, load_or_create_instance_identity
 from .instance_lock import DataDirectoryLock
+from .media_organization_batch_api import router as media_organization_batch_router
 from .model_quarantine import recover_model_delete_quarantines
 from .orchestrator import ConversationOrchestrator
 from .processes import ProcessSupervisor
@@ -827,6 +828,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     register_api_error_handler(app)
     register_workflow_selection_error_handler(app)
     app.include_router(router)
+    app.include_router(media_organization_batch_router, prefix="/api")
 
     @app.websocket("/api/events")
     async def events_socket(websocket: WebSocket, after: int = 0) -> None:

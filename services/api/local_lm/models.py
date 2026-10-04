@@ -102,6 +102,11 @@ from .domain import (
     new_id,
     utcnow,
 )
+from .media_organization_catalog_schema import (
+    CATALOG_SEED_SQL,
+    CREATE_CATALOG_TRIGGER_SQL,
+    DROP_CATALOG_TRIGGER_SQL,
+)
 from .media_organization_schema import (
     CREATE_MEDIA_ORGANIZATION_TRIGGER_SQL,
     DROP_MEDIA_ORGANIZATION_TRIGGER_SQL,
@@ -906,6 +911,7 @@ class MediaCollection(TimestampMixin, Base):
             name="ck_media_collection_description",
         ),
         CheckConstraint("version > 0", name="ck_media_collection_version_positive"),
+        Index("ix_media_collection_catalog_order", "created_at", "id"),
     )
 
     id: Mapped[str] = mapped_column(String(43), primary_key=True)
@@ -963,6 +969,7 @@ class MediaTag(TimestampMixin, Base):
             name="ck_media_tag_color",
         ),
         CheckConstraint("version > 0", name="ck_media_tag_version_positive"),
+        Index("ix_media_tag_catalog_order", "created_at", "id"),
     )
 
     id: Mapped[str] = mapped_column(String(41), primary_key=True)
@@ -970,6 +977,42 @@ class MediaTag(TimestampMixin, Base):
     label: Mapped[str] = mapped_column(String(200))
     color: Mapped[str | None] = mapped_column(String(7), nullable=True)
     version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class MediaOrganizationCatalogRevision(Base):
+    """A catalog-wide revision also advanced by membership version changes."""
+
+    __tablename__ = "media_organization_catalog_revisions"
+    __table_args__ = (
+        CheckConstraint("kind IN ('albums', 'tags')", name="ck_media_catalog_kind"),
+        CheckConstraint(
+            "typeof(revision) = 'integer' AND revision BETWEEN 1 AND 9007199254740991",
+            name="ck_media_catalog_revision",
+        ),
+    )
+
+    kind: Mapped[str] = mapped_column(String(8), primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer)
+
+
+class MediaOrganizationCreation(Base):
+    """The original response to an explicitly keyed catalog creation."""
+
+    __tablename__ = "media_organization_creations"
+    __table_args__ = (
+        CheckConstraint("kind IN ('albums', 'tags')", name="ck_media_creation_kind"),
+        CheckConstraint(
+            "length(operation_key) = 32 AND operation_key NOT GLOB '*[^0-9a-f]*'",
+            name="ck_media_creation_key",
+        ),
+    )
+
+    operation_key: Mapped[str] = mapped_column(String(32), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(8))
+    request_sha256: Mapped[str] = mapped_column(String(64))
+    entity_id: Mapped[str] = mapped_column(String(43))
+    response_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    response_sha256: Mapped[str] = mapped_column(String(64))
 
 
 class MediaTagAssignment(Base):
@@ -984,6 +1027,23 @@ class MediaTagAssignment(Base):
         ForeignKey("artifact_library_entries.id", ondelete="RESTRICT"), primary_key=True
     )
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class MediaOrganizationImpact(Base):
+    """An expiring non-owning selection and its atomic organization result."""
+
+    __tablename__ = "media_organization_impacts"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    request_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    preview_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    input_sha256: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    recovery_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    operation_key: Mapped[str | None] = mapped_column(String(128), unique=True, nullable=True)
+    response_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    response_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class PromptTemplateDefinition(TimestampMixin, Base):
@@ -1275,6 +1335,25 @@ for _statement in DROP_TRIGGER_SQL:
         "before_drop",
         DDL(_statement).execute_if(dialect="sqlite"),  # type: ignore[no-untyped-call]
     )
+
+
+def _seed_media_catalog(_target: object, connection: Connection, **_kwargs: object) -> None:
+    if connection.dialect.name == "sqlite":
+        connection.exec_driver_sql(CATALOG_SEED_SQL)
+
+
+event.listen(Base.metadata, "after_create", _seed_media_catalog)
+for _statement in CREATE_CATALOG_TRIGGER_SQL:
+    event.listen(Base.metadata, "after_create", _install_sqlite_trigger(_statement))
+
+
+def _drop_media_catalog(_target: object, connection: Connection, **_kwargs: object) -> None:
+    if connection.dialect.name == "sqlite":
+        for statement in DROP_CATALOG_TRIGGER_SQL:
+            connection.exec_driver_sql(statement)
+
+
+event.listen(Base.metadata, "before_drop", _drop_media_catalog)
 for _statement in CREATE_MEDIA_ORGANIZATION_TRIGGER_SQL:
     event.listen(
         Base.metadata,

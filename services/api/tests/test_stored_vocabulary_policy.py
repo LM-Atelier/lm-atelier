@@ -91,6 +91,10 @@ CONSTRAINED_COLUMNS: frozenset[tuple[str, str]] = frozenset(
         ("media_collections", "kind"),
         ("media_collections", "name"),
         ("media_collections", "version"),
+        ("media_organization_catalog_revisions", "kind"),
+        ("media_organization_catalog_revisions", "revision"),
+        ("media_organization_creations", "kind"),
+        ("media_organization_creations", "operation_key"),
         ("media_tags", "color"),
         ("media_tags", "label"),
         ("media_tags", "slug"),
@@ -189,7 +193,7 @@ CONSTRAINED_COLUMNS: frozenset[tuple[str, str]] = frozenset(
 #: The number of ``CheckConstraint`` objects in the schema. Pinned alongside the
 #: columns so that a constraint naming no column at all, or one constraint
 #: replaced by two over the same columns, still fails.
-CHECK_CONSTRAINT_COUNT = 106
+CHECK_CONSTRAINT_COUNT = 110
 
 
 def _mapped_tables() -> dict[str, Table]:

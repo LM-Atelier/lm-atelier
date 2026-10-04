@@ -16,6 +16,10 @@ import { formatBytes } from "./format";
 import { MediaLibraryRecovery } from "./MediaLibraryRecovery";
 import { PictureFileSettings } from "./PictureFileSettings";
 import { useMediaLibraryRecovery } from "./useMediaLibraryRecovery";
+import { useMediaOrganization } from "./useMediaOrganization";
+import { MediaOrganizationControls } from "./MediaOrganizationControls";
+import { MediaOrganizationManager } from "./MediaOrganizationManager";
+import { MediaOrganizationReview } from "./MediaOrganizationReview";
 
 const PAGE_LIMIT = 20;
 const LIBRARY_UNAVAILABLE = "The Media Library could not be loaded safely. Refresh and try again.";
@@ -52,6 +56,16 @@ export function MediaLibraryView({
   const clock = useClockChoice();
   const [favoriteFailed, setFavoriteFailed] = useState(false);
   const recovery = useMediaLibraryRecovery();
+  const organization = useMediaOrganization((command) => {
+    setFilters((current) => ({
+      ...current,
+      collection_id: command.action === "delete-album" && current.collection_id === command.target.id
+        ? undefined : current.collection_id,
+      tag_id: (command.action === "delete-tag" || command.action === "merge-tags") && current.tag_id === command.target.id
+        ? undefined : current.tag_id,
+    }));
+    setEpoch((current) => current + 1);
+  });
 
   const replaceFilters = (next: ArtifactLibraryFilters) => {
     setFavoriteFailed(false);
@@ -61,10 +75,12 @@ export function MediaLibraryView({
   const refresh = () => {
     setFavoriteFailed(false);
     setEpoch((current) => current + 1);
+    organization.refresh();
   };
 
   const feed = useInfiniteQuery({
-    queryKey: ["artifact-library-v1", filters.kind, filters.query, filters.favorite, PAGE_LIMIT, epoch],
+    queryKey: ["artifact-library-v1", filters.kind, filters.query, filters.favorite,
+      filters.collection_id, filters.tag_id, PAGE_LIMIT, epoch],
     initialPageParam: null as string | null,
     queryFn: ({ pageParam, signal }) =>
       api.artifactLibrary(filters, pageParam, PAGE_LIMIT, signal),
@@ -84,7 +100,7 @@ export function MediaLibraryView({
   let chainInvalid = false;
   if (feed.data) {
     try {
-      entries = flattenArtifactLibraryPages(feed.data.pages);
+      entries = flattenArtifactLibraryPages(feed.data.pages, Boolean(filters.collection_id));
     } catch (error) {
       if (!(error instanceof Error) || error.message !== ARTIFACT_LIBRARY_PAGE_ERROR) throw error;
       chainInvalid = true;
@@ -145,6 +161,7 @@ export function MediaLibraryView({
         </select>
       </div>
 
+      <MediaOrganizationControls filters={filters} onFilters={replaceFilters} organization={organization} />
       {unavailable && <ErrorCallout message={LIBRARY_UNAVAILABLE} />}
       {!unavailable && favoriteFailed && <ErrorCallout message="The favorite change could not be confirmed. The library was refreshed." />}
       {!unavailable && feed.isPending && (
@@ -158,6 +175,9 @@ export function MediaLibraryView({
               const favoriteLabel = `${entry.favorite ? "Unfavorite" : "Favorite"} ${entry.display_name}`;
               return (
                 <article className="gallery-card" key={entry.id}>
+                  <label><input type="checkbox" aria-label={`Select ${entry.display_name}`}
+                    checked={organization.selection.has(entry.id)}
+                    onChange={() => organization.choose(entry)} />Select</label>
                   {entry.kind === "image" ? (
                     <img src={source} alt={entry.display_name} loading="lazy" />
                   ) : (
@@ -225,6 +245,8 @@ export function MediaLibraryView({
         />
       )}
       <MediaLibraryRecovery recovery={recovery} />
+      {organization.manage && <MediaOrganizationManager organization={organization} />}
+      <MediaOrganizationReview organization={organization} />
     </div>
   );
 }

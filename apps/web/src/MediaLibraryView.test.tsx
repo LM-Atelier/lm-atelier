@@ -8,7 +8,8 @@ import { CLOCK_KEY } from "./clockPreference";
 
 vi.mock("./api", async (original) => {
   const actual = await original<typeof import("./api")>();
-  return { ApiError: actual.ApiError, api: { artifactLibrary: vi.fn(), favoriteArtifact: vi.fn() } };
+  return { ApiError: actual.ApiError, api: { artifactLibrary: vi.fn(), favoriteArtifact: vi.fn(),
+    mediaOrganizationCatalog: vi.fn().mockResolvedValue({ items: [], next_cursor: null, revision: 1 }) } };
 });
 
 const digest = (character: string) => /^[a-f]$/.test(character)

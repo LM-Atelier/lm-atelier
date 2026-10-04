@@ -36,6 +36,7 @@ export interface ArtifactLibraryEntry {
   updated_at: string;
   /** Parsed once at the trust boundary; used only for exact page ordering. */
   created_at_epoch_micros: number;
+  collection_position?: number;
 }
 
 export interface ArtifactLibraryPage {
@@ -47,6 +48,8 @@ export interface ArtifactLibraryFilters {
   kind: "" | ArtifactLibraryKind;
   query: string;
   favorite: boolean;
+  collection_id?: string;
+  tag_id?: string;
 }
 
 function invalid(): never {
@@ -125,9 +128,11 @@ function timestamp(value: unknown): { text: string; epochMicros: number } {
   return { text, epochMicros };
 }
 
-function parseEntry(value: unknown): ArtifactLibraryEntry {
+function parseEntry(value: unknown, albumOrder: boolean): ArtifactLibraryEntry {
   const record = plainDataObject(value);
-  exactKeys(record, ITEM_KEYS);
+  exactKeys(record, albumOrder ? [...ITEM_KEYS, "collection_position"] : ITEM_KEYS);
+  const position = record.collection_position;
+  if (albumOrder && (typeof position !== "number" || !Number.isSafeInteger(position) || position < 0)) invalid();
   const id = boundedString(record.id, 80, 80);
   const artifactId = boundedString(record.artifact_id, 71, 71);
   const entryMatch = /^libentry:sha256:([0-9a-f]{64})$/.exec(id);
@@ -153,15 +158,16 @@ function parseEntry(value: unknown): ArtifactLibraryEntry {
     created_at: created.text,
     updated_at: updated.text,
     created_at_epoch_micros: created.epochMicros,
+    ...(albumOrder ? { collection_position: position as number } : {}),
   });
 }
 
-export function parseArtifactLibraryPage(value: unknown, requestedLimit: number): ArtifactLibraryPage {
+export function parseArtifactLibraryPage(value: unknown, requestedLimit: number, albumOrder = false): ArtifactLibraryPage {
   if (!Number.isSafeInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 100) invalid();
   const record = plainDataObject(value);
   exactKeys(record, PAGE_KEYS);
   if (!Array.isArray(record.items) || record.items.length > requestedLimit) invalid();
-  const items = record.items.map(parseEntry);
+  const items = record.items.map((item) => parseEntry(item, albumOrder));
   const ids = new Set(items.map((item) => item.id));
   if (ids.size !== items.length) invalid();
   const nextCursor = record.next_cursor === null
@@ -171,12 +177,14 @@ export function parseArtifactLibraryPage(value: unknown, requestedLimit: number)
   return Object.freeze({ items: Object.freeze(items) as ArtifactLibraryEntry[], next_cursor: nextCursor });
 }
 
-function comesBefore(left: ArtifactLibraryEntry, right: ArtifactLibraryEntry): boolean {
+function comesBefore(left: ArtifactLibraryEntry, right: ArtifactLibraryEntry, albumOrder: boolean): boolean {
+  if (albumOrder) return typeof left.collection_position === "number" && typeof right.collection_position === "number"
+    && left.collection_position < right.collection_position;
   return left.created_at_epoch_micros > right.created_at_epoch_micros
     || (left.created_at_epoch_micros === right.created_at_epoch_micros && left.id > right.id);
 }
 
-export function flattenArtifactLibraryPages(pages: readonly ArtifactLibraryPage[]): ArtifactLibraryEntry[] {
+export function flattenArtifactLibraryPages(pages: readonly ArtifactLibraryPage[], albumOrder = false): ArtifactLibraryEntry[] {
   const result: ArtifactLibraryEntry[] = [];
   const ids = new Set<string>();
   let previous: ArtifactLibraryEntry | undefined;
@@ -184,7 +192,8 @@ export function flattenArtifactLibraryPages(pages: readonly ArtifactLibraryPage[
     const page = pages[pageIndex];
     if (pageIndex < pages.length - 1 && page.next_cursor === null) invalid();
     for (const item of page.items) {
-      if (ids.has(item.id) || (previous && !comesBefore(previous, item))) invalid();
+      if (albumOrder && (typeof item.collection_position !== "number" || !Number.isSafeInteger(item.collection_position) || item.collection_position < 0)) invalid();
+      if (ids.has(item.id) || (previous && !comesBefore(previous, item, albumOrder))) invalid();
       ids.add(item.id);
       result.push(item);
       previous = item;

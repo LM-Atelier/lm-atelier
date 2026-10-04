@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { PictureFileSettings } from "./PictureFileSettings";
@@ -8,8 +8,11 @@ import { parseArtifactLibraryPage } from "./artifactLibraryPage";
 
 vi.mock("./api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./api")>()),
-  api: { artifactLibrary: vi.fn(), pictureSettings: vi.fn() },
+  api: { artifactLibrary: vi.fn(), pictureSettings: vi.fn(), mediaOrganizationCatalog: vi.fn() },
 }));
+beforeEach(() => {
+  vi.mocked(api.mediaOrganizationCatalog).mockResolvedValue({ items: [], next_cursor: null, revision: 1 });
+});
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
 
 const artifactId = `sha256:${"b".repeat(64)}`;

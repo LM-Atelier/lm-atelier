@@ -1220,14 +1220,33 @@ export const api = {
     });
     if (filters.kind) parameters.set("kind", filters.kind);
     if (filters.favorite) parameters.set("favorite", "true");
+    if (filters.collection_id) parameters.set("collection_id", filters.collection_id);
+    if (filters.tag_id) parameters.set("tag_id", filters.tag_id);
     if (cursor !== null) parameters.set("cursor", cursor);
     const payload = await request<unknown>(`/api/artifact-library?${parameters}`, { signal });
-    const page = parseArtifactLibraryPage(payload, limit);
+    const page = parseArtifactLibraryPage(payload, limit, Boolean(filters.collection_id));
     if (cursor !== null && page.next_cursor === cursor) {
       throw new Error("The Media Library response was invalid.");
     }
     return page;
   },
+  mediaCollections: () => request<unknown>("/api/media-collections"),
+  mediaTags: () => request<unknown>("/api/media-tags"),
+  mediaOrganizationCatalog: (kind: "albums" | "tags", query: string, cursor: string | null, signal?: AbortSignal) => {
+    const params = new URLSearchParams({ query, limit: "50" });
+    if (cursor) params.set("cursor", cursor);
+    return request<unknown>(`/api/media-organization/catalog/${kind}?${params}`, { signal });
+  },
+  createMediaCollection: (name: string, description: string, operationKey?: string) =>
+    request<unknown>("/api/media-collections", { method: "POST", body: JSON.stringify({ name, description, ...(operationKey ? { operation_key: operationKey } : {}) }) }),
+  createMediaTag: (label: string, color: string | null, operationKey?: string) =>
+    request<unknown>("/api/media-tags", { method: "POST", body: JSON.stringify({ label, color, ...(operationKey ? { operation_key: operationKey } : {}) }) }),
+  previewMediaOrganization: (command: import("./mediaOrganization").OrganizationCommand) =>
+    request<unknown>("/api/media-organization/impacts", { method: "POST", body: JSON.stringify(command) }),
+  applyMediaOrganization: (id: string, operationKey: string) =>
+    request<unknown>(`/api/media-organization/impacts/${encodeURIComponent(id)}/apply`, {
+      method: "POST", body: JSON.stringify({ operation_key: operationKey }),
+    }),
   generationRetryPolicy: () =>
     request<import("./generationRetryTypes").GenerationRetryPolicy>("/api/settings/generation-retries"),
   updateGenerationRetryPolicy: (maxRetries: number, expectedRevision: number) =>
