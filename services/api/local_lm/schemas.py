@@ -3592,7 +3592,7 @@ class CustomNodeContainmentStatus(ApiModel):
 
 class WorkerStatus(ApiModel):
     name: Literal["chat", "media"]
-    state: Literal["stopped", "starting", "ready", "exited"] = "stopped"
+    state: Literal["stopped", "starting", "ready", "stopping", "exited"] = "stopped"
     managed: bool
     running: bool
     pid: int | None = None

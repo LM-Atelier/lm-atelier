@@ -2,7 +2,7 @@ import type { CustomNodeContainmentStatus } from "./customNodeContainmentTypes";
 
 export interface WorkerStatus {
   name: "chat" | "media";
-  state: "stopped" | "starting" | "ready" | "exited";
+  state: "stopped" | "starting" | "ready" | "stopping" | "exited";
   managed: boolean;
   running: boolean;
   pid: number | null;
