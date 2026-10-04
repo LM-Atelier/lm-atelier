@@ -52,11 +52,12 @@ async def test_removed_membership_is_absent_from_library_pickers_but_shared_chat
         part["artifact_id"] for row in transcript.json()["messages"] for part in row["parts"]
     ] == [artifact_id]
     assert (await client.get(f"/api/artifacts/{artifact_id}/content")).status_code == 200
-    for params in (
+    picker_filters: tuple[dict[str, str | int], ...] = (
         {"kind": "image", "limit": 1},
         {"kind": "image", "chat_id": chat_id},
         {"kind": "image", "query": "Garden"},
-    ):
+    )
+    for params in picker_filters:
         picker = await client.get("/api/artifacts", params=params)
         assert picker.status_code == 200
         assert artifact_id not in [row["id"] for row in picker.json()]

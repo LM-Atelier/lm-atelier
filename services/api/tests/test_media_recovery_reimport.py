@@ -1,15 +1,19 @@
 """Explicit imports recover existing library identity without renewing expired deletion."""
 
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
-from sqlalchemy import func, select
+from sqlalchemy import Row, func, select
+from sqlalchemy.orm import Session
 from test_chat_recovery import _command, _impact
 from test_media_recovery import CONTENT, _seed
 
 from local_lm.db import SessionLocal
+from local_lm.media_recovery import restore_media
 from local_lm.models import (
     Artifact,
     ArtifactLibraryEntry,
@@ -21,9 +25,13 @@ from local_lm.models import (
     RecoveryPreviewRecord,
 )
 from local_lm.recovery_previews import RecoveryPreviewConflict
+from local_lm.recovery_v1 import RestoreRecoveryV1
+from local_lm.schemas import EventOut
 
 
-async def _deleted(app: FastAPI, client: AsyncClient):
+async def _deleted(
+    app: FastAPI, client: AsyncClient
+) -> tuple[tuple[str, str, str, str], dict[str, Any]]:
     with SessionLocal() as session:
         artifact, entry, collection, tag = _seed(app.state.services.artifacts, session)
         identities = artifact.id, entry.id, collection.id, tag.id
@@ -33,7 +41,9 @@ async def _deleted(app: FastAPI, client: AsyncClient):
         json=_command(preview, "trash-for-import"),
     )
     assert response.status_code == 200
-    return identities, response.json()
+    item = response.json()
+    assert isinstance(item, dict)
+    return identities, item
 
 
 @pytest.mark.parametrize("kind", ["image", "video", "input"])
@@ -42,14 +52,21 @@ async def test_import_restores_the_same_membership_and_organization_after_trash(
 ) -> None:
     (artifact_id, entry_id, collection_id, tag_id), item = await _deleted(app, client)
     observed: list[str] = []
-    publish = app.state.services.events.publish
+    publish: Callable[[str, str | None, dict[str, Any] | None], Awaitable[EventOut]] = (
+        app.state.services.events.publish
+    )
 
-    async def observe(event_type: str, entity_id: str | None = None, payload: dict | None = None):
+    async def observe(
+        event_type: str, entity_id: str | None = None, payload: dict[str, Any] | None = None
+    ) -> EventOut:
         if event_type == "recovery.updated":
             assert entity_id == item["deletion_id"] and payload == {}
+            assert entity_id is not None
             with SessionLocal() as session:
                 assert session.get(RecoveryItem, entity_id) is None
-                assert session.get(ArtifactLibraryEntry, entry_id).state == "visible"
+                entry = session.get(ArtifactLibraryEntry, entry_id)
+                assert entry is not None
+                assert entry.state == "visible"
             observed.append(entity_id)
         return await publish(event_type, entity_id, payload)
 
@@ -72,14 +89,17 @@ async def test_import_restores_the_same_membership_and_organization_after_trash(
             assert session.scalar(select(func.count()).select_from(ArtifactLibraryEntry)) == 1
             assert session.scalar(select(func.count()).select_from(Job)) == 0
             membership = session.scalar(select(MediaCollectionMembership))
+            assert membership is not None
             assert (membership.collection_id, membership.entry_id, membership.note) == (
                 collection_id,
                 entry_id,
                 "Keep original spacing",
             )
             assignment = session.scalar(select(MediaTagAssignment))
+            assert assignment is not None
             assert (assignment.tag_id, assignment.entry_id) == (tag_id, entry_id)
             artifact = session.get(Artifact, artifact_id)
+            assert artifact is not None
             assert artifact.metadata_json["uploaded"] is True
             assert app.state.services.artifacts.resolve(artifact).read_bytes() == CONTENT
     assert observed == [item["deletion_id"]]
@@ -92,7 +112,9 @@ async def test_import_cannot_restore_expired_membership_or_extend_its_deadline(
     deadline = datetime.fromisoformat(item["purge_after"]).astimezone(UTC)
     monkeypatch.setattr("local_lm.api.utcnow", lambda: deadline + timedelta(seconds=1))
     with SessionLocal() as session:
-        before_metadata = dict(session.get(Artifact, artifact_id).metadata_json)
+        artifact = session.get(Artifact, artifact_id)
+        assert artifact is not None
+        before_metadata = dict(artifact.metadata_json)
         before_operations = session.scalar(select(func.count()).select_from(RecoveryOperation))
     imported = await client.post(
         "/api/artifacts?kind=image",
@@ -102,11 +124,14 @@ async def test_import_cannot_restore_expired_membership_or_extend_its_deadline(
     assert imported.json()["code"] == "recovery-window-expired"
     with SessionLocal() as session:
         entry = session.get(ArtifactLibraryEntry, entry_id)
+        assert entry is not None
         assert entry.state == "trashed" and entry.recovery_id == item["deletion_id"]
         recovery = session.get(RecoveryItem, item["deletion_id"])
+        assert recovery is not None
         assert recovery.state == "recoverable"
         assert recovery.purge_after.replace(tzinfo=UTC) == deadline
         artifact = session.get(Artifact, artifact_id)
+        assert artifact is not None
         assert artifact.metadata_json == before_metadata
         assert app.state.services.artifacts.resolve(artifact).read_bytes() == CONTENT
         assert (
@@ -121,7 +146,7 @@ async def test_import_rolls_back_membership_restore_and_its_receipt_on_failure(
 
     (artifact_id, _entry_id, _collection_id, _tag_id), _item = await _deleted(app, client)
 
-    def rows():
+    def rows() -> dict[str, Sequence[Row[Any]]]:
         with SessionLocal() as session:
             return {
                 model.__tablename__: session.execute(select(model.__table__)).all()
@@ -137,10 +162,12 @@ async def test_import_rolls_back_membership_restore_and_its_receipt_on_failure(
                 )
             }
 
-    original = media_reimport.restore_media
+    original = restore_media
 
-    def fail_after_restore(*args, **kwargs):
-        original(*args, **kwargs)
+    def fail_after_restore(
+        session: Session, deletion_id: str, command: RestoreRecoveryV1, now: datetime
+    ) -> None:
+        original(session, deletion_id, command, now)
         raise RecoveryPreviewConflict("recovery-impact-stale")
 
     before = rows()
@@ -154,4 +181,5 @@ async def test_import_rolls_back_membership_restore_and_its_receipt_on_failure(
     assert rows() == before
     with SessionLocal() as session:
         artifact = session.get(Artifact, artifact_id)
+        assert artifact is not None
         assert app.state.services.artifacts.resolve(artifact).read_bytes() == CONTENT
