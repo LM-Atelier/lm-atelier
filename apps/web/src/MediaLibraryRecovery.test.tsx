@@ -11,6 +11,7 @@ vi.mock("./api", async (original) => {
   return { ApiError: actual.ApiError, api: {
     artifactLibrary: vi.fn(), favoriteArtifact: vi.fn(), mediaDeletionImpact: vi.fn(), trashMedia: vi.fn(),
     recoveryImpact: vi.fn(), restoreRecovery: vi.fn(),
+    mediaOrganizationCatalog: vi.fn().mockResolvedValue({ items: [], next_cursor: null, revision: 1 }),
   } };
 });
 

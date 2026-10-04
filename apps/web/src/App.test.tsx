@@ -4374,7 +4374,7 @@ describe("App", { timeout: CASE_TIMEOUT_MS }, () => {
     fireEvent.click(await screen.findByText("Media library"));
     expect(await screen.findByText("one.png")).toBeVisible();
     expect(screen.getByText("two.png")).toBeVisible();
-    expect(screen.queryByRole("checkbox", { name: /Select/ })).not.toBeInTheDocument();
+    screen.getAllByRole("checkbox", { name: /^Select (one|two)\.png$/ }).forEach((checkbox) => fireEvent.click(checkbox));
     expect(screen.queryByText(/images selected/)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Edit together/ })).not.toBeInTheDocument();
   });

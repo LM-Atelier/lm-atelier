@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MessageBubble } from "./MessageBubble";
@@ -9,7 +9,12 @@ import type { Message, Run, Artifact } from "./types";
 
 vi.mock("./api", async (original) => {
   const actual = await original<typeof import("./api")>();
-  return { ApiError: actual.ApiError, api: { artifactLibrary: vi.fn(), artifact: vi.fn(), run: vi.fn() } };
+  return { ApiError: actual.ApiError, api: { artifactLibrary: vi.fn(), artifact: vi.fn(), run: vi.fn(),
+    mediaOrganizationCatalog: vi.fn() } };
+});
+
+beforeEach(() => {
+  vi.mocked(api.mediaOrganizationCatalog).mockResolvedValue({ items: [], next_cursor: null, revision: 1 });
 });
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
 const artifactId = `sha256:${"a".repeat(64)}`;

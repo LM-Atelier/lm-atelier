@@ -82,6 +82,8 @@ for (const [density, scale] of Object.entries(scales)) {
       await page.goto("/?view=media");
       await expect(page.getByRole("heading", { name: "Media library", exact: true })).toBeVisible();
       expect(await visibleOverflow(page), "media library fits the viewport").toEqual([]);
+      await page.getByText("Find albums and tags", { exact: true }).click();
+      expect(await visibleOverflow(page), "album and tag search fits the viewport").toEqual([]);
     });
   }
 }

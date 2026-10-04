@@ -213,6 +213,15 @@ class ArtifactLibraryPage(ApiModel):
     next_cursor: str | None = Field(default=None, min_length=1, max_length=2_048)
 
 
+class ArtifactAlbumEntrySummary(ArtifactLibraryEntrySummary):
+    collection_position: int = Field(ge=0, le=9_007_199_254_740_991)
+
+
+class ArtifactAlbumPage(ApiModel):
+    items: list[ArtifactAlbumEntrySummary]
+    next_cursor: str | None = Field(default=None, min_length=1, max_length=2_048)
+
+
 class ArtifactStorageInfo(ApiModel):
     total_bytes: int
     total_count: int
