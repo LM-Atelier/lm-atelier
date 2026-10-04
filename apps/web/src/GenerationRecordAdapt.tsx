@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import { discardBlankChat } from "./discardBlankChat";
 import {
@@ -10,6 +10,9 @@ import {
   type ReplayPlan,
 } from "./generationRecord";
 import { LibraryImagePicker } from "./LibraryImagePicker";
+import { GenerationRecordAdaptChoices } from "./GenerationRecordAdaptChoices";
+import { ProfilePicker } from "./ProfilePicker";
+import { useProfileLibrary } from "./useProfileLibrary";
 import type { ArtifactLibraryItem } from "./types";
 
 /** A new version of a checked record, when only its workflow, model, LoRAs or pictures keep it from being made again here.
@@ -65,14 +68,10 @@ function AdaptChooser({
   const missingInputs = requirements
     .filter((item) => item.kind === "input")
     .flatMap((item, position) => (item.state === "present" ? [] : [{ position, role: item.role }]));
-  const workflows = useQuery({
-    queryKey: ["workflow-summaries", "adaptation", plan.operation],
-    queryFn: ({ signal }) => api.workflowSummaries({ operation: plan.operation, limit: 200 }, signal),
-    enabled: needs.workflow,
-  });
-  const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles, enabled: needs.model });
   const [revisionId, setRevisionId] = useState("");
   const [profileId, setProfileId] = useState("");
+  const [workflowReady, setWorkflowReady] = useState(true);
+  const profiles = useProfileLibrary(role, profileId, needs.model);
   const [leaveOutLoras, setLeaveOutLoras] = useState(false);
   const [pictures, setPictures] = useState<Record<number, InputChoice>>({});
   const [choosingFor, setChoosingFor] = useState<number | null>(null);
@@ -107,7 +106,8 @@ function AdaptChooser({
   const chosen = (!needs.workflow || Boolean(revisionId)) && (!needs.model || Boolean(profileId))
     && (!needs.loras || leaveOutLoras)
     && (!needs.inputs || missingInputs.every(({ position }) => Boolean(pictures[position])));
-  const usable = !adapt.isPending && chosen;
+  const usable = !adapt.isPending && chosen && (!needs.workflow || workflowReady)
+    && (!needs.model || profiles.identity.ready);
 
   return (
     <section className="generation-record-body" aria-labelledby={`adapt-${plan.digest}`}>
@@ -117,26 +117,14 @@ function AdaptChooser({
         generation, not this one made again, and it keeps which record it came from and what differs.
       </p>
       {needs.workflow && (
-        <label>
-          <span>Workflow</span>
-          <select value={revisionId} onChange={(event) => setRevisionId(event.target.value)}>
-            <option value="">Choose a workflow</option>
-            {(workflows.data ?? []).flatMap((workflow) => workflow.current_revision_id
-              ? [<option key={workflow.id} value={workflow.current_revision_id}>{workflow.name}</option>]
-              : [])}
-          </select>
-        </label>
+        <GenerationRecordAdaptChoices operation={plan.operation} value={revisionId} saving={adapt.isPending}
+          onChange={setRevisionId} onReady={setWorkflowReady} />
       )}
       {needs.model && (
-        <label>
-          <span>Model</span>
-          <select value={profileId} onChange={(event) => setProfileId(event.target.value)}>
-            <option value="">Choose a model</option>
-            {(profiles.data ?? []).filter((profile) => profile.role === role).map((profile) => (
-              <option key={profile.id} value={profile.id}>{profile.name}</option>
-            ))}
-          </select>
-        </label>
+        <ProfilePicker library={profiles} label="Model" searchLabel="Search models" value={profileId}
+          selectedId={profileId} onChange={setProfileId} disabled={adapt.isPending}>
+          <option value="">Choose a model</option>
+        </ProfilePicker>
       )}
       {needs.loras && (
         <label>
@@ -175,7 +163,6 @@ function AdaptChooser({
           onClose={() => setChoosingFor(null)}
         />
       )}
-      {(workflows.isError || profiles.isError) && <p role="alert">The choices could not be read.</p>}
       {adapt.isPending && <p role="status">Starting it in a new chat…</p>}
       {adapt.isError && <p role="alert">{adaptationFailureText(adapt.error)}</p>}
       <div>

@@ -15,7 +15,9 @@ vi.mock("./api", async (importOriginal) => {
     api: {
       ...actual.api,
       workflowSummaries: vi.fn(),
+      workflowRevisionChoices: vi.fn(),
       profiles: vi.fn(),
+      profilesPage: vi.fn(),
       createChat: vi.fn(),
       adaptGenerationRecord: vi.fn(),
       artifacts: vi.fn(),
@@ -47,14 +49,19 @@ function show(value: ReplayPlan, requirements: GenerationRecordRequirement[] = [
 }
 
 beforeEach(() => {
+  vi.mocked(api.workflowRevisionChoices).mockResolvedValue([
+    { revision_id: "rev_1", workflow_id: "w1", workflow_name: "Harbor workflow", operation: "text_to_image", version: 1 },
+  ]);
   vi.mocked(api.workflowSummaries).mockResolvedValue([
     { id: "w1", name: "Harbor workflow", operation: "text_to_image", current_revision_id: "rev_1" },
     { id: "w2", name: "Unpublished", operation: "text_to_image", current_revision_id: null },
   ] as WorkflowSummary[]);
-  vi.mocked(api.profiles).mockResolvedValue([
+  const profiles = [
     { id: "profile_image", name: "Picture model", role: "image" },
     { id: "profile_video", name: "Motion model", role: "video" },
-  ] as ModelProfile[]);
+  ] as ModelProfile[];
+  vi.mocked(api.profilesPage).mockImplementation(async options => profiles.filter(profile =>
+    profile.role === options.role && (!options.profileIds || options.profileIds.includes(profile.id))));
   vi.mocked(api.createChat).mockResolvedValue({ id: "chat_new" } as Chat);
   vi.mocked(discardBlankChat).mockResolvedValue(undefined);
   vi.mocked(api.adaptGenerationRecord).mockResolvedValue({});
@@ -88,6 +95,7 @@ it("makes a new version with the chosen model in a new chat, and shows it", asyn
   expect(screen.queryByRole("option", { name: "Motion model" })).toBeNull();
   expect(screen.queryByRole("combobox", { name: "Workflow" })).toBeNull();
   fireEvent.change(model, { target: { value: "profile_image" } });
+  await waitFor(() => expect(button).toHaveAttribute("aria-disabled", "false"));
   fireEvent.click(button);
 
   await waitFor(() => expect(onStarted).toHaveBeenCalledExactlyOnceWith("chat_new"));
@@ -98,12 +106,14 @@ it("makes a new version with the chosen model in a new chat, and shows it", asyn
 it("stands in a chosen workflow and leaves out every LoRA it names", async () => {
   const onStarted = show(plan(["replay-workflow-missing", "replay-lora-missing"]),
     [requirement("lora", "missing"), requirement("lora", "present")]);
+  fireEvent.click(screen.getByRole("combobox", { name: "Workflow" }));
   await screen.findByRole("option", { name: "Harbor workflow" });
   expect(screen.queryByRole("option", { name: "Unpublished" })).toBeNull();
 
-  fireEvent.change(screen.getByRole("combobox", { name: "Workflow" }), { target: { value: "rev_1" } });
+  fireEvent.click(screen.getByRole("option", { name: "Harbor workflow" }));
   expect(screen.getByRole("button", { name: "Make a new version" })).toHaveAttribute("aria-disabled", "true");
   fireEvent.click(screen.getByRole("checkbox", { name: "Leave out its LoRAs" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Make a new version" })).toHaveAttribute("aria-disabled", "false"));
   fireEvent.click(screen.getByRole("button", { name: "Make a new version" }));
 
   await waitFor(() => expect(onStarted).toHaveBeenCalledOnce());
@@ -117,7 +127,7 @@ it("says why the choices were refused, and removes the empty chat it made", asyn
   const onStarted = show(plan(["replay-model-missing"]));
   await screen.findByRole("option", { name: "Picture model" });
   fireEvent.change(screen.getByRole("combobox", { name: "Model" }), { target: { value: "profile_image" } });
-
+  await waitFor(() => expect(screen.getByRole("button", { name: "Make a new version" })).toHaveAttribute("aria-disabled", "false"));
   fireEvent.click(screen.getByRole("button", { name: "Make a new version" }));
 
   expect(await screen.findByRole("alert")).toHaveTextContent(

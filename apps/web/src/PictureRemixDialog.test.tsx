@@ -6,12 +6,14 @@ import { PictureFileSettings } from "./PictureFileSettings";
 import { api } from "./api";
 import { discardBlankChat } from "./discardBlankChat";
 import { applicableClaims, readRemixPreview } from "./pictureRemix";
+import type { ModelProfile } from "./types";
 
 vi.mock("./discardBlankChat", () => ({ discardBlankChat: vi.fn() }));
 vi.mock("./api", () => ({
   api: {
     workflowReadyRevisions: vi.fn(),
     profiles: vi.fn(),
+    profilesPage: vi.fn(),
     remixPreview: vi.fn(),
     pictureSettings: vi.fn(),
     createChat: vi.fn(),
@@ -66,12 +68,14 @@ function renderDialog(onOpenChat?: (chatId: string) => void, onClose: () => void
     { family_id: "f", family_name: "Cups", workflow_id: "w", workflow_name: "Cup workflow",
       revision_id: "rev_cup", revision_version: 1, operation: "text_to_image" },
   ]);
-  vi.mocked(api.profiles).mockResolvedValue([
+  const profiles: ModelProfile[] = [
     { id: "profile_cup", model_install_id: null, name: "Cup model", use_case: "", role: "image",
       engine: "mock", load_settings_json: {}, request_settings_json: {}, is_default: false },
     { id: "profile_video", model_install_id: null, name: "Moving model", use_case: "", role: "video",
       engine: "mock", load_settings_json: {}, request_settings_json: {}, is_default: false },
-  ]);
+  ];
+  vi.mocked(api.profilesPage).mockImplementation(async options => profiles.filter(profile =>
+    profile.role === options.role && (!options.profileIds || options.profileIds.includes(profile.id))));
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<QueryClientProvider client={client}><PictureRemixDialog artifactId={artifactId} onClose={onClose} onOpenChat={onOpenChat} /></QueryClientProvider>);
 }
@@ -351,7 +355,7 @@ describe("remix from the settings in a picture's file", () => {
 
   it("is offered for a file with a prompt and opens over the page", async () => {
     vi.mocked(api.workflowReadyRevisions).mockResolvedValue([]);
-    vi.mocked(api.profiles).mockResolvedValue([]);
+    vi.mocked(api.profilesPage).mockResolvedValue([]);
     renderSettings([{ key: "prompt", value: PROMPT, source: "prompt" }]);
 
     fireEvent.click(await screen.findByRole("button", { name: "Remix these settings" }));
