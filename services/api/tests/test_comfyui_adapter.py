@@ -5,7 +5,7 @@ import json
 import os
 import subprocess
 import time
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -386,7 +386,7 @@ async def test_workflow_probe_requires_a_generated_asset(
     adapter = ComfyUIAdapter("http://comfy.test")
     request = media_request(operation="text_to_image")
 
-    async def successful_probe(_request: MediaRequest):  # type: ignore[no-untyped-def]
+    async def successful_probe(_request: MediaRequest) -> AsyncIterator[MediaEvent]:
         yield MediaEvent(
             type="complete",
             assets=[
@@ -399,7 +399,7 @@ async def test_workflow_probe_requires_a_generated_asset(
             ],
         )
 
-    async def empty_probe(_request: MediaRequest):  # type: ignore[no-untyped-def]
+    async def empty_probe(_request: MediaRequest) -> AsyncIterator[MediaEvent]:
         yield MediaEvent(type="complete")
 
     try:
@@ -424,7 +424,7 @@ async def test_workflow_probe_interrupts_a_backend_that_exceeds_its_deadline(
         interrupted = True
         return httpx.Response(200, json={})
 
-    async def stalled_probe(_request: MediaRequest):  # type: ignore[no-untyped-def]
+    async def stalled_probe(_request: MediaRequest) -> AsyncIterator[MediaEvent]:
         yield MediaEvent(type="queued")
         await asyncio.Event().wait()
 

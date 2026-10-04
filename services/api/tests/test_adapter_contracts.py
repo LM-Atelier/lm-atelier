@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
@@ -343,7 +344,7 @@ async def test_guarded_chat_adapter_adds_a_redacted_terminal_error() -> None:
     secret = "adapter-private-error"
 
     class BrokenChatAdapter(MockChatAdapter):
-        async def stream(self, _request: ChatRequest):  # type: ignore[no-untyped-def]
+        async def stream(self, _request: ChatRequest) -> AsyncIterator[ChatEvent]:
             yield ChatEvent(type="delta", text="partial")
             raise RuntimeError(secret)
 
@@ -364,7 +365,7 @@ async def test_guarded_chat_adapter_adds_a_redacted_terminal_error() -> None:
 
 async def test_guarded_chat_adapter_times_out_a_silent_third_party_stream() -> None:
     class SilentChatAdapter(MockChatAdapter):
-        async def stream(self, _request: ChatRequest):  # type: ignore[no-untyped-def]
+        async def stream(self, _request: ChatRequest) -> AsyncIterator[ChatEvent]:
             await asyncio.Event().wait()
             yield ChatEvent(type="complete")
 
@@ -382,7 +383,7 @@ async def test_guarded_chat_adapter_times_out_a_silent_third_party_stream() -> N
 
 async def test_guarded_chat_adapter_stops_events_after_terminal() -> None:
     class PostTerminalAdapter(MockChatAdapter):
-        async def stream(self, _request: ChatRequest):  # type: ignore[no-untyped-def]
+        async def stream(self, _request: ChatRequest) -> AsyncIterator[ChatEvent]:
             yield ChatEvent(type="complete")
             yield ChatEvent(type="delta", text="must not escape")
 
@@ -457,7 +458,7 @@ def test_role_aware_capabilities_reject_ambiguous_and_weakened_fields() -> None:
 
 async def test_conformance_probe_reports_events_after_terminal() -> None:
     class PostTerminalAdapter(MockChatAdapter):
-        async def stream(self, _request: ChatRequest):  # type: ignore[no-untyped-def]
+        async def stream(self, _request: ChatRequest) -> AsyncIterator[ChatEvent]:
             yield ChatEvent(type="complete")
             yield ChatEvent(type="delta", text="late")
 
@@ -468,7 +469,7 @@ async def test_conformance_probe_reports_events_after_terminal() -> None:
 
 async def test_conformance_probe_reports_oversized_events() -> None:
     class OversizedEventAdapter(MockChatAdapter):
-        async def stream(self, _request: ChatRequest):  # type: ignore[no-untyped-def]
+        async def stream(self, _request: ChatRequest) -> AsyncIterator[ChatEvent]:
             yield ChatEvent(type="delta", text="x" * (1024 * 1024 + 1))
             yield ChatEvent(type="complete")
 
