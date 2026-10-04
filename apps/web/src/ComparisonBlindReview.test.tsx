@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ApiError, api } from "./api";
 import { ComparisonBlindReview } from "./ComparisonBlindReview";
 import type { BlindPosition, GenerationExperiment, GenerationExperimentBlindView } from "./generationExperimentTypes";
+import { SENSITIVE_MEDIA_KEY } from "./sensitiveMedia";
 
 vi.mock("./api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./api")>();
@@ -44,6 +45,7 @@ afterEach(() => {
   cleanup();
   vi.resetAllMocks();
   window.sessionStorage.clear();
+  localStorage.clear();
 });
 
 it("opens a viewing and shows the pictures only by where they are shown", async () => {
@@ -114,4 +116,16 @@ it("says the preference by position, then shows the comparison with its choices 
   await waitFor(() => expect(reread).toHaveBeenCalledTimes(2));
   expect(api.sayBlindPreference).toHaveBeenCalledExactlyOnceWith("gexp-1", "gview-1", { preference: "preferred", position: 2 });
   expect(window.sessionStorage.getItem(KEY)).toBeNull();
+});
+
+it("keeps blind pictures blurred until each is shown", async () => {
+  localStorage.setItem(SENSITIVE_MEDIA_KEY, "blur");
+  vi.mocked(api.openBlindView).mockResolvedValue(view("gview-1"));
+  show();
+  const section = await screen.findByRole("region", { name: "Compared blind" });
+
+  expect(within(section).queryAllByRole("img")).toHaveLength(0);
+  fireEvent.click(within(section).getAllByRole("button", { name: "Show picture" })[1]);
+
+  expect(within(section).getAllByRole("img").map((picture) => picture.getAttribute("alt"))).toEqual(["Shown at position 2"]);
 });

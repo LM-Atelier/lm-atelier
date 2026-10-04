@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { ShieldedMedia } from "./ShieldedMedia";
 import type { ReactNode, Ref } from "react";
 import { api } from "./api";
 import { ComparisonBlindReview } from "./ComparisonBlindReview";
@@ -38,7 +39,7 @@ function TrialPicture({ experimentId, arm, trial, job }: {
     {finished && run.isPending && <p role="status">Loading the picture…</p>}
     {finished && run.isError && <p role="alert">This picture could not be loaded.</p>}
     {picture && <figure className="comparison-picture">
-      <img src={artifactSource(picture) ?? undefined} alt={`Made by ${arm.label}`} />
+      <ShieldedMedia kind="image"><img src={artifactSource(picture) ?? undefined} alt={`Made by ${arm.label}`} /></ShieldedMedia>
     </figure>}
     {finished && run.data && !picture && <p>No picture was recorded for this choice.</p>}
     {run.data && picture && <GenerationDetails provenance={run.data.provenance_json} />}

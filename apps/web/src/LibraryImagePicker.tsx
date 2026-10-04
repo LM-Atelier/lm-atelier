@@ -1,4 +1,6 @@
 import { useState, type ReactNode } from "react";
+import { useSensitiveMediaChoice } from "./sensitiveMedia";
+import { ShieldedThumbnail } from "./ShieldedThumbnail";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { ErrorCallout } from "./ErrorCallout";
@@ -31,6 +33,7 @@ export function LibraryImagePicker({
   children?: ReactNode;
 }) {
   const [chosen, setChosen] = useState<string[]>([]);
+  const shielding = useSensitiveMediaChoice() !== "show";
   const library = useInfiniteQuery({
     queryKey: ["artifacts", "image-picker", { pageSize: 50 }],
     initialPageParam: 0,
@@ -61,22 +64,23 @@ export function LibraryImagePicker({
       )}
       {children}
       <ul className="library-attach-grid">
-        {usable.map((item) => {
+        {usable.map((item, index) => {
           const picked = chosen.includes(item.id);
+          const name = shielding ? `Picture ${index + 1}` : item.original_name ?? `${item.kind} ${item.id}`;
           return (
             <li key={item.id}>
               <button
                 type="button"
                 className={`library-attach-tile ${picked ? "picked" : ""}`}
                 aria-pressed={picked}
-                aria-label={item.original_name ?? `${item.kind} ${item.id}`}
+                aria-label={name}
                 onClick={() =>
                   setChosen((current) =>
                     picked ? current.filter((id) => id !== item.id) : single ? [item.id] : [...current, item.id],
                   )
                 }
               >
-                <img src={artifactSource(item.id) ?? undefined} alt="" loading="lazy" />
+                <ShieldedThumbnail src={artifactSource(item.id) ?? undefined} kind="image" />
               </button>
             </li>
           );
