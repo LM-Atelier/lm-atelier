@@ -57,6 +57,7 @@ from .instance_lock import DataDirectoryLock
 from .model_quarantine import recover_model_delete_quarantines
 from .orchestrator import ConversationOrchestrator
 from .processes import ProcessSupervisor
+from .project_archive_encryption import sweep_staging
 from .queue_lane_policy import recover_queue_lanes
 from .recovery_maintenance import maintain_recovery_expiry
 from .retention_policy import windows_for
@@ -693,6 +694,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with _api_file_logging(active_settings):
             with _startup_stage("database-migrations"):
                 upgrade_database(active_settings)
+            with _startup_stage("archive-staging-cleanup"):
+                sweep_staging(active_settings.export_dir)
             with SessionLocal() as session:
                 with _startup_stage("model-delete-quarantine-recovery"):
                     recover_model_delete_quarantines(

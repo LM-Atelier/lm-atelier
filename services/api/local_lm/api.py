@@ -12,7 +12,7 @@ import re
 import shutil
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
-from contextlib import AsyncExitStack, suppress
+from contextlib import AsyncExitStack, nullcontext, suppress
 from datetime import UTC, datetime
 from itertools import islice
 from pathlib import Path, PurePosixPath
@@ -25,6 +25,7 @@ from fastapi import (
     BackgroundTasks,
     Depends,
     File,
+    Form,
     HTTPException,
     Query,
     Request,
@@ -335,6 +336,7 @@ from .picture_remix_api import RemixQueueRequest, remix_source
 from .picture_remix_api import router as picture_remix_router
 from .picture_shape import MatchSourceRequest, shown_size
 from .platforms import list_platform_matrix
+from .portable_archive_v1 import ArchiveRefused
 from .preflight import (
     ExactCivitaiFileSelectionError,
     assess_catalog_install,
@@ -360,6 +362,14 @@ from .profile_service import (
     validate_profile_install,
 )
 from .progress import update_job_progress
+from .project_archive_encryption import (
+    ExportUnverified,
+    StagingNotPrivate,
+    archive_api_error,
+    decrypt_import_owned,
+    is_encrypted,
+    staging_api_error,
+)
 from .project_recovery_visibility import (
     effective_project_id,
     live_project,
@@ -555,6 +565,7 @@ from .schemas import (
     PriorTurnEditRequest,
     PriorTurnEditSource,
     ProjectCreate,
+    ProjectExportRequest,
     ProjectOut,
     ProjectUpdate,
     ProjectWorkflowSelectionIn,
@@ -2375,6 +2386,7 @@ async def import_project(
     request: Request,
     session: SessionDep,
     archive: Annotated[UploadFile, File()],
+    passphrase: Annotated[str | None, Form()] = None,
 ) -> Project:
     archive.file.seek(0, 2)
     size = archive.file.tell()
@@ -2397,15 +2409,36 @@ async def import_project(
             )
         except HTTPException:
             continue
+    staged: Path | None = None
+    if is_encrypted(archive.file):
+        if not passphrase:
+            raise api_error(
+                422,
+                "archive-passphrase-required",
+                "This archive is encrypted. Import it from Settings, under Data & backups, "
+                "where its passphrase can be entered.",
+            )
+        try:
+            staged = await decrypt_import_owned(
+                archive.file, _services(request).settings.export_dir, passphrase.encode("utf-8")
+            )
+        except ArchiveRefused as exc:
+            raise archive_api_error(exc) from exc
+        except StagingNotPrivate as exc:
+            raise staging_api_error() from exc
     try:
-        project = _services(request).exports.import_archive(
-            session,
-            archive.file,
-            known_fields=known_fields,
-        )
+        with staged.open("rb") if staged is not None else nullcontext(archive.file) as source:
+            project = _services(request).exports.import_archive(
+                session,
+                source,
+                known_fields=known_fields,
+            )
     except ValueError as exc:
         session.rollback()
         raise api_error(422, "project-import-invalid", str(exc)) from exc
+    finally:
+        if staged is not None:
+            staged.unlink(missing_ok=True)
     reconcile_legacy_workflow_compatibility(session)
     session.commit()
     session.refresh(project)
@@ -2462,18 +2495,36 @@ async def delete_project(project_id: str, session: SessionDep) -> Response:
 
 
 @router.post("/projects/{project_id}/export", response_model=ArtifactOut, status_code=201)
-async def export_project(
+def export_project(
     project_id: str,
     request: Request,
     session: SessionDep,
     include_media: bool = True,
+    payload: ProjectExportRequest | None = None,
 ) -> ArtifactOut:
+    # Synchronous: writing an archive is disk work, and encrypting and checking
+    # one derives a memory-hard key twice, so it runs off the event loop.
+    passphrase = (
+        payload.passphrase.encode("utf-8")
+        if payload is not None and payload.passphrase is not None
+        else None
+    )
     try:
         artifact = _services(request).exports.export(
-            session, project_id, include_media=include_media
+            session, project_id, include_media=include_media, passphrase=passphrase
         )
     except LookupError as exc:
         raise api_error(404, "project-not-found", str(exc)) from exc
+    except ArchiveRefused as exc:
+        raise archive_api_error(exc) from exc
+    except StagingNotPrivate as exc:
+        raise staging_api_error() from exc
+    except ExportUnverified as exc:
+        raise api_error(
+            500,
+            "project-export-unverified",
+            "The encrypted archive could not be checked after it was written, so it was not kept.",
+        ) from exc
     session.commit()
     result = ArtifactOut.model_validate(artifact)
     result.url = f"/api/artifacts/{artifact.id}/content"

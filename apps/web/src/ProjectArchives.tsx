@@ -1,8 +1,9 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useProjectPages } from "./useProjectPages";
 import { ProjectPageControls } from "./ProjectPageControls";
 import { ErrorCallout } from "./ErrorCallout";
+import { isEncryptedArchive } from "./projectArchiveFiles";
 import { useProjectMutations } from "./useProjectMutations";
 
 /** Taking a project out of the workspace as an archive, and bringing one back in.
@@ -15,6 +16,11 @@ import { useProjectMutations } from "./useProjectMutations";
  *
  * Archived projects are listed as well: an archived project is still somebody's
  * work, and exporting it is one of the few things left to do with it.
+ *
+ * An export can be encrypted with a passphrase, typed twice so a slip of the
+ * keyboard does not lock the archive for good. An encrypted archive chosen for
+ * import is recognized by its first bytes, and its passphrase is asked for
+ * before anything is sent. Neither passphrase is kept anywhere but this page.
  */
 export function ProjectArchives() {
   const client = useQueryClient();
@@ -24,7 +30,43 @@ export function ProjectArchives() {
   const [search, setSearch] = useState("");
   const projects = useProjectPages(search, true);
   const picker = useRef<HTMLInputElement>(null);
-  const error = exportProject.error ?? importProject.error;
+  const [encrypt, setEncrypt] = useState(false);
+  const [passphrase, setPassphrase] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [locked, setLocked] = useState<File | null>(null);
+  const [unlock, setUnlock] = useState("");
+  const unlockField = useRef<HTMLInputElement>(null);
+  const hint = useId();
+  // While the passphrase prompt is open, an import's error belongs inside it.
+  const error = locked ? exportProject.error : (exportProject.error ?? importProject.error);
+  const ready = !encrypt || (passphrase.length > 0 && passphrase === confirmation);
+  useEffect(() => {
+    if (locked) unlockField.current?.focus();
+  }, [locked]);
+  const exportWith = (id: string, includeMedia: boolean) => {
+    if (!ready) return;
+    exportProject.mutate(encrypt ? { id, includeMedia, passphrase } : { id, includeMedia });
+  };
+  const closeLocked = () => {
+    setLocked(null);
+    setUnlock("");
+    importProject.reset();
+  };
+  const choose = async (file: File) => {
+    importProject.reset();
+    if (await isEncryptedArchive(file).catch(() => false)) {
+      setLocked(file);
+      setUnlock("");
+      return;
+    }
+    setLocked(null);
+    setUnlock("");
+    importProject.mutate(file);
+  };
+  const openLocked = () => {
+    if (!locked || !unlock || importProject.isPending) return;
+    importProject.mutate({ file: locked, passphrase: unlock }, { onSuccess: () => { setLocked(null); setUnlock(""); } });
+  };
 
   return (
     <section aria-labelledby="project-archives-heading">
@@ -39,11 +81,11 @@ export function ProjectArchives() {
             hidden
             type="file"
             aria-label="Project archive to import"
-            accept=".zip,.lm-atelier.zip,application/zip"
+            accept=".zip,.lm-atelier.zip,.lm-atelier.encrypted,application/zip,application/octet-stream"
             onChange={(event) => {
               const file = event.target.files?.[0];
               event.target.value = "";
-              if (file) importProject.mutate(file);
+              if (file) void choose(file);
             }}
           />
           <button
@@ -58,8 +100,41 @@ export function ProjectArchives() {
           </button>
         </div>
       </div>
+      {locked && (
+        <form
+          className="callout"
+          aria-label="Encrypted archive"
+          onSubmit={(event) => { event.preventDefault(); openLocked(); }}
+        >
+          <p>{locked.name} is encrypted. Enter its passphrase to import it.</p>
+          <label>Archive passphrase<input ref={unlockField} type="password" autoComplete="current-password" value={unlock} onChange={(event) => setUnlock(event.target.value)} /></label>
+          {importProject.error && <ErrorCallout message={importProject.error.message} />}
+          <span className="row-actions">
+            <button type="submit" aria-disabled={!unlock || importProject.isPending}>Import</button>
+            <button type="button" className="secondary" aria-disabled={importProject.isPending}
+              onClick={() => { if (!importProject.isPending) closeLocked(); }}>Cancel</button>
+          </span>
+        </form>
+      )}
       {importProject.data && (
         <div className="callout success" role="status">Imported {importProject.data.name}.</div>
+      )}
+      <label className="toggle-row">
+        <span><strong>Encrypt exports with a passphrase</strong><small>The archive cannot be opened without it, and a forgotten passphrase cannot be recovered.</small></span>
+        <input type="checkbox" checked={encrypt} onChange={(event) => setEncrypt(event.target.checked)} />
+      </label>
+      {encrypt && (
+        <span className="row-actions">
+          <label>Passphrase<input type="password" autoComplete="new-password" maxLength={1024} value={passphrase} onChange={(event) => setPassphrase(event.target.value)} /></label>
+          <label>Confirm passphrase<input type="password" autoComplete="new-password" maxLength={1024} value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></label>
+        </span>
+      )}
+      {encrypt && !ready && (
+        <p className="muted" id={hint}>
+          {confirmation.length > 0 && passphrase !== confirmation
+            ? "The passphrases do not match."
+            : "Type the passphrase twice to export encrypted."}
+        </p>
       )}
       <label>Search projects to export<input type="search" maxLength={500} value={search} onChange={(event) => setSearch(event.target.value)} /></label>
       {projects.data && projects.data.length === 0 && !projects.error && <p className="muted">{search.trim() ? "No matching projects." : "No projects to export yet."}</p>}
@@ -76,7 +151,9 @@ export function ProjectArchives() {
                   type="button"
                   className="secondary compact-button"
                   aria-label={`Export ${project.name}, metadata only`}
-                  onClick={() => exportProject.mutate({ id: project.id, includeMedia: false })}
+                  aria-disabled={!ready}
+                  aria-describedby={ready ? undefined : hint}
+                  onClick={() => exportWith(project.id, false)}
                 >
                   Metadata only
                 </button>
@@ -84,7 +161,9 @@ export function ProjectArchives() {
                   type="button"
                   className="secondary compact-button"
                   aria-label={`Export ${project.name} with media`}
-                  onClick={() => exportProject.mutate({ id: project.id, includeMedia: true })}
+                  aria-disabled={!ready}
+                  aria-describedby={ready ? undefined : hint}
+                  onClick={() => exportWith(project.id, true)}
                 >
                   With media
                 </button>
