@@ -1,18 +1,23 @@
 """New work ignores deleted project defaults while frozen work keeps its snapshot."""
 
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
+from typing import Any, NoReturn
 
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
 from run_waits import wait_for_terminal_status
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 from test_accepted_turn_context import _accept_context
 from test_chat_deletion import _text_exchange
 from test_chat_recovery import _command, _impact
 from test_project_recovery_api import _project, _stored_trash
 from test_recovery_expiry import manual_expiry as manual_expiry
 
+from local_lm.accepted_turn_context import AcceptedContext
+from local_lm.adapters.base import ChatEvent, ChatRequest, MediaEvent, MediaRequest
 from local_lm.db import SessionLocal
 from local_lm.models import (
     ProjectWorkflowUseCaseSelection,
@@ -43,41 +48,52 @@ async def test_new_turns_stop_inheriting_deleted_project_settings_and_restore_th
         },
     )
     assert updated.status_code == 200, updated.text
-    seen = []
+    seen: list[ChatRequest | MediaRequest] = []
     adapter = (
         app.state.services.engines.chat if mode == "text" else app.state.services.engines.media
     )
     method = "stream" if mode == "text" else "generate"
-    original = getattr(adapter, method)
+    original: Callable[[ChatRequest | MediaRequest], AsyncIterator[ChatEvent | MediaEvent]] = (
+        getattr(adapter, method)
+    )
 
-    async def observe(request):
+    async def observe(request: ChatRequest | MediaRequest) -> AsyncIterator[ChatEvent | MediaEvent]:
         seen.append(request)
         async for event in original(request):
             yield event
 
     monkeypatch.setattr(adapter, method, observe)
 
-    async def generate():
+    async def generate() -> ChatRequest | MediaRequest:
         accepted = await client.post(
             f"/api/chats/{chat_id}/turns", json={"text": "A garden path", "mode": mode}
         )
         assert accepted.status_code == 202, accepted.text
         run_id = accepted.json()["run"]["id"]
 
-        async def read():
+        async def read() -> dict[str, Any]:
             response = await client.get(f"/api/runs/{run_id}")
             assert response.status_code == 200
-            return response.json()
+            payload: dict[str, Any] = response.json()
+            return payload
 
         await wait_for_terminal_status(read, what="garden generation")
         return seen[-1]
 
+    def settings_for(request: ChatRequest | MediaRequest) -> dict[str, Any]:
+        if mode == "text":
+            assert isinstance(request, ChatRequest)
+            return request.settings
+        assert isinstance(request, MediaRequest)
+        return request.parameters
+
     first = await generate()
-    assert (first.settings if mode == "text" else first.parameters)[field] == value
+    assert settings_for(first)[field] == value
     item = _stored_trash(project_id, datetime.now(UTC))
     second = await generate()
-    assert (second.settings if mode == "text" else second.parameters).get(field) != value
+    assert settings_for(second).get(field) != value
     if mode == "text":
+        assert isinstance(first, ChatRequest) and isinstance(second, ChatRequest)
         instruction = {"role": "system", "content": "Use evenly spaced garden beds"}
         assert instruction in first.messages and instruction not in second.messages
     preview = await _impact(client, f"/api/recovery-items/{item.deletion_id}/impact")
@@ -87,7 +103,7 @@ async def test_new_turns_stop_inheriting_deleted_project_settings_and_restore_th
     )
     assert restored.status_code == 200
     third = await generate()
-    assert (third.settings if mode == "text" else third.parameters)[field] == value
+    assert settings_for(third)[field] == value
 
 
 async def test_frozen_accepted_work_keeps_its_original_project_instructions_after_trash(
@@ -149,10 +165,9 @@ async def test_deleted_project_recipe_falls_back_to_workspace_without_rewriting_
             session, WorkflowUseCase.IMAGE_GENERATION, chat_id=chat_id
         )
         assert resolved.scope == "workspace" and resolved.preset_id == "garden-workspace"
-        assert (
-            session.get(ProjectWorkflowUseCaseSelection, (project_id, "image_generation")).preset_id
-            == "garden-project"
-        )
+        selection = session.get(ProjectWorkflowUseCaseSelection, (project_id, "image_generation"))
+        assert selection is not None
+        assert selection.preset_id == "garden-project"
     preview = await _impact(client, f"/api/recovery-items/{item.deletion_id}/impact")
     assert (
         await client.post(
@@ -249,10 +264,10 @@ async def test_project_trash_freezes_ordinary_queued_work_before_hiding_configur
             },
         )
     ).status_code == 200
-    seen = []
+    seen: list[ChatRequest] = []
     original = app.state.services.engines.chat.stream
 
-    async def observe(request):
+    async def observe(request: ChatRequest) -> AsyncIterator[ChatEvent]:
         seen.append(request)
         async for event in original(request):
             yield event
@@ -289,8 +304,9 @@ async def test_project_trash_freezes_ordinary_queued_work_before_hiding_configur
         assert transition.status_code == 200, transition.text
         assert seen == []
 
-    async def read():
-        return (await client.get(f"/api/runs/{run_id}")).json()
+    async def read() -> dict[str, Any]:
+        payload: dict[str, Any] = (await client.get(f"/api/runs/{run_id}")).json()
+        return payload
 
     await wait_for_terminal_status(read, what="accepted garden work")
     assert seen and seen[-1].settings["max_tokens"] == 37
@@ -313,10 +329,28 @@ async def test_project_trash_rolls_back_new_snapshots_when_context_capture_fails
         )
         assert accepted.status_code == 202
         run_id = accepted.json()["run"]["id"]
-        original = app.state.services.orchestrator._freeze_turn_context
+        orchestrator: ConversationOrchestrator = app.state.services.orchestrator
+        original = orchestrator._freeze_turn_context
 
-        def fail_after_snapshot(*args, **kwargs):
-            original(*args, **kwargs)
+        def fail_after_snapshot(
+            session: Session,
+            run: Run,
+            *,
+            inherited_context: AcceptedContext | None = None,
+            inherited_configuration: AcceptedContext | None = None,
+            inherit_profile_configuration: bool = False,
+            inherit_vision_configuration: bool = False,
+            inherit_workflow_configuration: bool = False,
+        ) -> NoReturn:
+            original(
+                session,
+                run,
+                inherited_context=inherited_context,
+                inherited_configuration=inherited_configuration,
+                inherit_profile_configuration=inherit_profile_configuration,
+                inherit_vision_configuration=inherit_vision_configuration,
+                inherit_workflow_configuration=inherit_workflow_configuration,
+            )
             raise RecoveryPreviewConflict("project-recovery-accepted-work-invalid")
 
         monkeypatch.setattr(
