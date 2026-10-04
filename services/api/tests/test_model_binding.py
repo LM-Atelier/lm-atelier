@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import itertools
 
+from sqlalchemy.orm import Session
+
 import local_lm.model_manifests as manifests_module
 from local_lm.auxiliary_assets import AUXILIARY_ASSET_KINDS
 from local_lm.config import Settings
@@ -85,7 +87,7 @@ def test_declared_background_removal_folder_refines_unknown_safe_weights() -> No
     ]
 
 
-def _install(session, suffix: str, components: list[tuple[str, str]]) -> ModelInstall:  # type: ignore[no-untyped-def]
+def _install(session: Session, suffix: str, components: list[tuple[str, str]]) -> ModelInstall:
     install = ModelInstall(
         id=f"install_{suffix}",
         name=f"acme/model-{suffix}",
