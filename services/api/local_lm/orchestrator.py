@@ -322,6 +322,7 @@ from .web_retrieval import (
     WebRetrievalError,
     bounded_request,
     fetch_source,
+    public_address,
 )
 from .web_search import SearchResults, WebSearchError, search_crw
 from .web_search_configuration import configured_search_provider, search_provider_revision
@@ -5181,10 +5182,14 @@ class ConversationOrchestrator:
         try:
             lease = OutboundPolicy.from_settings(self.engines.settings).lease("web-page")
             async with outbound_client(
-                lease, timeout=REQUEST_TIMEOUT_SECONDS, headers=REQUEST_HEADERS
+                lease,
+                timeout=REQUEST_TIMEOUT_SECONDS,
+                headers=REQUEST_HEADERS,
+                admit=public_address,
             ) as client:
                 # Each hop's host is asked of the lease before it is looked up,
-                # by the check below and again by the client that requests it.
+                # by the check below and again by the client that requests it,
+                # which connects only to the public addresses it then finds.
                 async with asyncio.timeout(PAGE_DEADLINE_SECONDS):
                     source = await fetch_source(
                         chosen.url, request=bounded_request(client), resolve=lease.resolver()

@@ -150,12 +150,17 @@ def validate_target(url: str, *, resolve: Any = socket.getaddrinfo) -> str:
     if not host:
         raise WebRetrievalError("web-url-invalid", "That address names no host.")
     for address in _addresses_for(host, resolve):
-        if not address.is_global or address.is_multicast:
+        if not public_address(address):
             raise WebRetrievalError(
                 "web-private-address-refused",
                 "That address points inside this machine or network.",
             )
     return url
+
+
+def public_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Whether a page may be fetched from this address: a public one, not a group."""
+    return address.is_global and not address.is_multicast
 
 
 def _addresses_for(host: str, resolve: Any) -> list[Any]:
