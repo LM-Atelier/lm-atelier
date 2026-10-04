@@ -15,6 +15,8 @@ prompt, a file name or anything else about the work itself.
 
 from __future__ import annotations
 
+import ctypes
+import sys
 import threading
 from collections import Counter
 from collections.abc import Callable, Iterator
@@ -22,7 +24,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import Protocol
+from typing import Any, Protocol, cast
 
 from .domain import utcnow
 
@@ -65,6 +67,101 @@ class UnsupportedPowerBackend:
 
     def release(self, handle: object) -> None:
         return None
+
+
+class _DetailedReason(ctypes.Structure):
+    _fields_ = (
+        ("module", ctypes.c_void_p),
+        ("reason_id", ctypes.c_ulong),
+        ("count", ctypes.c_ulong),
+        ("strings", ctypes.c_void_p),
+    )
+
+
+class _Reason(ctypes.Union):
+    _fields_ = (("detailed", _DetailedReason), ("simple", ctypes.c_wchar_p))
+
+
+class _ReasonContext(ctypes.Structure):
+    """Windows' REASON_CONTEXT, used here only with its simple reason string."""
+
+    _fields_ = (("version", ctypes.c_ulong), ("flags", ctypes.c_ulong), ("reason", _Reason))
+
+
+_POWER_REQUEST_CONTEXT_VERSION = 0
+_POWER_REQUEST_CONTEXT_SIMPLE_STRING = 0x1
+# PowerRequestSystemRequired: the system stays awake; the display may still sleep.
+_POWER_REQUEST_SYSTEM_REQUIRED = 1
+_INVALID_HANDLE = ctypes.c_void_p(-1).value
+
+
+def _kernel32() -> Any:
+    # Widened to Any: this module is type-checked for POSIX too, where ctypes
+    # has no WinDLL at all.
+    windows: Any = ctypes
+    kernel = windows.WinDLL("kernel32", use_last_error=True)
+    kernel.PowerCreateRequest.argtypes = (ctypes.POINTER(_ReasonContext),)
+    kernel.PowerCreateRequest.restype = ctypes.c_void_p
+    kernel.PowerSetRequest.argtypes = (ctypes.c_void_p, ctypes.c_int)
+    kernel.PowerSetRequest.restype = ctypes.c_int
+    kernel.PowerClearRequest.argtypes = (ctypes.c_void_p, ctypes.c_int)
+    kernel.PowerClearRequest.restype = ctypes.c_int
+    kernel.CloseHandle.argtypes = (ctypes.c_void_p,)
+    kernel.CloseHandle.restype = ctypes.c_int
+    return kernel
+
+
+def _last_error() -> int:
+    windows: Any = ctypes
+    return int(windows.get_last_error())
+
+
+class WindowsPowerBackend:
+    """A Windows power request asking that the system, not the display, stay awake.
+
+    The request is a handle the process owns, so Windows ends it if the
+    process dies; sleep the person asks for, and the lid and battery policy,
+    still win.
+    """
+
+    name = "windows-power-request"
+    supported = True
+
+    def __init__(self, kernel: Any = None, last_error: Callable[[], int] = _last_error) -> None:
+        self._kernel = kernel if kernel is not None else _kernel32()
+        self._last_error = last_error
+
+    def acquire(self, reason: str) -> object:
+        context = _ReasonContext(
+            _POWER_REQUEST_CONTEXT_VERSION,
+            _POWER_REQUEST_CONTEXT_SIMPLE_STRING,
+            _Reason(simple=reason),
+        )
+        handle = self._kernel.PowerCreateRequest(ctypes.byref(context))
+        if not handle or handle == _INVALID_HANDLE:
+            raise OSError(self._last_error(), "Windows refused to create a power request.")
+        if not self._kernel.PowerSetRequest(handle, _POWER_REQUEST_SYSTEM_REQUIRED):
+            error = self._last_error()
+            self._kernel.CloseHandle(handle)
+            raise OSError(error, "Windows refused to keep the computer awake.")
+        # The reason's buffer is kept alive for as long as the request is.
+        return (handle, context)
+
+    def release(self, handle: object) -> None:
+        request, _context = cast(tuple[object, object], handle)
+        try:
+            if not self._kernel.PowerClearRequest(request, _POWER_REQUEST_SYSTEM_REQUIRED):
+                raise OSError(self._last_error(), "Windows refused to end the power request.")
+        finally:
+            self._kernel.CloseHandle(request)
+
+
+def default_power_backend() -> PowerBackend:
+    """The way this platform keeps the computer awake, or an honest unsupported one."""
+
+    if sys.platform == "win32":
+        return WindowsPowerBackend()
+    return UnsupportedPowerBackend()
 
 
 @dataclass(frozen=True)

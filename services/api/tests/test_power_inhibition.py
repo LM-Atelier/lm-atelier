@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import ctypes
+import sys
 import threading
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
+from local_lm import power_inhibition
 from local_lm.power_inhibition import (
     POWER_REASON,
     PowerInhibitor,
@@ -173,3 +177,105 @@ def test_work_starting_and_finishing_on_many_threads_still_asks_once() -> None:
     inhibitor.release("anchor")
 
     assert backend.calls == [("acquire", POWER_REASON), ("release", 1)]
+
+
+def _kernel(
+    calls: list[tuple[str, object]], *, create: int = 0x50, set_ok: int = 1, clear_ok: int = 1
+) -> SimpleNamespace:
+    """kernel32's power request calls, recorded, each able to fail."""
+
+    def create_request(context: object) -> int:
+        reason = ctypes.cast(context, ctypes.POINTER(power_inhibition._ReasonContext)).contents
+        calls.append(("create", (reason.version, reason.flags, reason.reason.simple)))
+        return create
+
+    def set_request(handle: int, kind: int) -> int:
+        calls.append(("set", (handle, kind)))
+        return set_ok
+
+    def clear_request(handle: int, kind: int) -> int:
+        calls.append(("clear", (handle, kind)))
+        return clear_ok
+
+    def close(handle: int) -> int:
+        calls.append(("close", handle))
+        return 1
+
+    return SimpleNamespace(
+        PowerCreateRequest=create_request,
+        PowerSetRequest=set_request,
+        PowerClearRequest=clear_request,
+        CloseHandle=close,
+    )
+
+
+def test_windows_asks_that_the_system_stay_awake_and_lets_go_cleanly() -> None:
+    calls: list[tuple[str, object]] = []
+    backend = power_inhibition.WindowsPowerBackend(_kernel(calls))
+
+    handle = backend.acquire(POWER_REASON)
+    backend.release(handle)
+
+    assert calls == [
+        ("create", (0, 1, POWER_REASON)),
+        ("set", (0x50, 1)),
+        ("clear", (0x50, 1)),
+        ("close", 0x50),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("kernel", "expected"),
+    [
+        ({"create": 0}, ["create"]),
+        ({"create": -1}, ["create"]),
+        ({"set_ok": 0}, ["create", "set", "close"]),
+    ],
+    ids=["no-handle", "invalid-handle", "set-refused"],
+)
+def test_windows_refusing_the_request_raises_and_leaves_no_handle_open(
+    kernel: dict[str, int], expected: list[str]
+) -> None:
+    calls: list[tuple[str, object]] = []
+    if kernel.get("create") == -1:
+        kernel = {"create": ctypes.c_void_p(-1).value or 0}
+    backend = power_inhibition.WindowsPowerBackend(_kernel(calls, **kernel), lambda: 5)
+
+    with pytest.raises(OSError) as refused:
+        backend.acquire(POWER_REASON)
+
+    assert refused.value.errno == 5
+    assert [name for name, _ in calls] == expected
+
+
+def test_windows_refusing_to_end_the_request_still_closes_it() -> None:
+    calls: list[tuple[str, object]] = []
+    backend = power_inhibition.WindowsPowerBackend(_kernel(calls, clear_ok=0), lambda: 6)
+    handle = backend.acquire(POWER_REASON)
+
+    with pytest.raises(OSError) as refused:
+        backend.release(handle)
+
+    assert refused.value.errno == 6
+    assert [name for name, _ in calls] == ["create", "set", "clear", "close"]
+
+
+def test_each_platform_gets_its_own_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(power_inhibition.sys, "platform", "linux")
+    assert isinstance(power_inhibition.default_power_backend(), UnsupportedPowerBackend)
+    monkeypatch.setattr(power_inhibition.sys, "platform", "win32")
+    monkeypatch.setattr(power_inhibition, "_kernel32", lambda: _kernel([]))
+    assert isinstance(
+        power_inhibition.default_power_backend(), power_inhibition.WindowsPowerBackend
+    )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="a real power request exists only on Windows")
+def test_a_real_windows_power_request_is_made_and_ended() -> None:
+    inhibitor = PowerInhibitor(power_inhibition.WindowsPowerBackend())
+
+    with inhibitor.hold("job_a", SleepJobKind.GENERATION):
+        state = inhibitor.state()
+
+    assert (state.active, state.last_error, state.backend) == (True, None, "windows-power-request")
+    assert inhibitor.state().active is False and inhibitor.state().last_error is None
