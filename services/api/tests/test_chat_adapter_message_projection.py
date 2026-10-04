@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
@@ -401,7 +402,7 @@ class _RecordingExternalAdapter:
         self.counted.append(messages)
         return 5
 
-    async def stream(self, request: ChatRequest):  # type: ignore[no-untyped-def]
+    async def stream(self, request: ChatRequest) -> AsyncIterator[ChatEvent]:
         self.streamed.append(request.messages)
         yield ChatEvent(type="complete")
 
