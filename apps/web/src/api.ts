@@ -1113,12 +1113,17 @@ export const api = {
     request<BackupInfo>(`/api/backups/${encodeURIComponent(name)}/restore`, { method: "POST" }),
   deleteBackup: (name: string) =>
     request<void>(`/api/backups/${encodeURIComponent(name)}`, { method: "DELETE" }),
-  exportProject: (projectId: string, includeMedia = true) =>
-    request<{ url: string }>(`/api/projects/${projectId}/export?${new URLSearchParams({ include_media: String(includeMedia) })}`, { method: "POST" }),
-  importProject: async (file: File) => {
+  exportProject: (projectId: string, includeMedia = true, passphrase?: string) =>
+    request<{ url: string }>(
+      `/api/projects/${projectId}/export?${new URLSearchParams({ include_media: String(includeMedia) })}`,
+      // In the body, never the address, so the passphrase stays out of logs and history.
+      passphrase === undefined ? { method: "POST" } : { method: "POST", body: JSON.stringify({ passphrase }) },
+    ),
+  importProject: async (file: File, passphrase?: string) => {
     await ensureSession();
     const form = new FormData();
     form.append("archive", file);
+    if (passphrase !== undefined) form.append("passphrase", passphrase);
     return request<Project>("/api/projects/import", {
       method: "POST",
       headers: { "x-local-lm-csrf": csrfToken },

@@ -519,6 +519,15 @@ def _windows_ownership_api() -> Any:
     security.GetAce.restype = ctypes.c_int
     security.IsWellKnownSid.argtypes = [ctypes.c_void_p, ctypes.c_int]
     security.IsWellKnownSid.restype = ctypes.c_int
+    security.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_wchar_p)]
+    security.ConvertSidToStringSidW.restype = ctypes.c_int
+    security.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_ulong),
+    ]
+    security.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = ctypes.c_int
     kernel.LocalFree.argtypes = [ctypes.c_void_p]
     kernel.LocalFree.restype = ctypes.c_void_p
     return types.SimpleNamespace(
@@ -559,6 +568,68 @@ def open_child_directory(
         _close_windows_handle(child)
         _refuse()
     return _adopt(anchor.path / name, child, True)
+
+
+def create_private_directory(anchor: AnchoredDirectory, name: str) -> None:
+    """Create one child directory that only this account and the system can open.
+
+    Its access is set as it is created rather than inherited from the parent,
+    which may let other accounts read what is made inside: on POSIX mode
+    0o700, on Windows a protected access list naming only the current user,
+    who also owns it, and SYSTEM, both inherited by what is made inside. An
+    entry already there is left exactly as it is and raises
+    AnchoredEntryExists; nothing here changes an existing directory's access.
+    """
+
+    _require_entry_name(name)
+    if anchor.descriptor is not None:
+        try:
+            os.mkdir(name, 0o700, dir_fd=anchor.descriptor)
+        except FileExistsError:
+            raise AnchoredEntryExists(CONTAINMENT_REFUSED) from None
+        except OSError:
+            _refuse()
+        return
+    handle = anchor.handle
+    if handle is None:
+        _refuse()
+    api = _windows_ownership_api()
+    # The SID points into this buffer, which is kept alive until it is used.
+    token_buffer, user_sid = _windows_effective_user(api)
+    sid_text = ctypes.c_wchar_p()
+    descriptor = ctypes.c_void_p()
+    try:
+        if (
+            not api.security.ConvertSidToStringSidW(
+                ctypes.c_void_p(user_sid), ctypes.byref(sid_text)
+            )
+            or not sid_text.value
+        ):
+            _refuse()
+        # O: the user owns it. D:P is a protected list, so nothing comes from
+        # the parent. OICI passes the same two entries to what is made inside.
+        sddl = f"O:{sid_text.value}D:P(A;OICI;FA;;;{sid_text.value})(A;OICI;FA;;;SY)"
+        if (
+            not api.security.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl, 1, ctypes.byref(descriptor), None
+            )
+            or not descriptor.value
+        ):
+            _refuse()
+        child, status = _nt_try_open_relative(
+            handle, name, intent="create_private_dir", security_descriptor=descriptor.value
+        )
+    finally:
+        if descriptor.value:
+            api.kernel.LocalFree(descriptor)
+        if sid_text.value:
+            api.kernel.LocalFree(ctypes.cast(sid_text, ctypes.c_void_p))
+        del token_buffer
+    if status == _STATUS_OBJECT_NAME_COLLISION:
+        raise AnchoredEntryExists(CONTAINMENT_REFUSED) from None
+    if status != _STATUS_SUCCESS or not child:
+        _refuse()
+    _close_windows_handle(child)
 
 
 def create_entry(anchor: AnchoredDirectory, name: str) -> int:
@@ -2316,7 +2387,9 @@ def _nt_open_relative(parent: int | None, name: str, *, intent: str) -> int:
     return handle
 
 
-def _nt_try_open_relative(parent: int | None, name: str, *, intent: str) -> tuple[int, int]:
+def _nt_try_open_relative(
+    parent: int | None, name: str, *, intent: str, security_descriptor: int | None = None
+) -> tuple[int, int]:
     """Open or create one entry relative to a held handle, reporting status.
 
     The status is returned rather than raised so callers can distinguish an
@@ -2324,6 +2397,7 @@ def _nt_try_open_relative(parent: int | None, name: str, *, intent: str) -> tupl
     does not need that distinction goes through _nt_open_relative.
 
     `intent` is one of open_dir, create_dir, open_security_dir, create_security_dir,
+    create_private_dir (a new directory only, with the given security descriptor),
     open_file, open_publishable_file, create_file, create_publishable_file,
     delete_directory, delete_source, delete_link or rename_source. It is spelled out rather
     than inferred from a flag because
@@ -2344,7 +2418,9 @@ def _nt_try_open_relative(parent: int | None, name: str, *, intent: str) -> tupl
     attributes.RootDirectory = api.ctypes.c_void_p(parent) if parent else None
     attributes.ObjectName = api.ctypes.pointer(unicode_name)
     attributes.Attributes = _OBJ_CASE_INSENSITIVE
-    attributes.SecurityDescriptor = None
+    attributes.SecurityDescriptor = (
+        api.ctypes.c_void_p(security_descriptor) if security_descriptor else None
+    )
     attributes.SecurityQualityOfService = None
 
     access = _FILE_READ_ATTRIBUTES | _SYNCHRONIZE
@@ -2357,6 +2433,12 @@ def _nt_try_open_relative(parent: int | None, name: str, *, intent: str) -> tupl
         disposition = (
             _FILE_OPEN_IF if intent in ("create_dir", "create_security_dir") else _FILE_OPEN
         )
+    elif intent == "create_private_dir":
+        # FILE_CREATE, never open-if: the access list is set only on a new
+        # directory, so one already there is a collision, not something reused.
+        access |= _FILE_LIST_DIRECTORY | _FILE_TRAVERSE
+        options |= _FILE_DIRECTORY_FILE
+        disposition = _FILE_CREATE
     elif intent == "create_file":
         access |= _FILE_WRITE_DATA
         options |= _FILE_NON_DIRECTORY_FILE

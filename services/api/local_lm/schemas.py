@@ -100,6 +100,12 @@ class ProjectCreate(ApiModel):
     generation_preset_ids_json: GenerationPresetIdsByRole = Field(default_factory=dict)
 
 
+class ProjectExportRequest(ApiModel):
+    """An export's options sent in its body, so a passphrase never travels in an address."""
+
+    passphrase: str | None = Field(default=None, min_length=1, max_length=1024)
+
+
 class ProjectUpdate(ApiModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = Field(default=None, max_length=10_000)
