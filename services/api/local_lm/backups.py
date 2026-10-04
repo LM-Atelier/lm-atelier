@@ -11,8 +11,10 @@ import tempfile
 import threading
 import zipfile
 from contextlib import closing, suppress
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
+from typing import Any, Literal, get_args
 
 from .config import Settings
 from .filesystem_links import is_link_or_reparse
@@ -34,6 +36,37 @@ _REQUIRED_TABLES = {
 }
 logger = logging.getLogger(__name__)
 _BACKED_UP_ARTIFACT_KINDS = ("image", "video", "thumbnail", "input")
+_RESTORE_MARKER = "restore-on-next-start.json"
+_FAILED_RESTORE = "restore-failed.json"
+
+#: Why a restore someone asked for could not be applied, as the API reports it.
+FailedRestoreReason = Literal["backup-missing", "backup-invalid", "backup-newer", "restore-failed"]
+
+
+class BackupFromNewerVersion(ValueError):
+    """A backup recording a schema revision this build's migrations do not know."""
+
+
+class _RestoreNotApplied(Exception):
+    """A restore that failed while the live data was still exactly as it was."""
+
+    def __init__(self, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+
+
+class _LiveLogLeftAside(OSError):
+    """The live database's log was moved aside and could not be put back."""
+
+
+@dataclass(frozen=True)
+class RestoreState:
+    """A restore waiting for the next start, or why the last one asked for was not applied."""
+
+    state: Literal["none", "pending", "failed"]
+    backup: str | None = None
+    reason: FailedRestoreReason | None = None
+    failed_at: datetime | None = None
 
 
 class BackupManager:
@@ -134,11 +167,24 @@ class BackupManager:
         result.verified = True
         return result
 
-    def request_restore(self, name: str) -> BackupInfo:
+    def request_restore(self, name: str, *, requested: bool = False) -> BackupInfo:
+        """Ask for `name` to replace the data on the next start.
+
+        `requested` marks a restore a person asked for. If one of those cannot
+        be applied, the next start keeps the data it has and says why, rather
+        than failing. A restore armed for any other reason, such as the copy an
+        upgrade takes before it begins, still stops the start when it fails,
+        because the data it was meant to replace may be half changed.
+        """
+
         with self._lock:
             result = self._verify_locked(name)
             self._require_known_revision(self._path(name))
-            marker = self.settings.state_dir / "restore-on-next-start.json"
+            # Asking again replaces whatever the last failure said. Cleared
+            # before the restore is armed, so a record that cannot be cleared
+            # leaves nothing scheduled behind the error.
+            (self.settings.state_dir / _FAILED_RESTORE).unlink(missing_ok=True)
+            marker = self.settings.state_dir / _RESTORE_MARKER
             fd, temporary_name = tempfile.mkstemp(
                 prefix="restore-marker-",
                 suffix=".partial",
@@ -147,7 +193,10 @@ class BackupManager:
             temporary = Path(temporary_name)
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                    json.dump({"backup": name}, handle)
+                    json.dump(
+                        {"backup": name, "requested": True} if requested else {"backup": name},
+                        handle,
+                    )
                     handle.flush()
                     os.fsync(handle.fileno())
                 os.replace(temporary, marker)
@@ -155,6 +204,38 @@ class BackupManager:
                 temporary.unlink(missing_ok=True)
             result.restore_pending = True
             return result
+
+    def restore_state(self) -> RestoreState:
+        """What waits for the next start, or why the last restore asked for was not applied."""
+
+        pending = self._pending_backup_name()
+        if pending is not None:
+            return RestoreState(state="pending", backup=pending)
+        record = self.settings.state_dir / _FAILED_RESTORE
+        if not record.is_file() or self._is_link(record):
+            return RestoreState(state="none")
+        try:
+            payload = json.loads(record.read_text(encoding="utf-8"))
+            reason = payload["reason"]
+            failed_at = datetime.fromisoformat(payload["failed_at"])
+            backup = payload.get("backup")
+        except (OSError, ValueError, KeyError, TypeError):
+            return RestoreState(state="failed", reason="restore-failed")
+        return RestoreState(
+            state="failed",
+            backup=backup if isinstance(backup, str) and _BACKUP_NAME.fullmatch(backup) else None,
+            reason=reason if reason in get_args(FailedRestoreReason) else "restore-failed",
+            failed_at=failed_at,
+        )
+
+    def dismiss_failed_restore(self) -> bool:
+        """Forget why the last restore asked for was not applied. Returns whether there was one."""
+
+        with self._lock:
+            record = self.settings.state_dir / _FAILED_RESTORE
+            existed = record.is_file()
+            record.unlink(missing_ok=True)
+            return existed
 
     def cancel_restore(self) -> bool:
         """Withdraw a restore that is no longer wanted.
@@ -164,7 +245,7 @@ class BackupManager:
         """
 
         with self._lock:
-            marker = self.settings.state_dir / "restore-on-next-start.json"
+            marker = self.settings.state_dir / _RESTORE_MARKER
             existed = marker.is_file()
             marker.unlink(missing_ok=True)
             return existed
@@ -500,54 +581,153 @@ class BackupManager:
                 logger.warning("Could not reconcile interrupted backup deletion", exc_info=True)
 
     def apply_pending_restore(self) -> bool:
-        marker = self.settings.state_dir / "restore-on-next-start.json"
+        """Replace the data with the backup a restore was asked for, before it is opened.
+
+        A restore a person asked for that fails while the current data is still
+        exactly as it was records why, withdraws itself and lets the start go
+        on, so a backup that went missing or went bad cannot keep LM Atelier
+        from starting. A failure after the live data may have changed still
+        raises, as does every failure of any other restore.
+        """
+
+        marker = self.settings.state_dir / _RESTORE_MARKER
         if not marker.is_file():
             return False
         if self._is_link(marker):
             raise ValueError("restore marker may not be a filesystem link")
         payload = json.loads(marker.read_text(encoding="utf-8"))
-        source_path = self._path(str(payload["backup"]))
-        self._verify_path(source_path)
-        # Checked again here, not only when the restore was asked for: a build
-        # that cannot open the backup must not put it in place of data it can.
-        self._require_known_revision(source_path)
-        media_path = self._media_path(source_path)
-        if media_path.is_file():
-            self._verify_media_archive(media_path, source_path)
+        requested = isinstance(payload, dict) and payload.get("requested") is True
+        try:
+            return self._apply_restore(marker, payload)
+        except _RestoreNotApplied as failure:
+            if not requested:
+                raise failure.cause from None
+            self._record_failed_restore(marker, payload.get("backup"), failure.cause)
+            return False
 
-        # Materialize and verify the complete database before changing any live
-        # state. Media restoration is additive in the content-addressed store,
-        # so a media failure can safely leave the current database untouched.
-        fd, temporary_name = tempfile.mkstemp(
-            prefix="restore-", suffix=".partial", dir=self.settings.state_dir
+    def _record_failed_restore(self, marker: Path, backup: object, error: Exception) -> None:
+        reason: FailedRestoreReason
+        if isinstance(error, FileNotFoundError):
+            reason = "backup-missing"
+        elif isinstance(error, BackupFromNewerVersion):
+            reason = "backup-newer"
+        elif isinstance(error, ValueError | KeyError | TypeError):
+            reason = "backup-invalid"
+        else:
+            reason = "restore-failed"
+        logger.warning(
+            "The restore that was asked for could not be applied (%s), so LM Atelier "
+            "started with the data it already had.",
+            reason,
+            exc_info=error,
         )
-        os.close(fd)
+        record = {
+            "backup": backup
+            if isinstance(backup, str) and _BACKUP_NAME.fullmatch(backup)
+            else None,
+            "reason": reason,
+            "failed_at": datetime.now(UTC).isoformat(),
+        }
+        try:
+            self._write_failure_record(json.dumps(record))
+        except OSError:
+            logger.warning("Why the restore failed could not be saved.", exc_info=True)
+        # Withdrawn even when the record could not be saved: starting matters more.
+        marker.unlink()
+
+    def _write_failure_record(self, text: str) -> None:
+        """Write the failure record as a new file, never through a link at its name."""
+
+        record = self.settings.state_dir / _FAILED_RESTORE
+        if self._is_link(record):
+            raise OSError("the restore failure record may not be a filesystem link")
+        fd, temporary_name = tempfile.mkstemp(
+            prefix="restore-failed-", suffix=".partial", dir=self.settings.state_dir
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            # Replacing the name replaces whatever is there, a link included,
+            # rather than writing to where it points.
+            os.replace(temporary, record)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _apply_restore(self, marker: Path, payload: Any) -> bool:
+        """Put the backup in place of the live database.
+
+        Every failure that leaves the live data exactly as it was is raised as
+        _RestoreNotApplied. Anything else raised here means the live data may
+        have changed.
+        """
+
+        try:
+            source_path = self._path(str(payload["backup"]))
+            self._verify_path(source_path)
+            # Checked again here, not only when the restore was asked for: a build
+            # that cannot open the backup must not put it in place of data it can.
+            self._require_known_revision(source_path)
+            media_path = self._media_path(source_path)
+            if media_path.is_file():
+                self._verify_media_archive(media_path, source_path)
+
+            # Materialize and verify the complete database before changing any live
+            # state. Media restoration is additive in the content-addressed store,
+            # so a media failure can safely leave the current database untouched.
+            fd, temporary_name = tempfile.mkstemp(
+                prefix="restore-", suffix=".partial", dir=self.settings.state_dir
+            )
+            os.close(fd)
+        except Exception as exc:
+            raise _RestoreNotApplied(exc) from exc
         restored_database = Path(temporary_name)
         destination = self._database_path()
         try:
-            with (
-                closing(sqlite3.connect(source_path)) as source,
-                closing(sqlite3.connect(restored_database)) as target,
-            ):
-                source.backup(target)
-            self._verify_path(restored_database)
-            if media_path.is_file():
-                self._restore_media_archive(media_path, restored_database)
+            try:
+                with (
+                    closing(sqlite3.connect(source_path)) as source,
+                    closing(sqlite3.connect(restored_database)) as target,
+                ):
+                    source.backup(target)
+                self._verify_path(restored_database)
+                if media_path.is_file():
+                    self._restore_media_archive(media_path, restored_database)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+            except Exception as exc:
+                raise _RestoreNotApplied(exc) from exc
 
-            destination.parent.mkdir(parents=True, exist_ok=True)
             # A restored database must never inherit WAL pages from the
             # database it replaces. This runs before SQLAlchemy is configured.
             # The live log is only set aside until the replace succeeds: it may
             # hold writes not yet in the database file, and a replace that fails
             # leaves that database in use.
-            set_aside = self._set_aside_live_log(destination)
             try:
-                os.replace(restored_database, destination)
-            except BaseException:
-                self._put_back_live_log(set_aside)
+                set_aside = self._set_aside_live_log(destination)
+                try:
+                    os.replace(restored_database, destination)
+                except BaseException:
+                    self._put_back_live_log(set_aside)
+                    raise
+            except _LiveLogLeftAside:
+                # The live database is without its log now; starting on it would
+                # lose whatever the log held.
                 raise
+            except OSError as exc:
+                raise _RestoreNotApplied(exc) from exc
+
+            # The backup is in place from here, so nothing below may report the
+            # restore as not applied.
             for _live, aside in set_aside:
-                aside.unlink(missing_ok=True)
+                try:
+                    aside.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning(
+                        "A database log set aside for a restore could not be removed.",
+                        exc_info=True,
+                    )
             marker.unlink()
             return True
         finally:
@@ -577,8 +757,11 @@ class BackupManager:
 
     @staticmethod
     def _put_back_live_log(moved: tuple[tuple[Path, Path], ...]) -> None:
-        for live, aside in reversed(moved):
-            os.replace(aside, live)
+        try:
+            for live, aside in reversed(moved):
+                os.replace(aside, live)
+        except OSError as exc:
+            raise _LiveLogLeftAside("the live database log could not be put back") from exc
 
     @staticmethod
     def _require_known_revision(path: Path) -> None:
@@ -595,7 +778,7 @@ class BackupManager:
             raise ValueError("backup failed SQLite integrity verification") from exc
         recorded = {row[0] for row in rows}
         if not recorded or not recorded <= known_revisions():
-            raise ValueError(
+            raise BackupFromNewerVersion(
                 "backup uses a database schema revision this version does not recognize; "
                 "it was likely made by a newer version of LM Atelier"
             )
@@ -609,7 +792,7 @@ class BackupManager:
         return path.resolve()
 
     def _pending_backup_name(self) -> str | None:
-        marker = self.settings.state_dir / "restore-on-next-start.json"
+        marker = self.settings.state_dir / _RESTORE_MARKER
         if not marker.is_file() or self._is_link(marker):
             return None
         try:
