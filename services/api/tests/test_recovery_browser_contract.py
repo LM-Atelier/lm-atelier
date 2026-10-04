@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from test_typescript_contract import (
+    JsonSchema,
     _admissible_values,
     _array_item_components,
     _declared_literals,
@@ -28,7 +29,7 @@ CONTRACTS = {
 
 
 @pytest.fixture(scope="module")
-def recovery_contract():
+def recovery_contract() -> tuple[str, dict[str, JsonSchema]]:
     source = (Path(__file__).resolve().parents[3] / "apps/web/src/recoveryTypes.ts").read_text(
         encoding="utf-8"
     )
@@ -37,7 +38,7 @@ def recovery_contract():
 
 @pytest.mark.parametrize(("interface", "component"), sorted(CONTRACTS.items()))
 def test_recovery_fields_and_closed_choices_match_the_served_protocol(
-    recovery_contract, interface: str, component: str
+    recovery_contract: tuple[str, dict[str, JsonSchema]], interface: str, component: str
 ) -> None:
     source, schemas = recovery_contract
     properties = schemas[component]["properties"]

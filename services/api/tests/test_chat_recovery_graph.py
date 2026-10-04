@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import update
 from sqlalchemy.orm import Session
 
+from local_lm.chat_recovery_graph import ChatRecoveryGraph
 from local_lm.config import Settings
 from local_lm.db import Base, create_database_engine
 from local_lm.models import (
@@ -170,7 +171,7 @@ def graph_session(tmp_path: Path) -> Iterator[Session]:
     engine.dispose()
 
 
-def _graph(session: Session):
+def _graph(session: Session) -> ChatRecoveryGraph:
     from local_lm.chat_recovery_graph import inspect_chat_recovery_graph
     from local_lm.recovery_previews import reserve_recovery_write
 
