@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import delete, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.dml import Delete, Insert, Update
 
 from local_lm.config import Settings
 from local_lm.db import Base, create_database_engine
@@ -109,8 +110,11 @@ def test_new_filing_cannot_enter_a_deleted_project(project_session: Session, act
 @pytest.mark.parametrize("selection", [ProjectWorkflowSelection, ProjectWorkflowUseCaseSelection])
 @pytest.mark.parametrize("action", ["insert", "update", "delete"])
 def test_deleted_project_selections_reject_old_and_new_ownership_writes(
-    project_session: Session, selection, action: str
+    project_session: Session,
+    selection: type[ProjectWorkflowSelection] | type[ProjectWorkflowUseCaseSelection],
+    action: str,
 ) -> None:
+    statement: Insert | Update | Delete
     if action == "insert":
         values = (
             {"id": "selection-new", "selector_capability": "video", "mode": "automatic"}
