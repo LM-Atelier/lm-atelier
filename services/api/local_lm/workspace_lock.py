@@ -68,6 +68,8 @@ class WorkspaceLockState:
     require_pin: bool
     #: None while the lock is off.
     lock_epoch: str | None
+    #: How long the workspace may go unused before it locks itself; None for never.
+    idle_lock_seconds: int | None = None
 
 
 def wait_after(failures: int) -> int:
@@ -135,6 +137,23 @@ def _new_epoch() -> str:
     return secrets.token_urlsafe(16)
 
 
+def _seconds(minutes: int | None) -> int | None:
+    return None if minutes is None else minutes * 60
+
+
+#: How often the service looks for a quiet spell that has run out. A lock
+#: lands at most this long after its moment, which is far below any spell.
+IDLE_CHECK_SECONDS = 1.0
+
+
+async def lock_when_idle(lock: WorkspaceLock, *, every: float = IDLE_CHECK_SECONDS) -> None:
+    """Lock the workspace whenever it has gone unused for its chosen spell. Runs until cancelled."""
+
+    while True:
+        await asyncio.sleep(every)
+        lock.lock_if_idle()
+
+
 class WorkspaceLock:
     """The lock state for this run of the service.
 
@@ -143,9 +162,18 @@ class WorkspaceLock:
     that set or replace it, `settle`, `lock` and `unlock`, run on the event loop.
     """
 
-    def __init__(self, attempts: UnlockAttempts | None = None) -> None:
+    def __init__(
+        self,
+        attempts: UnlockAttempts | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self.attempts = attempts or UnlockAttempts()
+        self._clock = clock
         self._guard = threading.Lock()
+        # The quiet spell is measured on a monotonic clock from the last use
+        # someone reported, so a change of wall clock or time zone moves nothing.
+        self._idle_seconds: int | None = None
+        self._last_used = clock()
         # Locked, on and PIN-protected until startup has read the saved setting.
         self._locked = True
         self._enabled = True
@@ -168,10 +196,13 @@ class WorkspaceLock:
                 self._setting_readable = False
                 self._enabled = True
                 self._require_pin = True
+                self._idle_seconds = None
             else:
                 self._setting_readable = True
                 self._enabled = saved.enabled
                 self._require_pin = saved.pin is not None
+                self._idle_seconds = _seconds(saved.idle_lock_minutes)
+            self._last_used = self._clock()
             self._locked = self._enabled
             if self._locked:
                 self._signal.set()
@@ -202,16 +233,54 @@ class WorkspaceLock:
                 if admitted_epoch is not None and admitted_epoch != self._epoch:
                     raise WorkspaceLockChanged("The workspace was locked again.")
                 self._locked = False
+                self._last_used = self._clock()
                 self._signal = asyncio.Event()
         return self.status()
 
-    def note_policy(self, *, enabled: bool, require_pin: bool) -> None:
-        """Take a setting that was just committed. Safe from any thread."""
+    def note_policy(
+        self, *, enabled: bool, require_pin: bool, idle_lock_minutes: int | None
+    ) -> None:
+        """Take a setting that was just committed. Safe from any thread.
+
+        Choosing it is a use of the workspace, so the quiet spell starts again.
+        """
 
         with self._guard:
             self._enabled = enabled
             self._require_pin = require_pin
+            self._idle_seconds = _seconds(idle_lock_minutes)
             self._setting_readable = True
+            self._last_used = self._clock()
+
+    def note_use(self) -> None:
+        """Someone used the workspace just now. Safe from any thread.
+
+        Only a person's own input counts: requests a page makes by itself, live
+        events and running work leave the quiet spell as it is.
+        """
+
+        with self._guard:
+            if not self._locked:
+                self._last_used = self._clock()
+
+    def lock_if_idle(self) -> bool:
+        """Lock once the workspace has gone unused for its chosen spell; say whether it did.
+
+        Sets the lock signal, so it runs on the event loop like `lock`.
+        """
+
+        with self._guard:
+            if (
+                not self._enabled
+                or self._locked
+                or self._idle_seconds is None
+                or self._clock() - self._last_used < self._idle_seconds
+            ):
+                return False
+            self._locked = True
+            self._epoch = _new_epoch()
+            self._signal.set()
+            return True
 
     def status(self) -> WorkspaceLockState:
         with self._guard:
@@ -220,6 +289,7 @@ class WorkspaceLock:
                 enabled=self._enabled,
                 require_pin=self._require_pin,
                 lock_epoch=self._epoch if self._enabled else None,
+                idle_lock_seconds=self._idle_seconds if self._enabled else None,
             )
 
     def lock_signal(self) -> asyncio.Event:

@@ -81,6 +81,7 @@ from .workspace_lock import (
     LOCKED_CLOSE_CODE,
     WorkspaceLock,
     WorkspaceLockMiddleware,
+    lock_when_idle,
 )
 from .workspace_lock_policy import (
     SavedWorkspaceLock,
@@ -821,7 +822,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 maintain_recovery_expiry(services), name="recovery-expiry-maintenance"
             )
             app.state.recovery_maintenance = recovery_maintenance
-            background = (worker_restore, backup_maintenance, retention_sweep, recovery_maintenance)
+            idle_lock = asyncio.create_task(
+                lock_when_idle(services.workspace_lock), name="workspace-idle-lock"
+            )
+            background = (
+                worker_restore,
+                backup_maintenance,
+                retention_sweep,
+                recovery_maintenance,
+                idle_lock,
+            )
             try:
                 yield
             finally:

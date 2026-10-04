@@ -1,16 +1,35 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { api } from "./api";
 import type { WorkspaceLockPolicy, WorkspaceLockPolicyWrite } from "./workspaceLockTypes";
-import { applyWorkspaceLockStatus, workspaceLockFailure } from "./workspaceLockState";
+import { applyWorkspaceLockStatus, workspaceLockFailure, workspaceLockGeneration } from "./workspaceLockState";
 
-type PinTask = "set" | "change" | "remove" | "turn-off";
+type PinTask = "set" | "change" | "remove" | "turn-off" | "lock-later";
 
 const TASKS: Record<PinTask, { title: string; action: string; done: string; asksCurrent: boolean; asksNew: boolean }> = {
   set: { title: "Set a PIN", action: "Save PIN", done: "PIN saved. Unlocking now asks for it.", asksCurrent: false, asksNew: true },
   change: { title: "Change the PIN", action: "Change PIN", done: "PIN changed.", asksCurrent: true, asksNew: true },
   remove: { title: "Remove the PIN", action: "Remove PIN", done: "PIN removed. Anyone at this computer can unlock.", asksCurrent: true, asksNew: false },
   "turn-off": { title: "Turn the lock off", action: "Turn off", done: "Workspace lock turned off.", asksCurrent: true, asksNew: false },
+  "lock-later": { title: "Lock later when unused", action: "Save", done: "Lock when unused changed.", asksCurrent: true, asksNew: false },
 };
+
+/** The quiet spells offered, in minutes; null never locks for being unused. */
+const IDLE_CHOICES: readonly (number | null)[] = [null, 5, 15, 30, 60];
+
+function idleLabel(minutes: number | null): string {
+  if (minutes === null) return "Never";
+  return minutes === 60 ? "1 hour" : `${minutes} min`;
+}
+
+/** Read the lock again so this window follows a setting it just changed. */
+async function followSavedLock(): Promise<void> {
+  const sentAt = workspaceLockGeneration();
+  try {
+    applyWorkspaceLockStatus(await api.workspaceLockStatus(), sentAt);
+  } catch {
+    // The next status read, or the next refusal, brings the window up to date.
+  }
+}
 
 const SETTING_UNREADABLE = "The saved lock setting could not be read. The privacy documentation explains how to reset it.";
 
@@ -51,6 +70,7 @@ export function WorkspaceLockSettings() {
   const [currentPin, setCurrentPin] = useState("");
   const [newPin, setNewPin] = useState("");
   const [confirmPin, setConfirmPin] = useState("");
+  const [laterIdle, setLaterIdle] = useState<number | null>(null);
   const [refresh, setRefresh] = useState(0);
   const request = useRef(0);
   const busy = useRef(false);
@@ -104,6 +124,7 @@ export function WorkspaceLockSettings() {
       setTask(null);
       setPhase("ready");
       setNotice({ alert: false, text: done });
+      void followSavedLock();
     } catch (error) {
       if (request.current !== sequence) return;
       if (workspaceLockFailure(error).code === "workspace-lock-setting-stale") {
@@ -130,6 +151,20 @@ export function WorkspaceLockSettings() {
       return;
     }
     void save({ expected_revision: policy.revision, enabled }, enabled ? "Workspace lock turned on." : "Workspace lock turned off.");
+  };
+
+  const chooseIdle = (minutes: number | null) => {
+    if (phase !== "ready" || policy === null || !policy.enabled || minutes === (policy.idle_lock_minutes ?? null)) return;
+    const saved = policy.idle_lock_minutes ?? null;
+    // Staying open longer weakens the lock, so with a PIN it asks for the PIN.
+    if (policy.require_pin && saved !== null && (minutes === null || minutes > saved)) {
+      clearPins();
+      setNotice(null);
+      setLaterIdle(minutes);
+      setTask("lock-later");
+      return;
+    }
+    void save({ expected_revision: policy.revision, enabled: policy.enabled, idle_lock_minutes: minutes }, "Lock when unused changed.");
   };
 
   const open = (next: PinTask) => {
@@ -162,6 +197,7 @@ export function WorkspaceLockSettings() {
       ...(shape.asksCurrent ? { current_pin: current } : {}),
       ...(shape.asksNew ? { new_pin: next } : {}),
       ...(task === "remove" ? { clear_pin: true } : {}),
+      ...(task === "lock-later" ? { idle_lock_minutes: laterIdle } : {}),
     };
     void save(write, shape.done);
   };
@@ -251,6 +287,30 @@ export function WorkspaceLockSettings() {
           </div>
         </form>
       )}
+      <div className="setting-row appearance-row">
+        <span>
+          <strong id={`${id}-idle`}>Lock when unused</strong>
+          <small id={`${id}-idle-help`}>
+            {enabled
+              ? "Locks once no window has had a key press, click or touch for this long. Running work does not count as use."
+              : "Turn the lock on to choose this."}
+          </small>
+        </span>
+        <div className="segmented workspace-lock-switch" role="group" aria-labelledby={`${id}-idle`} aria-describedby={`${id}-idle-help`}>
+          {IDLE_CHOICES.map((minutes) => (
+            <button
+              type="button"
+              key={minutes ?? "never"}
+              className={policy !== null && (policy.idle_lock_minutes ?? null) === minutes ? "active" : ""}
+              aria-pressed={policy !== null && (policy.idle_lock_minutes ?? null) === minutes}
+              aria-disabled={!ready || !enabled}
+              onClick={() => chooseIdle(minutes)}
+            >
+              {idleLabel(minutes)}
+            </button>
+          ))}
+        </div>
+      </div>
       <div className="setting-row appearance-row">
         <span>
           <strong>Lock now</strong>

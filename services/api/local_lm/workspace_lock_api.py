@@ -15,7 +15,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, cast
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.orm import Session
 
 from .api_errors import ApiError, api_error
@@ -63,12 +63,16 @@ def _status_out(state: WorkspaceLockState) -> WorkspaceLockStatusOut:
         enabled=state.enabled,
         require_pin=state.require_pin,
         lock_epoch=state.lock_epoch,
+        idle_lock_seconds=state.idle_lock_seconds,
     )
 
 
 def _policy_out(policy: SavedWorkspaceLock) -> WorkspaceLockPolicyOut:
     return WorkspaceLockPolicyOut(
-        enabled=policy.enabled, require_pin=policy.pin is not None, revision=policy.revision
+        enabled=policy.enabled,
+        require_pin=policy.pin is not None,
+        revision=policy.revision,
+        idle_lock_minutes=policy.idle_lock_minutes,
     )
 
 
@@ -207,18 +211,31 @@ def get_workspace_lock_policy(session: SessionDep) -> WorkspaceLockPolicyOut:
         raise _setting_invalid() from None
 
 
+def _chosen_idle(saved: SavedWorkspaceLock, change: WorkspaceLockPolicyWrite) -> int | None:
+    """The quiet spell a change saves: the one it names, or the saved one when it names none."""
+
+    if "idle_lock_minutes" in change.model_fields_set:
+        return change.idle_lock_minutes
+    return saved.idle_lock_minutes
+
+
 def _chosen_pin(
     attempts: UnlockAttempts, saved: SavedWorkspaceLock, change: WorkspaceLockPolicyWrite
 ) -> PinVerifier | None:
     """The verifier a change saves, checking the current PIN first where it must.
 
-    A change that replaces or removes the PIN, or turns the lock off, would
-    otherwise open the workspace to anyone at the screen, so it goes through
-    the same pacing as unlocking. Setting the first PIN needs nothing.
+    A change that replaces or removes the PIN, turns the lock off, or lets the
+    workspace stay open longer when unused would otherwise open it to anyone at
+    the screen, so it goes through the same pacing as unlocking. Setting the
+    first PIN, or a shorter quiet spell, needs nothing.
     """
 
     turns_off = saved.enabled and not change.enabled
-    weakens = change.new_pin is not None or change.clear_pin or turns_off
+    idle = _chosen_idle(saved, change)
+    stays_open_longer = saved.idle_lock_minutes is not None and (
+        idle is None or idle > saved.idle_lock_minutes
+    )
+    weakens = change.new_pin is not None or change.clear_pin or turns_off or stays_open_longer
     check_current = saved.pin is not None and weakens
     if not check_current and change.new_pin is None:
         return None if change.clear_pin else saved.pin
@@ -261,11 +278,31 @@ def put_workspace_lock_policy(
     pin = _chosen_pin(lock.attempts, saved, payload)
     try:
         chosen = write_policy(
-            session, expected_revision=payload.expected_revision, enabled=payload.enabled, pin=pin
+            session,
+            expected_revision=payload.expected_revision,
+            enabled=payload.enabled,
+            pin=pin,
+            idle_lock_minutes=_chosen_idle(saved, payload),
         )
     except WorkspaceLockPolicyStale as stale:
         session.rollback()
         raise _setting_stale(stale.current_revision) from None
     session.commit()
-    lock.note_policy(enabled=chosen.enabled, require_pin=chosen.pin is not None)
+    lock.note_policy(
+        enabled=chosen.enabled,
+        require_pin=chosen.pin is not None,
+        idle_lock_minutes=chosen.idle_lock_minutes,
+    )
     return _policy_out(chosen)
+
+
+@router.post("/activity", status_code=204)
+async def note_workspace_use(request: Request) -> Response:
+    """Someone pressed a key, clicked or touched the page, so the quiet spell starts again.
+
+    Gated like any other request: a locked workspace refuses it, so it can never
+    keep a lock away or lift one.
+    """
+
+    _lock(request).note_use()
+    return Response(status_code=204)

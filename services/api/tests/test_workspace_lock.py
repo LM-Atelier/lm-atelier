@@ -167,7 +167,7 @@ async def test_locking_needs_the_lock_turned_on() -> None:
         lock.lock()
     assert not lock.status().locked
 
-    lock.note_policy(enabled=True, require_pin=False)
+    lock.note_policy(enabled=True, require_pin=False, idle_lock_minutes=None)
     assert lock.lock().locked
 
 
@@ -268,7 +268,7 @@ async def test_an_epoch_from_before_the_last_lock_is_refused_only_while_the_lock
     assert await _gate(lock, "/api/privacy/status", epoch="an-older-epoch") is None
     assert await _gate(lock, "/api/session", method="POST", epoch="an-older-epoch") is None
 
-    lock.note_policy(enabled=False, require_pin=False)
+    lock.note_policy(enabled=False, require_pin=False, idle_lock_minutes=None)
     assert lock.status().lock_epoch is None
     assert await _gate(lock, "/api/chats", epoch="an-older-epoch") is None
 

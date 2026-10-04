@@ -131,6 +131,17 @@ further attempt waits longer, up to 15 minutes, and the page never says how many
 attempts remain. Changing or removing the PIN, or turning the lock off, asks for
 the current PIN.
 
+**Lock when unused** locks the workspace by itself once no window has had a key
+press, click or touch for the chosen time: 5, 15 or 30 minutes, or an hour.
+Moving the pointer, live updates and running work do not count as use, so a long
+generation does not keep it unlocked. Each window tells the service about use at
+most once every half minute, so the lock can arrive up to that much before the
+chosen time has passed since the very last use. The time is measured on the
+service's own clock, so
+changing the computer's time or time zone does not shorten or lengthen it, and
+the lock lands within about a second of the moment it runs out. With a PIN, a
+longer time, or Never, asks for the current PIN; a shorter one does not.
+
 The lock keeps the workspace off the screen; it does not encrypt anything.
 Anyone who can read the data directory or its backups can read what is in them.
 While the lock is on, everything the API sends is marked not to be cached, so

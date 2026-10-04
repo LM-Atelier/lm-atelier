@@ -46,7 +46,14 @@ MAX_PIN_CHARACTERS = 64
 #: it to the floor the bounds allow.
 PIN_KEY_DERIVATION = DEFAULT_KEY_DERIVATION
 
+#: How long the workspace may go unused before it locks itself, in whole minutes.
+MIN_IDLE_LOCK_MINUTES = 1
+MAX_IDLE_LOCK_MINUTES = 24 * 60
+
 _DOCUMENT_KEYS = frozenset({"enabled", "revision", "pin"})
+#: Saved only once chosen, so a setting that never chose one reads the same in
+#: versions from before it.
+_OPTIONAL_KEYS = frozenset({"idle_lock_minutes"})
 _LOWER_HEX = r"^[0-9a-f]+$"
 #: A verifier's digest written as lowercase hex.
 _DIGEST_HEX_CHARACTERS = 2 * KEY_BYTES
@@ -99,13 +106,20 @@ class PinVerifier(BaseModel):
 
 
 class SavedWorkspaceLock(BaseModel):
-    """The saved setting. With nothing saved it is off, with no PIN, at revision 0."""
+    """The saved setting. With nothing saved it is off, with no PIN, at revision 0.
+
+    `idle_lock_minutes`, when set, locks the workspace once it has gone that
+    long without anyone using it; it has an effect only while the lock is on.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     enabled: StrictBool = False
     revision: StrictInt = Field(default=0, ge=0)
     pin: PinVerifier | None = None
+    idle_lock_minutes: StrictInt | None = Field(
+        default=None, ge=MIN_IDLE_LOCK_MINUTES, le=MAX_IDLE_LOCK_MINUTES
+    )
 
 
 def read_policy(session: Session) -> SavedWorkspaceLock:
@@ -115,7 +129,9 @@ def read_policy(session: Session) -> SavedWorkspaceLock:
     if row is None:
         return SavedWorkspaceLock()
     value: Any = row.value_json
-    if not isinstance(value, dict) or set(value) != _DOCUMENT_KEYS:
+    if not isinstance(value, dict) or not (
+        _DOCUMENT_KEYS <= set(value) <= _DOCUMENT_KEYS | _OPTIONAL_KEYS
+    ):
         raise WorkspaceLockSettingInvalid(_UNREADABLE)
     try:
         policy = SavedWorkspaceLock.model_validate(value)
@@ -127,12 +143,24 @@ def read_policy(session: Session) -> SavedWorkspaceLock:
 
 
 def write_policy(
-    session: Session, *, expected_revision: int, enabled: bool, pin: PinVerifier | None
+    session: Session,
+    *,
+    expected_revision: int,
+    enabled: bool,
+    pin: PinVerifier | None,
+    idle_lock_minutes: int | None = None,
 ) -> SavedWorkspaceLock:
     """Save a setting if it is still at `expected_revision`. The calling route commits."""
 
-    policy = SavedWorkspaceLock(enabled=enabled, revision=expected_revision + 1, pin=pin)
+    policy = SavedWorkspaceLock(
+        enabled=enabled,
+        revision=expected_revision + 1,
+        pin=pin,
+        idle_lock_minutes=idle_lock_minutes,
+    )
     document = policy.model_dump(mode="json")
+    if policy.idle_lock_minutes is None:
+        del document["idle_lock_minutes"]
     now = utcnow()
     statement: Insert | Update
     if expected_revision == 0:
