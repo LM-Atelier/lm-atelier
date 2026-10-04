@@ -49,7 +49,10 @@ for (const [width, zoom] of [[1280, 1], [390, 1], [1280, 2]]) {
     await expect(undo).toBeFocused();
     await expect(move).toHaveCount(0);
     expect((await request.get(`${artifactPath}/content`)).status()).toBe(200);
+    // The button is renamed while the restore runs, so its going away is not the restore finishing.
+    const restoration = page.waitForResponse((response) => response.url().endsWith("/restore") && response.request().method() === "POST");
     await undo.press("Enter");
+    expect((await restoration).status()).toBe(200);
     await expect(undo).toHaveCount(0);
     await expect(move).toBeVisible();
     await expect(page.getByRole("textbox", { name: "Search media" })).toHaveValue("Garden");

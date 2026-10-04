@@ -73,7 +73,10 @@ for (const [width, zoom] of [[1280, 1], [390, 1], [1280, 2]]) {
     expect((await request.get(`/api/projects/${project.id}`)).status()).toBe(404);
     expect(await (await request.get(`/api/chats/${chat.id}/messages`)).json()).toEqual(before);
     expect((await request.patch(`/api/chats/${chat.id}`, { headers, data: { project_id: destination.id } })).status()).toBe(200);
+    // The button is renamed while the restore runs, so its going away is not the restore finishing.
+    const restoration = page.waitForResponse((response) => response.url().endsWith("/restore") && response.request().method() === "POST");
     await undo.press("Enter");
+    expect((await restoration).status()).toBe(200);
     await expect(undo).toHaveCount(0);
     expect((await (await request.get(`/api/chats/${chat.id}/metadata`)).json()).project_id).toBe(destination.id);
     if (width < 700) await page.getByRole("button", { name: "Toggle navigation" }).click();

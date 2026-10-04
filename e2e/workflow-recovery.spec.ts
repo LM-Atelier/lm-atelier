@@ -52,7 +52,11 @@ for (const [width, zoom] of [[1280, 1], [390, 1], [1280, 2]]) {
     await expect(page.locator(`time[datetime="${item.purge_after}"]`)).toBeVisible();
     await expect(page.getByRole("button", { name: new RegExp(name) })).toHaveCount(0);
     expect((await request.get(`/api/workflows/${workflow.id}`)).status()).toBe(404);
-    await undo.press("Enter"); await expect(undo).toHaveCount(0);
+    // The button is renamed while the restore runs, so its going away is not the restore finishing.
+    const restoration = page.waitForResponse((response) => response.url().endsWith("/restore") && response.request().method() === "POST");
+    await undo.press("Enter");
+    expect((await restoration).status()).toBe(200);
+    await expect(undo).toHaveCount(0);
     await expect(page.getByRole("heading", { name, exact: true }).last()).toBeVisible();
     const restored = await (await request.get(familyPath)).json() as WorkflowFamily;
     expect(restored).toMatchObject({ id: workflow.family_id, enabled: false, archived: false, description: "Wide garden paths" });
