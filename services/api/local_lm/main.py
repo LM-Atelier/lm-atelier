@@ -57,6 +57,7 @@ from .instance_lock import DataDirectoryLock
 from .media_organization_batch_api import router as media_organization_batch_router
 from .model_quarantine import recover_model_delete_quarantines
 from .orchestrator import ConversationOrchestrator
+from .power_inhibition import PowerInhibitor, default_power_backend
 from .processes import ProcessSupervisor
 from .project_archive_encryption import sweep_staging
 from .queue_lane_policy import recover_queue_lanes
@@ -312,7 +313,10 @@ def build_services(settings: Settings) -> Services:
     artifacts = ArtifactStore(settings)
     runtimes = RuntimeProvisioner(settings)
     engines = EngineRegistry(settings)
-    scheduler = ResourceScheduler(events)
+    scheduler = ResourceScheduler(
+        events,
+        power=PowerInhibitor(default_power_backend(), enabled=settings.keep_awake_during_work),
+    )
     processes = ProcessSupervisor(settings, runtimes, events)
     orchestrator = ConversationOrchestrator(engines, artifacts, events, scheduler, processes)
     catalog = HuggingFaceCatalog(settings)
