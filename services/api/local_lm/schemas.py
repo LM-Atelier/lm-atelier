@@ -44,6 +44,7 @@ from .references import (
 from .saved_settings import GenerationSettingsByRole, SavedRoleSettings
 from .studio_capabilities import StudioToolKind
 from .worker_failures import WorkerFailureCode
+from .workflow_install_offer_error_types import WorkflowInstallOfferInvalidationCode
 
 
 class ApiModel(BaseModel):
@@ -2780,7 +2781,7 @@ class WorkflowInstallOfferOut(ApiModel):
     queued_at: datetime | None
     completed_at: datetime | None
     invalidated_at: datetime | None
-    invalidation_code: str | None
+    invalidation_code: WorkflowInstallOfferInvalidationCode | None
     invalidation_reason: str | None
 
 

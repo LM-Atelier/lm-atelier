@@ -8,6 +8,8 @@ export type * from "./hardwareFitTypes";
 export type * from "./customNodeContainmentTypes";
 import type { WorkerStatus } from "./workerStatusTypes";
 export type * from "./workerStatusTypes";
+import type { WorkflowInstallOffer } from "./workflowInstallOfferTypes";
+export type * from "./workflowInstallOfferTypes";
 export type * from "./priorTurnEditTypes";
 export type * from "./studioLocalEditTypes";
 export type * from "./enlargementTypes";
@@ -1942,24 +1944,6 @@ export interface WorkflowInstallProgress {
     | "workflow-install-cancelled"
     | null;
   retry_job_id: string | null;
-}
-
-export interface WorkflowInstallOffer {
-  id: string;
-  workflow_revision_id: string;
-  workflow_artifact_sha256: string;
-  dependency_contract_sha256: string;
-  binding_plan_sha256: string;
-  offer_sha256: string;
-  assets: BoundWorkflowAsset[];
-  plan_count: number;
-  total_bytes: number;
-  status: "ready" | "queued" | "invalidated" | "completed" | "expired";
-  queued_at: string | null;
-  completed_at: string | null;
-  invalidated_at: string | null;
-  invalidation_code: string | null;
-  invalidation_reason: string | null;
 }
 
 export interface WorkflowFamilyVariant {
