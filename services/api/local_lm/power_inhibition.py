@@ -16,6 +16,8 @@ prompt, a file name or anything else about the work itself.
 from __future__ import annotations
 
 import ctypes
+import importlib
+import os
 import sys
 import threading
 from collections import Counter
@@ -156,11 +158,60 @@ class WindowsPowerBackend:
             self._kernel.CloseHandle(request)
 
 
+def _logind_inhibit(reason: str) -> int:
+    """Ask systemd-logind for an idle inhibitor and return the descriptor that holds it."""
+
+    # Loaded by name: jeepney is installed only on Linux, and this module is
+    # type-checked everywhere.
+    jeepney: Any = importlib.import_module("jeepney")
+    blocking: Any = importlib.import_module("jeepney.io.blocking")
+    wrappers: Any = importlib.import_module("jeepney.wrappers")
+    manager = jeepney.DBusAddress(
+        "/org/freedesktop/login1",
+        bus_name="org.freedesktop.login1",
+        interface="org.freedesktop.login1.Manager",
+    )
+    # "idle" holds off the idle timer only; sleep the person asks for still wins.
+    message = jeepney.new_method_call(
+        manager, "Inhibit", "ssss", ("idle", "LM Atelier", reason, "block")
+    )
+    try:
+        with blocking.open_dbus_connection(bus="SYSTEM", enable_fds=True) as connection:
+            body = wrappers.unwrap_msg(connection.send_and_get_reply(message, timeout=5))
+            return int(body[0].to_raw_fd())
+    except OSError:
+        raise
+    except Exception as error:
+        raise OSError("systemd-logind refused an idle inhibitor.") from error
+
+
+class LinuxLogindPowerBackend:
+    """A systemd-logind idle inhibitor, held as a descriptor this process owns.
+
+    Closing the descriptor ends the inhibitor, and so does the process ending,
+    so a crash can never leave the machine held awake.
+    """
+
+    name = "logind-idle-inhibitor"
+    supported = True
+
+    def __init__(self, inhibit: Callable[[str], int] = _logind_inhibit) -> None:
+        self._inhibit = inhibit
+
+    def acquire(self, reason: str) -> object:
+        return self._inhibit(reason)
+
+    def release(self, handle: object) -> None:
+        os.close(cast(int, handle))
+
+
 def default_power_backend() -> PowerBackend:
     """The way this platform keeps the computer awake, or an honest unsupported one."""
 
     if sys.platform == "win32":
         return WindowsPowerBackend()
+    if sys.platform.startswith("linux"):
+        return LinuxLogindPowerBackend()
     return UnsupportedPowerBackend()
 
 
