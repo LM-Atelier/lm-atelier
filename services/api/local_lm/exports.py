@@ -45,6 +45,7 @@ from .models import (
     Run,
     RunContextArtifact,
 )
+from .portable_archive_v1 import MAX_PASSPHRASE_BYTES, ArchiveRefused
 from .profile_service import AUTO_PROFILE_ID
 from .project_accepted_context import (
     export_accepted_contexts,
@@ -52,6 +53,7 @@ from .project_accepted_context import (
     removed_at,
     validate_accepted_contexts,
 )
+from .project_archive_encryption import STAGING_PREFIX, encrypt_export
 from .project_dependencies import (
     DependencySourceIndex,
     ImportedDependencies,
@@ -127,7 +129,22 @@ class ProjectExporter:
         # Live engine schema per role, supplied per import by the request layer.
         self._known_fields: dict[str, list[SettingField]] = {}
 
-    def export(self, session: Session, project_id: str, *, include_media: bool = True) -> Artifact:
+    def export(
+        self,
+        session: Session,
+        project_id: str,
+        *,
+        include_media: bool = True,
+        passphrase: bytes | None = None,
+    ) -> Artifact:
+        """Write a project archive into the store, encrypted under ``passphrase`` when given.
+
+        An encrypted export's plaintext stays in a staged file that is removed
+        before this returns; only the encrypted form reaches the store.
+        """
+        if passphrase is not None and not 1 <= len(passphrase) <= MAX_PASSPHRASE_BYTES:
+            # Refused before the archive is built rather than after.
+            raise ArchiveRefused("archive-passphrase-invalid")
         project = live_project(session, project_id)
         if not project:
             raise LookupError("project not found")
@@ -363,9 +380,14 @@ class ProjectExporter:
         if has_local_path([record["provenance_json"] for record in run_records]):
             raise ValueError("project export contains a non-portable local path")
         with tempfile.NamedTemporaryFile(
-            dir=self.settings.export_dir, suffix=".lm-atelier.zip", delete=False
+            dir=self.settings.export_dir,
+            # A staged name, so a crash cannot leave this plaintext beyond the next start.
+            prefix=STAGING_PREFIX if passphrase is not None else "tmp",
+            suffix=".lm-atelier.zip",
+            delete=False,
         ) as handle:
             temporary = Path(handle.name)
+        encrypted: Path | None = None
         try:
             with zipfile.ZipFile(temporary, "w", allowZip64=True) as archive:
                 archive.writestr(
@@ -380,22 +402,35 @@ class ProjectExporter:
                             self._archive_path(artifact),
                             compress_type=zipfile.ZIP_STORED,
                         )
+            metadata = {
+                "format": "local-lm-project",
+                "version": 7,
+                "project_id": project.id,
+                "artifact_count": len(referenced),
+                "media_included": include_media,
+            }
+            if passphrase is None:
+                return self.artifacts.ingest_path(
+                    session,
+                    temporary,
+                    kind=ArtifactKind.EXPORT,
+                    media_type="application/zip",
+                    original_name=f"{self._safe_name(project.name)}.lm-atelier.zip",
+                    metadata=metadata,
+                )
+            encrypted = encrypt_export(temporary, self.settings.export_dir, passphrase)
             return self.artifacts.ingest_path(
                 session,
-                temporary,
+                encrypted,
                 kind=ArtifactKind.EXPORT,
-                media_type="application/zip",
-                original_name=f"{self._safe_name(project.name)}.lm-atelier.zip",
-                metadata={
-                    "format": "local-lm-project",
-                    "version": 7,
-                    "project_id": project.id,
-                    "artifact_count": len(referenced),
-                    "media_included": include_media,
-                },
+                media_type="application/octet-stream",
+                original_name=f"{self._safe_name(project.name)}.lm-atelier.encrypted",
+                metadata={**metadata, "encrypted": True},
             )
         finally:
             temporary.unlink(missing_ok=True)
+            if encrypted is not None:
+                encrypted.unlink(missing_ok=True)
 
     @staticmethod
     def _safe_name(value: str) -> str:
