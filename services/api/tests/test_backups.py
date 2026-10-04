@@ -170,6 +170,59 @@ def test_daily_backup_creates_a_new_snapshot_after_utc_day_changes(tmp_path: Pat
     assert len(list(settings.backup_dir.glob("*.sqlite3"))) == 2
 
 
+def test_a_manual_media_backup_survives_the_days_automatic_check(tmp_path: Path) -> None:
+    settings = Settings(data_dir=tmp_path / "data")
+    settings.prepare()
+    _write_test_database(settings.state_dir / "local-lm.sqlite3", "current")
+    manager = BackupManager(settings)
+    manual = manager.create(include_media=True)
+    stamp = datetime.strptime(manual.name.split("-")[2], "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
+
+    # The hourly check finds no backup without media for the day, so it makes one.
+    automatic = manager.ensure_daily_backup(now=stamp)
+
+    names = {item.name for item in manager.list()}
+    assert automatic.name != manual.name
+    assert names == {manual.name, automatic.name}
+    assert manager._media_path(settings.backup_dir / manual.name).is_file()
+    assert manager.verify(manual.name).media_included is True
+
+
+def test_each_retained_day_keeps_its_newest_media_backup(tmp_path: Path) -> None:
+    settings = Settings(data_dir=tmp_path / "data", backup_daily_count=2, backup_weekly_count=0)
+    settings.prepare()
+    with_media = {
+        "local-lm-20260110T090000Z-00000001.sqlite3",
+        "local-lm-20260110T100000Z-00000002.sqlite3",
+        "local-lm-20260109T080000Z-00000005.sqlite3",
+        "local-lm-20260108T080000Z-00000007.sqlite3",
+    }
+    without_media = {
+        "local-lm-20260110T110000Z-00000003.sqlite3",
+        "local-lm-20260110T120000Z-00000004.sqlite3",
+        "local-lm-20260109T090000Z-00000006.sqlite3",
+    }
+    for name in with_media | without_media:
+        path = settings.backup_dir / name
+        path.write_bytes(b"backup")
+        if name in with_media:
+            path.with_name(f"{name}.media.zip").write_bytes(b"media")
+
+    removed = BackupManager(settings).prune()
+
+    remaining = {path.name for path in settings.backup_dir.glob("*.sqlite3")}
+    assert remaining == {
+        "local-lm-20260110T120000Z-00000004.sqlite3",
+        "local-lm-20260110T100000Z-00000002.sqlite3",
+        "local-lm-20260109T090000Z-00000006.sqlite3",
+        "local-lm-20260109T080000Z-00000005.sqlite3",
+    }
+    assert removed == 3
+    assert not (
+        settings.backup_dir / "local-lm-20260110T090000Z-00000001.sqlite3.media.zip"
+    ).exists()
+
+
 def test_simultaneous_daily_checks_create_only_one_snapshot(tmp_path: Path) -> None:
     settings = Settings(data_dir=tmp_path / "data")
     settings.prepare()
