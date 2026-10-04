@@ -31,6 +31,7 @@ from .artifact_deletion_authority import (
     restrict_artifact_deletion_proof,
 )
 from .artifact_library import (
+    ArtifactReferenceDataError,
     artifacts_naming,
     begin_artifact_write_fence,
     fenced_reference_snapshot,
@@ -775,7 +776,11 @@ class ArtifactStore:
         # this set. Taking the fence first is what makes the snapshot safe to
         # hand back, so the check costs one walk rather than two.
         begin_artifact_write_fence(session)
-        retained = self.referenced_artifact_ids(session, for_deletion=True)
+        try:
+            retained = self.referenced_artifact_ids(session, for_deletion=True)
+        except ArtifactReferenceDataError:
+            # Without complete references, keep the preview for later cleanup.
+            return False
         if artifact.id in retained:
             return False
         # Being unreachable from the walk is not the same as being
