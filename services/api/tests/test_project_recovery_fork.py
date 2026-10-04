@@ -26,7 +26,9 @@ async def test_fork_preserves_shared_media_and_projects_only_live_filing(
     with SessionLocal() as session:
         artifact, _entry, _collection, _tag = _seed(app.state.services.artifacts, session)
         artifact_id = artifact.id
-        position = len(session.get(Message, leaf_id).parts)
+        leaf = session.get(Message, leaf_id)
+        assert leaf is not None
+        position = len(leaf.parts)
         session.add(
             MessagePart(
                 message_id=leaf_id, position=position, type="image", artifact_id=artifact_id

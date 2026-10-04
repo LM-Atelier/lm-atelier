@@ -1,5 +1,7 @@
 """Project trash refuses accepted work that cannot be safely preserved."""
 
+from typing import Any
+
 import pytest
 from fastapi import FastAPI
 from httpx2 import AsyncClient
@@ -75,8 +77,9 @@ async def test_project_trash_refuses_unpreservable_pending_work_atomically(
                     session.delete(snapshot)
                 session.commit()
 
-    async def read():
-        return (await client.get(f"/api/runs/{run_id}")).json()
+    async def read() -> dict[str, Any]:
+        result: dict[str, Any] = (await client.get(f"/api/runs/{run_id}")).json()
+        return result
 
     assert (await wait_for_terminal_status(read, what="preserved garden work"))[
         "status"
