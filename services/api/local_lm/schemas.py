@@ -106,6 +106,19 @@ class ProjectExportRequest(ApiModel):
     passphrase: str | None = Field(default=None, min_length=1, max_length=1024)
 
 
+class EncryptedOutputRecipeRequest(ApiModel):
+    """A record download's options and passphrase, in its body rather than its address."""
+
+    passphrase: str = Field(min_length=1, max_length=1024)
+    prompts: Literal["include", "omit"]
+    # The record the person was shown; a record rebuilt differently is refused.
+    digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+
+class EncryptedOutputRecipeBundleRequest(EncryptedOutputRecipeRequest):
+    inputs: Literal["include", "omit"] = "omit"
+
+
 class ProjectUpdate(ApiModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = Field(default=None, max_length=10_000)

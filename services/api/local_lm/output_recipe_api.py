@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
+import base64
+import binascii
+import hmac
+import io
+from typing import TYPE_CHECKING, Annotated, Any, BinaryIO, Literal, cast
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Query, Request, Response
@@ -22,6 +26,7 @@ from .output_recipe import OutputRecipe, OutputRecipeUnavailable, build_output_r
 from .output_recipe_bundle import OutputRecipeBundle, build_output_recipe_bundle
 from .output_recipe_check import (
     BUNDLE_SIGNATURE,
+    MAX_CHECK_BYTES,
     OutputRecipeCheckRefused,
     check_output_recipe_file,
     most_read_for,
@@ -36,6 +41,9 @@ from .output_recipe_promotion import (
 )
 from .output_recipe_replay import plan_output_recipe_replay, replay_outcome
 from .picture_workflow import read_picture_workflow
+from .portable_archive_v1 import ArchiveKind, ArchiveRefused, open_archive
+from .project_archive_encryption import ExportUnverified, archive_api_error, encrypt_bytes
+from .schemas import EncryptedOutputRecipeBundleRequest, EncryptedOutputRecipeRequest
 from .studio_region_edit import MAX_BLEND_READ_BYTES
 
 if TYPE_CHECKING:
@@ -140,6 +148,122 @@ async def download_output_recipe_bundle(
             "Cross-Origin-Resource-Policy": "same-origin",
             "X-Content-Type-Options": "nosniff",
             "X-Output-Recipe-Digest": bundle.record_digest,
+        },
+    )
+
+
+@router.post("/runs/{run_id}/outputs/{artifact_id}/recipe/encrypted")
+async def download_encrypted_output_recipe(
+    run_id: str,
+    artifact_id: str,
+    payload: EncryptedOutputRecipeRequest,
+    request: Request,
+) -> Response:
+    """The record the caller was shown, encrypted under the passphrase it typed.
+
+    The passphrase travels in the body, never the address. The record is built
+    again and must be the one named by its digest, so the file never holds a
+    record nobody looked at. It is encrypted in memory and opened again before
+    it is sent; nothing of it is written to disk.
+    """
+
+    artifacts = cast("Services", request.app.state.services).artifacts
+    try:
+        content, file_name, digest = await run_in_threadpool(
+            _encrypted_record, artifacts, run_id, artifact_id, payload
+        )
+    except OutputRecipeUnavailable as exc:
+        raise api_error(exc.status, exc.code, exc.message) from exc
+    except ArchiveRefused as exc:
+        raise archive_api_error(exc) from exc
+    except ExportUnverified as exc:
+        raise _unverified() from exc
+    return _encrypted_download(content, file_name, digest)
+
+
+@router.post("/runs/{run_id}/outputs/{artifact_id}/recipe-bundle/encrypted")
+async def download_encrypted_output_recipe_bundle(
+    run_id: str,
+    artifact_id: str,
+    payload: EncryptedOutputRecipeBundleRequest,
+    request: Request,
+) -> Response:
+    """A picture's record and its clean copy in one ZIP, encrypted under a passphrase.
+
+    The same bundle the plain download makes, from the record named by its
+    digest, sealed in memory and opened again before it is sent.
+    """
+
+    artifacts = cast("Services", request.app.state.services).artifacts
+    try:
+        content, file_name, digest = await run_in_threadpool(
+            _encrypted_bundle, artifacts, run_id, artifact_id, payload
+        )
+    except OutputRecipeUnavailable as exc:
+        raise api_error(exc.status, exc.code, exc.message) from exc
+    except ArchiveRefused as exc:
+        raise archive_api_error(exc) from exc
+    except ExportUnverified as exc:
+        raise _unverified() from exc
+    return _encrypted_download(content, file_name, digest)
+
+
+def _encrypted_record(
+    artifacts: ArtifactStore, run_id: str, artifact_id: str, payload: EncryptedOutputRecipeRequest
+) -> tuple[bytes, str, str]:
+    recipe = _build(artifacts, run_id, artifact_id, payload.prompts == "include")
+    if not hmac.compare_digest(recipe.digest, payload.digest):
+        raise OutputRecipeUnavailable(
+            409,
+            "output-recipe-changed",
+            "This output's record changed since it was shown. Show it again.",
+        )
+    sealed = encrypt_bytes(
+        recipe.content, kind=ArchiveKind.OUTPUT_RECIPE, passphrase=payload.passphrase.encode()
+    )
+    return sealed, f"{recipe.file_name}.encrypted", recipe.digest
+
+
+def _encrypted_bundle(
+    artifacts: ArtifactStore,
+    run_id: str,
+    artifact_id: str,
+    payload: EncryptedOutputRecipeBundleRequest,
+) -> tuple[bytes, str, str]:
+    bundle = _build_bundle(
+        artifacts,
+        run_id,
+        artifact_id,
+        payload.prompts == "include",
+        payload.digest,
+        payload.inputs == "include",
+    )
+    sealed = encrypt_bytes(
+        bundle.content, kind=ArchiveKind.OUTPUT_RECIPE, passphrase=payload.passphrase.encode()
+    )
+    return sealed, f"{bundle.file_name}.encrypted", bundle.record_digest
+
+
+def _unverified() -> Exception:
+    return api_error(
+        500,
+        "output-recipe-encryption-unverified",
+        "The encrypted file could not be checked after it was written, so it was not sent.",
+    )
+
+
+def _encrypted_download(content: bytes, file_name: str, digest: str) -> Response:
+    name = quote(file_name, safe="")
+    return Response(
+        content,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f"attachment; filename*=utf-8''{name}",
+            "Cache-Control": "private, no-store",
+            "Content-Security-Policy": "sandbox; default-src 'none'",
+            "Cross-Origin-Resource-Policy": "same-origin",
+            "X-Content-Type-Options": "nosniff",
+            "X-Output-Recipe-Digest": digest,
         },
     )
 
@@ -310,6 +434,101 @@ async def check_output_recipe_against_this_install(request: Request) -> JSONResp
     except OutputRecipeCheckRefused as exc:
         raise api_error(exc.status, exc.code, exc.message) from exc
     return JSONResponse(report, headers={"Cache-Control": "no-store"})
+
+
+# An encrypted file adds a tag of 16 bytes to every 16 KiB and a short header.
+_MAX_ENCRYPTED_BYTES = MAX_CHECK_BYTES + MAX_CHECK_BYTES // 1024 + 64 * 1024
+PASSPHRASE_HEADER = "x-archive-passphrase"
+
+
+class _OpenedTooLarge(Exception):
+    """An encrypted file that opens to more than a record or a bundle can be."""
+
+
+class _BoundedSink:
+    """A destination that holds what it is given, up to what a record file can be."""
+
+    def __init__(self) -> None:
+        self._held = io.BytesIO()
+
+    def write(self, data: bytes) -> int:
+        if self._held.tell() + len(data) > MAX_CHECK_BYTES:
+            raise _OpenedTooLarge
+        return self._held.write(data)
+
+    def getvalue(self) -> bytes:
+        return self._held.getvalue()
+
+
+@router.post("/output-recipes/open")
+async def open_encrypted_output_recipe(request: Request) -> Response:
+    """An encrypted record or bundle opened with its passphrase, as the file it holds.
+
+    The file is the request body, read only up to the largest encrypted record
+    file there can be. The passphrase arrives in a request header as base64 of
+    its UTF-8 bytes, never in the address. What comes back is the plain record
+    or bundle, for this browser to check or remake as it would a plain file;
+    nothing is kept.
+    """
+
+    passphrase = _passphrase(request)
+    declared = request.headers.get("content-length")
+    if declared is not None and declared.isdigit() and int(declared) > _MAX_ENCRYPTED_BYTES:
+        raise _too_large()
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > _MAX_ENCRYPTED_BYTES:
+            raise _too_large()
+    try:
+        opened = await run_in_threadpool(_open_encrypted, bytes(body), passphrase)
+    except _OpenedTooLarge as exc:
+        raise _too_large() from exc
+    except ArchiveRefused as exc:
+        if exc.code == "archive-kind-mismatch":
+            raise api_error(
+                422, "archive-kind-mismatch", "This file is not an encrypted generation record."
+            ) from exc
+        raise archive_api_error(exc) from exc
+    if len(opened) > most_read_for(opened[: len(BUNDLE_SIGNATURE)]):
+        # Held to a record's own bound unless it opens as a bundle, as a plain file is.
+        raise _too_large()
+    return Response(
+        opened,
+        media_type="application/octet-stream",
+        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
+    )
+
+
+def _passphrase(request: Request) -> bytes:
+    value = request.headers.get(PASSPHRASE_HEADER)
+    if not value:
+        raise api_error(
+            422,
+            "archive-passphrase-required",
+            "This file is encrypted. Enter its passphrase to open it.",
+        )
+    try:
+        return base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise archive_api_error(ArchiveRefused("archive-passphrase-invalid")) from exc
+
+
+def _open_encrypted(content: bytes, passphrase: bytes) -> bytes:
+    sink = _BoundedSink()
+    open_archive(
+        io.BytesIO(content),
+        cast(BinaryIO, sink),
+        kind=ArchiveKind.OUTPUT_RECIPE,
+        passphrase=passphrase,
+    )
+    return sink.getvalue()
+
+
+def _too_large() -> Exception:
+    return api_error(
+        413, "output-recipe-too-large", "This file is larger than a generation record can be."
+    )
 
 
 def _check(content: bytes) -> dict[str, Any]:

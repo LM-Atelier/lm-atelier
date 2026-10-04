@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 import { FileJson } from "lucide-react";
@@ -35,6 +35,16 @@ const PICTURE_PROBLEMS: Record<string, string> = {
     "It has more input pictures than can be saved with it. Save it without them.",
 };
 
+/** What the person is told when a file could not be saved encrypted. */
+const SEAL_PROBLEMS: Record<string, string> = {
+  "output-recipe-changed": "The record changed since it was shown. Check it again, then save.",
+  "archive-passphrase-invalid": "That passphrase is too long. Use at most 1024 bytes.",
+  "archive-key-derivation-failed":
+    "This computer could not set aside the memory the passphrase needs. Close other applications and try again.",
+  "output-recipe-encryption-unverified":
+    "The encrypted file could not be checked after it was written, so it was not saved.",
+};
+
 /** Said instead when inputs were asked for: the inputs, or the picture alone, may be what does not fit. */
 const TOO_LARGE_WITH_INPUTS =
   "The pictures are too large to save together with the record. Try again without its inputs; if this picture alone is too large, save the record on its own.";
@@ -56,6 +66,15 @@ function GenerationRecordBody({
   const [includeInputs, setIncludeInputs] = useState(false);
   const [savingPicture, setSavingPicture] = useState(false);
   const [pictureProblem, setPictureProblem] = useState<string | null>(null);
+  const [encrypt, setEncrypt] = useState(false);
+  const [passphrase, setPassphrase] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [savingRecord, setSavingRecord] = useState(false);
+  const [recordProblem, setRecordProblem] = useState<string | null>(null);
+  const hint = useId();
+  // Typed twice, so a slip of the keyboard does not lock the file for good.
+  const sealable = !encrypt || (passphrase.length > 0 && passphrase === confirmation);
+  const saving = savingPicture || savingRecord;
   // A copy still being made when the dialog closes is stopped, so nothing is
   // saved after the person has left.
   const [pictureRequests] = useState(() => new Set<AbortController>());
@@ -93,37 +112,60 @@ function GenerationRecordBody({
     }
   }, [replayed.data]);
   const ready = Boolean(record.data && summary);
-  const download = () => {
-    if (!record.data || !summary) return;
-    // The bytes previewed are the bytes saved, so the file matches its digest.
-    downloadBytes(record.data, generationRecordFileName(summary), "application/json");
+  const download = async () => {
+    if (!record.data || !summary || !sealable || savingRecord) return;
+    if (!encrypt) {
+      // The bytes previewed are the bytes saved, so the file matches its digest.
+      downloadBytes(record.data, generationRecordFileName(summary), "application/json");
+      return;
+    }
+    const request = new AbortController();
+    pictureRequests.add(request);
+    setSavingRecord(true);
+    setRecordProblem(null);
+    try {
+      // Encrypted from the record named by the digest on screen, so it holds no other.
+      const bytes = await api.encryptedGenerationRecord(
+        runId, artifactId, includePrompt, summary.digest, passphrase, request.signal,
+      );
+      if (!request.signal.aborted) {
+        downloadBytes(bytes, `${generationRecordFileName(summary)}.encrypted`, "application/octet-stream");
+      }
+    } catch (error) {
+      if (request.signal.aborted) return;
+      const code = (error as { code?: unknown } | null)?.code;
+      setRecordProblem((typeof code === "string" ? SEAL_PROBLEMS[code] : undefined) ?? "The record could not be saved encrypted.");
+      if (code === "output-recipe-changed") void record.refetch();
+    } finally {
+      pictureRequests.delete(request);
+      if (!request.signal.aborted) setSavingRecord(false);
+    }
   };
   const downloadWithPicture = async () => {
-    if (!summary || savingPicture) return;
+    if (!summary || savingPicture || !sealable) return;
     const request = new AbortController();
     pictureRequests.add(request);
     setSavingPicture(true);
     setPictureProblem(null);
     try {
       // The digest names the record on screen, so the file never holds another.
-      const bytes = await api.generationRecordBundle(
-        runId,
-        artifactId,
-        includePrompt,
-        summary.digest,
-        // Only offered, and only sent, when the record names some.
-        includeInputs && summary.inputCount > 0,
-        request.signal,
-      );
+      // Only offered, and only sent, when the record names some.
+      const inputs = includeInputs && summary.inputCount > 0;
+      const bytes = encrypt
+        ? await api.encryptedGenerationRecordBundle(
+          runId, artifactId, includePrompt, summary.digest, inputs, passphrase, request.signal,
+        )
+        : await api.generationRecordBundle(runId, artifactId, includePrompt, summary.digest, inputs, request.signal);
       if (!request.signal.aborted) {
-        downloadBytes(bytes, generationRecordBundleFileName(summary), "application/zip");
+        const name = generationRecordBundleFileName(summary);
+        downloadBytes(bytes, encrypt ? `${name}.encrypted` : name, encrypt ? "application/octet-stream" : "application/zip");
       }
     } catch (error) {
       if (request.signal.aborted) return;
       const code = (error as { code?: unknown } | null)?.code;
       const known = code === "output-recipe-bundle-too-large" && includeInputs
         ? TOO_LARGE_WITH_INPUTS
-        : typeof code === "string" ? PICTURE_PROBLEMS[code] : undefined;
+        : typeof code === "string" ? PICTURE_PROBLEMS[code] ?? SEAL_PROBLEMS[code] : undefined;
       setPictureProblem(known ?? "The picture could not be saved with its record.");
       if (code === "output-recipe-changed") void record.refetch();
     } finally {
@@ -145,7 +187,7 @@ function GenerationRecordBody({
             type="checkbox"
             checked={includePrompt}
             // The choice is part of the file being made; it waits until that is saved.
-            disabled={savingPicture}
+            disabled={saving}
             onChange={(event) => {
               setIncludePrompt(event.target.checked);
               setPictureProblem(null);
@@ -166,7 +208,7 @@ function GenerationRecordBody({
             <input
               type="checkbox"
               checked={includeInputs}
-              disabled={savingPicture}
+              disabled={saving}
               onChange={(event) => {
                 setIncludeInputs(event.target.checked);
                 setPictureProblem(null);
@@ -175,13 +217,46 @@ function GenerationRecordBody({
             <span>{inputChoiceText(summary.inputCount, summary.inputBytes)}</span>
           </label>
         )}
+        <label className="generation-record-choice">
+          <input
+            type="checkbox"
+            checked={encrypt}
+            disabled={saving}
+            onChange={(event) => {
+              setEncrypt(event.target.checked);
+              setPictureProblem(null);
+              setRecordProblem(null);
+            }}
+          />
+          <span>
+            Encrypt the saved file with a passphrase. It cannot be opened without it, and a forgotten
+            passphrase cannot be recovered.
+          </span>
+        </label>
+        {encrypt && (
+          <span className="row-actions">
+            <label>Passphrase<input type="password" autoComplete="new-password" value={passphrase}
+              readOnly={saving} onChange={(event) => setPassphrase(event.target.value)} /></label>
+            <label>Confirm passphrase<input type="password" autoComplete="new-password" value={confirmation}
+              readOnly={saving} onChange={(event) => setConfirmation(event.target.value)} /></label>
+          </span>
+        )}
+        {encrypt && !sealable && (
+          <p className="muted" id={hint}>
+            {confirmation.length > 0 && passphrase !== confirmation
+              ? "The passphrases do not match."
+              : "Type the passphrase twice to save the file encrypted."}
+          </p>
+        )}
         {outcome && <p>{replayOutcomeText(outcome)}</p>}
         {record.isPending && <p role="status">Reading the record…</p>}
         {(record.isError || (record.data && !summary)) && (
           <p role="alert">The record could not be made for this output.</p>
         )}
         {savingPicture && <p role="status">Copying the picture…</p>}
+        {savingRecord && <p role="status">Encrypting the record…</p>}
         {pictureProblem && <p role="alert">{pictureProblem}</p>}
+        {recordProblem && <p role="alert">{recordProblem}</p>}
         {summary && (
           <>
             <dl className="generation-record-facts">
@@ -223,8 +298,8 @@ function GenerationRecordBody({
       </div>
       <footer>
         {summary && (RECIPE_DRAFT_OPERATIONS.has(summary.operation) || summary.operation === "image_to_image") && (
-          <button type="button" className="secondary" aria-disabled={savingPicture} onClick={() => {
-            if (!savingPicture) onKeepRecipe(summary.operation === "image_to_image" ? "edit" : "generation");
+          <button type="button" className="secondary" aria-disabled={saving} onClick={() => {
+            if (!saving) onKeepRecipe(summary.operation === "image_to_image" ? "edit" : "generation");
           }}>
             Keep as a recipe
           </button>
@@ -233,9 +308,10 @@ function GenerationRecordBody({
           <button
             type="button"
             className="secondary"
-            aria-disabled={!ready || savingPicture}
+            aria-disabled={!ready || saving || !sealable}
+            aria-describedby={sealable ? undefined : hint}
             onClick={() => {
-              if (ready && !savingPicture) void downloadWithPicture();
+              if (ready && !saving && sealable) void downloadWithPicture();
             }}
           >
             Download with picture
@@ -244,9 +320,10 @@ function GenerationRecordBody({
         <button
           type="button"
           className="primary"
-          aria-disabled={!ready}
+          aria-disabled={!ready || saving || !sealable}
+          aria-describedby={sealable ? undefined : hint}
           onClick={() => {
-            if (ready) download();
+            if (ready && !saving && sealable) void download();
           }}
         >
           Download record
