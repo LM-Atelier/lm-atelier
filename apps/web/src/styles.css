@@ -1211,6 +1211,19 @@ html[data-motion="reduced"] .progress-track > div.indeterminate { width: 100% !i
 .install-confirm .install-warning { color: var(--warning-ink); line-height: 1.5; margin: 0 0 12px; }
 .install-confirm footer { display: flex; justify-content: flex-end; gap: calc(12px * var(--spacing-scale, 1)); margin-top: 20px; }
 .first-run-shell { min-height: 100vh; display: grid; place-items: center; background: var(--bg); }
+/* The locked workspace stands in for the whole page, so on a short window it
+   scrolls itself rather than clipping its own controls. */
+.workspace-lock-shell { overflow-y: auto; padding: calc(16px * var(--spacing-scale, 1)); }
+.workspace-lock-card { width: min(420px, 100%); display: grid; gap: calc(16px * var(--spacing-scale, 1)); padding: calc(28px * var(--spacing-scale, 1)); background: var(--panel); border: 1px solid var(--border); border-radius: 14px; box-shadow: 0 18px 60px var(--shadow); }
+.workspace-lock-card h1 { font-size: calc(20px * var(--text-scale, 1)); }
+.workspace-lock-card p { margin: 0; line-height: 1.5; }
+.workspace-lock-pending { margin: 0; color: var(--ink-secondary); }
+.workspace-lock-form { display: grid; gap: calc(12px * var(--spacing-scale, 1)); max-width: 420px; }
+.workspace-lock-form label { display: grid; gap: calc(6px * var(--spacing-scale, 1)); font-weight: 600; }
+.workspace-lock-form input { width: 100%; color: var(--ink); border: 1px solid var(--line-control); border-radius: 10px; background: var(--panel-2); padding: calc(9px * var(--spacing-scale, 1)) calc(10px * var(--spacing-scale, 1)); }
+.workspace-lock-form small { color: var(--muted); line-height: 1.3; }
+.workspace-lock-actions { display: flex; flex-wrap: wrap; align-items: center; gap: calc(8px * var(--spacing-scale, 1)); }
+.workspace-lock-actions .secondary[aria-disabled="true"], .workspace-lock-switch button[aria-disabled="true"] { opacity: .55; cursor: default; }
 .editing-studio { width: min(680px, 96vw); }
 .studio-template-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: calc(8px * var(--spacing-scale, 1)); margin: 12px 0; }
 .studio-template { display: grid; gap: calc(4px * var(--spacing-scale, 1)); justify-items: start; text-align: left; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); padding: calc(11px * var(--spacing-scale, 1)); cursor: pointer; }

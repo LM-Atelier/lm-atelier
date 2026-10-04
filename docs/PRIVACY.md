@@ -116,3 +116,33 @@ changes on this computer, and it is kept for as long as the remix is.
 
 Before sharing issue details, inspect them and remove tokens, private prompts,
 chats, media, model inputs, and identifying file paths.
+
+## Workspace lock
+
+**Settings > Privacy** can turn on a workspace lock. While it is on, **Lock
+now** takes the workspace off the screen in every open window, and the service
+refuses every request for workspace content (chats, media, settings and the
+live connection) until it is unlocked. It also starts locked whenever the
+service starts. Work that was already running keeps going while it is locked.
+Without a PIN, anyone at the computer can unlock it with one click; with a PIN,
+unlocking asks for it. A PIN is 4 to 64 characters and is stored only as a
+salted Argon2id verifier in the database. After five wrong PINs in a row, each
+further attempt waits longer, up to 15 minutes, and the page never says how many
+attempts remain. Changing or removing the PIN, or turning the lock off, asks for
+the current PIN.
+
+The lock keeps the workspace off the screen; it does not encrypt anything.
+Anyone who can read the data directory or its backups can read what is in them.
+While the lock is on, everything the API sends is marked not to be cached, so
+the browser keeps no new copies of pictures or videos. Ones it fetched before
+the lock was turned on may still be in its own cache. A workflow editor window that is already
+open shows ComfyUI's own page, which runs as a separate service and is not
+covered. Text typed but not yet sent may be lost when the workspace locks.
+
+If the PIN is forgotten, or the saved lock setting cannot be read and the
+workspace stays locked, stop LM Atelier and start it once with
+`LOCAL_LM_RESET_WORKSPACE_LOCK=true`. That removes the saved lock setting and
+its PIN, so the workspace starts unlocked with the lock off. A warning is logged
+on every start while the variable is set, so remove it afterwards. This weakens
+nothing: anyone who can restart the service with a changed environment can
+already read its database.

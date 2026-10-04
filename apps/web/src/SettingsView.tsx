@@ -16,6 +16,7 @@ import { RuntimeSetupCard } from "./RuntimeSetupCard";
 import { StatusDot } from "./StatusDot";
 import { WorkerLogFolderButton, WorkerStartupLimit } from "./WorkerStartupLimit";
 import { WorkerStatusCard } from "./WorkerStatusCard";
+import { WorkspaceLockSettings } from "./WorkspaceLockSettings";
 import { FONT_CREDITS, downloadJson, formatBytes, formatDate, supportLinks } from "./format";
 import {
   resolveCapabilitySettings,
@@ -372,6 +373,7 @@ export function SettingsView({ engines, appearance, destinationId, onDestination
         aria-label={settingsDestinationFor(destination).label}>
       {on("general") && <GeneralSettings />}
       {on("appearance") && <AppearanceSettings appearance={appearance} />}
+      {on("privacy") && <WorkspaceLockSettings />}
       {on("model-sources") && (<>
       <CredentialSettingsCard
         provider="huggingface"

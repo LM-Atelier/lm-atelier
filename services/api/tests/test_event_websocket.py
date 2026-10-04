@@ -15,10 +15,14 @@ class FakeWebSocket:
         self.sent: list[dict[str, Any]] = []
         self.send_started = asyncio.Event()
         self.send_cancelled = asyncio.Event()
+        self.closed: list[tuple[int, str | None]] = []
         self._block_sends = block_sends
 
     async def receive(self) -> dict[str, Any]:
         return await self.received.get()
+
+    async def close(self, code: int = 1000, reason: str | None = None) -> None:
+        self.closed.append((code, reason))
 
     async def send_json(self, payload: dict[str, Any]) -> None:
         self.send_started.set()
@@ -81,4 +85,53 @@ async def test_disconnect_wins_when_a_replayed_event_is_already_ready() -> None:
     await asyncio.wait_for(_stream_events(websocket(fake), broker, after=0), timeout=1)
 
     assert fake.sent == []
+    assert not broker._subscribers
+
+
+async def test_a_lock_closes_an_idle_stream_with_the_lock_code() -> None:
+    broker = EventBroker()
+    fake = FakeWebSocket()
+    closing = asyncio.Event()
+    stream = asyncio.create_task(_stream_events(websocket(fake), broker, after=0, closing=closing))
+    await wait_for_subscriber(broker)
+
+    closing.set()
+    await asyncio.wait_for(stream, timeout=1)
+
+    assert fake.closed == [(4423, "workspace-locked")]
+    assert fake.sent == []
+    assert not broker._subscribers
+
+
+async def test_a_lock_cancels_an_in_flight_send_and_closes() -> None:
+    broker = EventBroker()
+    fake = FakeWebSocket(block_sends=True)
+    closing = asyncio.Event()
+    stream = asyncio.create_task(_stream_events(websocket(fake), broker, after=0, closing=closing))
+    await wait_for_subscriber(broker)
+
+    await broker.publish("jobs.changed", "job-1")
+    await asyncio.wait_for(fake.send_started.wait(), timeout=1)
+    closing.set()
+    await asyncio.wait_for(stream, timeout=1)
+
+    assert fake.send_cancelled.is_set()
+    assert fake.sent == []
+    assert fake.closed == [(4423, "workspace-locked")]
+    assert not broker._subscribers
+
+
+async def test_a_lock_wins_over_a_replayed_event_that_is_already_ready() -> None:
+    broker = EventBroker()
+    await broker.publish("jobs.changed", "job-1")
+    fake = FakeWebSocket()
+    closing = asyncio.Event()
+    closing.set()
+
+    await asyncio.wait_for(
+        _stream_events(websocket(fake), broker, after=0, closing=closing), timeout=1
+    )
+
+    assert fake.sent == []
+    assert fake.closed == [(4423, "workspace-locked")]
     assert not broker._subscribers
