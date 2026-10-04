@@ -32,6 +32,7 @@ from local_lm.recovery_v1 import (
     PurgeRecoveryV1,
     RecoveryCommandV1,
     RecoveryImpactV1,
+    RecoveryItemV1,
     RestoreRecoveryV1,
 )
 
@@ -110,7 +111,7 @@ def _rows(session: Session, *names: str) -> dict[str, list[dict[str, Any]]]:
     }
 
 
-def _trash(session: Session):
+def _trash(session: Session) -> tuple[RecoveryCommandV1, RecoveryItemV1]:
     preview = preview_project_trash(session, "project-garden", NOW)
     session.commit()
     command = RecoveryCommandV1(**_command(preview, "trash-garden"))
@@ -150,15 +151,13 @@ def test_project_recovery_keeps_history_active_work_and_later_filing_moves(
         assert _rows(session, "projects")["projects"][0] == original
         expected_project = "project-garden"
     else:
-        transition = PurgeRecoveryV1(
+        purge = PurgeRecoveryV1(
             **_command(preview, "purge-garden"), acknowledgement="permanently-delete"
         )
-        result = purge_project(session, item.deletion_id, transition, NOW)
+        result = purge_project(session, item.deletion_id, purge, NOW)
         session.commit()
         assert result.reclaimed_bytes == 0
-        assert (
-            purge_project(session, item.deletion_id, transition, NOW + timedelta(days=60)) == result
-        )
+        assert purge_project(session, item.deletion_id, purge, NOW + timedelta(days=60)) == result
         session.commit()
         assert session.get(Project, "project-garden") is None
         expected_project = None

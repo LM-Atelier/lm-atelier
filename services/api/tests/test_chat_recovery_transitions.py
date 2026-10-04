@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import Row, delete, select
 from sqlalchemy.orm import Session
 from test_chat_recovery_graph import graph_session as graph_session
 
@@ -25,6 +26,7 @@ from local_lm.recovery_v1 import (
     RecoveryAction,
     RecoveryConflict,
     RecoveryImpactV1,
+    RecoveryItemV1,
     RecoveryState,
     RestoreRecoveryV1,
     TrashChatV1,
@@ -41,7 +43,7 @@ def _fields(impact: RecoveryImpactV1, key: str) -> dict[str, str]:
     }
 
 
-def _trash(session: Session, key: str = "trash-garden"):
+def _trash(session: Session, key: str = "trash-garden") -> tuple[RecoveryItemV1, TrashChatV1]:
     preview = preview_chat_trash(session, "chat-garden", NOW)
     session.commit()
     command = TrashChatV1.model_validate(_fields(preview, key))
@@ -50,7 +52,7 @@ def _trash(session: Session, key: str = "trash-garden"):
     return result, command
 
 
-def _history(session: Session):
+def _history(session: Session) -> dict[str, tuple[Row[Any], ...]]:
     names = (
         "chats",
         "messages",
@@ -213,7 +215,9 @@ def test_purge_deletes_owned_jobs_before_the_graph_and_preserves_foreign_history
     assert session.get(Chat, "chat-garden") is None
     assert session.get(Job, "job-garden") is None and session.get(Job, "job-source") is None
     assert session.get(Job, "job-other") is not None
-    assert session.get(Chat, "chat-other").title == other_title
+    retained = session.get(Chat, "chat-other")
+    assert retained is not None
+    assert retained.title == other_title
     assert len(list(session.scalars(select(Artifact)))) == 5
     membership = session.get(RecoveryItem, item.deletion_id)
     assert membership is not None and membership.state == RecoveryState.PURGED.value
@@ -261,7 +265,9 @@ def test_missing_original_project_needs_an_explicit_unfiled_restore(graph_sessio
     )
     session.commit()
     assert result.action == RecoveryAction.RESTORE
-    assert session.get(Chat, "chat-garden").project_id is None
+    restored = session.get(Chat, "chat-garden")
+    assert restored is not None
+    assert restored.project_id is None
 
 
 def test_expired_window_cannot_restore_but_can_be_previewed_for_purge(

@@ -1,6 +1,7 @@
 """Recovery pages seek through stable identities and expose only current structural facts."""
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -12,9 +13,11 @@ from test_empty_chat_deletion import session as session
 
 from local_lm.chat_recovery import chat_recovery_page
 from local_lm.db import SessionLocal
+from local_lm.events import EventBroker
 from local_lm.models import Chat, Message, MessagePart, RecoveryItem, RecoveryPreviewRecord
 from local_lm.recovery_previews import RecoveryPreviewConflict
 from local_lm.recovery_v1 import RecoveryConflict, RecoveryState
+from local_lm.schemas import EventOut
 
 NOW = datetime(2026, 10, 2, tzinfo=UTC)
 
@@ -176,9 +179,12 @@ async def test_membership_events_follow_committed_transitions_without_content(
     app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch, action: str
 ) -> None:
     observed: list[tuple[str, str | None]] = []
-    publish = app.state.services.events.publish
+    broker: EventBroker = app.state.services.events
+    publish = broker.publish
 
-    async def observe(event_type: str, entity_id: str | None = None, payload: dict | None = None):
+    async def observe(
+        event_type: str, entity_id: str | None = None, payload: dict[str, Any] | None = None
+    ) -> EventOut:
         if event_type == "recovery.updated":
             assert entity_id is not None and payload == {}
             with SessionLocal() as current:
