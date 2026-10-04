@@ -141,6 +141,7 @@ class ResourceScheduler:
         group: str,
         priority: int = 0,
         capacity: int = 1,
+        on_claim_lost: Callable[[], None] | None = None,
     ) -> AsyncIterator[JobClaim]:
         lock = self._lock(group, capacity)
         claim = await self._acquire_job(
@@ -151,8 +152,13 @@ class ResourceScheduler:
             capacity=capacity,
             local_lock=lock,
         )
+        renewal = (
+            self._heartbeat(job_id, claim.token)
+            if on_claim_lost is None
+            else self._heartbeat(job_id, claim.token, on_claim_lost=on_claim_lost)
+        )
         heartbeat = asyncio.create_task(
-            self._heartbeat(job_id, claim.token),
+            renewal,
             name=f"job-heartbeat-{job_id}",
         )
         # Held only once the claim is real, never while the job waits its turn.
@@ -161,11 +167,15 @@ class ResourceScheduler:
         sleep_kind = _SLEEP_KINDS.get(resource)
         if self._power is not None and sleep_kind is not None:
             self._power.acquire(claim.token, sleep_kind)
+        execution_failed = False
         try:
             # The claim identity is YIELDED so the execution can bind its
             # engine-provenance writes to the attempt it was claimed for; a
             # bare `async with` caller that ignores it is unchanged.
             yield claim
+        except BaseException:
+            execution_failed = True
+            raise
         finally:
             # First, so the hold ends with the work even if releasing the claim fails.
             if self._power is not None:
@@ -200,7 +210,11 @@ class ResourceScheduler:
                 # past the busy timeout, makes likely rather than rare.
                 lock.release()
             if stopped is not None:
-                raise stopped
+                if not execution_failed:
+                    raise stopped
+                logger.warning(
+                    "A scheduler heartbeat failed while the execution was already ending."
+                )
 
     async def queue_control_changed(self, plan_id: str) -> None:
         self._eligibility.clear()
@@ -649,45 +663,54 @@ class ResourceScheduler:
             )
         ]
 
-    async def _heartbeat(self, job_id: str, token: str) -> None:
+    async def _heartbeat(
+        self, job_id: str, token: str, *, on_claim_lost: Callable[[], None] | None = None
+    ) -> None:
         while True:
             await asyncio.sleep(_HEARTBEAT_SECONDS)
-            with self.session_factory() as session:
-                now = utcnow()
-                result = cast(
-                    CursorResult[Any],
-                    session.execute(
-                        update(Job)
-                        .where(
-                            Job.id == job_id,
-                            Job.claim_owner == token,
-                            # A result or retry may precede a slow handoff.
-                            # Keep its ownership live until job_lease releases it.
-                            Job.status.in_(
-                                [
-                                    JobStatus.QUEUED.value,
-                                    JobStatus.RUNNING.value,
-                                    *_TERMINAL_STATUSES,
-                                ]
-                            ),
-                        )
-                        .values(
-                            heartbeat_at=now,
-                            claim_expires_at=now + timedelta(seconds=_CLAIM_SECONDS),
-                        )
-                    ),
-                )
-                session.commit()
-                if result.rowcount != 1:
-                    owner = session.execute(
-                        select(Job.claim_owner).where(Job.id == job_id)
-                    ).scalar_one_or_none()
-                    if owner != token and self._power is not None:
-                        # The claim moved to another attempt or was cleared, so
-                        # this one no longer keeps the computer awake, however
-                        # long its own work takes to stop.
-                        self._power.release(token)
-                    return
+            try:
+                with self.session_factory() as session:
+                    now = utcnow()
+                    result = cast(
+                        CursorResult[Any],
+                        session.execute(
+                            update(Job)
+                            .where(
+                                Job.id == job_id,
+                                Job.claim_owner == token,
+                                # A result or retry may precede a slow handoff.
+                                # Keep its ownership live until job_lease releases it.
+                                Job.status.in_(
+                                    [
+                                        JobStatus.QUEUED.value,
+                                        JobStatus.RUNNING.value,
+                                        *_TERMINAL_STATUSES,
+                                    ]
+                                ),
+                            )
+                            .values(
+                                heartbeat_at=now,
+                                claim_expires_at=now + timedelta(seconds=_CLAIM_SECONDS),
+                            )
+                        ),
+                    )
+                    session.commit()
+                    if result.rowcount != 1:
+                        owner = session.execute(
+                            select(Job.claim_owner).where(Job.id == job_id)
+                        ).scalar_one_or_none()
+                        if owner != token:
+                            if on_claim_lost is not None:
+                                on_claim_lost()
+                            if self._power is not None:
+                                # The claim moved to another attempt or was cleared, so
+                                # this one no longer keeps the computer awake, however
+                                # long its own work takes to stop.
+                                self._power.release(token)
+                        return
+            except OperationalError as error:
+                if not database_is_contended(error):
+                    raise
 
     def _expire_foreign_claims(self, group: str) -> list[str]:
         """Interrupt abandoned work without risking a duplicate backend request.
