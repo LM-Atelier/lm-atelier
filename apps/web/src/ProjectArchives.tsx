@@ -125,8 +125,8 @@ export function ProjectArchives() {
       </label>
       {encrypt && (
         <span className="row-actions">
-          <label>Passphrase<input type="password" autoComplete="new-password" maxLength={1024} value={passphrase} onChange={(event) => setPassphrase(event.target.value)} /></label>
-          <label>Confirm passphrase<input type="password" autoComplete="new-password" maxLength={1024} value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></label>
+          <label>Passphrase<input type="password" autoComplete="new-password" value={passphrase} onChange={(event) => setPassphrase(event.target.value)} /></label>
+          <label>Confirm passphrase<input type="password" autoComplete="new-password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></label>
         </span>
       )}
       {encrypt && !ready && (

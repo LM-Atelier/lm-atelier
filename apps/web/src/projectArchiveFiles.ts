@@ -1,4 +1,4 @@
-/** What a chosen project archive is, read from its first bytes rather than its name. */
+/** What a chosen archive is, read from its first bytes rather than its name. */
 
 // The first bytes of every passphrase-encrypted archive.
 const ENCRYPTED_MAGIC = [0x4c, 0x4d, 0x41, 0x41, 0x52, 0x43, 0x48, 0x00];

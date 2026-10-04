@@ -12,7 +12,10 @@ import { recordBytes } from "./generationRecordFixtures";
 import type { MessagePart } from "./types";
 
 vi.mock("./api", () => ({
-  api: { generationRecord: vi.fn(), generationRecordBundle: vi.fn(), replayResult: vi.fn(), outputRecipeDraft: vi.fn() },
+  api: {
+    generationRecord: vi.fn(), generationRecordBundle: vi.fn(), replayResult: vi.fn(), outputRecipeDraft: vi.fn(),
+    encryptedGenerationRecord: vi.fn(), encryptedGenerationRecordBundle: vi.fn(),
+  },
 }));
 // The recipe dialogs have their own tests; here only what they are given matters.
 vi.mock("./GenerationEditRecipeDialog", () => ({
@@ -36,6 +39,8 @@ const generationRecordBundle = vi.mocked(api.generationRecordBundle);
 const replayResult = vi.mocked(api.replayResult);
 const outputRecipeDraft = vi.mocked(api.outputRecipeDraft);
 const saved = vi.mocked(downloadBytes);
+const encryptedRecord = vi.mocked(api.encryptedGenerationRecord);
+const encryptedBundle = vi.mocked(api.encryptedGenerationRecordBundle);
 
 function withQueries(children: ReactNode) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -53,6 +58,8 @@ beforeEach(() => {
   replayResult.mockRejectedValue(Object.assign(new Error("not found"), { code: "replay-result-not-found" }));
   outputRecipeDraft.mockReset();
   saved.mockReset();
+  encryptedRecord.mockReset();
+  encryptedBundle.mockReset();
 });
 afterEach(cleanup);
 
@@ -461,6 +468,74 @@ describe("saving a record's input pictures with it", () => {
       "The pictures are too large to save together with the record. Try again without its inputs; "
         + "if this picture alone is too large, save the record on its own.",
     ));
+    expect(saved).not.toHaveBeenCalled();
+  });
+});
+
+describe("saving a record encrypted", () => {
+  const DIGEST = `sha256:${"d".repeat(64)}`;
+
+  async function openWithEncryption() {
+    generationRecord.mockResolvedValue(recordBytes());
+    render(withQueries(<GenerationRecordButton runId="run_1" artifactId={`sha256:${SHA}`} kind="image" />));
+    openRecord();
+    await screen.findByText("Left out, as you chose.");
+    fireEvent.click(screen.getByRole("checkbox", { name: /Encrypt the saved file with a passphrase/ }));
+  }
+
+  it("saves only once the passphrase is typed the same way twice", async () => {
+    const sealed = new ArrayBuffer(8);
+    encryptedRecord.mockResolvedValue(sealed);
+    await openWithEncryption();
+    const save = screen.getByRole("button", { name: "Download record" });
+    expect(save).toHaveAttribute("aria-disabled", "true");
+    expect(save).toHaveAccessibleDescription("Type the passphrase twice to save the file encrypted.");
+
+    fireEvent.change(screen.getByLabelText("Passphrase"), { target: { value: "correct horse" } });
+    fireEvent.change(screen.getByLabelText("Confirm passphrase"), { target: { value: "correct hose" } });
+    expect(screen.getByText("The passphrases do not match.")).toBeInTheDocument();
+    fireEvent.click(save);
+    expect(encryptedRecord).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText("Confirm passphrase"), { target: { value: "correct horse" } });
+    fireEvent.click(save);
+
+    await waitFor(() => expect(saved).toHaveBeenCalledTimes(1));
+    expect(encryptedRecord).toHaveBeenCalledWith(
+      "run_1", `sha256:${SHA}`, false, DIGEST, "correct horse", expect.any(AbortSignal),
+    );
+    expect(saved.mock.calls[0]).toEqual([sealed, `generation-record-${SHA.slice(0, 12)}.json.encrypted`, "application/octet-stream"]);
+  });
+
+  it("saves the picture and its record encrypted the same way", async () => {
+    const sealed = new ArrayBuffer(8);
+    encryptedBundle.mockResolvedValue(sealed);
+    await openWithEncryption();
+    fireEvent.change(screen.getByLabelText("Passphrase"), { target: { value: "correct horse" } });
+    fireEvent.change(screen.getByLabelText("Confirm passphrase"), { target: { value: "correct horse" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Download with picture" }));
+
+    await waitFor(() => expect(saved).toHaveBeenCalledTimes(1));
+    expect(encryptedBundle).toHaveBeenCalledWith(
+      "run_1", `sha256:${SHA}`, false, DIGEST, false, "correct horse", expect.any(AbortSignal),
+    );
+    expect(generationRecordBundle).not.toHaveBeenCalled();
+    expect(saved.mock.calls[0]).toEqual([sealed, `generation-record-${SHA.slice(0, 12)}.zip.encrypted`, "application/octet-stream"]);
+  });
+
+  it("says why an encrypted save failed in its own words, never the server's", async () => {
+    encryptedRecord.mockRejectedValue(Object.assign(new Error("neutral internal error marker"), { code: "archive-key-derivation-failed" }));
+    await openWithEncryption();
+    fireEvent.change(screen.getByLabelText("Passphrase"), { target: { value: "correct horse" } });
+    fireEvent.change(screen.getByLabelText("Confirm passphrase"), { target: { value: "correct horse" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Download record" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "This computer could not set aside the memory the passphrase needs. Close other applications and try again.",
+    );
+    expect(screen.queryByText("neutral internal error marker")).toBeNull();
     expect(saved).not.toHaveBeenCalled();
   });
 });

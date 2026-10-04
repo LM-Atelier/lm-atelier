@@ -1,7 +1,7 @@
 /** Checking a record file against this installation, from the model library. */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "./api";
 import { GenerationRecordCheck } from "./GenerationRecordCheck";
@@ -14,12 +14,15 @@ vi.mock("./api", () => ({
     createChat: vi.fn(),
     deleteChat: vi.fn(),
     replayGenerationRecord: vi.fn(),
+    openEncryptedGenerationRecord: vi.fn(),
   },
 }));
 
 const checkRecord = vi.mocked(api.checkGenerationRecord);
 const planReplay = vi.mocked(api.planGenerationReplay);
 const replay = vi.mocked(api.replayGenerationRecord);
+const openEncrypted = vi.mocked(api.openEncryptedGenerationRecord);
+const ENCRYPTED_HEAD = [0x4c, 0x4d, 0x41, 0x41, 0x52, 0x43, 0x48, 0x00];
 
 function answer(overrides: Record<string, unknown> = {}) {
   return {
@@ -51,6 +54,7 @@ beforeEach(() => {
   checkRecord.mockReset();
   planReplay.mockReset();
   replay.mockReset();
+  openEncrypted.mockReset();
   planReplay.mockResolvedValue({
     digest: `sha256:${"d".repeat(64)}`,
     operation: "text_to_image",
@@ -120,7 +124,7 @@ describe("checking a record", () => {
     renderCheck();
 
     expect(screen.getByLabelText("Generation record file")).toHaveAttribute(
-      "accept", "application/json,.json,application/zip,.zip",
+      "accept", "application/json,.json,application/zip,.zip,.encrypted,application/octet-stream",
     );
     choose("PK");
 
@@ -225,5 +229,81 @@ describe("the inputs a bundle carries", () => {
       expect(() => readGenerationRecordCheck(answer({ requirements: inputs, bundled_inputs: bundled })))
         .toThrow("malformed");
     }
+  });
+});
+
+describe("checking an encrypted record", () => {
+  function chooseEncrypted() {
+    const file = new File([new Uint8Array([...ENCRYPTED_HEAD, 1, 2, 3])], "record.json.encrypted");
+    fireEvent.change(screen.getByLabelText("Generation record file"), { target: { files: [file] } });
+    return file;
+  }
+
+  it("asks for its passphrase, opens it and checks the record it holds", async () => {
+    const plain = new TextEncoder().encode("{}").buffer;
+    openEncrypted.mockResolvedValue(plain);
+    checkRecord.mockResolvedValue(answer());
+    renderCheck();
+    chooseEncrypted();
+
+    expect(await screen.findByText("record.json.encrypted is encrypted. Enter its passphrase to check it.")).toBeVisible();
+    const field = screen.getByLabelText("Record passphrase");
+    await waitFor(() => expect(field).toHaveFocus());
+    expect(checkRecord).not.toHaveBeenCalled();
+    fireEvent.change(field, { target: { value: "correct horse" } });
+    fireEvent.click(screen.getByRole("button", { name: "Open" }));
+
+    await waitFor(() => expect(checkRecord).toHaveBeenCalledWith(plain));
+    const [sent, passphrase] = openEncrypted.mock.calls[0];
+    expect(new Uint8Array(sent).slice(0, 8)).toEqual(new Uint8Array(ENCRYPTED_HEAD));
+    expect(passphrase).toBe("correct horse");
+    expect(await screen.findByText("Here and ready")).toBeVisible();
+    expect(screen.queryByLabelText("Record passphrase")).toBeNull();
+  });
+
+  it("keeps asking after a passphrase that does not open it, and checks nothing", async () => {
+    openEncrypted.mockRejectedValue(new Error("The passphrase is wrong, or the archive is damaged."));
+    renderCheck();
+    chooseEncrypted();
+    fireEvent.change(await screen.findByLabelText("Record passphrase"), { target: { value: "wrong" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Open" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("The passphrase is wrong, or the archive is damaged.");
+    expect(screen.getByLabelText("Record passphrase")).toBeVisible();
+    expect(checkRecord).not.toHaveBeenCalled();
+  });
+
+  it("never applies an open the person closed and replaced with another file", async () => {
+    let finish: (value: ArrayBuffer) => void = () => undefined;
+    openEncrypted.mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    checkRecord.mockResolvedValue(answer());
+    renderCheck();
+    chooseEncrypted();
+    fireEvent.change(await screen.findByLabelText("Record passphrase"), { target: { value: "correct horse" } });
+    fireEvent.click(screen.getByRole("button", { name: "Open" }));
+    await waitFor(() => expect(openEncrypted).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Close the record check" }));
+    choose('{"schema":"lm-atelier-output-recipe-v1"}');
+    await waitFor(() => expect(checkRecord).toHaveBeenCalledTimes(1));
+    await act(async () => finish(new TextEncoder().encode("{\"earlier\":true}").buffer));
+
+    expect(checkRecord).toHaveBeenCalledTimes(1);
+    expect(new TextDecoder().decode(checkRecord.mock.calls[0][0])).toBe('{"schema":"lm-atelier-output-recipe-v1"}');
+  });
+
+  it("keeps focus inside the dialog once the opened record is being checked", async () => {
+    openEncrypted.mockResolvedValue(new TextEncoder().encode("{}").buffer);
+    checkRecord.mockResolvedValue(answer());
+    renderCheck();
+    chooseEncrypted();
+    const field = await screen.findByLabelText("Record passphrase");
+    fireEvent.change(field, { target: { value: "correct horse" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Open" }));
+
+    await waitFor(() => expect(screen.queryByLabelText("Record passphrase")).toBeNull());
+    expect(screen.getByRole("dialog").contains(document.activeElement)).toBe(true);
   });
 });

@@ -357,6 +357,13 @@ async function requestBytes(path: string, init: RequestInit = {}): Promise<Array
   return (await send(path, init)).arrayBuffer();
 }
 
+// A header carries only Latin-1, so a passphrase goes as base64 of its UTF-8 bytes.
+function base64Text(text: string): string {
+  let binary = "";
+  for (const byte of new TextEncoder().encode(text)) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
 type WorkflowRevisionInput = Pick<
   WorkflowBundle,
   "engine_version" | "api_graph" | "ui_graph" | "input_schema" | "dependencies"
@@ -564,6 +571,44 @@ export const api = {
       `/api/runs/${encodeURIComponent(runId)}/outputs/${encodeURIComponent(artifactId)}/recipe-bundle?prompts=${includePrompt ? "include" : "omit"}&digest=${encodeURIComponent(digest)}&inputs=${includeInputs ? "include" : "omit"}`,
       { signal },
     ),
+  /** The record on screen, named by its digest, encrypted under a passphrase sent in the body. */
+  encryptedGenerationRecord: (
+    runId: string,
+    artifactId: string,
+    includePrompt: boolean,
+    digest: string,
+    passphrase: string,
+    signal?: AbortSignal,
+  ) =>
+    requestBytes(
+      `/api/runs/${encodeURIComponent(runId)}/outputs/${encodeURIComponent(artifactId)}/recipe/encrypted`,
+      { method: "POST", body: JSON.stringify({ passphrase, prompts: includePrompt ? "include" : "omit", digest }), signal },
+    ),
+  /** The same bundle as generationRecordBundle, encrypted under a passphrase sent in the body. */
+  encryptedGenerationRecordBundle: (
+    runId: string,
+    artifactId: string,
+    includePrompt: boolean,
+    digest: string,
+    includeInputs: boolean,
+    passphrase: string,
+    signal?: AbortSignal,
+  ) =>
+    requestBytes(
+      `/api/runs/${encodeURIComponent(runId)}/outputs/${encodeURIComponent(artifactId)}/recipe-bundle/encrypted`,
+      {
+        method: "POST",
+        body: JSON.stringify({ passphrase, prompts: includePrompt ? "include" : "omit", digest, inputs: includeInputs ? "include" : "omit" }),
+        signal,
+      },
+    ),
+  /** An encrypted record or bundle opened with its passphrase, which travels in a header, never the address. */
+  openEncryptedGenerationRecord: (content: ArrayBuffer, passphrase: string) =>
+    requestBytes("/api/output-recipes/open", {
+      method: "POST",
+      body: content,
+      headers: { "content-type": "application/octet-stream", "x-archive-passphrase": base64Text(passphrase) },
+    }),
   preflightGenerationExperiment: (payload: GenerationExperimentRequest) =>
     request<GenerationExperimentPreflight>("/api/generation-experiments/preflight", { method: "POST", body: JSON.stringify(payload) }),
   createGenerationExperiment: (payload: GenerationExperimentCreate) =>

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import io
 import logging
 import os
 import uuid
@@ -192,6 +193,31 @@ def encrypt_export(plaintext: Path, directory: Path, passphrase: bytes) -> Path:
         encrypted.unlink(missing_ok=True)
         raise
     return encrypted
+
+
+def encrypt_bytes(content: bytes, *, kind: ArchiveKind, passphrase: bytes) -> bytes:
+    """Encrypt a file built in memory and prove it opens to exactly those bytes.
+
+    For a file small enough never to touch the disk, such as a picture's record
+    and its bundle, so nothing of it is staged anywhere. The same check as an
+    encrypted export's: every chunk must authenticate under the same passphrase
+    and what it opens to must hash the same as what went in.
+    """
+
+    sealed = io.BytesIO()
+    write_archive(io.BytesIO(content), sealed, kind=kind, passphrase=passphrase)
+    opened = _Digest()
+    try:
+        open_archive(
+            io.BytesIO(sealed.getvalue()), cast(BinaryIO, opened), kind=kind, passphrase=passphrase
+        )
+    except ArchiveRefused as refused:
+        if refused.code == "archive-key-derivation-failed":
+            raise
+        raise ExportUnverified from refused
+    if opened.hash.digest() != hashlib.sha256(content).digest():
+        raise ExportUnverified
+    return sealed.getvalue()
 
 
 def decrypt_import(source: BinaryIO, directory: Path, passphrase: bytes) -> Path:

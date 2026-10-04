@@ -17,6 +17,8 @@ export function useProjectMutations({
   });
   const deleteProject = useProjectDeletion(client);
   const exportProject = useMutation({
+    // Not kept once finished, so a passphrase it was given does not linger.
+    gcTime: 0,
     mutationFn: ({ id, includeMedia = true, passphrase }: { id: string; includeMedia?: boolean; passphrase?: string }) =>
       passphrase === undefined ? api.exportProject(id, includeMedia) : api.exportProject(id, includeMedia, passphrase),
     onSuccess: (artifact) => {
@@ -27,6 +29,7 @@ export function useProjectMutations({
     },
   });
   const importProject = useMutation({
+    gcTime: 0,
     // A file alone is a plain archive; an encrypted one comes with its passphrase.
     mutationFn: (archive: File | { file: File; passphrase: string }) =>
       archive instanceof File ? api.importProject(archive) : api.importProject(archive.file, archive.passphrase),
