@@ -968,6 +968,7 @@ from .workflow_use_case_errors import workflow_use_case_error
 from .workflow_use_case_execution import InheritedWorkflowUseCasePreset
 from .workflow_use_case_preset_api import router as workflow_use_case_preset_router
 from .workflow_use_case_preset_provenance import read_workflow_use_case_preset
+from .workspace_lock_api import router as workspace_lock_router
 
 if TYPE_CHECKING:
     from .main import Services
@@ -998,6 +999,7 @@ router.include_router(media_organization_router)
 router.include_router(recovery_router)
 router.include_router(output_recipe_router)
 router.include_router(picture_remix_router)
+router.include_router(workspace_lock_router)
 logger = logging.getLogger(__name__)
 
 
@@ -1021,13 +1023,20 @@ async def _engine_role_fields(
 
 
 @router.post("/session")
-async def create_session(request: Request, response: Response) -> dict[str, str | int]:
+async def create_session(
+    request: Request, response: Response
+) -> dict[str, str | int | bool | None]:
     services = _services(request)
     security: SessionSecurity = services.security
+    lock = services.workspace_lock.status()
     return {
         "csrf_token": security.issue_session(response),
         "event_epoch": services.events.epoch,
         "event_sequence": services.events.sequence,
+        # The lock comes with the session, so a page learns it is locked
+        # without a request of its own; the epoch is null while the lock is off.
+        "workspace_locked": lock.locked,
+        "lock_epoch": lock.lock_epoch,
     }
 
 

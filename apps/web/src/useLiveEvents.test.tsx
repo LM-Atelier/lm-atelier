@@ -2,6 +2,7 @@ import { act, renderHook } from "@testing-library/react";
 import { QueryClient } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AppEvent, Job, JobActivity } from "./types";
+import { connectEvents } from "./api";
 
 const handlers: Array<(event: AppEvent) => void> = [];
 
@@ -377,5 +378,34 @@ describe("workflow installation refresh", () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(100); });
       keys.forEach(key => expect(client.getQueryState(key)?.isInvalidated).toBe(true));
     } finally { hook.unmount(); client.clear(); vi.useRealTimers(); }
+  });
+});
+
+describe("closing a connection that finishes opening late", () => {
+  it("closes the connection when it opens after the page that asked for it has gone", async () => {
+    // Connecting waits for the session first. A page taken down in that time,
+    // as locking the workspace does, used to leave the socket and its retry
+    // loop running with nothing left to close them.
+    let finish: (cleanup: () => void) => void = () => undefined;
+    vi.mocked(connectEvents).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const client = new QueryClient();
+    const hook = renderHook(() => useLiveEvents(client, vi.fn()));
+    hook.unmount();
+    const close = vi.fn();
+    await act(async () => { finish(close); await Promise.resolve(); });
+    expect(close).toHaveBeenCalledTimes(1);
+    client.clear();
+  });
+
+  it("closes a connection that opened in time when the page goes", async () => {
+    const close = vi.fn();
+    vi.mocked(connectEvents).mockImplementationOnce(async () => close);
+    const client = new QueryClient();
+    const hook = renderHook(() => useLiveEvents(client, vi.fn()));
+    await act(async () => { await Promise.resolve(); });
+    expect(close).not.toHaveBeenCalled();
+    hook.unmount();
+    expect(close).toHaveBeenCalledTimes(1);
+    client.clear();
   });
 });

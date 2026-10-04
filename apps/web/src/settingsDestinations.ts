@@ -29,6 +29,11 @@ export const SETTINGS_DESTINATIONS: readonly SettingsDestination[] = [
     summary: "Light or dark, theme, chat width, motion, the sidebar and the clock.",
   },
   {
+    id: "privacy",
+    label: "Privacy",
+    summary: "Lock the workspace, and the PIN that unlocks it.",
+  },
+  {
     id: "models-and-generation",
     label: "Models & generation",
     summary: "Model profiles, generation presets, and how much detail their editors open with.",

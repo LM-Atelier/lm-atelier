@@ -96,6 +96,10 @@ class Settings(BaseSettings):
     backup_weekly_count: int = Field(default=4, ge=0, le=52)
     max_concurrent_downloads: int = Field(default=2, ge=1, le=8)
     event_history_size: int = Field(default=2_000, ge=100, le=50_000)
+    # Clears the saved workspace lock and its PIN at startup, for a forgotten PIN
+    # or a saved setting that can no longer be read. It weakens nothing: anyone
+    # who can restart the service with a changed environment can read its data.
+    reset_workspace_lock: bool = False
 
     @field_validator("host")
     @classmethod

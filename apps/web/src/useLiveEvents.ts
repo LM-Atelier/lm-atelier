@@ -65,6 +65,10 @@ export function useLiveEvents(
   const [connected, setConnected] = useState(true);
   useEffect(() => {
     let dispose: (() => void) | undefined;
+    // Set when the effect is torn down. Connecting waits on the session first,
+    // so it can finish after the page that asked for it has gone; its socket
+    // and retry loop are then closed at once rather than left running.
+    let cancelled = false;
     // The newest attempt heard per assistant message. A delta names the
     // attempt that produced it; an older attempt's word arriving after a
     // newer attempt has spoken is dropped, and a newer attempt starts its
@@ -302,8 +306,12 @@ export function useLiveEvents(
       },
       setConnected,
       scheduleAuthoritativeRefresh,
-    ).then((cleanup) => { dispose = cleanup; });
+    ).then((cleanup) => {
+      if (cancelled) cleanup();
+      else dispose = cleanup;
+    });
     return () => {
+      cancelled = true;
       if (mediaRefresh !== undefined) window.clearTimeout(mediaRefresh);
       if (authoritativeRefresh !== undefined) window.clearTimeout(authoritativeRefresh);
       if (activityRefresh !== undefined) window.clearTimeout(activityRefresh);

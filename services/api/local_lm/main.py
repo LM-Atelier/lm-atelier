@@ -20,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -75,6 +76,18 @@ from .seed import seed_defaults
 from .worker_startup import restore_configured_workers
 from .workflow_editor_sessions import WorkflowEditorSessions
 from .workflow_selection_errors import register_workflow_selection_error_handler
+from .workspace_lock import (
+    LOCK_EPOCH_HEADER,
+    LOCKED_CLOSE_CODE,
+    WorkspaceLock,
+    WorkspaceLockMiddleware,
+)
+from .workspace_lock_policy import (
+    SavedWorkspaceLock,
+    WorkspaceLockSettingInvalid,
+    clear_policy,
+    read_policy,
+)
 
 logger = logging.getLogger("local_lm")
 AUTOMATIC_BACKUP_CHECK_INTERVAL_SECONDS = 60 * 60
@@ -82,6 +95,8 @@ API_LOG_MAX_BYTES = 2 * 1024 * 1024
 API_LOG_BACKUP_COUNT = 3
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
 STARTUP_STAGE_WARN_SECONDS = 30.0
+#: The API paths answered without a session, and so also while locked.
+PUBLIC_API_PATHS = frozenset({"/api/session", "/api/health", "/api/ready"})
 
 
 def _request_hostname(authority: str) -> str | None:
@@ -225,11 +240,29 @@ async def _wait_for_websocket_disconnect(websocket: WebSocket) -> None:
             return
 
 
-async def _stream_events(websocket: WebSocket, broker: EventBroker, *, after: int) -> None:
+async def _stream_events(
+    websocket: WebSocket,
+    broker: EventBroker,
+    *,
+    after: int,
+    closing: asyncio.Event | None = None,
+) -> None:
+    """Send the broker's events until the client leaves or `closing` is set.
+
+    `closing` is set when the workspace locks. It is checked first after every
+    wait, so a lock wins over an event that is already waiting and nothing
+    more is sent once it lands.
+    """
+
     disconnect_task = asyncio.create_task(
         _wait_for_websocket_disconnect(websocket),
         name="event-websocket-disconnect",
     )
+    watched: set[asyncio.Task[Any]] = {disconnect_task}
+    closing_task: asyncio.Task[Any] | None = None
+    if closing is not None:
+        closing_task = asyncio.create_task(closing.wait(), name="event-websocket-lock")
+        watched.add(closing_task)
     event_task: asyncio.Task[Any] | None = None
     send_task: asyncio.Task[Any] | None = None
     try:
@@ -237,9 +270,14 @@ async def _stream_events(websocket: WebSocket, broker: EventBroker, *, after: in
             while True:
                 event_task = asyncio.create_task(queue.get(), name="event-websocket-next-event")
                 done, _ = await asyncio.wait(
-                    {disconnect_task, event_task},
+                    {*watched, event_task},
                     return_when=asyncio.FIRST_COMPLETED,
                 )
+                if closing is not None and closing.is_set():
+                    await _cancel_task(event_task)
+                    event_task = None
+                    await websocket.close(code=LOCKED_CLOSE_CODE, reason="workspace-locked")
+                    return
                 if disconnect_task in done:
                     await _cancel_task(event_task)
                     event_task = None
@@ -253,9 +291,14 @@ async def _stream_events(websocket: WebSocket, broker: EventBroker, *, after: in
                     name="event-websocket-send",
                 )
                 done, _ = await asyncio.wait(
-                    {disconnect_task, send_task},
+                    {*watched, send_task},
                     return_when=asyncio.FIRST_COMPLETED,
                 )
+                if closing is not None and closing.is_set():
+                    await _cancel_task(send_task)
+                    send_task = None
+                    await websocket.close(code=LOCKED_CLOSE_CODE, reason="workspace-locked")
+                    return
                 if disconnect_task in done:
                     await _cancel_task(send_task)
                     send_task = None
@@ -266,6 +309,7 @@ async def _stream_events(websocket: WebSocket, broker: EventBroker, *, after: in
     finally:
         await _cancel_task(event_task)
         await _cancel_task(send_task)
+        await _cancel_task(closing_task)
         await _cancel_task(disconnect_task)
 
 
@@ -288,6 +332,7 @@ class Services:
     custom_nodes: CustomNodeManager
     credentials: CredentialStore
     workflow_editor_sessions: WorkflowEditorSessions
+    workspace_lock: WorkspaceLock
 
     @property
     def catalog(self) -> HuggingFaceCatalog:
@@ -346,8 +391,33 @@ def build_services(settings: Settings) -> Services:
         custom_nodes=CustomNodeManager(settings),
         credentials=credentials,
         workflow_editor_sessions=WorkflowEditorSessions(),
+        # Built locked; the lifespan settles it from the saved setting.
+        workspace_lock=WorkspaceLock(),
     )
     return services
+
+
+def _settle_workspace_lock(session: Session, lock: WorkspaceLock, settings: Settings) -> None:
+    """Start locked or unlocked as the saved setting says, before anything is served."""
+
+    if settings.reset_workspace_lock:
+        clear_policy(session)
+        session.commit()
+        logger.warning(
+            "The workspace lock and its PIN were cleared because "
+            "LOCAL_LM_RESET_WORKSPACE_LOCK is set. Unset it so the next start keeps "
+            "the lock you choose."
+        )
+    saved: SavedWorkspaceLock | None
+    try:
+        saved = read_policy(session)
+    except WorkspaceLockSettingInvalid:
+        saved = None
+        logger.warning(
+            "The saved workspace lock setting cannot be read, so the workspace stays "
+            "locked. Start once with LOCAL_LM_RESET_WORKSPACE_LOCK=true to clear it."
+        )
+    lock.settle(saved)
 
 
 async def ensure_automatic_recovery_backup(backups: BackupManager) -> None:
@@ -711,6 +781,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     seed_defaults(session, active_settings)
                 with _startup_stage("session-commit"):
                     session.commit()
+            with _startup_stage("workspace-lock"), SessionLocal() as session:
+                _settle_workspace_lock(session, services.workspace_lock, active_settings)
             with _startup_stage("orchestrator-recovery"):
                 services.orchestrator.recover_interrupted()
             with _startup_stage("download-recovery"):
@@ -783,6 +855,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         artifact_max_bytes=active_settings.max_upload_bytes,
         project_max_bytes=active_settings.max_project_import_bytes,
     )
+    # Added after the body limits and before the host and session checks, so
+    # it runs inside the session checks and refuses before any body is read.
+    app.add_middleware(
+        WorkspaceLockMiddleware, lock=services.workspace_lock, public_paths=PUBLIC_API_PATHS
+    )
     app.add_middleware(LocalHostMiddleware, allow_test_hosts=active_settings.dev)
     if active_settings.dev:
         app.add_middleware(
@@ -795,8 +872,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.middleware("http")
     async def local_session(request: Request, call_next):  # type: ignore[no-untyped-def]
-        public = {"/api/session", "/api/health", "/api/ready"}
-
         def refusal(exc: Exception, fallback_status: int, fallback_detail: str) -> JSONResponse:
             """Answer a refused request the same way the rest of the API does.
 
@@ -820,7 +895,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 services.security.validate_origin(request.headers.get("origin"))
             except Exception as exc:
                 return refusal(exc, 403, "untrusted browser origin")
-        if request.url.path.startswith("/api") and request.url.path not in public:
+        if request.url.path.startswith("/api") and request.url.path not in PUBLIC_API_PATHS:
             try:
                 services.security.validate_request(request)
             except Exception as exc:
@@ -842,9 +917,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not await services.security.validate_websocket(websocket):
             await websocket.close(code=4401)
             return
+        # Taken and checked with no await between, so a lock either lands
+        # before this check or sets the very signal the stream then watches.
+        # A page that names an epoch from before the latest lock is refused
+        # too, as its requests are. Refused before accept, a page sees a failed
+        # connection rather than an open one, which would send it to refetch
+        # everything it shows.
+        lock = services.workspace_lock
+        closing = lock.lock_signal()
+        claimed = [
+            epoch
+            for epoch in (
+                websocket.query_params.get("lock_epoch"),
+                websocket.headers.get(LOCK_EPOCH_HEADER),
+            )
+            if epoch
+        ]
+        if closing.is_set() or any(lock.refusal_code(epoch) for epoch in claimed):
+            await websocket.close(code=LOCKED_CLOSE_CODE)
+            return
         await websocket.accept()
         try:
-            await _stream_events(websocket, services.events, after=after)
+            await _stream_events(websocket, services.events, after=after, closing=closing)
         except WebSocketDisconnect:
             return
 

@@ -8,8 +8,12 @@ from pathlib import Path
 import pytest
 from httpx2 import AsyncClient
 
-API_SOURCE = (Path(__file__).resolve().parents[1] / "local_lm" / "api.py").read_text(
-    encoding="utf-8"
+_PACKAGE = Path(__file__).resolve().parents[1] / "local_lm"
+API_MODULE_SOURCE = (_PACKAGE / "api.py").read_text(encoding="utf-8")
+# The routers api.py includes answer through the same handler, so their codes
+# are held to the same rules. The bare-exception ceiling counts api.py alone.
+API_SOURCE = "\n".join(
+    (_PACKAGE / name).read_text(encoding="utf-8") for name in ("api.py", "workspace_lock_api.py")
 )
 
 # Lower this every time a bare HTTPException is converted to api_error; it
@@ -100,7 +104,7 @@ async def test_an_unknown_request_field_is_refused_not_defaulted(
 
 
 def test_bare_http_exceptions_only_ever_decrease() -> None:
-    bare = len(re.findall(r"HTTPException\(", API_SOURCE))
+    bare = len(re.findall(r"HTTPException\(", API_MODULE_SOURCE))
     assert bare <= BARE_HTTP_EXCEPTIONS_CEILING, (
         f"api.py has {bare} bare HTTPException raises, above the recorded "
         f"ceiling of {BARE_HTTP_EXCEPTIONS_CEILING}. New errors must use "

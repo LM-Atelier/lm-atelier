@@ -12,6 +12,7 @@ export type * from "./priorTurnEditTypes";
 export type * from "./studioLocalEditTypes";
 export type * from "./enlargementTypes";
 export type * from "./recipeDraftTypes";
+export type * from "./workspaceLockTypes";
 import type { PriorTurnEditConfiguration } from "./priorTurnEditTypes";
 
 import type { ComposerPromptSource } from "./composerPromptSource";

@@ -1,5 +1,13 @@
 import type { QueueLane, QueueOrderCommand, QueueOrderPage, QueueOrderResult } from "./queueOrderTypes";
 import { recoveryApi } from "./recoveryApi";
+import { workspaceLockApi } from "./workspaceLockApi";
+import {
+  isWorkspaceLockBlocking,
+  noteSessionLock,
+  noteWorkspaceLockChanged,
+  noteWorkspaceLocked,
+  workspaceLockEpoch,
+} from "./workspaceLockState";
 import type { GenerationExperiment, GenerationExperimentBlindEvaluationCreate, GenerationExperimentBlindView, GenerationExperimentCreate, GenerationExperimentEvaluationCreate, GenerationExperimentPreflight, GenerationExperimentRecipeDraft, GenerationExperimentRequest, GenerationExperimentStart } from "./generationExperimentTypes";
 import { workflowFamilyQuery, workflowReadQuery, type WorkflowFamilyReadOptions, type WorkflowReadPageOptions } from "./workflowReadQuery";
 import type { WorkflowRecipeTarget, WorkflowUseCase, WorkflowUseCaseChoice, WorkflowUseCaseDefault, WorkflowUseCasePreset, WorkflowUseCasePresetCreate } from "./workflowUseCaseTypes";
@@ -262,10 +270,13 @@ async function ensureSession(): Promise<void> {
         csrf_token: string;
         event_epoch?: string;
         event_sequence?: number;
+        workspace_locked?: boolean;
+        lock_epoch?: string | null;
       };
       csrfToken = payload.csrf_token;
       eventEpoch = payload.event_epoch ?? "";
       eventSequence = Math.max(0, payload.event_sequence ?? 0);
+      noteSessionLock(payload);
     })();
   }
   try {
@@ -311,6 +322,10 @@ async function send(
   if (init.method && !["GET", "HEAD"].includes(init.method.toUpperCase())) {
     headers.set("x-local-lm-csrf", csrfToken);
   }
+  // Ties the request to the lock this page last saw, so a page that slept
+  // through a lock is refused rather than served as if nothing happened.
+  const lockEpoch = path === "/api/session" ? null : workspaceLockEpoch();
+  if (lockEpoch) headers.set("x-local-lm-lock-epoch", lockEpoch);
   const response = await fetch(path, { ...init, headers, credentials: "same-origin" });
   if (path !== "/api/session" && retrySession) {
     // A stale session answers 401, but a stale CSRF token answers 403, and only
@@ -340,6 +355,10 @@ async function send(
       else if (detail && typeof detail === "object" && "message" in detail && typeof detail.message === "string") message = detail.message;
     } catch {
       // Preserve the HTTP status text.
+    }
+    if (response.status === 423) {
+      if (code === "workspace-lock-changed") noteWorkspaceLockChanged();
+      else noteWorkspaceLocked();
     }
     throw new ApiError(response.status, detail, message, code, body);
   }
@@ -376,6 +395,7 @@ type WorkflowCreateInput = WorkflowRevisionInput & Pick<
 
 export const api = {
   ...recoveryApi(request),
+  ...workspaceLockApi(request),
   searchConfiguration: () => request<WebSearchConfiguration>("/api/web-search/configuration"),
   decideSearch: (jobId: string, revision: number, action: "approve" | "decline" | "cancel") =>
     request<WebSearch>("/api/jobs/" + encodeURIComponent(jobId) + "/search/decision",
@@ -1912,6 +1932,9 @@ export async function connectEvents(
     try {
       await ensureSession();
       if (closed) return;
+      // A locked workspace refuses the socket. Asking again every second would
+      // only repeat that; the page reconnects from scratch once it is unlocked.
+      if (isWorkspaceLockBlocking()) return;
       if (!sequenceInitialized) {
         lastSequence = eventSequence;
         connectedEpoch = eventEpoch;
@@ -1923,7 +1946,11 @@ export async function connectEvents(
         lastSequence = 0;
       }
       const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
-      socket = new WebSocket(`${scheme}//${window.location.host}/api/events?after=${lastSequence}`);
+      // The lock epoch rides along like every request's, so a page that slept
+      // through a lock cannot reattach to the stream after it.
+      const lockEpoch = workspaceLockEpoch();
+      const epochQuery = lockEpoch ? `&lock_epoch=${encodeURIComponent(lockEpoch)}` : "";
+      socket = new WebSocket(`${scheme}//${window.location.host}/api/events?after=${lastSequence}${epochQuery}`);
       socket.onopen = () => {
         onStatus(true);
         if (hasOpened) onReconnect?.();
@@ -1941,9 +1968,14 @@ export async function connectEvents(
         eventSequence = lastSequence;
         onEvent(event);
       };
-      socket.onclose = () => {
+      socket.onclose = (event: CloseEvent) => {
         onStatus(false);
         if (closed) return;
+        // The server closes live sockets with this code when the workspace locks.
+        if (event?.code === 4423) {
+          noteWorkspaceLocked();
+          return;
+        }
         resetSession();
         scheduleRetry();
       };

@@ -182,6 +182,42 @@ class GenerationRetryPolicyUpdate(ApiModel):
     expected_revision: StrictInt = Field(ge=0)
 
 
+class WorkspaceLockStatusOut(ApiModel):
+    locked: bool
+    enabled: bool
+    require_pin: bool
+    # Changes with every lock and every restart; null while the lock is off.
+    lock_epoch: str | None
+
+
+class WorkspaceUnlockIn(ApiModel):
+    # Bounded well above any PIN so parsing stays cheap. A PIN of the wrong
+    # length is answered like a wrong PIN, not refused here.
+    pin: StrictStr | None = Field(default=None, max_length=256)
+
+
+class WorkspaceLockPolicyOut(ApiModel):
+    enabled: bool
+    require_pin: bool
+    revision: int = Field(ge=0)
+
+
+class WorkspaceLockPolicyWrite(ApiModel):
+    expected_revision: StrictInt = Field(ge=0, le=9_223_372_036_854_775_807)
+    enabled: StrictBool
+    new_pin: StrictStr | None = Field(default=None, max_length=256)
+    clear_pin: StrictBool = False
+    # Needed when a PIN is set and the change replaces it, removes it, or
+    # turns the lock off.
+    current_pin: StrictStr | None = Field(default=None, max_length=256)
+
+    @model_validator(mode="after")
+    def one_pin_change(self) -> Self:
+        if self.new_pin is not None and self.clear_pin:
+            raise ValueError("Choose a new PIN or remove the PIN, not both.")
+        return self
+
+
 class GenerationIdentityOut(ApiModel):
     model_profile_name: str | None = None
     workflow_family_name: str | None = None

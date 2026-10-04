@@ -191,6 +191,9 @@ CHECKED_CONTRACTS = {
     "EditRecipeDraft": "EditRecipeDraftOut",
     "RefusalAlternative": "RefusalAlternativeOut",
     "ResourceEvidence": "ResourceEvidenceOut",
+    "WorkspaceLockPolicy": "WorkspaceLockPolicyOut",
+    "WorkspaceLockPolicyWrite": "WorkspaceLockPolicyWrite",
+    "WorkspaceLockStatus": "WorkspaceLockStatusOut",
 }
 
 # Fields the browser deliberately does not mirror, with the reason. Anything
