@@ -16,7 +16,6 @@ from httpx2 import AsyncClient
 from PIL import Image, ImageCms, PngImagePlugin
 from run_waits import wait_for_terminal_status
 
-from local_lm import output_recipe_bundle
 from local_lm.db import SessionLocal
 from local_lm.domain import ArtifactKind
 from local_lm.models import Run
@@ -557,7 +556,7 @@ def test_a_directory_listing_many_entries_is_refused_before_it_is_parsed(
     def parsed(*_arguments: object, **_options: object) -> None:
         raise AssertionError("the archive was parsed")
 
-    monkeypatch.setattr(output_recipe_bundle.zipfile, "ZipFile", parsed)
+    monkeypatch.setattr(zipfile, "ZipFile", parsed)
 
     with pytest.raises(OutputRecipeBundleFormatError):
         open_output_recipe_bundle(crafted)

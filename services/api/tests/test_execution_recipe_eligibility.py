@@ -111,6 +111,7 @@ def test_a_compatibility_family_cannot_bypass_recipe_refusal(session: Session) -
     session.add(profile)
     session.flush()
     family = ensure_legacy_profile_workflow(session, profile)
+    assert family is not None
     chat = Chat(title="Example chat")
     session.add(chat)
     session.flush()
