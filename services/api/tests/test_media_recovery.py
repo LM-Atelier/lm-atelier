@@ -43,6 +43,7 @@ from local_lm.recovery_v1 import (
     RecoveryAction,
     RecoveryCommandV1,
     RecoveryImpactV1,
+    RecoveryItemV1,
     RestoreRecoveryV1,
 )
 
@@ -58,7 +59,9 @@ def _command(preview: RecoveryImpactV1, key: str) -> dict[str, str]:
     }
 
 
-def _seed(store: ArtifactStore, session: Session):
+def _seed(
+    store: ArtifactStore, session: Session
+) -> tuple[Artifact, ArtifactLibraryEntry, MediaCollection, MediaTag]:
     artifact = store.ingest_bytes(
         session,
         CONTENT,
@@ -85,7 +88,9 @@ def _seed(store: ArtifactStore, session: Session):
     return artifact, entry, collection, tag
 
 
-def _trash(session: Session, entry_id: str, key: str = "trash-garden"):
+def _trash(
+    session: Session, entry_id: str, key: str = "trash-garden"
+) -> tuple[RecoveryItemV1, RecoveryCommandV1]:
     preview = preview_media_trash(session, entry_id, NOW)
     session.commit()
     command = RecoveryCommandV1.model_validate(_command(preview, key))
@@ -103,10 +108,9 @@ def test_trash_and_restore_keep_favorite_organization_identity_and_bytes(
     item, command = _trash(session, entry.id)
     assert entry.state == "trashed" and entry.favorite and artifact.favorite
     assert entry.recovery_id == item.deletion_id
-    assert (
-        session.get(MediaCollectionMembership, (collection.id, entry.id)).note
-        == "Keep original spacing"
-    )
+    membership = session.get(MediaCollectionMembership, (collection.id, entry.id))
+    assert membership is not None
+    assert membership.note == "Keep original spacing"
     assert session.get(MediaTagAssignment, (tag.id, entry.id)) is not None
     assert store.resolve(artifact).read_bytes() == CONTENT
     assert trash_media(session, entry.id, command, NOW) == item
@@ -120,11 +124,10 @@ def test_trash_and_restore_keep_favorite_organization_identity_and_bytes(
     session.commit()
     assert (artifact.id, entry.id, collection.id, tag.id) == ids
     assert entry.state == "visible" and entry.favorite and artifact.favorite
-    assert entry.recovery_id is entry.deleted_at is None
-    assert (
-        session.get(MediaCollectionMembership, (collection.id, entry.id)).note
-        == "Keep original spacing"
-    )
+    assert entry.recovery_id is None and entry.deleted_at is None
+    membership = session.get(MediaCollectionMembership, (collection.id, entry.id))
+    assert membership is not None
+    assert membership.note == "Keep original spacing"
     assert session.get(MediaTagAssignment, (tag.id, entry.id)) is not None
     assert store.resolve(artifact).read_bytes() == CONTENT
 
@@ -300,5 +303,7 @@ def test_reimport_can_start_a_new_recovery_cycle_without_replaying_the_old_purge
     assert second.deletion_id != first.deletion_id
     assert purge_media(session, first.deletion_id, command, NOW) == purged
     session.commit()
-    assert session.get(ArtifactLibraryEntry, entry_id).recovery_id == second.deletion_id
+    recovered_entry = session.get(ArtifactLibraryEntry, entry_id)
+    assert recovered_entry is not None
+    assert recovered_entry.recovery_id == second.deletion_id
     assert store.resolve(artifact).read_bytes() == CONTENT
