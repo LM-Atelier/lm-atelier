@@ -1,4 +1,5 @@
 import { useId, useState } from "react";
+import { setHiddenTabCover, useHiddenTabCover } from "./tabCoverChoice";
 import {
   SENSITIVE_MEDIA_CHOICES,
   setSensitiveMediaChoice,
@@ -8,9 +9,11 @@ import {
 
 const LABELS: Record<SensitiveMediaChoice, string> = { show: "Show", blur: "Blur", hide: "Hide" };
 
-/** Whether pictures and videos in chats appear at once, blurred, or hidden until shown. */
+/** Whether pictures and videos in chats appear at once, blurred, or hidden until shown,
+ * and whether a hidden tab stays covered until it is shown again. */
 export function SensitiveMediaSetting() {
   const choice = useSensitiveMediaChoice();
+  const coverHiddenTab = useHiddenTabCover();
   const [unsaved, setUnsaved] = useState(false);
   const id = useId();
   return (
@@ -37,6 +40,19 @@ export function SensitiveMediaSetting() {
           ))}
         </div>
       </div>
+      <label className="toggle-row">
+        <span className="toggle-copy">
+          <strong>Cover this window when it is hidden</strong>
+          <small>
+            After you switch away or minimize it, LM Atelier stays covered until you choose Show. Other windows that are still in view are not covered.
+          </small>
+        </span>
+        <input
+          type="checkbox"
+          checked={coverHiddenTab}
+          onChange={(event) => setUnsaved(!setHiddenTabCover(event.target.checked))}
+        />
+      </label>
       {unsaved && <p className="muted" role="status">This browser cannot save the choice, so it was not changed.</p>}
     </section>
   );

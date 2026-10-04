@@ -168,6 +168,15 @@ the lock was turned on may still be in its own cache. A workflow editor window t
 open shows ComfyUI's own page, which runs as a separate service and is not
 covered. Text typed but not yet sent may be lost when the workspace locks.
 
+**Settings > Appearance**, under Privacy on screen, can also cover a window
+once it is hidden. The choice is saved in that browser. After you switch to
+another window or tab, or minimize this one, LM Atelier stays covered until you
+choose **Show**, and what was on it, including unsent text, is kept underneath.
+A window that is still in view is never covered because another one was hidden,
+and nothing is locked or stopped. Like the lock, the cover keeps the workspace
+off the screen and encrypts nothing. A preview the operating system captured
+before the window was hidden is beyond its reach.
+
 If the PIN is forgotten, or the saved lock setting cannot be read and the
 workspace stays locked, stop LM Atelier and start it once with
 `LOCAL_LM_RESET_WORKSPACE_LOCK=true`. That removes the saved lock setting and

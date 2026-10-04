@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "./App";
 import { ErrorBoundary } from "./ErrorBoundary";
+import { HiddenTabCover } from "./HiddenTabCover";
 import { WorkspaceLockGate } from "./WorkspaceLockGate";
 import { isWorkspaceLockRefusal } from "./workspaceLockState";
 import "./styles.css";
@@ -23,7 +24,9 @@ createRoot(document.getElementById("root")!).render(
     <ErrorBoundary>
       <QueryClientProvider client={queryClient}>
         <WorkspaceLockGate>
-          <App />
+          <HiddenTabCover>
+            <App />
+          </HiddenTabCover>
         </WorkspaceLockGate>
       </QueryClientProvider>
     </ErrorBoundary>
